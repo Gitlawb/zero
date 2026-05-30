@@ -3,12 +3,15 @@ import type { ToolCall, ToolResult } from '../tools/types';
 import { toolRegistry } from '../tools';
 import { DEFAULT_SYSTEM_PROMPT } from './prompts';
 import { clearPlan } from '../tools/plan';
+import { z } from 'zod';
 
 export interface AgentOptions {
   maxTurns?: number;
   onText?: (text: string) => void;
   onToolCall?: (toolCall: ToolCall) => void;
   onToolResult?: (result: ToolResult) => void;
+  toolsEnabled?: boolean;   // allows temporarily disabling tool calling for debugging
+  debug?: boolean;          // when true, logs the exact payload sent to the provider
 }
 
 interface PendingToolCall {
@@ -22,7 +25,14 @@ export async function runAgent(
   provider: Provider,
   options: AgentOptions = {}
 ): Promise<string> {
-  const { maxTurns = 12, onText, onToolCall, onToolResult } = options;
+  const { 
+    maxTurns = 12, 
+    onText, 
+    onToolCall, 
+    onToolResult,
+    toolsEnabled = true,
+    debug = false 
+  } = options;
 
   // Clear any previous plan when starting a new task
   clearPlan();
@@ -36,14 +46,61 @@ export async function runAgent(
   let finalAnswer = '';
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    const toolDefinitions = tools.map(t => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters.shape,
-    }));
+    const toolDefinitions = (toolsEnabled && tools.length > 0)
+      ? tools.map(t => {
+          // Convert Zod schema to proper JSON Schema (critical for many providers).
+          // zod v4 ships this natively — no external package needed.
+          const jsonSchema = z.toJSONSchema(t.parameters, {
+            target: 'draft-7',
+          }) as any;
+
+          // Remove $schema if present (some providers dislike it)
+          delete jsonSchema.$schema;
+
+          // Make it strict by default (good practice)
+          if (jsonSchema.type === 'object' && !('additionalProperties' in jsonSchema)) {
+            jsonSchema.additionalProperties = false;
+          }
+
+          return {
+            name: t.name,
+            description: t.description,
+            parameters: jsonSchema,
+          };
+        })
+      : [];
 
     let currentText = '';
     const toolCallMap = new Map<string, PendingToolCall>();
+
+    if (debug) {
+      const red = '\x1b[31m';
+      const reset = '\x1b[0m';
+      const border = '─'.repeat(50);
+
+      console.log(`\n${red}┌${border}┐`);
+      console.log(`│  SENDING TO PROVIDER${' '.repeat(31)}│`);
+      console.log(`├${border}┤`);
+      console.log(`│ Messages: ${messages.length}${' '.repeat(40 - String(messages.length).length)}│`);
+      console.log(`│ Tools enabled: ${toolDefinitions.length > 0}${' '.repeat(33)}│`);
+      console.log(`│ Tool count: ${toolDefinitions.length}${' '.repeat(38 - String(toolDefinitions.length).length)}│`);
+      
+      if (toolDefinitions.length > 0) {
+        const toolsList = toolDefinitions.map(t => t.name).join(', ');
+        console.log(`│ Tools: ${toolsList.slice(0, 42)}${' '.repeat(Math.max(0, 43 - toolsList.length))}│`);
+        
+        // Show a sample of the schema for the first tool (very useful for debugging)
+        const firstTool = toolDefinitions[0];
+        if (firstTool.parameters) {
+          const schemaPreview = JSON.stringify(firstTool.parameters, null, 2).slice(0, 300);
+          console.log(`│ First tool schema sample:\n${schemaPreview}...`);
+        }
+      }
+      
+      const preview = String(messages[messages.length-1]?.content || '').slice(0, 45);
+      console.log(`│ Last message: ${preview}${' '.repeat(Math.max(0, 36 - preview.length))}│`);
+      console.log(`└${border}┘${reset}\n`);
+    }
 
     // Stream the response
     for await (const event of provider.streamCompletion(messages, toolDefinitions)) {

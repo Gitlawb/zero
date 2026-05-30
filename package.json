@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
+    "test": "bun test",
     "build": "bun build src/index.ts --compile --outfile zero"
   },
   "devDependencies": {

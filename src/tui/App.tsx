@@ -54,6 +54,29 @@ export const App: React.FC = () => {
   // Plan Mode (inspired by OpenClaude / Claude Code)
   const [isPlanMode, setIsPlanMode] = useState(false);
 
+  // Debug mode - when enabled, prints full error objects to console
+  const [debugMode, setDebugMode] = useState(false);
+  const [lastError, setLastError] = useState<any>(null);
+
+  // Tools enabled (useful for debugging provider errors)
+  const [toolsEnabled, setToolsEnabled] = useState(true);
+
+  // Command suggestions
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+
+  const knownCommands = ['/provider', '/plan', '/debug-mode', '/debug', '/tools', '/help', '/exit', '/quit'];
+
+  // Update suggestions when input changes
+  React.useEffect(() => {
+    if (input.startsWith('/')) {
+      const query = input.toLowerCase();
+      const matches = knownCommands.filter(cmd => cmd.startsWith(query));
+      setSuggestions(matches.slice(0, 6)); // limit suggestions
+    } else {
+      setSuggestions([]);
+    }
+  }, [input]);
+
   // Scrolling state (Grok Build style internal scrolling)
   const [scrollOffset, setScrollOffset] = useState(0);
   const [terminalRows, setTerminalRows] = useState(24); // default fallback
@@ -128,6 +151,13 @@ export const App: React.FC = () => {
       return;
     }
 
+    // Autocomplete first suggestion with Tab when typing a command
+    if (key.tab && suggestions.length > 0) {
+      setInput(suggestions[0] + ' ');
+      setSuggestions([]);
+      return;
+    }
+
     if (key.backspace || key.delete) {
       setInput((prev) => prev.slice(0, -1));
       return;
@@ -143,6 +173,7 @@ export const App: React.FC = () => {
 
     const trimmed = input.trim();
     setInput('');
+    setSuggestions([]);
 
     // Handle slash commands
     if (trimmed.startsWith('/')) {
@@ -173,6 +204,8 @@ export const App: React.FC = () => {
         });
 
         await runAgent(trimmed, provider, {
+          debug: debugMode,
+          toolsEnabled,
           onText: (text: string) => {
             setIsThinking(false);
             setMessages((prev) => {
@@ -219,17 +252,35 @@ export const App: React.FC = () => {
       } catch (err: any) {
         setIsThinking(false);
 
-        let friendlyMessage = err.message || String(err);
+        if (debugMode) {
+          setLastError(err);
+          try {
+            const red = '\x1b[31m';
+            const reset = '\x1b[0m';
+            const border = '─'.repeat(50);
 
-        // Make common provider/auth errors more helpful
-        if (friendlyMessage.includes('401') || friendlyMessage.toLowerCase().includes('unauthorized') || friendlyMessage.toLowerCase().includes('invalid api key')) {
-          friendlyMessage = 'Provider error: Invalid or missing API key. Use /provider to fix your credentials.';
-        } else if (friendlyMessage.includes('No LLM provider configured')) {
-          friendlyMessage = 'No provider set up. Type /provider to add one.';
-        } else if (friendlyMessage.toLowerCase().includes('connection') || friendlyMessage.toLowerCase().includes('network')) {
-          friendlyMessage = `Provider connection error: ${friendlyMessage}`;
+            console.error(`\n${red}┌${border}┐`);
+            console.error(`│  FULL PROVIDER ERROR${' '.repeat(29)}│`);
+            console.error(`├${border}┤`);
+            console.error(`│ Message: ${(err?.message || String(err)).slice(0, 40)}${' '.repeat(9)}│`);
+            console.error(`│ Name:    ${err?.name || 'Error'}${' '.repeat(42 - (err?.name || 'Error').length)}│`);
+
+            if (err?.response?.status) {
+              console.error(`│ Status:  ${err.response.status}${' '.repeat(42 - String(err.response.status).length)}│`);
+            }
+
+            console.error(`└${border}┘${reset}`);
+            console.error('Full object:');
+            console.dir(err, { depth: 6 });
+            console.error(`${red}${'='.repeat(52)}${reset}\n`);
+          } catch (logErr) {
+            console.error('Failed to log full error:', logErr);
+          }
+        } else {
+          setLastError(null);
         }
 
+        const friendlyMessage = err?.message || String(err);
         setMessages((prev) => [...prev, { type: 'system', content: `Error: ${friendlyMessage}` }]);
       } finally {
         setIsThinking(false);
@@ -241,7 +292,9 @@ export const App: React.FC = () => {
   };
 
   const handleSlashCommand = (command: string) => {
-    const cmd = command.toLowerCase();
+    const parts = command.trim().split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const arg = parts[1]?.toLowerCase();
 
     if (cmd === '/provider') {
       setScreen('provider-picker');
@@ -265,14 +318,49 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (cmd === '/debug-mode' || cmd === '/debug') {
+      // Support "/debug-mode true", "/debug false", or just toggle
+      let nextDebug: boolean;
+
+      if (arg === 'true') nextDebug = true;
+      else if (arg === 'false') nextDebug = false;
+      else nextDebug = !debugMode;
+
+      setDebugMode(nextDebug);
+      if (!nextDebug) setLastError(null);
+      setMessages((prev) => [
+        ...prev,
+        { type: 'system', content: `Debug mode ${nextDebug ? 'enabled' : 'disabled'}.` },
+      ]);
+      return;
+    }
+
+    if (cmd === '/tools') {
+      const arg2 = parts[1]?.toLowerCase();
+      let nextEnabled: boolean;
+
+      if (arg2 === 'on' || arg2 === 'true') nextEnabled = true;
+      else if (arg2 === 'off' || arg2 === 'false') nextEnabled = false;
+      else nextEnabled = !toolsEnabled;
+
+      setToolsEnabled(nextEnabled);
+      setMessages((prev) => [
+        ...prev,
+        { type: 'system', content: `Tool calling ${nextEnabled ? 'enabled' : 'disabled'}.` },
+      ]);
+      return;
+    }
+
     if (cmd === '/help') {
       setMessages((prev) => [
         ...prev,
         { type: 'system', content: 'Available commands:' },
-        { type: 'system', content: '  /provider  - Manage LLM providers (fix provider errors here)' },
-        { type: 'system', content: '  /plan      - Toggle Plan Mode (green border)' },
-        { type: 'system', content: '  /help      - Show this help' },
-        { type: 'system', content: '  /exit      - Quit' },
+        { type: 'system', content: '  /provider     - Manage LLM providers (fix provider errors here)' },
+        { type: 'system', content: '  /plan         - Toggle Plan Mode (green border)' },
+        { type: 'system', content: '  /debug-mode   - Toggle debug mode (prints full errors to console)' },
+        { type: 'system', content: '  /tools        - Toggle tool calling (useful for debugging provider errors)' },
+        { type: 'system', content: '  /help         - Show this help' },
+        { type: 'system', content: '  /exit         - Quit' },
       ]);
       return;
     }
@@ -448,6 +536,41 @@ export const App: React.FC = () => {
         <Box paddingX={1} justifyContent="flex-end">
           <Text color="gray" dimColor>
             {scrollOffset + 1}/{messages.length}{canScrollUp ? ' ↑' : ''}{canScrollDown ? ' ↓' : ''}
+          </Text>
+        </Box>
+      )}
+
+      {/* Command suggestions */}
+      {suggestions.length > 0 && (
+        <Box paddingX={2} paddingBottom={0}>
+          <Text color="gray" dimColor>
+            Suggestions: {suggestions.map((s, i) => (
+              <Text key={i} color={i === 0 ? 'cyan' : 'gray'}>{s}{i < suggestions.length - 1 ? '  ' : ''}</Text>
+            ))} (Tab to autocomplete)
+          </Text>
+        </Box>
+      )}
+
+      {/* Debug error box */}
+      {debugMode && lastError && (
+        <Box 
+          borderStyle="single" 
+          borderColor="red" 
+          paddingX={1} 
+          paddingY={0} 
+          marginBottom={1}
+        >
+          <Text color="red" bold>⚠ Debug Error</Text>
+          <Text color="gray" dimColor>
+            {lastError.message || String(lastError)}
+          </Text>
+          {lastError.stack && (
+            <Text color="gray" dimColor>
+              {lastError.stack.split('\n').slice(0, 8).join('\n')}
+            </Text>
+          )}
+          <Text color="cyan" dimColor>
+            (Full details in terminal • /debug-mode false to hide)
           </Text>
         </Box>
       )}
