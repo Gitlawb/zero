@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { TextAttributes, type KeyEvent } from '@opentui/core';
-import { useKeyboard, useTerminalDimensions } from '@opentui/solid';
+import { useKeyboard, usePaste, useTerminalDimensions } from '@opentui/solid';
 import { For, Match, Show, Switch, createMemo, createSignal, onMount } from 'solid-js';
 import { configManager } from '../config/manager';
 import { loadProviderConfig } from '../config/provider';
@@ -78,6 +78,25 @@ function printable(event: KeyEvent): string | undefined {
   if (event.ctrl || event.meta || event.super) return undefined;
   if (event.name === 'space' || event.name === ' ') return ' ';
   if (event.name.length === 1) return event.name;
+  return undefined;
+}
+
+function normalizePastedText(input: string, singleLine = false) {
+  const normalized = input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return singleLine ? normalized.replace(/\n/g, ' ') : normalized;
+}
+
+async function readClipboardText(): Promise<string | undefined> {
+  if (process.platform === 'win32') {
+    const proc = Bun.spawn(['powershell', '-NoProfile', '-Command', 'Get-Clipboard -Raw'], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    const output = await new Response(proc.stdout).text();
+    const code = await proc.exited;
+    return code === 0 ? output : undefined;
+  }
+
   return undefined;
 }
 
@@ -435,10 +454,56 @@ export function App(props: { onExit: () => void }) {
     }
   }
 
+  function insertText(text: string) {
+    if (!text) return;
+
+    if (screen() === 'add-provider') {
+      const field = draftField();
+      setDraft((current) => ({
+        ...current,
+        [field]: current[field] + normalizePastedText(text, true).trimEnd(),
+      }));
+      return;
+    }
+
+    if (screen() === 'chat') {
+      setInput((value) => value + normalizePastedText(text));
+    }
+  }
+
+  usePaste((event) => {
+    if (event.defaultPrevented) return;
+    insertText(new TextDecoder().decode(event.bytes));
+    event.preventDefault();
+  });
+
   useKeyboard((event) => {
     if (event.defaultPrevented) return;
     if (event.ctrl && event.name === 'c') {
+      if (screen() === 'add-provider') {
+        setScreen('providers');
+        event.preventDefault();
+        return;
+      }
+      if (screen() === 'providers') {
+        setScreen('chat');
+        event.preventDefault();
+        return;
+      }
+      if (input()) {
+        setInput('');
+        setCommandCursor(0);
+        event.preventDefault();
+        return;
+      }
       props.onExit();
+      event.preventDefault();
+      return;
+    }
+    if ((event.ctrl && event.name === 'v') || event.raw === '\x16') {
+      void readClipboardText().then((text) => {
+        if (text) insertText(text);
+      });
       event.preventDefault();
       return;
     }
