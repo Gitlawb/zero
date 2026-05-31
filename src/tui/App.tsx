@@ -13,6 +13,31 @@ import { runAgent } from '../agent/loop';
 
 type Screen = 'chat' | 'provider-picker' | 'add-provider';
 
+// Map low-level errors back to actionable guidance for the user. The full
+// error object is still surfaced separately when debug mode is on.
+function toFriendlyError(err: any): string {
+  const raw = err?.message || String(err);
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('no llm provider configured') || lower.includes('no provider')) {
+    return 'No provider set up. Type /provider to add one.';
+  }
+
+  if (lower.includes('auth') || lower.includes('unauthorized') || lower.includes('invalid') || lower.includes('401') || lower.includes('api key')) {
+    return `Authentication failed — check your API key. Type /provider to update it.\n(${raw})`;
+  }
+
+  if (lower.includes('rate') || lower.includes('quota')) {
+    return `Provider rate limit or quota reached. Try again shortly.\n(${raw})`;
+  }
+
+  if (lower.includes('enotfound') || lower.includes('econnrefused') || lower.includes('etimedout') || lower.includes('fetch failed') || lower.includes('network')) {
+    return `Network error reaching the provider. Check your connection and base URL.\n(${raw})`;
+  }
+
+  return `Error: ${raw}`;
+}
+
 type ChatMessage =
   | { type: 'user'; content: string }
   | { type: 'assistant'; content: string }
@@ -206,6 +231,7 @@ export const App: React.FC = () => {
         await runAgent(trimmed, provider, {
           debug: debugMode,
           toolsEnabled,
+          planMode: isPlanMode,
           onText: (text: string) => {
             setIsThinking(false);
             setMessages((prev) => {
@@ -280,8 +306,8 @@ export const App: React.FC = () => {
           setLastError(null);
         }
 
-        const friendlyMessage = err?.message || String(err);
-        setMessages((prev) => [...prev, { type: 'system', content: `Error: ${friendlyMessage}` }]);
+        const friendlyMessage = toFriendlyError(err);
+        setMessages((prev) => [...prev, { type: 'system', content: friendlyMessage }]);
       } finally {
         setIsThinking(false);
         setStreamingMessageIndex(null);
@@ -356,7 +382,7 @@ export const App: React.FC = () => {
         ...prev,
         { type: 'system', content: 'Available commands:' },
         { type: 'system', content: '  /provider     - Manage LLM providers (fix provider errors here)' },
-        { type: 'system', content: '  /plan         - Toggle Plan Mode (green border)' },
+        { type: 'system', content: '  /plan         - Toggle Plan Mode (agent plans first, makes no edits)' },
         { type: 'system', content: '  /debug-mode   - Toggle debug mode (prints full errors to console)' },
         { type: 'system', content: '  /tools        - Toggle tool calling (useful for debugging provider errors)' },
         { type: 'system', content: '  /help         - Show this help' },

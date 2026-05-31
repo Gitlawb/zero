@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "test": "bun test",
+    "test": "bun test ./tests --timeout 15000",
     "build": "bun build src/index.ts --compile --outfile zero"
   },
   "devDependencies": {

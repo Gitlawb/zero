@@ -1,7 +1,7 @@
 import type { Provider } from '../providers/types';
 import type { ToolCall, ToolResult } from '../tools/types';
 import { toolRegistry } from '../tools';
-import { DEFAULT_SYSTEM_PROMPT } from './prompts';
+import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from './prompts';
 import { clearPlan } from '../tools/plan';
 import { z } from 'zod';
 
@@ -12,6 +12,7 @@ export interface AgentOptions {
   onToolResult?: (result: ToolResult) => void;
   toolsEnabled?: boolean;   // allows temporarily disabling tool calling for debugging
   debug?: boolean;          // when true, logs the exact payload sent to the provider
+  planMode?: boolean;       // when true, the agent plans without modifying the codebase
 }
 
 interface PendingToolCall {
@@ -31,14 +32,17 @@ export async function runAgent(
     onToolCall, 
     onToolResult,
     toolsEnabled = true,
-    debug = false 
+    debug = false,
+    planMode = false
   } = options;
 
   // Clear any previous plan when starting a new task
   clearPlan();
 
+  const systemPrompt = planMode ? PLAN_MODE_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
+
   const messages: any[] = [
-    { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt },
     { role: 'user', content: initialPrompt },
   ];
 
