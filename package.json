@@ -7,25 +7,23 @@
     "zero": "src/index.ts"
   },
   "scripts": {
-    "dev": "bun run src/index.ts",
-    "build": "bun build src/index.ts --compile --outfile zero"
+    "dev": "bun --preload @opentui/solid/preload src/index.ts",
+    "build": "bun run scripts/build.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "@types/react": "^19.2.15"
+    "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
+    "@opentui/core": "^0.2.16",
+    "@opentui/solid": "^0.2.16",
     "commander": "^15.0.0",
     "execa": "^9.6.1",
-    "ink": "^7.0.4",
-    "ink-spinner": "^5.0.0",
-    "ink-text-input": "^6.0.0",
     "openai": "^6.39.1",
-    "react": "^19.2.6",
     "shiki": "^4.1.0",
+    "solid-js": "1.9.12",
     "zod": "^4.4.3"
   }
 }

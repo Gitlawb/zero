@@ -3,12 +3,15 @@ import type { ToolCall, ToolResult } from '../tools/types';
 import { toolRegistry } from '../tools';
 import { DEFAULT_SYSTEM_PROMPT } from './prompts';
 import { clearPlan } from '../tools/plan';
+import { getCurrentPlan, type PlanItem } from '../tools/plan';
 
 export interface AgentOptions {
   maxTurns?: number;
   onText?: (text: string) => void;
   onToolCall?: (toolCall: ToolCall) => void;
   onToolResult?: (result: ToolResult) => void;
+  onUsage?: (usage: { promptTokens: number; completionTokens: number }) => void;
+  onPlanUpdate?: (plan: PlanItem[]) => void;
 }
 
 interface PendingToolCall {
@@ -22,10 +25,11 @@ export async function runAgent(
   provider: Provider,
   options: AgentOptions = {}
 ): Promise<string> {
-  const { maxTurns = 12, onText, onToolCall, onToolResult } = options;
+  const { maxTurns = 12, onText, onToolCall, onToolResult, onUsage, onPlanUpdate } = options;
 
   // Clear any previous plan when starting a new task
   clearPlan();
+  onPlanUpdate?.(getCurrentPlan());
 
   const messages: any[] = [
     { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
@@ -50,6 +54,13 @@ export async function runAgent(
       if (event.type === 'text') {
         currentText += event.content;
         if (onText) onText(event.content);
+      }
+
+      if (event.type === 'usage') {
+        onUsage?.({
+          promptTokens: event.promptTokens,
+          completionTokens: event.completionTokens,
+        });
       }
 
       if (event.type === 'tool-call-start') {
@@ -126,6 +137,10 @@ export async function runAgent(
 
       if (onToolResult) {
         onToolResult({ toolCallId: tc.id, result });
+      }
+
+      if (tc.name === 'update_plan') {
+        onPlanUpdate?.(getCurrentPlan());
       }
 
       return { toolCallId: tc.id, result };

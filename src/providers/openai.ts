@@ -7,6 +7,35 @@ interface OpenAIProviderOptions {
   model: string;
 }
 
+function isUnsupportedStreamOptionsError(error: unknown): boolean {
+  const candidate = error as {
+    status?: number;
+    code?: string;
+    message?: string;
+    error?: {
+      code?: string;
+      message?: string;
+    };
+  };
+
+  const statusAllowsRetry = candidate.status === 400 || candidate.status === 422;
+  const errorText = [
+    candidate.code,
+    candidate.message,
+    candidate.error?.code,
+    candidate.error?.message,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  return statusAllowsRetry && (
+    errorText.includes('stream_options') ||
+    errorText.includes('stream options') ||
+    errorText.includes('include_usage') ||
+    errorText.includes('unknown parameter') ||
+    errorText.includes('unsupported parameter') ||
+    errorText.includes('unrecognized')
+  );
+}
+
 export class OpenAIProvider implements Provider {
   private client: OpenAI;
   private model: string;
@@ -48,12 +77,27 @@ export class OpenAIProvider implements Provider {
         }))
       : undefined;
 
-    const stream = await this.client.chat.completions.create({
+    const createStreamRequest = (includeUsage: boolean) => ({
       model: this.model,
       messages: openaiMessages as any,
       tools: openaiTools,
-      stream: true,
+      stream: true as const,
+      ...(includeUsage ? {
+        stream_options: {
+          include_usage: true,
+        },
+      } : {}),
     });
+
+    let stream;
+    try {
+      stream = await this.client.chat.completions.create(createStreamRequest(true));
+    } catch (error) {
+      if (!isUnsupportedStreamOptionsError(error)) {
+        throw error;
+      }
+      stream = await this.client.chat.completions.create(createStreamRequest(false));
+    }
 
     const toolCallAccumulators = new Map<number, { 
       id: string; 

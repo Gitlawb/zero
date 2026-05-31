@@ -1,9 +1,15 @@
 import { Command } from 'commander';
+import { ensureSolidTransformPlugin } from '@opentui/solid/bun-plugin';
 import { runHeadless } from './cli';
 import { configManager } from './config/manager';
-import { startTUI } from './tui';
 
 const program = new Command();
+
+async function startInteractiveTUI() {
+  ensureSolidTransformPlugin();
+  const { startTUI } = await import('./tui');
+  startTUI();
+}
 
 program
   .name('zero')
@@ -17,7 +23,7 @@ program
       await runHeadless(options.prompt);
     } else {
       // Launch the interactive TUI (Grok Build style)
-      startTUI();
+      await startInteractiveTUI();
     }
   });
 
