@@ -1,15 +1,24 @@
 # zero
 
-To install dependencies:
+## Setup
 
 ```bash
 bun install
 ```
 
-To run:
+## Run
 
 ```bash
-bun run index.ts
+bun run dev
 ```
 
-This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+## Checks
+
+```bash
+bun test
+bun run typecheck
+bun run build
+bun run smoke:build
+```
+
+This project uses Bun 1.3.14.
