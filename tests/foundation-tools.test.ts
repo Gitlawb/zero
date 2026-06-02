@@ -22,7 +22,8 @@ describe('package scripts', () => {
 
     expect(pkg.scripts.typecheck).toBe('bunx tsc --noEmit');
     expect(pkg.scripts.test).toBe('bun test ./tests --timeout 15000');
-    expect(pkg.scripts.build).toBe('bun build src/index.ts --compile --outfile zero');
+    expect(pkg.scripts.build).toBe('bun run scripts/build.ts');
+    expect(pkg.scripts['smoke:build']).toBe('bun run scripts/smoke-build.ts');
   });
 });
 

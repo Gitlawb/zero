@@ -19,9 +19,7 @@
         "@types/bun": "latest",
         "@types/react": "^19.2.15",
         "react-devtools-core": "^7.0.1",
-      },
-      "peerDependencies": {
-        "typescript": "^5",
+        "typescript": "^5.9.3",
       },
     },
   },
