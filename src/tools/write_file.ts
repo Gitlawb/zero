@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, stat } from 'fs/promises';
 import { dirname } from 'path';
 import type { Tool } from './types';
 
@@ -22,14 +22,18 @@ export const writeFileTool: Tool = {
   async execute(args) {
     const { path, content, overwrite } = WriteFileParams.parse(args);
 
-    let existed = true;
+    // Use stat() for an existence check: a zero-byte file should still be
+    // considered existing, otherwise write_file would silently overwrite
+    // touched-but-empty files.
+    let existed = false;
     try {
-      const existing = await Bun.file(path).text();
-      if (existing.length > 0 && !overwrite) {
+      await stat(path);
+      existed = true;
+      if (!overwrite) {
         return `Error: ${path} already exists. Pass overwrite: true to replace it.`;
       }
     } catch {
-      existed = false;
+      // File does not exist; safe to create.
     }
 
     try {

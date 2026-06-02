@@ -109,6 +109,32 @@ describe('writeFileTool', () => {
     expect(await readFile(file, 'utf-8')).toBe('new');
   });
 
+  it('refuses to overwrite an empty existing file without overwrite: true', async () => {
+    // Regression: previously the guard used `existing.length > 0`, so a
+    // touched-but-empty file was silently overwritten. The tool must treat
+    // any existing path as already present.
+    const file = join(dir, 'empty.txt');
+    await writeFile(file, '', 'utf-8');
+    expect((await readFile(file, 'utf-8')).length).toBe(0);
+
+    const result = await writeFileTool.execute({ path: file, content: 'new' });
+    expect(result).toContain('already exists');
+    expect(await readFile(file, 'utf-8')).toBe('');
+  });
+
+  it('overwrites an empty file when overwrite: true', async () => {
+    const file = join(dir, 'empty.txt');
+    await writeFile(file, '', 'utf-8');
+
+    const result = await writeFileTool.execute({
+      path: file,
+      content: 'new',
+      overwrite: true,
+    });
+    expect(result).toContain('Overwrote');
+    expect(await readFile(file, 'utf-8')).toBe('new');
+  });
+
   it('creates parent directories as needed', async () => {
     const file = join(dir, 'nested', 'deep', 'file.txt');
     const result = await writeFileTool.execute({ path: file, content: 'hi' });

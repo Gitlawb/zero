@@ -12,6 +12,13 @@ export interface Tool<T extends z.ZodObject<any> = z.ZodObject<any>> {
   description: string;
   parameters: T;
   execute: (args: z.infer<T>) => Promise<string>;
+  /**
+   * Optional safe-execute path used by the agent loop. When present the
+   * loop should prefer it over calling `execute` directly so schema
+   * validation and thrown-error handling from `ToolBase.run` are honored.
+   * Falls back to `execute` for plain object-literal tools.
+   */
+  run?: (rawArgs: unknown) => Promise<string>;
 }
 
 export interface ToolCall {

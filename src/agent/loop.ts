@@ -179,7 +179,12 @@ export async function runAgent(
         }
 
         try {
-          result = await tool.execute(parsedArgs);
+          // Prefer the safe `run` path (ToolBase) so schema validation
+          // and thrown-error handling kick in for subclasses. Plain
+          // object-literal tools fall back to `execute` directly.
+          result = await (tool.run
+            ? tool.run(parsedArgs)
+            : tool.execute(parsedArgs));
         } catch (e: any) {
           result = `Error executing ${tc.name}: ${e.message}`;
         }
