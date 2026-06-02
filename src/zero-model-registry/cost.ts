@@ -9,6 +9,14 @@ import type {
 
 const TOKENS_PER_MILLION = 1_000_000;
 
+/**
+ * Calculates estimated USD model cost from provider token usage.
+ *
+ * Usage token names accept both Zero's normalized `inputTokens`/`outputTokens`
+ * and the current provider event aliases `promptTokens`/`completionTokens`.
+ * Cached input tokens are billed only when the model exposes cache pricing;
+ * otherwise they are treated as ordinary input tokens.
+ */
 export function calculateZeroModelCost(
   modelOrAlias: string | ZeroModelDefinition,
   usage: ZeroTokenUsage
@@ -23,17 +31,19 @@ export function calculateZeroModelCost(
     usage.outputTokens ?? usage.completionTokens ?? 0,
     'outputTokens'
   );
-  const cachedInputTokens = Math.min(
+  const requestedCachedInputTokens = Math.min(
     nonNegativeInteger(usage.cachedInputTokens ?? 0, 'cachedInputTokens'),
     inputTokens
   );
-  const uncachedInputTokens = inputTokens - cachedInputTokens;
   const tier = selectZeroPricingTier(model.pricing, inputTokens);
   const inputRate = getInputRate(model.pricing, tier);
   const outputRate = getOutputRate(model.pricing, tier);
-  const cachedInputRate = getCachedInputRate(model.pricing, tier, inputRate);
+  const cachedInputRate = getCachedInputRate(model.pricing, tier);
+  const cachedInputTokens =
+    cachedInputRate === undefined ? 0 : requestedCachedInputTokens;
+  const uncachedInputTokens = inputTokens - cachedInputTokens;
   const inputCost = costForTokens(uncachedInputTokens, inputRate);
-  const cachedInputCost = costForTokens(cachedInputTokens, cachedInputRate);
+  const cachedInputCost = costForTokens(cachedInputTokens, cachedInputRate ?? 0);
   const outputCost = costForTokens(outputTokens, outputRate);
 
   return {
@@ -70,9 +80,25 @@ function selectZeroPricingTier(
   inputTokens: number
 ): ZeroModelPricingTier | undefined {
   if (!pricing.tiers?.length) return undefined;
-  return pricing.tiers.find(
-    (tier) => tier.upToInputTokens === undefined || inputTokens <= tier.upToInputTokens
+
+  const boundedTiers = pricing.tiers
+    .filter((tier) => tier.upToInputTokens !== undefined)
+    .sort((a, b) => a.upToInputTokens! - b.upToInputTokens!);
+
+  for (const tier of boundedTiers) {
+    if (inputTokens <= tier.upToInputTokens!) {
+      return tier;
+    }
+  }
+
+  const fallbackTier = pricing.tiers.find(
+    (tier) => tier.upToInputTokens === undefined
   );
+  if (!fallbackTier) {
+    throw new Error(`No Zero model pricing tier covers ${inputTokens} input tokens`);
+  }
+
+  return fallbackTier;
 }
 
 function getInputRate(
@@ -91,10 +117,9 @@ function getOutputRate(
 
 function getCachedInputRate(
   pricing: ZeroModelPricing,
-  tier: ZeroModelPricingTier | undefined,
-  inputRate: number
-): number {
-  return tier?.cachedInputPerMillion ?? pricing.cachedInputPerMillion ?? inputRate;
+  tier: ZeroModelPricingTier | undefined
+): number | undefined {
+  return tier?.cachedInputPerMillion ?? pricing.cachedInputPerMillion;
 }
 
 function costForTokens(tokens: number, perMillionRate: number): number {
@@ -112,8 +137,8 @@ function requireRate(rate: number | undefined, label: string): number {
 }
 
 function nonNegativeInteger(value: number, label: string): number {
-  if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
-    throw new Error(`Expected ${label} to be a non-negative integer`);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`Expected ${label} to be a non-negative number`);
   }
-  return value;
+  return Math.floor(value);
 }

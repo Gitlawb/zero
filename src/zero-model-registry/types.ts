@@ -27,6 +27,7 @@ export interface ZeroModelContextLimits {
 }
 
 export interface ZeroModelPricingTier {
+  /** Inclusive input-token ceiling for this tier; omit only on the final fallback tier. */
   upToInputTokens?: number;
   inputPerMillion: number;
   outputPerMillion: number;
@@ -47,11 +48,14 @@ export interface ZeroModelPricing {
 }
 
 export interface ZeroModelDefinition {
+  /** Stable Zero-facing slug. Version dots are kept when the provider markets the model that way. */
   id: string;
   displayName: string;
+  /** Exact model string sent to the provider API. */
   apiModel: string;
   provider: ZeroModelProvider;
   status: ZeroModelStatus;
+  /** Stable aliases only; aliases must never auto-redirect to a future model. */
   aliases: readonly string[];
   context: ZeroModelContextLimits;
   pricing: ZeroModelPricing;
