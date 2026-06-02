@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-bun install
+bun install --frozen-lockfile
 ```
 
 ## Run
@@ -21,4 +21,4 @@ bun run build
 bun run smoke:build
 ```
 
-This project uses Bun 1.3.14.
+Bun version is pinned in `package.json`.

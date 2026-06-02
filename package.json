@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "test": "bun test ./tests --timeout 15000",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/build.ts",
     "smoke:build": "bun run scripts/smoke-build.ts"
   },

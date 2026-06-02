@@ -24,7 +24,16 @@ if (exitCode !== 0) {
   process.exit(exitCode);
 }
 
-const expectedVersion = JSON.parse(packageText).version;
+let expectedVersion: string;
+
+try {
+  expectedVersion = JSON.parse(packageText).version;
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Failed to parse package.json: ${message}`);
+  process.exit(1);
+}
+
 const actualVersion = stdout.trim();
 
 if (actualVersion !== expectedVersion) {
