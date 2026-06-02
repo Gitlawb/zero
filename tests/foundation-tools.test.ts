@@ -9,7 +9,7 @@ import { toolRegistry } from '../src/tools';
 let dir: string;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'zero-foundation-'));
+  dir = await mkdtemp(join(process.cwd(), '.zero-foundation-'));
 });
 
 afterEach(async () => {
@@ -71,5 +71,19 @@ describe('applyPatchTool', () => {
     expect(result).toBe('Patch applied successfully.');
     const content = await readFile(file, 'utf-8');
     expect(content.replace(/\r\n/g, '\n')).toBe('hello\nnew\n');
+  });
+
+  it('refuses to apply patches outside the workspace', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'zero-outside-'));
+    try {
+      const result = await applyPatchTool.execute({
+        cwd: outsideDir,
+        patch: 'diff --git a/nope.txt b/nope.txt\n',
+      });
+
+      expect(result).toContain('cwd must stay inside the workspace');
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
   });
 });

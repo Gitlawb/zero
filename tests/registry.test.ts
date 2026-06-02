@@ -19,6 +19,17 @@ function makeTool(name: string): Tool {
   };
 }
 
+function makePromptTool(name: string): Tool {
+  return {
+    ...makeTool(name),
+    safety: {
+      sideEffect: 'write',
+      permission: 'prompt',
+      reason: 'test prompt gate',
+    },
+  };
+}
+
 describe('ToolRegistry', () => {
   it('registers and retrieves a tool by name', () => {
     const registry = new ToolRegistry();
@@ -58,5 +69,14 @@ describe('ToolRegistry', () => {
 
     expect(await registry.run('safe', { x: 'ok' })).toBe('ran safe:ok');
     expect(await registry.run('safe', { x: 1 })).toContain('Invalid arguments');
+  });
+
+  it('does not auto-run prompt-gated tools without a grant', async () => {
+    const registry = new ToolRegistry();
+    registry.register(makePromptTool('mutate'));
+
+    const result = await registry.run('mutate', { x: 'ok' });
+    expect(result).toContain('Permission required');
+    expect(result).toContain('was not executed');
   });
 });

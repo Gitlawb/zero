@@ -1,6 +1,6 @@
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { isAbsolute, join, relative, resolve } from 'path';
 import { z } from 'zod';
 import { execa } from 'execa';
 import type { Tool } from './types';
@@ -21,15 +21,28 @@ export const applyPatchTool: Tool = {
   },
   async execute(args) {
     const { patch, cwd } = ApplyPatchParams.parse(args);
-    const root = cwd || process.cwd();
+    const workspaceRoot = process.cwd();
+    const root = resolve(cwd || workspaceRoot);
+    const rel = relative(workspaceRoot, root);
+
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      return `Error applying patch: cwd must stay inside the workspace (${workspaceRoot}).`;
+    }
+
     const tempDir = await mkdtemp(join(tmpdir(), 'zero-patch-'));
     const patchPath = join(tempDir, 'change.patch');
 
     try {
       await writeFile(patchPath, patch, 'utf-8');
 
-      const result = await execa('git', ['apply', '--whitespace=nowarn', patchPath], {
-        cwd: root,
+      const gitArgs = ['apply', '--whitespace=nowarn'];
+      if (rel) {
+        gitArgs.push(`--directory=${rel.replaceAll('\\', '/')}`);
+      }
+      gitArgs.push(patchPath);
+
+      const result = await execa('git', gitArgs, {
+        cwd: workspaceRoot,
         reject: false,
       });
 
