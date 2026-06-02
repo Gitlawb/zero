@@ -21,7 +21,7 @@ export async function runHeadless(prompt: string) {
     provider = createZeroProvider(runtime);
   } catch (err: any) {
     console.error(`[zero] ${err?.message ?? String(err)}`);
-    if (runtime?.provider === 'anthropic' || runtime?.provider === 'google') {
+    if (runtime?.provider === 'google') {
       console.error(
         `[zero] ${runtime.provider} adapter is not yet implemented. ` +
         'Set provider: "openai-compatible" with a custom gateway or use an OpenAI model.'

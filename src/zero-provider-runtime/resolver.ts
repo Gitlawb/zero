@@ -1,4 +1,5 @@
 import { OpenAIProvider } from '../providers/openai';
+import { AnthropicProvider } from '../providers/anthropic';
 import type { Provider } from '../providers/types';
 import {
   getZeroModel,
@@ -84,6 +85,18 @@ export function createZeroProvider(
 
     return new OpenAIProvider({
       apiKey: runtime.apiKey || 'zero-openai-compatible',
+      baseURL: runtime.baseURL,
+      model: runtime.apiModel,
+    });
+  }
+
+  if (runtime.provider === 'anthropic') {
+    if (!runtime.apiKey) {
+      throw new Error('Zero anthropic provider requires an API key');
+    }
+
+    return new AnthropicProvider({
+      apiKey: runtime.apiKey,
       baseURL: runtime.baseURL,
       model: runtime.apiModel,
     });
