@@ -47,11 +47,16 @@ export async function runAgent(
   ];
 
   const tools = toolRegistry.getAll();
+  // Until a real permission UX exists, only advertise tools that can run
+  // without an interactive grant. Prompt/deny tools remain registered for
+  // direct guarded execution, but the model should not be invited to call
+  // tools that the agent loop cannot approve yet.
+  const autoExecutableTools = tools.filter(t => t.safety.permission === 'allow');
   let finalAnswer = '';
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    const toolDefinitions = (toolsEnabled && tools.length > 0)
-      ? tools.map(t => {
+    const toolDefinitions = (toolsEnabled && autoExecutableTools.length > 0)
+      ? autoExecutableTools.map(t => {
           // Convert Zod schema to proper JSON Schema (critical for many providers).
           // zod v4 ships this natively — no external package needed.
           const jsonSchema = z.toJSONSchema(t.parameters, {

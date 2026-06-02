@@ -7,6 +7,7 @@ import type { Provider, Message, StreamEvent } from '../src/providers/types';
 // scripted sequence of stream events per turn.
 class MockProvider implements Provider {
   public received: Message[][] = [];
+  public receivedTools: any[][] = [];
   private turns: StreamEvent[][];
   private turn = 0;
 
@@ -14,9 +15,10 @@ class MockProvider implements Provider {
     this.turns = turns;
   }
 
-  async *streamCompletion(messages: Message[]): AsyncIterable<StreamEvent> {
-    // Snapshot the messages for this turn so tests can inspect the prompt.
+  async *streamCompletion(messages: Message[], tools: any[] = []): AsyncIterable<StreamEvent> {
+    // Snapshot the messages and tool definitions for this turn so tests can inspect the prompt.
     this.received.push(messages.map((m) => ({ ...m })));
+    this.receivedTools.push(tools.map((t) => ({ ...t })));
     const events = this.turns[this.turn] ?? [{ type: 'done' as const }];
     this.turn++;
     for (const ev of events) yield ev;
@@ -77,6 +79,22 @@ describe('runAgent tool-call flow', () => {
     const toolMsg = secondTurn.find((m) => m.role === 'tool');
     expect(toolMsg).toBeDefined();
     expect(toolMsg?.content).toContain('do it');
+  });
+
+  it('does not advertise prompt-gated tools until permission UX exists', async () => {
+    const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
+
+    await runAgent('which tools can you use?', provider);
+
+    const names = (provider.receivedTools[0] ?? []).map((tool) => tool.name).sort();
+    expect(names).toContain('read_file');
+    expect(names).toContain('grep');
+    expect(names).toContain('glob');
+    expect(names).toContain('update_plan');
+    expect(names).not.toContain('bash');
+    expect(names).not.toContain('apply_patch');
+    expect(names).not.toContain('write_file');
+    expect(names).not.toContain('edit_file');
   });
 
   it('keeps tool arguments when a delta arrives before the start event', async () => {
