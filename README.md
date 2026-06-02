@@ -19,6 +19,7 @@ bun test
 bun run typecheck
 bun run build
 bun run smoke:build
+bun run package:release
 ```
 
 Bun version is pinned in `package.json`.
