@@ -1,5 +1,9 @@
 import { loadProviderConfig } from '../config/provider';
-import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
+import {
+  createZeroProvider,
+  resolveZeroProviderRuntime,
+  ZeroPendingProviderError,
+} from '../zero-provider-runtime';
 import type { Provider } from '../providers/types';
 import type { ZeroResolvedProviderRuntime } from '../zero-provider-runtime';
 import { runAgent } from '../agent/loop';
@@ -21,10 +25,9 @@ export async function runHeadless(prompt: string) {
     provider = createZeroProvider(runtime);
   } catch (err: any) {
     console.error(`[zero] ${err?.message ?? String(err)}`);
-    if (runtime?.provider === 'google') {
+    if (err instanceof ZeroPendingProviderError) {
       console.error(
-        `[zero] ${runtime.provider} adapter is not yet implemented. ` +
-        'Set provider: "openai-compatible" with a custom gateway or use an OpenAI model.'
+        '[zero] Use an implemented provider, or set provider: "openai-compatible" with a custom gateway.'
       );
     }
     process.exit(1);

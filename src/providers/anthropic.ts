@@ -82,7 +82,7 @@ export class AnthropicProvider implements Provider {
     this.apiKey = apiKey;
     this.baseURL = (baseURL || DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
     this.model = model;
-    this.maxTokens = maxTokens;
+    this.maxTokens = normalizeMaxTokens(maxTokens);
     this.version = version;
     this.beta = beta;
     this.fetchImpl = fetchImpl;
@@ -278,15 +278,14 @@ async function* readAnthropicSSE(
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value, { stream: !done });
-    buffer = buffer.replace(/\r\n/g, '\n');
 
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary !== -1) {
-      const rawEvent = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
+    let boundary = findSSEBoundary(buffer);
+    while (boundary) {
+      const rawEvent = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.length);
       const payload = parseAnthropicSSEPayload(rawEvent);
       if (payload) yield payload;
-      boundary = buffer.indexOf('\n\n');
+      boundary = findSSEBoundary(buffer);
     }
 
     if (done) break;
@@ -296,10 +295,19 @@ async function* readAnthropicSSE(
   if (trailingPayload) yield trailingPayload;
 }
 
+function findSSEBoundary(buffer: string): { index: number; length: number } | undefined {
+  const lfIndex = buffer.indexOf('\n\n');
+  const crlfIndex = buffer.indexOf('\r\n\r\n');
+  if (lfIndex === -1 && crlfIndex === -1) return undefined;
+  if (lfIndex === -1) return { index: crlfIndex, length: 4 };
+  if (crlfIndex === -1 || lfIndex < crlfIndex) return { index: lfIndex, length: 2 };
+  return { index: crlfIndex, length: 4 };
+}
+
 function parseAnthropicSSEPayload(rawEvent: string): AnthropicStreamPayload | undefined {
   const dataLines: string[] = [];
 
-  for (const line of rawEvent.split('\n')) {
+  for (const line of rawEvent.replace(/\r\n/g, '\n').split('\n')) {
     if (!line || line.startsWith(':')) continue;
     if (line.startsWith('data:')) {
       dataLines.push(line.slice('data:'.length).trimStart());
@@ -353,7 +361,7 @@ function toAnthropicMessages(messages: Message[]): {
           type: 'tool_use',
           id: toolCall.id,
           name: toolCall.name,
-          input: parseToolArguments(toolCall.arguments),
+          input: parseToolArguments(toolCall.arguments, toolCall.name),
         });
       }
       anthropicMessages.push({
@@ -403,17 +411,29 @@ function toAnthropicTools(tools: ToolDefinition[]): Array<Record<string, unknown
   }));
 }
 
-function parseToolArguments(argumentsJson: string): Record<string, unknown> {
+function parseToolArguments(argumentsJson: string, toolName: string): Record<string, unknown> {
   if (!argumentsJson) return {};
   try {
     const parsed = JSON.parse(argumentsJson);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
-    return { input: parsed };
-  } catch {
-    return { input: argumentsJson };
+    throw new Error(
+      `Zero Anthropic provider requires tool arguments for ${toolName} to be a JSON object`
+    );
+  } catch (err: any) {
+    if (err?.message?.includes('JSON object')) throw err;
+    throw new Error(
+      `Zero Anthropic provider could not parse tool arguments for ${toolName} as JSON`
+    );
   }
+}
+
+function normalizeMaxTokens(maxTokens: number): number {
+  if (!Number.isFinite(maxTokens) || !Number.isInteger(maxTokens) || maxTokens < 1) {
+    throw new Error('Zero Anthropic provider maxTokens must be a positive integer');
+  }
+  return maxTokens;
 }
 
 function normalizeMessageContent(content: unknown): string {

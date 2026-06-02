@@ -11,6 +11,7 @@ describe('AnthropicProvider', () => {
     const provider = new AnthropicProvider({
       apiKey: 'test-anthropic-key',
       model: 'claude-sonnet-4-5-20250929',
+      maxTokens: 64000,
       fetchImpl: async (url, init) => {
         capturedUrl = String(url);
         capturedBody = JSON.parse(String(init?.body));
@@ -60,7 +61,7 @@ describe('AnthropicProvider', () => {
     expect(capturedHeaders?.get('anthropic-version')).toBe('2023-06-01');
     expect(capturedBody).toEqual({
       model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 4096,
+      max_tokens: 64000,
       stream: true,
       system: 'You are Zero.',
       messages: [
@@ -205,6 +206,53 @@ describe('AnthropicProvider', () => {
     ]);
   });
 
+  it('normalizes multiple Anthropic tool-use blocks in the same response', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      fetchImpl: createFetch([
+        event('content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'tool_use', id: 'toolu_1', name: 'read_file', input: {} },
+        }),
+        event('content_block_start', {
+          type: 'content_block_start',
+          index: 1,
+          content_block: { type: 'tool_use', id: 'toolu_2', name: 'grep', input: {} },
+        }),
+        event('content_block_delta', {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: '{"path":"a.ts"}' },
+        }),
+        event('content_block_delta', {
+          type: 'content_block_delta',
+          index: 1,
+          delta: { type: 'input_json_delta', partial_json: '{"pattern":"Zero"}' },
+        }),
+        event('content_block_stop', { type: 'content_block_stop', index: 0 }),
+        event('content_block_stop', { type: 'content_block_stop', index: 1 }),
+        event('message_stop', { type: 'message_stop' }),
+      ]),
+    });
+
+    const events = await collectEvents(provider.streamCompletion(
+      [{ role: 'user', content: 'read and grep' }],
+      []
+    ));
+
+    expect(events).toEqual([
+      { type: 'tool-call-start', id: 'toolu_1', name: 'read_file' },
+      { type: 'tool-call-start', id: 'toolu_2', name: 'grep' },
+      { type: 'tool-call-delta', id: 'toolu_1', argumentsFragment: '{"path":"a.ts"}' },
+      { type: 'tool-call-delta', id: 'toolu_2', argumentsFragment: '{"pattern":"Zero"}' },
+      { type: 'tool-call-end', id: 'toolu_1' },
+      { type: 'tool-call-end', id: 'toolu_2' },
+      { type: 'done' },
+    ]);
+  });
+
   it('surfaces Anthropic HTTP authentication errors with provider context', async () => {
     const provider = new AnthropicProvider({
       apiKey: 'bad-key',
@@ -219,6 +267,94 @@ describe('AnthropicProvider', () => {
       [{ role: 'user', content: 'hello' }],
       []
     ))).rejects.toThrow('Provider authentication error');
+  });
+
+  it('surfaces Anthropic HTTP rate limit errors with provider context', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: { message: 'rate limited' } }), {
+          status: 429,
+        }),
+    });
+
+    await expect(collectEvents(provider.streamCompletion(
+      [{ role: 'user', content: 'hello' }],
+      []
+    ))).rejects.toThrow('Provider rate limit error');
+  });
+
+  it('surfaces Anthropic stream error events with provider context', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      fetchImpl: createFetch([
+        event('error', {
+          type: 'error',
+          error: { type: 'overloaded_error', message: 'server overloaded' },
+        }),
+      ]),
+    });
+
+    await expect(collectEvents(provider.streamCompletion(
+      [{ role: 'user', content: 'hello' }],
+      []
+    ))).rejects.toThrow('server overloaded');
+  });
+
+  it('rejects Anthropic calls without a non-system message', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      fetchImpl: createFetch([]),
+    });
+
+    await expect(collectEvents(provider.streamCompletion(
+      [{ role: 'system', content: 'Only system.' }],
+      []
+    ))).rejects.toThrow('requires at least one non-system message');
+  });
+
+  it('rejects tool results without a toolCallId before dispatch', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      fetchImpl: createFetch([]),
+    });
+
+    await expect(collectEvents(provider.streamCompletion(
+      [{ role: 'tool', content: 'missing id' }],
+      []
+    ))).rejects.toThrow('requires toolCallId');
+  });
+
+  it('rejects assistant tool calls whose arguments are not JSON objects', async () => {
+    const provider = new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      fetchImpl: createFetch([]),
+    });
+
+    await expect(collectEvents(provider.streamCompletion(
+      [
+        { role: 'user', content: 'call tool' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'toolu_1', name: 'read_file', arguments: '"src/index.ts"' }],
+        },
+      ],
+      []
+    ))).rejects.toThrow('requires tool arguments for read_file to be a JSON object');
+  });
+
+  it('validates maxTokens before dispatch', async () => {
+    expect(() => new AnthropicProvider({
+      apiKey: 'test-key',
+      model: 'claude-sonnet-4-5-20250929',
+      maxTokens: 0,
+    })).toThrow('maxTokens must be a positive integer');
   });
 });
 

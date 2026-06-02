@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   createZeroProvider,
   resolveZeroProviderRuntime,
+  ZeroPendingProviderError,
 } from '../src/zero-provider-runtime';
 
 describe('resolveZeroProviderRuntime', () => {
@@ -125,7 +126,9 @@ describe('resolveZeroProviderRuntime', () => {
       model: 'sonnet-4.5',
       apiKey: 'test-anthropic-key',
     });
-    expect(createZeroProvider(anthropic)).toBeDefined();
+    const provider = createZeroProvider(anthropic);
+    expect(provider).toBeDefined();
+    expect((provider as any).maxTokens).toBe(64000);
   });
 
   it('requires an API key for the official Anthropic runtime', () => {
@@ -144,9 +147,7 @@ describe('resolveZeroProviderRuntime', () => {
       apiKey: 'test-google-key',
     });
 
-    expect(() => createZeroProvider(google)).toThrow(
-      'google provider adapter is not implemented yet'
-    );
+    expect(() => createZeroProvider(google)).toThrow(ZeroPendingProviderError);
   });
 
   it('creates OpenAI-compatible providers without an API key for custom gateways', () => {
