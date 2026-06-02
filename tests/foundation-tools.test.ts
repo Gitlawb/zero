@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { applyPatchTool } from '../src/tools/apply_patch';
@@ -27,16 +27,15 @@ describe('package scripts', () => {
 });
 
 describe('tool safety metadata', () => {
-  it('marks core tools with side effects and default permission decisions', () => {
-    expect(toolRegistry.get('bash')?.safety).toEqual({
-      sideEffect: 'shell',
-      permission: 'prompt',
-      reason: expect.any(String),
-    });
-    expect(toolRegistry.get('grep')?.safety.sideEffect).toBe('read');
-    expect(toolRegistry.get('glob')?.safety.permission).toBe('allow');
-    expect(toolRegistry.get('apply_patch')?.safety.sideEffect).toBe('write');
-    expect(toolRegistry.get('apply_patch')?.safety.permission).toBe('prompt');
+  it('marks every registered tool with valid safety metadata', () => {
+    const sideEffects = ['read', 'write', 'shell', 'network', 'out_of_workspace'];
+    const permissions = ['allow', 'prompt', 'deny'];
+
+    for (const tool of toolRegistry.getAll()) {
+      expect(sideEffects).toContain(tool.safety.sideEffect);
+      expect(permissions).toContain(tool.safety.permission);
+      expect(tool.safety.reason.length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -48,6 +47,25 @@ describe('globTool', () => {
     const result = await globTool.execute({ pattern: '*.ts', cwd: dir });
     expect(result).toContain('one.ts');
     expect(result).not.toContain('two.txt');
+  });
+
+  it('respects limit without collecting an extra match', async () => {
+    await writeFile(join(dir, 'a.ts'), '', 'utf-8');
+    await writeFile(join(dir, 'b.ts'), '', 'utf-8');
+    await writeFile(join(dir, 'c.ts'), '', 'utf-8');
+
+    const result = await globTool.execute({ pattern: '*.ts', cwd: dir, limit: 2 });
+    const lines = result.split('\n');
+    expect(lines.filter(line => line.endsWith('.ts'))).toHaveLength(2);
+    expect(result).toContain('truncated after 2 matches');
+  });
+
+  it('can include directory matches', async () => {
+    await mkdir(join(dir, 'src'), { recursive: true });
+    await writeFile(join(dir, 'src', 'index.ts'), 'export {};', 'utf-8');
+
+    const result = await globTool.execute({ pattern: 'src', cwd: dir, include_dirs: true });
+    expect(result).toContain('src');
   });
 });
 

@@ -22,7 +22,8 @@ Features:
 - Full regex support
 - Filter by glob
 - Different output modes (content, files_with_matches, count)
-- Automatically respects .gitignore`,
+- Automatically respects .gitignore
+- Requires ripgrep (rg) on PATH; returns an error if rg is unavailable`,
   parameters: GrepParams,
   safety: {
     sideEffect: 'read',
@@ -92,8 +93,7 @@ Features:
 
       return formatted.join('\n');
     } catch (err) {
-      // Fallback to simple grep if rg not available (not ideal but works)
-      return `ripgrep (rg) not found. Falling back to basic search is not yet implemented. Please install ripgrep for best results.`;
+      return `Error: ripgrep (rg) is required for grep but was not found on PATH.`;
     }
   },
 };

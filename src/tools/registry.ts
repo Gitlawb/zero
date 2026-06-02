@@ -26,10 +26,6 @@ export class ToolRegistry {
         `The tool is marked "${tool.safety.permission}" and was not executed.`;
     }
 
-    if (tool.run) {
-      return tool.run(args);
-    }
-
     const parsed = tool.parameters.safeParse(args);
     if (!parsed.success) {
       return `Error: Invalid arguments for ${name}: ${parsed.error.message}`;
@@ -40,14 +36,6 @@ export class ToolRegistry {
     } catch (err: any) {
       return `Error executing ${name}: ${err?.message ?? String(err)}`;
     }
-  }
-
-  getDefinitionsForProvider() {
-    return this.getAll().map(tool => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters.shape, // We'll convert properly later
-    }));
   }
 }
 

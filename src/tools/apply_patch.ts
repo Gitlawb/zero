@@ -12,7 +12,8 @@ const ApplyPatchParams = z.object({
 
 export const applyPatchTool: Tool = {
   name: 'apply_patch',
-  description: 'Apply a unified diff patch to files in the workspace.',
+  description:
+    'Apply a unified diff patch inside the current workspace. Paths outside the workspace are rejected; be conservative about which paths you patch.',
   parameters: ApplyPatchParams,
   safety: {
     sideEffect: 'write',

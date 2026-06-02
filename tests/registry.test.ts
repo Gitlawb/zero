@@ -71,6 +71,11 @@ describe('ToolRegistry', () => {
     expect(await registry.run('safe', { x: 1 })).toContain('Invalid arguments');
   });
 
+  it('reports unknown tools from the registry run path', async () => {
+    const registry = new ToolRegistry();
+    expect(await registry.run('missing', {})).toBe('Error: Unknown tool "missing".');
+  });
+
   it('does not auto-run prompt-gated tools without a grant', async () => {
     const registry = new ToolRegistry();
     registry.register(makePromptTool('mutate'));

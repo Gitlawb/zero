@@ -22,11 +22,15 @@ export const globTool: Tool = {
     const glob = new Bun.Glob(pattern);
     const root = cwd || process.cwd();
     const matches: string[] = [];
+    let truncated = false;
 
     try {
       for (const match of glob.scanSync({ cwd: root, onlyFiles: !include_dirs })) {
+        if (matches.length >= limit) {
+          truncated = true;
+          break;
+        }
         matches.push(match);
-        if (matches.length > limit) break;
       }
     } catch (err: any) {
       return `Error running glob "${pattern}": ${err.message}`;
@@ -36,8 +40,6 @@ export const globTool: Tool = {
       return `No matches found for ${pattern}`;
     }
 
-    const visible = matches.slice(0, limit);
-    const truncated = matches.length > limit ? `\n... truncated after ${limit} matches` : '';
-    return visible.join('\n') + truncated;
+    return matches.join('\n') + (truncated ? `\n... truncated after ${limit} matches` : '');
   },
 };

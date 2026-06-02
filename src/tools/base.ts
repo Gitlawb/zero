@@ -28,22 +28,6 @@ export abstract class ToolBase<T extends z.ZodObject<any> = z.ZodObject<any>> {
   abstract execute(args: z.infer<T>): Promise<string>;
 
   /**
-   * Parse raw LLM-supplied arguments through the Zod schema, then execute.
-   * Returns either a string result or a `ZodError` formatted as a string.
-   */
-  async run(rawArgs: unknown): Promise<string> {
-    const parsed = this.parameters.safeParse(rawArgs);
-    if (!parsed.success) {
-      return `Error: Invalid arguments for ${this.name}: ${parsed.error.message}`;
-    }
-    try {
-      return await this.execute(parsed.data as z.infer<T>);
-    } catch (err: any) {
-      return `Error executing ${this.name}: ${err?.message ?? String(err)}`;
-    }
-  }
-
-  /**
    * JSON Schema (draft-7) representation of the parameters, suitable for
    * sending to OpenAI-compatible providers. We rely on Zod v4's built-in
    * converter so no extra dependency is required.
