@@ -112,6 +112,14 @@ export class OpenAIProvider implements Provider {
 
             if (tc.id) acc.id = tc.id;
             if (tc.function?.name) acc.name = tc.function.name;
+
+            // Emit start before the first argument delta when a provider
+            // sends id, name, and arguments in the same stream chunk.
+            if (acc.id && acc.name && !acc.started) {
+              yield { type: 'tool-call-start', id: acc.id, name: acc.name };
+              acc.started = true;
+            }
+
             if (tc.function?.arguments) {
               acc.arguments += tc.function.arguments;
               yield {
@@ -119,12 +127,6 @@ export class OpenAIProvider implements Provider {
                 id: acc.id || `pending-${tc.index}`,
                 argumentsFragment: tc.function.arguments,
               };
-            }
-
-            // Emit start event the first time we have both id and name
-            if (acc.id && acc.name && !acc.started) {
-              yield { type: 'tool-call-start', id: acc.id, name: acc.name };
-              acc.started = true;
             }
           }
         }

@@ -6,6 +6,8 @@ import { bashTool } from './bash';
 import { planTool } from './plan';
 import { listDirectoryTool } from './list-directory';
 import { grepTool } from './grep';
+import { globTool } from './glob';
+import { applyPatchTool } from './apply_patch';
 
 toolRegistry.register(readFileTool);
 toolRegistry.register(writeFileTool);
@@ -14,6 +16,8 @@ toolRegistry.register(bashTool);
 toolRegistry.register(planTool);
 toolRegistry.register(listDirectoryTool);
 toolRegistry.register(grepTool);
+toolRegistry.register(globTool);
+toolRegistry.register(applyPatchTool);
 
 // Compatibility re-exports (kebab-case filenames still resolve)
 export { readFileTool as readFileToolKebab } from './read_file';

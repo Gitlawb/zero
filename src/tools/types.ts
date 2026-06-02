@@ -1,5 +1,14 @@
 import type { z } from 'zod';
 
+export type ToolSideEffect = 'read' | 'write' | 'shell' | 'network' | 'out_of_workspace';
+export type ToolPermission = 'allow' | 'prompt' | 'deny';
+
+export interface ToolSafety {
+  sideEffect: ToolSideEffect;
+  permission: ToolPermission;
+  reason: string;
+}
+
 /**
  * Structural type describing any tool usable by the agent loop.
  *
@@ -11,6 +20,7 @@ export interface Tool<T extends z.ZodObject<any> = z.ZodObject<any>> {
   name: string;
   description: string;
   parameters: T;
+  safety: ToolSafety;
   execute: (args: z.infer<T>) => Promise<string>;
   /**
    * Optional safe-execute path used by the agent loop. When present the

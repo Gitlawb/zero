@@ -19,6 +19,11 @@ export const writeFileTool: Tool = {
     'Create a new file with the given contents. Refuses to overwrite existing files unless `overwrite: true` is passed. ' +
     'Parent directories are created automatically. Use this for new files; for existing files prefer `edit_file`.',
   parameters: WriteFileParams,
+  safety: {
+    sideEffect: 'write',
+    permission: 'prompt',
+    reason: 'Creates or overwrites files.',
+  },
   async execute(args) {
     const { path, content, overwrite } = WriteFileParams.parse(args);
 

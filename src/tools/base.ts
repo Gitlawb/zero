@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { ToolSafety } from './types';
 
 /**
  * Abstract base class for all Zero tools.
@@ -17,6 +18,7 @@ export abstract class ToolBase<T extends z.ZodObject<any> = z.ZodObject<any>> {
   abstract readonly name: string;
   abstract readonly description: string;
   abstract readonly parameters: T;
+  abstract readonly safety: ToolSafety;
 
   /**
    * Run the tool with the (already parsed) arguments.

@@ -52,6 +52,11 @@ When to use:
 
 The plan should be clear, actionable, and ordered. Keep it up to date as you work.`,
   parameters: UpdatePlanParams,
+  safety: {
+    sideEffect: 'read',
+    permission: 'allow',
+    reason: 'Updates in-memory planning state only.',
+  },
   async execute(args) {
     const { plan } = UpdatePlanParams.parse(args);
 

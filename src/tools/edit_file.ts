@@ -27,6 +27,11 @@ export const editFileTool: Tool = {
     'Replace an exact string in a file. By default old_string must match exactly one location (a safety check). ' +
     'Pass replace_all: true to replace every occurrence. The new_string may be empty to delete a region.',
   parameters: EditFileParams,
+  safety: {
+    sideEffect: 'write',
+    permission: 'prompt',
+    reason: 'Edits files in place.',
+  },
   async execute(args) {
     const { path, old_string, new_string, replace_all } = EditFileParams.parse(args);
 

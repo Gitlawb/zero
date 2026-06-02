@@ -79,6 +79,30 @@ describe('runAgent tool-call flow', () => {
     expect(toolMsg?.content).toContain('do it');
   });
 
+  it('keeps tool arguments when a delta arrives before the start event', async () => {
+    const provider = new MockProvider([
+      [
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({
+            plan: [{ id: '1', content: 'ordered safely', status: 'pending' }],
+          }),
+        },
+        { type: 'tool-call-start', id: 'call_1', name: 'update_plan' },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [{ type: 'text', content: 'all done' }],
+    ]);
+
+    const toolResults: string[] = [];
+    await runAgent('make a plan', provider, {
+      onToolResult: (r) => toolResults.push(r.result),
+    });
+
+    expect(toolResults[0]).toContain('ordered safely');
+  });
+
   it('stops and returns text when the model makes no tool calls', async () => {
     const provider = new MockProvider([[{ type: 'text', content: 'just an answer' }]]);
     const answer = await runAgent('hi', provider, {});

@@ -11,6 +11,11 @@ export const bashTool: Tool = {
   name: 'bash',
   description: 'Execute a shell command and return the output. Use for running commands, git, tests, etc.',
   parameters: BashParams,
+  safety: {
+    sideEffect: 'shell',
+    permission: 'prompt',
+    reason: 'Shell commands can read, write, or execute programs.',
+  },
   async execute(args) {
     const { command, cwd } = BashParams.parse(args);
 

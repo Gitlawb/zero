@@ -38,6 +38,11 @@ export const readFileTool: Tool = {
     'Read the contents of a file. Supports an optional inclusive line range (start_line, end_line) and a max_lines cap. ' +
     'Output is line-numbered so lines can be referenced precisely.',
   parameters: ReadFileParams,
+  safety: {
+    sideEffect: 'read',
+    permission: 'allow',
+    reason: 'Reads file contents without modifying files.',
+  },
   async execute(args) {
     const { path, start_line, end_line, max_lines } = ReadFileParams.parse(args);
 

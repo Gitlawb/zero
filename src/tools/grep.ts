@@ -24,6 +24,11 @@ Features:
 - Different output modes (content, files_with_matches, count)
 - Automatically respects .gitignore`,
   parameters: GrepParams,
+  safety: {
+    sideEffect: 'read',
+    permission: 'allow',
+    reason: 'Searches file paths and matching lines without modifying files.',
+  },
   async execute(args) {
     const params = GrepParams.parse(args);
     const { pattern, path = '.', glob, output_mode, '-i': caseInsensitive, '-n': showLineNumbers, head_limit } = params;

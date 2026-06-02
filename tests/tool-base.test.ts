@@ -6,6 +6,11 @@ class EchoTool extends ToolBase {
   readonly name = 'echo';
   readonly description = 'Returns its input back.';
   readonly parameters = z.object({ message: z.string() });
+  readonly safety = {
+    sideEffect: 'read' as const,
+    permission: 'allow' as const,
+    reason: 'test tool',
+  };
 
   async execute(args: z.infer<typeof this.parameters>) {
     return `echo: ${args.message}`;
@@ -16,6 +21,11 @@ class FailingTool extends ToolBase {
   readonly name = 'boom';
   readonly description = 'Always throws.';
   readonly parameters = z.object({});
+  readonly safety = {
+    sideEffect: 'read' as const,
+    permission: 'allow' as const,
+    reason: 'test tool',
+  };
 
   async execute(_args: Record<string, unknown>): Promise<string> {
     throw new Error('kaboom');

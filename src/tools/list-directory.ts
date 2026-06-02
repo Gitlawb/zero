@@ -18,6 +18,11 @@ This is the preferred tool for understanding the codebase layout before planning
 - Supports recursive listing with depth control
 - Ignores common junk directories (.git, node_modules, dist, etc.) by default`,
   parameters: ListDirectoryParams,
+  safety: {
+    sideEffect: 'read',
+    permission: 'allow',
+    reason: 'Lists directory entries without modifying files.',
+  },
   async execute(args) {
     const { path = '.', recursive, max_depth } = ListDirectoryParams.parse(args);
 

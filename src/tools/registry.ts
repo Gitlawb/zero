@@ -15,6 +15,28 @@ export class ToolRegistry {
     return Array.from(this.tools.values());
   }
 
+  async run(name: string, args: unknown): Promise<string> {
+    const tool = this.get(name);
+    if (!tool) {
+      return `Error: Unknown tool "${name}".`;
+    }
+
+    if (tool.run) {
+      return tool.run(args);
+    }
+
+    const parsed = tool.parameters.safeParse(args);
+    if (!parsed.success) {
+      return `Error: Invalid arguments for ${name}: ${parsed.error.message}`;
+    }
+
+    try {
+      return await tool.execute(parsed.data);
+    } catch (err: any) {
+      return `Error executing ${name}: ${err?.message ?? String(err)}`;
+    }
+  }
+
   getDefinitionsForProvider() {
     return this.getAll().map(tool => ({
       name: tool.name,

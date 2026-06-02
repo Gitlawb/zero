@@ -8,8 +8,13 @@ function makeTool(name: string): Tool {
     name,
     description: `tool ${name}`,
     parameters: z.object({ x: z.string() }),
-    async execute() {
-      return `ran ${name}`;
+    safety: {
+      sideEffect: 'read',
+      permission: 'allow',
+      reason: 'test tool',
+    },
+    async execute(args) {
+      return `ran ${name}:${args.x}`;
     },
   };
 }
@@ -45,5 +50,13 @@ describe('ToolRegistry', () => {
 
     expect(registry.getAll()).toHaveLength(1);
     expect(registry.get('dup')).toBe(second);
+  });
+
+  it('runs tools through the validating registry path', async () => {
+    const registry = new ToolRegistry();
+    registry.register(makeTool('safe'));
+
+    expect(await registry.run('safe', { x: 'ok' })).toBe('ran safe:ok');
+    expect(await registry.run('safe', { x: 1 })).toContain('Invalid arguments');
   });
 });

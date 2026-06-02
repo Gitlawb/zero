@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test ./tests --timeout 15000",
     "build": "bun build src/index.ts --compile --outfile zero"
   },

@@ -114,19 +114,27 @@ export async function runAgent(
       }
 
       if (event.type === 'tool-call-start') {
-        toolCallMap.set(event.id, {
-          id: event.id,
-          name: event.name,
-          arguments: '',
-        });
+        const existing = toolCallMap.get(event.id);
+        if (existing) {
+          existing.name = event.name;
+        } else {
+          toolCallMap.set(event.id, {
+            id: event.id,
+            name: event.name,
+            arguments: '',
+          });
+        }
         // Do NOT emit to UI yet — we want the full arguments for proper formatting
       }
 
       if (event.type === 'tool-call-delta') {
-        const existing = toolCallMap.get(event.id);
-        if (existing) {
-          existing.arguments += event.argumentsFragment;
-        }
+        const existing = toolCallMap.get(event.id) ?? {
+          id: event.id,
+          name: '',
+          arguments: '',
+        };
+        existing.arguments += event.argumentsFragment;
+        toolCallMap.set(event.id, existing);
       }
 
       if (event.type === 'tool-call-end') {
@@ -162,32 +170,21 @@ export async function runAgent(
 
     // === Execute tools (in parallel) ===
     const toolPromises = assistantToolCalls.map(async (tc) => {
-      const tool = tools.find(t => t.name === tc.name);
-
       let result: string;
 
-      if (!tool) {
-        result = `Error: Unknown tool "${tc.name}".`;
-      } else {
-        let parsedArgs: any = {};
-        try {
-          parsedArgs = tc.arguments ? JSON.parse(tc.arguments) : {};
-        } catch (e: any) {
-          result = `Error: Failed to parse arguments for ${tc.name}: ${e.message}`;
-          if (onToolResult) onToolResult({ toolCallId: tc.id, result });
-          return { toolCallId: tc.id, result };
-        }
+      let parsedArgs: any = {};
+      try {
+        parsedArgs = tc.arguments ? JSON.parse(tc.arguments) : {};
+      } catch (e: any) {
+        result = `Error: Failed to parse arguments for ${tc.name}: ${e.message}`;
+        if (onToolResult) onToolResult({ toolCallId: tc.id, result });
+        return { toolCallId: tc.id, result };
+      }
 
-        try {
-          // Prefer the safe `run` path (ToolBase) so schema validation
-          // and thrown-error handling kick in for subclasses. Plain
-          // object-literal tools fall back to `execute` directly.
-          result = await (tool.run
-            ? tool.run(parsedArgs)
-            : tool.execute(parsedArgs));
-        } catch (e: any) {
-          result = `Error executing ${tc.name}: ${e.message}`;
-        }
+      try {
+        result = await toolRegistry.run(tc.name, parsedArgs);
+      } catch (e: any) {
+        result = `Error executing ${tc.name}: ${e.message}`;
       }
 
       if (onToolResult) {
