@@ -22,7 +22,7 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => 
     matches.push({
       index: match.index,
       lang: match[1] || 'text',
-      code: match[2].trim(),
+      code: (match[2] ?? '').trim(),
       fullMatch: match[0],
     });
   }
@@ -33,7 +33,7 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => 
       const newHighlights = new Map<number, string>();
 
       for (let i = 0; i < matches.length; i++) {
-        const m = matches[i];
+        const m = matches[i]!;
         try {
           const ansi = await highlightCode(m.code, m.lang);
           newHighlights.set(i, ansi);
@@ -51,7 +51,7 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => 
   }, [content]);
 
   for (let i = 0; i < matches.length; i++) {
-    const m = matches[i];
+    const m = matches[i]!;
 
     // Add text before this code block (with paragraph formatting)
     if (m.index > lastIndex) {
@@ -71,8 +71,8 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => 
         marginBottom={1}
         paddingX={1}
       >
-        {m.lang && m.lang !== 'text' && (
-          <Text color="cyan" dimColor>{m.lang}</Text>
+        {m?.lang && m.lang !== 'text' && (
+        <Text color="cyan" dimColor>{m.lang}</Text>
         )}
         {highlighted ? (
           <Text>{highlighted}</Text>
@@ -82,7 +82,7 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => 
       </Box>
     );
 
-    lastIndex = m.index + m.fullMatch.length;
+    lastIndex = (m?.index ?? 0) + (m?.fullMatch?.length ?? 0);
     blockIndex++;
   }
 

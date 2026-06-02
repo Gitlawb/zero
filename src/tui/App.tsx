@@ -319,7 +319,7 @@ export const App: React.FC = () => {
 
   const handleSlashCommand = (command: string) => {
     const parts = command.trim().split(/\s+/);
-    const cmd = parts[0].toLowerCase();
+    const cmd = parts[0]?.toLowerCase() ?? '';
     const arg = parts[1]?.toLowerCase();
 
     if (cmd === '/provider') {

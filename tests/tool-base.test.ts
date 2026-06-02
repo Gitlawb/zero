@@ -17,7 +17,7 @@ class FailingTool extends ToolBase {
   readonly description = 'Always throws.';
   readonly parameters = z.object({});
 
-  async execute() {
+  async execute(_args: Record<string, unknown>): Promise<string> {
     throw new Error('kaboom');
   }
 }

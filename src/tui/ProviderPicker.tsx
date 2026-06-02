@@ -35,7 +35,7 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCanc
     if (key.return) {
       if (selectedIndex < providers.length) {
         const selected = providers[selectedIndex];
-        onSelect(selected.name);
+        if (selected) onSelect(selected.name);
       } else {
         // Last item = Add new
         onAddNew();
@@ -48,7 +48,7 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCanc
     if (!isNaN(num) && num >= 1 && num <= totalItems) {
       if (num <= providers.length) {
         const selected = providers[num - 1];
-        onSelect(selected.name);
+        if (selected) onSelect(selected.name);
       } else {
         onAddNew();
       }

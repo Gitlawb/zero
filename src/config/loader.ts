@@ -27,7 +27,7 @@ export const ProviderProfileSchema = z.object({
 
 export const ZeroConfigSchema = z.object({
   activeProvider: z.string().optional(),
-  providers: z.array(ProviderProfileSchema).default([]),
+  providers: z.array(ProviderProfileSchema).optional(),
   maxTurns: z.number().int().min(1).max(100).optional(),
   planMode: z.boolean().optional(),
   debug: z.boolean().optional(),
