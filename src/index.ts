@@ -2,10 +2,14 @@ import { Command } from 'commander';
 import { runHeadless } from './cli';
 import { configManager } from './config/manager';
 import { startTUI } from './tui';
-import { checkForUpdate, formatUpdateCheck } from './update/check';
+import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
 
 const program = new Command();
+
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 program
   .name('zero')
@@ -91,15 +95,15 @@ program
     }
 
     try {
-      const result = await checkForUpdate();
+      const result = await checkForUpdate({ timeoutMs: DEFAULT_UPDATE_CHECK_TIMEOUT_MS });
 
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
         console.log(formatUpdateCheck(result));
       }
-    } catch (err: any) {
-      console.error(`[zero] Could not check for updates: ${err?.message ?? String(err)}`);
+    } catch (err: unknown) {
+      console.error(`[zero] Could not check for updates: ${getErrorMessage(err)}`);
       process.exitCode = 1;
     }
   });

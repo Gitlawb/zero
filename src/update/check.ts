@@ -1,5 +1,7 @@
 import { ZERO_RELEASE_REPOSITORY, ZERO_VERSION } from '../version';
 
+export const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 5000;
+
 type FetchResponse = {
   ok: boolean;
   status: number;
@@ -11,6 +13,7 @@ export type UpdateFetch = (
   url: string,
   init?: {
     headers?: Record<string, string>;
+    signal?: AbortSignal;
   }
 ) => Promise<FetchResponse>;
 
@@ -27,16 +30,51 @@ export type UpdateCheckOptions = {
   endpoint?: string;
   fetch?: UpdateFetch;
   repository?: string;
+  timeoutMs?: number;
 };
 
 type Semver = [major: number, minor: number, patch: number];
 
-function getDefaultEndpoint(repository: string): string {
+export function getReleaseEndpoint(repository: string): string {
   return `https://api.github.com/repos/${repository}/releases/latest`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function isRepositorySlug(value: string): boolean {
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
+}
+
+export function resolveReleaseEndpoint(endpointOrRepository: string | undefined, repository: string): string {
+  const value = endpointOrRepository?.trim();
+
+  if (!value) {
+    return getReleaseEndpoint(repository);
+  }
+
+  if (isRepositorySlug(value)) {
+    return getReleaseEndpoint(value);
+  }
+
+  try {
+    new URL(value);
+  } catch {
+    throw new Error(
+      `Invalid update endpoint "${value}". Use a full URL or an owner/repo slug like ${repository}.`
+    );
+  }
+
+  return value;
+}
+
+function createTimeoutSignal(timeoutMs: number | undefined): AbortSignal | undefined {
+  if (timeoutMs === undefined || timeoutMs <= 0) {
+    return undefined;
+  }
+
+  return AbortSignal.timeout(timeoutMs);
 }
 
 export function normalizeVersionTag(version: string): string {
@@ -71,14 +109,16 @@ export function compareSemver(left: string, right: string): number {
 export async function checkForUpdate(options: UpdateCheckOptions = {}): Promise<UpdateCheckResult> {
   const currentVersion = normalizeVersionTag(options.currentVersion ?? ZERO_VERSION);
   const repository = options.repository ?? ZERO_RELEASE_REPOSITORY;
-  const endpoint = options.endpoint ?? process.env.ZERO_UPDATE_RELEASE_URL ?? getDefaultEndpoint(repository);
+  const endpoint = resolveReleaseEndpoint(options.endpoint ?? process.env.ZERO_UPDATE_RELEASE_URL, repository);
   const fetchRelease = options.fetch ?? (globalThis.fetch as unknown as UpdateFetch);
+  const signal = createTimeoutSignal(options.timeoutMs ?? DEFAULT_UPDATE_CHECK_TIMEOUT_MS);
 
   const response = await fetchRelease(endpoint, {
     headers: {
       Accept: 'application/vnd.github+json',
       'User-Agent': `zero/${currentVersion}`,
     },
+    signal,
   });
 
   if (!response.ok) {
@@ -117,7 +157,7 @@ export function formatUpdateCheck(result: UpdateCheckResult): string {
   }
 
   return [
-    `[zero] zero is up to date (${result.currentVersion})`,
+    `[zero] up to date (${result.currentVersion})`,
     `Latest release: ${result.releaseUrl}`,
   ].join('\n');
 }

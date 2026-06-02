@@ -25,7 +25,7 @@ bun run package:release
 Check for released CLI updates:
 
 ```bash
-bun run src/index.ts update --check
+./zero update --check
 ```
 
 Bun version is pinned in `package.json`.
