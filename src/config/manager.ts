@@ -92,6 +92,7 @@ export class ConfigManager {
 
   // Used by the agent loop
   getEffectiveProviderConfig(): {
+    provider?: ProviderProfile['provider'];
     baseURL: string;
     apiKey?: string;
     model: string;
@@ -101,6 +102,7 @@ export class ConfigManager {
     const active = this.getActiveProvider();
     if (active) {
       return {
+        provider: active.provider,
         baseURL: active.baseURL,
         apiKey: active.apiKey,
         model: active.model,
@@ -110,6 +112,7 @@ export class ConfigManager {
     // Fallback to env vars
     if (process.env.OPENAI_BASE_URL || process.env.OPENAI_MODEL) {
       return {
+        provider: 'openai',
         baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
         apiKey: process.env.OPENAI_API_KEY,
         model: process.env.OPENAI_MODEL || 'gpt-4o',

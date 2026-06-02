@@ -1,6 +1,8 @@
 import { configManager } from './manager';
+import type { ProviderType } from './types';
 
 export interface ProviderConfig {
+  provider?: ProviderType;
   apiKey?: string;
   baseURL: string;
   model: string;
@@ -21,6 +23,7 @@ export async function loadProviderConfig(): Promise<ProviderConfig> {
     const parsed = JSON.parse(stdout.toString());
 
     return {
+      provider: normalizeProviderType(parsed.provider ?? parsed.provider_type ?? parsed.type),
       apiKey: parsed.api_key,
       baseURL: parsed.base_url || 'https://api.openai.com/v1',
       model: parsed.model,
@@ -47,8 +50,16 @@ export async function loadProviderConfig(): Promise<ProviderConfig> {
   }
 
   return {
+    provider: 'openai',
     apiKey: envApiKey,
     baseURL: envBaseURL,
     model: envModel,
   };
+}
+
+function normalizeProviderType(value: unknown): ProviderType | undefined {
+  if (value === 'openai' || value === 'anthropic' || value === 'google' || value === 'openai-compatible') {
+    return value;
+  }
+  return undefined;
 }

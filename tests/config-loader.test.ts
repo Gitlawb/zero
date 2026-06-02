@@ -141,6 +141,30 @@ describe('ZeroConfigSchema', () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it('accepts supported provider types', () => {
+    const result = ZeroConfigSchema.safeParse({
+      providers: [{
+        name: 'anthropic',
+        provider: 'anthropic',
+        baseURL: 'https://api.anthropic.com',
+        model: 'claude-sonnet',
+      }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects unknown provider types', () => {
+    const result = ZeroConfigSchema.safeParse({
+      providers: [{
+        name: 'bad',
+        provider: 'not-real',
+        baseURL: 'https://api.example.com',
+        model: 'm',
+      }],
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe('loadConfig', () => {

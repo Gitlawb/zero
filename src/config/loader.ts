@@ -17,8 +17,11 @@ import { z } from 'zod';
  * environment variables. CLI flags win over everything except defaults.
  */
 
+export const ProviderTypeSchema = z.enum(['openai', 'anthropic', 'google', 'openai-compatible']);
+
 export const ProviderProfileSchema = z.object({
   name: z.string().min(1),
+  provider: ProviderTypeSchema.optional(),
   baseURL: z.string().url(),
   apiKey: z.string().optional(),
   model: z.string().min(1),

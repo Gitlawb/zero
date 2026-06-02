@@ -1,17 +1,13 @@
 import { loadProviderConfig } from '../config/provider';
 import { configManager } from '../config/manager';
-import { OpenAIProvider } from '../providers/openai';
+import { createProvider, resolveProviderType } from '../providers/factory';
 import { runAgent } from '../agent/loop';
 
 export async function runHeadless(prompt: string) {
   const providerConfig = await loadProviderConfig();
   const activeProfile = configManager.getActiveProvider();
-
-  const provider = new OpenAIProvider({
-    apiKey: providerConfig.apiKey || '',
-    baseURL: providerConfig.baseURL,
-    model: providerConfig.model,
-  });
+  const providerType = resolveProviderType(providerConfig);
+  const provider = createProvider(providerConfig);
 
   const source = activeProfile 
     ? `profile: ${activeProfile.name}`
@@ -29,6 +25,7 @@ export async function runHeadless(prompt: string) {
 `);
 
   console.log(`[zero] Provider: ${source}`);
+  console.log(`[zero] Provider Type: ${providerType}`);
   console.log(`[zero] Model: ${providerConfig.model}`);
   console.log(`[zero] Base URL: ${providerConfig.baseURL}`);
   console.log(`\n> ${prompt}\n`);
