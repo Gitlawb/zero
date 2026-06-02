@@ -2,13 +2,15 @@ import { Command } from 'commander';
 import { runHeadless } from './cli';
 import { configManager } from './config/manager';
 import { startTUI } from './tui';
+import { checkForUpdate, formatUpdateCheck } from './update/check';
+import { ZERO_VERSION } from './version';
 
 const program = new Command();
 
 program
   .name('zero')
   .description('A clean terminal AI coding agent')
-  .version('0.1.0');
+  .version(ZERO_VERSION);
 
 program
   .option('-p, --prompt <prompt>', 'Run in headless mode with the given prompt')
@@ -76,4 +78,30 @@ providersCmd
     }
   });
 
-program.parse();
+program
+  .command('update')
+  .description('Check for Zero CLI updates')
+  .option('--check', 'Check the latest GitHub release without installing')
+  .option('--json', 'Print the update check result as JSON')
+  .action(async (options: { check?: boolean; json?: boolean }) => {
+    if (!options.check) {
+      console.error('Only `zero update --check` is available right now.');
+      process.exitCode = 1;
+      return;
+    }
+
+    try {
+      const result = await checkForUpdate();
+
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatUpdateCheck(result));
+      }
+    } catch (err: any) {
+      console.error(`[zero] Could not check for updates: ${err?.message ?? String(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+await program.parseAsync();
