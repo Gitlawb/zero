@@ -1,23 +1,36 @@
 import { loadProviderConfig } from '../config/provider';
-import { configManager } from '../config/manager';
-import { OpenAIProvider } from '../providers/openai';
+import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
+import type { Provider } from '../providers/types';
+import type { ZeroResolvedProviderRuntime } from '../zero-provider-runtime';
 import { runAgent } from '../agent/loop';
 
 export async function runHeadless(prompt: string) {
   const providerConfig = await loadProviderConfig();
-  const activeProfile = configManager.getActiveProvider();
+  let runtime: ZeroResolvedProviderRuntime | undefined;
+  let provider: Provider | undefined;
 
-  const provider = new OpenAIProvider({
-    apiKey: providerConfig.apiKey || '',
-    baseURL: providerConfig.baseURL,
-    model: providerConfig.model,
-  });
+  try {
+    runtime = resolveZeroProviderRuntime({
+      provider: providerConfig.provider,
+      apiKey: providerConfig.apiKey,
+      baseURL: providerConfig.baseURL,
+      model: providerConfig.model,
+      profileName: providerConfig.profileName,
+      source: providerConfig.source,
+    });
+    provider = createZeroProvider(runtime);
+  } catch (err: any) {
+    console.error(`[zero] ${err?.message ?? String(err)}`);
+    if (runtime?.provider === 'anthropic' || runtime?.provider === 'google') {
+      console.error(
+        `[zero] ${runtime.provider} adapter is not yet implemented. ` +
+        'Set provider: "openai-compatible" with a custom gateway or use an OpenAI model.'
+      );
+    }
+    process.exit(1);
+  }
 
-  const source = activeProfile 
-    ? `profile: ${activeProfile.name}`
-    : process.env.ZERO_PROVIDER_COMMAND 
-      ? 'provider-command'
-      : 'environment';
+  if (!runtime || !provider) return;
 
   console.log(`
    ███████╗ ███████╗ ██████╗   ██████╗ 
@@ -28,9 +41,11 @@ export async function runHeadless(prompt: string) {
    ╚══════╝ ╚══════╝ ╚═╝  ╚═╝  ╚═════╝ 
 `);
 
-  console.log(`[zero] Provider: ${source}`);
-  console.log(`[zero] Model: ${providerConfig.model}`);
-  console.log(`[zero] Base URL: ${providerConfig.baseURL}`);
+  console.log(`[zero] Provider: ${runtime.profileName ? `profile: ${runtime.profileName}` : runtime.source}`);
+  console.log(`[zero] Runtime: ${runtime.provider}`);
+  console.log(`[zero] Model: ${runtime.modelId ?? runtime.requestedModel}`);
+  console.log(`[zero] API model: ${runtime.apiModel}`);
+  console.log(`[zero] Base URL: ${runtime.baseURL}`);
   console.log(`\n> ${prompt}\n`);
 
   const finalAnswer = await runAgent(prompt, provider, {

@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { loadConfig, loadConfigWithLayers, mergeLayers, ZeroConfigSchema } from '../src/config/loader';
+import { parseProviderProfileKind } from '../src/config/types';
+import { ConfigManager } from '../src/config/manager';
+import { ZERO_DEFAULT_MODEL_ID } from '../src/zero-model-registry';
 
 function freshTmp(): string {
   return mkdtempSync(join(tmpdir(), 'zero-cfg-'));
@@ -24,6 +27,19 @@ describe('mergeLayers', () => {
       { providers: [] },
     );
     expect(merged.providers).toHaveLength(1);
+  });
+
+  it('merges partial provider overrides by provider name', () => {
+    const merged = mergeLayers(
+      { providers: [{ name: 'p1', baseURL: 'https://x.test', model: 'old' }] },
+      { providers: [{ name: 'p1', model: 'new' } as any] },
+    );
+
+    expect(merged.providers?.[0]).toEqual({
+      name: 'p1',
+      baseURL: 'https://x.test',
+      model: 'new',
+    });
   });
 });
 
@@ -137,9 +153,68 @@ describe('ZeroConfigSchema', () => {
 
   it('accepts a minimal valid config', () => {
     const result = ZeroConfigSchema.safeParse({
-      providers: [{ name: 'p', baseURL: 'https://api.example.com', model: 'm' }],
+      providers: [{
+        name: 'p',
+        provider: 'openai-compatible',
+        baseURL: 'https://api.example.com',
+        model: 'm',
+      }],
     });
     expect(result.success).toBe(true);
+  });
+
+  it('rejects unknown provider kinds', () => {
+    const result = ZeroConfigSchema.safeParse({
+      providers: [{
+        name: 'p',
+        provider: 'made-up',
+        baseURL: 'https://api.example.com',
+        model: 'm',
+      }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('parses provider kinds defensively for env and provider commands', () => {
+    expect(parseProviderProfileKind('google')).toBe('google');
+    expect(parseProviderProfileKind('OpenAI')).toBe('openai');
+    expect(parseProviderProfileKind('GOOGLE')).toBe('google');
+    expect(parseProviderProfileKind(undefined)).toBeUndefined();
+    expect(() => parseProviderProfileKind('made-up')).toThrow(
+      'Unknown Zero provider kind'
+    );
+  });
+});
+
+describe('ConfigManager', () => {
+  it('uses OPENAI_API_KEY-only env config with the registry default model', () => {
+    const manager = new ConfigManager({ providers: [] });
+    const provider = manager.getEffectiveProviderConfig({
+      OPENAI_API_KEY: 'sk-test',
+    });
+
+    expect(provider).toEqual({
+      provider: undefined,
+      baseURL: 'https://api.openai.com/v1',
+      apiKey: 'sk-test',
+      model: ZERO_DEFAULT_MODEL_ID,
+      source: 'environment',
+    });
+  });
+
+  it('returns active profile config with source metadata', () => {
+    const manager = new ConfigManager({
+      activeProvider: 'local',
+      providers: [{
+        name: 'local',
+        provider: 'openai-compatible',
+        baseURL: 'http://localhost:11434/v1',
+        model: 'local-coder',
+      }],
+    });
+
+    expect(manager.getEffectiveProviderConfig({})?.source).toBe('profile');
+    expect(manager.getEffectiveProviderConfig({})?.profileName).toBe('local');
   });
 });
 

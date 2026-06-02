@@ -1,10 +1,20 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import type { ZeroConfig, ProviderProfile } from './types';
+import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
+import {
+  type ProviderProfile,
+  type ZeroConfig,
+  ZeroConfigSchema,
+} from './loader';
+import {
+  parseProviderProfileKind,
+  type EffectiveProviderConfig,
+} from './types';
 
 const CONFIG_DIR = join(homedir(), '.config', 'zero');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
+type ConfigState = ZeroConfig & { providers: ProviderProfile[] };
 
 function ensureConfigDir() {
   if (!existsSync(CONFIG_DIR)) {
@@ -12,7 +22,14 @@ function ensureConfigDir() {
   }
 }
 
-function readConfig(): ZeroConfig {
+function normalizeConfig(config: ZeroConfig): ConfigState {
+  return {
+    ...config,
+    providers: config.providers ?? [],
+  };
+}
+
+function readConfig(): ConfigState {
   ensureConfigDir();
 
   if (!existsSync(CONFIG_PATH)) {
@@ -22,25 +39,27 @@ function readConfig(): ZeroConfig {
   try {
     const content = readFileSync(CONFIG_PATH, 'utf-8');
     const parsed = JSON.parse(content);
-    return {
-      activeProvider: parsed.activeProvider,
-      providers: parsed.providers ?? [],
-    };
-  } catch {
+    return normalizeConfig(ZeroConfigSchema.partial().parse(parsed));
+  } catch (err: any) {
+    console.warn(
+      `[zero] Ignoring invalid config at ${CONFIG_PATH}: ${err?.message ?? String(err)}`
+    );
     return { providers: [] };
   }
 }
 
-function writeConfig(config: ZeroConfig) {
+function writeConfig(config: ConfigState) {
   ensureConfigDir();
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+  const tempPath = `${CONFIG_PATH}.tmp`;
+  writeFileSync(tempPath, JSON.stringify(config, null, 2), 'utf-8');
+  renameSync(tempPath, CONFIG_PATH);
 }
 
 export class ConfigManager {
-  private config: ZeroConfig;
+  private config: ConfigState;
 
-  constructor() {
-    this.config = readConfig();
+  constructor(initialConfig?: ZeroConfig) {
+    this.config = initialConfig ? normalizeConfig(initialConfig) : readConfig();
   }
 
   getActiveProvider(): ProviderProfile | undefined {
@@ -91,28 +110,36 @@ export class ConfigManager {
   }
 
   // Used by the agent loop
-  getEffectiveProviderConfig(): {
+  getEffectiveProviderConfig(env: NodeJS.ProcessEnv = process.env): {
+    provider?: EffectiveProviderConfig['provider'];
     baseURL: string;
     apiKey?: string;
     model: string;
+    source: EffectiveProviderConfig['source'];
+    profileName?: string;
   } | null {
     // Highest priority: provider command (handled elsewhere)
     // Then: active profile from config
     const active = this.getActiveProvider();
     if (active) {
       return {
+        provider: active.provider,
         baseURL: active.baseURL,
         apiKey: active.apiKey,
         model: active.model,
+        source: 'profile',
+        profileName: active.name,
       };
     }
 
     // Fallback to env vars
-    if (process.env.OPENAI_BASE_URL || process.env.OPENAI_MODEL) {
+    if (env.OPENAI_API_KEY || env.OPENAI_BASE_URL || env.OPENAI_MODEL) {
       return {
-        baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-        apiKey: process.env.OPENAI_API_KEY,
-        model: process.env.OPENAI_MODEL || 'gpt-4o',
+        provider: parseProviderProfileKind(env.ZERO_PROVIDER),
+        baseURL: env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+        apiKey: env.OPENAI_API_KEY,
+        model: env.OPENAI_MODEL || ZERO_DEFAULT_MODEL_ID,
+        source: 'environment',
       };
     }
 

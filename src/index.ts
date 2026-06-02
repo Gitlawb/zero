@@ -42,6 +42,7 @@ providersCmd
       const isActive = p.name === active ? ' (active)' : '';
       console.log(`  ${p.name}${isActive}`);
       console.log(`    Model:   ${p.model}`);
+      if (p.provider) console.log(`    Provider: ${p.provider}`);
       console.log(`    BaseURL: ${p.baseURL}`);
       if (p.description) console.log(`    Desc:    ${p.description}`);
       console.log('');
@@ -67,6 +68,7 @@ providersCmd
     const active = configManager.getActiveProvider();
     if (active) {
       console.log(`Active provider: ${active.name}`);
+      if (active.provider) console.log(`Provider: ${active.provider}`);
       console.log(`Model: ${active.model}`);
       console.log(`Base URL: ${active.baseURL}`);
     } else {

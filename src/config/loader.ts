@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { z } from 'zod';
+import { PROVIDER_PROFILE_KINDS } from './types';
 
 /**
  * Layered configuration loader for Zero.
@@ -19,6 +20,7 @@ import { z } from 'zod';
 
 export const ProviderProfileSchema = z.object({
   name: z.string().min(1),
+  provider: z.enum(PROVIDER_PROFILE_KINDS).optional(),
   baseURL: z.string().url(),
   apiKey: z.string().optional(),
   model: z.string().min(1),
