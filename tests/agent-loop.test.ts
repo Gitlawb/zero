@@ -97,6 +97,65 @@ describe('runAgent tool-call flow', () => {
     expect(names).not.toContain('edit_file');
   });
 
+  it('advertises prompt-gated tools only in unsafe permission mode', async () => {
+    const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
+
+    await runAgent('which tools can you use?', provider, {
+      permissionMode: 'unsafe',
+    });
+
+    const names = (provider.receivedTools[0] ?? []).map((tool) => tool.name).sort();
+    expect(names).toContain('read_file');
+    expect(names).toContain('grep');
+    expect(names).toContain('glob');
+    expect(names).toContain('bash');
+    expect(names).toContain('apply_patch');
+    expect(names).toContain('write_file');
+    expect(names).toContain('edit_file');
+  });
+
+  it('runs prompt-gated tools through the registry only when unsafe mode grants permission', async () => {
+    const command = 'echo zero-agent-unsafe';
+    const safeProvider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'bash' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ command }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [{ type: 'text', content: 'safe done' }],
+    ]);
+    const unsafeProvider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'bash' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ command }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [{ type: 'text', content: 'unsafe done' }],
+    ]);
+
+    const safeResults: string[] = [];
+    const unsafeResults: string[] = [];
+
+    await runAgent('try shell', safeProvider, {
+      onToolResult: (result) => safeResults.push(result.result),
+    });
+    await runAgent('try shell', unsafeProvider, {
+      permissionMode: 'unsafe',
+      onToolResult: (result) => unsafeResults.push(result.result),
+    });
+
+    expect(safeResults[0]).toContain('Permission required for bash');
+    expect(unsafeResults[0]).toContain('zero-agent-unsafe');
+  });
+
   it('keeps tool arguments when a delta arrives before the start event', async () => {
     const provider = new MockProvider([
       [

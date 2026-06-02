@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { runHeadless } from './cli';
+import { runExec } from './cli';
 import { configManager } from './config/manager';
 import { startTUI } from './tui';
 
@@ -14,11 +14,30 @@ program
   .option('-p, --prompt <prompt>', 'Run in headless mode with the given prompt')
   .action(async (options) => {
     if (options.prompt) {
-      await runHeadless(options.prompt);
+      process.exitCode = await runExec({ prompt: options.prompt, outputFormat: 'text' });
     } else {
-      // Launch the interactive TUI (Grok Build style)
       startTUI();
     }
+  });
+
+program
+  .command('exec')
+  .description('Run Zero headlessly for scripts, automation, or CI')
+  .argument('[prompt...]', 'Prompt to send to the coding agent')
+  .option('-f, --file <path>', 'Read the prompt from a file')
+  .option('-m, --model <model>', 'Override the configured model for this run')
+  .option('-C, --cwd <path>', 'Run from a different working directory')
+  .option('-o, --output-format <format>', 'Output format: text or json', 'text')
+  .option('--skip-permissions-unsafe', 'Allow prompt-gated tools for this run')
+  .action(async (promptParts: string[] | undefined, options) => {
+    process.exitCode = await runExec({
+      prompt: (promptParts ?? []).join(' '),
+      file: options.file,
+      model: options.model,
+      cwd: options.cwd,
+      outputFormat: options.outputFormat,
+      skipPermissionsUnsafe: Boolean(options.skipPermissionsUnsafe),
+    });
   });
 
 // Providers subcommand (temporary until we have a nice /provider in the TUI)

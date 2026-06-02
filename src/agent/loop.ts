@@ -13,6 +13,7 @@ export interface AgentOptions {
   toolsEnabled?: boolean;   // allows temporarily disabling tool calling for debugging
   debug?: boolean;          // when true, logs the exact payload sent to the provider
   planMode?: boolean;       // when true, the agent plans without modifying the codebase
+  permissionMode?: 'auto' | 'unsafe'; // unsafe grants prompt-gated tools for this run
 }
 
 interface PendingToolCall {
@@ -33,7 +34,8 @@ export async function runAgent(
     onToolResult,
     toolsEnabled = true,
     debug = false,
-    planMode = false
+    planMode = false,
+    permissionMode = 'auto'
   } = options;
 
   // Clear any previous plan when starting a new task
@@ -47,16 +49,19 @@ export async function runAgent(
   ];
 
   const tools = toolRegistry.getAll();
-  // Until a real permission UX exists, only advertise tools that can run
-  // without an interactive grant. Prompt/deny tools remain registered for
-  // direct guarded execution, but the model should not be invited to call
-  // tools that the agent loop cannot approve yet.
-  const autoExecutableTools = tools.filter(t => t.safety.permission === 'allow');
+  // Until a real permission UX exists, normal mode only advertises tools that
+  // can run without an interactive grant. Unsafe headless mode is explicit and
+  // still never advertises tools marked deny.
+  const executableTools = tools.filter(t =>
+    permissionMode === 'unsafe'
+      ? t.safety.permission !== 'deny'
+      : t.safety.permission === 'allow'
+  );
   let finalAnswer = '';
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    const toolDefinitions = (toolsEnabled && autoExecutableTools.length > 0)
-      ? autoExecutableTools.map(t => {
+    const toolDefinitions = (toolsEnabled && executableTools.length > 0)
+      ? executableTools.map(t => {
           // Convert Zod schema to proper JSON Schema (critical for many providers).
           // zod v4 ships this natively — no external package needed.
           const jsonSchema = z.toJSONSchema(t.parameters, {
@@ -187,7 +192,9 @@ export async function runAgent(
       }
 
       try {
-        result = await toolRegistry.run(tc.name, parsedArgs);
+        result = await toolRegistry.run(tc.name, parsedArgs, {
+          permissionGranted: permissionMode === 'unsafe',
+        });
       } catch (e: any) {
         result = `Error executing ${tc.name}: ${e.message}`;
       }
