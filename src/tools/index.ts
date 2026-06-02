@@ -1,17 +1,23 @@
 import { toolRegistry } from './registry';
-import { readFileTool } from './read-file';
+import { readFileTool } from './read_file';
+import { writeFileTool } from './write_file';
+import { editFileTool } from './edit_file';
 import { bashTool } from './bash';
-import { editFileTool } from './edit-file';
 import { planTool } from './plan';
 import { listDirectoryTool } from './list-directory';
 import { grepTool } from './grep';
 
 toolRegistry.register(readFileTool);
-toolRegistry.register(bashTool);
+toolRegistry.register(writeFileTool);
 toolRegistry.register(editFileTool);
+toolRegistry.register(bashTool);
 toolRegistry.register(planTool);
 toolRegistry.register(listDirectoryTool);
 toolRegistry.register(grepTool);
+
+// Compatibility re-exports (kebab-case filenames still resolve)
+export { readFileTool as readFileToolKebab } from './read_file';
+export { editFileTool as editFileToolKebab } from './edit_file';
 
 export { toolRegistry };
 export * from './types';
