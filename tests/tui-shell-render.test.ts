@@ -36,19 +36,19 @@ function renderShell(overrides: Partial<React.ComponentProps<typeof TuiShell>> =
 }
 
 describe('TuiShell render surface', () => {
-  it('renders the themed startup shell in the first PR style', () => {
+  it('renders the startup splash with the full ASCII wordmark', () => {
     const output = renderShell();
 
     expect(output).toContain('ZERO');
+    expect(output).toContain('███████████');
     expect(output).toContain('terminal coding agent');
-    expect(output).toContain('> █ Type your message or @path/to/file');
+    expect(output).toContain('zero >');
     expect(output).toContain('/provider');
-    expect(output).toContain('Welcome to zero');
-    expect(output).toContain('gpt-5.1 Model');
+    expect(output).toContain('status: READY');
+    expect(output).toContain('gpt-5.1');
     expect(output).not.toContain('live');
-    expect(output).not.toContain('zero >');
-    expect(output).not.toContain('status: READY');
-    expect(output).not.toContain('Enter');
+    expect(output).not.toContain('Welcome to zero');
+
     expect(output).not.toContain('Tab');
     expect(output).not.toContain('Ctrl+C');
     expect(output).not.toContain('Tab accepts');
