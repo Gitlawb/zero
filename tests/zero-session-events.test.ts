@@ -174,6 +174,36 @@ describe('ZeroSessionEventStore', () => {
     }
   });
 
+  it('limits event search results for callers that only need the first matches', async () => {
+    const rootDir = tempRoot();
+    try {
+      const store = new ZeroSessionEventStore({
+        rootDir,
+        now: sequenceClock([
+          '2026-06-03T00:00:00.000Z',
+          '2026-06-03T00:00:01.000Z',
+          '2026-06-03T00:00:02.000Z',
+        ]),
+      });
+
+      await store.createSession({ sessionId: 'limited' });
+      await store.appendEvent('limited', {
+        type: 'message',
+        payload: { content: 'first matching zero event' },
+      });
+      await store.appendEvent('limited', {
+        type: 'message',
+        payload: { content: 'second matching zero event' },
+      });
+
+      const hits = await store.searchEvents('matching', { limit: 1 });
+      expect(hits).toHaveLength(1);
+      expect(hits[0]?.eventId).toBe('limited:1');
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects invalid session ids and corrupted event lines', async () => {
     const rootDir = tempRoot();
     try {
