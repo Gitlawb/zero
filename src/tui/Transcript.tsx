@@ -20,6 +20,7 @@ interface TranscriptProps {
   providerName: string;
   modelName: string;
   terminalWidth: number;
+  messageBackground?: string;
 }
 
 export const Transcript: React.FC<TranscriptProps> = ({
@@ -28,32 +29,23 @@ export const Transcript: React.FC<TranscriptProps> = ({
   scrollOffset,
   streamingMessageIndex,
   isThinking,
-  showLogo,
   canScrollUp,
   canScrollDown,
   terminalWidth,
+  messageBackground,
 }) => {
-  const contentWidth = Math.max(40, terminalWidth - 8);
-  const rows = showLogo ? messages : visibleMessages;
-  const startIndex = showLogo ? 0 : scrollOffset;
+  const contentWidth = Math.max(40, terminalWidth - 4);
+  const rows = visibleMessages;
+  const startIndex = Math.max(0, messages.length - rows.length - scrollOffset);
 
   return (
-    <Box flexDirection="column" marginTop={1}>
-      {showLogo && (
-        <Box marginBottom={1}>
-          <Logo />
-        </Box>
-      )}
+    <Box flexDirection="column">
+      <Logo />
 
       {(canScrollUp || canScrollDown) && (
-        <Box marginLeft={3} marginBottom={1} flexDirection="row" justifyContent="space-between">
-          <Text color={tuiTheme.colors.muted} dimColor>
-            history {scrollOffset + 1}/{messages.length}
-          </Text>
-          <Text color={tuiTheme.colors.muted} dimColor>
-            PgUp/PgDn scroll
-          </Text>
-        </Box>
+        <Text color={tuiTheme.colors.subtle}>
+          {canScrollUp ? '↑ ' : '  '}Scroll PgUp/PgDn / Home/End {canScrollDown ? '↓' : ''}
+        </Text>
       )}
 
       {rows.map((msg, index) => (
@@ -63,12 +55,13 @@ export const Transcript: React.FC<TranscriptProps> = ({
           index={startIndex + index}
           streamingMessageIndex={streamingMessageIndex}
           contentWidth={contentWidth}
+          messageBackground={messageBackground}
         />
       ))}
 
       {isThinking && (
-        <Box marginTop={1} marginLeft={3}>
-          <ThinkingSpinner label="zero is working" />
+        <Box>
+          <ThinkingSpinner />
         </Box>
       )}
     </Box>
@@ -80,24 +73,27 @@ function TranscriptRow({
   index,
   streamingMessageIndex,
   contentWidth,
+  messageBackground,
 }: {
   message: ChatMessage;
   index: number;
   streamingMessageIndex: number | null;
   contentWidth: number;
+  messageBackground?: string;
 }) {
   if (message.type === 'user') {
-    const messageWidth = Math.max(1, contentWidth + 3);
+    const backgroundColor = messageBackground ?? tuiTheme.colors.userBg;
+    const messageWidth = Math.max(1, contentWidth + 2);
     return (
-      <Box marginTop={1} width="100%" flexDirection="column">
-        <Text color={tuiTheme.colors.userBg}>{'▄'.repeat(messageWidth)}</Text>
-        <Box paddingX={1} backgroundColor={tuiTheme.colors.userBg} flexDirection="row" width="100%">
-          <Text color={tuiTheme.colors.userSymbol} backgroundColor={tuiTheme.colors.userBg}>{'> '}</Text>
-          <Text color={tuiTheme.colors.userSymbol} backgroundColor={tuiTheme.colors.userBg} wrap="wrap">
+      <Box width="100%" flexDirection="column" marginBottom={1}>
+        <Text color={backgroundColor}>{'▄'.repeat(messageWidth)}</Text>
+        <Box paddingX={1} backgroundColor={backgroundColor} flexDirection="row" width="100%">
+          <Text color={tuiTheme.colors.userSymbol} backgroundColor={backgroundColor}>{'> '}</Text>
+          <Text color={tuiTheme.colors.userSymbol} backgroundColor={backgroundColor} wrap="wrap">
             {message.content}
           </Text>
         </Box>
-        <Text color={tuiTheme.colors.userBg}>{'▀'.repeat(messageWidth)}</Text>
+        <Text color={backgroundColor}>{'▀'.repeat(messageWidth)}</Text>
       </Box>
     );
   }
@@ -106,21 +102,22 @@ function TranscriptRow({
     const isStreaming = index === streamingMessageIndex;
 
     return (
-      <MarkedRow marker="◆" color={tuiTheme.colors.brand} contentWidth={contentWidth}>
-        <MessageRenderer content={message.content} />
-        {isStreaming && (
-          <Text backgroundColor={tuiTheme.colors.brand} color={tuiTheme.colors.brand}>
-            {tuiTheme.marks.cursor}
-          </Text>
-        )}
-      </MarkedRow>
+      <Box marginBottom={1} flexDirection="row">
+        <Text color={tuiTheme.colors.brand} bold>{'⛬ '}</Text>
+        <Box flexDirection="column" flexGrow={1}>
+          <MessageRenderer content={message.content} />
+          {isStreaming && (
+            <Text color={tuiTheme.colors.brand} bold>▌</Text>
+          )}
+        </Box>
+      </Box>
     );
   }
 
   if (message.type === 'tool-call') {
     const hasResult = !!message.result;
     return (
-      <Box marginTop={1} marginLeft={3}>
+      <Box marginBottom={0}>
         <ToolCallRenderer
           name={message.name}
           args={message.args}
@@ -136,9 +133,9 @@ function TranscriptRow({
   }
 
   return (
-    <MarkedRow marker="•" color={tuiTheme.colors.muted} contentWidth={contentWidth} compact>
+    <Box marginBottom={1}>
       {renderSystemMessage(message.content)}
-    </MarkedRow>
+    </Box>
   );
 }
 
@@ -183,29 +180,4 @@ function highlightCommands(text: string, commands: Set<string>): React.ReactNode
 
   if (lastIndex < text.length) parts.push(text.slice(lastIndex));
   return parts.length > 0 ? <>{parts}</> : text;
-}
-
-function MarkedRow({
-  marker,
-  color,
-  contentWidth,
-  compact = false,
-  children,
-}: {
-  marker: string;
-  color: string;
-  contentWidth: number;
-  compact?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <Box marginTop={compact ? 0 : 1} width="100%" flexDirection="row">
-      <Box marginRight={1} flexShrink={0}>
-        <Text color={color} bold>{marker}</Text>
-      </Box>
-      <Box width={contentWidth} flexDirection="column">
-        {children}
-      </Box>
-    </Box>
-  );
 }

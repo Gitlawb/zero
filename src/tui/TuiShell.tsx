@@ -1,12 +1,12 @@
 import React from 'react';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
 import { CommandSuggestions } from './CommandSuggestions';
 import { DebugErrorPanel } from './DebugErrorPanel';
 import { ToolApprovalPanel } from './ToolApprovalPanel';
 import { Transcript } from './Transcript';
-import { TuiHeader } from './TuiHeader';
 import { TuiPromptBox } from './TuiPromptBox';
 import { TuiStatusBar } from './TuiStatusBar';
+import { tuiTheme } from './theme';
 import type { ChatMessage, TuiModeState } from './types';
 import type { ToolApprovalRequest } from '../agent/loop';
 
@@ -35,6 +35,8 @@ interface TuiShellProps extends TuiModeState {
   terminalWidth: number;
   terminalHeight: number;
   inputStyle?: 'border' | 'solid';
+  inputBackground?: string;
+  messageBackground?: string;
 }
 
 export const TuiShell: React.FC<TuiShellProps> = ({
@@ -51,16 +53,14 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   providerName,
   modelName,
   lastError,
-  activeFile,
-  branch,
-  ahead,
-  behind,
   totalTokens,
   costUsd,
   contextPercent,
   pendingApproval,
   terminalWidth,
   inputStyle = 'border',
+  inputBackground,
+  messageBackground,
   isPlanMode,
   debugMode,
   toolsEnabled,
@@ -72,36 +72,35 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   return (
     <Box
       flexDirection="column"
+      height="100%"
       width={shellWidth}
-      paddingX={1}
     >
-      {!showLogo && (
-        <TuiHeader
-          providerName={providerName}
-          modelName={modelName}
-          activeFile={activeFile}
-          branch={branch}
-          ahead={ahead}
-          behind={behind}
-          {...modeState}
-        />
+      <Box flexGrow={1} flexDirection="row" overflow="hidden">
+        <Box flexGrow={1} flexDirection="column" paddingX={1} paddingTop={1}>
+          <Transcript
+            messages={messages}
+            visibleMessages={visibleMessages}
+            scrollOffset={scrollOffset}
+            streamingMessageIndex={streamingMessageIndex}
+            isThinking={isThinking}
+            showLogo={showLogo}
+            canScrollUp={canScrollUp}
+            canScrollDown={canScrollDown}
+            providerName={providerName}
+            modelName={modelName}
+            terminalWidth={shellWidth}
+            messageBackground={messageBackground}
+          />
+        </Box>
+      </Box>
+
+      {canScrollUp && (
+        <Box paddingX={1} justifyContent="flex-end">
+          <Text color={tuiTheme.colors.subtle}>
+            ↑{scrollOffset}{canScrollDown ? ' ↓' : ''}
+          </Text>
+        </Box>
       )}
-
-      <Transcript
-        messages={messages}
-        visibleMessages={visibleMessages}
-        scrollOffset={scrollOffset}
-        streamingMessageIndex={streamingMessageIndex}
-        isThinking={isThinking}
-        showLogo={showLogo}
-        canScrollUp={canScrollUp}
-        canScrollDown={canScrollDown}
-        providerName={providerName}
-        modelName={modelName}
-        terminalWidth={shellWidth}
-      />
-
-      <CommandSuggestions suggestions={suggestions} selectedIndex={suggestionIndex} />
 
       {debugMode && <DebugErrorPanel error={lastError} />}
 
@@ -112,8 +111,15 @@ export const TuiShell: React.FC<TuiShellProps> = ({
         providerName={providerName}
         modelName={modelName}
         inputStyle={inputStyle}
+        inputBackground={inputBackground}
         terminalWidth={shellWidth}
         {...modeState}
+      />
+
+      <CommandSuggestions
+        suggestions={suggestions}
+        selectedIndex={suggestionIndex}
+        terminalWidth={shellWidth}
       />
 
       {suggestions.length === 0 && (

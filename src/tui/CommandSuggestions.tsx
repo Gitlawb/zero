@@ -6,6 +6,7 @@ import { tuiTheme } from './theme';
 interface CommandSuggestionsProps {
   suggestions: string[];
   selectedIndex?: number;
+  terminalWidth?: number;
 }
 
 function truncate(text: string, maxLength: number): string {
@@ -15,7 +16,11 @@ function truncate(text: string, maxLength: number): string {
   return `${text.slice(0, maxLength - 3)}...`;
 }
 
-export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({ suggestions, selectedIndex = 0 }) => {
+export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({
+  suggestions,
+  selectedIndex = 0,
+  terminalWidth = 80,
+}) => {
   if (suggestions.length === 0) return null;
 
   const commands = listTuiCommands();
@@ -28,20 +33,19 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({ suggesti
     const display = suggestion.startsWith('/') ? suggestion.slice(1) : suggestion;
     return Math.max(max, display.length);
   }, 0);
+  const descriptionWidth = Math.max(0, terminalWidth - nameWidth - 8);
 
   return (
     <Box
       flexDirection="column"
       paddingLeft={3}
-      marginTop={1}
-      marginBottom={1}
     >
       {visibleSuggestions.map((suggestion, index) => {
         const realIndex = windowStart + index;
         const isFocused = realIndex === selectedIndex;
         const display = suggestion.startsWith('/') ? suggestion.slice(1) : suggestion;
         const command = commands.find((item) => item.name === suggestion);
-        const description = truncate(command?.description ?? '', 64);
+        const description = truncate(command?.description ?? '', descriptionWidth);
         const rowColor = isFocused ? tuiTheme.colors.text : tuiTheme.colors.muted;
         const descriptionPadding = ' '.repeat(Math.max(1, nameWidth - display.length + 2));
 
@@ -49,7 +53,7 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({ suggesti
           <Box key={suggestion} flexDirection="row">
             <Text color={rowColor} bold={isFocused}>{display}</Text>
             {description ? (
-              <Text color={tuiTheme.colors.muted} dimColor={!isFocused}>
+              <Text color={rowColor} bold={isFocused}>
                 {descriptionPadding}{description}
               </Text>
             ) : null}

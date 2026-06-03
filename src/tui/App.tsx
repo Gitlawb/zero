@@ -24,7 +24,8 @@ import {
   resolveTuiModelProfileSelection,
   resolveTuiModelSelection,
 } from './model-selection';
-import { getAllThemes, setTheme } from './theme';
+import { getAllThemes, getTheme, setTheme } from './theme';
+import { detectFromColorFgBg } from './terminal-background';
 import type { ChatMessage } from './types';
 
 type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker' | 'theme-picker';
@@ -35,13 +36,40 @@ const INITIAL_MESSAGES: ChatMessage[] = [
 
 setTheme(configManager.getTheme());
 
+function blend(a: string, b: string, t: number): string {
+  const ah = parseInt(a.slice(1), 16);
+  const bh = parseInt(b.slice(1), 16);
+  const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
+  const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
+  const rr = Math.round(ar + (br - ar) * t);
+  const rg = Math.round(ag + (bg - ag) * t);
+  const rb = Math.round(ab + (bb - ab) * t);
+  return `#${((rr << 16) | (rg << 8) | rb).toString(16).padStart(6, '0')}`;
+}
+
+function isLightColor(color: string): boolean {
+  const n = parseInt(color.slice(1), 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  return (r * 299 + g * 587 + b * 114) / 1000 > 128;
+}
+
 interface AppProps {
   initialTerminalBackground?: string;
 }
 
-export const App: React.FC<AppProps> = () => {
+export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const { exit } = useApp();
   const { columns, rows } = useWindowSize();
+  const colorDepth = process.env.COLORTERM === 'truecolor' || process.env.COLORTERM === '24bit'
+    ? 24
+    : (process.env.TERM ?? '').includes('256color')
+      ? 24
+      : process.stdout.getColorDepth?.() ?? 24;
+  const [terminalBackground] = useState<string | undefined>(() => (
+    initialTerminalBackground ?? configManager.getTerminalBackground() ?? detectFromColorFgBg()
+  ));
   const [screen, setScreen] = useState<Screen>('chat');
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
@@ -139,6 +167,19 @@ export const App: React.FC<AppProps> = () => {
   const currentModel = modelStatus
     ? `${modelStatus.label}${modelStatus.sourceLabel === 'session' ? ' *' : ''}`
     : 'No provider configured';
+  const activeTheme = getTheme();
+  const useTerminalBackground = Boolean(
+    terminalBackground && (activeTheme.type === 'light' ? isLightColor(terminalBackground) : !isLightColor(terminalBackground))
+  );
+  const adaptedInputBackground = useTerminalBackground && terminalBackground
+    ? blend(terminalBackground, activeTheme.colors.text.secondary, 0.24)
+    : activeTheme.colors.background.input;
+  const adaptedMessageBackground = useTerminalBackground && terminalBackground
+    ? blend(terminalBackground, activeTheme.colors.text.secondary, 0.16)
+    : activeTheme.colors.background.message;
+  const solidInputBackground = colorDepth < 24
+    ? (useTerminalBackground && terminalBackground ? terminalBackground : activeTheme.colors.background.primary)
+    : adaptedInputBackground;
   const isInChat = screen === 'chat';
 
   useInput((inputChar, key) => {
@@ -692,13 +733,12 @@ export const App: React.FC<AppProps> = () => {
 
   const terminalHeight = Math.max(20, rows || terminalRows);
   const terminalWidth = Math.max(64, columns || process.stdout.columns || 96);
-  const showLogo = messages.every((message) => message.type === 'system');
-  const chatHeight = Math.max(7, terminalHeight - 14);
-  const visibleMessages = showLogo
-    ? messages
-    : messages.slice(scrollOffset, scrollOffset + chatHeight);
-  const canScrollUp = scrollOffset < messages.length - 1;
-  const canScrollDown = scrollOffset > 0;
+  const chatHeight = Math.max(8, terminalHeight - 6);
+  const startIndex = Math.max(0, messages.length - chatHeight - scrollOffset);
+  const visibleMessages = messages.slice(startIndex, startIndex + chatHeight);
+  const hasOverflow = messages.length > chatHeight;
+  const canScrollUp = hasOverflow && scrollOffset < messages.length - 1;
+  const canScrollDown = hasOverflow && scrollOffset > 0;
   const activeFile = deriveActiveFile(messages);
   const estimatedTokens = estimateTokens(messages);
   const contextPercent = Math.min(99, Math.round((estimatedTokens / 200000) * 100));
@@ -710,7 +750,7 @@ export const App: React.FC<AppProps> = () => {
       visibleMessages={visibleMessages}
       scrollOffset={scrollOffset}
       streamingMessageIndex={streamingMessageIndex}
-      showLogo={showLogo}
+      showLogo={true}
       canScrollUp={canScrollUp}
       canScrollDown={canScrollDown}
       input={input}
@@ -723,6 +763,8 @@ export const App: React.FC<AppProps> = () => {
       debugMode={debugMode}
       toolsEnabled={toolsEnabled}
       inputStyle={inputStyle}
+      inputBackground={solidInputBackground}
+      messageBackground={adaptedMessageBackground}
       isThinking={isThinking}
       activeFile={activeFile}
       branch={git.branch}

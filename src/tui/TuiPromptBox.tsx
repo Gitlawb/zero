@@ -8,55 +8,54 @@ interface TuiPromptBoxProps extends TuiModeState {
   providerName: string;
   modelName: string;
   inputStyle: 'border' | 'solid';
+  inputBackground?: string;
   terminalWidth: number;
 }
 
 export const TuiPromptBox: React.FC<TuiPromptBoxProps> = ({
   input,
   isPlanMode,
-  isThinking,
   inputStyle,
+  inputBackground,
   terminalWidth,
 }) => {
-  const borderColor = isThinking
-    ? tuiTheme.colors.warning
-    : isPlanMode
-      ? tuiTheme.colors.success
-      : tuiTheme.colors.brand;
-  const placeholder = isThinking
-    ? 'Zero is working...'
-    : isPlanMode
-      ? 'Plan the next change...'
-      : 'Ask Zero to inspect, edit, explain, or run a command...';
+  const borderColor = isPlanMode ? tuiTheme.colors.success : tuiTheme.colors.brand;
+  const backgroundColor = inputBackground ?? tuiTheme.colors.panel;
 
   const prompt = (
     <Box
       borderStyle={inputStyle === 'border' ? 'round' : undefined}
       borderColor={borderColor}
-      backgroundColor={inputStyle === 'solid' ? tuiTheme.colors.panel : undefined}
+      backgroundColor={inputStyle === 'solid' ? backgroundColor : undefined}
       paddingX={1}
       flexDirection="row"
+      alignItems="center"
     >
-      <Text color={isPlanMode ? tuiTheme.colors.success : tuiTheme.colors.accent}>{tuiTheme.marks.prompt} </Text>
+      <Text color={isPlanMode ? tuiTheme.colors.success : tuiTheme.colors.accent}>{'> '}</Text>
       {input ? (
-        <Text color={tuiTheme.colors.text}>{input}</Text>
+        <>
+          <Text color={tuiTheme.colors.text}>{input}</Text>
+          <Text color={tuiTheme.colors.muted}>█</Text>
+        </>
       ) : (
-        <Text color={tuiTheme.colors.muted} dimColor>{placeholder}</Text>
+        <>
+          <Text color={tuiTheme.colors.muted}>█ </Text>
+          <Text color={tuiTheme.colors.muted} wrap="truncate">Type your message or @path/to/file</Text>
+        </>
       )}
-      <Text color={tuiTheme.colors.muted}>█</Text>
     </Box>
   );
 
   if (inputStyle !== 'solid') {
-    return <Box flexDirection="column" marginTop={1}>{prompt}</Box>;
+    return <Box flexDirection="column">{prompt}</Box>;
   }
 
   const width = Math.max(1, terminalWidth);
   return (
-    <Box flexDirection="column" marginTop={1}>
-      <Text color={tuiTheme.colors.panel}>{'▄'.repeat(width)}</Text>
+    <Box flexDirection="column">
+      <Text color={backgroundColor}>{'▄'.repeat(width)}</Text>
       {prompt}
-      <Text color={tuiTheme.colors.panel}>{'▀'.repeat(width)}</Text>
+      <Text color={backgroundColor}>{'▀'.repeat(width)}</Text>
     </Box>
   );
 };

@@ -36,15 +36,16 @@ function renderShell(overrides: Partial<React.ComponentProps<typeof TuiShell>> =
 }
 
 describe('TuiShell render surface', () => {
-  it('renders the themed startup shell without old splash chrome', () => {
+  it('renders the themed startup shell in the first PR style', () => {
     const output = renderShell();
 
     expect(output).toContain('ZERO');
     expect(output).toContain('terminal coding agent');
-    expect(output).toContain('> Ask Zero to inspect, edit, explain, or run a command');
+    expect(output).toContain('> █ Type your message or @path/to/file');
     expect(output).toContain('/provider');
     expect(output).toContain('Welcome to zero');
     expect(output).toContain('gpt-5.1 Model');
+    expect(output).not.toContain('live');
     expect(output).not.toContain('zero >');
     expect(output).not.toContain('status: READY');
     expect(output).not.toContain('Enter');
@@ -74,10 +75,10 @@ describe('TuiShell render surface', () => {
     });
 
     expect(output).toContain('> inspect the repo');
-    expect(output).toContain('◆ I will scan the codebase.');
+    expect(output).toContain('⛬ I will scan the codebase.');
     expect(output).toContain('Grep');
     expect(output).toContain('"TODO"');
-    expect(output).toContain('• Plan mode enabled.');
+    expect(output).toContain('Plan mode enabled.');
     expect(output).toContain('model       Browse models');
     expect(output).toContain('model list');
     expect(output).not.toContain('perms ask');
