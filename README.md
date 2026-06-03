@@ -67,8 +67,8 @@ export OPENAI_MODEL=gpt-4.1
 bun run dev          # or: zero
 ```
 
-Inside the TUI: type to chat, `/` for the command palette, `@` to reference a file,
-`!` to run a shell command, **shift+tab** to cycle modes, and `Esc` to interrupt.
+Inside the TUI: type to chat, `/` opens command suggestions, **Tab** accepts the first
+command suggestion, and **Ctrl+C** exits. Empty-prompt arrow keys scroll the transcript.
 
 ### Headless (`exec`)
 
