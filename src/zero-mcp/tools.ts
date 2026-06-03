@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { z } from 'zod';
 import type { Tool } from '../tools/types';
 import type { ToolRegistry } from '../tools/registry';
@@ -8,8 +9,18 @@ import type {
 } from './types';
 import type { ZeroMcpClientManager } from './manager';
 
-export function createZeroMcpToolName(serverName: string, toolName: string): string {
-  return `mcp__${sanitizeToolSegment(serverName)}__${sanitizeToolSegment(toolName)}`;
+export function createZeroMcpToolName(
+  serverName: string,
+  serverIdentity: string,
+  toolName: string
+): string {
+  return [
+    'mcp',
+    sanitizeToolSegment(serverName),
+    sanitizeIdentitySegment(serverIdentity),
+    sanitizeToolSegment(toolName),
+    shortToolDigest(toolName),
+  ].join('__');
 }
 
 export function createZeroMcpTool(
@@ -17,7 +28,7 @@ export function createZeroMcpTool(
   manager: ZeroMcpClientManager
 ): Tool & { toJSONSchema: () => Record<string, unknown> } {
   return {
-    name: createZeroMcpToolName(descriptor.serverName, descriptor.name),
+    name: createZeroMcpToolName(descriptor.serverName, descriptor.serverIdentity, descriptor.name),
     description: descriptor.description
       ? `[MCP:${descriptor.serverName}] ${descriptor.description}`
       : `[MCP:${descriptor.serverName}] ${descriptor.name}`,
@@ -42,7 +53,12 @@ export async function registerZeroMcpTools(
 ): Promise<Tool[]> {
   const descriptors = await manager.listTools(options.serverName);
   const tools = descriptors.map((descriptor) => createZeroMcpTool(descriptor, manager));
+  const names = new Set<string>();
   for (const tool of tools) {
+    if (names.has(tool.name) || registry.get(tool.name)) {
+      throw new Error(`Duplicate MCP tool registry name "${tool.name}" was refused.`);
+    }
+    names.add(tool.name);
     registry.register(tool);
   }
   return tools;
@@ -107,6 +123,19 @@ function sanitizeToolSegment(value: string): string {
     .replace(/[^a-z0-9_]+/g, '_')
     .replace(/^_+|_+$/g, '');
   return sanitized || 'unnamed';
+}
+
+function sanitizeIdentitySegment(value: string): string {
+  const sanitized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-f0-9]+/g, '')
+    .slice(0, 12);
+  return sanitized || 'unknown';
+}
+
+function shortToolDigest(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 8);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

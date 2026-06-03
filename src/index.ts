@@ -58,7 +58,7 @@ function formatZeroMcpToolList(tools: ZeroMcpToolDescriptor[]): string {
   return [
     'MCP Tools:',
     ...tools.map((tool) =>
-      `  ${createZeroMcpToolName(tool.serverName, tool.name)} (${tool.serverName}/${tool.name})` +
+      `  ${createZeroMcpToolName(tool.serverName, tool.serverIdentity, tool.name)} (${tool.serverName}/${tool.name})` +
       (tool.description ? ` - ${tool.description}` : '')
     ),
   ].join('\n');
@@ -69,7 +69,7 @@ function toZeroMcpToolJson(tool: ZeroMcpToolDescriptor): Record<string, unknown>
     serverName: tool.serverName,
     serverIdentity: tool.serverIdentity,
     name: tool.name,
-    zeroToolName: createZeroMcpToolName(tool.serverName, tool.name),
+    zeroToolName: createZeroMcpToolName(tool.serverName, tool.serverIdentity, tool.name),
     description: tool.description,
     inputSchema: tool.inputSchema,
   };

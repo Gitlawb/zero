@@ -209,7 +209,9 @@ describe('Zero MCP client backend', () => {
 
     try {
       const registered = await registerZeroMcpTools(registry, manager);
-      const toolName = createZeroMcpToolName('docs', 'lookup');
+      const [registeredTool] = registered;
+      if (!registeredTool) throw new Error('Expected one registered MCP tool.');
+      const toolName = registeredTool.name;
       const tool = registry.get(toolName);
 
       expect(registered.map((tool) => tool.name)).toEqual([toolName]);
@@ -233,6 +235,63 @@ describe('Zero MCP client backend', () => {
     } finally {
       await manager.closeAll();
     }
+  });
+
+  it('generates collision-safe registry names for sanitized server and tool names', () => {
+    const serverCollisionA = createZeroMcpToolName(
+      'docs-prod',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'lookup-all'
+    );
+    const serverCollisionB = createZeroMcpToolName(
+      'docs_prod',
+      'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'lookup_all'
+    );
+    const toolCollisionA = createZeroMcpToolName(
+      'docs',
+      'cccccccccccccccccccccccccccccccc',
+      'lookup-all'
+    );
+    const toolCollisionB = createZeroMcpToolName(
+      'docs',
+      'cccccccccccccccccccccccccccccccc',
+      'lookup_all'
+    );
+
+    expect(serverCollisionA).not.toBe(serverCollisionB);
+    expect(toolCollisionA).not.toBe(toolCollisionB);
+    expect(serverCollisionA).toContain('__aaaaaaaaaaaa__');
+    expect(serverCollisionB).toContain('__bbbbbbbbbbbb__');
+  });
+
+  it('refuses duplicate generated MCP registry names before overwriting tools', async () => {
+    const registry = new ToolRegistry();
+    const manager = {
+      async listTools() {
+        return [
+          {
+            serverName: 'docs',
+            serverIdentity: 'dddddddddddddddddddddddddddddddd',
+            name: 'lookup',
+            inputSchema: { type: 'object', properties: {} },
+          },
+          {
+            serverName: 'docs',
+            serverIdentity: 'dddddddddddddddddddddddddddddddd',
+            name: 'lookup',
+            inputSchema: { type: 'object', properties: {} },
+          },
+        ];
+      },
+      async callTool() {
+        return { content: [] };
+      },
+    } as unknown as ZeroMcpClientManager;
+
+    await expect(registerZeroMcpTools(registry, manager)).rejects.toThrow(
+      'Duplicate MCP tool registry name'
+    );
   });
 
   it('lists configured MCP servers and discovered tools from the CLI', async () => {
@@ -276,7 +335,7 @@ describe('Zero MCP client backend', () => {
     expect(JSON.parse(toolsResult.stdout).tools).toEqual([
       expect.objectContaining({
         name: 'lookup',
-        zeroToolName: 'mcp__docs__lookup',
+        zeroToolName: expect.stringMatching(/^mcp__docs__[a-f0-9]{12}__lookup__[a-f0-9]{8}$/),
         serverName: 'docs',
       }),
     ]);
