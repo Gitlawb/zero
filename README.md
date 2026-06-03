@@ -31,7 +31,7 @@ scriptable headless mode, so the same agent works at your prompt or inside CI.
 ## Highlights
 
 - 🔌 **Multi-provider** — OpenAI-compatible, Anthropic, and Gemini behind one interface, with a model registry (capabilities, context limits, cost). Bring your own key and endpoint.
-- 🖥️ **Premium TUI** — append-style, scrollback-native Ink interface: streaming responses, collapsible tool rows, inline diffs, a command palette, and a live status footer (model · tokens · cost · context).
+- 🖥️ **Premium TUI** — append-style, scrollback-native Ink interface: streaming responses, compact tool-call rows with inline diffs, a slash-command palette, and a live status footer (model · tokens · cost · context).
 - 🤖 **Headless & scriptable** — `zero exec` with clean `text` / `json` / `stream-json` I/O and meaningful exit codes for CI and automation.
 - 🧰 **Real tools** — read / write / edit files, `apply_patch`, `grep`, `glob`, `bash`, directory listing, and a live plan/todo.
 - 🛡️ **Safe by default** — mutating tools are permission-gated; `--skip-permissions-unsafe` is an explicit, clearly-labeled opt-out.
@@ -67,8 +67,9 @@ export OPENAI_MODEL=gpt-4.1
 bun run dev          # or: zero
 ```
 
-Inside the TUI: type to chat, `/` opens command suggestions, **Tab** accepts the first
-command suggestion, and **Ctrl+C** exits. Empty-prompt arrow keys scroll the transcript.
+Inside the TUI: type to chat and press **Enter** to send. `/` opens command suggestions
+(**Tab** accepts the first). When the prompt is empty, the arrow keys, **PgUp/PgDn**, and
+**Home/End** scroll the transcript. **Ctrl+C** exits.
 
 ### Headless (`exec`)
 
