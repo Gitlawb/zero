@@ -1,11 +1,51 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 
+language: "en-US"
+tone_instructions: "Be direct and prioritize actionable correctness, safety, CLI UX, and test coverage issues over style nits."
+
 reviews:
+  profile: "chill"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
   # Avoid noisy "review skipped" status comments when CodeRabbit decides not to run.
   review_status: false
+  collapse_walkthrough: false
+  path_filters:
+    - "!dist/**"
+    - "!out/**"
+    - "!coverage/**"
+    - "!*.tgz"
+    - "!zero"
+    - "!zero.exe"
+  path_instructions:
+    - path: "src/**/*.ts"
+      instructions: |
+        Review changed code as a Bun-first TypeScript terminal coding agent. Prioritize tool safety, permission metadata, provider/config correctness, session/stream event integrity, and avoiding raw execution paths that bypass ToolBase-style controls.
+    - path: "src/tui/**/*.tsx"
+      instructions: |
+        Review Ink terminal UI for responsive layout, keyboard flow, approval prompts, startup cleanliness, and small-terminal behavior. Flag browser UI assumptions, hardcoded terminal dimensions, and clutter that weakens the CLI agent experience.
+    - path: "tests/**/*.ts"
+      instructions: |
+        Review tests for Bun test idioms, deterministic behavior, and meaningful coverage of safety decisions, provider/runtime flows, session events, and TUI command behavior.
+  tools:
+    github-checks:
+      timeout_ms: 300000
   auto_review:
     enabled: true
+    drafts: true
     auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 10
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+      - "[skip review]"
+    labels:
+      - "!do-not-review"
+    ignore_usernames:
+      - "dependabot[bot]"
+      - "renovate[bot]"
+      - "github-actions[bot]"
     # CodeRabbit reviews default-branch PRs by default. This extends automatic
     # reviews to PRs targeting any branch, including release and stacked branches.
     base_branches:
