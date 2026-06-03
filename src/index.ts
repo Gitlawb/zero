@@ -62,6 +62,8 @@ program
   .option('-C, --cwd <path>', 'Run from a different working directory')
   .option('-i, --input-format <format>', 'Input format: text or stream-json', 'text')
   .option('-o, --output-format <format>', 'Output format: text, json, or stream-json', 'text')
+  .option('--resume [id]', 'Resume a persisted Zero session; omit id to use the latest session')
+  .option('--fork <id>', 'Fork an existing Zero session into a new session branch')
   .option('--skip-permissions-unsafe', 'Allow prompt-gated tools for this run')
   .action(async (promptParts: string[] | undefined, options) => {
     let maxTurns: number | undefined;
@@ -87,6 +89,8 @@ program
       maxTurns,
       cwd: options.cwd,
       outputFormat: options.outputFormat,
+      resume: options.resume,
+      fork: options.fork,
       skipPermissionsUnsafe: Boolean(options.skipPermissionsUnsafe),
     });
   });

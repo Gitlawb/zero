@@ -14,6 +14,13 @@ import {
   type ZeroRunContext,
 } from '../zero-runtime';
 import {
+  ZeroExecSessionError,
+  formatZeroExecSessionPrompt,
+  prepareZeroExecSession,
+  type PreparedZeroExecSession,
+  type AppendZeroSessionEventInput,
+} from '../zero-sessions';
+import {
   ZERO_STREAM_JSON_SCHEMA_VERSION,
   createZeroStreamJsonRunId,
   formatZeroStreamJsonEvent,
@@ -50,6 +57,8 @@ export interface RunExecOptions {
   listTools?: boolean;
   maxTurns?: number;
   stdin?: string;
+  resume?: string | boolean;
+  fork?: string;
 }
 
 class ExecUsageError extends Error {}
@@ -133,6 +142,24 @@ export async function runExec(options: RunExecOptions): Promise<number> {
 
   const previousCwd = process.cwd();
   const runId = createZeroStreamJsonRunId();
+  let preparedSession: PreparedZeroExecSession | undefined;
+  let sessionEventQueue: Promise<void> = Promise.resolve();
+  const appendSessionEvent = (input: AppendZeroSessionEventInput): void => {
+    if (!preparedSession) return;
+    const session = preparedSession.session;
+    sessionEventQueue = sessionEventQueue.then(async () => {
+      await preparedSession?.store.appendEvent(session.sessionId, input);
+    });
+  };
+
+  if (options.resume && options.fork) {
+    writeExecError(outputFormat, 'usage_error', 'Use either --resume or --fork, not both.', {
+      exitCode: ZERO_EXEC_EXIT_CODES.usage,
+      recoverable: true,
+      runId,
+    });
+    return ZERO_EXEC_EXIT_CODES.usage;
+  }
 
   try {
     await changeWorkingDirectory(options.cwd);
@@ -179,6 +206,31 @@ export async function runExec(options: RunExecOptions): Promise<number> {
       return ZERO_EXEC_EXIT_CODES.success;
     }
 
+    if (prompt === undefined) {
+      throw new ExecUsageError('Prompt required. Use `zero exec "prompt"` or `zero exec --file prompt.txt`.');
+    }
+
+    try {
+      preparedSession = await prepareZeroExecSession({
+        resume: options.resume,
+        fork: options.fork,
+        cwd: process.cwd(),
+        modelId: context.modelId,
+        provider: context.runtime.provider,
+        title: createSessionTitle(prompt),
+      });
+    } catch (err: unknown) {
+      if (err instanceof ZeroExecSessionError) {
+        writeExecError(outputFormat, 'usage_error', err.message, {
+          exitCode: ZERO_EXEC_EXIT_CODES.usage,
+          recoverable: true,
+          runId,
+        });
+        return ZERO_EXEC_EXIT_CODES.usage;
+      }
+      throw err;
+    }
+
     if (context.permissionMode === 'unsafe') {
       writeWarning(outputFormat, 'Unsafe permissions are active for this run.', runId);
     }
@@ -197,11 +249,13 @@ export async function runExec(options: RunExecOptions): Promise<number> {
       enabled_tools: context.enabledTools,
       disabled_tools: context.disabledTools,
       output_format: outputFormat,
+      session_id: preparedSession.session.sessionId,
     });
     emitStreamJson(outputFormat, {
       schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
       type: 'run_start',
       runId,
+      sessionId: preparedSession.session.sessionId,
       cwd: process.cwd(),
       provider: context.runtime.provider,
       model: context.modelId,
@@ -209,8 +263,13 @@ export async function runExec(options: RunExecOptions): Promise<number> {
     });
 
     let streamedText = '';
+    appendSessionEvent({
+      type: 'message',
+      payload: { role: 'user', content: prompt, source: 'exec' },
+    });
+    const agentPrompt = formatZeroExecSessionPrompt(prompt, preparedSession);
 
-    const finalAnswer = await runAgent(prompt!, context.provider, {
+    const finalAnswer = await runAgent(agentPrompt, context.provider, {
       ...context.agentOptions,
       onText: (text) => {
         streamedText += text;
@@ -228,6 +287,8 @@ export async function runExec(options: RunExecOptions): Promise<number> {
         }
       },
       onToolCall: (toolCall) => {
+        const args = parseToolArguments(toolCall.arguments);
+        const sideEffect = classifyToolSideEffect(toolCall.name);
         if (outputFormat === 'json') {
           emitLegacyJson(outputFormat, {
             type: 'tool_call',
@@ -242,14 +303,24 @@ export async function runExec(options: RunExecOptions): Promise<number> {
             runId,
             id: toolCall.id,
             name: toolCall.name,
-            args: parseToolArguments(toolCall.arguments),
-            sideEffect: classifyToolSideEffect(toolCall.name),
+            args,
+            sideEffect,
           });
         } else {
           process.stderr.write(`[tool] ${toolCall.name}\n`);
         }
+        appendSessionEvent({
+          type: 'tool_call',
+          payload: {
+            id: toolCall.id,
+            name: toolCall.name,
+            args,
+            sideEffect,
+          },
+        });
       },
       onToolResult: (result) => {
+        const status = result.result.startsWith('Error') ? 'error' : 'ok';
         if (outputFormat === 'json') {
           emitLegacyJson(outputFormat, {
             type: 'tool_result',
@@ -262,13 +333,22 @@ export async function runExec(options: RunExecOptions): Promise<number> {
             type: 'tool_result',
             runId,
             id: result.toolCallId,
-            status: result.result.startsWith('Error') ? 'error' : 'ok',
+            status,
             output: result.result,
             truncated: false,
           });
         } else {
           process.stderr.write(`[result] ${truncateForStatus(result.result)}\n`);
         }
+        appendSessionEvent({
+          type: 'tool_result',
+          payload: {
+            id: result.toolCallId,
+            status,
+            output: result.result,
+            truncated: false,
+          },
+        });
       },
       onUsage: (usage) => {
         const totalTokens = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
@@ -286,8 +366,21 @@ export async function runExec(options: RunExecOptions): Promise<number> {
           completionTokens: usage.completionTokens,
           totalTokens,
         });
+        appendSessionEvent({
+          type: 'provider_usage',
+          payload: {
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens,
+            totalTokens,
+          },
+        });
       },
     });
+    appendSessionEvent({
+      type: 'message',
+      payload: { role: 'assistant', content: finalAnswer, source: 'exec' },
+    });
+    await sessionEventQueue;
 
     if (outputFormat === 'json') {
       emitLegacyJson(outputFormat, { type: 'final', text: finalAnswer });
@@ -327,6 +420,14 @@ export async function runExec(options: RunExecOptions): Promise<number> {
       return ZERO_EXEC_EXIT_CODES.usage;
     }
 
+    appendSessionEvent({
+      type: 'error',
+      payload: {
+        code: 'crash',
+        message: err?.message ?? String(err),
+      },
+    });
+    await sessionEventQueue;
     writeExecError(outputFormat, 'crash', err?.message ?? String(err), {
       exitCode: ZERO_EXEC_EXIT_CODES.crash,
       recoverable: false,
@@ -565,6 +666,11 @@ function classifyToolSideEffect(name: string): ZeroStreamJsonToolSideEffect {
   if (['apply_patch', 'edit_file', 'write_file'].includes(name)) return 'write';
   if (name === 'bash') return 'shell';
   return 'unknown';
+}
+
+function createSessionTitle(prompt: string): string {
+  const normalized = prompt.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, 80) : 'Zero exec session';
 }
 
 function formatProviderError(err: any): string {

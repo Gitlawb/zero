@@ -7,6 +7,7 @@ import {
   resolveExecPrompt,
   ZERO_EXEC_EXIT_CODES,
 } from '../src/cli';
+import { ZeroSessionEventStore } from '../src/zero-sessions';
 import { ZERO_STREAM_JSON_SCHEMA_VERSION } from '../src/zero-stream-json';
 
 async function runZero(
@@ -53,6 +54,8 @@ describe('zero exec CLI surface', () => {
     expect(result.stdout).toContain('--cwd');
     expect(result.stdout).toContain('--input-format');
     expect(result.stdout).toContain('--output-format');
+    expect(result.stdout).toContain('--resume');
+    expect(result.stdout).toContain('--fork');
     expect(result.stdout).toContain('stream-json');
     expect(result.stdout).toContain('--skip-permissions-unsafe');
   });
@@ -117,6 +120,42 @@ describe('zero exec CLI surface', () => {
       expect(result.stdout).not.toContain('bash');
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns usage exit code for invalid resume and fork options', async () => {
+    const dataHome = await mkdtemp(join(process.cwd(), '.zero-session-cli-'));
+    try {
+      const conflictWithoutProvider = await runZero(
+        ['exec', '--resume', 'abc', '--fork', 'def', 'hello'],
+        { XDG_DATA_HOME: dataHome, OPENAI_API_KEY: '' }
+      );
+      expect(conflictWithoutProvider.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+      expect(conflictWithoutProvider.stderr).toContain('Use either --resume or --fork, not both');
+      expect(conflictWithoutProvider.stderr).not.toContain('No LLM provider configured');
+
+      const conflict = await runZero(
+        ['exec', '--resume', 'abc', '--fork', 'def', 'hello'],
+        { XDG_DATA_HOME: dataHome, OPENAI_API_KEY: 'test-key' }
+      );
+      expect(conflict.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+      expect(conflict.stderr).toContain('Use either --resume or --fork, not both');
+
+      const missingLatest = await runZero(
+        ['exec', 'hello', '--resume'],
+        { XDG_DATA_HOME: dataHome, OPENAI_API_KEY: 'test-key' }
+      );
+      expect(missingLatest.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+      expect(missingLatest.stderr).toContain('No Zero sessions available to resume');
+
+      const missingFork = await runZero(
+        ['exec', '--fork', 'missing', 'hello'],
+        { XDG_DATA_HOME: dataHome, OPENAI_API_KEY: 'test-key' }
+      );
+      expect(missingFork.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+      expect(missingFork.stderr).toContain('Zero session not found: missing');
+    } finally {
+      await rm(dataHome, { recursive: true, force: true });
     }
   });
 
@@ -253,6 +292,74 @@ describe('zero exec CLI surface', () => {
       expect(events[0].message).not.toContain(leakedModel);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits session id and records successful exec events', async () => {
+    const dataHome = await mkdtemp(join(process.cwd(), '.zero-session-cli-'));
+    const providerDir = await mkdtemp(join(process.cwd(), '.zero-provider-test-'));
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response([
+          'data: {"id":"chatcmpl_zero","object":"chat.completion.chunk","created":0,"model":"local-coder","choices":[{"index":0,"delta":{"content":"session recorded"},"finish_reason":null}]}\n\n',
+          'data: {"id":"chatcmpl_zero","object":"chat.completion.chunk","created":0,"model":"local-coder","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+          'data: [DONE]\n\n',
+        ].join(''), {
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      },
+    });
+
+    try {
+      const providerScript = join(providerDir, 'provider-command.js');
+      await writeFile(
+        providerScript,
+        `console.log(JSON.stringify({ provider: "openai-compatible", model: "local-coder", base_url: "http://127.0.0.1:${server.port}/v1" }));\n`,
+        'utf-8'
+      );
+
+      const result = await runZero(
+        ['exec', '--model', 'local-coder', '--output-format', 'stream-json', 'persist this'],
+        {
+          XDG_DATA_HOME: dataHome,
+          ZERO_PROVIDER_COMMAND: `${JSON.stringify(process.execPath)} ${JSON.stringify(providerScript)}`,
+        }
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr.trim()).toBe('');
+      const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+      const runStart = events.find((event) => event.type === 'run_start');
+      const sessionId = runStart?.sessionId;
+      expect(runStart).toMatchObject({
+        schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+      });
+      expect(typeof sessionId).toBe('string');
+      expect(events.find((event) => event.type === 'final')).toMatchObject({
+        text: 'session recorded',
+      });
+
+      const store = new ZeroSessionEventStore({
+        rootDir: join(dataHome, 'zero', 'sessions'),
+      });
+      const sessions = await store.listSessions();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]).toMatchObject({
+        sessionId,
+        eventCount: 2,
+        lastEventType: 'message',
+      });
+      const recorded = await store.readEvents(sessionId);
+      expect(recorded.map((event) => [event.type, (event.payload as any).role])).toEqual([
+        ['message', 'user'],
+        ['message', 'assistant'],
+      ]);
+      expect((recorded[1]?.payload as any).content).toBe('session recorded');
+    } finally {
+      server.stop(true);
+      await rm(dataHome, { recursive: true, force: true });
+      await rm(providerDir, { recursive: true, force: true });
     }
   });
 });

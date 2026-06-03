@@ -36,7 +36,7 @@ Unknown fields are rejected so protocol clients catch drift early.
 `zero exec --output-format stream-json` emits schema-versioned JSONL events.
 
 ```json
-{ "schemaVersion": 1, "type": "run_start", "runId": "run_20260603_abc123", "cwd": "/repo", "provider": "openai", "model": "gpt-4.1", "apiModel": "gpt-4.1" }
+{ "schemaVersion": 1, "type": "run_start", "runId": "run_20260603_abc123", "sessionId": "zero_20260603100000_abc123", "cwd": "/repo", "provider": "openai", "model": "gpt-4.1", "apiModel": "gpt-4.1" }
 { "schemaVersion": 1, "type": "text", "runId": "run_20260603_abc123", "delta": "..." }
 { "schemaVersion": 1, "type": "tool_call", "runId": "run_20260603_abc123", "id": "call_1", "name": "read_file", "args": { "path": "README.md" }, "sideEffect": "read" }
 { "schemaVersion": 1, "type": "tool_result", "runId": "run_20260603_abc123", "id": "call_1", "status": "ok", "output": "...", "truncated": false }
