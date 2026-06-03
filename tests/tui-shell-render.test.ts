@@ -2,6 +2,7 @@ import React from 'react';
 import { describe, expect, it } from 'bun:test';
 import { renderToString } from 'ink';
 import { TuiShell } from '../src/tui/TuiShell';
+import { shouldShowStartupLogo } from '../src/tui/App';
 import type { ChatMessage } from '../src/tui/types';
 
 function renderShell(overrides: Partial<React.ComponentProps<typeof TuiShell>> = {}) {
@@ -36,6 +37,20 @@ function renderShell(overrides: Partial<React.ComponentProps<typeof TuiShell>> =
 }
 
 describe('TuiShell render surface', () => {
+  it('only keeps the startup wordmark visible before chat content starts', () => {
+    expect(shouldShowStartupLogo([
+      { type: 'system', content: 'Welcome to zero.' },
+      { type: 'system', content: 'Type /help.' },
+    ])).toBe(true);
+    expect(shouldShowStartupLogo([
+      { type: 'system', content: 'Welcome to zero.' },
+      { type: 'user', content: 'inspect the repo' },
+    ])).toBe(false);
+    expect(shouldShowStartupLogo([
+      { type: 'assistant', content: 'Done.' },
+    ])).toBe(false);
+  });
+
   it('renders the themed startup shell in the first PR style', () => {
     const output = renderShell();
 

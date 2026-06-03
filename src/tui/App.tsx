@@ -725,11 +725,12 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const terminalColumns = Math.max(1, columns);
   const terminalWidth = Math.max(64, columns);
   const chatHeight = Math.max(8, terminalHeight - 6);
+  const showLogo = shouldShowStartupLogo(messages);
   const maxScrollOffset = Math.max(0, messages.length - chatHeight);
   const windowEnd = Math.max(0, messages.length - scrollOffset);
   const windowStart = Math.max(0, windowEnd - chatHeight);
   const visibleMessages = messages.slice(windowStart, windowEnd);
-  const hasOverflow = messages.length > chatHeight;
+  const hasOverflow = !showLogo && messages.length > chatHeight;
   const canScrollUp = hasOverflow && scrollOffset < maxScrollOffset;
   const canScrollDown = hasOverflow && scrollOffset > 0;
   const activeFile = deriveActiveFile(messages);
@@ -743,7 +744,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
       visibleMessages={visibleMessages}
       scrollOffset={scrollOffset}
       streamingMessageIndex={streamingMessageIndex}
-      showLogo={true}
+      showLogo={showLogo}
       canScrollUp={canScrollUp}
       canScrollDown={canScrollDown}
       input={input}
@@ -770,6 +771,10 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     />
   );
 };
+
+export function shouldShowStartupLogo(messages: ChatMessage[]): boolean {
+  return messages.every((message) => message.type === 'system');
+}
 
 function deriveActiveFile(messages: ChatMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
