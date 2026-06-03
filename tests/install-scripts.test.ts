@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'bun:test';
+import { createHash } from 'node:crypto';
+import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 async function read(path: string): Promise<string> {
   return Bun.file(path).text();
@@ -14,8 +18,10 @@ describe('install scripts', () => {
     expect(script).toContain('ZERO_INSTALL_DIR="${ZERO_INSTALL_DIR:-$HOME/.local/bin}"');
     expect(script).toContain('archive_name="zero-v${version}-${platform}-${arch}.tar.gz"');
     expect(script).toContain('checksum_name="${archive_name}.sha256"');
+    expect(script).toContain("curl --fail --location --show-error --silent --header 'Accept: application/vnd.github+json'");
     expect(script).toContain('verify_checksum "$checksum_name"');
     expect(script).toContain('tar -xzf "$archive_path" -C "$extract_dir"');
+    expect(script).toContain('find_extracted_binary "$extract_dir"');
     expect(script).toContain('cp "$binary_path" "$ZERO_INSTALL_DIR/zero"');
   });
 
@@ -28,6 +34,103 @@ describe('install scripts', () => {
     expect(script).toContain('$checksumName = "$archiveName.sha256"');
     expect(script).toContain('Get-FileHash -Path $archivePath -Algorithm SHA256');
     expect(script).toContain('Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force');
+    expect(script).toContain('Get-ChildItem -Path $extractDir -Filter "zero.exe" -File -Recurse');
     expect(script).toContain('Copy-Item -Path $binaryPath -Destination $targetPath -Force');
+  });
+
+  it('installs from a prefixed Unix release archive without network access', async () => {
+    if (process.platform === 'win32') return;
+
+    const root = await mkdtemp(join(tmpdir(), 'zero-install-test-'));
+    const mockBin = join(root, 'bin');
+    const packageDir = join(root, 'package', 'zero-v0.1.0-linux-x64');
+    const releaseDir = join(root, 'release');
+    const installDir = join(root, 'install');
+    const archiveName = 'zero-v0.1.0-linux-x64.tar.gz';
+    const archivePath = join(releaseDir, archiveName);
+    const checksumPath = `${archivePath}.sha256`;
+
+    await mkdir(mockBin, { recursive: true });
+    await mkdir(packageDir, { recursive: true });
+    await mkdir(releaseDir, { recursive: true });
+    await mkdir(installDir, { recursive: true });
+    await writeFile(join(packageDir, 'zero'), '#!/usr/bin/env sh\necho mock-zero\n');
+    await chmod(join(packageDir, 'zero'), 0o755);
+
+    const tar = Bun.spawn(['tar', '-C', join(root, 'package'), '-czf', archivePath, 'zero-v0.1.0-linux-x64'], {
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+    const [tarExit, tarStderr] = await Promise.all([
+      tar.exited,
+      new Response(tar.stderr).text(),
+    ]);
+    expect(tarExit).toBe(0);
+    expect(tarStderr.trim()).toBe('');
+
+    const checksum = createHash('sha256')
+      .update(Buffer.from(await Bun.file(archivePath).arrayBuffer()))
+      .digest('hex');
+    await writeFile(checksumPath, `${checksum}  ${archiveName}\n`);
+
+    const mockCurl = join(mockBin, 'curl');
+    await writeFile(mockCurl, `#!/usr/bin/env sh
+set -eu
+output=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    --header)
+      shift 2
+      ;;
+    --fail|--location|--show-error|--silent)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+case "$url" in
+  */${archiveName})
+    cp "${archivePath}" "$output"
+    ;;
+  */${archiveName}.sha256)
+    cp "${checksumPath}" "$output"
+    ;;
+  *)
+    echo "unexpected url: $url" >&2
+    exit 2
+    ;;
+esac
+`);
+    await chmod(mockCurl, 0o755);
+
+    const child = Bun.spawn(['bash', 'scripts/install.sh', '--version', '0.1.0', '--install-dir', installDir], {
+      env: {
+        ...process.env,
+        PATH: `${mockBin}:${process.env.PATH ?? ''}`,
+        ZERO_GITHUB_BASE_URL: 'https://example.test',
+        ZERO_REPO: 'Gitlawb/zero',
+      },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stderr.trim()).toBe('');
+    expect(stdout).toContain(`Installed ${join(installDir, 'zero')}`);
+    expect(await Bun.file(join(installDir, 'zero')).text()).toContain('mock-zero');
   });
 });

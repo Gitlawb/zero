@@ -28,6 +28,12 @@ Install to a custom directory:
 ZERO_INSTALL_DIR="$HOME/bin" scripts/install.sh
 ```
 
+Install from a fork or internal repository:
+
+```bash
+scripts/install.sh --repo owner/repo
+```
+
 Defaults:
 
 - Repository: `Gitlawb/zero`
@@ -54,6 +60,12 @@ Install to a custom directory:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -InstallDir "$env:USERPROFILE\bin"
+```
+
+Install from a fork or internal repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Repository owner/repo
 ```
 
 Defaults:

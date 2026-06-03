@@ -81,7 +81,15 @@ try {
   $binaryPath = Join-Path $extractDir "zero.exe"
 
   if (-not (Test-Path $binaryPath)) {
-    throw "Release archive did not contain zero.exe"
+    $binaryMatches = @(Get-ChildItem -Path $extractDir -Filter "zero.exe" -File -Recurse)
+
+    if ($binaryMatches.Count -eq 1) {
+      $binaryPath = $binaryMatches[0].FullName
+    }
+  }
+
+  if (-not (Test-Path $binaryPath)) {
+    throw "Release archive did not contain exactly one zero.exe"
   }
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null

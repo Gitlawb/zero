@@ -72,6 +72,19 @@ download() {
   fi
 }
 
+download_json() {
+  local url="$1"
+  local output="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --show-error --silent --header 'Accept: application/vnd.github+json' "$url" --output "$output"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --quiet --header='Accept: application/vnd.github+json' "$url" --output-document "$output"
+  else
+    fail "curl or wget is required"
+  fi
+}
+
 detect_platform() {
   case "$(uname -s)" in
     Linux) echo "linux" ;;
@@ -93,7 +106,7 @@ latest_tag() {
   local api_url="${ZERO_GITHUB_API%/}/repos/${ZERO_REPO}/releases/latest"
   local tag
 
-  download "$api_url" "$metadata_file"
+  download_json "$api_url" "$metadata_file"
   tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata_file" | head -n 1)"
   [ -n "$tag" ] || fail "could not read tag_name from $api_url"
   echo "$tag"
@@ -109,6 +122,25 @@ verify_checksum() {
   else
     fail "shasum or sha256sum is required"
   fi
+}
+
+find_extracted_binary() {
+  local root="$1"
+  local candidate
+
+  if [ -f "$root/zero" ]; then
+    echo "$root/zero"
+    return 0
+  fi
+
+  for candidate in "$root"/*/zero; do
+    if [ -f "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 need_command uname
@@ -153,8 +185,7 @@ download "${release_url}/${checksum_name}" "$checksum_path"
 mkdir -p "$extract_dir"
 tar -xzf "$archive_path" -C "$extract_dir"
 
-binary_path="$extract_dir/zero"
-[ -f "$binary_path" ] || fail "release archive did not contain zero"
+binary_path="$(find_extracted_binary "$extract_dir")" || fail "release archive did not contain zero"
 
 mkdir -p "$ZERO_INSTALL_DIR"
 cp "$binary_path" "$ZERO_INSTALL_DIR/zero"
