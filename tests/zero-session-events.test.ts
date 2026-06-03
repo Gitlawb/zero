@@ -232,11 +232,11 @@ describe('defaultZeroSessionRoot', () => {
   it('uses XDG_DATA_HOME when present and falls back to ~/.local/share', () => {
     expect(defaultZeroSessionRoot({
       env: { XDG_DATA_HOME: '/xdg/data', HOME: '/home/zero' },
-    })).toBe('/xdg/data/zero/sessions');
+    })).toBe(join('/xdg/data', 'zero', 'sessions'));
 
     expect(defaultZeroSessionRoot({
       env: { HOME: '/home/zero' },
-    })).toBe('/home/zero/.local/share/zero/sessions');
+    })).toBe(join('/home/zero', '.local', 'share', 'zero', 'sessions'));
   });
 });
 
