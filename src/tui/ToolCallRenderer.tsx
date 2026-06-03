@@ -2,6 +2,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { tuiTheme } from './theme';
 import { DiffCard, buildEditDiff } from './DiffCard';
+import Spinner from 'ink-spinner';
 
 interface ToolCallRendererProps {
   name: string;
@@ -105,7 +106,14 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   return (
     <Box flexDirection="column">
       <Box flexDirection="row" paddingX={1}>
-        <Text color={dotColor}>● </Text>
+        {/* Animated spinner while running; resolves to a static dot when done. */}
+        {status === 'running' ? (
+          <Text color={tuiTheme.colors.warning}>
+            <Spinner type="dots" />{' '}
+          </Text>
+        ) : (
+          <Text color={dotColor}>● </Text>
+        )}
         <Text color={tuiTheme.colors.brand} bold>
           {label}{' '}
         </Text>

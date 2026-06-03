@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { tuiTheme } from './theme';
+import { LiveDot } from './LiveDot';
 import type { TuiModeState } from './types';
 
 interface TuiStatusBarProps extends TuiModeState {
@@ -41,10 +42,9 @@ export const TuiStatusBar: React.FC<TuiStatusBarProps> = ({
       </Box>
 
       <Box flexDirection="row">
-        <Text color={isThinking ? tuiTheme.colors.success : tuiTheme.colors.subtle}>● </Text>
-        <Text color={isThinking ? tuiTheme.colors.success : tuiTheme.colors.muted}>
-          {isThinking ? 'live' : 'idle'}
-        </Text>
+        {/* Pulses while the agent is working; steady green otherwise. */}
+        <LiveDot pulsing={!!isThinking} color={tuiTheme.colors.success} />
+        <Text color={tuiTheme.colors.success}> live</Text>
       </Box>
     </Box>
   );
