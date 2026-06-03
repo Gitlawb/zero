@@ -6,6 +6,7 @@ import {
   formatOutcome,
   hasBlockingChecks,
   normalizeOutcome,
+  parseChangedFiles,
 } from '../scripts/pr-review';
 
 describe('PR review automation helpers', () => {
@@ -77,5 +78,12 @@ describe('PR review automation helpers', () => {
     expect(markdown).toContain('`bun run typecheck` ended with `failure`');
     expect(formatOutcome('success')).toBe('[pass]');
     expect(formatOutcome('failure')).toBe('[fail]');
+  });
+
+  it('parses changed file output into a stable sorted list', () => {
+    expect(parseChangedFiles('tests/b.test.ts\n\nsrc/a.ts\r\n')).toEqual([
+      'src/a.ts',
+      'tests/b.test.ts',
+    ]);
   });
 });
