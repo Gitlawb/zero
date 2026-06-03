@@ -3,24 +3,25 @@ import { Box, Text } from 'ink';
 import { theme } from './theme';
 
 const HINTS: ReadonlyArray<readonly [key: string, label: string]> = [
-  ['Enter', 'sends'],
-  ['Tab', 'accepts command'],
-  ['Ctrl+C', 'exits'],
+  ['Enter', 'send'],
+  ['Tab', 'complete'],
+  ['Ctrl+C', 'exit'],
 ];
 
 /**
- * Keycap-style shortcut hints beneath the prompt. Each key sits in a small
- * bordered box followed by a muted label; `alignItems="center"` keeps the
- * single-line labels aligned against the keycaps. Wraps on narrow terminals.
+ * Minimal shortcut hints: one quiet line with the keys emphasized in cyan and
+ * a faint middot between groups — no boxed keycaps (they read as heavy/noisy).
+ * Wraps on narrow terminals.
  */
 export const ShortcutHints: React.FC = () => (
-  <Box paddingX={1} flexWrap="wrap" alignItems="center" flexShrink={0}>
-    {HINTS.map(([key, label]) => (
-      <Box key={key} marginRight={3} alignItems="center">
-        <Box borderStyle="single" borderColor={theme.label} paddingX={1}>
-          <Text color={theme.value}>{key}</Text>
-        </Box>
+  <Box paddingX={1} flexWrap="wrap" flexShrink={0}>
+    {HINTS.map(([key, label], i) => (
+      <Box key={key}>
+        <Text color={theme.accent} bold>
+          {key}
+        </Text>
         <Text color={theme.muted}> {label}</Text>
+        {i < HINTS.length - 1 && <Text color={theme.label}>{'   ·   '}</Text>}
       </Box>
     ))}
   </Box>
