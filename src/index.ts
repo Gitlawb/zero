@@ -4,11 +4,24 @@ import { configManager } from './config/manager';
 import { startTUI } from './tui';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
+import { redactZeroSecrets } from './zero-redaction';
+import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
 
 const program = new Command();
 
 function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function parseNonNegativeIntegerOption(name: string, value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`Invalid ${name} value "${value}". Expected a non-negative integer.`);
+  }
+
+  return Number(normalized);
 }
 
 program
@@ -98,6 +111,36 @@ providersCmd
       console.log(`Base URL: ${active.baseURL}`);
     } else {
       console.log('No active provider set.');
+    }
+  });
+
+program
+  .command('search')
+  .description('Search local Zero session events')
+  .argument('<query...>', 'Search query')
+  .option('--json', 'Print search results as JSON')
+  .option('--limit <number>', 'Maximum number of matches to return', '20')
+  .option('--context <chars>', 'Context characters around each match', '80')
+  .option('--session <id>', 'Search one session id')
+  .option('--type <eventType>', 'Search one event type')
+  .action(async (queryParts: string[] | undefined, options) => {
+    try {
+      const query = (queryParts ?? []).join(' ');
+      const result = await searchZeroSessions(query, {
+        limit: parseNonNegativeIntegerOption('--limit', options.limit),
+        contextChars: parseNonNegativeIntegerOption('--context', options.context),
+        sessionId: options.session,
+        type: options.type,
+      });
+
+      if (options.json) {
+        console.log(JSON.stringify(redactZeroSecrets(result), null, 2));
+      } else {
+        console.log(formatZeroSearchResult(result));
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] ${getErrorMessage(err)}`);
+      process.exitCode = 2;
     }
   });
 
