@@ -37,6 +37,7 @@ bun run build
 bun run smoke:build
 bun run perf:bench
 bun run package:release
+bun run verify:release
 ```
 
 Check for released CLI updates:
