@@ -50,8 +50,6 @@ export const TuiShell: React.FC<TuiShellProps> = ({
     <Box
       flexDirection="column"
       width={shellWidth}
-      borderStyle="round"
-      borderColor={isThinking ? '#f59e0b' : '#22d3ee'}
       paddingX={1}
     >
       <TuiHeader
@@ -71,6 +69,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
         canScrollDown={canScrollDown}
         providerName={providerName}
         modelName={modelName}
+        terminalWidth={shellWidth}
       />
 
       <CommandSuggestions suggestions={suggestions} />

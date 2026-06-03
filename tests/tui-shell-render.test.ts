@@ -39,8 +39,8 @@ describe('TuiShell render surface', () => {
     const output = renderShell();
 
     expect(output).toContain('ZERO');
-    expect(output).toContain('SESSION');
-    expect(output).toContain('START FAST');
+    expect(output).toContain('WORKSPACE');
+    expect(output).toContain('QUICK COMMANDS');
     expect(output).toContain('COMPOSER');
     expect(output).toContain('/provider');
   });
