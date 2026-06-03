@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,7 @@ import {
   formatSha256Checksum,
   parseReleaseChecksumArgs,
   parseSha256Checksum,
+  sha256File,
   verifyReleaseChecksums,
   verifySha256Checksum,
   writeSha256Checksum,
@@ -21,6 +23,18 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 describe('release checksum helpers', () => {
+  it('hashes archive bytes as SHA-256 hex', async () => {
+    await withTempDir(async (dir) => {
+      const archivePath = join(dir, 'zero-v0.1.0-linux-x64.tar.gz');
+      const archiveBytes = 'zero archive bytes';
+      await writeFile(archivePath, archiveBytes, 'utf-8');
+
+      const expected = createHash('sha256').update(archiveBytes).digest('hex');
+
+      expect(await sha256File(archivePath)).toBe(expected);
+    });
+  });
+
   it('writes installer-compatible SHA-256 files and verifies release directories', async () => {
     await withTempDir(async (dir) => {
       const archiveName = 'zero-v0.1.0-linux-x64.tar.gz';
@@ -89,6 +103,14 @@ describe('release checksum helpers', () => {
 
       await expect(verifyReleaseChecksums({ releaseDir: dir })).rejects.toThrow(
         'Unexpected checksum file'
+      );
+    });
+  });
+
+  it('rejects empty release directories', async () => {
+    await withTempDir(async (dir) => {
+      await expect(verifyReleaseChecksums({ releaseDir: dir })).rejects.toThrow(
+        'No release archives found'
       );
     });
   });
