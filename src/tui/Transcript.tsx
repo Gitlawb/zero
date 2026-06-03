@@ -35,7 +35,6 @@ export const Transcript: React.FC<TranscriptProps> = ({
   terminalWidth,
   messageBackground,
 }) => {
-  const contentWidth = Math.max(40, terminalWidth - 4);
   const rows = visibleMessages;
   const startIndex = Math.max(0, messages.length - rows.length - scrollOffset);
 
@@ -55,7 +54,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           message={msg}
           index={startIndex + index}
           streamingMessageIndex={streamingMessageIndex}
-          contentWidth={contentWidth}
+          terminalWidth={terminalWidth}
           messageBackground={messageBackground}
         />
       ))}
@@ -73,28 +72,32 @@ function TranscriptRow({
   message,
   index,
   streamingMessageIndex,
-  contentWidth,
+  terminalWidth,
   messageBackground,
 }: {
   message: ChatMessage;
   index: number;
   streamingMessageIndex: number | null;
-  contentWidth: number;
+  terminalWidth: number;
   messageBackground?: string;
 }) {
   if (message.type === 'user') {
     const backgroundColor = messageBackground ?? tuiTheme.colors.userBg;
-    const messageWidth = Math.max(1, contentWidth + 2);
+    const messageWidth = Math.max(1, terminalWidth - 2);
     return (
       <Box width="100%" flexDirection="column" marginBottom={1}>
-        <Text color={backgroundColor}>{'▄'.repeat(messageWidth)}</Text>
+        <Box width="100%" height={1}>
+          <Text color={backgroundColor}>{'▄'.repeat(messageWidth)}</Text>
+        </Box>
         <Box paddingX={1} backgroundColor={backgroundColor} flexDirection="row" width="100%">
           <Text color={tuiTheme.colors.userSymbol} backgroundColor={backgroundColor}>{'> '}</Text>
           <Text color={tuiTheme.colors.userSymbol} backgroundColor={backgroundColor} wrap="wrap">
             {message.content}
           </Text>
         </Box>
-        <Text color={backgroundColor}>{'▀'.repeat(messageWidth)}</Text>
+        <Box width="100%" height={1}>
+          <Text color={backgroundColor}>{'▀'.repeat(messageWidth)}</Text>
+        </Box>
       </Box>
     );
   }

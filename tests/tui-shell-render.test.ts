@@ -94,6 +94,8 @@ describe('TuiShell render surface', () => {
     expect(output).toContain('Plan mode enabled.');
     expect(output).toContain('model       Browse models');
     expect(output).toContain('model list');
+    expect(output).toContain('▄');
+    expect(output).toContain('▀');
     expect(output).not.toContain('perms ask');
     expect(output).not.toContain('Tab accepts');
   });
@@ -126,5 +128,21 @@ describe('TuiShell render surface', () => {
     expect(output).toContain('[y]');
     expect(output).toContain('[n]');
     expect(output).toContain('[a]');
+  });
+
+  it('renders solid prompt with Music-style separators', () => {
+    const messages: ChatMessage[] = [
+      { type: 'system', content: 'Ready.' },
+    ];
+    const output = renderShell({
+      messages,
+      visibleMessages: messages,
+      showLogo: false,
+      inputStyle: 'solid',
+    });
+
+    expect(output).toContain('> █ Type your message or @path/to/file');
+    expect(output).toContain('▄');
+    expect(output).toContain('▀');
   });
 });

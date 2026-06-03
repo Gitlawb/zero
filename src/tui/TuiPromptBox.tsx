@@ -50,12 +50,15 @@ export const TuiPromptBox: React.FC<TuiPromptBoxProps> = ({
     return <Box flexDirection="column">{prompt}</Box>;
   }
 
-  const width = Math.max(1, terminalWidth);
   return (
     <Box flexDirection="column">
-      <Text color={backgroundColor}>{'▄'.repeat(width)}</Text>
+      <Box width="100%" height={1}>
+        <Text color={backgroundColor}>{'▄'.repeat(terminalWidth)}</Text>
+      </Box>
       {prompt}
-      <Text color={backgroundColor}>{'▀'.repeat(width)}</Text>
+      <Box width="100%" height={1}>
+        <Text color={backgroundColor}>{'▀'.repeat(terminalWidth)}</Text>
+      </Box>
     </Box>
   );
 };

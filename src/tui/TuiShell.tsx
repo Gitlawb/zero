@@ -33,6 +33,7 @@ interface TuiShellProps extends TuiModeState {
   contextPercent?: number;
   pendingApproval?: ToolApprovalRequest | null;
   terminalWidth: number;
+  terminalColumns?: number;
   terminalHeight: number;
   inputStyle?: 'border' | 'solid';
   inputBackground?: string;
@@ -58,6 +59,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   contextPercent,
   pendingApproval,
   terminalWidth,
+  terminalColumns,
   inputStyle = 'border',
   inputBackground,
   messageBackground,
@@ -68,6 +70,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
 }) => {
   const modeState = { isPlanMode, debugMode, toolsEnabled, isThinking };
   const shellWidth = Math.max(60, terminalWidth);
+  const rawColumns = Math.max(1, terminalColumns ?? terminalWidth);
 
   return (
     <Box
@@ -87,7 +90,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
             canScrollDown={canScrollDown}
             providerName={providerName}
             modelName={modelName}
-            terminalWidth={shellWidth}
+            terminalWidth={rawColumns}
             messageBackground={messageBackground}
           />
         </Box>
@@ -111,7 +114,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
         modelName={modelName}
         inputStyle={inputStyle}
         inputBackground={inputBackground}
-        terminalWidth={shellWidth}
+        terminalWidth={rawColumns}
         {...modeState}
       />
 

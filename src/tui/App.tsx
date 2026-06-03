@@ -70,7 +70,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const colorDepth = process.env.COLORTERM === 'truecolor' || process.env.COLORTERM === '24bit'
     ? 24
     : (process.env.TERM ?? '').includes('256color')
-      ? 24
+      ? 8
       : stdout?.getColorDepth?.() ?? process.stdout.getColorDepth?.() ?? 24;
   const [terminalBackground] = useState<string | undefined>(() => (
     initialTerminalBackground ?? configManager.getTerminalBackground() ?? detectFromColorFgBg()
@@ -390,13 +390,16 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
 
     if (cmd === '/input-style') {
       const value = parts[1]?.toLowerCase();
-      const next = value === 'border'
-        ? 'border'
-        : value === 'solid'
+      if (value && value !== 'border' && value !== 'solid') {
+        addSystemMessage('Usage: /input-style [border|solid]');
+        return;
+      }
+
+      const next: 'border' | 'solid' = value === 'border' || value === 'solid'
+        ? value
+        : inputStyle === 'border'
           ? 'solid'
-          : inputStyle === 'border'
-            ? 'solid'
-            : 'border';
+          : 'border';
       setInputStyle(next);
       configManager.setInputStyle(next);
       addSystemMessage(`Input style set to: ${next}`);
@@ -631,6 +634,9 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     }
 
     const switched = configManager.setActiveProvider(providerName);
+    if (switched) {
+      setSelectedModelOverride(undefined);
+    }
     addSystemMessage(switched
       ? `Added and switched to provider: ${providerName}`
       : `Provider added: ${providerName}`);
@@ -716,6 +722,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   }
 
   const terminalHeight = Math.max(20, rows);
+  const terminalColumns = Math.max(1, columns);
   const terminalWidth = Math.max(64, columns);
   const chatHeight = Math.max(8, terminalHeight - 6);
   const maxScrollOffset = Math.max(0, messages.length - chatHeight);
@@ -758,6 +765,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
       contextPercent={contextPercent}
       pendingApproval={pendingApproval}
       terminalWidth={terminalWidth}
+      terminalColumns={terminalColumns}
       terminalHeight={terminalHeight}
     />
   );
