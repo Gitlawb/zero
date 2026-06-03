@@ -62,7 +62,7 @@ describe('TuiShell render surface', () => {
     const messages: ChatMessage[] = [
       { type: 'user', content: 'inspect the repo' },
       { type: 'assistant', content: 'I will scan the codebase.' },
-      { type: 'tool-call', name: 'grep', args: '{"pattern":"TODO"}', result: 'src/index.ts:1' },
+      { type: 'tool-call', id: 'call_grep', name: 'grep', args: '{"pattern":"TODO"}', result: 'src/index.ts:1' },
       { type: 'system', content: 'Plan mode enabled.' },
     ];
     const output = renderShell({
@@ -88,7 +88,7 @@ describe('TuiShell render surface', () => {
   it('renders pending tool approval with a command preview', () => {
     const messages: ChatMessage[] = [
       { type: 'user', content: 'run tests' },
-      { type: 'tool-call', name: 'bash', args: '{"command":"bun test ./tests"}' },
+      { type: 'tool-call', id: 'call_bash', name: 'bash', args: '{"command":"bun test ./tests"}' },
     ];
     const output = renderShell({
       messages,

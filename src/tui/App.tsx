@@ -24,7 +24,7 @@ import {
   resolveTuiModelProfileSelection,
   resolveTuiModelSelection,
 } from './model-selection';
-import { getAllThemes, getTheme, setTheme } from './theme';
+import { getAllThemes, getTheme, normalizeHexColor, setTheme } from './theme';
 import { detectFromColorFgBg } from './terminal-background';
 import type { ChatMessage } from './types';
 
@@ -37,8 +37,8 @@ const INITIAL_MESSAGES: ChatMessage[] = [
 setTheme(configManager.getTheme());
 
 function blend(a: string, b: string, t: number): string {
-  const ah = parseInt(a.slice(1), 16);
-  const bh = parseInt(b.slice(1), 16);
+  const ah = parseInt(normalizeHexColor(a).slice(1), 16);
+  const bh = parseInt(normalizeHexColor(b).slice(1), 16);
   const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
   const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
   const rr = Math.round(ar + (br - ar) * t);
@@ -48,7 +48,7 @@ function blend(a: string, b: string, t: number): string {
 }
 
 function isLightColor(color: string): boolean {
-  const n = parseInt(color.slice(1), 16);
+  const n = parseInt(normalizeHexColor(color).slice(1), 16);
   const r = (n >> 16) & 0xff;
   const g = (n >> 8) & 0xff;
   const b = n & 0xff;
@@ -215,8 +215,12 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     }
 
     if (!input) {
+      const currentTerminalHeight = Math.max(20, rows || terminalRows);
+      const currentChatHeight = Math.max(8, currentTerminalHeight - 6);
+      const currentMaxScrollOffset = Math.max(0, messages.length - currentChatHeight);
+
       if (key.upArrow) {
-        setScrollOffset((prev) => Math.min(prev + 1, messages.length - 1));
+        setScrollOffset((prev) => Math.min(prev + 1, currentMaxScrollOffset));
         return;
       }
       if (key.downArrow) {
@@ -224,7 +228,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
         return;
       }
       if (key.pageUp) {
-        setScrollOffset((prev) => Math.min(prev + 8, messages.length - 1));
+        setScrollOffset((prev) => Math.min(prev + 8, currentMaxScrollOffset));
         return;
       }
       if (key.pageDown) {
@@ -232,7 +236,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
         return;
       }
       if (key.home) {
-        setScrollOffset(messages.length - 1);
+        setScrollOffset(currentMaxScrollOffset);
         return;
       }
       if (key.end) {
@@ -312,20 +316,14 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
           setIsThinking(false);
           streamingMessageIndexRef.current = null;
           setStreamingMessageIndex(null);
-          addMessage({ type: 'tool-call', name: tc.name, args: redactZeroString(tc.arguments) });
+          addMessage({ type: 'tool-call', id: tc.id, name: tc.name, args: redactZeroString(tc.arguments) });
         },
         onToolResult: (result) => {
-          setMessages((prev) => {
-            const next = [...prev];
-            for (let i = next.length - 1; i >= 0; i--) {
-              const msg = next[i];
-              if (msg?.type === 'tool-call' && msg.result === undefined) {
-                next[i] = { ...msg, result: redactZeroString(result.result) };
-                break;
-              }
-            }
-            return next;
-          });
+          setMessages((prev) => prev.map((msg) => (
+            msg.type === 'tool-call' && msg.id === result.toolCallId
+              ? { ...msg, result: redactZeroString(result.result) }
+              : msg
+          )));
         },
       });
     } catch (err: any) {
@@ -735,12 +733,14 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const terminalWidth = Math.max(64, columns || process.stdout.columns || 96);
   const showLogo = messages.every((message) => message.type === 'system');
   const chatHeight = Math.max(8, terminalHeight - 6);
-  const startIndex = Math.max(0, messages.length - chatHeight - scrollOffset);
+  const maxScrollOffset = Math.max(0, messages.length - chatHeight);
+  const windowEnd = Math.max(0, messages.length - scrollOffset);
+  const windowStart = Math.max(0, windowEnd - chatHeight);
   const visibleMessages = showLogo
     ? messages
-    : messages.slice(startIndex, startIndex + chatHeight);
+    : messages.slice(windowStart, windowEnd);
   const hasOverflow = !showLogo && messages.length > chatHeight;
-  const canScrollUp = hasOverflow && scrollOffset < messages.length - 1;
+  const canScrollUp = hasOverflow && scrollOffset < maxScrollOffset;
   const canScrollDown = hasOverflow && scrollOffset > 0;
   const activeFile = deriveActiveFile(messages);
 

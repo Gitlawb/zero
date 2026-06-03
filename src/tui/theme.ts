@@ -51,9 +51,28 @@ export interface ThemeDefinition {
   colors: SemanticColors;
 }
 
+const NAMED_COLORS: Record<string, string> = {
+  black: '#000000',
+  white: '#ffffff',
+};
+
+export function normalizeHexColor(color: string): string {
+  const raw = color.trim().toLowerCase();
+  const named = NAMED_COLORS[raw] ?? raw;
+  const expanded = /^#[0-9a-f]{3}$/.test(named)
+    ? `#${named[1]}${named[1]}${named[2]}${named[2]}${named[3]}${named[3]}`
+    : named;
+
+  if (!/^#[0-9a-f]{6}$/.test(expanded)) {
+    throw new Error(`Invalid theme color: ${color}`);
+  }
+
+  return expanded;
+}
+
 function mix(a: string, b: string, t: number): string {
-  const ah = parseInt(a.slice(1), 16);
-  const bh = parseInt(b.slice(1), 16);
+  const ah = parseInt(normalizeHexColor(a).slice(1), 16);
+  const bh = parseInt(normalizeHexColor(b).slice(1), 16);
   const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
   const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
   const rr = Math.round(ar + (br - ar) * t);
@@ -86,34 +105,35 @@ interface RawColors {
 }
 
 function rawToSemantic(raw: RawColors, overrides?: Partial<SemanticColors>): SemanticColors {
+  const c = normalizeHexColor;
   const base: SemanticColors = {
     text: {
-      primary: raw.Foreground,
-      secondary: raw.Gray,
-      link: raw.AccentBlue,
-      accent: raw.AccentPurple,
-      response: raw.Foreground,
+      primary: c(raw.Foreground),
+      secondary: c(raw.Gray),
+      link: c(raw.AccentBlue),
+      accent: c(raw.AccentPurple),
+      response: c(raw.Foreground),
     },
     background: {
-      primary: raw.Background,
-      message: raw.MessageBackground ?? mix(raw.Background, raw.Gray, 0.24),
-      input: raw.InputBackground ?? mix(raw.Background, raw.Gray, 0.24),
-      focus: raw.FocusBackground ?? mix(raw.Background, raw.FocusColor ?? raw.AccentGreen, 0.2),
-      diff: { added: raw.DiffAdded, removed: raw.DiffRemoved },
+      primary: c(raw.Background),
+      message: raw.MessageBackground ? c(raw.MessageBackground) : mix(raw.Background, raw.Gray, 0.24),
+      input: raw.InputBackground ? c(raw.InputBackground) : mix(raw.Background, raw.Gray, 0.24),
+      focus: raw.FocusBackground ? c(raw.FocusBackground) : mix(raw.Background, raw.FocusColor ?? raw.AccentGreen, 0.2),
+      diff: { added: c(raw.DiffAdded), removed: c(raw.DiffRemoved) },
     },
-    border: { default: raw.DarkGray },
+    border: { default: c(raw.DarkGray) },
     ui: {
-      comment: raw.Comment,
-      symbol: raw.AccentCyan,
-      active: raw.AccentBlue,
-      dark: raw.DarkGray,
-      focus: raw.FocusColor ?? raw.AccentGreen,
-      gradient: raw.GradientColors,
+      comment: c(raw.Comment),
+      symbol: c(raw.AccentCyan),
+      active: c(raw.AccentBlue),
+      dark: c(raw.DarkGray),
+      focus: c(raw.FocusColor ?? raw.AccentGreen),
+      gradient: raw.GradientColors.map(c),
     },
     status: {
-      error: raw.AccentRed,
-      success: raw.AccentGreen,
-      warning: raw.AccentYellow,
+      error: c(raw.AccentRed),
+      success: c(raw.AccentGreen),
+      warning: c(raw.AccentYellow),
     },
     agent: {
       red: '#EA4335',
