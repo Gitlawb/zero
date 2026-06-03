@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { configManager } from '../config/manager';
+import { theme } from './theme';
 
 type AddMode = 'choose' | 'opengateway' | 'generic';
 
@@ -123,24 +124,24 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
   if (mode === 'choose') {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Add New Provider</Text>
-        <Text color="gray">Esc to go back • ↑↓ to navigate • Enter to select</Text>
+        <Text bold color={theme.ui.active}>Add New Provider</Text>
+        <Text color={theme.ui.comment}>Esc to go back • ↑↓ to navigate • Enter to select</Text>
 
         <Box marginY={1} flexDirection="column">
-          <Text color={selectedOption === 0 ? 'greenBright' : 'white'}>
+          <Text color={selectedOption === 0 ? theme.ui.active : theme.text.primary}>
             {selectedOption === 0 ? '› ' : '  '}1. Add OpenGateway (recommended)
           </Text>
           {selectedOption === 0 && (
-            <Text color="gray" dimColor>
+            <Text color={theme.ui.comment}>
               {'   '}You'll be asked for your ogw_live_... API key
             </Text>
           )}
 
-          <Text color={selectedOption === 1 ? 'greenBright' : 'white'}>
+          <Text color={selectedOption === 1 ? theme.ui.active : theme.text.primary}>
             {selectedOption === 1 ? '› ' : '  '}2. Add custom OpenAI-compatible provider
           </Text>
           {selectedOption === 1 && (
-            <Text color="gray" dimColor>
+            <Text color={theme.ui.comment}>
               {'   '}For Groq, OpenAI, Ollama, etc.
             </Text>
           )}
@@ -153,10 +154,10 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
     if (success) {
       return (
         <Box flexDirection="column" padding={1}>
-          <Text color="greenBright" bold>
+          <Text color={theme.status.success} bold>
             ✓ OpenGateway provider added successfully!
           </Text>
-          <Text color="gray" dimColor>
+          <Text color={theme.ui.comment}>
             It is now your active provider.
           </Text>
         </Box>
@@ -165,17 +166,17 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
 
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Add OpenGateway Provider</Text>
-        <Text color="gray">Esc to go back</Text>
+        <Text bold color={theme.ui.active}>Add OpenGateway Provider</Text>
+        <Text color={theme.ui.comment}>Esc to go back</Text>
 
         {ogwFormStep === 0 && (
           <Box marginTop={1} flexDirection="column">
-            <Text color="yellowBright">Step 1/2 — Enter your OpenGateway API key</Text>
-            <Text color="gray" dimColor>
+            <Text color={theme.status.warning}>Step 1/2 — Enter your OpenGateway API key</Text>
+            <Text color={theme.ui.comment}>
               You can get one at https://opengateway.gitlawb.com
             </Text>
             <Box marginTop={1}>
-              <Text>API Key: </Text>
+              <Text color={theme.text.primary}>API Key: </Text>
               <TextInput
                 value={ogwKey}
                 onChange={setOgwKey}
@@ -184,7 +185,7 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
               />
             </Box>
             <Box marginTop={1}>
-              <Text color="gray" dimColor>Press Enter to continue</Text>
+              <Text color={theme.ui.comment}>Press Enter to continue</Text>
             </Box>
             <TextInput
               value=""
@@ -203,14 +204,14 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
 
         {ogwFormStep === 1 && (
           <Box marginTop={1} flexDirection="column">
-            <Text color="yellowBright">Step 2/2 — Model name</Text>
+            <Text color={theme.status.warning}>Step 2/2 — Model name</Text>
             <Box marginTop={1}>
-              <Text>Model: </Text>
+              <Text color={theme.text.primary}>Model: </Text>
               <TextInput value={ogwModel} onChange={setOgwModel} />
             </Box>
-            {error && <Text color="red">⚠ {error}</Text>}
+            {error && <Text color={theme.status.error}>⚠ {error}</Text>}
             <Box marginTop={1}>
-              <Text color="gray" dimColor>Press Enter to save</Text>
+              <Text color={theme.ui.comment}>Press Enter to save</Text>
             </Box>
             <TextInput
               value=""
@@ -227,7 +228,7 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
     if (success) {
       return (
         <Box flexDirection="column" padding={1}>
-          <Text color="greenBright" bold>
+          <Text color={theme.status.success} bold>
             ✓ Provider added successfully!
           </Text>
         </Box>
@@ -236,30 +237,30 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
 
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color="cyan">Add Custom Provider</Text>
-        <Text color="gray">Esc to go back</Text>
+        <Text bold color={theme.ui.active}>Add Custom Provider</Text>
+        <Text color={theme.ui.comment}>Esc to go back</Text>
 
         <Box marginTop={1}>
-          <Text>Name: </Text>
+          <Text color={theme.text.primary}>Name: </Text>
           <TextInput value={name} onChange={setName} />
         </Box>
         <Box>
-          <Text>Base URL: </Text>
+          <Text color={theme.text.primary}>Base URL: </Text>
           <TextInput value={baseURL} onChange={setBaseURL} />
         </Box>
         <Box>
-          <Text>API Key: </Text>
+          <Text color={theme.text.primary}>API Key: </Text>
           <TextInput value={apiKey} onChange={setApiKey} mask="*" />
         </Box>
         <Box>
-          <Text>Model: </Text>
+          <Text color={theme.text.primary}>Model: </Text>
           <TextInput value={model} onChange={setModel} />
         </Box>
 
-        {error && <Text color="red">{error}</Text>}
+        {error && <Text color={theme.status.error}>{error}</Text>}
 
         <Box marginTop={1}>
-          <Text color="gray">Press Enter to save</Text>
+          <Text color={theme.ui.comment}>Press Enter to save</Text>
         </Box>
 
         <TextInput

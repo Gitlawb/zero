@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { highlightCode } from './highlighter';
+import { theme } from './theme';
 
 interface ToolCallRendererProps {
   name: string;
@@ -71,28 +72,28 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   }, [result, isExpanded]);
 
   const borderColor =
-    status === 'running' ? 'yellow' : status === 'error' ? 'red' : 'green';
+    status === 'running' ? theme.status.warning : status === 'error' ? theme.status.error : theme.status.success;
 
   const statusIcon =
-    status === 'running' ? '⟳' : status === 'error' ? '✕' : '✓';
+    status === 'running' ? '●' : status === 'error' ? '✕' : '✓';
 
   const statusColor =
-    status === 'running' ? 'yellow' : status === 'error' ? 'red' : 'green';
+    status === 'running' ? theme.status.warning : status === 'error' ? theme.status.error : theme.status.success;
 
-  // === COLLAPSED VIEW — clean formatter for model actions ===
   if (!isExpanded) {
     const showToggle = args || hasResult;
 
     return (
       <Box flexDirection="row" paddingX={1} paddingY={0}>
         <Text color={statusColor} bold>
-          {statusIcon} {name}
+          {statusIcon}
         </Text>
-        <Text color="gray" dimColor>  {summary}</Text>
+        <Text color={theme.ui.active} bold> {name}</Text>
+        <Text color={theme.ui.comment}>  {summary}</Text>
 
         {showToggle && (
           <Text
-            color="cyan"
+            color={theme.ui.active}
             dimColor
             {...({ onPress: () => setIsExpanded(true) } as any)}
           >
@@ -103,7 +104,6 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
     );
   }
 
-  // === EXPANDED VIEW — formatted details ===
   return (
     <Box
       flexDirection="column"
@@ -112,13 +112,12 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
       paddingX={0}
       paddingY={0}
     >
-      {/* Header */}
       <Box paddingX={1} flexDirection="row" justifyContent="space-between">
         <Text color={statusColor} bold>
           {statusIcon} {name}
         </Text>
         <Text
-          color="cyan"
+          color={theme.ui.active}
           dimColor
           {...({ onPress: () => setIsExpanded(false) } as any)}
         >
@@ -126,22 +125,20 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
         </Text>
       </Box>
 
-      {/* Arguments */}
       <Box paddingX={1} paddingTop={0} flexDirection="column">
-        <Text color="gray" dimColor bold>args</Text>
+        <Text color={theme.ui.comment} bold>args</Text>
         {highlightedArgs ? (
-          <Text>{highlightedArgs}</Text>
+          <Text color={theme.text.secondary}>{highlightedArgs}</Text>
         ) : (
-          <Text color="gray" dimColor>…</Text>
+          <Text color={theme.ui.comment}>…</Text>
         )}
       </Box>
 
-      {/* Result */}
       {hasResult && (
         <Box paddingX={1} paddingTop={0} flexDirection="column">
-          <Text color="gray" dimColor bold>result</Text>
+          <Text color={theme.ui.comment}>↳</Text>
           {highlightedResult || result ? (
-            <Text color="green" dimColor>
+            <Text color={theme.text.secondary}>
               {isLongResult && !showFullResult
                 ? (highlightedResult || result!).slice(0, 200) + '...'
                 : (highlightedResult || result)}
@@ -150,7 +147,7 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
 
           {isLongResult && (
             <Text
-              color="cyan"
+              color={theme.ui.active}
               dimColor
               {...({ onPress: () => setShowFullResult(!showFullResult) } as any)}
             >

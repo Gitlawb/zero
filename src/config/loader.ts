@@ -33,6 +33,9 @@ export const ZeroConfigSchema = z.object({
   maxTurns: z.number().int().min(1).max(100).optional(),
   planMode: z.boolean().optional(),
   debug: z.boolean().optional(),
+  theme: z.string().optional(),
+  terminalBackground: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  inputStyle: z.enum(['border', 'solid']).optional(),
 });
 
 export type ZeroConfig = z.infer<typeof ZeroConfigSchema>;
@@ -43,6 +46,9 @@ const DEFAULT_CONFIG: ZeroConfig = {
   maxTurns: 12,
   planMode: false,
   debug: false,
+  theme: 'Default',
+  terminalBackground: undefined,
+  inputStyle: 'border',
 };
 
 export interface ConfigLayer {
@@ -113,6 +119,9 @@ export function mergeLayers(...layers: ZeroConfig[]): ZeroConfig {
     if (layer.maxTurns !== undefined) result.maxTurns = layer.maxTurns;
     if (layer.planMode !== undefined) result.planMode = layer.planMode;
     if (layer.debug !== undefined) result.debug = layer.debug;
+    if (layer.theme !== undefined) result.theme = layer.theme;
+    if (layer.terminalBackground !== undefined) result.terminalBackground = layer.terminalBackground;
+    if (layer.inputStyle !== undefined) result.inputStyle = layer.inputStyle;
   }
   return result;
 }

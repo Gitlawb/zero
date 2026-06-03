@@ -1,24 +1,27 @@
 import React, { useState } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import { theme } from './theme';
 import { ProviderPicker } from './ProviderPicker';
 import { ModelPicker } from './ModelPicker';
 import { AddProvider } from './AddProvider';
+import { ThemePicker } from './ThemePicker';
 import { Logo } from './Logo';
 import { ThinkingSpinner } from './Spinner';
 import { MessageRenderer } from './MessageRenderer';
 import { ToolCallRenderer } from './ToolCallRenderer';
+import { setTheme, getAllThemes, getTheme } from './theme';
 import { configManager } from '../config/manager';
 import { loadProviderConfig } from '../config/provider';
 import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
 import { runAgent } from '../agent/loop';
-import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
 import {
   buildTuiModelStatus,
   formatModelListLines,
   resolveTuiModelSelection,
 } from './model-selection';
+import { detectFromColorFgBg } from './terminal-background';
 
-type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker';
+type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker' | 'theme-picker';
 
 // Map low-level errors back to actionable guidance for the user. The full
 // error object is still surfaced separately when debug mode is on.
@@ -52,13 +55,123 @@ type ChatMessage =
   | { type: 'tool-result'; content: string } // legacy - results now attach to tool-call
   | { type: 'system'; content: string };
 
-export const App: React.FC = () => {
+type SlashCommand = {
+  name: string;
+  description: string;
+  aliases?: string[];
+  run: (args: string[], rawCommand: string) => void;
+};
+
+function blend(a: string, b: string, t: number): string {
+  const ah = parseInt(a.slice(1), 16);
+  const bh = parseInt(b.slice(1), 16);
+  const ar = (ah >> 16) & 0xff, ag = (ah >> 8) & 0xff, ab = ah & 0xff;
+  const br = (bh >> 16) & 0xff, bg = (bh >> 8) & 0xff, bb = bh & 0xff;
+  const rr = Math.round(ar + (br - ar) * t);
+  const rg = Math.round(ag + (bg - ag) * t);
+  const rb = Math.round(ab + (bb - ab) * t);
+  return `#${((rr << 16) | (rg << 8) | rb).toString(16).padStart(6, '0')}`;
+}
+
+function isLightColor(color: string): boolean {
+  const n = parseInt(color.slice(1), 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  return (r * 299 + g * 587 + b * 114) / 1000 > 128;
+}
+
+setTheme(configManager.getTheme());
+
+interface AppProps {
+  initialTerminalBackground?: string;
+}
+
+function truncateText(text: string, maxLength: number): string {
+  if (maxLength <= 0) return '';
+  if (text.length <= maxLength) return text;
+  if (maxLength <= 3) return '';
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
+function highlightSlashCommands(text: string, commands: SlashCommand[]): React.ReactNode {
+  const commandNames = new Set(
+    commands.flatMap((command) => [command.name, ...(command.aliases ?? [])]).map((name) => name.toLowerCase())
+  );
+  const parts: React.ReactNode[] = [];
+  const regex = /\/[a-zA-Z][\w-]*/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    const value = match[0];
+    if (!commandNames.has(value.toLowerCase())) continue;
+
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+
+    parts.push(
+      <Text key={`${value}-${match.index}`} color={theme.text.accent}>
+        {value}
+      </Text>
+    );
+    lastIndex = match.index + value.length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? <>{parts}</> : text;
+}
+
+function getSystemMessageTone(content: string): 'info' | 'success' | 'warning' | 'error' {
+  const lower = content.toLowerCase();
+  if (lower.includes('error') || lower.includes('failed') || lower.includes('authentication')) return 'error';
+  if (lower.includes('no provider') || lower.includes('unknown') || lower.includes('not configured')) return 'warning';
+  if (lower.includes('set to') || lower.includes('enabled') || lower.includes('disabled') || lower.includes('switched') || lower.includes('added')) return 'success';
+  return 'info';
+}
+
+function renderSystemMessage(content: string, commands: SlashCommand[]): React.ReactNode {
+  const lines = content.split('\n');
+  const tone = getSystemMessageTone(content);
+  const toneColor = tone === 'error'
+    ? theme.status.error
+    : tone === 'warning'
+      ? theme.status.warning
+      : tone === 'success'
+        ? theme.status.success
+        : theme.text.primary;
+
+  return (
+    <Box flexDirection="column">
+      {lines.map((line, index) => (
+        <Box key={`${index}-${line}`} flexDirection="row">
+          <Text color={index === 0 ? toneColor : theme.text.primary}>
+            {highlightSlashCommands(line, commands)}
+          </Text>
+        </Box>
+      ))}
+    </Box>
+  );
+}
+
+export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? 80;
+  const colorDepth = process.env.COLORTERM === 'truecolor' || process.env.COLORTERM === '24bit'
+    ? 24
+    : (process.env.TERM ?? '').includes('256color')
+      ? 24
+      : stdout?.getColorDepth?.() ?? 24;
+  const [terminalBackground] = useState<string | undefined>(() => initialTerminalBackground ?? configManager.getTerminalBackground() ?? detectFromColorFgBg());
   const [screen, setScreen] = useState<Screen>('chat');
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { type: 'system', content: 'Welcome to zero. Type /provider to manage providers.' },
-    { type: 'system', content: 'Type /help for available commands.' },
+    { type: 'system', content: 'Welcome to zero\nUse /help for available commands.' },
   ]);
 
   // Check on startup if we have any usable provider
@@ -72,7 +185,7 @@ export const App: React.FC = () => {
             ...prev,
             { 
               type: 'system', 
-              content: '⚠️  No provider configured yet. Use /provider to add one (OpenGateway recommended).' 
+              content: 'No provider configured\nRun /provider to add one (OpenGateway recommended)'
             }
           ]);
         }
@@ -94,17 +207,180 @@ export const App: React.FC = () => {
   // Tools enabled (useful for debugging provider errors)
   const [toolsEnabled, setToolsEnabled] = useState(true);
 
-  // Command suggestions
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  // Input box style
+  const [inputStyle, setInputStyle] = useState<'border' | 'solid'>(configManager.getInputStyle());
 
-  const knownCommands = ['/provider', '/model', '/plan', '/debug-mode', '/debug', '/tools', '/help', '/exit', '/quit'];
+  // Command suggestions (dropdown style)
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const maxVisibleSuggestions = 6;
+
+  // Input history for up/down arrow recall
+  const [inputHistory, setInputHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
+  const slashCommandsRef = React.useRef<SlashCommand[]>([]);
+  const slashCommands: SlashCommand[] = [
+    {
+      name: '/provider',
+      description: 'Manage LLM providers',
+      run: () => setScreen('provider-picker'),
+    },
+    {
+      name: '/model',
+      description: 'Select or list registry models',
+      run: (args) => {
+        const modelArg = args.join(' ').trim();
+
+        if (!modelArg) {
+          setScreen('model-picker');
+          return;
+        }
+
+        if (modelArg.toLowerCase() === 'list') {
+          setMessages((prev) => [
+            ...prev,
+            { type: 'system', content: ['Available models:', ...formatModelListLines().map((line) => `  ${line}`)].join('\n') },
+          ]);
+          return;
+        }
+
+        const selectedModel = resolveTuiModelSelection(modelArg);
+        if (!selectedModel) {
+          setMessages((prev) => [
+            ...prev,
+            { type: 'system', content: `Unknown model: ${modelArg}. Type /model list or /model to browse.` },
+          ]);
+          return;
+        }
+
+        setSelectedModelOverride(selectedModel.id);
+        setMessages((prev) => [
+          ...prev,
+          { type: 'system', content: `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})` },
+        ]);
+      },
+    },
+    {
+      name: '/theme',
+      description: 'Change the UI color theme',
+      run: (args) => {
+        const themeName = args.join(' ').trim();
+        if (themeName) {
+          const found = getAllThemes().find(t => t.name.toLowerCase() === themeName.toLowerCase());
+          if (found) {
+            setTheme(found.name);
+            configManager.setTheme(found.name);
+            setMessages((prev) => [...prev, { type: 'system', content: `Theme set to: ${found.name}` }]);
+          } else {
+            const names = getAllThemes().map(t => t.name).join(', ');
+            setMessages((prev) => [...prev, { type: 'system', content: `Unknown theme. Available: ${names}` }]);
+          }
+        } else {
+          setScreen('theme-picker');
+        }
+      },
+    },
+    {
+      name: '/input-style',
+      description: 'Toggle input border style',
+      run: (args) => {
+        const arg = args[0]?.toLowerCase();
+        const next = arg === 'border' ? 'border' : arg === 'solid' ? 'solid' : inputStyle === 'border' ? 'solid' : 'border';
+        setInputStyle(next);
+        configManager.setInputStyle(next);
+        setMessages((prev) => [...prev, { type: 'system', content: `Input style set to: ${next}` }]);
+      },
+    },
+    {
+      name: '/plan',
+      description: 'Toggle Plan Mode',
+      run: () => {
+        setIsPlanMode(prev => {
+          const next = !prev;
+          setMessages((msgs) => [
+            ...msgs,
+            {
+              type: 'system',
+              content: next
+                ? 'Plan mode enabled. The agent will focus on planning before making changes.'
+                : 'Plan mode disabled.',
+            },
+          ]);
+          return next;
+        });
+      },
+    },
+    {
+      name: '/debug-mode',
+      description: 'Toggle debug mode',
+      aliases: ['/debug'],
+      run: (args) => {
+        const arg = args[0]?.toLowerCase();
+        let nextDebug: boolean;
+
+        if (arg === 'true') nextDebug = true;
+        else if (arg === 'false') nextDebug = false;
+        else nextDebug = !debugMode;
+
+        setDebugMode(nextDebug);
+        if (!nextDebug) setLastError(null);
+        setMessages((prev) => [
+          ...prev,
+          { type: 'system', content: `Debug mode ${nextDebug ? 'enabled' : 'disabled'}.` },
+        ]);
+      },
+    },
+    {
+      name: '/tools',
+      description: 'Toggle tool calling',
+      run: (args) => {
+        const arg = args[0]?.toLowerCase();
+        let nextEnabled: boolean;
+
+        if (arg === 'on' || arg === 'true') nextEnabled = true;
+        else if (arg === 'off' || arg === 'false') nextEnabled = false;
+        else nextEnabled = !toolsEnabled;
+
+        setToolsEnabled(nextEnabled);
+        setMessages((prev) => [
+          ...prev,
+          { type: 'system', content: `Tool calling ${nextEnabled ? 'enabled' : 'disabled'}.` },
+        ]);
+      },
+    },
+    {
+      name: '/help',
+      description: 'Show available commands',
+      run: () => {
+        const commands = slashCommandsRef.current;
+        const nameWidth = commands.reduce((max, command) => Math.max(max, command.name.length), 0);
+        const helpLines = [
+          'Available commands:',
+          ...commands.map((command) => `  ${command.name.padEnd(nameWidth)} - ${command.description}`),
+        ];
+        setMessages((prev) => [
+          ...prev,
+          { type: 'system', content: helpLines.join('\n') },
+        ]);
+      },
+    },
+    {
+      name: '/exit',
+      description: 'Quit zero',
+      aliases: ['/quit'],
+      run: () => exit(),
+    },
+  ];
+  slashCommandsRef.current = slashCommands;
 
   // Update suggestions when input changes
   React.useEffect(() => {
     if (input.startsWith('/')) {
       const query = input.toLowerCase();
-      const matches = knownCommands.filter(cmd => cmd.startsWith(query));
-      setSuggestions(matches.slice(0, 6)); // limit suggestions
+      const matches = slashCommands.map(command => command.name).filter(cmd => cmd.startsWith(query));
+      setSuggestions(matches);
+      setSuggestionIndex(0);
     } else {
       setSuggestions([]);
     }
@@ -114,24 +390,28 @@ export const App: React.FC = () => {
   const [scrollOffset, setScrollOffset] = useState(0);
   const [terminalRows, setTerminalRows] = useState(24); // default fallback
 
-  // Current provider info for the input bar (Grok Build style)
-  const activeProfile = configManager.getActiveProvider();
-  const modelStatus = buildTuiModelStatus(
-    activeProfile
-      ? {
-          model: activeProfile.model,
-          provider: activeProfile.provider,
-          profileName: activeProfile.name,
-          source: 'profile',
-        }
-      : {
-          model: process.env.OPENAI_MODEL || ZERO_DEFAULT_MODEL_ID,
-          source: process.env.ZERO_PROVIDER_COMMAND ? 'provider-command' : 'environment',
-        },
-    selectedModelOverride
+  // Current provider info for the footer. Do not fall back to the default model
+  // unless an actual provider source exists.
+  const effectiveProviderConfig = configManager.getEffectiveProviderConfig();
+  const modelStatus = effectiveProviderConfig
+    ? buildTuiModelStatus(effectiveProviderConfig, selectedModelOverride)
+    : undefined;
+  const currentModel = modelStatus
+    ? `${modelStatus.label}${modelStatus.sourceLabel === 'session' ? ' *' : ''}`
+    : 'No provider configured';
+  const themeType = getTheme().type;
+  const useTerminalBackground = Boolean(
+    terminalBackground && (themeType === 'light' ? isLightColor(terminalBackground) : !isLightColor(terminalBackground))
   );
-  const currentProviderName = activeProfile?.name || modelStatus.providerLabel;
-  const currentModel = `${modelStatus.label}${modelStatus.sourceLabel === 'session' ? ' *' : ''}`;
+  const adaptedInputBackground = useTerminalBackground && terminalBackground
+    ? blend(terminalBackground, theme.text.secondary, 0.24)
+    : theme.background.input;
+  const adaptedMessageBackground = useTerminalBackground && terminalBackground
+    ? blend(terminalBackground, theme.text.secondary, 0.16)
+    : theme.background.message;
+  const solidInputBackground = colorDepth < 24
+    ? (useTerminalBackground && terminalBackground ? terminalBackground : theme.background.primary)
+    : adaptedInputBackground;
 
   // Track terminal size for proper scrolling
   React.useEffect(() => {
@@ -165,42 +445,75 @@ export const App: React.FC = () => {
     // Don't process chat input while in provider picker or add flow
     if (!isInChat) return;
 
-    // Scrolling controls (when input is empty)
-    if (!input) {
-      if (key.upArrow) {
-        setScrollOffset((prev) => Math.min(prev + 1, messages.length - 1));
-        return;
+    if (key.upArrow && suggestions.length > 0) {
+      setSuggestionIndex((prev) => prev <= 0 ? suggestions.length - 1 : prev - 1);
+      return;
+    }
+    if (key.downArrow && suggestions.length > 0) {
+      setSuggestionIndex((prev) => prev >= suggestions.length - 1 ? 0 : prev + 1);
+      return;
+    }
+    if (key.upArrow && inputHistory.length > 0) {
+      if (historyIndex === -1) {
+        setHistoryIndex(inputHistory.length - 1);
+        setInput(inputHistory[inputHistory.length - 1] ?? '');
+      } else if (historyIndex > 0) {
+        const newIdx = historyIndex - 1;
+        setHistoryIndex(newIdx);
+        setInput(inputHistory[newIdx] ?? '');
       }
-      if (key.downArrow) {
-        setScrollOffset((prev) => Math.max(prev - 1, 0));
-        return;
+      return;
+    }
+    if (key.downArrow && historyIndex !== -1) {
+      if (historyIndex < inputHistory.length - 1) {
+        const newIdx = historyIndex + 1;
+        setHistoryIndex(newIdx);
+        setInput(inputHistory[newIdx] ?? '');
+      } else {
+        setHistoryIndex(-1);
+        setInput('');
       }
-      if (key.pageUp) {
-        setScrollOffset((prev) => Math.min(prev + 8, messages.length - 1));
-        return;
-      }
-      if (key.pageDown) {
-        setScrollOffset((prev) => Math.max(prev - 8, 0));
-        return;
-      }
-      if (key.home) {
-        setScrollOffset(messages.length - 1);
-        return;
-      }
-      if (key.end) {
-        setScrollOffset(0);
-        return;
-      }
+      return;
+    }
+    if (key.pageUp) {
+      setScrollOffset((prev) => Math.min(prev + 8, messages.length - 1));
+      return;
+    }
+    if (key.pageDown) {
+      setScrollOffset((prev) => Math.max(prev - 8, 0));
+      return;
+    }
+    if (key.home) {
+      setScrollOffset(messages.length - 1);
+      return;
+    }
+    if (key.end) {
+      setScrollOffset(0);
+      return;
     }
 
     if (key.return) {
-      handleSubmit();
+      if (suggestions.length > 0) {
+        const selected = (suggestions[suggestionIndex] + ' ').trim();
+        setSuggestions([]);
+        setInputHistory((prev) => prev[prev.length - 1] !== selected ? [...prev, selected] : prev);
+        setHistoryIndex(-1);
+        if (selected.startsWith('/')) {
+          setInput('');
+          setMessages((prev) => [...prev, { type: 'user', content: selected }]);
+          handleSlashCommand(selected);
+        } else {
+          setInput(selected);
+        }
+      } else {
+        handleSubmit();
+      }
       return;
     }
 
     // Autocomplete first suggestion with Tab when typing a command
     if (key.tab && suggestions.length > 0) {
-      setInput(suggestions[0] + ' ');
+      setInput(suggestions[suggestionIndex] + ' ');
       setSuggestions([]);
       return;
     }
@@ -221,6 +534,10 @@ export const App: React.FC = () => {
     const trimmed = input.trim();
     setInput('');
     setSuggestions([]);
+
+    // Save to input history (avoid duplicate consecutive entries)
+    setInputHistory((prev) => prev[prev.length - 1] !== trimmed ? [...prev, trimmed] : prev);
+    setHistoryIndex(-1);
 
     // Handle slash commands
     if (trimmed.startsWith('/')) {
@@ -346,114 +663,12 @@ export const App: React.FC = () => {
   const handleSlashCommand = (command: string) => {
     const parts = command.trim().split(/\s+/);
     const cmd = parts[0]?.toLowerCase() ?? '';
-    const arg = parts[1]?.toLowerCase();
+    const slashCommand = slashCommandsRef.current.find(
+      (candidate) => candidate.name === cmd || candidate.aliases?.includes(cmd)
+    );
 
-    if (cmd === '/provider') {
-      setScreen('provider-picker');
-      return;
-    }
-
-    if (cmd === '/model') {
-      const modelArg = parts.slice(1).join(' ').trim();
-
-      if (!modelArg) {
-        setScreen('model-picker');
-        return;
-      }
-
-      if (modelArg.toLowerCase() === 'list') {
-        setMessages((prev) => [
-          ...prev,
-          { type: 'system', content: 'Available models:' },
-          ...formatModelListLines().map((line) => ({ type: 'system' as const, content: `  ${line}` })),
-        ]);
-        return;
-      }
-
-      const selectedModel = resolveTuiModelSelection(modelArg);
-      if (!selectedModel) {
-        setMessages((prev) => [
-          ...prev,
-          { type: 'system', content: `Unknown model: ${modelArg}. Type /model list or /model to browse.` },
-        ]);
-        return;
-      }
-
-      setSelectedModelOverride(selectedModel.id);
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})` },
-      ]);
-      return;
-    }
-
-    if (cmd === '/plan') {
-      setIsPlanMode(prev => {
-        const next = !prev;
-        setMessages((msgs) => [
-          ...msgs,
-          { 
-            type: 'system', 
-            content: next 
-              ? 'Plan mode enabled. The agent will focus on planning before making changes.' 
-              : 'Plan mode disabled.' 
-          },
-        ]);
-        return next;
-      });
-      return;
-    }
-
-    if (cmd === '/debug-mode' || cmd === '/debug') {
-      // Support "/debug-mode true", "/debug false", or just toggle
-      let nextDebug: boolean;
-
-      if (arg === 'true') nextDebug = true;
-      else if (arg === 'false') nextDebug = false;
-      else nextDebug = !debugMode;
-
-      setDebugMode(nextDebug);
-      if (!nextDebug) setLastError(null);
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: `Debug mode ${nextDebug ? 'enabled' : 'disabled'}.` },
-      ]);
-      return;
-    }
-
-    if (cmd === '/tools') {
-      const arg2 = parts[1]?.toLowerCase();
-      let nextEnabled: boolean;
-
-      if (arg2 === 'on' || arg2 === 'true') nextEnabled = true;
-      else if (arg2 === 'off' || arg2 === 'false') nextEnabled = false;
-      else nextEnabled = !toolsEnabled;
-
-      setToolsEnabled(nextEnabled);
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: `Tool calling ${nextEnabled ? 'enabled' : 'disabled'}.` },
-      ]);
-      return;
-    }
-
-    if (cmd === '/help') {
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: 'Available commands:' },
-        { type: 'system', content: '  /provider     - Manage LLM providers (fix provider errors here)' },
-        { type: 'system', content: '  /model        - Select or list registry models for this session' },
-        { type: 'system', content: '  /plan         - Toggle Plan Mode (agent plans first, makes no edits)' },
-        { type: 'system', content: '  /debug-mode   - Toggle debug mode (prints full errors to console)' },
-        { type: 'system', content: '  /tools        - Toggle tool calling (useful for debugging provider errors)' },
-        { type: 'system', content: '  /help         - Show this help' },
-        { type: 'system', content: '  /exit         - Quit' },
-      ]);
-      return;
-    }
-
-    if (cmd === '/exit' || cmd === '/quit') {
-      exit();
+    if (slashCommand) {
+      slashCommand.run(parts.slice(1), command);
       return;
     }
 
@@ -489,6 +704,17 @@ export const App: React.FC = () => {
   };
 
   const handleModelPickerCancel = () => {
+    setScreen('chat');
+  };
+
+  const handleThemeSelected = (name: string) => {
+    setTheme(name);
+    configManager.setTheme(name);
+    setMessages((prev) => [...prev, { type: 'system', content: `Theme set to: ${name}` }]);
+    setScreen('chat');
+  };
+
+  const handleThemePickerCancel = () => {
     setScreen('chat');
   };
 
@@ -545,21 +771,40 @@ export const App: React.FC = () => {
   if (screen === 'model-picker') {
     return (
       <ModelPicker
-        activeModelId={modelStatus.knownModel?.id || modelStatus.modelId}
+        activeModelId={modelStatus?.knownModel?.id || modelStatus?.modelId || selectedModelOverride}
         onSelect={handleModelSelected}
         onCancel={handleModelPickerCancel}
       />
     );
   }
 
-  const showLogo = messages.length <= 2;
+  if (screen === 'theme-picker') {
+    return (
+      <ThemePicker
+        onSelect={handleThemeSelected}
+        onCancel={handleThemePickerCancel}
+      />
+    );
+  }
 
-  // Calculate visible messages for scrolling (Grok Build style)
-  const chatHeight = Math.max(8, terminalRows - 6); // leave room for input + status
-  const visibleMessages = messages.slice(scrollOffset, scrollOffset + chatHeight);
+  // Calculate visible messages for scrolling
+  // scrollOffset: 0 = at bottom (newest), positive = scrolled up into history
+  const chatHeight = Math.max(8, terminalRows - 6);
+  const startIdx = Math.max(0, messages.length - chatHeight - scrollOffset);
+  const visibleMessages = messages.slice(startIdx, startIdx + chatHeight);
 
-  const canScrollUp = scrollOffset < messages.length - 1;
-  const canScrollDown = scrollOffset > 0;
+  const hasOverflow = messages.length > chatHeight;
+  const canScrollUp = hasOverflow && scrollOffset < messages.length - 1;
+  const canScrollDown = hasOverflow && scrollOffset > 0;
+  const suggestionWindowStart = suggestions.length > maxVisibleSuggestions
+    ? Math.max(0, Math.min(suggestionIndex - 3, suggestions.length - maxVisibleSuggestions))
+    : 0;
+  const visibleSuggestions = suggestions.slice(suggestionWindowStart, suggestionWindowStart + maxVisibleSuggestions);
+  const suggestionNameWidth = suggestions.reduce((max, cmd) => {
+    const display = cmd.startsWith('/') ? cmd.slice(1) : cmd;
+    return Math.max(max, display.length);
+  }, 0);
+  const suggestionDescriptionWidth = Math.max(0, columns - suggestionNameWidth - 8);
 
   return (
     <Box flexDirection="column" height="100%">
@@ -576,25 +821,32 @@ export const App: React.FC = () => {
           paddingX={1} 
           paddingTop={1}
         >
-        {showLogo && <Logo />}
+        <Logo />
 
-        {/* Scroll indicator */}
         {(canScrollUp || canScrollDown) && (
-          <Text color="gray" dimColor>
-            {canScrollUp ? '↑ ' : '  '}Scroll with ↑↓ / PgUp/PgDn / Home/End {canScrollDown ? '↓' : ''}
+          <Text color={theme.ui.comment}>
+            {canScrollUp ? '↑ ' : '  '}Scroll PgUp/PgDn / Home/End {canScrollDown ? '↓' : ''}
           </Text>
         )}
 
         <Box flexDirection="column">
           {visibleMessages.map((msg, index) => {
-            const realIndex = scrollOffset + index;
+            const realIndex = startIdx + index;
 
             if (msg.type === 'user') {
+              const messageWidth = Math.max(1, columns - 2);
               return (
-                <Box key={realIndex} marginBottom={1}>
-                  <Text color="blueBright">
-                    {`> ${msg.content}`}
-                  </Text>
+                <Box key={realIndex} flexDirection="column" width="100%" marginBottom={1}>
+                  <Box width="100%" height={1}>
+                    <Text color={adaptedMessageBackground}>{'▄'.repeat(messageWidth)}</Text>
+                  </Box>
+                  <Box paddingX={1} backgroundColor={adaptedMessageBackground} flexDirection="row" width="100%">
+                    <Text color={theme.text.accent} backgroundColor={adaptedMessageBackground}>{'> '}</Text>
+                    <Text color={theme.text.accent} backgroundColor={adaptedMessageBackground}>{msg.content}</Text>
+                  </Box>
+                  <Box width="100%" height={1}>
+                    <Text color={adaptedMessageBackground}>{'▀'.repeat(messageWidth)}</Text>
+                  </Box>
                 </Box>
               );
             }
@@ -603,11 +855,11 @@ export const App: React.FC = () => {
               const isStreaming = realIndex === streamingMessageIndex;
               return (
                 <Box key={realIndex} marginBottom={1} flexDirection="row">
-                  <Text color="cyan" dimColor>● </Text>
+                  <Text color={theme.ui.active} bold>{'⛬ '}</Text>
                   <Box flexDirection="column" flexGrow={1}>
                     <MessageRenderer content={msg.content} />
                     {isStreaming && (
-                      <Text color="cyan" dimColor>▌</Text>
+                      <Text color={theme.ui.active} bold>▌</Text>
                     )}
                   </Box>
                 </Box>
@@ -633,12 +885,9 @@ export const App: React.FC = () => {
               return null;
             }
 
-            // system messages
             return (
               <Box key={realIndex} marginBottom={1}>
-                <Text color="gray" dimColor>
-                  {msg.content}
-                </Text>
+                {renderSystemMessage(msg.content, slashCommands)}
               </Box>
             );
           })}
@@ -648,85 +897,114 @@ export const App: React.FC = () => {
         </Box>
       </Box>
 
-      {/* Scroll position (Grok Build style) */}
-      {(canScrollUp || canScrollDown) && (
+      {canScrollUp && (
         <Box paddingX={1} justifyContent="flex-end">
-          <Text color="gray" dimColor>
-            {scrollOffset + 1}/{messages.length}{canScrollUp ? ' ↑' : ''}{canScrollDown ? ' ↓' : ''}
+          <Text color={theme.ui.comment}>
+            ↑{scrollOffset}{canScrollDown ? ' ↓' : ''}
           </Text>
         </Box>
       )}
 
-      {/* Command suggestions */}
-      {suggestions.length > 0 && (
-        <Box paddingX={2} paddingBottom={0}>
-          <Text color="gray" dimColor>
-            Suggestions: {suggestions.map((s, i) => (
-              <Text key={i} color={i === 0 ? 'cyan' : 'gray'}>{s}{i < suggestions.length - 1 ? '  ' : ''}</Text>
-            ))} (Tab to autocomplete)
-          </Text>
-        </Box>
-      )}
-
-      {/* Debug error box */}
       {debugMode && lastError && (
         <Box 
           borderStyle="single" 
-          borderColor="red" 
+          borderColor={theme.status.error}
           paddingX={1} 
-          paddingY={0} 
+        paddingY={1}
           marginBottom={1}
         >
-          <Text color="red" bold>⚠ Debug Error</Text>
-          <Text color="gray" dimColor>
+          <Text color={theme.status.error} bold>⚠ Debug Error</Text>
+          <Text color={theme.ui.comment}>
             {lastError.message || String(lastError)}
           </Text>
           {lastError.stack && (
-            <Text color="gray" dimColor>
+          <Text color={theme.ui.comment}>
               {lastError.stack.split('\n').slice(0, 8).join('\n')}
             </Text>
           )}
-          <Text color="cyan" dimColor>
+          <Text color={theme.text.secondary}>
             (Full details in terminal • /debug-mode false to hide)
           </Text>
         </Box>
       )}
 
+      {/* Solid mode top separator */}
+      {inputStyle === 'solid' && (
+        <Box width="100%" height={1}>
+          <Text color={solidInputBackground}>{'▄'.repeat(columns)}</Text>
+        </Box>
+      )}
+
       {/* Input box at the bottom */}
       <Box
-        borderStyle="single"
-        borderColor={isPlanMode ? 'green' : 'gray'}
+        borderStyle={inputStyle === 'border' ? 'round' : undefined}
+        borderColor={isPlanMode ? theme.status.success : theme.ui.active}
+        backgroundColor={inputStyle === 'solid' ? solidInputBackground : undefined}
         paddingX={1}
         paddingY={0}
         flexDirection="row"
-        justifyContent="space-between"
         alignItems="center"
       >
         {/* Left: prompt + input */}
         <Box flexDirection="row">
-          <Text color={isPlanMode ? 'green' : 'greenBright'}>› </Text>
-          <Text color="white">{input}</Text>
-          <Text color="gray">█</Text>
-        </Box>
-
-        {/* Right: Current provider + model */}
-        <Box flexDirection="row">
-          <Text color="cyan" bold>{currentProviderName}</Text>
-          <Text color="gray"> • </Text>
-          <Text color="magenta" dimColor>{currentModel}</Text>
+          <Text color={isPlanMode ? theme.status.success : theme.text.accent}>{'> '}</Text>
+          {input ? (
+            <>
+              <Text color={theme.text.primary}>{input}</Text>
+              <Text color={theme.text.secondary}>█</Text>
+            </>
+          ) : (
+            <>
+              <Text color={theme.text.secondary}>█ </Text>
+              <Text color={theme.text.secondary} wrap="truncate">Type your message or @path/to/file</Text>
+            </>
+          )}
         </Box>
       </Box>
 
-      {/* Very subtle status line */}
-      <Box paddingX={1} flexDirection="row">
-        <Text color="gray" dimColor>
-          /help • ↑↓ scroll • Ctrl+C exit
-        </Text>
-        {isPlanMode && (
-          <Text color="green"> • PLAN MODE</Text>
-        )}
-      </Box>
+      {/* Solid mode bottom separator */}
+      {inputStyle === 'solid' && (
+        <Box width="100%" height={1}>
+          <Text color={solidInputBackground}>{'▀'.repeat(columns)}</Text>
+        </Box>
+      )}
+
+      {suggestions.length > 0 && (
+        <Box flexDirection="column" paddingLeft={3}>
+          {visibleSuggestions.map((s, i) => {
+            const realIndex = suggestionWindowStart + i;
+            const isFocused = realIndex === suggestionIndex;
+            const rowColor = isFocused ? theme.text.primary : theme.text.secondary;
+            const display = s.startsWith('/') ? s.slice(1) : s;
+            const commandMeta = slashCommands.find((command) => command.name === s);
+            const description = truncateText(commandMeta?.description ?? '', suggestionDescriptionWidth);
+            const descriptionPadding = ' '.repeat(Math.max(1, suggestionNameWidth - display.length + 2));
+            return (
+              <Box key={s} flexDirection="row">
+                <Text color={rowColor} bold={isFocused}>
+                  {display}
+                </Text>
+                {description ? (
+                  <Text color={rowColor} bold={isFocused}>
+                    {descriptionPadding}{description}
+                  </Text>
+                ) : null}
+              </Box>
+            );
+          })}
+        </Box>
+      )}
+
+      {suggestions.length === 0 && (
+        <Box paddingX={1} flexDirection="row">
+          <Text color={modelStatus ? theme.text.secondary : theme.status.warning}>
+            {modelStatus ? `${currentModel} Model` : currentModel}
+          </Text>
+          {isPlanMode && (
+            <Text color={theme.status.success}> · PLAN MODE</Text>
+          )}
+        </Box>
+      )}
     </Box>
   );
 };
-

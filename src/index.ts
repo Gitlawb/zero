@@ -22,7 +22,7 @@ program
     if (options.prompt) {
       process.exitCode = await runExec({ prompt: options.prompt, outputFormat: 'text' });
     } else {
-      startTUI();
+      await startTUI();
     }
   });
 

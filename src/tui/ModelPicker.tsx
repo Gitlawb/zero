@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { ZeroModelDefinition } from '../zero-model-registry';
 import { getSelectableZeroModels } from './model-selection';
+import { theme } from './theme';
 
 interface ModelPickerProps {
   activeModelId?: string;
@@ -51,10 +52,10 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Text bold color="cyan">
+      <Text bold color={theme.ui.active}>
         Select Model
       </Text>
-      <Text color="gray" dimColor>
+      <Text color={theme.ui.comment}>
         Up/Down to navigate - Enter to select - Esc to cancel
       </Text>
 
@@ -71,26 +72,26 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
       </Box>
 
       {selectedModel && (
-        <Box flexDirection="column" marginLeft={2} borderStyle="round" paddingX={1}>
-          <Text>
-            <Text bold>ID:</Text> {selectedModel.id}
+        <Box flexDirection="column" marginLeft={2} borderStyle="round" paddingX={1} borderColor={theme.border.default}>
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>ID:</Text> {selectedModel.id}
           </Text>
-          <Text>
-            <Text bold>Provider:</Text> {selectedModel.provider}
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Provider:</Text> {selectedModel.provider}
           </Text>
-          <Text>
-            <Text bold>Context:</Text> {formatTokens(selectedModel.context.contextWindow)} input / {formatTokens(selectedModel.context.maxOutputTokens)} output
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Context:</Text> {formatTokens(selectedModel.context.contextWindow)} input / {formatTokens(selectedModel.context.maxOutputTokens)} output
           </Text>
-          <Text>
-            <Text bold>Capabilities:</Text> {selectedModel.capabilities.join(', ')}
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Capabilities:</Text> {selectedModel.capabilities.join(', ')}
           </Text>
           {selectedModel.reasoningEfforts && (
-            <Text>
-              <Text bold>Effort:</Text> {selectedModel.reasoningEfforts.join(', ')}
+            <Text color={theme.text.primary}>
+              <Text bold color={theme.text.secondary}>Effort:</Text> {selectedModel.reasoningEfforts.join(', ')}
             </Text>
           )}
           {selectedModel.description && (
-            <Text color="gray" dimColor>
+            <Text color={theme.text.secondary}>
               {selectedModel.description}
             </Text>
           )}
@@ -98,7 +99,7 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
       )}
 
       <Box marginTop={1}>
-        <Text color="gray" dimColor>
+        <Text color={theme.ui.comment}>
           Press 1-{models.length} for quick selection. This changes the current TUI session only.
         </Text>
       </Box>
@@ -119,11 +120,11 @@ function ModelRow({
 }) {
   return (
     <Box paddingLeft={1}>
-      <Text color={isSelected ? 'green' : 'white'}>
-        {isSelected ? '> ' : '  '}
+      <Text color={isSelected ? theme.ui.active : theme.text.primary}>
+        {isSelected ? '› ' : '  '}
         {index + 1}. {model.displayName}
-        <Text color="gray"> ({model.provider})</Text>
-        {isActive && <Text color="blue"> current</Text>}
+        <Text color={theme.ui.comment}> ({model.provider})</Text>
+        {isActive && <Text color={theme.text.accent}> current</Text>}
       </Text>
     </Box>
   );

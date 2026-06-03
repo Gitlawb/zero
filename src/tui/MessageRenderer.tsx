@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { highlightCode } from './highlighter';
+import { theme } from './theme';
 
 // Formatter for model responses: paragraphs, inline code, and highlighted code blocks
 interface MessageRendererProps {
@@ -66,18 +67,18 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({ content }) => 
         key={`code-${i}`}
         flexDirection="column"
         borderStyle="single"
-        borderColor="gray"
+        borderColor={theme.border.default}
         marginTop={1}
         marginBottom={1}
         paddingX={1}
       >
         {m?.lang && m.lang !== 'text' && (
-        <Text color="cyan" dimColor>{m.lang}</Text>
+        <Text color={theme.ui.active} dimColor>{m.lang}</Text>
         )}
         {highlighted ? (
-          <Text>{highlighted}</Text>
+          <Text color={theme.text.secondary}>{highlighted}</Text>
         ) : (
-          <Text color="gray" dimColor>Highlighting...</Text>
+          <Text color={theme.ui.comment}>…</Text>
         )}
       </Box>
     );
@@ -177,11 +178,10 @@ function formatInline(text: string): React.ReactNode {
 
   // Simple sequential parser for **bold** and `code`
   while (remaining.length > 0) {
-    // Try bold first
     const boldMatch = remaining.match(/^\*\*([^*]+)\*\*/);
     if (boldMatch) {
       elements.push(
-        <Text key={`bold-${idx++}`} bold color="white">
+        <Text key={`bold-${idx++}`} bold color={theme.text.primary}>
           {boldMatch[1]}
         </Text>
       );
@@ -189,11 +189,10 @@ function formatInline(text: string): React.ReactNode {
       continue;
     }
 
-    // Try inline code
     const codeMatch = remaining.match(/^`([^`]+)`/);
     if (codeMatch) {
       elements.push(
-        <Text key={`code-${idx++}`} color="cyan" backgroundColor="#2d2d2d">
+        <Text key={`code-${idx++}`} color={theme.ui.comment}>
           {codeMatch[1]}
         </Text>
       );

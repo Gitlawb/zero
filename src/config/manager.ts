@@ -109,6 +109,34 @@ export class ConfigManager {
     return this.config.providers.length < before;
   }
 
+  getInputStyle(): 'border' | 'solid' {
+    return this.config.inputStyle ?? 'border';
+  }
+
+  setInputStyle(style: 'border' | 'solid'): void {
+    this.config.inputStyle = style;
+    writeConfig(this.config);
+  }
+
+  getTheme(): string {
+    return this.config.theme ?? 'Default';
+  }
+
+  setTheme(theme: string): void {
+    this.config.theme = theme;
+    writeConfig(this.config);
+  }
+
+  getTerminalBackground(): string | undefined {
+    return this.config.terminalBackground;
+  }
+
+  setTerminalBackground(background: string | undefined): void {
+    if (background) this.config.terminalBackground = background;
+    else delete this.config.terminalBackground;
+    writeConfig(this.config);
+  }
+
   // Used by the agent loop
   getEffectiveProviderConfig(env: NodeJS.ProcessEnv = process.env): {
     provider?: EffectiveProviderConfig['provider'];

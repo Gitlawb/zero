@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { configManager } from '../config/manager';
 import type { ProviderProfile } from '../config/types';
+import { theme } from './theme';
 
 interface ProviderPickerProps {
   onSelect: (name: string) => void;
@@ -57,10 +58,10 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCanc
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Text bold color="cyan">
+      <Text bold color={theme.ui.active}>
         Select Provider
       </Text>
-      <Text color="gray" dimColor>
+      <Text color={theme.ui.comment}>
         ↑↓ to navigate • Enter to select • Esc to cancel
       </Text>
 
@@ -71,18 +72,17 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCanc
 
           return (
             <Box key={provider.name} paddingLeft={1}>
-              <Text color={isSelected ? 'green' : 'white'}>
+              <Text color={isSelected ? theme.ui.active : theme.text.primary}>
                 {isSelected ? '› ' : '  '}
                 {provider.name}
-                {isActive && <Text color="blue"> (current)</Text>}
+                {isActive && <Text color={theme.text.accent}> (current)</Text>}
               </Text>
             </Box>
           );
         })}
 
-        {/* Add new option */}
         <Box paddingLeft={1}>
-          <Text color={selectedIndex === providers.length ? 'green' : 'cyan'}>
+          <Text color={selectedIndex === providers.length ? theme.ui.active : theme.ui.active}>
             {selectedIndex === providers.length ? '› ' : '  '}
             + Add new provider...
           </Text>
@@ -90,23 +90,23 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCanc
       </Box>
 
       {providers[selectedIndex] && (
-        <Box flexDirection="column" marginLeft={2} borderStyle="round" paddingX={1}>
-          <Text>
-            <Text bold>Model:</Text> {providers[selectedIndex].model}
+        <Box flexDirection="column" marginLeft={2} borderStyle="round" paddingX={1} borderColor={theme.border.default}>
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Model:</Text> {providers[selectedIndex].model}
           </Text>
-          <Text>
-            <Text bold>Base URL:</Text> {providers[selectedIndex].baseURL}
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Base URL:</Text> {providers[selectedIndex].baseURL}
           </Text>
           {providers[selectedIndex].description && (
-            <Text>
-              <Text bold>Description:</Text> {providers[selectedIndex].description}
+            <Text color={theme.text.secondary}>
+              <Text bold>{' '}</Text>{providers[selectedIndex].description}
             </Text>
           )}
         </Box>
       )}
 
       <Box marginTop={1}>
-        <Text color="gray" dimColor>
+        <Text color={theme.ui.comment}>
           Press 1-{totalItems} for quick selection
         </Text>
       </Box>
