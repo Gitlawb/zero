@@ -9,12 +9,22 @@ import {
 } from '../src/cli';
 import { ZERO_STREAM_JSON_SCHEMA_VERSION } from '../src/zero-stream-json';
 
-async function runZero(args: string[], envOverrides: NodeJS.ProcessEnv = {}) {
+async function runZero(
+  args: string[],
+  envOverrides: NodeJS.ProcessEnv = {},
+  stdin?: string
+) {
   const child = Bun.spawn([process.execPath, 'src/index.ts', ...args], {
     env: { ...process.env, ...envOverrides },
     stderr: 'pipe',
+    stdin: stdin === undefined ? undefined : 'pipe',
     stdout: 'pipe',
   });
+
+  if (stdin !== undefined) {
+    child.stdin.write(stdin);
+    child.stdin.end();
+  }
 
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
@@ -130,6 +140,42 @@ describe('zero exec CLI surface', () => {
         status: 'error',
         exitCode: ZERO_EXEC_EXIT_CODES.provider,
       });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads stream-json prompt events from piped stdin before provider setup', async () => {
+    const dir = await mkdtemp(join(process.cwd(), '.zero-provider-test-'));
+    try {
+      const providerScript = join(dir, 'provider-command.js');
+      await writeFile(
+        providerScript,
+        'console.log(JSON.stringify({ model: "zero-test-unknown-model" }));\n',
+        'utf-8'
+      );
+
+      const result = await runZero(
+        ['exec', '--input-format', 'stream-json', '--output-format', 'stream-json'],
+        {
+          ZERO_PROVIDER_COMMAND: `${JSON.stringify(process.execPath)} ${JSON.stringify(providerScript)}`,
+        },
+        `${JSON.stringify({
+          schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+          type: 'prompt',
+          content: 'Read this from piped stdin.',
+        })}\n`
+      );
+
+      const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+      expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.provider);
+      expect(result.stderr.trim()).toBe('');
+      expect(events[0]).toMatchObject({
+        schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+        type: 'error',
+        code: 'provider_error',
+      });
+      expect(events[0].message).not.toContain('Stream-json input required');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

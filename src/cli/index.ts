@@ -363,7 +363,7 @@ async function readStreamJsonStdinIfNeeded(
   if (inputFormat !== 'stream-json' || options.file || options.stdin !== undefined) {
     return undefined;
   }
-  if (process.stdin.isTTY !== false) return undefined;
+  if (process.stdin.isTTY === true) return undefined;
 
   return Bun.stdin.text();
 }
