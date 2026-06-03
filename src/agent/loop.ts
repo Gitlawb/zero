@@ -213,64 +213,17 @@ export async function runAgent(
       break;
     }
 
-    // === Execute tools (in parallel) ===
-    const toolPromises = assistantToolCalls.map(async (tc) => {
-      let result: string;
-
-      let parsedArgs: any = {};
-      try {
-        parsedArgs = tc.arguments ? JSON.parse(tc.arguments) : {};
-      } catch (e: any) {
-        result = `Error: Failed to parse arguments for ${tc.name}: ${e.message}`;
-        if (onToolResult) onToolResult({ toolCallId: tc.id, result });
-        return { toolCallId: tc.id, result };
-      }
-
-      try {
-        const tool = toolRegistry.get(tc.name);
-        const grantKey = tool ? `${tool.safety.permission}:${tool.safety.sideEffect}` : `unknown:${tc.name}`;
-        let permissionGranted = permissionMode === 'unsafe' || tool?.safety.permission === 'allow';
-
-        if (permissionMode === 'ask' && tool?.safety.permission === 'prompt') {
-          if (approvalGrants.has(grantKey)) {
-            permissionGranted = true;
-          } else if (onToolApproval) {
-            const decision = await onToolApproval({
-              toolCall: tc,
-              parsedArgs,
-              safety: tool.safety,
-              reason: tool.safety.reason,
-              grantKey,
-            });
-
-            if (decision === 'allow' || decision === 'allow-session') {
-              permissionGranted = true;
-              if (decision === 'allow-session') {
-                approvalGrants.add(grantKey);
-              }
-            } else {
-              result = `Permission denied for ${tc.name}: ${tool.safety.reason}`;
-              if (onToolResult) onToolResult({ toolCallId: tc.id, result });
-              return { toolCallId: tc.id, result };
-            }
-          }
-        }
-
-        result = await toolRegistry.run(tc.name, parsedArgs, {
-          permissionGranted,
-        });
-      } catch (e: any) {
-        result = `Error executing ${tc.name}: ${e.message}`;
-      }
-
-      if (onToolResult) {
-        onToolResult({ toolCallId: tc.id, result });
-      }
-
-      return { toolCallId: tc.id, result };
-    });
-
-    const toolResults = await Promise.all(toolPromises);
+    // Tool execution is serialized so prompt-gated approvals cannot overlap
+    // while interactive surfaces keep a single visible pending approval.
+    const toolResults: ToolResult[] = [];
+    for (const tc of assistantToolCalls) {
+      toolResults.push(await executeToolCall(tc, {
+        approvalGrants,
+        onToolApproval,
+        onToolResult,
+        permissionMode,
+      }));
+    }
 
     // Feed tool results back into the conversation
     for (const tr of toolResults) {
@@ -283,6 +236,64 @@ export async function runAgent(
   }
 
   return finalAnswer || 'Agent reached maximum number of turns without a final answer.';
+}
+
+async function executeToolCall(
+  tc: ToolCall,
+  options: {
+    approvalGrants: Set<string>;
+    onToolApproval?: AgentOptions['onToolApproval'];
+    onToolResult?: AgentOptions['onToolResult'];
+    permissionMode: AgentPermissionMode;
+  }
+): Promise<ToolResult> {
+  const emitResult = (result: string): ToolResult => {
+    const toolResult = { toolCallId: tc.id, result };
+    options.onToolResult?.(toolResult);
+    return toolResult;
+  };
+
+  let parsedArgs: any = {};
+  try {
+    parsedArgs = tc.arguments ? JSON.parse(tc.arguments) : {};
+  } catch (e: any) {
+    return emitResult(`Error: Failed to parse arguments for ${tc.name}: ${e.message}`);
+  }
+
+  try {
+    const tool = toolRegistry.get(tc.name);
+    const grantKey = tool ? `${tool.safety.permission}:${tool.safety.sideEffect}` : `unknown:${tc.name}`;
+    let permissionGranted = options.permissionMode === 'unsafe' || tool?.safety.permission === 'allow';
+
+    if (options.permissionMode === 'ask' && tool?.safety.permission === 'prompt') {
+      if (options.approvalGrants.has(grantKey)) {
+        permissionGranted = true;
+      } else if (options.onToolApproval) {
+        const decision = await options.onToolApproval({
+          toolCall: tc,
+          parsedArgs,
+          safety: tool.safety,
+          reason: tool.safety.reason,
+          grantKey,
+        });
+
+        if (decision === 'allow' || decision === 'allow-session') {
+          permissionGranted = true;
+          if (decision === 'allow-session') {
+            options.approvalGrants.add(grantKey);
+          }
+        } else {
+          return emitResult(`Permission denied for ${tc.name}: ${tool.safety.reason}`);
+        }
+      }
+    }
+
+    return emitResult(await toolRegistry.run(tc.name, parsedArgs, {
+      permissionGranted,
+    }));
+  } catch (e: any) {
+    return emitResult(`Error executing ${tc.name}: ${e.message}`);
+  }
 }
 
 function filterExecutableTools(

@@ -2,7 +2,11 @@ import { describe, it, expect } from 'bun:test';
 import { mkdtemp, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { runAgent } from '../src/agent/loop';
+import {
+  runAgent,
+  type ToolApprovalDecision,
+  type ToolApprovalRequest,
+} from '../src/agent/loop';
 import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from '../src/agent/prompts';
 import type { Provider, Message, StreamEvent } from '../src/providers/types';
 
@@ -26,6 +30,20 @@ class MockProvider implements Provider {
     this.turn++;
     for (const ev of events) yield ev;
   }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error('Timed out waiting for condition');
+    }
+    await delay(5);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe('runAgent system prompt selection', () => {
@@ -278,6 +296,54 @@ describe('runAgent tool-call flow', () => {
     expect(approvalCount).toBe(1);
     expect(await readFile(firstPath, 'utf-8')).toBe('first');
     expect(await readFile(secondPath, 'utf-8')).toBe('second');
+  });
+
+  it('serializes multiple prompt-gated approvals from the same assistant turn', async () => {
+    const provider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'bash' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ command: 'echo zero-first' }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+        { type: 'tool-call-start', id: 'call_2', name: 'bash' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_2',
+          argumentsFragment: JSON.stringify({ command: 'echo zero-second' }),
+        },
+        { type: 'tool-call-end', id: 'call_2' },
+      ],
+      [{ type: 'text', content: 'approval done' }],
+    ]);
+    const approvals: ToolApprovalRequest[] = [];
+    const approvalResolvers: Array<(decision: ToolApprovalDecision) => void> = [];
+    const resultIds: string[] = [];
+
+    const run = runAgent('run two shell commands', provider, {
+      permissionMode: 'ask',
+      onToolApproval: (request) => {
+        approvals.push(request);
+        return new Promise<ToolApprovalDecision>((resolve) => {
+          approvalResolvers.push(resolve);
+        });
+      },
+      onToolResult: (result) => resultIds.push(result.toolCallId),
+    });
+
+    await waitFor(() => approvalResolvers.length === 1);
+    await delay(25);
+    expect(approvals.map((approval) => approval.toolCall.id)).toEqual(['call_1']);
+
+    approvalResolvers[0]?.('allow');
+    await waitFor(() => approvalResolvers.length === 2);
+    expect(approvals.map((approval) => approval.toolCall.id)).toEqual(['call_1', 'call_2']);
+
+    approvalResolvers[1]?.('allow');
+    await expect(run).resolves.toBe('approval done');
+    expect(resultIds).toEqual(['call_1', 'call_2']);
   });
 
   it('keeps tool arguments when a delta arrives before the start event', async () => {
