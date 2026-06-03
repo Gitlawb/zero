@@ -87,8 +87,16 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
   });
 
   const saveOpenGateway = () => {
-    if (!openGatewayKey.trim()) {
+    const apiKey = openGatewayKey.trim();
+    const apiModel = openGatewayModel.trim();
+
+    if (!apiKey) {
       setError('API key is required');
+      return;
+    }
+
+    if (!apiModel) {
+      setError('Model is required');
       return;
     }
 
@@ -96,8 +104,8 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
     configManager.addProvider({
       name: profileName,
       baseURL: 'https://opengateway.gitlawb.com/v1',
-      apiKey: openGatewayKey.trim(),
-      model: openGatewayModel.trim(),
+      apiKey,
+      model: apiModel,
       description: 'OpenGateway',
     });
 
