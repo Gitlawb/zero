@@ -35,6 +35,7 @@ bun test
 bun run typecheck
 bun run build
 bun run smoke:build
+bun run perf:bench
 bun run package:release
 ```
 
@@ -43,5 +44,7 @@ Check for released CLI updates:
 ```bash
 ./zero update --check
 ```
+
+See `docs/PERFORMANCE.md` for benchmark thresholds and CI smoke behavior.
 
 Bun version is pinned in `package.json`.

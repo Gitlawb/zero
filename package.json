@@ -13,7 +13,9 @@
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/build.ts",
     "smoke:build": "bun run scripts/smoke-build.ts",
-    "package:release": "bun run scripts/package-release.ts"
+    "package:release": "bun run scripts/package-release.ts",
+    "perf:bench": "bun run scripts/perf-bench.ts",
+    "perf:smoke": "bun run scripts/perf-bench.ts --output dist/perf/perf-bench.json"
   },
   "devDependencies": {
     "@types/bun": "latest",
