@@ -1,7 +1,6 @@
 import { Command } from 'commander';
 import { runExec } from './cli';
 import { configManager } from './config/manager';
-import { startTUI } from './tui';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
 import {
@@ -41,6 +40,7 @@ program
     if (options.prompt) {
       process.exitCode = await runExec({ prompt: options.prompt, outputFormat: 'text' });
     } else {
+      const { startTUI } = await import('./tui');
       startTUI();
     }
   });
