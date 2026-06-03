@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ZeroSessionEventStore } from '../src/zero-sessions';
+import { ZERO_REDACTED_SECRET } from '../src/zero-redaction';
 import {
   formatZeroSearchResult,
   searchZeroSessions,
@@ -166,6 +167,49 @@ describe('Zero session search backend', () => {
       expect(formatZeroSearchResult(emptyResult)).toBe(
         'No local session events matched "missing". Searched 1 session.'
       );
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts secrets from formatted search output', async () => {
+    const rootDir = tempRoot();
+    try {
+      const store = new ZeroSessionEventStore({
+        rootDir,
+        now: sequenceClock([
+          '2026-06-03T00:00:00.000Z',
+          '2026-06-03T00:00:01.000Z',
+        ]),
+      });
+      await store.createSession({
+        sessionId: 'secret_search',
+        title: 'Secret Search sk-proj-abcdefghijklmnopqrstuvwxyz1234567890',
+        cwd: '/repo/zero?token=local-cwd-secret',
+      });
+      await store.appendEvent('secret_search', {
+        type: 'tool_result',
+        payload: {
+          result:
+            'diagnostic output includes OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890',
+          authorization: 'Bearer local-authorization-secret',
+          headers: {
+            'x-api-key': 'local-header-secret',
+          },
+        },
+      });
+
+      const result = await searchZeroSessions('diagnostic output', {
+        store,
+        contextChars: 240,
+      });
+      const output = formatZeroSearchResult(result);
+
+      expect(output).toContain(ZERO_REDACTED_SECRET);
+      expect(output).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz1234567890');
+      expect(output).not.toContain('local-cwd-secret');
+      expect(output).not.toContain('local-authorization-secret');
+      expect(output).not.toContain('local-header-secret');
     } finally {
       rmSync(rootDir, { recursive: true, force: true });
     }

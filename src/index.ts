@@ -4,6 +4,7 @@ import { configManager } from './config/manager';
 import { startTUI } from './tui';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
+import { redactZeroSecrets } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
 
 const program = new Command();
@@ -133,7 +134,7 @@ program
       });
 
       if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify(redactZeroSecrets(result), null, 2));
       } else {
         console.log(formatZeroSearchResult(result));
       }

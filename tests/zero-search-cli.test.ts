@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { ZERO_REDACTED_SECRET } from '../src/zero-redaction';
 import { ZeroSessionEventStore } from '../src/zero-sessions';
 
 async function runZeroSearch(
@@ -69,6 +70,50 @@ describe('zero search CLI', () => {
         },
       });
       expect(payload.hits[0].context).toContain('zero search');
+    } finally {
+      rmSync(dataHome, { recursive: true, force: true });
+    }
+  });
+
+  it('redacts secrets from structured JSON search output', async () => {
+    const dataHome = mkdtempSync(join(tmpdir(), 'zero-search-cli-'));
+    try {
+      const store = new ZeroSessionEventStore({
+        rootDir: join(dataHome, 'zero', 'sessions'),
+        now: sequenceClock([
+          '2026-06-03T00:00:00.000Z',
+          '2026-06-03T00:00:01.000Z',
+        ]),
+      });
+      await store.createSession({
+        sessionId: 'json_secret_search',
+        title: 'JSON Secret sk-proj-abcdefghijklmnopqrstuvwxyz1234567890',
+        cwd: '/repo/zero?token=local-cwd-secret',
+      });
+      await store.appendEvent('json_secret_search', {
+        type: 'tool_result',
+        payload: {
+          result:
+            'diagnostic json includes OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890',
+          authorization: 'Bearer local-authorization-secret',
+          headers: {
+            cookie: 'zero_session=local-cookie-secret',
+          },
+        },
+      });
+
+      const result = await runZeroSearch(
+        ['--json', '--context', '240', 'diagnostic', 'json'],
+        { XDG_DATA_HOME: dataHome }
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr.trim()).toBe('');
+      expect(result.stdout).toContain(ZERO_REDACTED_SECRET);
+      expect(result.stdout).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz1234567890');
+      expect(result.stdout).not.toContain('local-cwd-secret');
+      expect(result.stdout).not.toContain('local-authorization-secret');
+      expect(result.stdout).not.toContain('local-cookie-secret');
     } finally {
       rmSync(dataHome, { recursive: true, force: true });
     }

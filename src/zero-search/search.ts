@@ -1,4 +1,5 @@
 import { ZeroSessionEventStore } from '../zero-sessions';
+import { redactZeroSecrets, redactZeroString } from '../zero-redaction';
 import type {
   ZeroSearchCandidate,
   ZeroSearchHit,
@@ -31,10 +32,11 @@ export async function searchZeroSessions(
     for (const event of events) {
       if (options.type && event.type !== options.type) continue;
 
+      const redactedPayload = redactZeroSecrets(event.payload);
       const candidate: ZeroSearchCandidate = {
         session,
         event,
-        text: extractSearchText(event.payload),
+        text: extractSearchText(redactedPayload),
       };
       const match = findSearchMatch(candidate.text, normalizedQuery, terms);
       if (!match) continue;
@@ -75,7 +77,7 @@ export async function searchZeroSessions(
 }
 
 export function formatZeroSearchResult(result: ZeroSearchResult): string {
-  const query = result.query.trim();
+  const query = redactZeroString(result.query.trim());
   if (result.hits.length === 0) {
     return `No local session events matched "${query}". Searched ${formatCount(
       result.searchedSessions,
@@ -88,18 +90,20 @@ export function formatZeroSearchResult(result: ZeroSearchResult): string {
   ];
 
   result.hits.forEach((hit, index) => {
-    const title = hit.session.title ? ` - ${hit.session.title}` : '';
+    const sessionId = redactZeroString(hit.session.sessionId);
+    const eventType = redactZeroString(hit.event.type);
+    const title = hit.session.title ? ` - ${redactZeroString(hit.session.title)}` : '';
     lines.push(
-      `${index + 1}. ${hit.session.sessionId} #${hit.event.sequence} ${hit.event.type}${title}`
+      `${index + 1}. ${sessionId} #${hit.event.sequence} ${eventType}${title}`
     );
-    const context = hit.context.replace(/\s+/g, ' ').trim();
+    const context = redactZeroString(hit.context).replace(/\s+/g, ' ').trim();
     if (context) lines.push(`   ${context}`);
 
     const details = [
-      hit.session.cwd ? `cwd: ${hit.session.cwd}` : undefined,
-      hit.session.modelId ? `model: ${hit.session.modelId}` : undefined,
-      hit.session.provider ? `provider: ${hit.session.provider}` : undefined,
-      `updated: ${hit.session.updatedAt}`,
+      hit.session.cwd ? `cwd: ${redactZeroString(hit.session.cwd)}` : undefined,
+      hit.session.modelId ? `model: ${redactZeroString(hit.session.modelId)}` : undefined,
+      hit.session.provider ? `provider: ${redactZeroString(hit.session.provider)}` : undefined,
+      `updated: ${redactZeroString(hit.session.updatedAt)}`,
     ].filter(Boolean);
     lines.push(`   ${details.join(' | ')}`);
   });
