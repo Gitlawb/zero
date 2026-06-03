@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'bun:test';
-import { runAgent } from '../src/agent/loop';
+import { mkdtemp, readFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import {
+  runAgent,
+  type ToolApprovalDecision,
+  type ToolApprovalRequest,
+} from '../src/agent/loop';
 import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from '../src/agent/prompts';
 import type { Provider, Message, StreamEvent } from '../src/providers/types';
 
@@ -23,6 +30,20 @@ class MockProvider implements Provider {
     this.turn++;
     for (const ev of events) yield ev;
   }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error('Timed out waiting for condition');
+    }
+    await delay(5);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe('runAgent system prompt selection', () => {
@@ -81,7 +102,7 @@ describe('runAgent tool-call flow', () => {
     expect(toolMsg?.content).toContain('do it');
   });
 
-  it('does not advertise prompt-gated tools until permission UX exists', async () => {
+  it('does not advertise prompt-gated tools in automatic permission mode', async () => {
     const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
 
     await runAgent('which tools can you use?', provider);
@@ -97,7 +118,7 @@ describe('runAgent tool-call flow', () => {
     expect(names).not.toContain('edit_file');
   });
 
-  it('advertises prompt-gated tools only in unsafe permission mode', async () => {
+  it('advertises prompt-gated tools in unsafe permission mode', async () => {
     const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
 
     await runAgent('which tools can you use?', provider, {
@@ -112,6 +133,36 @@ describe('runAgent tool-call flow', () => {
     expect(names).toContain('apply_patch');
     expect(names).toContain('write_file');
     expect(names).toContain('edit_file');
+  });
+
+  it('advertises prompt-gated tools in ask permission mode', async () => {
+    const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
+
+    await runAgent('which tools can you use?', provider, {
+      permissionMode: 'ask',
+    });
+
+    const names = (provider.receivedTools[0] ?? []).map((tool) => tool.name).sort();
+    expect(names).toContain('read_file');
+    expect(names).toContain('grep');
+    expect(names).toContain('glob');
+    expect(names).toContain('bash');
+    expect(names).toContain('apply_patch');
+    expect(names).toContain('write_file');
+    expect(names).toContain('edit_file');
+  });
+
+  it('respects enabled and disabled tool filters', async () => {
+    const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
+
+    await runAgent('which tools can you use?', provider, {
+      permissionMode: 'ask',
+      enabledTools: ['read_file', 'bash', 'write_file'],
+      disabledTools: ['bash'],
+    });
+
+    const names = (provider.receivedTools[0] ?? []).map((tool) => tool.name).sort();
+    expect(names).toEqual(['read_file', 'write_file']);
   });
 
   it('runs prompt-gated tools through the registry only when unsafe mode grants permission', async () => {
@@ -154,6 +205,145 @@ describe('runAgent tool-call flow', () => {
 
     expect(safeResults[0]).toContain('Permission required for bash');
     expect(unsafeResults[0]).toContain('zero-agent-unsafe');
+  });
+
+  it('denies prompt-gated tools in ask mode without running them', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zero-deny-'));
+    const path = join(dir, 'denied.txt');
+    const provider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'write_file' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ path, content: 'nope' }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [{ type: 'text', content: 'denied done' }],
+    ]);
+    const results: string[] = [];
+
+    await runAgent('write file', provider, {
+      permissionMode: 'ask',
+      onToolApproval: () => 'deny',
+      onToolResult: (result) => results.push(result.result),
+    });
+
+    expect(results[0]).toContain('Permission denied for write_file');
+    expect(await Bun.file(path).exists()).toBe(false);
+  });
+
+  it('runs approved prompt-gated tools through the registry path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zero-allow-'));
+    const path = join(dir, 'allowed.txt');
+    const provider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'write_file' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ path, content: 'allowed' }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [{ type: 'text', content: 'allowed done' }],
+    ]);
+
+    await runAgent('write file', provider, {
+      permissionMode: 'ask',
+      onToolApproval: () => 'allow',
+    });
+
+    expect(await readFile(path, 'utf-8')).toBe('allowed');
+  });
+
+  it('skips repeated approval after an allow-session decision for the same safety class', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zero-session-'));
+    const firstPath = join(dir, 'first.txt');
+    const secondPath = join(dir, 'second.txt');
+    const provider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'write_file' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ path: firstPath, content: 'first' }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [
+        { type: 'tool-call-start', id: 'call_2', name: 'write_file' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_2',
+          argumentsFragment: JSON.stringify({ path: secondPath, content: 'second' }),
+        },
+        { type: 'tool-call-end', id: 'call_2' },
+      ],
+      [{ type: 'text', content: 'session done' }],
+    ]);
+    let approvalCount = 0;
+
+    await runAgent('write two files', provider, {
+      permissionMode: 'ask',
+      onToolApproval: () => {
+        approvalCount++;
+        return 'allow-session';
+      },
+    });
+
+    expect(approvalCount).toBe(1);
+    expect(await readFile(firstPath, 'utf-8')).toBe('first');
+    expect(await readFile(secondPath, 'utf-8')).toBe('second');
+  });
+
+  it('serializes multiple prompt-gated approvals from the same assistant turn', async () => {
+    const provider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: 'bash' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_1',
+          argumentsFragment: JSON.stringify({ command: 'echo zero-first' }),
+        },
+        { type: 'tool-call-end', id: 'call_1' },
+        { type: 'tool-call-start', id: 'call_2', name: 'bash' },
+        {
+          type: 'tool-call-delta',
+          id: 'call_2',
+          argumentsFragment: JSON.stringify({ command: 'echo zero-second' }),
+        },
+        { type: 'tool-call-end', id: 'call_2' },
+      ],
+      [{ type: 'text', content: 'approval done' }],
+    ]);
+    const approvals: ToolApprovalRequest[] = [];
+    const approvalResolvers: Array<(decision: ToolApprovalDecision) => void> = [];
+    const resultIds: string[] = [];
+
+    const run = runAgent('run two shell commands', provider, {
+      permissionMode: 'ask',
+      onToolApproval: (request) => {
+        approvals.push(request);
+        return new Promise<ToolApprovalDecision>((resolve) => {
+          approvalResolvers.push(resolve);
+        });
+      },
+      onToolResult: (result) => resultIds.push(result.toolCallId),
+    });
+
+    await waitFor(() => approvalResolvers.length === 1);
+    await delay(25);
+    expect(approvals.map((approval) => approval.toolCall.id)).toEqual(['call_1']);
+
+    approvalResolvers[0]?.('allow');
+    await waitFor(() => approvalResolvers.length === 2);
+    expect(approvals.map((approval) => approval.toolCall.id)).toEqual(['call_1', 'call_2']);
+
+    approvalResolvers[1]?.('allow');
+    await expect(run).resolves.toBe('approval done');
+    expect(resultIds).toEqual(['call_1', 'call_2']);
   });
 
   it('keeps tool arguments when a delta arrives before the start event', async () => {

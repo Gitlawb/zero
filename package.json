@@ -13,6 +13,7 @@
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/build.ts",
     "smoke:build": "bun run scripts/smoke-build.ts",
+    "review:pr": "bun run scripts/pr-review.ts",
     "package:release": "bun run scripts/package-release.ts",
     "verify:release": "bun run scripts/release-checksums.ts",
     "perf:bench": "bun run scripts/perf-bench.ts",

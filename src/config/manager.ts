@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
 import {
   type ProviderProfile,
   type ZeroConfig,
-  ZeroConfigSchema,
+  readConfigLayer,
 } from './loader';
 import {
   parseProviderProfileKind,
@@ -36,16 +36,12 @@ function readConfig(): ConfigState {
     return { providers: [] };
   }
 
-  try {
-    const content = readFileSync(CONFIG_PATH, 'utf-8');
-    const parsed = JSON.parse(content);
-    return normalizeConfig(ZeroConfigSchema.partial().parse(parsed));
-  } catch (err: any) {
-    console.warn(
-      `[zero] Ignoring invalid config at ${CONFIG_PATH}: ${err?.message ?? String(err)}`
-    );
-    return { providers: [] };
+  const layer = readConfigLayer('user', CONFIG_PATH);
+  if (layer?.status === 'loaded') {
+    return normalizeConfig(layer.config);
   }
+
+  return { providers: [] };
 }
 
 function writeConfig(config: ConfigState) {

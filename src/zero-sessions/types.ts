@@ -4,6 +4,7 @@ export type ZeroSessionEventType =
   | 'tool_result'
   | 'provider_usage'
   | 'error'
+  | 'session_fork'
   | (string & {});
 
 export interface ZeroSessionMetadata {
@@ -12,6 +13,9 @@ export interface ZeroSessionMetadata {
   cwd?: string;
   modelId?: string;
   provider?: string;
+  parentSessionId?: string;
+  forkedFromEventId?: string;
+  forkedFromSequence?: number;
   createdAt: string;
   updatedAt: string;
   eventCount: number;
@@ -24,7 +28,12 @@ export interface CreateZeroSessionInput {
   cwd?: string;
   modelId?: string;
   provider?: string;
+  parentSessionId?: string;
+  forkedFromEventId?: string;
+  forkedFromSequence?: number;
 }
+
+export interface ForkZeroSessionInput extends Omit<CreateZeroSessionInput, 'parentSessionId'> {}
 
 export interface AppendZeroSessionEventInput {
   type: ZeroSessionEventType;

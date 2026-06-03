@@ -139,6 +139,57 @@ describe('ZeroSessionEventStore', () => {
     }
   });
 
+  it('finds the latest session and forks sessions with copied events', async () => {
+    const rootDir = tempRoot();
+    try {
+      const store = new ZeroSessionEventStore({
+        rootDir,
+        now: sequenceClock([
+          '2026-06-03T00:00:00.000Z',
+          '2026-06-03T00:00:01.000Z',
+          '2026-06-03T00:00:02.000Z',
+          '2026-06-03T00:00:03.000Z',
+          '2026-06-03T00:00:04.000Z',
+          '2026-06-03T00:00:05.000Z',
+        ]),
+      });
+
+      await store.createSession({ sessionId: 'base', title: 'Base' });
+      await store.appendEvent('base', {
+        type: 'message',
+        payload: { role: 'user', content: 'base prompt' },
+      });
+      expect((await store.getLatestSession())?.sessionId).toBe('base');
+
+      const forked = await store.forkSession('base', {
+        sessionId: 'forked',
+        title: 'Forked',
+      });
+
+      expect(forked).toMatchObject({
+        sessionId: 'forked',
+        parentSessionId: 'base',
+        title: 'Forked',
+        eventCount: 2,
+        lastEventType: 'session_fork',
+      });
+      expect((await store.getLatestSession())?.sessionId).toBe('forked');
+
+      const forkedEvents = await store.readEvents('forked');
+      expect(forkedEvents.map((event) => [event.id, event.type])).toEqual([
+        ['forked:1', 'message'],
+        ['forked:2', 'session_fork'],
+      ]);
+      expect(forkedEvents[0]?.payload).toEqual({ role: 'user', content: 'base prompt' });
+      expect(forkedEvents[1]?.payload).toMatchObject({
+        parentSessionId: 'base',
+        copiedEventCount: 1,
+      });
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it('searches persisted event payload text with bounded context', async () => {
     const rootDir = tempRoot();
     try {

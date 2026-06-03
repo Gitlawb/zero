@@ -1,0 +1,183 @@
+name: PR Auto Review
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    name: Zero Review
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Diff hygiene
+        id: diffcheck
+        continue-on-error: true
+        run: git diff --check origin/${{ github.base_ref }}...HEAD
+
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        run: bun run typecheck
+
+      - name: Test
+        id: test
+        continue-on-error: true
+        run: bun run test
+
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: bun run build
+
+      - name: Smoke build
+        id: smoke
+        continue-on-error: true
+        run: bun run smoke:build
+
+      - name: Collect changed files
+        id: changed-files
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo 'files<<EOF'
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" | sort
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post review summary
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          ZERO_REVIEW_DIFF_CHECK: ${{ steps.diffcheck.outcome }}
+          ZERO_REVIEW_TYPECHECK: ${{ steps.typecheck.outcome }}
+          ZERO_REVIEW_TEST: ${{ steps.test.outcome }}
+          ZERO_REVIEW_BUILD: ${{ steps.build.outcome }}
+          ZERO_REVIEW_SMOKE: ${{ steps.smoke.outcome }}
+          ZERO_CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = '<!-- zero-auto-review -->';
+            const checks = [
+              { label: 'Diff hygiene', command: 'git diff --check', outcome: process.env.ZERO_REVIEW_DIFF_CHECK },
+              { label: 'Typecheck', command: 'bun run typecheck', outcome: process.env.ZERO_REVIEW_TYPECHECK },
+              { label: 'Tests', command: 'bun run test', outcome: process.env.ZERO_REVIEW_TEST },
+              { label: 'Build', command: 'bun run build', outcome: process.env.ZERO_REVIEW_BUILD },
+              { label: 'Smoke build', command: 'bun run smoke:build', outcome: process.env.ZERO_REVIEW_SMOKE },
+            ].map((check) => ({
+              ...check,
+              outcome: normalizeOutcome(check.outcome),
+            }));
+            const blocking = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'unknown']);
+            const blockers = checks.filter((check) => blocking.has(check.outcome));
+            const files = (process.env.ZERO_CHANGED_FILES || '')
+              .split(/\r?\n/)
+              .map((file) => file.trim())
+              .filter(Boolean)
+              .sort();
+            const visibleFiles = files.slice(0, 12);
+            const fileSuffix = files.length > visibleFiles.length
+              ? `, and ${files.length - visibleFiles.length} more`
+              : '';
+            const fileLine = files.length > 0
+              ? `Changed files (${files.length}): ${visibleFiles.map((file) => `\`${file}\``).join(', ')}${fileSuffix}`
+              : 'Changed files: unavailable in this run.';
+            const body = [
+              marker,
+              '## Zero automated PR review',
+              '',
+              `Verdict: **${blockers.length > 0 ? 'Changes requested' : 'No blockers found'}**`,
+              '',
+              '### Blockers',
+              '',
+              blockers.length > 0
+                ? blockers.map((check) => `- \`${check.command}\` ended with \`${check.outcome}\`.`).join('\n')
+                : '- None found.',
+              '',
+              '### Validation',
+              '',
+              ...checks.map((check) => `- ${formatOutcome(check.outcome)} ${check.label}: \`${check.command}\``),
+              '',
+              '### Scope',
+              '',
+              `Head: \`${context.payload.pull_request.head.sha.slice(0, 12)}\``,
+              fileLine,
+              '',
+              'This deterministic review checks validation status and basic diff hygiene. A human reviewer still owns product judgment and design quality.',
+            ].join('\n');
+
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                per_page: 100,
+              });
+              const existing = comments.find((comment) => comment.body?.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body,
+                });
+              }
+            } catch (error) {
+              core.warning(`Unable to post automated review comment: ${error.message}`);
+              await core.summary.addRaw(body, true).write();
+            }
+
+            function normalizeOutcome(value) {
+              const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+              return [
+                'success',
+                'failure',
+                'cancelled',
+                'skipped',
+                'timed_out',
+                'action_required',
+                'neutral',
+              ].includes(normalized) ? normalized : 'unknown';
+            }
+
+            function formatOutcome(outcome) {
+              if (outcome === 'success') return '[pass]';
+              if (outcome === 'skipped' || outcome === 'neutral') return '[info]';
+              return '[fail]';
+            }
+
+      - name: Fail on review blockers
+        if: ${{ steps.diffcheck.outcome != 'success' || steps.typecheck.outcome != 'success' || steps.test.outcome != 'success' || steps.build.outcome != 'success' || steps.smoke.outcome != 'success' }}
+        run: exit 1

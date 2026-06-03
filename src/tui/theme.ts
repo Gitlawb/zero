@@ -712,3 +712,35 @@ export const theme = new Proxy<SemanticColors>({} as SemanticColors, {
     return activeTheme.colors[prop];
   },
 });
+
+export const tuiTheme = {
+  colors: {
+    get background() { return theme.background.primary; },
+    get brand() { return theme.ui.active; },
+    get brandStrong() { return theme.ui.focus; },
+    get accent() { return theme.text.accent; },
+    get text() { return theme.text.primary; },
+    get muted() { return theme.text.secondary; },
+    get subtle() { return theme.ui.comment; },
+    get panel() { return theme.background.input; },
+    get panelAlt() { return theme.background.primary; },
+    get userBg() { return theme.background.message; },
+    get userSymbol() { return theme.text.accent; },
+    get model() { return theme.ui.active; },
+    get warning() { return theme.status.warning; },
+    get danger() { return theme.status.error; },
+    get success() { return theme.status.success; },
+    get border() { return theme.border.default; },
+    get strongBorder() { return theme.ui.focus; },
+  },
+  marks: {
+    prompt: '>',
+    cursor: ' ',
+    user: '>',
+    assistant: 'zero',
+    tool: 'tool',
+    note: 'sys',
+  },
+} as const;
+
+export type TuiColor = string;

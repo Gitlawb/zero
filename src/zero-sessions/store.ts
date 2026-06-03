@@ -5,6 +5,7 @@ import type {
   AppendZeroSessionEventInput,
   CreateZeroSessionInput,
   DefaultZeroSessionRootOptions,
+  ForkZeroSessionInput,
   ZeroSessionEvent,
   ZeroSessionEventStoreOptions,
   ZeroSessionMetadata,
@@ -46,6 +47,9 @@ export class ZeroSessionEventStore {
       cwd: input.cwd,
       modelId: input.modelId,
       provider: input.provider,
+      parentSessionId: input.parentSessionId,
+      forkedFromEventId: input.forkedFromEventId,
+      forkedFromSequence: input.forkedFromSequence,
       createdAt,
       updatedAt: createdAt,
       eventCount: 0,
@@ -94,6 +98,55 @@ export class ZeroSessionEventStore {
       const updated = right.updatedAt.localeCompare(left.updatedAt);
       return updated || left.sessionId.localeCompare(right.sessionId);
     });
+  }
+
+  async getLatestSession(): Promise<ZeroSessionMetadata | undefined> {
+    const sessions = await this.listSessions();
+    return sessions[0];
+  }
+
+  async forkSession(
+    parentSessionId: string,
+    input: ForkZeroSessionInput = {}
+  ): Promise<ZeroSessionMetadata> {
+    assertValidSessionId(parentSessionId);
+    const parent = await this.getSession(parentSessionId);
+    if (!parent) {
+      throw new Error(`Zero session not found: ${parentSessionId}`);
+    }
+
+    const parentEvents = await this.readEvents(parentSessionId);
+    const lastParentEvent = parentEvents[parentEvents.length - 1];
+    const fork = await this.createSession({
+      sessionId: input.sessionId,
+      title: input.title ?? (parent.title ? `${parent.title} (fork)` : undefined),
+      cwd: input.cwd ?? parent.cwd,
+      modelId: input.modelId ?? parent.modelId,
+      provider: input.provider ?? parent.provider,
+      parentSessionId,
+      forkedFromEventId: lastParentEvent?.id,
+      forkedFromSequence: lastParentEvent?.sequence,
+    });
+
+    for (const event of parentEvents) {
+      await this.appendEvent(fork.sessionId, {
+        type: event.type,
+        payload: cloneJsonValue(event.payload),
+      });
+    }
+
+    await this.appendEvent(fork.sessionId, {
+      type: 'session_fork',
+      payload: {
+        parentSessionId,
+        parentEventCount: parent.eventCount,
+        copiedEventCount: parentEvents.length,
+        forkedFromEventId: lastParentEvent?.id,
+        forkedFromSequence: lastParentEvent?.sequence,
+      },
+    });
+
+    return await this.readMetadata(fork.sessionId);
   }
 
   async appendEvent(
@@ -241,6 +294,11 @@ function extractSearchText(value: unknown): string {
     return Object.values(value).map(extractSearchText).filter(Boolean).join(' ');
   }
   return '';
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (value === undefined) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function isFileExistsError(err: unknown): boolean {

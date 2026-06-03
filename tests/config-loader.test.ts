@@ -104,6 +104,30 @@ describe('loadConfigWithLayers', () => {
     }
   });
 
+  it('keeps valid env overrides while reporting invalid env diagnostics', () => {
+    const tmp = freshTmp();
+    try {
+      const { effective, diagnostics } = loadConfigWithLayers({
+        userConfigPath: join(tmp, 'no-user.json'),
+        projectConfigPath: join(tmp, 'no-project.json'),
+        env: {
+          ZERO_MAX_TURNS: 'many',
+          ZERO_DEBUG: 'true',
+        },
+      });
+
+      expect(effective.debug).toBe(true);
+      expect(effective.maxTurns).toBe(12);
+      expect(diagnostics).toContainEqual(expect.objectContaining({
+        source: 'env',
+        fieldPath: 'ZERO_MAX_TURNS',
+        kind: 'env',
+      }));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('lets CLI overrides win over everything else', () => {
     const tmp = freshTmp();
     try {
@@ -137,6 +161,41 @@ describe('loadConfigWithLayers', () => {
       });
 
       expect(effective.maxTurns).toBe(12);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports invalid config diagnostics with source paths and field paths', () => {
+    const tmp = freshTmp();
+    try {
+      const user = join(tmp, 'user.json');
+      writeFileSync(
+        user,
+        JSON.stringify({
+          providers: [{ name: 'broken', baseURL: 'not a url', model: 'm' }],
+        }),
+        'utf-8',
+      );
+
+      const { effective, layers, diagnostics } = loadConfigWithLayers({
+        userConfigPath: user,
+        projectConfigPath: join(tmp, 'no-project.json'),
+        env: {},
+      });
+
+      expect(effective.maxTurns).toBe(12);
+      expect(layers.find((layer) => layer.source === 'user')).toMatchObject({
+        source: 'user',
+        status: 'invalid',
+        path: user,
+      });
+      expect(diagnostics).toContainEqual(expect.objectContaining({
+        source: 'user',
+        path: user,
+        fieldPath: 'providers.0.baseURL',
+        kind: 'schema',
+      }));
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
