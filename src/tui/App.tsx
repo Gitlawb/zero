@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import { ProviderPicker } from './ProviderPicker';
+import { ModelPicker } from './ModelPicker';
 import { AddProvider } from './AddProvider';
 import { Logo } from './Logo';
 import { ThinkingSpinner } from './Spinner';
@@ -8,10 +9,16 @@ import { MessageRenderer } from './MessageRenderer';
 import { ToolCallRenderer } from './ToolCallRenderer';
 import { configManager } from '../config/manager';
 import { loadProviderConfig } from '../config/provider';
-import { OpenAIProvider } from '../providers/openai';
+import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
 import { runAgent } from '../agent/loop';
+import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
+import {
+  buildTuiModelStatus,
+  formatModelListLines,
+  resolveTuiModelSelection,
+} from './model-selection';
 
-type Screen = 'chat' | 'provider-picker' | 'add-provider';
+type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker';
 
 // Map low-level errors back to actionable guidance for the user. The full
 // error object is still surfaced separately when debug mode is on.
@@ -78,6 +85,7 @@ export const App: React.FC = () => {
 
   // Plan Mode (inspired by OpenClaude / Claude Code)
   const [isPlanMode, setIsPlanMode] = useState(false);
+  const [selectedModelOverride, setSelectedModelOverride] = useState<string | undefined>();
 
   // Debug mode - when enabled, prints full error objects to console
   const [debugMode, setDebugMode] = useState(false);
@@ -89,7 +97,7 @@ export const App: React.FC = () => {
   // Command suggestions
   const [suggestions, setSuggestions] = useState<string[]>([]);
 
-  const knownCommands = ['/provider', '/plan', '/debug-mode', '/debug', '/tools', '/help', '/exit', '/quit'];
+  const knownCommands = ['/provider', '/model', '/plan', '/debug-mode', '/debug', '/tools', '/help', '/exit', '/quit'];
 
   // Update suggestions when input changes
   React.useEffect(() => {
@@ -108,8 +116,22 @@ export const App: React.FC = () => {
 
   // Current provider info for the input bar (Grok Build style)
   const activeProfile = configManager.getActiveProvider();
-  const currentProviderName = activeProfile?.name || (process.env.ZERO_PROVIDER_COMMAND ? 'command' : 'env');
-  const currentModel = activeProfile?.model || process.env.OPENAI_MODEL || 'default';
+  const modelStatus = buildTuiModelStatus(
+    activeProfile
+      ? {
+          model: activeProfile.model,
+          provider: activeProfile.provider,
+          profileName: activeProfile.name,
+          source: 'profile',
+        }
+      : {
+          model: process.env.OPENAI_MODEL || ZERO_DEFAULT_MODEL_ID,
+          source: process.env.ZERO_PROVIDER_COMMAND ? 'provider-command' : 'environment',
+        },
+    selectedModelOverride
+  );
+  const currentProviderName = activeProfile?.name || modelStatus.providerLabel;
+  const currentModel = `${modelStatus.label}${modelStatus.sourceLabel === 'session' ? ' *' : ''}`;
 
   // Track terminal size for proper scrolling
   React.useEffect(() => {
@@ -215,11 +237,15 @@ export const App: React.FC = () => {
 
       try {
         const providerConfig = await loadProviderConfig();
-        const provider = new OpenAIProvider({
-          apiKey: providerConfig.apiKey || '',
+        const runtime = resolveZeroProviderRuntime({
+          provider: providerConfig.provider,
+          apiKey: providerConfig.apiKey,
           baseURL: providerConfig.baseURL,
-          model: providerConfig.model,
+          model: selectedModelOverride || providerConfig.model,
+          profileName: providerConfig.profileName,
+          source: providerConfig.source,
         });
+        const provider = createZeroProvider(runtime);
 
         // Add empty assistant message that we'll stream into
         setMessages((prev) => {
@@ -327,6 +353,40 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (cmd === '/model') {
+      const modelArg = parts.slice(1).join(' ').trim();
+
+      if (!modelArg) {
+        setScreen('model-picker');
+        return;
+      }
+
+      if (modelArg.toLowerCase() === 'list') {
+        setMessages((prev) => [
+          ...prev,
+          { type: 'system', content: 'Available models:' },
+          ...formatModelListLines().map((line) => ({ type: 'system' as const, content: `  ${line}` })),
+        ]);
+        return;
+      }
+
+      const selectedModel = resolveTuiModelSelection(modelArg);
+      if (!selectedModel) {
+        setMessages((prev) => [
+          ...prev,
+          { type: 'system', content: `Unknown model: ${modelArg}. Type /model list or /model to browse.` },
+        ]);
+        return;
+      }
+
+      setSelectedModelOverride(selectedModel.id);
+      setMessages((prev) => [
+        ...prev,
+        { type: 'system', content: `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})` },
+      ]);
+      return;
+    }
+
     if (cmd === '/plan') {
       setIsPlanMode(prev => {
         const next = !prev;
@@ -382,6 +442,7 @@ export const App: React.FC = () => {
         ...prev,
         { type: 'system', content: 'Available commands:' },
         { type: 'system', content: '  /provider     - Manage LLM providers (fix provider errors here)' },
+        { type: 'system', content: '  /model        - Select or list registry models for this session' },
         { type: 'system', content: '  /plan         - Toggle Plan Mode (agent plans first, makes no edits)' },
         { type: 'system', content: '  /debug-mode   - Toggle debug mode (prints full errors to console)' },
         { type: 'system', content: '  /tools        - Toggle tool calling (useful for debugging provider errors)' },
@@ -403,11 +464,31 @@ export const App: React.FC = () => {
     const success = configManager.setActiveProvider(name);
     if (success) {
       setMessages((prev) => [...prev, { type: 'system', content: `Switched to provider: ${name}` }]);
+      setSelectedModelOverride(undefined);
     }
     setScreen('chat');
   };
 
   const handleProviderPickerCancel = () => {
+    setScreen('chat');
+  };
+
+  const handleModelSelected = (modelId: string) => {
+    const selectedModel = resolveTuiModelSelection(modelId);
+    setSelectedModelOverride(modelId);
+    setMessages((prev) => [
+      ...prev,
+      {
+        type: 'system',
+        content: selectedModel
+          ? `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})`
+          : `Model set for this session: ${modelId}`,
+      },
+    ]);
+    setScreen('chat');
+  };
+
+  const handleModelPickerCancel = () => {
     setScreen('chat');
   };
 
@@ -457,6 +538,16 @@ export const App: React.FC = () => {
         onSelect={handleProviderSelected}
         onCancel={handleProviderPickerCancel}
         onAddNew={handleOpenAddProvider}
+      />
+    );
+  }
+
+  if (screen === 'model-picker') {
+    return (
+      <ModelPicker
+        activeModelId={modelStatus.knownModel?.id || modelStatus.modelId}
+        onSelect={handleModelSelected}
+        onCancel={handleModelPickerCancel}
       />
     );
   }
