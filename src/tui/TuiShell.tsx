@@ -3,7 +3,6 @@ import { Box, Text } from 'ink';
 import { CommandSuggestions } from './CommandSuggestions';
 import { DebugErrorPanel } from './DebugErrorPanel';
 import { ToolApprovalPanel } from './ToolApprovalPanel';
-import { StartupScreen } from './StartupScreen';
 import { Transcript } from './Transcript';
 import { TuiPromptBox } from './TuiPromptBox';
 import { TuiStatusBar } from './TuiStatusBar';
@@ -59,7 +58,6 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   contextPercent,
   pendingApproval,
   terminalWidth,
-  terminalHeight,
   inputStyle = 'border',
   inputBackground,
   messageBackground,
@@ -70,20 +68,6 @@ export const TuiShell: React.FC<TuiShellProps> = ({
 }) => {
   const modeState = { isPlanMode, debugMode, toolsEnabled, isThinking };
   const shellWidth = Math.max(60, terminalWidth - 1);
-
-  if (showLogo) {
-    return (
-      <StartupScreen
-        providerName={providerName}
-        modelName={modelName}
-        input={input}
-        suggestions={suggestions}
-        suggestionIndex={suggestionIndex}
-        terminalWidth={terminalWidth}
-        terminalHeight={terminalHeight}
-      />
-    );
-  }
 
   return (
     <Box

@@ -731,19 +731,15 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
 
   const terminalHeight = Math.max(20, rows || terminalRows);
   const terminalWidth = Math.max(64, columns || process.stdout.columns || 96);
-  const showLogo = messages.every((message) => message.type === 'system');
   const chatHeight = Math.max(8, terminalHeight - 6);
   const maxScrollOffset = Math.max(0, messages.length - chatHeight);
   const windowEnd = Math.max(0, messages.length - scrollOffset);
   const windowStart = Math.max(0, windowEnd - chatHeight);
-  const visibleMessages = showLogo
-    ? messages
-    : messages.slice(windowStart, windowEnd);
-  const hasOverflow = !showLogo && messages.length > chatHeight;
+  const visibleMessages = messages.slice(windowStart, windowEnd);
+  const hasOverflow = messages.length > chatHeight;
   const canScrollUp = hasOverflow && scrollOffset < maxScrollOffset;
   const canScrollDown = hasOverflow && scrollOffset > 0;
   const activeFile = deriveActiveFile(messages);
-
   const estimatedTokens = estimateTokens(messages);
   const contextPercent = Math.min(99, Math.round((estimatedTokens / 200000) * 100));
   const estimatedCost = Number(((estimatedTokens / 1000) * 0.003).toFixed(4));
@@ -754,7 +750,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
       visibleMessages={visibleMessages}
       scrollOffset={scrollOffset}
       streamingMessageIndex={streamingMessageIndex}
-      showLogo={showLogo}
+      showLogo={true}
       canScrollUp={canScrollUp}
       canScrollDown={canScrollDown}
       input={input}
