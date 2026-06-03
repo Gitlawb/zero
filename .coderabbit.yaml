@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+reviews:
+  # Avoid noisy "review skipped" status comments when CodeRabbit decides not to run.
+  review_status: false
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    # CodeRabbit reviews default-branch PRs by default. This extends automatic
+    # reviews to PRs targeting any branch, including release and stacked branches.
+    base_branches:
+      - ".*"
