@@ -1,17 +1,19 @@
 import type {
-  ZeroSessionEvent,
   ZeroSessionEventStore,
   ZeroSessionEventType,
   ZeroSessionMetadata,
 } from '../zero-sessions';
+import type { ZeroSessionSearchIndex } from './session-index';
 
 export interface ZeroSearchOptions {
   store?: ZeroSessionEventStore;
+  searchIndex?: ZeroSessionSearchIndex;
   rootDir?: string;
   limit?: number;
   contextChars?: number;
   sessionId?: string;
   type?: ZeroSessionEventType;
+  reindex?: boolean;
 }
 
 export interface ZeroSearchEventSummary {
@@ -38,10 +40,4 @@ export interface ZeroSearchResult {
   searchedSessions: number;
   totalHits: number;
   hits: ZeroSearchHit[];
-}
-
-export interface ZeroSearchCandidate {
-  session: ZeroSessionMetadata;
-  event: ZeroSessionEvent;
-  text: string;
 }

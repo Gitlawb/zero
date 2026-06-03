@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ZERO_REDACTED_SECRET } from '../src/zero-redaction';
@@ -149,6 +149,63 @@ describe('zero search CLI', () => {
       expect(invalidResult.exitCode).toBe(2);
       expect(invalidResult.stdout.trim()).toBe('');
       expect(invalidResult.stderr).toContain('Invalid --limit value');
+    } finally {
+      rmSync(dataHome, { recursive: true, force: true });
+    }
+  });
+
+  it('forces a search index rebuild with --reindex', async () => {
+    const dataHome = mkdtempSync(join(tmpdir(), 'zero-search-cli-'));
+    try {
+      const rootDir = join(dataHome, 'zero', 'sessions');
+      const store = new ZeroSessionEventStore({
+        rootDir,
+        now: sequenceClock([
+          '2026-06-03T00:00:00.000Z',
+          '2026-06-03T00:00:01.000Z',
+        ]),
+      });
+      await store.createSession({ sessionId: 'cli_reindex', title: 'CLI Reindex' });
+      await store.appendEvent('cli_reindex', {
+        type: 'message',
+        payload: { content: 'force rebuild indexed content' },
+      });
+
+      const session = await store.getSession('cli_reindex');
+      writeFileSync(
+        join(rootDir, 'cli_reindex', 'search-index.json'),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          sessionId: 'cli_reindex',
+          sessionUpdatedAt: session?.updatedAt,
+          sessionEventCount: session?.eventCount,
+          generatedAt: '2026-06-03T00:00:02.000Z',
+          entries: [{
+            sessionId: 'cli_reindex',
+            eventId: 'cli_reindex:1',
+            sequence: 1,
+            type: 'message',
+            createdAt: '2026-06-03T00:00:01.000Z',
+            text: 'cached unrelated text',
+          }],
+        })}\n`,
+        'utf-8'
+      );
+
+      const staleResult = await runZeroSearch(['--json', 'force', 'rebuild'], {
+        XDG_DATA_HOME: dataHome,
+      });
+      expect(JSON.parse(staleResult.stdout).totalHits).toBe(0);
+
+      const rebuiltResult = await runZeroSearch(['--json', '--reindex', 'force', 'rebuild'], {
+        XDG_DATA_HOME: dataHome,
+      });
+
+      expect(rebuiltResult.exitCode).toBe(0);
+      expect(rebuiltResult.stderr.trim()).toBe('');
+      const payload = JSON.parse(rebuiltResult.stdout);
+      expect(payload.totalHits).toBe(1);
+      expect(payload.hits[0].event.id).toBe('cli_reindex:1');
     } finally {
       rmSync(dataHome, { recursive: true, force: true });
     }

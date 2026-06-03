@@ -1,7 +1,7 @@
 import { ZeroSessionEventStore } from '../zero-sessions';
-import { redactZeroSecrets, redactZeroString } from '../zero-redaction';
+import { redactZeroString } from '../zero-redaction';
+import { ZeroSessionSearchIndex } from './session-index';
 import type {
-  ZeroSearchCandidate,
   ZeroSearchHit,
   ZeroSearchOptions,
   ZeroSearchResult,
@@ -16,6 +16,7 @@ export async function searchZeroSessions(
 ): Promise<ZeroSearchResult> {
   const normalizedQuery = normalizeZeroSearchQuery(query);
   const store = options.store ?? new ZeroSessionEventStore({ rootDir: options.rootDir });
+  const searchIndex = options.searchIndex ?? new ZeroSessionSearchIndex(store);
   const limit = normalizeLimit(options.limit);
   const contextChars = normalizeContextChars(options.contextChars);
 
@@ -28,28 +29,24 @@ export async function searchZeroSessions(
   const terms = splitSearchTerms(normalizedQuery);
 
   for (const session of sessions) {
-    const events = await store.readEvents(session.sessionId);
-    for (const event of events) {
-      if (options.type && event.type !== options.type) continue;
+    const indexedSession = await searchIndex.loadSession(session, {
+      reindex: options.reindex,
+    });
+    for (const entry of indexedSession.entries) {
+      if (options.type && entry.type !== options.type) continue;
 
-      const redactedPayload = redactZeroSecrets(event.payload);
-      const candidate: ZeroSearchCandidate = {
-        session,
-        event,
-        text: extractSearchText(redactedPayload),
-      };
-      const match = findSearchMatch(candidate.text, normalizedQuery, terms);
+      const match = findSearchMatch(entry.text, normalizedQuery, terms);
       if (!match) continue;
 
       hits.push({
         session,
         event: {
-          id: event.id,
-          sequence: event.sequence,
-          type: event.type,
-          createdAt: event.createdAt,
+          id: entry.eventId,
+          sequence: entry.sequence,
+          type: entry.type,
+          createdAt: entry.createdAt,
         },
-        context: buildContext(candidate.text, match.start, match.end, contextChars),
+        context: buildContext(entry.text, match.start, match.end, contextChars),
         match,
       });
 
@@ -190,18 +187,6 @@ function buildContext(text: string, start: number, end: number, contextChars: nu
   return text
     .slice(Math.max(0, start - contextChars), Math.min(text.length, end + contextChars))
     .trim();
-}
-
-function extractSearchText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (Array.isArray(value)) {
-    return value.map(extractSearchText).filter(Boolean).join(' ');
-  }
-  if (typeof value === 'object' && value !== null) {
-    return Object.values(value).map(extractSearchText).filter(Boolean).join(' ');
-  }
-  return '';
 }
 
 function formatCount(count: number, label: string): string {

@@ -159,6 +159,7 @@ program
   .option('--context <chars>', 'Context characters around each match', '80')
   .option('--session <id>', 'Search one session id')
   .option('--type <eventType>', 'Search one event type')
+  .option('--reindex', 'Drop and rebuild session search indexes before searching')
   .action(async (queryParts: string[] | undefined, options) => {
     try {
       const query = (queryParts ?? []).join(' ');
@@ -167,6 +168,7 @@ program
         contextChars: parseNonNegativeIntegerOption('--context', options.context),
         sessionId: options.session,
         type: options.type,
+        reindex: Boolean(options.reindex),
       });
 
       if (options.json) {
