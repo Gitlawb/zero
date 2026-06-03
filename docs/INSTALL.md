@@ -8,6 +8,19 @@ Zero release archives are published as:
 
 Each archive must have a matching `.sha256` file. The install scripts download both files and verify the checksum before copying the binary.
 
+Maintainers can verify the release directory before upload:
+
+```bash
+bun run package:release
+bun run verify:release
+```
+
+`verify:release` requires every archive in `dist/release` to have a same-directory `.sha256` file whose contents are:
+
+```text
+<sha256>  <archive-name>
+```
+
 ## Linux And macOS
 
 From a checkout:

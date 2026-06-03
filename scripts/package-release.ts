@@ -1,13 +1,13 @@
 import { $ } from 'bun';
-import { createHash } from 'node:crypto';
 import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import {
   getReleaseArchiveName,
   getReleasePackageName,
   zeroArtifactName,
   zeroArtifactPath,
 } from './artifact';
+import { writeSha256Checksum } from './release-checksums';
 
 function parsePackageVersion(packageText: string): string {
   const parsed = JSON.parse(packageText) as { version?: unknown };
@@ -41,11 +41,6 @@ async function run(command: string[]): Promise<void> {
     const message = stderr.trim() || `${command[0]} exited with ${exitCode}`;
     throw new Error(message);
   }
-}
-
-async function sha256(path: string): Promise<string> {
-  const bytes = await Bun.file(path).arrayBuffer();
-  return createHash('sha256').update(Buffer.from(bytes)).digest('hex');
 }
 
 const packageText = await Bun.file('package.json').text();
@@ -87,8 +82,7 @@ if (process.platform === 'win32') {
   await $`tar -C ${stagingDir} -czf ${archivePath} .`;
 }
 
-const checksum = await sha256(archivePath);
-await writeFile(`${archivePath}.sha256`, `${checksum}  ${basename(archivePath)}\n`);
+const checksum = await writeSha256Checksum(archivePath);
 
 console.log(`Packaged ${archiveName}`);
-console.log(`Wrote ${archiveName}.sha256`);
+console.log(`Wrote ${checksum.archiveName}.sha256`);

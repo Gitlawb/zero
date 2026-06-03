@@ -51,6 +51,9 @@ jobs:
       - name: Package release artifact
         run: bun run package:release
 
+      - name: Verify release checksums
+        run: bun run verify:release
+
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
