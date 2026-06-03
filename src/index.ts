@@ -4,6 +4,11 @@ import { configManager } from './config/manager';
 import { startTUI } from './tui';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
+import {
+  formatZeroConfigInspection,
+  inspectZeroConfig,
+  type ZeroConfigInspectionReport,
+} from './zero-config-inspection';
 import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from './zero-doctor';
 import { redactZeroErrorMessage, redactZeroSecrets } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
@@ -194,6 +199,30 @@ program
       }
     } catch (err: unknown) {
       console.error(`[zero] Doctor failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('config')
+  .description('Inspect Zero configuration')
+  .option('--json', 'Print config inspection as JSON')
+  .action((options: { json?: boolean }) => {
+    try {
+      const report = inspectZeroConfig();
+      const safeReport = redactZeroSecrets(report) as ZeroConfigInspectionReport;
+
+      if (options.json) {
+        console.log(JSON.stringify(safeReport, null, 2));
+      } else {
+        console.log(formatZeroConfigInspection(safeReport));
+      }
+
+      if (!report.ok) {
+        process.exitCode = 1;
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] Config inspection failed: ${redactZeroErrorMessage(err)}`);
       process.exitCode = 1;
     }
   });
