@@ -9,6 +9,11 @@ import {
   ZeroPendingProviderError,
 } from '../zero-provider-runtime';
 import type { ZeroResolvedProviderRuntime } from '../zero-provider-runtime';
+import {
+  redactZeroErrorMessage,
+  redactZeroSecrets,
+  redactZeroString,
+} from '../zero-redaction';
 
 export type ExecOutputFormat = 'text' | 'json';
 
@@ -140,7 +145,7 @@ export async function runExec(options: RunExecOptions): Promise<number> {
             type: 'tool_call',
             id: toolCall.id,
             name: toolCall.name,
-            arguments: toolCall.arguments,
+            arguments: redactZeroString(toolCall.arguments),
           });
         } else {
           process.stderr.write(`[tool] ${toolCall.name}\n`);
@@ -151,7 +156,7 @@ export async function runExec(options: RunExecOptions): Promise<number> {
           emitJson(outputFormat, {
             type: 'tool_result',
             tool_call_id: result.toolCallId,
-            result: result.result,
+            result: redactZeroString(result.result),
           });
         } else {
           process.stderr.write(`[result] ${truncateForStatus(result.result)}\n`);
@@ -211,30 +216,32 @@ function writeUsageError(message: string): void {
 }
 
 function writeExecError(format: ExecOutputFormat, code: string, message: string): void {
+  const safeMessage = redactZeroString(message);
   if (format === 'json') {
-    emitJson(format, { type: 'error', code, message });
+    emitJson(format, { type: 'error', code, message: safeMessage });
     return;
   }
 
-  process.stderr.write(`[zero] ${message}\n`);
+  process.stderr.write(`[zero] ${safeMessage}\n`);
 }
 
 function writeWarning(format: ExecOutputFormat, message: string): void {
+  const safeMessage = redactZeroString(message);
   if (format === 'json') {
-    emitJson(format, { type: 'warning', message });
+    emitJson(format, { type: 'warning', message: safeMessage });
     return;
   }
 
-  process.stderr.write(`[zero] WARNING: ${message}\n`);
+  process.stderr.write(`[zero] WARNING: ${safeMessage}\n`);
 }
 
 function emitJson(format: ExecOutputFormat, payload: Record<string, unknown>): void {
   if (format !== 'json') return;
-  process.stdout.write(`${JSON.stringify(payload)}\n`);
+  process.stdout.write(`${JSON.stringify(redactZeroSecrets(payload))}\n`);
 }
 
 function formatProviderError(err: any): string {
-  const message = err?.message ?? String(err);
+  const message = redactZeroErrorMessage(err);
   if (err instanceof ZeroPendingProviderError) {
     return `${message}\nUse an implemented provider, or set provider: "openai-compatible" with a custom gateway.`;
   }
@@ -243,6 +250,6 @@ function formatProviderError(err: any): string {
 }
 
 function truncateForStatus(value: string): string {
-  const compact = value.replace(/\s+/g, ' ').trim();
+  const compact = redactZeroString(value).replace(/\s+/g, ' ').trim();
   return compact.length > 200 ? `${compact.slice(0, 200)}...` : compact;
 }

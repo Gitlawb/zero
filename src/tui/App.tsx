@@ -12,6 +12,7 @@ import { loadProviderConfig } from '../config/provider';
 import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
 import { runAgent } from '../agent/loop';
 import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
+import { redactZeroError, redactZeroString } from '../zero-redaction';
 import {
   buildTuiModelStatus,
   formatModelListLines,
@@ -23,7 +24,7 @@ type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker';
 // Map low-level errors back to actionable guidance for the user. The full
 // error object is still surfaced separately when debug mode is on.
 function toFriendlyError(err: any): string {
-  const raw = err?.message || String(err);
+  const raw = redactZeroError(err).message;
   const lower = raw.toLowerCase();
 
   if (lower.includes('no llm provider configured') || lower.includes('no provider')) {
@@ -43,6 +44,12 @@ function toFriendlyError(err: any): string {
   }
 
   return `Error: ${raw}`;
+}
+
+function formatDebugErrorRow(label: string, value: unknown): string {
+  const text = String(value).slice(0, 40);
+  const padding = ' '.repeat(Math.max(0, 41 - text.length));
+  return `│ ${label.padEnd(8)} ${text}${padding}│`;
 }
 
 type ChatMessage =
@@ -278,7 +285,7 @@ export const App: React.FC = () => {
             setIsThinking(false);
             setMessages((prev) => [
               ...prev,
-              { type: 'tool-call', name: tc.name, args: tc.arguments },
+              { type: 'tool-call', name: tc.name, args: redactZeroString(tc.arguments) },
             ]);
             // Reset streaming index since we inserted a message
             setStreamingMessageIndex(null);
@@ -292,7 +299,7 @@ export const App: React.FC = () => {
                 if (msg && msg.type === 'tool-call' && (msg as any).result === undefined) {
                   (newMessages as any)[i] = {
                     ...msg,
-                    result: result.result,
+                    result: redactZeroString(result.result),
                   };
                   break;
                 }
@@ -305,7 +312,8 @@ export const App: React.FC = () => {
         setIsThinking(false);
 
         if (debugMode) {
-          setLastError(err);
+          const safeError = redactZeroError(err);
+          setLastError(safeError);
           try {
             const red = '\x1b[31m';
             const reset = '\x1b[0m';
@@ -314,16 +322,17 @@ export const App: React.FC = () => {
             console.error(`\n${red}┌${border}┐`);
             console.error(`│  FULL PROVIDER ERROR${' '.repeat(29)}│`);
             console.error(`├${border}┤`);
-            console.error(`│ Message: ${(err?.message || String(err)).slice(0, 40)}${' '.repeat(9)}│`);
-            console.error(`│ Name:    ${err?.name || 'Error'}${' '.repeat(42 - (err?.name || 'Error').length)}│`);
+            console.error(formatDebugErrorRow('Message:', safeError.message));
+            console.error(formatDebugErrorRow('Name:', safeError.name));
 
-            if (err?.response?.status) {
-              console.error(`│ Status:  ${err.response.status}${' '.repeat(42 - String(err.response.status).length)}│`);
+            const response = safeError.response as { status?: unknown } | undefined;
+            if (response?.status) {
+              console.error(formatDebugErrorRow('Status:', response.status));
             }
 
             console.error(`└${border}┘${reset}`);
             console.error('Full object:');
-            console.dir(err, { depth: 6 });
+            console.dir(safeError, { depth: 6 });
             console.error(`${red}${'='.repeat(52)}${reset}\n`);
           } catch (logErr) {
             console.error('Failed to log full error:', logErr);
@@ -729,4 +738,3 @@ export const App: React.FC = () => {
     </Box>
   );
 };
-

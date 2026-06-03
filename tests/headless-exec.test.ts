@@ -82,6 +82,37 @@ describe('zero exec CLI surface', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('redacts secrets from structured provider errors', async () => {
+    const dir = await mkdtemp(join(process.cwd(), '.zero-provider-test-'));
+    const leakedModel = ['sk-proj', 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH'].join('-');
+    try {
+      const providerScript = join(dir, `${leakedModel}.js`);
+      await writeFile(
+        providerScript,
+        `console.error(${JSON.stringify(`provider leaked ${leakedModel}`)}); process.exit(1);\n`,
+        'utf-8'
+      );
+
+      const result = await runZero(
+        ['exec', '--output-format', 'json', 'hello'],
+        {
+          ZERO_PROVIDER_COMMAND: `${JSON.stringify(process.execPath)} ${JSON.stringify(providerScript)}`,
+        }
+      );
+
+      const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+      expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.provider);
+      expect(events[0]).toMatchObject({
+        type: 'error',
+        code: 'provider_error',
+      });
+      expect(events[0].message).toContain('[REDACTED]');
+      expect(events[0].message).not.toContain(leakedModel);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('headless exec prompt helpers', () => {
