@@ -41,12 +41,15 @@ describe('install scripts', () => {
   it('installs from a prefixed Unix release archive without network access', async () => {
     if (process.platform === 'win32') return;
 
+    const releasePlatform = process.platform === 'darwin' ? 'macos' : 'linux';
+    const releaseArch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    const packageName = `zero-v0.1.0-${releasePlatform}-${releaseArch}`;
+    const archiveName = `${packageName}.tar.gz`;
     const root = await mkdtemp(join(tmpdir(), 'zero-install-test-'));
     const mockBin = join(root, 'bin');
-    const packageDir = join(root, 'package', 'zero-v0.1.0-linux-x64');
+    const packageDir = join(root, 'package', packageName);
     const releaseDir = join(root, 'release');
     const installDir = join(root, 'install');
-    const archiveName = 'zero-v0.1.0-linux-x64.tar.gz';
     const archivePath = join(releaseDir, archiveName);
     const checksumPath = `${archivePath}.sha256`;
 
@@ -57,7 +60,7 @@ describe('install scripts', () => {
     await writeFile(join(packageDir, 'zero'), '#!/usr/bin/env sh\necho mock-zero\n');
     await chmod(join(packageDir, 'zero'), 0o755);
 
-    const tar = Bun.spawn(['tar', '-C', join(root, 'package'), '-czf', archivePath, 'zero-v0.1.0-linux-x64'], {
+    const tar = Bun.spawn(['tar', '-C', join(root, 'package'), '-czf', archivePath, packageName], {
       stderr: 'pipe',
       stdout: 'pipe',
     });
