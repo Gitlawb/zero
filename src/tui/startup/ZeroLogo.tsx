@@ -3,19 +3,23 @@ import { Box, Text } from 'ink';
 import { theme } from './theme';
 
 /**
- * Block "ZERO" wordmark (figlet "ANSI Shadow").
- *
- * Terminals render text, not images — real monospace block glyphs are the
- * faithful way to draw the splash logo (and the established Zero wordmark).
- * Never generate this from an image model; it fakes the box-drawing glyphs.
+ * Block "ZERO" wordmark (figlet "Electronic" — outlined glyphs with a dotted
+ * fill, the closest faithful terminal match to the splash mockup). Generated
+ * from figlet, never an image model (which would fake the glyphs). Lines are
+ * padded to equal width at render so the block stays aligned when centered.
  */
 const LOGO = [
-  '███████╗ ███████╗ ██████╗   ██████╗ ',
-  '╚══███╔╝ ██╔════╝ ██╔══██╗ ██╔═══██╗',
-  '  ███╔╝  █████╗   ██████╔╝ ██║   ██║',
-  ' ███╔╝   ██╔══╝   ██╔══██╗ ██║   ██║',
-  '███████╗ ███████╗ ██║  ██║ ╚██████╔╝',
-  '╚══════╝ ╚══════╝ ╚═╝  ╚═╝  ╚═════╝ ',
+  " ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄",
+  "▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌",
+  " ▀▀▀▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀▀▀ ▐░█▀▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀█░▌",
+  "          ▐░▌▐░▌          ▐░▌       ▐░▌▐░▌       ▐░▌",
+  " ▄▄▄▄▄▄▄▄▄█░▌▐░█▄▄▄▄▄▄▄▄▄ ▐░█▄▄▄▄▄▄▄█░▌▐░▌       ▐░▌",
+  "▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░▌       ▐░▌",
+  "▐░█▀▀▀▀▀▀▀▀▀ ▐░█▀▀▀▀▀▀▀▀▀ ▐░█▀▀▀▀█░█▀▀ ▐░▌       ▐░▌",
+  "▐░▌          ▐░▌          ▐░▌     ▐░▌  ▐░▌       ▐░▌",
+  "▐░█▄▄▄▄▄▄▄▄▄ ▐░█▄▄▄▄▄▄▄▄▄ ▐░▌      ▐░▌ ▐░█▄▄▄▄▄▄▄█░▌",
+  "▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░▌       ▐░▌▐░░░░░░░░░░░▌",
+  " ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀  ▀         ▀  ▀▀▀▀▀▀▀▀▀▀▀",
 ];
 
 export const LOGO_WIDTH = Math.max(...LOGO.map((line) => line.length));
@@ -26,8 +30,8 @@ export interface ZeroLogoProps {
 }
 
 export const ZeroLogo: React.FC<ZeroLogoProps> = ({ maxWidth }) => {
-  // Degrade gracefully: render a compact title rather than a wrapped/broken
-  // logo when the terminal is narrower than the wordmark.
+  // Degrade gracefully: compact title rather than a wrapped/broken logo when
+  // the terminal is narrower than the wordmark.
   const fits = maxWidth >= LOGO_WIDTH;
 
   return (
@@ -35,7 +39,7 @@ export const ZeroLogo: React.FC<ZeroLogoProps> = ({ maxWidth }) => {
       {fits ? (
         LOGO.map((line, i) => (
           <Text key={i} color={theme.accent} bold>
-            {line}
+            {line.padEnd(LOGO_WIDTH)}
           </Text>
         ))
       ) : (
