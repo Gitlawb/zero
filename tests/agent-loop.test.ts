@@ -134,6 +134,19 @@ describe('runAgent tool-call flow', () => {
     expect(names).toContain('edit_file');
   });
 
+  it('respects enabled and disabled tool filters', async () => {
+    const provider = new MockProvider([[{ type: 'text', content: 'done' }]]);
+
+    await runAgent('which tools can you use?', provider, {
+      permissionMode: 'ask',
+      enabledTools: ['read_file', 'bash', 'write_file'],
+      disabledTools: ['bash'],
+    });
+
+    const names = (provider.receivedTools[0] ?? []).map((tool) => tool.name).sort();
+    expect(names).toEqual(['read_file', 'write_file']);
+  });
+
   it('runs prompt-gated tools through the registry only when unsafe mode grants permission', async () => {
     const command = 'echo zero-agent-unsafe';
     const safeProvider = new MockProvider([

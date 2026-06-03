@@ -3,32 +3,34 @@ import { useApp, useInput, useWindowSize } from 'ink';
 import { runAgent, type ToolApprovalDecision, type ToolApprovalRequest } from '../agent/loop';
 import { configManager } from '../config/manager';
 import { loadProviderConfig } from '../config/provider';
-import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
 import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
-import { redactZeroError, redactZeroString } from '../zero-redaction';
+import { redactZeroError, redactZeroSecrets, redactZeroString } from '../zero-redaction';
+import { formatZeroConfigInspection, inspectZeroConfig, type ZeroConfigInspectionReport } from '../zero-config-inspection';
+import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from '../zero-doctor';
+import { formatZeroSearchResult, searchZeroSessions } from '../zero-search';
+import { createZeroRunContext } from '../zero-runtime';
 import { AddProvider } from './AddProvider';
 import { ModelPicker } from './ModelPicker';
 import { ProviderPicker } from './ProviderPicker';
 import { TuiShell } from './TuiShell';
 import {
+  formatTuiHelpLines,
+  listTuiCommandNames,
+} from './commands';
+import {
   buildTuiModelStatus,
   formatModelListLines,
+  formatModelProfileLines,
+  resolveTuiModelProfileSelection,
   resolveTuiModelSelection,
 } from './model-selection';
 import type { ChatMessage } from './types';
 
 type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker';
-
-const KNOWN_COMMANDS = [
-  '/provider',
-  '/model',
-  '/plan',
-  '/debug-mode',
-  '/debug',
-  '/tools',
-  '/help',
-  '/exit',
-  '/quit',
+const KNOWN_COMMANDS = listTuiCommandNames();
+const INITIAL_MESSAGES: ChatMessage[] = [
+  { type: 'system', content: 'Welcome to zero. Type /provider to manage providers.' },
+  { type: 'system', content: 'Type /help for available commands.' },
 ];
 
 export const App: React.FC = () => {
@@ -36,10 +38,7 @@ export const App: React.FC = () => {
   const { columns, rows } = useWindowSize();
   const [screen, setScreen] = useState<Screen>('chat');
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { type: 'system', content: 'Welcome to zero. Type /provider to manage providers.' },
-    { type: 'system', content: 'Type /help for available commands.' },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const [isThinking, setIsThinking] = useState(false);
   const [streamingMessageIndex, setStreamingMessageIndex] = useState<number | null>(null);
   const streamingMessageIndexRef = useRef<number | null>(null);
@@ -223,7 +222,7 @@ export const App: React.FC = () => {
     addMessage({ type: 'user', content: trimmed });
 
     if (trimmed.startsWith('/')) {
-      handleSlashCommand(trimmed);
+      void handleSlashCommand(trimmed);
       return;
     }
 
@@ -234,22 +233,17 @@ export const App: React.FC = () => {
     setIsThinking(true);
 
     try {
-      const providerConfig = await loadProviderConfig();
-      const runtime = resolveZeroProviderRuntime({
-        provider: providerConfig.provider,
-        apiKey: providerConfig.apiKey,
-        baseURL: providerConfig.baseURL,
-        model: selectedModelOverride || providerConfig.model,
-        profileName: providerConfig.profileName,
-        source: providerConfig.source,
+      const context = await createZeroRunContext({
+        surface: 'tui',
+        model: selectedModelOverride,
+        permissionMode: 'ask',
       });
-      const provider = createZeroProvider(runtime);
 
-      await runAgent(prompt, provider, {
+      await runAgent(prompt, context.provider, {
+        ...context.agentOptions,
         debug: debugMode,
         toolsEnabled,
         planMode: isPlanMode,
-        permissionMode: 'ask',
         onToolApproval: requestToolApproval,
         onText: appendAssistantText,
         onToolCall: (tc) => {
@@ -314,7 +308,7 @@ export const App: React.FC = () => {
     });
   };
 
-  const handleSlashCommand = (command: string) => {
+  const handleSlashCommand = async (command: string) => {
     const parts = command.trim().split(/\s+/);
     const cmd = parts[0]?.toLowerCase() ?? '';
     const arg = parts[1]?.toLowerCase();
@@ -326,6 +320,27 @@ export const App: React.FC = () => {
 
     if (cmd === '/model') {
       handleModelCommand(parts.slice(1).join(' ').trim());
+      return;
+    }
+
+    if (cmd === '/clear') {
+      setMessages(INITIAL_MESSAGES);
+      setScrollOffset(0);
+      return;
+    }
+
+    if (cmd === '/context') {
+      addMessages([
+        { type: 'system', content: 'Context:' },
+        { type: 'system', content: `  provider      ${currentProviderName}` },
+        { type: 'system', content: `  model         ${currentModel}` },
+        { type: 'system', content: `  mode          ${isPlanMode ? 'plan' : 'chat'}` },
+        { type: 'system', content: `  permissions   ask (${approvalGrantsRef.current.size} session grants)` },
+        { type: 'system', content: `  tools         ${toolsEnabled ? 'enabled' : 'disabled'}` },
+        { type: 'system', content: `  tokens        ${estimatedTokens} estimated (${contextPercent}%)` },
+        { type: 'system', content: `  cost          $${estimatedCost.toFixed(4)} estimated` },
+        { type: 'system', content: `  active file   ${activeFile ?? 'none'}` },
+      ]);
       return;
     }
 
@@ -366,15 +381,36 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (cmd === '/permissions') {
+      addMessages([
+        { type: 'system', content: 'Permissions:' },
+        { type: 'system', content: '  mode          ask before shell/write/patch tools' },
+        { type: 'system', content: `  tools         ${toolsEnabled ? 'enabled' : 'disabled'}` },
+        { type: 'system', content: `  session grants ${approvalGrantsRef.current.size}` },
+        { type: 'system', content: '  controls      y allow, n deny, a allow this session' },
+      ]);
+      return;
+    }
+
+    if (cmd === '/doctor') {
+      await runTuiDoctor(parts.slice(1));
+      return;
+    }
+
+    if (cmd === '/config') {
+      runTuiConfigInspection();
+      return;
+    }
+
+    if (cmd === '/search') {
+      await runTuiSearch(parts.slice(1).join(' ').trim());
+      return;
+    }
+
     if (cmd === '/help') {
       addMessages([
         { type: 'system', content: 'Available commands:' },
-        { type: 'system', content: '  /provider     Manage LLM providers' },
-        { type: 'system', content: '  /model        Select or list registry models for this session' },
-        { type: 'system', content: '  /plan         Toggle planning behavior' },
-        { type: 'system', content: '  /debug        Toggle debug mode' },
-        { type: 'system', content: '  /tools        Toggle tool calling' },
-        { type: 'system', content: '  /exit         Quit' },
+        ...formatTuiHelpLines().map((line) => ({ type: 'system' as const, content: `  ${line}` })),
       ]);
       return;
     }
@@ -401,6 +437,24 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (modelArg.toLowerCase() === 'profiles') {
+      addMessages([
+        { type: 'system', content: 'Model profiles:' },
+        ...formatModelProfileLines().map((line) => ({ type: 'system' as const, content: `  ${line}` })),
+      ]);
+      return;
+    }
+
+    const profileSelection = resolveTuiModelProfileSelection(modelArg);
+    if (profileSelection) {
+      setSelectedModelOverride(profileSelection.model.id);
+      addSystemMessage(
+        `Model profile ${profileSelection.profile.id} selected: ` +
+        `${profileSelection.model.displayName} (${profileSelection.model.provider})`
+      );
+      return;
+    }
+
     const selectedModel = resolveTuiModelSelection(modelArg);
     if (!selectedModel) {
       addSystemMessage(`Unknown model: ${modelArg}. Type /model list or /model to browse.`);
@@ -409,6 +463,42 @@ export const App: React.FC = () => {
 
     setSelectedModelOverride(selectedModel.id);
     addSystemMessage(`Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})`);
+  };
+
+  const runTuiDoctor = async (args: string[]) => {
+    addSystemMessage('Running Zero doctor...');
+    try {
+      const report = await runZeroDoctor({
+        connectivity: args.includes('--connectivity'),
+      });
+      addSystemLines(formatZeroDoctorReport(redactZeroSecrets(report) as ZeroDoctorReport));
+    } catch (err: any) {
+      addSystemMessage(`Doctor failed: ${redactZeroError(err).message}`);
+    }
+  };
+
+  const runTuiConfigInspection = () => {
+    try {
+      addSystemLines(
+        formatZeroConfigInspection(redactZeroSecrets(inspectZeroConfig()) as ZeroConfigInspectionReport)
+      );
+    } catch (err: any) {
+      addSystemMessage(`Config inspection failed: ${redactZeroError(err).message}`);
+    }
+  };
+
+  const runTuiSearch = async (query: string) => {
+    if (!query) {
+      addSystemMessage('Usage: /search <query>');
+      return;
+    }
+
+    try {
+      const result = await searchZeroSessions(query, { limit: 8, contextChars: 80 });
+      addSystemLines(formatZeroSearchResult(result));
+    } catch (err: any) {
+      addSystemMessage(`Search failed: ${redactZeroError(err).message}`);
+    }
   };
 
   const handleProviderSelected = (name: string) => {
@@ -469,6 +559,14 @@ export const App: React.FC = () => {
 
   const addSystemMessage = (content: string) => {
     setMessages((prev) => [...prev, { type: 'system', content }]);
+  };
+
+  const addSystemLines = (content: string) => {
+    const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    setMessages((prev) => [
+      ...prev,
+      ...lines.map((line) => ({ type: 'system' as const, content: line })),
+    ]);
   };
 
   const requestToolApproval = async (request: ToolApprovalRequest): Promise<ToolApprovalDecision> => {

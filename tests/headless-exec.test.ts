@@ -44,6 +44,12 @@ describe('zero exec CLI surface', () => {
     expect(result.stdout).toContain('Usage: zero exec');
     expect(result.stdout).toContain('--file');
     expect(result.stdout).toContain('--model');
+    expect(result.stdout).toContain('--profile');
+    expect(result.stdout).toContain('--reasoning-effort');
+    expect(result.stdout).toContain('--auto');
+    expect(result.stdout).toContain('--enabled-tools');
+    expect(result.stdout).toContain('--disabled-tools');
+    expect(result.stdout).toContain('--list-tools');
     expect(result.stdout).toContain('--cwd');
     expect(result.stdout).toContain('--input-format');
     expect(result.stdout).toContain('--output-format');
@@ -74,6 +80,44 @@ describe('zero exec CLI surface', () => {
     expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
     expect(result.stdout.trim()).toBe('');
     expect(result.stderr).toContain('Invalid input format');
+  });
+
+  it('returns usage exit code for invalid autonomy and tool filters', async () => {
+    const badAuto = await runZero(['exec', '--auto', 'chaos', 'hello']);
+    expect(badAuto.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+    expect(badAuto.stderr).toContain('Invalid autonomy level');
+
+    const badTool = await runZero(['exec', '--enabled-tools', 'missing_tool', 'hello']);
+    expect(badTool.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+    expect(badTool.stderr).toContain('Unknown tool');
+  });
+
+  it('lists visible tools without requiring a prompt', async () => {
+    const dir = await mkdtemp(join(process.cwd(), '.zero-list-tools-test-'));
+    try {
+      const providerScript = join(dir, 'provider-command.js');
+      await writeFile(
+        providerScript,
+        'console.log(JSON.stringify({ provider: "openai-compatible", base_url: "http://localhost/v1", model: "local-model" }));\n',
+        'utf-8'
+      );
+
+      const result = await runZero(
+        ['exec', '--list-tools', '--enabled-tools', 'read_file,grep'],
+        {
+          ZERO_PROVIDER_COMMAND: `${JSON.stringify(process.execPath)} ${JSON.stringify(providerScript)}`,
+        }
+      );
+
+      expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.success);
+      expect(result.stderr.trim()).toBe('');
+      expect(result.stdout).toContain('Tools visible to model');
+      expect(result.stdout).toContain('read_file');
+      expect(result.stdout).toContain('grep');
+      expect(result.stdout).not.toContain('bash');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns provider exit code for provider runtime failures', async () => {

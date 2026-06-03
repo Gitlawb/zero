@@ -3,6 +3,7 @@ import { runExec } from './cli';
 import { configManager } from './config/manager';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
+import { parseToolList } from './zero-runtime';
 import {
   formatZeroConfigInspection,
   inspectZeroConfig,
@@ -51,16 +52,39 @@ program
   .argument('[prompt...]', 'Prompt to send to the coding agent')
   .option('-f, --file <path>', 'Read the prompt from a file')
   .option('-m, --model <model>', 'Override the configured model for this run')
+  .option('--profile <profile>', 'Use a model profile: fast, balanced, deep, or cheap')
+  .option('-r, --reasoning-effort <effort>', 'Reasoning effort for models that support it')
+  .option('--auto <level>', 'Autonomy level: low, medium, or high', 'low')
+  .option('--enabled-tools <tools>', 'Only expose these tools, separated by commas or spaces')
+  .option('--disabled-tools <tools>', 'Hide these tools, separated by commas or spaces')
+  .option('--list-tools', 'List tools visible under the selected model/autonomy and exit')
+  .option('--max-turns <number>', 'Maximum agent loop turns for this run')
   .option('-C, --cwd <path>', 'Run from a different working directory')
   .option('-i, --input-format <format>', 'Input format: text or stream-json', 'text')
   .option('-o, --output-format <format>', 'Output format: text, json, or stream-json', 'text')
   .option('--skip-permissions-unsafe', 'Allow prompt-gated tools for this run')
   .action(async (promptParts: string[] | undefined, options) => {
+    let maxTurns: number | undefined;
+    try {
+      maxTurns = parseNonNegativeIntegerOption('--max-turns', options.maxTurns);
+    } catch (err: unknown) {
+      console.error(`[zero] ${getErrorMessage(err)}`);
+      process.exitCode = 2;
+      return;
+    }
+
     process.exitCode = await runExec({
       prompt: (promptParts ?? []).join(' '),
       file: options.file,
       inputFormat: options.inputFormat,
       model: options.model,
+      modelProfile: options.profile,
+      reasoningEffort: options.reasoningEffort,
+      autonomy: options.auto,
+      enabledTools: parseToolList(options.enabledTools),
+      disabledTools: parseToolList(options.disabledTools),
+      listTools: Boolean(options.listTools),
+      maxTurns,
       cwd: options.cwd,
       outputFormat: options.outputFormat,
       skipPermissionsUnsafe: Boolean(options.skipPermissionsUnsafe),

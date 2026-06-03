@@ -18,7 +18,22 @@ export {
   formatZeroModelCost,
 } from './cost';
 
+export {
+  ZERO_MODEL_PROFILES,
+  formatZeroModelProfile,
+  getZeroModelProfile,
+  isZeroModelProfile,
+  listZeroModelProfiles,
+  resolveZeroModelProfile,
+} from './profiles';
+
 export type { ZeroModelId } from './registry';
+
+export type {
+  ZeroModelProfile,
+  ZeroModelProfileId,
+  ZeroResolvedModelProfile,
+} from './profiles';
 
 export type {
   ZeroModelCapability,

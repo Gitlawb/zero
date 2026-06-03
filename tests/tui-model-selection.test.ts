@@ -2,7 +2,9 @@ import { describe, expect, it } from 'bun:test';
 import {
   buildTuiModelStatus,
   formatModelListLines,
+  formatModelProfileLines,
   getSelectableZeroModels,
+  resolveTuiModelProfileSelection,
   resolveTuiModelSelection,
 } from '../src/tui/model-selection';
 
@@ -46,5 +48,14 @@ describe('TUI model selection helpers', () => {
     expect(lines).toHaveLength(4);
     expect(lines[0]).toContain('gpt');
     expect(lines[3]).toContain('more');
+  });
+
+  it('resolves intent-based model profiles', () => {
+    const deep = resolveTuiModelProfileSelection('deep');
+
+    expect(deep?.profile.id).toBe('deep');
+    expect(deep?.model.status).not.toBe('deprecated');
+    expect(resolveTuiModelSelection('cheap')).toBeDefined();
+    expect(formatModelProfileLines().join('\n')).toContain('balanced');
   });
 });

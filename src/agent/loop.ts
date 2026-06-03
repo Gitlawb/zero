@@ -1,5 +1,5 @@
 import type { Provider } from '../providers/types';
-import type { ZeroTokenUsage } from '../zero-model-registry';
+import type { ZeroReasoningEffort, ZeroTokenUsage } from '../zero-model-registry';
 import type { ToolCall, ToolResult, ToolSafety } from '../tools/types';
 import { toolRegistry } from '../tools';
 import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from './prompts';
@@ -28,6 +28,9 @@ export interface AgentOptions {
   planMode?: boolean;       // when true, the agent plans without modifying the codebase
   permissionMode?: AgentPermissionMode; // ask prompts for gated tools; unsafe grants them for this run
   onToolApproval?: (request: ToolApprovalRequest) => ToolApprovalDecision | Promise<ToolApprovalDecision>;
+  enabledTools?: readonly string[];
+  disabledTools?: readonly string[];
+  reasoningEffort?: ZeroReasoningEffort;
 }
 
 interface PendingToolCall {
@@ -51,7 +54,10 @@ export async function runAgent(
     debug = false,
     planMode = false,
     permissionMode = 'auto',
-    onToolApproval
+    onToolApproval,
+    enabledTools,
+    disabledTools,
+    reasoningEffort,
   } = options;
 
   // Clear any previous plan when starting a new task
@@ -68,11 +74,11 @@ export async function runAgent(
   // Auto mode only advertises tools that can run without an interactive grant.
   // Ask/unsafe modes can advertise prompt-gated tools, but deny tools are never
   // offered to the model.
-  const executableTools = tools.filter(t =>
-    permissionMode === 'unsafe' || permissionMode === 'ask'
-      ? t.safety.permission !== 'deny'
-      : t.safety.permission === 'allow'
-  );
+  const executableTools = filterExecutableTools(tools, {
+    permissionMode,
+    enabledTools,
+    disabledTools,
+  });
   const approvalGrants = new Set<string>();
   let finalAnswer = '';
 
@@ -115,6 +121,9 @@ export async function runAgent(
       console.log(`│ Messages: ${messages.length}${' '.repeat(40 - String(messages.length).length)}│`);
       console.log(`│ Tools enabled: ${toolDefinitions.length > 0}${' '.repeat(33)}│`);
       console.log(`│ Tool count: ${toolDefinitions.length}${' '.repeat(38 - String(toolDefinitions.length).length)}│`);
+      if (reasoningEffort) {
+        console.log(`│ Reasoning effort: ${reasoningEffort}${' '.repeat(Math.max(0, 31 - reasoningEffort.length))}│`);
+      }
       
       if (toolDefinitions.length > 0) {
         const toolsList = toolDefinitions.map(t => t.name).join(', ');
@@ -274,4 +283,25 @@ export async function runAgent(
   }
 
   return finalAnswer || 'Agent reached maximum number of turns without a final answer.';
+}
+
+function filterExecutableTools(
+  tools: ReturnType<typeof toolRegistry.getAll>,
+  options: {
+    permissionMode: AgentPermissionMode;
+    enabledTools?: readonly string[];
+    disabledTools?: readonly string[];
+  }
+) {
+  const enabled = options.enabledTools ? new Set(options.enabledTools) : undefined;
+  const disabled = new Set(options.disabledTools ?? []);
+
+  return tools.filter((tool) => {
+    if (enabled && !enabled.has(tool.name)) return false;
+    if (disabled.has(tool.name)) return false;
+
+    return options.permissionMode === 'unsafe' || options.permissionMode === 'ask'
+      ? tool.safety.permission !== 'deny'
+      : tool.safety.permission === 'allow';
+  });
 }

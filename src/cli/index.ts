@@ -1,19 +1,18 @@
 import { stat } from 'fs/promises';
 import { resolve } from 'path';
 import { runAgent } from '../agent/loop';
-import { loadProviderConfig } from '../config/provider';
-import type { Provider } from '../providers/types';
-import {
-  createZeroProvider,
-  resolveZeroProviderRuntime,
-  ZeroPendingProviderError,
-} from '../zero-provider-runtime';
-import type { ZeroResolvedProviderRuntime } from '../zero-provider-runtime';
+import { toolRegistry } from '../tools';
 import {
   redactZeroErrorMessage,
   redactZeroSecrets,
   redactZeroString,
 } from '../zero-redaction';
+import {
+  createZeroRunContext,
+  ZeroRuntimeProviderError,
+  ZeroRuntimeUsageError,
+  type ZeroRunContext,
+} from '../zero-runtime';
 import {
   ZERO_STREAM_JSON_SCHEMA_VERSION,
   createZeroStreamJsonRunId,
@@ -40,9 +39,15 @@ export interface RunExecOptions {
   file?: string;
   inputFormat?: string;
   model?: string;
+  modelProfile?: string;
+  reasoningEffort?: string;
+  autonomy?: string;
+  enabledTools?: string[];
+  disabledTools?: string[];
   cwd?: string;
   outputFormat?: string;
   skipPermissionsUnsafe?: boolean;
+  listTools?: boolean;
   maxTurns?: number;
   stdin?: string;
 }
@@ -131,28 +136,37 @@ export async function runExec(options: RunExecOptions): Promise<number> {
 
   try {
     await changeWorkingDirectory(options.cwd);
-    const prompt = await resolveExecPrompt({
+    const prompt = options.listTools ? undefined : await resolveExecPrompt({
       ...options,
       inputFormat,
       stdin: options.stdin ?? await readStreamJsonStdinIfNeeded(inputFormat, options),
     });
-
-    let runtime: ZeroResolvedProviderRuntime | undefined;
-    let provider: Provider;
+    let context: ZeroRunContext;
 
     try {
-      const providerConfig = await loadProviderConfig();
-      runtime = resolveZeroProviderRuntime({
-        provider: providerConfig.provider,
-        apiKey: providerConfig.apiKey,
-        baseURL: providerConfig.baseURL,
-        model: options.model?.trim() || providerConfig.model,
-        profileName: providerConfig.profileName,
-        source: providerConfig.source,
+      context = await createZeroRunContext({
+        surface: 'exec',
+        model: options.model,
+        modelProfile: options.modelProfile,
+        reasoningEffort: options.reasoningEffort,
+        autonomy: options.autonomy,
+        skipPermissionsUnsafe: options.skipPermissionsUnsafe,
+        enabledTools: options.enabledTools,
+        disabledTools: options.disabledTools,
+        maxTurns: options.maxTurns,
       });
-      provider = createZeroProvider(runtime);
     } catch (err: any) {
-      writeExecError(outputFormat, 'provider_error', formatProviderError(err), {
+      if (err instanceof ZeroRuntimeUsageError) {
+        writeExecError(outputFormat, 'usage_error', err.message, {
+          exitCode: ZERO_EXEC_EXIT_CODES.usage,
+          recoverable: true,
+          runId,
+        });
+        return ZERO_EXEC_EXIT_CODES.usage;
+      }
+
+      const message = err instanceof ZeroRuntimeProviderError ? err.message : formatProviderError(err);
+      writeExecError(outputFormat, 'provider_error', message, {
         exitCode: ZERO_EXEC_EXIT_CODES.provider,
         recoverable: false,
         runId,
@@ -160,20 +174,28 @@ export async function runExec(options: RunExecOptions): Promise<number> {
       return ZERO_EXEC_EXIT_CODES.provider;
     }
 
-    if (options.skipPermissionsUnsafe) {
-      writeWarning(
-        outputFormat,
-        '--skip-permissions-unsafe grants prompt-gated tools for this run.',
-        runId
-      );
+    if (options.listTools) {
+      writeToolList(outputFormat, context, runId);
+      return ZERO_EXEC_EXIT_CODES.success;
+    }
+
+    if (context.permissionMode === 'unsafe') {
+      writeWarning(outputFormat, 'Unsafe permissions are active for this run.', runId);
     }
 
     emitLegacyJson(outputFormat, {
       type: 'run_start',
       cwd: process.cwd(),
-      provider: runtime.provider,
-      model: runtime.modelId ?? runtime.requestedModel,
-      api_model: runtime.apiModel,
+      provider: context.runtime.provider,
+      model: context.modelId,
+      model_profile: context.modelProfile?.id,
+      model_label: context.modelLabel,
+      api_model: context.runtime.apiModel,
+      autonomy: context.autonomy,
+      permission_mode: context.permissionMode,
+      reasoning_effort: context.reasoningEffort,
+      enabled_tools: context.enabledTools,
+      disabled_tools: context.disabledTools,
       output_format: outputFormat,
     });
     emitStreamJson(outputFormat, {
@@ -181,16 +203,15 @@ export async function runExec(options: RunExecOptions): Promise<number> {
       type: 'run_start',
       runId,
       cwd: process.cwd(),
-      provider: runtime.provider,
-      model: runtime.modelId ?? runtime.requestedModel,
-      apiModel: runtime.apiModel,
+      provider: context.runtime.provider,
+      model: context.modelId,
+      apiModel: context.runtime.apiModel,
     });
 
     let streamedText = '';
 
-    const finalAnswer = await runAgent(prompt, provider, {
-      maxTurns: options.maxTurns,
-      permissionMode: options.skipPermissionsUnsafe ? 'unsafe' : 'auto',
+    const finalAnswer = await runAgent(prompt!, context.provider, {
+      ...context.agentOptions,
       onText: (text) => {
         streamedText += text;
         if (outputFormat === 'json') {
@@ -449,6 +470,77 @@ function writeWarning(format: ExecOutputFormat, message: string, runId: string):
   process.stderr.write(`[zero] WARNING: ${safeMessage}\n`);
 }
 
+function writeToolList(format: ExecOutputFormat, context: ZeroRunContext, runId: string): void {
+  const tools = listContextTools(context);
+  if (format === 'json') {
+    emitLegacyJson(format, {
+      type: 'tool_list',
+      permission_mode: context.permissionMode,
+      tools: tools.map((tool) => ({
+        name: tool.name,
+        side_effect: tool.safety.sideEffect,
+        permission: tool.safety.permission,
+        reason: tool.safety.reason,
+      })),
+    });
+    return;
+  }
+
+  const text = formatToolList(context, tools);
+  if (format === 'stream-json') {
+    emitStreamJson(format, {
+      schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+      type: 'run_start',
+      runId,
+      cwd: process.cwd(),
+      provider: context.runtime.provider,
+      model: context.modelId,
+      apiModel: context.runtime.apiModel,
+    });
+    emitStreamJson(format, {
+      schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+      type: 'final',
+      runId,
+      text,
+    });
+    emitStreamJson(format, {
+      schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+      type: 'run_end',
+      runId,
+      status: 'success',
+      exitCode: ZERO_EXEC_EXIT_CODES.success,
+    });
+    return;
+  }
+
+  process.stdout.write(text);
+}
+
+function formatToolList(
+  context: ZeroRunContext,
+  tools: ReturnType<typeof listContextTools>
+): string {
+  let output = `Tools visible to model (${context.permissionMode}):\n`;
+  for (const tool of tools) {
+    output += `  ${tool.name.padEnd(14)} ${tool.safety.sideEffect.padEnd(16)} ${tool.safety.permission} - ${tool.safety.reason}\n`;
+  }
+  return output;
+}
+
+function listContextTools(context: ZeroRunContext) {
+  const enabled = context.enabledTools ? new Set(context.enabledTools) : undefined;
+  const disabled = new Set(context.disabledTools ?? []);
+
+  return toolRegistry.getAll().filter((tool) => {
+    if (enabled && !enabled.has(tool.name)) return false;
+    if (disabled.has(tool.name)) return false;
+
+    return context.permissionMode === 'unsafe' || context.permissionMode === 'ask'
+      ? tool.safety.permission !== 'deny'
+      : tool.safety.permission === 'allow';
+  });
+}
+
 function emitLegacyJson(format: ExecOutputFormat, payload: Record<string, unknown>): void {
   if (format !== 'json') return;
   process.stdout.write(`${JSON.stringify(redactZeroSecrets(payload))}\n`);
@@ -476,12 +568,7 @@ function classifyToolSideEffect(name: string): ZeroStreamJsonToolSideEffect {
 }
 
 function formatProviderError(err: any): string {
-  const message = redactZeroErrorMessage(err);
-  if (err instanceof ZeroPendingProviderError) {
-    return `${message}\nUse an implemented provider, or set provider: "openai-compatible" with a custom gateway.`;
-  }
-
-  return message;
+  return redactZeroErrorMessage(err);
 }
 
 function truncateForStatus(value: string): string {

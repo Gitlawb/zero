@@ -1,9 +1,13 @@
 import {
   getZeroModel,
+  formatZeroModelProfile,
+  listZeroModelProfiles,
   listZeroModels,
+  resolveZeroModelProfile,
   resolveZeroModelId,
   type ZeroModelDefinition,
   type ZeroModelProvider,
+  type ZeroModelProfile,
 } from '../zero-model-registry';
 import type { ProviderConfig } from '../config/provider';
 
@@ -28,8 +32,17 @@ export function getSelectableZeroModels(): ZeroModelDefinition[] {
 export function resolveTuiModelSelection(input: string): ZeroModelDefinition | undefined {
   const normalized = input.trim();
   if (!normalized) return undefined;
+  const profile = resolveZeroModelProfile(normalized);
+  if (profile) return profile.model;
   const modelId = resolveZeroModelId(normalized);
   return modelId ? getZeroModel(modelId) : undefined;
+}
+
+export function resolveTuiModelProfileSelection(input: string): {
+  profile: ZeroModelProfile;
+  model: ZeroModelDefinition;
+} | undefined {
+  return resolveZeroModelProfile(input);
 }
 
 export function buildTuiModelStatus(
@@ -68,4 +81,8 @@ export function formatModelListLines(limit = 12): string[] {
   }
 
   return lines;
+}
+
+export function formatModelProfileLines(): string[] {
+  return listZeroModelProfiles().map(formatZeroModelProfile);
 }
