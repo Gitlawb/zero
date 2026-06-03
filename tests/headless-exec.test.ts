@@ -2,10 +2,12 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { join } from 'path';
 import {
+  parseExecInputFormat,
   parseExecOutputFormat,
   resolveExecPrompt,
   ZERO_EXEC_EXIT_CODES,
 } from '../src/cli';
+import { ZERO_STREAM_JSON_SCHEMA_VERSION } from '../src/zero-stream-json';
 
 async function runZero(args: string[], envOverrides: NodeJS.ProcessEnv = {}) {
   const child = Bun.spawn([process.execPath, 'src/index.ts', ...args], {
@@ -33,7 +35,9 @@ describe('zero exec CLI surface', () => {
     expect(result.stdout).toContain('--file');
     expect(result.stdout).toContain('--model');
     expect(result.stdout).toContain('--cwd');
+    expect(result.stdout).toContain('--input-format');
     expect(result.stdout).toContain('--output-format');
+    expect(result.stdout).toContain('stream-json');
     expect(result.stdout).toContain('--skip-permissions-unsafe');
   });
 
@@ -51,6 +55,15 @@ describe('zero exec CLI surface', () => {
     expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
     expect(result.stdout.trim()).toBe('');
     expect(result.stderr).toContain('Invalid output format');
+    expect(result.stderr).toContain('stream-json');
+  });
+
+  it('returns usage exit code for an invalid input format', async () => {
+    const result = await runZero(['exec', '--input-format', 'yaml', 'hello']);
+
+    expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.usage);
+    expect(result.stdout.trim()).toBe('');
+    expect(result.stderr).toContain('Invalid input format');
   });
 
   it('returns provider exit code for provider runtime failures', async () => {
@@ -78,6 +91,45 @@ describe('zero exec CLI surface', () => {
         code: 'provider_error',
       });
       expect(events[0].message).toContain('Unknown Zero model');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits schema-versioned stream-json provider errors and run end', async () => {
+    const dir = await mkdtemp(join(process.cwd(), '.zero-provider-test-'));
+    try {
+      const providerScript = join(dir, 'provider-command.js');
+      await writeFile(
+        providerScript,
+        'console.log(JSON.stringify({ model: "zero-test-unknown-model" }));\n',
+        'utf-8'
+      );
+
+      const result = await runZero(
+        ['exec', '--output-format', 'stream-json', 'hello'],
+        {
+          ZERO_PROVIDER_COMMAND: `${JSON.stringify(process.execPath)} ${JSON.stringify(providerScript)}`,
+        }
+      );
+
+      const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+      expect(result.exitCode).toBe(ZERO_EXEC_EXIT_CODES.provider);
+      expect(result.stderr.trim()).toBe('');
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+        type: 'error',
+        code: 'provider_error',
+        recoverable: false,
+      });
+      expect(events[0].message).toContain('Unknown Zero model');
+      expect(events[1]).toMatchObject({
+        schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+        type: 'run_end',
+        status: 'error',
+        exitCode: ZERO_EXEC_EXIT_CODES.provider,
+      });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -120,8 +172,17 @@ describe('headless exec prompt helpers', () => {
     expect(parseExecOutputFormat(undefined)).toBe('text');
     expect(parseExecOutputFormat('text')).toBe('text');
     expect(parseExecOutputFormat('json')).toBe('json');
+    expect(parseExecOutputFormat('stream-json')).toBe('stream-json');
     expect(parseExecOutputFormat('JSON')).toBe('json');
     expect(parseExecOutputFormat('xml')).toBeUndefined();
+  });
+
+  it('parses supported input formats', () => {
+    expect(parseExecInputFormat(undefined)).toBe('text');
+    expect(parseExecInputFormat('text')).toBe('text');
+    expect(parseExecInputFormat('stream-json')).toBe('stream-json');
+    expect(parseExecInputFormat('STREAM-JSON')).toBe('stream-json');
+    expect(parseExecInputFormat('yaml')).toBeUndefined();
   });
 
   it('combines inline and file prompts', async () => {
@@ -139,5 +200,26 @@ describe('headless exec prompt helpers', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('resolves prompts from stream-json stdin input', async () => {
+    const prompt = await resolveExecPrompt({
+      inputFormat: 'stream-json',
+      stdin: [
+        JSON.stringify({
+          schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+          type: 'message',
+          role: 'user',
+          content: 'Review the changed files.',
+        }),
+        JSON.stringify({
+          schemaVersion: ZERO_STREAM_JSON_SCHEMA_VERSION,
+          type: 'prompt',
+          content: 'Return only blockers.',
+        }),
+      ].join('\n'),
+    });
+
+    expect(prompt).toBe('Review the changed files.\n\nReturn only blockers.');
   });
 });

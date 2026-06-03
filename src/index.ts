@@ -52,12 +52,14 @@ program
   .option('-f, --file <path>', 'Read the prompt from a file')
   .option('-m, --model <model>', 'Override the configured model for this run')
   .option('-C, --cwd <path>', 'Run from a different working directory')
-  .option('-o, --output-format <format>', 'Output format: text or json', 'text')
+  .option('-i, --input-format <format>', 'Input format: text or stream-json', 'text')
+  .option('-o, --output-format <format>', 'Output format: text, json, or stream-json', 'text')
   .option('--skip-permissions-unsafe', 'Allow prompt-gated tools for this run')
   .action(async (promptParts: string[] | undefined, options) => {
     process.exitCode = await runExec({
       prompt: (promptParts ?? []).join(' '),
       file: options.file,
+      inputFormat: options.inputFormat,
       model: options.model,
       cwd: options.cwd,
       outputFormat: options.outputFormat,
