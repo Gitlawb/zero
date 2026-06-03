@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { useApp, useInput, useWindowSize } from 'ink';
-import { runAgent } from '../agent/loop';
+import { runAgent, type ToolApprovalDecision, type ToolApprovalRequest } from '../agent/loop';
 import { configManager } from '../config/manager';
 import { loadProviderConfig } from '../config/provider';
 import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
@@ -52,6 +52,9 @@ export const App: React.FC = () => {
   const [scrollOffset, setScrollOffset] = useState(0);
   const [terminalRows, setTerminalRows] = useState(24);
   const [git, setGit] = useState<{ branch?: string; ahead: number; behind: number }>({ ahead: 0, behind: 0 });
+  const [pendingApproval, setPendingApproval] = useState<ToolApprovalRequest | null>(null);
+  const approvalResolverRef = useRef<((decision: ToolApprovalDecision) => void) | null>(null);
+  const approvalGrantsRef = useRef(new Set<string>());
 
   React.useEffect(() => {
     const checkProvider = async () => {
@@ -145,6 +148,19 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (pendingApproval) {
+      const decision = inputChar?.toLowerCase();
+      if (decision === 'y') {
+        resolvePendingApproval('allow');
+      } else if (decision === 'n') {
+        resolvePendingApproval('deny');
+      } else if (decision === 'a') {
+        approvalGrantsRef.current.add(pendingApproval.grantKey);
+        resolvePendingApproval('allow-session');
+      }
+      return;
+    }
+
     if (!isInChat) return;
 
     if (!input) {
@@ -233,6 +249,8 @@ export const App: React.FC = () => {
         debug: debugMode,
         toolsEnabled,
         planMode: isPlanMode,
+        permissionMode: 'ask',
+        onToolApproval: requestToolApproval,
         onText: appendAssistantText,
         onToolCall: (tc) => {
           setIsThinking(false);
@@ -453,6 +471,23 @@ export const App: React.FC = () => {
     setMessages((prev) => [...prev, { type: 'system', content }]);
   };
 
+  const requestToolApproval = async (request: ToolApprovalRequest): Promise<ToolApprovalDecision> => {
+    if (approvalGrantsRef.current.has(request.grantKey)) {
+      return 'allow';
+    }
+
+    setPendingApproval(request);
+    return new Promise<ToolApprovalDecision>((resolve) => {
+      approvalResolverRef.current = resolve;
+    });
+  };
+
+  const resolvePendingApproval = (decision: ToolApprovalDecision) => {
+    approvalResolverRef.current?.(decision);
+    approvalResolverRef.current = null;
+    setPendingApproval(null);
+  };
+
   if (screen === 'add-provider') {
     return (
       <AddProvider
@@ -521,6 +556,7 @@ export const App: React.FC = () => {
       totalTokens={estimatedTokens}
       costUsd={estimatedCost}
       contextPercent={contextPercent}
+      pendingApproval={pendingApproval}
       terminalWidth={terminalWidth}
       terminalHeight={terminalHeight}
     />

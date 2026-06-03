@@ -2,12 +2,14 @@ import React from 'react';
 import { Box } from 'ink';
 import { CommandSuggestions } from './CommandSuggestions';
 import { DebugErrorPanel } from './DebugErrorPanel';
+import { ToolApprovalPanel } from './ToolApprovalPanel';
 import { StartupScreen } from './StartupScreen';
 import { Transcript } from './Transcript';
 import { TuiHeader } from './TuiHeader';
 import { TuiPromptBox } from './TuiPromptBox';
 import { TuiStatusBar } from './TuiStatusBar';
 import type { ChatMessage, TuiModeState } from './types';
+import type { ToolApprovalRequest } from '../agent/loop';
 
 interface TuiShellProps extends TuiModeState {
   messages: ChatMessage[];
@@ -29,6 +31,7 @@ interface TuiShellProps extends TuiModeState {
   totalTokens?: number;
   costUsd?: number;
   contextPercent?: number;
+  pendingApproval?: ToolApprovalRequest | null;
   terminalWidth: number;
   terminalHeight: number;
 }
@@ -53,6 +56,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   totalTokens,
   costUsd,
   contextPercent,
+  pendingApproval,
   terminalWidth,
   terminalHeight,
   isPlanMode,
@@ -109,6 +113,8 @@ export const TuiShell: React.FC<TuiShellProps> = ({
       <CommandSuggestions suggestions={suggestions} />
 
       {debugMode && <DebugErrorPanel error={lastError} />}
+
+      {pendingApproval && <ToolApprovalPanel request={pendingApproval} />}
 
       <TuiPromptBox
         input={input}
