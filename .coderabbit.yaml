@@ -16,8 +16,8 @@ reviews:
     - "!out/**"
     - "!coverage/**"
     - "!*.tgz"
-    - "!zero"
-    - "!zero.exe"
+    - "!/zero"
+    - "!/zero.exe"
   path_instructions:
     - path: "src/**/*.ts"
       instructions: |
