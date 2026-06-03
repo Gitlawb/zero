@@ -55,6 +55,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
         providerName={providerName}
         modelName={modelName}
         input={input}
+        suggestions={suggestions}
         terminalWidth={terminalWidth}
         terminalHeight={terminalHeight}
       />

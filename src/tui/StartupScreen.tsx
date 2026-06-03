@@ -4,7 +4,7 @@ import { Header } from './startup/Header';
 import { ZeroLogo } from './startup/ZeroLogo';
 import { CommandChips } from './startup/CommandChips';
 import { PromptBox } from './startup/PromptBox';
-import { ShortcutHints } from './startup/ShortcutHints';
+import { CommandSuggestions } from './CommandSuggestions';
 import { ModeStatus, type AgentMode } from './startup/ModeStatus';
 
 interface StartupScreenProps {
@@ -17,6 +17,8 @@ interface StartupScreenProps {
   terminalHeight: number;
   /** Active agent mode shown in the bottom status line. */
   mode?: AgentMode;
+  /** Slash-command suggestions, shown above the prompt when the user types `/`. */
+  suggestions?: string[];
 }
 
 const PLACEHOLDER = 'Ask Zero to inspect, edit, explain, or run a command...';
@@ -45,6 +47,7 @@ export const StartupScreen: React.FC<StartupScreenProps> = ({
   terminalWidth,
   terminalHeight,
   mode = 'build',
+  suggestions = [],
 }) => {
   // Clamp to sane minimums so the layout never collapses on tiny terminals.
   const width = Math.max(60, terminalWidth - 1);
@@ -71,8 +74,8 @@ export const StartupScreen: React.FC<StartupScreenProps> = ({
 
       {/* Bottom cluster, pinned near the bottom edge. */}
       <Box flexDirection="column" flexShrink={0} paddingBottom={1}>
+        <CommandSuggestions suggestions={suggestions} />
         <PromptBox value={input} placeholder={PLACEHOLDER} />
-        <ShortcutHints />
         <ModeStatus mode={mode} />
       </Box>
     </Box>
