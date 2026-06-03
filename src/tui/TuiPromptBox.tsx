@@ -30,23 +30,8 @@ export const TuiPromptBox: React.FC<TuiPromptBoxProps> = ({
       : 'Ask Zero to inspect, edit, explain, or run a command...';
 
   return (
-    <Box
-      borderStyle="bold"
-      borderColor={borderColor}
-      paddingX={1}
-      flexDirection="column"
-    >
-      <Box flexDirection="row" justifyContent="space-between">
-        <Text color={borderColor} bold>COMPOSER</Text>
-        <Box flexDirection="row">
-          {debugMode && <Text color={tuiTheme.colors.warning}>debug </Text>}
-          {!toolsEnabled && <Text color={tuiTheme.colors.danger}>tools off </Text>}
-          <Text color={tuiTheme.colors.muted}>model </Text>
-          <Text color={tuiTheme.colors.model}>{modelName}</Text>
-        </Box>
-      </Box>
-
-      <Box flexDirection="row" marginTop={0}>
+    <Box flexDirection="column" marginTop={1} paddingX={1}>
+      <Box flexDirection="row">
         <Text color={isPlanMode ? tuiTheme.colors.success : tuiTheme.colors.brand} bold>
           zero {tuiTheme.marks.prompt}{' '}
         </Text>
@@ -62,9 +47,12 @@ export const TuiPromptBox: React.FC<TuiPromptBoxProps> = ({
         <Text color={tuiTheme.colors.muted} dimColor>
           Enter sends  Tab accepts command  Ctrl+C exits
         </Text>
-        <Text color={tuiTheme.colors.muted} dimColor>
-          {providerName}
-        </Text>
+        <Box flexDirection="row">
+          {debugMode && <Text color={tuiTheme.colors.warning}>debug </Text>}
+          {!toolsEnabled && <Text color={tuiTheme.colors.danger}>tools off </Text>}
+          <Text color={tuiTheme.colors.muted} dimColor>{providerName} / </Text>
+          <Text color={tuiTheme.colors.model} dimColor>{modelName}</Text>
+        </Box>
       </Box>
     </Box>
   );

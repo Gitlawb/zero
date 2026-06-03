@@ -24,27 +24,26 @@ export const TuiHeader: React.FC<TuiHeaderProps> = ({
   const statusColor = isThinking ? tuiTheme.colors.warning : tuiTheme.colors.success;
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column">
       <Box
-        backgroundColor={tuiTheme.colors.panel}
         paddingX={1}
         flexDirection="row"
         justifyContent="space-between"
       >
         <Box flexDirection="row">
-          <Text color={tuiTheme.colors.brand} backgroundColor={tuiTheme.colors.panel} bold>
+          <Text color={tuiTheme.colors.brand} bold>
             ZERO
           </Text>
-          <Text color={tuiTheme.colors.muted} backgroundColor={tuiTheme.colors.panel}>
-            {'  '}workspace:{' '}
+          <Text color={tuiTheme.colors.muted}>
+            {'  '}cwd{' '}
           </Text>
-          <Text color={tuiTheme.colors.text} backgroundColor={tuiTheme.colors.panel}>
+          <Text color={tuiTheme.colors.text}>
             {workspace}
           </Text>
         </Box>
 
         <Box flexDirection="row">
-          <Text color={statusColor} backgroundColor={tuiTheme.colors.panel} bold>
+          <Text color={statusColor} bold>
             {statusLabel}
           </Text>
         </Box>

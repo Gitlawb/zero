@@ -7,6 +7,8 @@ export const tuiTheme = {
     subtle: '#475569',
     panel: '#111827',
     panelAlt: '#0f172a',
+    userBg: '#10251f',
+    userSymbol: '#34d399',
     model: '#bfdbfe',
     warning: '#fde68a',
     danger: '#fca5a5',
@@ -17,10 +19,10 @@ export const tuiTheme = {
   marks: {
     prompt: '>',
     cursor: ' ',
-    user: 'YOU',
-    assistant: 'ZERO',
-    tool: 'TOOL',
-    note: 'SYS',
+    user: '>',
+    assistant: 'zero',
+    tool: 'tool',
+    note: 'sys',
   },
 } as const;
 

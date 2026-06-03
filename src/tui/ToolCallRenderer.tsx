@@ -77,14 +77,9 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
 
   if (!isExpanded) {
     return (
-      <Box
-        flexDirection="row"
-        paddingX={1}
-        backgroundColor={tuiTheme.colors.panelAlt}
-      >
-        <Text color={statusColor} bold>{tuiTheme.marks.tool} {statusLabel.toUpperCase()} </Text>
-        <Text color={tuiTheme.colors.text}>{name}</Text>
-        <Text color={tuiTheme.colors.muted} dimColor>  {summary}</Text>
+      <Box flexDirection="row">
+        <Text color={statusColor} bold>{formatToolName(name)}</Text>
+        {summary && <Text color={tuiTheme.colors.muted}> {summary}</Text>}
         {(args || hasResult) && (
           <Text
             color={tuiTheme.colors.brand}
@@ -147,6 +142,17 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
 function formatResult(result: string, isLongResult: boolean, showFullResult: boolean): string {
   if (!isLongResult || showFullResult) return result;
   return `${result.slice(0, 200)}...`;
+}
+
+function formatToolName(name: string): string {
+  if (name === 'bash') return 'Execute';
+  if (name === 'read_file') return 'Read';
+  if (name === 'write_file') return 'Create';
+  if (name === 'edit_file') return 'Edit';
+  if (name === 'apply_patch') return 'ApplyPatch';
+  if (name === 'grep') return 'Search';
+  if (name === 'glob') return 'Glob';
+  return name;
 }
 
 function getToolSummary(name: string, args: string): string {
