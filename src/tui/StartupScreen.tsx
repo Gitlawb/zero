@@ -4,8 +4,8 @@ import { Header } from './startup/Header';
 import { ZeroLogo } from './startup/ZeroLogo';
 import { CommandChips } from './startup/CommandChips';
 import { PromptBox } from './startup/PromptBox';
+import { ShortcutHints } from './startup/ShortcutHints';
 import { CommandSuggestions } from './CommandSuggestions';
-import { ModeStatus, type AgentMode } from './startup/ModeStatus';
 
 interface StartupScreenProps {
   cwd?: string;
@@ -15,8 +15,6 @@ interface StartupScreenProps {
   input: string;
   terminalWidth: number;
   terminalHeight: number;
-  /** Active agent mode shown in the bottom status line. */
-  mode?: AgentMode;
   /** Slash-command suggestions, shown above the prompt when the user types `/`. */
   suggestions?: string[];
 }
@@ -30,12 +28,12 @@ const PLACEHOLDER = 'Ask Zero to inspect, edit, explain, or run a command...';
  * value + terminal size, so this just lays out the screen. Vertical balance is
  * done with flex (not hardcoded offsets):
  *
- *   ┌ Header ───────────────┐  ← pinned top
- *   │   logo + chips         │  ← flexGrow 1, centered both axes
- *   ├ PromptBox ────────────┤  ← pinned bottom
- *   └ ShortcutHints ────────┘
+ *   Header        pinned top
+ *   logo + chips  flexGrow 1, centered both axes
+ *   PromptBox     pinned bottom
+ *   ShortcutHints fixed below prompt
  *
- * No context / history / session panels render here — those mount only when
+ * No context / history / session panels render here; those mount only when
  * the user runs /context, /history or /session.
  */
 export const StartupScreen: React.FC<StartupScreenProps> = ({
@@ -46,7 +44,6 @@ export const StartupScreen: React.FC<StartupScreenProps> = ({
   input,
   terminalWidth,
   terminalHeight,
-  mode = 'build',
   suggestions = [],
 }) => {
   // Clamp to sane minimums so the layout never collapses on tiny terminals.
@@ -76,7 +73,7 @@ export const StartupScreen: React.FC<StartupScreenProps> = ({
       <Box flexDirection="column" flexShrink={0} paddingBottom={1}>
         <CommandSuggestions suggestions={suggestions} />
         <PromptBox value={input} placeholder={PLACEHOLDER} />
-        <ModeStatus mode={mode} />
+        <ShortcutHints />
       </Box>
     </Box>
   );

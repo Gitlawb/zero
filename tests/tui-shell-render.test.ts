@@ -44,13 +44,17 @@ describe('TuiShell render surface', () => {
     expect(output).toContain('zero >');
     expect(output).toContain('/provider');
     expect(output).toContain('status: READY');
+    expect(output).toContain('Enter');
+    expect(output).toContain('Tab');
+    expect(output).toContain('Ctrl+C');
+    expect(output).not.toContain('shift+tab');
     expect(output).not.toContain('Welcome to zero');
     expect(output).not.toContain('WORKSPACE');
     expect(output).not.toContain('SESSION');
     expect(output).not.toContain('history');
   });
 
-  it('renders D-style message rows and command suggestions', () => {
+  it('renders compact message rows and command suggestions', () => {
     const messages: ChatMessage[] = [
       { type: 'user', content: 'inspect the repo' },
       { type: 'assistant', content: 'I will scan the codebase.' },
