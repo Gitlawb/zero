@@ -187,3 +187,22 @@ describe('runAgent tool-call flow', () => {
     expect(provider.received).toHaveLength(1);
   });
 });
+
+describe('runAgent usage events', () => {
+  it('forwards provider usage events to backend callers', async () => {
+    const provider = new MockProvider([[
+      { type: 'usage', promptTokens: 12, completionTokens: 8 },
+      { type: 'text', content: 'usage captured' },
+    ]]);
+    const usageEvents: Array<{ promptTokens?: number; completionTokens?: number }> = [];
+
+    const answer = await runAgent('track usage', provider, {
+      onUsage: (usage) => usageEvents.push(usage),
+    });
+
+    expect(answer).toBe('usage captured');
+    expect(usageEvents).toEqual([
+      { promptTokens: 12, completionTokens: 8 },
+    ]);
+  });
+});

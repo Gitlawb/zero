@@ -1,4 +1,5 @@
 import type { Provider } from '../providers/types';
+import type { ZeroTokenUsage } from '../zero-model-registry';
 import type { ToolCall, ToolResult } from '../tools/types';
 import { toolRegistry } from '../tools';
 import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from './prompts';
@@ -10,6 +11,7 @@ export interface AgentOptions {
   onText?: (text: string) => void;
   onToolCall?: (toolCall: ToolCall) => void;
   onToolResult?: (result: ToolResult) => void;
+  onUsage?: (usage: ZeroTokenUsage) => void;
   toolsEnabled?: boolean;   // allows temporarily disabling tool calling for debugging
   debug?: boolean;          // when true, logs the exact payload sent to the provider
   planMode?: boolean;       // when true, the agent plans without modifying the codebase
@@ -32,6 +34,7 @@ export async function runAgent(
     onText, 
     onToolCall, 
     onToolResult,
+    onUsage,
     toolsEnabled = true,
     debug = false,
     planMode = false,
@@ -121,6 +124,15 @@ export async function runAgent(
       if (event.type === 'text') {
         currentText += event.content;
         if (onText) onText(event.content);
+      }
+
+      if (event.type === 'usage') {
+        if (onUsage) {
+          onUsage({
+            promptTokens: event.promptTokens,
+            completionTokens: event.completionTokens,
+          });
+        }
       }
 
       if (event.type === 'tool-call-start') {
