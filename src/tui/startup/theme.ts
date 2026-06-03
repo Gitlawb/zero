@@ -10,6 +10,7 @@ export const theme = {
   accentBright: 'cyanBright',
   ok: 'green', // status: READY
   okBright: 'greenBright',
+  warn: 'yellow', // caution modes (e.g. bypass permissions)
   label: 'gray', // dim labels: "cwd:", "project:", "status:"
   value: 'white', // values + typed input
   muted: 'gray', // subtitle, placeholder, shortcut labels
