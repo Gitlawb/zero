@@ -2,7 +2,6 @@ import React, { useRef, useState } from 'react';
 import { useApp, useInput, useWindowSize } from 'ink';
 import { runAgent, type ToolApprovalDecision, type ToolApprovalRequest } from '../agent/loop';
 import { configManager } from '../config/manager';
-import { loadProviderConfig } from '../config/provider';
 import { redactZeroError, redactZeroSecrets, redactZeroString } from '../zero-redaction';
 import { formatZeroConfigInspection, inspectZeroConfig, type ZeroConfigInspectionReport } from '../zero-config-inspection';
 import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from '../zero-doctor';
@@ -30,8 +29,12 @@ import type { ChatMessage } from './types';
 
 type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker' | 'theme-picker';
 const KNOWN_COMMANDS = listTuiCommands().map((command) => command.name);
+const hasInitialProvider = Boolean(process.env.ZERO_PROVIDER_COMMAND || configManager.getEffectiveProviderConfig());
 const INITIAL_MESSAGES: ChatMessage[] = [
   { type: 'system', content: 'Welcome to zero\nUse /help for available commands.' },
+  ...(!hasInitialProvider
+    ? [{ type: 'system' as const, content: 'No provider configured\nRun /provider to add one (OpenGateway recommended)' }]
+    : []),
 ];
 
 setTheme(configManager.getTheme());
@@ -87,25 +90,9 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [scrollOffset, setScrollOffset] = useState(0);
-  const [terminalRows, setTerminalRows] = useState(24);
-  const [git, setGit] = useState<{ branch?: string; ahead: number; behind: number }>({ ahead: 0, behind: 0 });
   const [pendingApproval, setPendingApproval] = useState<ToolApprovalRequest | null>(null);
   const approvalResolverRef = useRef<((decision: ToolApprovalDecision) => void) | null>(null);
   const approvalGrantsRef = useRef(new Set<string>());
-
-  React.useEffect(() => {
-    const checkProvider = async () => {
-      try {
-        await loadProviderConfig();
-      } catch (err: any) {
-        if (err.message?.includes('No LLM provider configured')) {
-          addSystemMessage('No provider configured\nRun /provider to add one (OpenGateway recommended)');
-        }
-      }
-    };
-
-    checkProvider();
-  }, []);
 
   React.useEffect(() => {
     if (!input.startsWith('/')) {
@@ -117,43 +104,6 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     setSuggestions(KNOWN_COMMANDS.filter((cmd) => cmd.startsWith(query)));
     setSuggestionIndex(0);
   }, [input]);
-
-  React.useEffect(() => {
-    const updateSize = () => {
-      setTerminalRows(process.stdout.rows || 24);
-    };
-
-    process.stdout.on('resize', updateSize);
-    updateSize();
-    return () => {
-      process.stdout.off('resize', updateSize);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { execa } = await import('execa');
-        const head = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => null);
-        const branch = head?.stdout?.trim();
-        let ahead = 0;
-        let behind = 0;
-        const counts = await execa('git', ['rev-list', '--left-right', '--count', '@{upstream}...HEAD']).catch(() => null);
-        if (counts?.stdout) {
-          const [b, a] = counts.stdout.trim().split(/\s+/).map((n) => Number(n) || 0);
-          behind = b ?? 0;
-          ahead = a ?? 0;
-        }
-        if (!cancelled && branch) setGit({ branch, ahead, behind });
-      } catch {
-        // Header git status is best effort.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   React.useEffect(() => {
     if (scrollOffset <= 3) {
@@ -763,7 +713,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     );
   }
 
-  const terminalHeight = Math.max(20, rows || terminalRows);
+  const terminalHeight = Math.max(20, rows || process.stdout.rows || 24);
   const terminalWidth = Math.max(64, columns || process.stdout.columns || 96);
   const chatHeight = Math.max(8, terminalHeight - 6);
   const maxScrollOffset = Math.max(0, messages.length - chatHeight);
@@ -801,9 +751,6 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
       messageBackground={adaptedMessageBackground}
       isThinking={isThinking}
       activeFile={activeFile}
-      branch={git.branch}
-      ahead={git.ahead}
-      behind={git.behind}
       totalTokens={estimatedTokens}
       costUsd={estimatedCost}
       contextPercent={contextPercent}
