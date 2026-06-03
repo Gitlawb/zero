@@ -4,7 +4,6 @@ import { Header } from './startup/Header';
 import { ZeroLogo } from './startup/ZeroLogo';
 import { CommandChips } from './startup/CommandChips';
 import { PromptBox } from './startup/PromptBox';
-import { ShortcutHints } from './startup/ShortcutHints';
 import { CommandSuggestions } from './CommandSuggestions';
 
 interface StartupScreenProps {
@@ -31,7 +30,6 @@ const PLACEHOLDER = 'Ask Zero to inspect, edit, explain, or run a command...';
  *   Header        pinned top
  *   logo + chips  flexGrow 1, centered both axes
  *   PromptBox     pinned bottom
- *   ShortcutHints fixed below prompt
  *
  * No context / history / session panels render here; those mount only when
  * the user runs /context, /history or /session.
@@ -73,7 +71,6 @@ export const StartupScreen: React.FC<StartupScreenProps> = ({
       <Box flexDirection="column" flexShrink={0} paddingBottom={1}>
         <CommandSuggestions suggestions={suggestions} />
         <PromptBox value={input} placeholder={PLACEHOLDER} />
-        <ShortcutHints />
       </Box>
     </Box>
   );

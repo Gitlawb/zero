@@ -44,8 +44,8 @@ export const TuiPromptBox: React.FC<TuiPromptBoxProps> = ({
       </Box>
 
       <Box flexDirection="row" justifyContent="space-between">
-        <Text color={tuiTheme.colors.muted} dimColor>
-          Enter sends  Tab accepts command  Ctrl+C exits
+        <Text color={toolsEnabled ? tuiTheme.colors.success : tuiTheme.colors.danger} dimColor>
+          perms {toolsEnabled ? 'ask' : 'tools-off'}
         </Text>
         <Box flexDirection="row">
           {debugMode && <Text color={tuiTheme.colors.warning}>debug </Text>}

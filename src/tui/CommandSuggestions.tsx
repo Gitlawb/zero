@@ -26,9 +26,6 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({ suggesti
             {suggestion}{index < suggestions.length - 1 ? '  ' : ''}
           </Text>
         ))}
-        <Text color={tuiTheme.colors.muted} dimColor>
-          {' '}Tab accepts first match
-        </Text>
       </Text>
     </Box>
   );
