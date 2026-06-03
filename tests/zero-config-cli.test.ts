@@ -29,6 +29,7 @@ describe('zero config CLI', () => {
     try {
       const result = await runZeroConfig(['--json'], {
         HOME: home,
+        USERPROFILE: home,
         OPENAI_API_KEY: 'sk-proj-abcdefghijklmnopqrstuvwxyz1234567890',
         OPENAI_MODEL: 'gpt-4.1',
       });
@@ -68,7 +69,10 @@ describe('zero config CLI', () => {
         'utf-8'
       );
 
-      const result = await runZeroConfig(['--json'], { HOME: home });
+      const result = await runZeroConfig(['--json'], {
+        HOME: home,
+        USERPROFILE: home,
+      });
 
       expect(result.exitCode).toBe(1);
       expect(result.stderr.trim()).toBe('');
