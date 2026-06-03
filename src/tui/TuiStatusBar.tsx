@@ -8,34 +8,44 @@ interface TuiStatusBarProps extends TuiModeState {
   messageCount: number;
   canScrollUp: boolean;
   canScrollDown: boolean;
+  modelName?: string;
+  totalTokens?: number;
+  costUsd?: number;
+  contextPercent?: number;
 }
 
+const Dot: React.FC = () => <Text color={tuiTheme.colors.subtle}>{'  ·  '}</Text>;
+
+/**
+ * Footer status bar: model · tokens · cost · context% on the left, and a
+ * live/idle indicator on the right. (Usage figures are estimated until the
+ * agent loop emits real token usage.)
+ */
 export const TuiStatusBar: React.FC<TuiStatusBarProps> = ({
-  scrollOffset,
-  messageCount,
-  canScrollUp,
-  canScrollDown,
-  isPlanMode,
-  debugMode,
-  toolsEnabled,
+  modelName = 'unknown',
+  totalTokens = 0,
+  costUsd = 0,
+  contextPercent = 0,
   isThinking,
 }) => {
-  const flags = [
-    isThinking ? 'running' : undefined,
-    isPlanMode ? 'plan' : undefined,
-    debugMode ? 'debug' : undefined,
-    toolsEnabled ? undefined : 'tools off',
-  ].filter(Boolean);
-
   return (
     <Box paddingX={1} flexDirection="row" justifyContent="space-between" marginTop={1}>
-      <Text color={tuiTheme.colors.muted} dimColor>
-        /help  /model  /provider  /plan  /tools
-      </Text>
-      <Text color={tuiTheme.colors.muted} dimColor>
-        {canScrollUp || canScrollDown ? `history ${scrollOffset + 1}/${messageCount}` : 'latest'}
-        {flags.length > 0 ? `  ${flags.join(' / ')}` : ''}
-      </Text>
+      <Box flexDirection="row">
+        <Text color={tuiTheme.colors.model}>{modelName}</Text>
+        <Dot />
+        <Text color={tuiTheme.colors.muted}>{totalTokens.toLocaleString('en-US')} tokens</Text>
+        <Dot />
+        <Text color={tuiTheme.colors.muted}>${costUsd.toFixed(4)}</Text>
+        <Dot />
+        <Text color={tuiTheme.colors.muted}>ctx {contextPercent}%</Text>
+      </Box>
+
+      <Box flexDirection="row">
+        <Text color={isThinking ? tuiTheme.colors.success : tuiTheme.colors.subtle}>● </Text>
+        <Text color={isThinking ? tuiTheme.colors.success : tuiTheme.colors.muted}>
+          {isThinking ? 'live' : 'idle'}
+        </Text>
+      </Box>
     </Box>
   );
 };

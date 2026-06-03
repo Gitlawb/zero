@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Box, Text } from 'ink';
-import { highlightCode } from './highlighter';
 import { tuiTheme } from './theme';
+import { DiffCard, buildEditDiff } from './DiffCard';
 
 interface ToolCallRendererProps {
   name: string;
@@ -10,182 +10,112 @@ interface ToolCallRendererProps {
   status?: 'running' | 'success' | 'error';
 }
 
+const LABELS: Record<string, string> = {
+  read_file: 'Read',
+  list_directory: 'List',
+  grep: 'Grep',
+  glob: 'Glob',
+  bash: 'Bash',
+  edit_file: 'Edit',
+  write_file: 'Write',
+  apply_patch: 'Patch',
+  update_plan: 'Plan',
+};
+
+function parseArgs(raw: string): any {
+  try {
+    return JSON.parse(raw || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function leaf(p: string): string {
+  if (!p) return '';
+  const parts = p.split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+}
+
+// One-line, tool-specific summary:
+//   read   → `dispatch.ts (312 lines)`
+//   grep   → `"handleDispatch" — 4 matches in 2 files`
+//   edit   → `dispatch.ts +3 -2`
+function summarize(name: string, args: any, result?: string): string {
+  switch (name) {
+    case 'read_file': {
+      const lines = result ? result.split('\n').length : undefined;
+      return `${leaf(args.path)}${lines ? ` (${lines} lines)` : ''}`;
+    }
+    case 'list_directory':
+      return args.path || '.';
+    case 'grep':
+    case 'glob': {
+      const hits =
+        result && !/^no matches/i.test(result.trim())
+          ? result.trim().split('\n').filter(Boolean)
+          : [];
+      const files = new Set(hits.map((h) => h.split(':')[0])).size;
+      const n = hits.length;
+      const where = files ? ` in ${files} file${files === 1 ? '' : 's'}` : '';
+      return `"${args.pattern || args.glob || ''}" — ${n} match${n === 1 ? '' : 'es'}${where}`;
+    }
+    case 'bash':
+      return args.command || '';
+    case 'edit_file':
+    case 'apply_patch': {
+      const add = typeof args.new_string === 'string' ? args.new_string.split('\n').length : 0;
+      const rem = typeof args.old_string === 'string' ? args.old_string.split('\n').length : 0;
+      return `${leaf(args.path)} +${add} -${rem}`;
+    }
+    case 'write_file':
+      return leaf(args.path);
+    case 'update_plan':
+      return 'updated plan';
+    default:
+      return '';
+  }
+}
+
+/**
+ * A single activity row: status dot + tool label + one-line summary. For edits
+ * it also renders an inline DiffCard of the changed snippet — matching the
+ * working-view mockup (collapsed, scannable rows + a diff for changes).
+ */
 export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   name,
   args,
   result,
   status = 'success',
 }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [highlightedArgs, setHighlightedArgs] = useState<string | null>(null);
-  const [highlightedResult, setHighlightedResult] = useState<string | null>(null);
-  const [showFullResult, setShowFullResult] = useState(false);
+  const parsed = parseArgs(args);
+  const label = LABELS[name] || name;
+  const summary = summarize(name, parsed, result);
+  const dotColor =
+    status === 'running'
+      ? tuiTheme.colors.warning
+      : status === 'error'
+        ? tuiTheme.colors.danger
+        : tuiTheme.colors.success;
 
-  const hasResult = !!result;
-  const isLongResult = hasResult && (result!.length > 400 || result!.split('\n').length > 12);
-  const summary = getToolSummary(name, args);
-  const statusColor = status === 'running'
-    ? tuiTheme.colors.warning
-    : status === 'error'
-      ? tuiTheme.colors.danger
-      : tuiTheme.colors.success;
-  const statusLabel = status === 'running'
-    ? 'run'
-    : status === 'error'
-      ? 'err'
-      : 'ok';
-
-  useEffect(() => {
-    if (!isExpanded) return;
-
-    const highlight = async () => {
-      try {
-        let jsonArgs = args;
-        try {
-          jsonArgs = JSON.stringify(JSON.parse(args), null, 2);
-        } catch {
-          // Keep raw arguments when providers send non-JSON text.
-        }
-        setHighlightedArgs(await highlightCode(jsonArgs, 'json'));
-      } catch {
-        setHighlightedArgs(args);
-      }
-    };
-
-    void highlight();
-  }, [args, isExpanded]);
-
-  useEffect(() => {
-    if (!isExpanded || !result) return;
-
-    const highlight = async () => {
-      try {
-        const looksLikeCode =
-          result.includes('function') ||
-          result.includes('const ') ||
-          result.includes('import ') ||
-          result.includes('=>') ||
-          result.includes('class ');
-        setHighlightedResult(await highlightCode(result, looksLikeCode ? 'typescript' : 'text'));
-      } catch {
-        setHighlightedResult(result);
-      }
-    };
-
-    void highlight();
-  }, [result, isExpanded]);
-
-  if (!isExpanded) {
-    return (
-      <Box flexDirection="row">
-        <Text color={statusColor} bold>{formatToolName(name)}</Text>
-        {summary && <Text color={tuiTheme.colors.muted}> {summary}</Text>}
-        {(args || hasResult) && (
-          <Text
-            color={tuiTheme.colors.brand}
-            dimColor
-            {...({ onPress: () => setIsExpanded(true) } as any)}
-          >
-            {'  '}[show]
-          </Text>
-        )}
-      </Box>
-    );
-  }
+  const showDiff =
+    (name === 'edit_file' || name === 'apply_patch') &&
+    typeof parsed.old_string === 'string' &&
+    typeof parsed.new_string === 'string';
 
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="single"
-      borderColor={statusColor}
-      paddingX={0}
-      paddingY={0}
-    >
-      <Box paddingX={1} flexDirection="row" justifyContent="space-between">
-        <Text color={statusColor} bold>[{statusLabel}] {name}</Text>
-        <Text
-          color={tuiTheme.colors.brand}
-          dimColor
-          {...({ onPress: () => setIsExpanded(false) } as any)}
-        >
-          [hide]
+    <Box flexDirection="column">
+      <Box flexDirection="row" paddingX={1}>
+        <Text color={dotColor}>● </Text>
+        <Text color={tuiTheme.colors.brand} bold>
+          {label}{' '}
         </Text>
+        {summary ? <Text color={tuiTheme.colors.muted}>{summary}</Text> : null}
       </Box>
-
-      <Box paddingX={1} flexDirection="column">
-        <Text color={tuiTheme.colors.muted} dimColor bold>args</Text>
-        <Text>{highlightedArgs || '...'}</Text>
-      </Box>
-
-      {hasResult && (
-        <Box paddingX={1} flexDirection="column">
-          <Text color={tuiTheme.colors.muted} dimColor bold>result</Text>
-          <Text color={tuiTheme.colors.success} dimColor>
-            {formatResult(highlightedResult || result!, isLongResult, showFullResult)}
-          </Text>
-
-          {isLongResult && (
-            <Text
-              color={tuiTheme.colors.brand}
-              dimColor
-              {...({ onPress: () => setShowFullResult(!showFullResult) } as any)}
-            >
-              {showFullResult ? ' [less]' : ' [more]'}
-            </Text>
-          )}
+      {showDiff ? (
+        <Box paddingX={1}>
+          <DiffCard file={parsed.path || ''} lines={buildEditDiff(parsed.old_string, parsed.new_string)} />
         </Box>
-      )}
+      ) : null}
     </Box>
   );
 };
-
-function formatResult(result: string, isLongResult: boolean, showFullResult: boolean): string {
-  if (!isLongResult || showFullResult) return result;
-  return `${result.slice(0, 200)}...`;
-}
-
-function formatToolName(name: string): string {
-  if (name === 'bash') return 'Execute';
-  if (name === 'read_file') return 'Read';
-  if (name === 'write_file') return 'Create';
-  if (name === 'edit_file') return 'Edit';
-  if (name === 'apply_patch') return 'ApplyPatch';
-  if (name === 'grep') return 'Search';
-  if (name === 'glob') return 'Glob';
-  return name;
-}
-
-function getToolSummary(name: string, args: string): string {
-  try {
-    const parsed = JSON.parse(args);
-
-    if (name === 'bash') {
-      return truncate(parsed.command || '', 65);
-    }
-
-    if (name === 'read_file') {
-      return `read ${truncate(parsed.path || '', 60)}`;
-    }
-
-    if (name === 'edit_file') {
-      return `edit ${truncate(parsed.path || '', 60)}`;
-    }
-
-    if (name === 'write_file') {
-      return `write ${truncate(parsed.path || '', 60)}`;
-    }
-
-    const firstKey = Object.keys(parsed)[0];
-    if (firstKey) {
-      return `${firstKey}: ${truncate(String(parsed[firstKey] ?? ''), 50)}`;
-    }
-
-    return truncate(args, 65);
-  } catch {
-    return truncate(args, 65);
-  }
-}
-
-function truncate(value: string, maxLength: number): string {
-  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
-}

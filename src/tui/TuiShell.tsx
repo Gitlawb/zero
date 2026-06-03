@@ -22,6 +22,13 @@ interface TuiShellProps extends TuiModeState {
   providerName: string;
   modelName: string;
   lastError: any;
+  activeFile?: string;
+  branch?: string;
+  ahead?: number;
+  behind?: number;
+  totalTokens?: number;
+  costUsd?: number;
+  contextPercent?: number;
   terminalWidth: number;
   terminalHeight: number;
 }
@@ -39,6 +46,13 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   providerName,
   modelName,
   lastError,
+  activeFile,
+  branch,
+  ahead,
+  behind,
+  totalTokens,
+  costUsd,
+  contextPercent,
   terminalWidth,
   terminalHeight,
   isPlanMode,
@@ -71,6 +85,10 @@ export const TuiShell: React.FC<TuiShellProps> = ({
       <TuiHeader
         providerName={providerName}
         modelName={modelName}
+        activeFile={activeFile}
+        branch={branch}
+        ahead={ahead}
+        behind={behind}
         {...modeState}
       />
 
@@ -104,6 +122,10 @@ export const TuiShell: React.FC<TuiShellProps> = ({
         messageCount={messages.length}
         canScrollUp={canScrollUp}
         canScrollDown={canScrollDown}
+        modelName={modelName}
+        totalTokens={totalTokens}
+        costUsd={costUsd}
+        contextPercent={contextPercent}
         {...modeState}
       />
     </Box>

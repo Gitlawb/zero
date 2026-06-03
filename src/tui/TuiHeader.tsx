@@ -1,86 +1,61 @@
 import React from 'react';
-import { Box, Text } from 'ink';
-import { basename } from 'path';
 import { tuiTheme } from './theme';
+import { Box, Text } from 'ink';
 import type { TuiModeState } from './types';
 
 interface TuiHeaderProps extends TuiModeState {
   providerName: string;
   modelName: string;
   cwd?: string;
+  /** Most recently read/edited file, shown as the working location. */
+  activeFile?: string;
+  /** Current git branch + ahead/behind counts. */
+  branch?: string;
+  ahead?: number;
+  behind?: number;
 }
 
+// Make the active path readable: collapse $HOME to ~, dim the directories,
+// bold the filename.
+function splitPath(file: string): { dir: string; name: string } {
+  let p = file.replace(/\\/g, '/');
+  const home = (process.env.HOME || process.env.USERPROFILE || '').replace(/\\/g, '/');
+  if (home && p.toLowerCase().startsWith(home.toLowerCase())) p = `~${p.slice(home.length)}`;
+  const idx = p.lastIndexOf('/');
+  return idx >= 0 ? { dir: p.slice(0, idx + 1), name: p.slice(idx + 1) } : { dir: '', name: p };
+}
+
+/**
+ * Working-view header: the active file location on the left, git branch +
+ * ahead/behind on the right. Model/provider/usage now live in the status bar.
+ */
 export const TuiHeader: React.FC<TuiHeaderProps> = ({
-  providerName,
-  modelName,
   cwd = process.cwd(),
-  isPlanMode,
-  debugMode,
-  toolsEnabled,
-  isThinking,
+  activeFile,
+  branch,
+  ahead = 0,
+  behind = 0,
 }) => {
-  const workspace = basename(cwd) || cwd;
-  const statusLabel = isThinking ? 'RUNNING' : 'READY';
-  const statusColor = isThinking ? tuiTheme.colors.warning : tuiTheme.colors.success;
+  const { dir, name } = splitPath(activeFile || cwd);
 
   return (
-    <Box flexDirection="column">
-      <Box
-        paddingX={1}
-        flexDirection="row"
-        justifyContent="space-between"
-      >
-        <Box flexDirection="row">
-          <Text color={tuiTheme.colors.brand} bold>
-            ZERO
-          </Text>
-          <Text color={tuiTheme.colors.muted}>
-            {'  '}cwd{' '}
-          </Text>
-          <Text color={tuiTheme.colors.text}>
-            {workspace}
-          </Text>
-        </Box>
-
-        <Box flexDirection="row">
-          <Text color={statusColor} bold>
-            {statusLabel}
-          </Text>
-        </Box>
+    <Box paddingX={1} flexDirection="row" justifyContent="space-between">
+      {/* Left: active file location */}
+      <Box flexDirection="row">
+        {dir ? <Text color={tuiTheme.colors.muted}>{dir}</Text> : null}
+        <Text color={tuiTheme.colors.text} bold>
+          {name}
+        </Text>
       </Box>
 
-      <Box paddingX={1} flexDirection="row" justifyContent="space-between">
+      {/* Right: git branch + ahead/behind */}
+      {branch ? (
         <Box flexDirection="row">
-          <ModePill label="plan" active={isPlanMode} color={tuiTheme.colors.success} />
-          <ModePill label="debug" active={debugMode} color={tuiTheme.colors.warning} />
-          <ModePill label="tools" active={toolsEnabled} color={toolsEnabled ? tuiTheme.colors.success : tuiTheme.colors.danger} />
+          <Text color={tuiTheme.colors.accent}>{branch}</Text>
+          {ahead > 0 ? <Text color={tuiTheme.colors.muted}>{` ↑${ahead}`}</Text> : null}
+          {behind > 0 ? <Text color={tuiTheme.colors.muted}>{` ↓${behind}`}</Text> : null}
         </Box>
-
-        <Box flexDirection="row">
-          <Text color={tuiTheme.colors.muted}>provider </Text>
-          <Text color={tuiTheme.colors.brand} bold>{providerName}</Text>
-          <Text color={tuiTheme.colors.subtle}> / </Text>
-          <Text color={tuiTheme.colors.model}>{modelName}</Text>
-        </Box>
-      </Box>
+      ) : null}
     </Box>
   );
 };
-
-function ModePill({
-  label,
-  active,
-  color,
-}: {
-  label: string;
-  active: boolean;
-  color: string;
-}) {
-  const text = active ? label.toUpperCase() : label;
-
-  return (
-    <Text color={active ? color : tuiTheme.colors.subtle}>
-      [{text}]{' '}
-    </Text>
-  );
-}

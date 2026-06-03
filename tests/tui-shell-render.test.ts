@@ -68,7 +68,8 @@ describe('TuiShell render surface', () => {
 
     expect(output).toContain('>   inspect the repo');
     expect(output).toContain('◆ I will scan the codebase.');
-    expect(output).toContain('Search pattern: TODO');
+    expect(output).toContain('Grep');
+    expect(output).toContain('"TODO"');
     expect(output).toContain('• Plan mode enabled.');
     expect(output).toContain('commands /model');
   });
