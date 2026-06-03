@@ -28,12 +28,12 @@ export const TuiStatusBar: React.FC<TuiStatusBarProps> = ({
   ].filter(Boolean);
 
   return (
-    <Box paddingX={1} flexDirection="row" justifyContent="space-between">
+    <Box paddingX={1} flexDirection="row" justifyContent="space-between" marginTop={1}>
       <Text color={tuiTheme.colors.muted} dimColor>
-        /help  /model  /provider  Ctrl+C exit
+        /help  /model  /provider  /plan  /tools
       </Text>
       <Text color={tuiTheme.colors.muted} dimColor>
-        {canScrollUp || canScrollDown ? `${scrollOffset + 1}/${messageCount}` : ''}
+        {canScrollUp || canScrollDown ? `history ${scrollOffset + 1}/${messageCount}` : 'latest'}
         {flags.length > 0 ? `  ${flags.join(' / ')}` : ''}
       </Text>
     </Box>

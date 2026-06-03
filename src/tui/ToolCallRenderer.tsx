@@ -77,8 +77,15 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
 
   if (!isExpanded) {
     return (
-      <Box flexDirection="row" paddingX={1} paddingY={0}>
-        <Text color={statusColor} bold>[{statusLabel}] {name}</Text>
+      <Box
+        borderStyle="single"
+        borderColor={statusColor}
+        flexDirection="row"
+        paddingX={1}
+        paddingY={0}
+      >
+        <Text color={statusColor} bold>{tuiTheme.marks.tool} {statusLabel.toUpperCase()} </Text>
+        <Text color={tuiTheme.colors.text}>{name}</Text>
         <Text color={tuiTheme.colors.muted} dimColor>  {summary}</Text>
         {(args || hasResult) && (
           <Text

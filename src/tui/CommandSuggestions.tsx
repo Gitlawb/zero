@@ -10,15 +10,22 @@ export const CommandSuggestions: React.FC<CommandSuggestionsProps> = ({ suggesti
   if (suggestions.length === 0) return null;
 
   return (
-    <Box paddingX={2} paddingBottom={0}>
-      <Text color={tuiTheme.colors.muted} dimColor>
-        Suggestions:{' '}
+    <Box
+      borderStyle="single"
+      borderColor={tuiTheme.colors.border}
+      paddingX={1}
+      marginTop={1}
+      marginBottom={1}
+      flexDirection="row"
+    >
+      <Text color={tuiTheme.colors.muted} bold>COMMANDS </Text>
+      <Text>
         {suggestions.map((suggestion, index) => (
           <Text key={suggestion} color={index === 0 ? tuiTheme.colors.brand : tuiTheme.colors.muted}>
-            {suggestion}{index < suggestions.length - 1 ? '  ' : ''}
+            [{suggestion}]{index < suggestions.length - 1 ? ' ' : ''}
           </Text>
         ))}
-        {' '}Tab accepts
+        <Text color={tuiTheme.colors.muted} dimColor>{' '}Tab accepts first match</Text>
       </Text>
     </Box>
   );

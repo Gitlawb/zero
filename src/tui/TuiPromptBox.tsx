@@ -22,32 +22,49 @@ export const TuiPromptBox: React.FC<TuiPromptBoxProps> = ({
     ? tuiTheme.colors.warning
     : isPlanMode
       ? tuiTheme.colors.success
-      : tuiTheme.colors.border;
+      : tuiTheme.colors.brand;
+  const placeholder = isThinking
+    ? 'Zero is working...'
+    : isPlanMode
+      ? 'Plan the next change...'
+      : 'Ask Zero to inspect, edit, explain, or run a command...';
 
   return (
     <Box
-      borderStyle="single"
+      borderStyle="bold"
       borderColor={borderColor}
       paddingX={1}
-      paddingY={0}
-      flexDirection="row"
-      justifyContent="space-between"
-      alignItems="center"
+      flexDirection="column"
     >
-      <Box flexDirection="row" flexGrow={1}>
-        <Text color={isPlanMode ? tuiTheme.colors.success : tuiTheme.colors.accent}>
-          {tuiTheme.marks.prompt}{' '}
-        </Text>
-        <Text color={tuiTheme.colors.text}>{input}</Text>
-        <Text color={tuiTheme.colors.muted}>{tuiTheme.marks.cursor}</Text>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text color={borderColor} bold>COMPOSER</Text>
+        <Box flexDirection="row">
+          {debugMode && <Text color={tuiTheme.colors.warning}>debug </Text>}
+          {!toolsEnabled && <Text color={tuiTheme.colors.danger}>tools off </Text>}
+          <Text color={tuiTheme.colors.muted}>model </Text>
+          <Text color={tuiTheme.colors.model}>{modelName}</Text>
+        </Box>
       </Box>
 
-      <Box flexDirection="row">
-        {debugMode && <Text color={tuiTheme.colors.warning}>debug </Text>}
-        {!toolsEnabled && <Text color={tuiTheme.colors.danger}>tools off </Text>}
-        <Text color={tuiTheme.colors.brand} bold>{providerName}</Text>
-        <Text color={tuiTheme.colors.muted}> / </Text>
-        <Text color={tuiTheme.colors.model}>{modelName}</Text>
+      <Box flexDirection="row" marginTop={0}>
+        <Text color={isPlanMode ? tuiTheme.colors.success : tuiTheme.colors.brand} bold>
+          zero {tuiTheme.marks.prompt}{' '}
+        </Text>
+        {input ? (
+          <Text color={tuiTheme.colors.text}>{input}</Text>
+        ) : (
+          <Text color={tuiTheme.colors.muted} dimColor>{placeholder}</Text>
+        )}
+        <Text backgroundColor={borderColor} color={borderColor}>{tuiTheme.marks.cursor}</Text>
+      </Box>
+
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text color={tuiTheme.colors.muted} dimColor>
+          Enter sends  Tab accepts command  Ctrl+C exits
+        </Text>
+        <Text color={tuiTheme.colors.muted} dimColor>
+          {providerName}
+        </Text>
       </Box>
     </Box>
   );

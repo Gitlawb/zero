@@ -21,6 +21,7 @@ interface TuiShellProps extends TuiModeState {
   providerName: string;
   modelName: string;
   lastError: any;
+  terminalWidth: number;
 }
 
 export const TuiShell: React.FC<TuiShellProps> = ({
@@ -36,15 +37,23 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   providerName,
   modelName,
   lastError,
+  terminalWidth,
   isPlanMode,
   debugMode,
   toolsEnabled,
   isThinking,
 }) => {
   const modeState = { isPlanMode, debugMode, toolsEnabled, isThinking };
+  const shellWidth = Math.max(60, terminalWidth - 1);
 
   return (
-    <Box flexDirection="column" height="100%">
+    <Box
+      flexDirection="column"
+      width={shellWidth}
+      borderStyle="round"
+      borderColor={isThinking ? '#f59e0b' : '#22d3ee'}
+      paddingX={1}
+    >
       <TuiHeader
         providerName={providerName}
         modelName={modelName}
@@ -60,6 +69,8 @@ export const TuiShell: React.FC<TuiShellProps> = ({
         showLogo={showLogo}
         canScrollUp={canScrollUp}
         canScrollDown={canScrollDown}
+        providerName={providerName}
+        modelName={modelName}
       />
 
       <CommandSuggestions suggestions={suggestions} />
