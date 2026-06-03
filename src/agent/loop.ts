@@ -1,9 +1,13 @@
 import type { Provider } from '../providers/types';
 import type { ZeroReasoningEffort, ZeroTokenUsage } from '../zero-model-registry';
-import type { ToolCall, ToolResult, ToolSafety } from '../tools/types';
+import type { Tool, ToolCall, ToolResult, ToolSafety } from '../tools/types';
 import { toolRegistry } from '../tools';
 import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from './prompts';
 import { clearPlan } from '../tools/plan';
+import {
+  ZeroMcpPermissionStore,
+  type ZeroMcpPermissionAutonomy,
+} from '../zero-mcp';
 import { z } from 'zod';
 
 export type AgentPermissionMode = 'auto' | 'ask' | 'unsafe';
@@ -31,6 +35,8 @@ export interface AgentOptions {
   enabledTools?: readonly string[];
   disabledTools?: readonly string[];
   reasoningEffort?: ZeroReasoningEffort;
+  autonomy?: ZeroMcpPermissionAutonomy;
+  mcpPermissionStore?: ZeroMcpPermissionStore;
 }
 
 interface PendingToolCall {
@@ -58,6 +64,8 @@ export async function runAgent(
     enabledTools,
     disabledTools,
     reasoningEffort,
+    autonomy = 'low',
+    mcpPermissionStore = new ZeroMcpPermissionStore(),
   } = options;
 
   // Clear any previous plan when starting a new task
@@ -87,14 +95,15 @@ export async function runAgent(
       ? executableTools.map(t => {
           // Convert Zod schema to proper JSON Schema (critical for many providers).
           // zod v4 ships this natively — no external package needed.
-          const jsonSchema = typeof t.toJSONSchema === 'function'
+          const rawJsonSchema = typeof t.toJSONSchema === 'function'
             ? t.toJSONSchema() as any
             : z.toJSONSchema(t.parameters, {
                 target: 'draft-7',
               }) as any;
 
-          // Remove $schema if present (some providers dislike it)
-          delete jsonSchema.$schema;
+          // Remove $schema if present (some providers dislike it), without
+          // mutating custom schemas returned by tool implementations.
+          const { $schema: _schema, ...jsonSchema } = rawJsonSchema;
 
           // Make it strict by default (good practice)
           if (jsonSchema.type === 'object' && !('additionalProperties' in jsonSchema)) {
@@ -224,6 +233,8 @@ export async function runAgent(
         onToolApproval,
         onToolResult,
         permissionMode,
+        autonomy,
+        mcpPermissionStore,
       }));
     }
 
@@ -247,6 +258,8 @@ async function executeToolCall(
     onToolApproval?: AgentOptions['onToolApproval'];
     onToolResult?: AgentOptions['onToolResult'];
     permissionMode: AgentPermissionMode;
+    autonomy: ZeroMcpPermissionAutonomy;
+    mcpPermissionStore: ZeroMcpPermissionStore;
   }
 ): Promise<ToolResult> {
   const emitResult = (result: string): ToolResult => {
@@ -264,11 +277,13 @@ async function executeToolCall(
 
   try {
     const tool = toolRegistry.get(tc.name);
-    const grantKey = tool ? `${tool.safety.permission}:${tool.safety.sideEffect}` : `unknown:${tc.name}`;
+    const grantKey = createToolGrantKey(tool, tc.name);
     let permissionGranted = options.permissionMode === 'unsafe' || tool?.safety.permission === 'allow';
 
     if (options.permissionMode === 'ask' && tool?.safety.permission === 'prompt') {
-      if (options.approvalGrants.has(grantKey)) {
+      if (await isPersistentlyApprovedMcpTool(tool, options.mcpPermissionStore, options.autonomy)) {
+        permissionGranted = true;
+      } else if (options.approvalGrants.has(grantKey)) {
         permissionGranted = true;
       } else if (options.onToolApproval) {
         const decision = await options.onToolApproval({
@@ -317,4 +332,30 @@ function filterExecutableTools(
       ? tool.safety.permission !== 'deny'
       : tool.safety.permission === 'allow';
   });
+}
+
+function createToolGrantKey(tool: Tool | undefined, toolName: string): string {
+  if (tool?.zeroMcp) {
+    return `mcp:${tool.zeroMcp.serverName}:${tool.zeroMcp.serverIdentity}:${tool.zeroMcp.toolName}`;
+  }
+  return tool ? `${tool.safety.permission}:${tool.safety.sideEffect}` : `unknown:${toolName}`;
+}
+
+async function isPersistentlyApprovedMcpTool(
+  tool: Tool,
+  store: ZeroMcpPermissionStore,
+  requestedAutonomy: ZeroMcpPermissionAutonomy
+): Promise<boolean> {
+  if (!tool.zeroMcp) return false;
+
+  try {
+    return await store.isToolPersistentlyApproved({
+      serverName: tool.zeroMcp.serverName,
+      serverIdentity: tool.zeroMcp.serverIdentity,
+      toolName: tool.zeroMcp.toolName,
+      requestedAutonomy,
+    });
+  } catch {
+    return false;
+  }
 }

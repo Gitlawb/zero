@@ -38,6 +38,11 @@ export function createZeroMcpTool(
       permission: 'prompt',
       reason: `Calls MCP tool "${descriptor.name}" on server "${descriptor.serverName}".`,
     },
+    zeroMcp: {
+      serverName: descriptor.serverName,
+      serverIdentity: descriptor.serverIdentity,
+      toolName: descriptor.name,
+    },
     toJSONSchema: () => normalizeMcpInputSchema(descriptor.inputSchema),
     async execute(args) {
       const result = await manager.callTool(descriptor.serverName, descriptor.name, args);
@@ -59,6 +64,8 @@ export async function registerZeroMcpTools(
       throw new Error(`Duplicate MCP tool registry name "${tool.name}" was refused.`);
     }
     names.add(tool.name);
+  }
+  for (const tool of tools) {
     registry.register(tool);
   }
   return tools;

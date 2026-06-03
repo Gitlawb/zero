@@ -292,6 +292,11 @@ describe('Zero MCP client backend', () => {
     await expect(registerZeroMcpTools(registry, manager)).rejects.toThrow(
       'Duplicate MCP tool registry name'
     );
+    expect(registry.get(createZeroMcpToolName(
+      'docs',
+      'dddddddddddddddddddddddddddddddd',
+      'lookup'
+    ))).toBeUndefined();
   });
 
   it('lists configured MCP servers and discovered tools from the CLI', async () => {

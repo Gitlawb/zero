@@ -26,6 +26,11 @@ export interface Tool<T extends z.ZodObject<any> = z.ZodObject<any>> {
   description: string;
   parameters: T;
   safety: ToolSafety;
+  zeroMcp?: {
+    serverName: string;
+    serverIdentity: string;
+    toolName: string;
+  };
   toJSONSchema?: () => Record<string, unknown>;
   execute: (args: z.infer<T>) => Promise<string>;
 }

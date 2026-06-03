@@ -88,6 +88,7 @@ export async function createZeroRunContext(options: ZeroRuntimeOptions): Promise
         enabledTools,
         disabledTools,
         reasoningEffort,
+        autonomy,
       },
     };
   } catch (err: unknown) {

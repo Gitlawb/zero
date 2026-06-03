@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import { mkdtemp, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { z } from 'zod';
 import {
   runAgent,
   type ToolApprovalDecision,
@@ -9,6 +10,8 @@ import {
 } from '../src/agent/loop';
 import { DEFAULT_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_PROMPT } from '../src/agent/prompts';
 import type { Provider, Message, StreamEvent } from '../src/providers/types';
+import { toolRegistry } from '../src/tools';
+import { ZeroMcpPermissionStore } from '../src/zero-mcp';
 
 // A mock provider that records the messages it receives and replays a
 // scripted sequence of stream events per turn.
@@ -165,6 +168,42 @@ describe('runAgent tool-call flow', () => {
     expect(names).toEqual(['read_file', 'write_file']);
   });
 
+  it('does not mutate custom tool JSON schemas while preparing provider tools', async () => {
+    const schema = {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
+      additionalProperties: true,
+    };
+    toolRegistry.register({
+      name: 'custom_schema_probe',
+      description: 'custom schema probe',
+      parameters: z.object({}),
+      safety: {
+        sideEffect: 'read',
+        permission: 'allow',
+        reason: 'Test-only schema probe.',
+      },
+      toJSONSchema: () => schema,
+      async execute() {
+        return 'ok';
+      },
+    });
+    const provider = new MockProvider([[{ type: 'text', content: 'schema done' }]]);
+
+    try {
+      await runAgent('check schema', provider, {
+        enabledTools: ['custom_schema_probe'],
+      });
+
+      const toolDefinition = provider.receivedTools[0]?.find((tool) => tool.name === 'custom_schema_probe');
+      expect(toolDefinition?.parameters.$schema).toBeUndefined();
+      expect(schema.$schema).toBe('http://json-schema.org/draft-07/schema#');
+    } finally {
+      toolRegistry.unregister('custom_schema_probe');
+    }
+  });
+
   it('runs prompt-gated tools through the registry only when unsafe mode grants permission', async () => {
     const command = 'echo zero-agent-unsafe';
     const safeProvider = new MockProvider([
@@ -296,6 +335,68 @@ describe('runAgent tool-call flow', () => {
     expect(approvalCount).toBe(1);
     expect(await readFile(firstPath, 'utf-8')).toBe('first');
     expect(await readFile(secondPath, 'utf-8')).toBe('second');
+  });
+
+  it('runs a matching persistently approved MCP tool without prompting again', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zero-mcp-agent-grant-'));
+    const permissionStore = new ZeroMcpPermissionStore({
+      filePath: join(dir, 'mcp-permissions.json'),
+      now: () => new Date('2026-06-03T09:30:00.000Z'),
+    });
+    const toolName = 'mcp__persisted_docs__aaaaaaaaaaaa__lookup__00000000';
+    await permissionStore.grantTool({
+      serverName: 'docs',
+      serverIdentity: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      toolName: 'lookup',
+      maxAutonomy: 'medium',
+    });
+    toolRegistry.register({
+      name: toolName,
+      description: 'persisted MCP tool',
+      parameters: z.object({}),
+      safety: {
+        sideEffect: 'network',
+        permission: 'prompt',
+        reason: 'Calls a persisted MCP tool.',
+      },
+      zeroMcp: {
+        serverName: 'docs',
+        serverIdentity: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        toolName: 'lookup',
+      },
+      async execute() {
+        return 'persisted mcp ok';
+      },
+    });
+    const provider = new MockProvider([
+      [
+        { type: 'tool-call-start', id: 'call_1', name: toolName },
+        { type: 'tool-call-delta', id: 'call_1', argumentsFragment: '{}' },
+        { type: 'tool-call-end', id: 'call_1' },
+      ],
+      [{ type: 'text', content: 'grant done' }],
+    ]);
+    let approvalCount = 0;
+    const toolResults: string[] = [];
+
+    try {
+      const answer = await runAgent('use persisted mcp', provider, {
+        permissionMode: 'ask',
+        autonomy: 'medium',
+        mcpPermissionStore: permissionStore,
+        onToolApproval: () => {
+          approvalCount++;
+          return 'deny';
+        },
+        onToolResult: (result) => toolResults.push(result.result),
+      });
+
+      expect(answer).toBe('grant done');
+      expect(approvalCount).toBe(0);
+      expect(toolResults[0]).toBe('persisted mcp ok');
+    } finally {
+      toolRegistry.unregister(toolName);
+    }
   });
 
   it('serializes multiple prompt-gated approvals from the same assistant turn', async () => {

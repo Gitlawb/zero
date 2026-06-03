@@ -44,7 +44,7 @@ export interface ZeroRunContext {
   disabledTools?: readonly string[];
   agentOptions: Pick<
     AgentOptions,
-    'maxTurns' | 'permissionMode' | 'enabledTools' | 'disabledTools' | 'reasoningEffort'
+    'maxTurns' | 'permissionMode' | 'enabledTools' | 'disabledTools' | 'reasoningEffort' | 'autonomy'
   >;
 }
 

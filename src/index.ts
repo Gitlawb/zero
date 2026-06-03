@@ -15,7 +15,9 @@ import { redactZeroErrorMessage, redactZeroSecrets } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
 import {
   ZeroMcpClientManager,
+  ZeroMcpPermissionStore,
   createZeroMcpToolName,
+  type ZeroMcpPermissionGrant,
   type ZeroMcpServerStatus,
   type ZeroMcpToolDescriptor,
 } from './zero-mcp';
@@ -61,6 +63,22 @@ function formatZeroMcpToolList(tools: ZeroMcpToolDescriptor[]): string {
       `  ${createZeroMcpToolName(tool.serverName, tool.serverIdentity, tool.name)} (${tool.serverName}/${tool.name})` +
       (tool.description ? ` - ${tool.description}` : '')
     ),
+  ].join('\n');
+}
+
+function formatZeroMcpPermissionList(permissions: ZeroMcpPermissionGrant[]): string {
+  if (permissions.length === 0) {
+    return 'No persistent MCP permissions granted.';
+  }
+
+  return [
+    'MCP Permissions:',
+    ...permissions.map((permission) => {
+      const target = permission.scope === 'tool'
+        ? `${permission.serverName}/${permission.toolName}`
+        : `${permission.serverName}/*`;
+      return `  ${target} [${permission.maxAutonomy}] ${permission.serverIdentity} approved ${permission.approvedAt}`;
+    }),
   ].join('\n');
 }
 
@@ -261,6 +279,87 @@ mcpCmd
       process.exitCode = 1;
     } finally {
       await manager.closeAll();
+    }
+  });
+
+const mcpPermissionsCmd = mcpCmd
+  .command('permissions')
+  .description('List and revoke persistent MCP tool permissions');
+
+mcpPermissionsCmd
+  .command('list')
+  .description('List persistent MCP permissions')
+  .option('--json', 'Print MCP permissions as JSON')
+  .action(async (options: { json?: boolean }) => {
+    const store = new ZeroMcpPermissionStore();
+
+    try {
+      const permissions = await store.list();
+      if (options.json) {
+        console.log(JSON.stringify({ permissions }, null, 2));
+      } else {
+        console.log(formatZeroMcpPermissionList(permissions));
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] MCP permissions list failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+mcpPermissionsCmd
+  .command('revoke')
+  .description('Revoke a server grant or one tool grant')
+  .argument('<server>', 'MCP server name')
+  .argument('[tool]', 'MCP tool name; omit to revoke the server and all of its tool grants')
+  .option('--json', 'Print revoke result as JSON')
+  .action(async (serverName: string, toolName: string | undefined, options: { json?: boolean }) => {
+    const store = new ZeroMcpPermissionStore();
+
+    try {
+      const revoked = toolName
+        ? await store.revokeTool(serverName, toolName)
+        : await store.revokeServer(serverName);
+      if (options.json) {
+        console.log(JSON.stringify({
+          revoked,
+          scope: toolName ? 'tool' : 'server',
+          serverName,
+          ...(toolName ? { toolName } : {}),
+        }, null, 2));
+      } else {
+        const target = toolName ? `${serverName}/${toolName}` : `${serverName}/*`;
+        console.log(`Revoked ${revoked} MCP permission grant${revoked === 1 ? '' : 's'} for ${target}.`);
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] MCP permissions revoke failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+mcpPermissionsCmd
+  .command('clear')
+  .description('Clear all persistent MCP permissions')
+  .option('--confirm', 'Confirm clearing all persistent MCP permissions')
+  .option('--json', 'Print clear result as JSON')
+  .action(async (options: { confirm?: boolean; json?: boolean }) => {
+    if (!options.confirm) {
+      console.error('[zero] Refusing to clear MCP permissions without --confirm.');
+      process.exitCode = 1;
+      return;
+    }
+
+    const store = new ZeroMcpPermissionStore();
+
+    try {
+      const cleared = await store.clear();
+      if (options.json) {
+        console.log(JSON.stringify({ cleared }, null, 2));
+      } else {
+        console.log(`Cleared ${cleared} MCP permission grant${cleared === 1 ? '' : 's'}.`);
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] MCP permissions clear failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
     }
   });
 
