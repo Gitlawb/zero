@@ -39,8 +39,8 @@ describe('TuiShell render surface', () => {
   it('renders the themed startup shell in the first PR style', () => {
     const output = renderShell();
 
-    expect(output).toContain('ZERO');
-    expect(output).toContain('terminal coding agent');
+    expect(output).toContain('____  ___  ____  ____');
+    expect(output).toContain('terminal agent');
     expect(output).toContain('> █ Type your message or @path/to/file');
     expect(output).toContain('/provider');
     expect(output).toContain('Welcome to zero');
@@ -76,8 +76,9 @@ describe('TuiShell render surface', () => {
 
     expect(output).toContain('> inspect the repo');
     expect(output).toContain('⛬ I will scan the codebase.');
-    expect(output).toContain('Grep');
-    expect(output).toContain('"TODO"');
+    expect(output).toContain('grep');
+    expect(output).toContain('pattern: TODO');
+    expect(output).toContain('[show]');
     expect(output).toContain('Plan mode enabled.');
     expect(output).toContain('model       Browse models');
     expect(output).toContain('model list');

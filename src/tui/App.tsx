@@ -84,6 +84,8 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const [inputStyle, setInputStyle] = useState<'border' | 'solid'>(configManager.getInputStyle());
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [inputHistory, setInputHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
   const [scrollOffset, setScrollOffset] = useState(0);
   const [terminalRows, setTerminalRows] = useState(24);
   const [git, setGit] = useState<{ branch?: string; ahead: number; behind: number }>({ ahead: 0, behind: 0 });
@@ -97,7 +99,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
         await loadProviderConfig();
       } catch (err: any) {
         if (err.message?.includes('No LLM provider configured')) {
-          addSystemMessage('No provider configured yet. Use /provider to add one.');
+          addSystemMessage('No provider configured\nRun /provider to add one (OpenGateway recommended)');
         }
       }
     };
@@ -182,6 +184,11 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     : adaptedInputBackground;
   const isInChat = screen === 'chat';
 
+  const rememberInput = (value: string) => {
+    setInputHistory((prev) => prev[prev.length - 1] !== value ? [...prev, value] : prev);
+    setHistoryIndex(-1);
+  };
+
   useInput((inputChar, key) => {
     if (key.ctrl && inputChar === 'c') {
       exit();
@@ -212,6 +219,30 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
         setSuggestionIndex((prev) => prev >= suggestions.length - 1 ? 0 : prev + 1);
         return;
       }
+    }
+
+    if (key.upArrow && inputHistory.length > 0) {
+      if (historyIndex === -1) {
+        setHistoryIndex(inputHistory.length - 1);
+        setInput(inputHistory[inputHistory.length - 1] ?? '');
+      } else if (historyIndex > 0) {
+        const nextIndex = historyIndex - 1;
+        setHistoryIndex(nextIndex);
+        setInput(inputHistory[nextIndex] ?? '');
+      }
+      return;
+    }
+
+    if (key.downArrow && historyIndex !== -1) {
+      if (historyIndex < inputHistory.length - 1) {
+        const nextIndex = historyIndex + 1;
+        setHistoryIndex(nextIndex);
+        setInput(inputHistory[nextIndex] ?? '');
+      } else {
+        setHistoryIndex(-1);
+        setInput('');
+      }
+      return;
     }
 
     if (!input) {
@@ -251,6 +282,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
         setInput('');
         setSuggestions([]);
         if (selected) {
+          rememberInput(selected);
           addMessage({ type: 'user', content: selected });
           void handleSlashCommand(selected);
         }
@@ -284,6 +316,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     setSuggestions([]);
     streamingMessageIndexRef.current = null;
     setStreamingMessageIndex(null);
+    rememberInput(trimmed);
 
     addMessage({ type: 'user', content: trimmed });
 
@@ -392,7 +425,8 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
 
       const found = getAllThemes().find((item) => item.name.toLowerCase() === themeName.toLowerCase());
       if (!found) {
-        addSystemMessage(`Unknown theme: ${themeName}`);
+        const names = getAllThemes().map((item) => item.name).join(', ');
+        addSystemMessage(`Unknown theme. Available: ${names}`);
         return;
       }
 

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { configManager } from '../config/manager';
-import { tuiTheme } from './theme';
+import { theme } from './theme';
 
 type AddMode = 'choose' | 'opengateway' | 'generic';
 
@@ -15,59 +15,61 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
   const [mode, setMode] = useState<AddMode>('choose');
   const [selectedOption, setSelectedOption] = useState(0);
   const [openGatewayStep, setOpenGatewayStep] = useState(0);
-  const [genericStep, setGenericStep] = useState(0);
   const [openGatewayKey, setOpenGatewayKey] = useState('');
   const [openGatewayModel, setOpenGatewayModel] = useState('mimo-v2.5-pro');
   const [name, setName] = useState('');
   const [baseURL, setBaseURL] = useState('https://api.openai.com/v1');
   const [apiKey, setApiKey] = useState('');
-  const [model, setModel] = useState('gpt-4.1');
+  const [model, setModel] = useState('gpt-4o');
   const [error, setError] = useState('');
-  const [successMessage, setSuccessMessage] = useState('');
+  const [success, setSuccess] = useState(false);
 
   useInput((input, key) => {
     if (key.escape) {
       if (mode === 'choose') {
         onCancel();
       } else {
-        resetToChoose();
+        setMode('choose');
+        setOpenGatewayStep(0);
+        setError('');
+        setSuccess(false);
+        setSelectedOption(0);
       }
       return;
     }
 
-    if (mode !== 'choose') return;
+    if (mode === 'choose') {
+      if (key.upArrow) {
+        setSelectedOption((prev) => Math.max(0, prev - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSelectedOption((prev) => Math.min(1, prev + 1));
+        return;
+      }
+      if (key.return) {
+        if (selectedOption === 0) {
+          setMode('opengateway');
+          setOpenGatewayStep(0);
+        } else {
+          setMode('generic');
+        }
+        return;
+      }
 
-    if (key.upArrow) {
-      setSelectedOption((prev) => Math.max(0, prev - 1));
-      return;
+      if (input === '1') {
+        setMode('opengateway');
+        setOpenGatewayStep(0);
+      }
+      if (input === '2') {
+        setMode('generic');
+      }
     }
-
-    if (key.downArrow) {
-      setSelectedOption((prev) => Math.min(1, prev + 1));
-      return;
-    }
-
-    if (key.return) {
-      setMode(selectedOption === 0 ? 'opengateway' : 'generic');
-      return;
-    }
-
-    if (input === '1') setMode('opengateway');
-    if (input === '2') setMode('generic');
   });
-
-  const resetToChoose = () => {
-    setMode('choose');
-    setSelectedOption(0);
-    setOpenGatewayStep(0);
-    setGenericStep(0);
-    setError('');
-    setSuccessMessage('');
-  };
 
   const saveOpenGateway = () => {
     if (!openGatewayKey.trim()) {
-      setError('API key is required.');
+      setError('API key is required');
       return;
     }
 
@@ -80,13 +82,15 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
       description: 'OpenGateway',
     });
 
-    setSuccessMessage('OpenGateway provider saved.');
-    setTimeout(() => onDone(profileName), 900);
+    setSuccess(true);
+    setTimeout(() => {
+      onDone(profileName);
+    }, 1200);
   };
 
   const saveGeneric = () => {
     if (!name.trim() || !baseURL.trim() || !model.trim()) {
-      setError('Name, base URL, and model are required.');
+      setError('Name, Base URL, and Model are required');
       return;
     }
 
@@ -98,205 +102,160 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
       description: 'Custom OpenAI-compatible',
     });
 
-    setSuccessMessage('Provider saved.');
-    setTimeout(() => onDone(name.trim()), 900);
+    setSuccess(true);
+    setTimeout(() => onDone(name.trim()), 1200);
   };
-
-  if (successMessage) {
-    return (
-      <Box flexDirection="column" padding={1}>
-        <Text color={tuiTheme.colors.success} bold>{successMessage}</Text>
-        <Text color={tuiTheme.colors.muted} dimColor>Returning to chat.</Text>
-      </Box>
-    );
-  }
 
   if (mode === 'choose') {
     return (
       <Box flexDirection="column" padding={1}>
-        <Text bold color={tuiTheme.colors.brand}>Add Provider</Text>
-        <Text color={tuiTheme.colors.muted} dimColor>
-          Up/Down moves, Enter selects, Esc returns
-        </Text>
+        <Text bold color={theme.ui.active}>Add New Provider</Text>
+        <Text color={theme.ui.comment}>Esc to go back • ↑↓ to navigate • Enter to select</Text>
 
         <Box marginY={1} flexDirection="column">
-          <ProviderOption
-            index={1}
-            label="OpenGateway"
-            description="Use the hosted OpenAI-compatible gateway."
-            selected={selectedOption === 0}
-          />
-          <ProviderOption
-            index={2}
-            label="Custom OpenAI-compatible"
-            description="Use OpenAI, Groq, Ollama, OpenRouter, or another compatible endpoint."
-            selected={selectedOption === 1}
-          />
+          <Text color={selectedOption === 0 ? theme.ui.active : theme.text.primary}>
+            {selectedOption === 0 ? '› ' : '  '}1. Add OpenGateway (recommended)
+          </Text>
+          {selectedOption === 0 && (
+            <Text color={theme.ui.comment}>
+              {'   '}You'll be asked for your ogw_live_... API key
+            </Text>
+          )}
+
+          <Text color={selectedOption === 1 ? theme.ui.active : theme.text.primary}>
+            {selectedOption === 1 ? '› ' : '  '}2. Add custom OpenAI-compatible provider
+          </Text>
+          {selectedOption === 1 && (
+            <Text color={theme.ui.comment}>
+              {'   '}For Groq, OpenAI, Ollama, etc.
+            </Text>
+          )}
         </Box>
       </Box>
     );
   }
 
   if (mode === 'opengateway') {
+    if (success) {
+      return (
+        <Box flexDirection="column" padding={1}>
+          <Text color={theme.status.success} bold>
+            ✓ OpenGateway provider added successfully!
+          </Text>
+          <Text color={theme.ui.comment}>
+            It is now your active provider.
+          </Text>
+        </Box>
+      );
+    }
+
     return (
-      <ProviderForm title="Add OpenGateway Provider" error={error}>
-        {openGatewayStep === 0 ? (
-          <Field label="API key" helper="Get one from https://opengateway.gitlawb.com">
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={theme.ui.active}>Add OpenGateway Provider</Text>
+        <Text color={theme.ui.comment}>Esc to go back</Text>
+
+        {openGatewayStep === 0 && (
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.status.warning}>Step 1/2 — Enter your OpenGateway API key</Text>
+            <Text color={theme.ui.comment}>
+              You can get one at https://opengateway.gitlawb.com
+            </Text>
+            <Box marginTop={1}>
+              <Text color={theme.text.primary}>API Key: </Text>
+              <TextInput
+                value={openGatewayKey}
+                onChange={setOpenGatewayKey}
+                mask="*"
+                placeholder="ogw_live_..."
+              />
+            </Box>
+            <Box marginTop={1}>
+              <Text color={theme.ui.comment}>Press Enter to continue</Text>
+            </Box>
             <TextInput
-              value={openGatewayKey}
-              onChange={setOpenGatewayKey}
+              value=""
+              onChange={() => {}}
               onSubmit={() => {
-                if (!openGatewayKey.trim()) {
-                  setError('API key cannot be empty.');
-                  return;
+                if (openGatewayKey.trim()) {
+                  setOpenGatewayStep(1);
+                  setError('');
+                } else {
+                  setError('API key cannot be empty');
                 }
-                setError('');
-                setOpenGatewayStep(1);
               }}
-              mask="*"
-              placeholder="ogw_live_..."
             />
-          </Field>
-        ) : (
-          <Field label="Model" helper="Press Enter to save this provider.">
+          </Box>
+        )}
+
+        {openGatewayStep === 1 && (
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.status.warning}>Step 2/2 — Model name</Text>
+            <Box marginTop={1}>
+              <Text color={theme.text.primary}>Model: </Text>
+              <TextInput value={openGatewayModel} onChange={setOpenGatewayModel} />
+            </Box>
+            {error && <Text color={theme.status.error}>⚠ {error}</Text>}
+            <Box marginTop={1}>
+              <Text color={theme.ui.comment}>Press Enter to save</Text>
+            </Box>
             <TextInput
-              value={openGatewayModel}
-              onChange={setOpenGatewayModel}
+              value=""
+              onChange={() => {}}
               onSubmit={saveOpenGateway}
             />
-          </Field>
+          </Box>
         )}
-      </ProviderForm>
+      </Box>
     );
   }
 
-  return (
-    <ProviderForm title="Add Custom Provider" error={error}>
-      {genericStep === 0 && (
-        <Field label="Name" helper="A short local name for this profile.">
-          <TextInput
-            value={name}
-            onChange={setName}
-            onSubmit={() => {
-              if (!name.trim()) {
-                setError('Name is required.');
-                return;
-              }
-              setError('');
-              setGenericStep(1);
-            }}
-            placeholder="work"
-          />
-        </Field>
-      )}
-
-      {genericStep === 1 && (
-        <Field label="Base URL" helper="OpenAI-compatible API base URL.">
-          <TextInput
-            value={baseURL}
-            onChange={setBaseURL}
-            onSubmit={() => {
-              if (!baseURL.trim()) {
-                setError('Base URL is required.');
-                return;
-              }
-              setError('');
-              setGenericStep(2);
-            }}
-          />
-        </Field>
-      )}
-
-      {genericStep === 2 && (
-        <Field label="API key" helper="Leave blank only for local gateways that do not need one.">
-          <TextInput
-            value={apiKey}
-            onChange={setApiKey}
-            onSubmit={() => {
-              setError('');
-              setGenericStep(3);
-            }}
-            mask="*"
-          />
-        </Field>
-      )}
-
-      {genericStep === 3 && (
-        <Field label="Model" helper="Press Enter to save this provider.">
-          <TextInput value={model} onChange={setModel} onSubmit={saveGeneric} />
-        </Field>
-      )}
-    </ProviderForm>
-  );
-};
-
-function ProviderOption({
-  index,
-  label,
-  description,
-  selected,
-}: {
-  index: number;
-  label: string;
-  description: string;
-  selected: boolean;
-}) {
-  return (
-    <Box flexDirection="column" paddingLeft={1} marginBottom={1}>
-      <Text color={selected ? tuiTheme.colors.accent : tuiTheme.colors.text}>
-        {selected ? '> ' : '  '}
-        {index}. {label}
-      </Text>
-      {selected && (
-        <Text color={tuiTheme.colors.muted} dimColor>
-          {'   '}{description}
-        </Text>
-      )}
-    </Box>
-  );
-}
-
-function ProviderForm({
-  title,
-  error,
-  children,
-}: {
-  title: string;
-  error: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Box flexDirection="column" padding={1}>
-      <Text bold color={tuiTheme.colors.brand}>{title}</Text>
-      <Text color={tuiTheme.colors.muted} dimColor>Esc returns to provider choices.</Text>
-      <Box marginTop={1} flexDirection="column">
-        {children}
-      </Box>
-      {error && (
-        <Box marginTop={1}>
-          <Text color={tuiTheme.colors.danger}>{error}</Text>
+  if (mode === 'generic') {
+    if (success) {
+      return (
+        <Box flexDirection="column" padding={1}>
+          <Text color={theme.status.success} bold>
+            ✓ Provider added successfully!
+          </Text>
         </Box>
-      )}
-    </Box>
-  );
-}
+      );
+    }
 
-function Field({
-  label,
-  helper,
-  children,
-}: {
-  label: string;
-  helper: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Box flexDirection="column">
-      <Text color={tuiTheme.colors.text}>{label}</Text>
-      <Text color={tuiTheme.colors.muted} dimColor>{helper}</Text>
-      <Box marginTop={1}>
-        {children}
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text bold color={theme.ui.active}>Add Custom Provider</Text>
+        <Text color={theme.ui.comment}>Esc to go back</Text>
+
+        <Box marginTop={1}>
+          <Text color={theme.text.primary}>Name: </Text>
+          <TextInput value={name} onChange={setName} />
+        </Box>
+        <Box>
+          <Text color={theme.text.primary}>Base URL: </Text>
+          <TextInput value={baseURL} onChange={setBaseURL} />
+        </Box>
+        <Box>
+          <Text color={theme.text.primary}>API Key: </Text>
+          <TextInput value={apiKey} onChange={setApiKey} mask="*" />
+        </Box>
+        <Box>
+          <Text color={theme.text.primary}>Model: </Text>
+          <TextInput value={model} onChange={setModel} />
+        </Box>
+
+        {error && <Text color={theme.status.error}>{error}</Text>}
+
+        <Box marginTop={1}>
+          <Text color={theme.ui.comment}>Press Enter to save</Text>
+        </Box>
+
+        <TextInput
+          value=""
+          onChange={() => {}}
+          onSubmit={saveGeneric}
+        />
       </Box>
-    </Box>
-  );
-}
+    );
+  }
+
+  return null;
+};

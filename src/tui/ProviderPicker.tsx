@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { configManager } from '../config/manager';
-import { tuiTheme } from './theme';
+import { theme } from './theme';
 
 interface ProviderPickerProps {
   onSelect: (name: string) => void;
@@ -9,17 +9,11 @@ interface ProviderPickerProps {
   onAddNew: () => void;
 }
 
-export const ProviderPicker: React.FC<ProviderPickerProps> = ({
-  onSelect,
-  onCancel,
-  onAddNew,
-}) => {
+export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCancel, onAddNew }) => {
   const providers = configManager.listProviders();
   const activeProvider = configManager.getActiveProvider()?.name;
   const totalItems = providers.length + 1;
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const selectedProvider = providers[selectedIndex];
-  const addNewSelected = selectedIndex === providers.length;
 
   useInput((input, key) => {
     if (key.escape || (key.ctrl && input === 'c')) {
@@ -38,16 +32,20 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({
     }
 
     if (key.return) {
-      if (addNewSelected) onAddNew();
-      else if (selectedProvider) onSelect(selectedProvider.name);
+      if (selectedIndex < providers.length) {
+        const selected = providers[selectedIndex];
+        if (selected) onSelect(selected.name);
+      } else {
+        onAddNew();
+      }
       return;
     }
 
     const num = parseInt(input, 10);
     if (!Number.isNaN(num) && num >= 1 && num <= totalItems) {
       if (num <= providers.length) {
-        const provider = providers[num - 1];
-        if (provider) onSelect(provider.name);
+        const selected = providers[num - 1];
+        if (selected) onSelect(selected.name);
       } else {
         onAddNew();
       }
@@ -56,53 +54,55 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Text bold color={tuiTheme.colors.brand}>Provider Profiles</Text>
-      <Text color={tuiTheme.colors.muted} dimColor>
-        Up/Down moves, Enter selects, Esc returns
+      <Text bold color={theme.ui.active}>
+        Select Provider
+      </Text>
+      <Text color={theme.ui.comment}>
+        ↑↓ to navigate • Enter to select • Esc to cancel
       </Text>
 
       <Box marginY={1} flexDirection="column">
-        {providers.length === 0 && (
-          <Text color={tuiTheme.colors.muted} dimColor>
-            No saved providers yet.
-          </Text>
-        )}
-
         {providers.map((provider, index) => {
           const isSelected = index === selectedIndex;
           const isActive = provider.name === activeProvider;
 
           return (
             <Box key={provider.name} paddingLeft={1}>
-              <Text color={isSelected ? tuiTheme.colors.accent : tuiTheme.colors.text}>
-                {isSelected ? '> ' : '  '}
-                {index + 1}. {provider.name}
-                <Text color={tuiTheme.colors.muted}> / {provider.model}</Text>
-                {isActive && <Text color={tuiTheme.colors.brand}> current</Text>}
+              <Text color={isSelected ? theme.ui.active : theme.text.primary}>
+                {isSelected ? '› ' : '  '}
+                {provider.name}
+                {isActive && <Text color={theme.text.accent}> (current)</Text>}
               </Text>
             </Box>
           );
         })}
 
         <Box paddingLeft={1}>
-          <Text color={addNewSelected ? tuiTheme.colors.accent : tuiTheme.colors.brand}>
-            {addNewSelected ? '> ' : '  '}
-            {providers.length + 1}. Add provider
+          <Text color={selectedIndex === providers.length ? theme.ui.active : theme.ui.active}>
+            {selectedIndex === providers.length ? '› ' : '  '}
+            + Add new provider...
           </Text>
         </Box>
       </Box>
 
-      {selectedProvider && (
-        <Box flexDirection="column" marginLeft={2} borderStyle="single" borderColor={tuiTheme.colors.border} paddingX={1}>
-          <Text><Text bold>Model:</Text> {selectedProvider.model}</Text>
-          {selectedProvider.provider && <Text><Text bold>Provider:</Text> {selectedProvider.provider}</Text>}
-          <Text><Text bold>Base URL:</Text> {selectedProvider.baseURL}</Text>
-          {selectedProvider.description && <Text><Text bold>Description:</Text> {selectedProvider.description}</Text>}
+      {providers[selectedIndex] && (
+        <Box flexDirection="column" marginLeft={2} borderStyle="round" paddingX={1} borderColor={theme.border.default}>
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Model:</Text> {providers[selectedIndex].model}
+          </Text>
+          <Text color={theme.text.primary}>
+            <Text bold color={theme.text.secondary}>Base URL:</Text> {providers[selectedIndex].baseURL}
+          </Text>
+          {providers[selectedIndex].description && (
+            <Text color={theme.text.secondary}>
+              <Text bold>{' '}</Text>{providers[selectedIndex].description}
+            </Text>
+          )}
         </Box>
       )}
 
       <Box marginTop={1}>
-        <Text color={tuiTheme.colors.muted} dimColor>
+        <Text color={theme.ui.comment}>
           Press 1-{totalItems} for quick selection
         </Text>
       </Box>
