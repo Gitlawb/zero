@@ -339,7 +339,7 @@ function toGeminiContents(messages: Message[]): {
     }
 
     if (content) {
-      contents.push({ role: 'user', parts: [{ text: content }] });
+      appendUserParts(contents, [{ text: content }]);
     }
   }
 

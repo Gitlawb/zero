@@ -116,6 +116,71 @@ describe('GeminiProvider', () => {
     });
   });
 
+  it('merges user text after a tool result into the same Gemini user turn', async () => {
+    let capturedBody: any;
+
+    const provider = new GeminiProvider({
+      apiKey: 'test-google-key',
+      model: 'gemini-2.5-flash',
+      fetchImpl: async (_url, init) => {
+        capturedBody = JSON.parse(String(init?.body));
+        return streamResponse([event({})]);
+      },
+    });
+
+    await collectEvents(provider.streamCompletion(
+      [
+        { role: 'user', content: 'Read the file.' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'read_file',
+              arguments: '{"path":"src/index.ts"}',
+            },
+          ],
+        },
+        { role: 'tool', toolCallId: 'call_1', content: 'file contents' },
+        { role: 'user', content: 'Now grep for Zero.' },
+      ],
+      []
+    ));
+
+    expect(capturedBody.contents).toEqual([
+      {
+        role: 'user',
+        parts: [{ text: 'Read the file.' }],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_1',
+              name: 'read_file',
+              args: { path: 'src/index.ts' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_1',
+              name: 'read_file',
+              response: { result: 'file contents' },
+            },
+          },
+          { text: 'Now grep for Zero.' },
+        ],
+      },
+    ]);
+  });
+
   it('normalizes Gemini text, usage, and thinking token stream chunks', async () => {
     const provider = new GeminiProvider({
       apiKey: 'test-key',
