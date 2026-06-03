@@ -1,6 +1,8 @@
 export const tuiTheme = {
   colors: {
+    background: '#05080a',
     brand: '#67e8f9',
+    brandStrong: '#22d3ee',
     accent: '#86efac',
     text: '#f8fafc',
     muted: '#94a3b8',

@@ -2,6 +2,7 @@ import React from 'react';
 import { Box } from 'ink';
 import { CommandSuggestions } from './CommandSuggestions';
 import { DebugErrorPanel } from './DebugErrorPanel';
+import { StartupScreen } from './StartupScreen';
 import { Transcript } from './Transcript';
 import { TuiHeader } from './TuiHeader';
 import { TuiPromptBox } from './TuiPromptBox';
@@ -22,6 +23,7 @@ interface TuiShellProps extends TuiModeState {
   modelName: string;
   lastError: any;
   terminalWidth: number;
+  terminalHeight: number;
 }
 
 export const TuiShell: React.FC<TuiShellProps> = ({
@@ -38,6 +40,7 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   modelName,
   lastError,
   terminalWidth,
+  terminalHeight,
   isPlanMode,
   debugMode,
   toolsEnabled,
@@ -45,6 +48,18 @@ export const TuiShell: React.FC<TuiShellProps> = ({
 }) => {
   const modeState = { isPlanMode, debugMode, toolsEnabled, isThinking };
   const shellWidth = Math.max(60, terminalWidth - 1);
+
+  if (showLogo) {
+    return (
+      <StartupScreen
+        providerName={providerName}
+        modelName={modelName}
+        input={input}
+        terminalWidth={terminalWidth}
+        terminalHeight={terminalHeight}
+      />
+    );
+  }
 
   return (
     <Box

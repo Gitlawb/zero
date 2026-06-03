@@ -29,20 +29,25 @@ function renderShell(overrides: Partial<React.ComponentProps<typeof TuiShell>> =
       toolsEnabled: true,
       isThinking: false,
       terminalWidth: 82,
+      terminalHeight: 28,
       ...overrides,
     })
   );
 }
 
 describe('TuiShell render surface', () => {
-  it('renders a compact terminal launch surface', () => {
+  it('renders the startup splash without session clutter', () => {
     const output = renderShell();
 
     expect(output).toContain('ZERO');
     expect(output).toContain('terminal coding agent');
-    expect(output).toContain('Welcome to zero');
     expect(output).toContain('zero >');
     expect(output).toContain('/provider');
+    expect(output).toContain('status: READY');
+    expect(output).not.toContain('Welcome to zero');
+    expect(output).not.toContain('WORKSPACE');
+    expect(output).not.toContain('SESSION');
+    expect(output).not.toContain('history');
   });
 
   it('renders D-style message rows and command suggestions', () => {
