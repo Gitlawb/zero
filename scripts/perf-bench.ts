@@ -184,42 +184,65 @@ export function parsePerfBenchArgs(
   };
 
   for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
+    const rawArg = args[index]!;
+    const { flag, inlineValue } = splitFlagValue(rawArg);
 
-    switch (arg) {
+    switch (flag) {
       case '--iterations':
-        options.iterations = parsePositiveInteger(arg, requireValue(args, ++index, arg));
+        options.iterations = parsePositiveInteger(flag, readOptionValue(args, inlineValue, ++index, flag));
+        if (inlineValue !== undefined) index--;
         break;
       case '--warmup':
-        options.warmupIterations = parseNonNegativeInteger(arg, requireValue(args, ++index, arg));
+        options.warmupIterations = parseNonNegativeInteger(
+          flag,
+          readOptionValue(args, inlineValue, ++index, flag)
+        );
+        if (inlineValue !== undefined) index--;
         break;
       case '--cold-start-warn-ms':
-        options.thresholds.coldStartP95Ms = parsePositiveNumber(arg, requireValue(args, ++index, arg));
+        options.thresholds.coldStartP95Ms = parsePositiveNumber(
+          flag,
+          readOptionValue(args, inlineValue, ++index, flag)
+        );
+        if (inlineValue !== undefined) index--;
         break;
       case '--ttft-warn-ms':
-        options.thresholds.ttftP95Ms = parsePositiveNumber(arg, requireValue(args, ++index, arg));
+        options.thresholds.ttftP95Ms = parsePositiveNumber(
+          flag,
+          readOptionValue(args, inlineValue, ++index, flag)
+        );
+        if (inlineValue !== undefined) index--;
         break;
       case '--rss-warn-mb':
-        options.thresholds.agentRssMaxMb = parsePositiveNumber(arg, requireValue(args, ++index, arg));
+        options.thresholds.agentRssMaxMb = parsePositiveNumber(
+          flag,
+          readOptionValue(args, inlineValue, ++index, flag)
+        );
+        if (inlineValue !== undefined) index--;
         break;
       case '--output':
-        options.output = requireValue(args, ++index, arg);
+        options.output = readOptionValue(args, inlineValue, ++index, flag);
+        if (inlineValue !== undefined) index--;
         break;
       case '--ci':
+        rejectInlineValue(flag, inlineValue);
         options.ci = true;
         break;
       case '--json':
+        rejectInlineValue(flag, inlineValue);
         options.json = true;
         break;
       case '--fail-on-warning':
+        rejectInlineValue(flag, inlineValue);
         options.failOnWarning = true;
         break;
       case '--help':
       case '-h':
+        rejectInlineValue(flag, inlineValue);
         options.help = true;
         break;
       default:
-        throw new Error(`Unknown option: ${arg}`);
+        throw new Error(`Unknown option: ${rawArg}`);
     }
   }
 
@@ -473,12 +496,44 @@ function formatCommand(command: string[]): string {
   return command.map((part) => (/\s/.test(part) ? JSON.stringify(part) : part)).join(' ');
 }
 
+function splitFlagValue(arg: string): { flag: string; inlineValue?: string } {
+  const separatorIndex = arg.indexOf('=');
+  if (separatorIndex === -1) return { flag: arg };
+
+  return {
+    flag: arg.slice(0, separatorIndex),
+    inlineValue: arg.slice(separatorIndex + 1),
+  };
+}
+
+function readOptionValue(
+  args: string[],
+  inlineValue: string | undefined,
+  index: number,
+  flag: string
+): string {
+  if (inlineValue !== undefined) {
+    if (inlineValue === '') {
+      throw new Error(`${flag} requires a value`);
+    }
+    return inlineValue;
+  }
+
+  return requireValue(args, index, flag);
+}
+
 function requireValue(args: string[], index: number, flag: string): string {
   const value = args[index];
   if (!value || value.startsWith('--')) {
     throw new Error(`${flag} requires a value`);
   }
   return value;
+}
+
+function rejectInlineValue(flag: string, inlineValue: string | undefined): void {
+  if (inlineValue !== undefined) {
+    throw new Error(`${flag} does not accept a value`);
+  }
 }
 
 function readPositiveIntegerEnv(

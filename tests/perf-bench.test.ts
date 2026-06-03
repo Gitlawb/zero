@@ -4,6 +4,7 @@ import {
   evaluatePerfWarnings,
   formatPerfSummary,
   parsePerfBenchArgs,
+  runPerfBench,
   summarizeSamples,
   type PerfBenchResult,
   type PerfMetrics,
@@ -44,14 +45,11 @@ describe('performance benchmark helpers', () => {
   it('parses CLI and environment overrides', () => {
     const options = parsePerfBenchArgs(
       [
-        '--iterations',
-        '3',
+        '--iterations=3',
         '--warmup',
         '0',
-        '--ttft-warn-ms',
-        '600',
-        '--output',
-        'dist/perf/report.json',
+        '--ttft-warn-ms=600',
+        '--output=dist/perf/report.json',
         '--ci',
         '--fail-on-warning',
       ],
@@ -71,6 +69,25 @@ describe('performance benchmark helpers', () => {
     expect(options.output).toBe('dist/perf/report.json');
     expect(options.ci).toBe(true);
     expect(options.failOnWarning).toBe(true);
+  });
+
+  it('runs a minimal benchmark end to end', async () => {
+    const result = await runPerfBench({
+      iterations: 1,
+      warmupIterations: 0,
+      thresholds: {
+        coldStartP95Ms: 60_000,
+        ttftP95Ms: 60_000,
+        agentRssMaxMb: 4096,
+      },
+    });
+
+    expect(result.schemaVersion).toBe(1);
+    expect(result.iterations).toBe(1);
+    expect(result.metrics.coldStartMs.samples).toHaveLength(1);
+    expect(result.metrics.ttftMs.samples).toHaveLength(1);
+    expect(result.metrics.agentRssMb.max).toBeGreaterThan(0);
+    expect(result.warnings).toEqual([]);
   });
 
   it('formats the benchmark summary with warning details', () => {

@@ -33,10 +33,12 @@ Default warning thresholds:
 - TTFT p95: 500 ms
 - Agent RSS peak: 256 MB
 
+The default sample count is intentionally small for CI smoke coverage. `p95` uses nearest-rank percentile selection, so with the default 5 measured samples it is the slowest sample. Increase `--iterations` for local baseline investigations.
+
 Override thresholds with CLI flags:
 
 ```bash
-bun run scripts/perf-bench.ts --cold-start-warn-ms 350 --ttft-warn-ms 600 --rss-warn-mb 384
+bun run scripts/perf-bench.ts --cold-start-warn-ms=350 --ttft-warn-ms=600 --rss-warn-mb=384
 ```
 
 Or with environment variables:
