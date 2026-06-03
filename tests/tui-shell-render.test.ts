@@ -39,8 +39,8 @@ describe('TuiShell render surface', () => {
   it('renders the themed startup shell in the first PR style', () => {
     const output = renderShell();
 
-    expect(output).toContain('____  ___  ____  ____');
-    expect(output.match(/____  ___  ____  ____/g)?.length ?? 0).toBe(1);
+    expect(output).toContain('███████╗███████╗██████╗');
+    expect(output.match(/███████╗███████╗██████╗/g)?.length ?? 0).toBe(1);
     expect(output).toContain('terminal agent');
     expect(output).toContain('> █ Type your message or @path/to/file');
     expect(output).toContain('/provider');
@@ -57,6 +57,17 @@ describe('TuiShell render surface', () => {
     expect(output).not.toContain('WORKSPACE');
     expect(output).not.toContain('SESSION');
     expect(output).not.toContain('history');
+  });
+
+  it('does not render the startup wordmark once chat mode hides it', () => {
+    const output = renderShell({
+      showLogo: false,
+      messages: [{ type: 'user', content: 'inspect the repo' }],
+      visibleMessages: [{ type: 'user', content: 'inspect the repo' }],
+    });
+
+    expect(output).not.toContain('███████╗███████╗██████╗');
+    expect(output).toContain('> inspect the repo');
   });
 
   it('renders compact message rows and command suggestions', () => {

@@ -2,7 +2,22 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from './theme';
 
-export const Logo: React.FC = () => {
+const LOGO_LINES = [
+  '███████╗███████╗██████╗  ██████╗',
+  '╚══███╔╝██╔════╝██╔══██╗██╔═══██╗',
+  '  ███╔╝ █████╗  ██████╔╝██║   ██║',
+  ' ███╔╝  ██╔══╝  ██╔══██╗██║   ██║',
+  '███████╗███████╗██║  ██║╚██████╔╝',
+  '╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝',
+];
+
+const LOGO_WIDTH = Math.max(...LOGO_LINES.map((line) => line.length));
+
+interface LogoProps {
+  maxWidth?: number;
+}
+
+export const Logo: React.FC<LogoProps> = ({ maxWidth = LOGO_WIDTH }) => {
   const [frame, setFrame] = React.useState(0);
   const animationsDisabled = process.env.NO_ANIMATION === '1' || process.env.NO_ANIMATIONS === '1' || process.env.CI === 'true';
 
@@ -13,21 +28,20 @@ export const Logo: React.FC = () => {
     return () => clearInterval(timer);
   }, [animationsDisabled]);
 
-  const lines = [
-    '   ____  ___  ____  ____ ',
-    '  /_  / / _ \\/ __ \\/ __ \\',
-    '   / /_/  __/ /_/ / /_/ /',
-    '  /___/\\___/\\____/\\____/ ',
-  ];
   const cursor = animationsDisabled || frame % 2 === 0 ? '▌' : ' ';
+  const canRenderWordmark = maxWidth >= LOGO_WIDTH;
 
   return (
     <Box flexDirection="column" marginBottom={1}>
-      {lines.map((line, index) => (
-        <Text key={line} color={index === 1 ? theme.text.accent : theme.ui.active} bold wrap="truncate">
-          {line}
-        </Text>
-      ))}
+      {canRenderWordmark ? (
+        LOGO_LINES.map((line, index) => (
+          <Text key={line} color={index === LOGO_LINES.length - 1 ? theme.ui.comment : theme.ui.active} bold wrap="truncate">
+            {line}
+          </Text>
+        ))
+      ) : (
+        <Text color={theme.ui.active} bold>ZERO</Text>
+      )}
       <Box flexDirection="row">
         <Text color={theme.ui.comment}>  terminal agent </Text>
         <Text color={theme.text.accent}>{cursor}</Text>

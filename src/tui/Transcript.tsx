@@ -29,6 +29,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   scrollOffset,
   streamingMessageIndex,
   isThinking,
+  showLogo,
   canScrollUp,
   canScrollDown,
   terminalWidth,
@@ -40,7 +41,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
 
   return (
     <Box flexDirection="column">
-      <Logo />
+      {showLogo && <Logo maxWidth={terminalWidth - 4} />}
 
       {(canScrollUp || canScrollDown) && (
         <Text color={tuiTheme.colors.subtle}>
