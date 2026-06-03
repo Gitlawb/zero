@@ -4,7 +4,8 @@ import { configManager } from './config/manager';
 import { startTUI } from './tui';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
-import { redactZeroSecrets } from './zero-redaction';
+import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from './zero-doctor';
+import { redactZeroErrorMessage, redactZeroSecrets } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
 
 const program = new Command();
@@ -166,6 +167,33 @@ program
       }
     } catch (err: unknown) {
       console.error(`[zero] Could not check for updates: ${getErrorMessage(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('doctor')
+  .description('Run Zero health checks')
+  .option('--json', 'Print health checks as JSON')
+  .option('--connectivity', 'Probe the configured provider endpoint')
+  .action(async (options: { json?: boolean; connectivity?: boolean }) => {
+    try {
+      const report = await runZeroDoctor({
+        connectivity: Boolean(options.connectivity),
+      });
+      const safeReport = redactZeroSecrets(report) as ZeroDoctorReport;
+
+      if (options.json) {
+        console.log(JSON.stringify(safeReport, null, 2));
+      } else {
+        console.log(formatZeroDoctorReport(safeReport));
+      }
+
+      if (!report.ok) {
+        process.exitCode = 1;
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] Doctor failed: ${redactZeroErrorMessage(err)}`);
       process.exitCode = 1;
     }
   });
