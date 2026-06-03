@@ -12,6 +12,7 @@ interface AddProviderProps {
 }
 
 export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) => {
+  const completionTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [mode, setMode] = useState<AddMode>('choose');
   const [selectedOption, setSelectedOption] = useState(0);
   const [openGatewayStep, setOpenGatewayStep] = useState(0);
@@ -24,8 +25,26 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
 
+  const clearCompletionTimeout = () => {
+    if (completionTimeoutRef.current) {
+      clearTimeout(completionTimeoutRef.current);
+      completionTimeoutRef.current = null;
+    }
+  };
+
+  React.useEffect(() => clearCompletionTimeout, []);
+
+  const completeAfterSuccess = (providerName: string) => {
+    clearCompletionTimeout();
+    completionTimeoutRef.current = setTimeout(() => {
+      completionTimeoutRef.current = null;
+      onDone(providerName);
+    }, 1200);
+  };
+
   useInput((input, key) => {
     if (key.escape) {
+      clearCompletionTimeout();
       if (mode === 'choose') {
         onCancel();
       } else {
@@ -83,9 +102,7 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
     });
 
     setSuccess(true);
-    setTimeout(() => {
-      onDone(profileName);
-    }, 1200);
+    completeAfterSuccess(profileName);
   };
 
   const saveGeneric = () => {
@@ -103,7 +120,7 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
     });
 
     setSuccess(true);
-    setTimeout(() => onDone(name.trim()), 1200);
+    completeAfterSuccess(name.trim());
   };
 
   if (mode === 'choose') {
@@ -172,6 +189,7 @@ export const AddProvider: React.FC<AddProviderProps> = ({ onDone, onCancel }) =>
             <Box marginTop={1}>
               <Text color={theme.ui.comment}>Press Enter to continue</Text>
             </Box>
+            {error && <Text color={theme.status.error}>⚠ {error}</Text>}
             <TextInput
               value=""
               onChange={() => {}}

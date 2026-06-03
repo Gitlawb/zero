@@ -37,6 +37,10 @@ export const Transcript: React.FC<TranscriptProps> = ({
 }) => {
   const rows = visibleMessages;
   const startIndex = Math.max(0, messages.length - rows.length - scrollOffset);
+  const activeToolCallIndex = rows.reduce(
+    (lastIndex, row, index) => row.type === 'tool-call' ? index : lastIndex,
+    -1
+  );
 
   return (
     <Box flexDirection="column">
@@ -56,6 +60,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
           streamingMessageIndex={streamingMessageIndex}
           terminalWidth={terminalWidth}
           messageBackground={messageBackground}
+          isActiveToolCall={index === activeToolCallIndex}
         />
       ))}
 
@@ -74,12 +79,14 @@ function TranscriptRow({
   streamingMessageIndex,
   terminalWidth,
   messageBackground,
+  isActiveToolCall,
 }: {
   message: ChatMessage;
   index: number;
   streamingMessageIndex: number | null;
   terminalWidth: number;
   messageBackground?: string;
+  isActiveToolCall: boolean;
 }) {
   if (message.type === 'user') {
     const backgroundColor = messageBackground ?? tuiTheme.colors.userBg;
@@ -127,6 +134,7 @@ function TranscriptRow({
           args={message.args}
           result={message.result}
           status={hasResult ? 'success' : 'running'}
+          isActive={isActiveToolCall}
         />
       </Box>
     );

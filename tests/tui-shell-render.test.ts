@@ -96,6 +96,7 @@ describe('TuiShell render surface', () => {
     expect(output).toContain('model list');
     expect(output).toContain('▄');
     expect(output).toContain('▀');
+    expect(output).toContain('ctrl+t');
     expect(output).not.toContain('perms ask');
     expect(output).not.toContain('Tab accepts');
   });

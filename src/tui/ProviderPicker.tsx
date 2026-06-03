@@ -78,7 +78,7 @@ export const ProviderPicker: React.FC<ProviderPickerProps> = ({ onSelect, onCanc
         })}
 
         <Box paddingLeft={1}>
-          <Text color={selectedIndex === providers.length ? theme.ui.active : theme.ui.active}>
+          <Text color={selectedIndex === providers.length ? theme.ui.active : theme.text.primary}>
             {selectedIndex === providers.length ? '› ' : '  '}
             + Add new provider...
           </Text>

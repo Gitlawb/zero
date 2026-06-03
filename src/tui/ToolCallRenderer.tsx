@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { highlightCode } from './highlighter';
 import { theme } from './theme';
 
@@ -8,6 +8,7 @@ interface ToolCallRendererProps {
   args: string;
   result?: string;
   status?: 'running' | 'success' | 'error';
+  isActive?: boolean;
 }
 
 export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
@@ -15,6 +16,7 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   args,
   result,
   status = 'success',
+  isActive = false,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [highlightedArgs, setHighlightedArgs] = useState<string | null>(null);
@@ -24,6 +26,17 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   const isLongResult = hasResult && (result!.length > 400 || result!.split('\n').length > 12);
   const [showFullResult, setShowFullResult] = useState(false);
   const summary = getToolSummary(name, args);
+
+  useInput((input, key) => {
+    if (key.ctrl && input === 't') {
+      setIsExpanded((prev) => !prev);
+      return;
+    }
+
+    if (key.ctrl && input === 'f' && isExpanded && isLongResult) {
+      setShowFullResult((prev) => !prev);
+    }
+  }, { isActive });
 
   useEffect(() => {
     if (!isExpanded) return;
@@ -90,9 +103,8 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
           <Text
             color={theme.ui.active}
             dimColor
-            {...({ onPress: () => setIsExpanded(true) } as any)}
           >
-            {'  '}[show]
+            {'  '}[show]{isActive ? ' ctrl+t' : ''}
           </Text>
         )}
       </Box>
@@ -114,9 +126,8 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
         <Text
           color={theme.ui.active}
           dimColor
-          {...({ onPress: () => setIsExpanded(false) } as any)}
         >
-          [hide]
+          [hide]{isActive ? ' ctrl+t' : ''}
         </Text>
       </Box>
 
@@ -144,9 +155,8 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
             <Text
               color={theme.ui.active}
               dimColor
-              {...({ onPress: () => setShowFullResult(!showFullResult) } as any)}
             >
-              {showFullResult ? ' [less]' : ' [more]'}
+              {showFullResult ? ' [less]' : ' [more]'}{isActive ? ' ctrl+f' : ''}
             </Text>
           )}
         </Box>
