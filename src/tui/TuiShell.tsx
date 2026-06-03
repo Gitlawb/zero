@@ -67,13 +67,12 @@ export const TuiShell: React.FC<TuiShellProps> = ({
   isThinking,
 }) => {
   const modeState = { isPlanMode, debugMode, toolsEnabled, isThinking };
-  const shellWidth = Math.max(60, terminalWidth - 1);
+  const shellWidth = Math.max(60, terminalWidth);
 
   return (
     <Box
       flexDirection="column"
       height="100%"
-      width={shellWidth}
     >
       <Box flexGrow={1} flexDirection="row" overflow="hidden">
         <Box flexGrow={1} flexDirection="column" paddingX={1} paddingTop={1}>

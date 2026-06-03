@@ -40,6 +40,7 @@ describe('TuiShell render surface', () => {
     const output = renderShell();
 
     expect(output).toContain('____  ___  ____  ____');
+    expect(output.match(/____  ___  ____  ____/g)?.length ?? 0).toBe(1);
     expect(output).toContain('terminal agent');
     expect(output).toContain('> █ Type your message or @path/to/file');
     expect(output).toContain('/provider');

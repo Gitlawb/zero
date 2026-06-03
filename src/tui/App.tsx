@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { useApp, useInput, useWindowSize } from 'ink';
+import { useApp, useInput, useStdout } from 'ink';
 import { runAgent, type ToolApprovalDecision, type ToolApprovalRequest } from '../agent/loop';
 import { configManager } from '../config/manager';
 import { redactZeroError, redactZeroSecrets, redactZeroString } from '../zero-redaction';
@@ -64,12 +64,14 @@ interface AppProps {
 
 export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
   const { exit } = useApp();
-  const { columns, rows } = useWindowSize();
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? process.stdout.columns ?? 80;
+  const rows = stdout?.rows ?? process.stdout.rows ?? 24;
   const colorDepth = process.env.COLORTERM === 'truecolor' || process.env.COLORTERM === '24bit'
     ? 24
     : (process.env.TERM ?? '').includes('256color')
       ? 24
-      : process.stdout.getColorDepth?.() ?? 24;
+      : stdout?.getColorDepth?.() ?? process.stdout.getColorDepth?.() ?? 24;
   const [terminalBackground] = useState<string | undefined>(() => (
     initialTerminalBackground ?? configManager.getTerminalBackground() ?? detectFromColorFgBg()
   ));
@@ -196,7 +198,7 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     }
 
     if (!input) {
-      const currentTerminalHeight = Math.max(20, rows || terminalRows);
+      const currentTerminalHeight = Math.max(20, rows);
       const currentChatHeight = Math.max(8, currentTerminalHeight - 6);
       const currentMaxScrollOffset = Math.max(0, messages.length - currentChatHeight);
 
@@ -713,8 +715,8 @@ export const App: React.FC<AppProps> = ({ initialTerminalBackground }) => {
     );
   }
 
-  const terminalHeight = Math.max(20, rows || process.stdout.rows || 24);
-  const terminalWidth = Math.max(64, columns || process.stdout.columns || 96);
+  const terminalHeight = Math.max(20, rows);
+  const terminalWidth = Math.max(64, columns);
   const chatHeight = Math.max(8, terminalHeight - 6);
   const maxScrollOffset = Math.max(0, messages.length - chatHeight);
   const windowEnd = Math.max(0, messages.length - scrollOffset);
