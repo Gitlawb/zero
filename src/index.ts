@@ -21,6 +21,11 @@ import {
   type ZeroMcpServerStatus,
   type ZeroMcpToolDescriptor,
 } from './zero-mcp';
+import {
+  loadZeroPlugins,
+  type ZeroLoadedPlugin,
+  type ZeroPluginDiagnostic,
+} from './zero-plugins';
 
 const program = new Command();
 
@@ -91,6 +96,39 @@ function toZeroMcpToolJson(tool: ZeroMcpToolDescriptor): Record<string, unknown>
     description: tool.description,
     inputSchema: tool.inputSchema,
   };
+}
+
+function formatZeroPluginList(
+  plugins: ZeroLoadedPlugin[],
+  diagnostics: ZeroPluginDiagnostic[]
+): string {
+  const lines: string[] = [];
+
+  if (plugins.length === 0) {
+    lines.push('No local Zero plugins loaded.');
+  } else {
+    lines.push('Zero Plugins:');
+    for (const plugin of plugins) {
+      const counts = [
+        `${plugin.tools.length} tools`,
+        `${plugin.prompts.length} prompts`,
+        `${plugin.skills.length} skills`,
+        `${plugin.hooks.length} hooks`,
+      ].join(', ');
+      lines.push(
+        `  ${plugin.id}@${plugin.version} [${plugin.source}] ${plugin.enabled ? 'enabled' : 'disabled'} - ${counts}`
+      );
+    }
+  }
+
+  if (diagnostics.length > 0) {
+    lines.push('Plugin diagnostics:');
+    for (const diagnostic of diagnostics) {
+      lines.push(`  [${diagnostic.kind}] ${diagnostic.message}`);
+    }
+  }
+
+  return lines.join('\n');
 }
 
 program
@@ -359,6 +397,29 @@ mcpPermissionsCmd
       }
     } catch (err: unknown) {
       console.error(`[zero] MCP permissions clear failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('plugins')
+  .description('Inspect local Zero plugin manifests')
+  .command('list')
+  .description('List local Zero plugins')
+  .option('--json', 'Print local plugin data as JSON')
+  .action(async (options: { json?: boolean }) => {
+    try {
+      const result = await loadZeroPlugins();
+      if (options.json) {
+        console.log(JSON.stringify(redactZeroSecrets({
+          plugins: result.plugins,
+          diagnostics: result.diagnostics,
+        }), null, 2));
+      } else {
+        console.log(formatZeroPluginList(result.plugins, result.diagnostics));
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] Plugin list failed: ${redactZeroErrorMessage(err)}`);
       process.exitCode = 1;
     }
   });
