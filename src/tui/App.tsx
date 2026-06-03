@@ -1,127 +1,125 @@
-import React, { useState } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
-import { ProviderPicker } from './ProviderPicker';
-import { ModelPicker } from './ModelPicker';
-import { AddProvider } from './AddProvider';
-import { Logo } from './Logo';
-import { ThinkingSpinner } from './Spinner';
-import { MessageRenderer } from './MessageRenderer';
-import { ToolCallRenderer } from './ToolCallRenderer';
+import React, { useRef, useState } from 'react';
+import { useApp, useInput, useWindowSize } from 'ink';
+import { runAgent } from '../agent/loop';
 import { configManager } from '../config/manager';
 import { loadProviderConfig } from '../config/provider';
 import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
-import { runAgent } from '../agent/loop';
 import { ZERO_DEFAULT_MODEL_ID } from '../zero-model-registry';
 import { redactZeroError, redactZeroString } from '../zero-redaction';
+import { AddProvider } from './AddProvider';
+import { ModelPicker } from './ModelPicker';
+import { ProviderPicker } from './ProviderPicker';
+import { TuiShell } from './TuiShell';
 import {
   buildTuiModelStatus,
   formatModelListLines,
   resolveTuiModelSelection,
 } from './model-selection';
+import type { ChatMessage } from './types';
 
 type Screen = 'chat' | 'provider-picker' | 'add-provider' | 'model-picker';
 
-// Map low-level errors back to actionable guidance for the user. The full
-// error object is still surfaced separately when debug mode is on.
-function toFriendlyError(err: any): string {
-  const raw = redactZeroError(err).message;
-  const lower = raw.toLowerCase();
-
-  if (lower.includes('no llm provider configured') || lower.includes('no provider')) {
-    return 'No provider set up. Type /provider to add one.';
-  }
-
-  if (lower.includes('auth') || lower.includes('unauthorized') || lower.includes('invalid') || lower.includes('401') || lower.includes('api key')) {
-    return `Authentication failed — check your API key. Type /provider to update it.\n(${raw})`;
-  }
-
-  if (lower.includes('rate') || lower.includes('quota')) {
-    return `Provider rate limit or quota reached. Try again shortly.\n(${raw})`;
-  }
-
-  if (lower.includes('enotfound') || lower.includes('econnrefused') || lower.includes('etimedout') || lower.includes('fetch failed') || lower.includes('network')) {
-    return `Network error reaching the provider. Check your connection and base URL.\n(${raw})`;
-  }
-
-  return `Error: ${raw}`;
-}
-
-function formatDebugErrorRow(label: string, value: unknown): string {
-  const text = String(value).slice(0, 40);
-  const padding = ' '.repeat(Math.max(0, 41 - text.length));
-  return `│ ${label.padEnd(8)} ${text}${padding}│`;
-}
-
-type ChatMessage =
-  | { type: 'user'; content: string }
-  | { type: 'assistant'; content: string }
-  | { type: 'tool-call'; name: string; args: string; result?: string }
-  | { type: 'tool-result'; content: string } // legacy - results now attach to tool-call
-  | { type: 'system'; content: string };
+const KNOWN_COMMANDS = [
+  '/provider',
+  '/model',
+  '/plan',
+  '/debug-mode',
+  '/debug',
+  '/tools',
+  '/help',
+  '/exit',
+  '/quit',
+];
 
 export const App: React.FC = () => {
   const { exit } = useApp();
+  const { columns, rows } = useWindowSize();
   const [screen, setScreen] = useState<Screen>('chat');
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([
     { type: 'system', content: 'Welcome to zero. Type /provider to manage providers.' },
     { type: 'system', content: 'Type /help for available commands.' },
   ]);
+  const [isThinking, setIsThinking] = useState(false);
+  const [streamingMessageIndex, setStreamingMessageIndex] = useState<number | null>(null);
+  const streamingMessageIndexRef = useRef<number | null>(null);
+  const [isPlanMode, setIsPlanMode] = useState(false);
+  const [selectedModelOverride, setSelectedModelOverride] = useState<string | undefined>();
+  const [debugMode, setDebugMode] = useState(false);
+  const [lastError, setLastError] = useState<any>(null);
+  const [toolsEnabled, setToolsEnabled] = useState(true);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [terminalRows, setTerminalRows] = useState(24);
+  const [git, setGit] = useState<{ branch?: string; ahead: number; behind: number }>({ ahead: 0, behind: 0 });
 
-  // Check on startup if we have any usable provider
   React.useEffect(() => {
     const checkProvider = async () => {
       try {
         await loadProviderConfig();
       } catch (err: any) {
         if (err.message?.includes('No LLM provider configured')) {
-          setMessages((prev) => [
-            ...prev,
-            { 
-              type: 'system', 
-              content: '⚠️  No provider configured yet. Use /provider to add one (OpenGateway recommended).' 
-            }
-          ]);
+          addSystemMessage('No provider configured yet. Use /provider to add one.');
         }
       }
     };
+
     checkProvider();
   }, []);
-  const [isThinking, setIsThinking] = useState(false);
-  const [streamingMessageIndex, setStreamingMessageIndex] = useState<number | null>(null);
 
-  // Plan Mode (inspired by OpenClaude / Claude Code)
-  const [isPlanMode, setIsPlanMode] = useState(false);
-  const [selectedModelOverride, setSelectedModelOverride] = useState<string | undefined>();
-
-  // Debug mode - when enabled, prints full error objects to console
-  const [debugMode, setDebugMode] = useState(false);
-  const [lastError, setLastError] = useState<any>(null);
-
-  // Tools enabled (useful for debugging provider errors)
-  const [toolsEnabled, setToolsEnabled] = useState(true);
-
-  // Command suggestions
-  const [suggestions, setSuggestions] = useState<string[]>([]);
-
-  const knownCommands = ['/provider', '/model', '/plan', '/debug-mode', '/debug', '/tools', '/help', '/exit', '/quit'];
-
-  // Update suggestions when input changes
   React.useEffect(() => {
-    if (input.startsWith('/')) {
-      const query = input.toLowerCase();
-      const matches = knownCommands.filter(cmd => cmd.startsWith(query));
-      setSuggestions(matches.slice(0, 6)); // limit suggestions
-    } else {
+    if (!input.startsWith('/')) {
       setSuggestions([]);
+      return;
     }
+
+    const query = input.toLowerCase();
+    setSuggestions(KNOWN_COMMANDS.filter((cmd) => cmd.startsWith(query)).slice(0, 6));
   }, [input]);
 
-  // Scrolling state (Grok Build style internal scrolling)
-  const [scrollOffset, setScrollOffset] = useState(0);
-  const [terminalRows, setTerminalRows] = useState(24); // default fallback
+  React.useEffect(() => {
+    const updateSize = () => {
+      setTerminalRows(process.stdout.rows || 24);
+    };
 
-  // Current provider info for the input bar (Grok Build style)
+    process.stdout.on('resize', updateSize);
+    updateSize();
+    return () => {
+      process.stdout.off('resize', updateSize);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { execa } = await import('execa');
+        const head = await execa('git', ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => null);
+        const branch = head?.stdout?.trim();
+        let ahead = 0;
+        let behind = 0;
+        const counts = await execa('git', ['rev-list', '--left-right', '--count', '@{upstream}...HEAD']).catch(() => null);
+        if (counts?.stdout) {
+          const [b, a] = counts.stdout.trim().split(/\s+/).map((n) => Number(n) || 0);
+          behind = b ?? 0;
+          ahead = a ?? 0;
+        }
+        if (!cancelled && branch) setGit({ branch, ahead, behind });
+      } catch {
+        // Header git status is best effort.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (scrollOffset <= 3) {
+      setScrollOffset(0);
+    }
+  }, [messages.length]);
+
   const activeProfile = configManager.getActiveProvider();
   const modelStatus = buildTuiModelStatus(
     activeProfile
@@ -139,28 +137,6 @@ export const App: React.FC = () => {
   );
   const currentProviderName = activeProfile?.name || modelStatus.providerLabel;
   const currentModel = `${modelStatus.label}${modelStatus.sourceLabel === 'session' ? ' *' : ''}`;
-
-  // Track terminal size for proper scrolling
-  React.useEffect(() => {
-    const updateSize = () => {
-      setTerminalRows(process.stdout.rows || 24);
-    };
-    process.stdout.on('resize', updateSize);
-    updateSize();
-    return () => {
-      process.stdout.off('resize', updateSize);
-    };
-  }, []);
-
-  // Auto-scroll to bottom when new messages arrive (unless user scrolled up)
-  React.useEffect(() => {
-    // Only auto-scroll if user is near the bottom
-    if (scrollOffset <= 3) {
-      setScrollOffset(0);
-    }
-  }, [messages.length]);
-
-  // Only capture main chat input when we're actually in the chat screen
   const isInChat = screen === 'chat';
 
   useInput((inputChar, key) => {
@@ -169,10 +145,8 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Don't process chat input while in provider picker or add flow
     if (!isInChat) return;
 
-    // Scrolling controls (when input is empty)
     if (!input) {
       if (key.upArrow) {
         setScrollOffset((prev) => Math.min(prev + 1, messages.length - 1));
@@ -205,9 +179,8 @@ export const App: React.FC = () => {
       return;
     }
 
-    // Autocomplete first suggestion with Tab when typing a command
     if (key.tab && suggestions.length > 0) {
-      setInput(suggestions[0] + ' ');
+      setInput(`${suggestions[0]} `);
       setSuggestions([]);
       return;
     }
@@ -223,133 +196,104 @@ export const App: React.FC = () => {
   }, { isActive: isInChat });
 
   const handleSubmit = () => {
-    if (!input.trim()) return;
-
     const trimmed = input.trim();
+    if (!trimmed) return;
+
     setInput('');
     setSuggestions([]);
+    streamingMessageIndexRef.current = null;
+    setStreamingMessageIndex(null);
 
-    // Handle slash commands
+    addMessage({ type: 'user', content: trimmed });
+
     if (trimmed.startsWith('/')) {
-      setMessages((prev) => [...prev, { type: 'user', content: trimmed }]);
       handleSlashCommand(trimmed);
       return;
     }
 
-    // Regular message → send to agent
-    setMessages((prev) => [...prev, { type: 'user', content: trimmed }]);
+    void runAgentLoop(trimmed);
+  };
 
-    const runAgentLoop = async () => {
-      setIsThinking(true);
+  const runAgentLoop = async (prompt: string) => {
+    setIsThinking(true);
 
-      try {
-        const providerConfig = await loadProviderConfig();
-        const runtime = resolveZeroProviderRuntime({
-          provider: providerConfig.provider,
-          apiKey: providerConfig.apiKey,
-          baseURL: providerConfig.baseURL,
-          model: selectedModelOverride || providerConfig.model,
-          profileName: providerConfig.profileName,
-          source: providerConfig.source,
-        });
-        const provider = createZeroProvider(runtime);
+    try {
+      const providerConfig = await loadProviderConfig();
+      const runtime = resolveZeroProviderRuntime({
+        provider: providerConfig.provider,
+        apiKey: providerConfig.apiKey,
+        baseURL: providerConfig.baseURL,
+        model: selectedModelOverride || providerConfig.model,
+        profileName: providerConfig.profileName,
+        source: providerConfig.source,
+      });
+      const provider = createZeroProvider(runtime);
 
-        // Add empty assistant message that we'll stream into
-        setMessages((prev) => {
-          const newMessages = [...prev, { type: 'assistant' as const, content: '' }];
-          setStreamingMessageIndex(newMessages.length - 1);
-          return newMessages;
-        });
-
-        await runAgent(trimmed, provider, {
-          debug: debugMode,
-          toolsEnabled,
-          planMode: isPlanMode,
-          onText: (text: string) => {
-            setIsThinking(false);
-            setMessages((prev) => {
-              const newMessages = [...prev];
-              const idx = streamingMessageIndex ?? newMessages.length - 1;
-
-              if (newMessages[idx]?.type === 'assistant') {
-                const current = newMessages[idx] as { type: 'assistant'; content: string };
-                newMessages[idx] = {
-                  ...current,
-                  content: current.content + text,
-                };
+      await runAgent(prompt, provider, {
+        debug: debugMode,
+        toolsEnabled,
+        planMode: isPlanMode,
+        onText: appendAssistantText,
+        onToolCall: (tc) => {
+          setIsThinking(false);
+          streamingMessageIndexRef.current = null;
+          setStreamingMessageIndex(null);
+          addMessage({ type: 'tool-call', name: tc.name, args: redactZeroString(tc.arguments) });
+        },
+        onToolResult: (result) => {
+          setMessages((prev) => {
+            const next = [...prev];
+            for (let i = next.length - 1; i >= 0; i--) {
+              const msg = next[i];
+              if (msg?.type === 'tool-call' && msg.result === undefined) {
+                next[i] = { ...msg, result: redactZeroString(result.result) };
+                break;
               }
-              return newMessages;
-            });
-          },
-          onToolCall: (tc) => {
-            setIsThinking(false);
-            setMessages((prev) => [
-              ...prev,
-              { type: 'tool-call', name: tc.name, args: redactZeroString(tc.arguments) },
-            ]);
-            // Reset streaming index since we inserted a message
-            setStreamingMessageIndex(null);
-          },
-          onToolResult: (result) => {
-            // Attach result to the most recent tool call that doesn't have one yet
-            setMessages((prev) => {
-              const newMessages = [...prev];
-              for (let i = newMessages.length - 1; i >= 0; i--) {
-                const msg = newMessages[i];
-                if (msg && msg.type === 'tool-call' && (msg as any).result === undefined) {
-                  (newMessages as any)[i] = {
-                    ...msg,
-                    result: redactZeroString(result.result),
-                  };
-                  break;
-                }
-              }
-              return newMessages;
-            });
-          },
-        });
-      } catch (err: any) {
-        setIsThinking(false);
-
-        if (debugMode) {
-          const safeError = redactZeroError(err);
-          setLastError(safeError);
-          try {
-            const red = '\x1b[31m';
-            const reset = '\x1b[0m';
-            const border = '─'.repeat(50);
-
-            console.error(`\n${red}┌${border}┐`);
-            console.error(`│  FULL PROVIDER ERROR${' '.repeat(29)}│`);
-            console.error(`├${border}┤`);
-            console.error(formatDebugErrorRow('Message:', safeError.message));
-            console.error(formatDebugErrorRow('Name:', safeError.name));
-
-            const response = safeError.response as { status?: unknown } | undefined;
-            if (response?.status) {
-              console.error(formatDebugErrorRow('Status:', response.status));
             }
-
-            console.error(`└${border}┘${reset}`);
-            console.error('Full object:');
-            console.dir(safeError, { depth: 6 });
-            console.error(`${red}${'='.repeat(52)}${reset}\n`);
-          } catch (logErr) {
-            console.error('Failed to log full error:', logErr);
-          }
-        } else {
-          setLastError(null);
-        }
-
-        const friendlyMessage = toFriendlyError(err);
-        setMessages((prev) => [...prev, { type: 'system', content: friendlyMessage }]);
-      } finally {
-        setIsThinking(false);
-        setStreamingMessageIndex(null);
+            return next;
+          });
+        },
+      });
+    } catch (err: any) {
+      setIsThinking(false);
+      const safeError = redactZeroError(err);
+      if (debugMode) {
+        setLastError(safeError);
+        logDebugError(safeError);
+      } else {
+        setLastError(null);
       }
-    };
+      addSystemMessage(toFriendlyError(err));
+    } finally {
+      setIsThinking(false);
+      streamingMessageIndexRef.current = null;
+      setStreamingMessageIndex(null);
+    }
+  };
 
-    runAgentLoop();
+  const appendAssistantText = (text: string) => {
+    setIsThinking(false);
+    setMessages((prev) => {
+      const next = [...prev];
+      let index = streamingMessageIndexRef.current;
+
+      if (index === null || next[index]?.type !== 'assistant') {
+        const lastIndex = next.length - 1;
+        index = next[lastIndex]?.type === 'assistant' ? lastIndex : next.length;
+        if (index === next.length) {
+          next.push({ type: 'assistant', content: '' });
+        }
+        streamingMessageIndexRef.current = index;
+        setStreamingMessageIndex(index);
+      }
+
+      const current = next[index];
+      if (current?.type === 'assistant') {
+        next[index] = { ...current, content: current.content + text };
+      }
+
+      return next;
+    });
   };
 
   const handleSlashCommand = (command: string) => {
@@ -363,100 +307,56 @@ export const App: React.FC = () => {
     }
 
     if (cmd === '/model') {
-      const modelArg = parts.slice(1).join(' ').trim();
-
-      if (!modelArg) {
-        setScreen('model-picker');
-        return;
-      }
-
-      if (modelArg.toLowerCase() === 'list') {
-        setMessages((prev) => [
-          ...prev,
-          { type: 'system', content: 'Available models:' },
-          ...formatModelListLines().map((line) => ({ type: 'system' as const, content: `  ${line}` })),
-        ]);
-        return;
-      }
-
-      const selectedModel = resolveTuiModelSelection(modelArg);
-      if (!selectedModel) {
-        setMessages((prev) => [
-          ...prev,
-          { type: 'system', content: `Unknown model: ${modelArg}. Type /model list or /model to browse.` },
-        ]);
-        return;
-      }
-
-      setSelectedModelOverride(selectedModel.id);
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})` },
-      ]);
+      handleModelCommand(parts.slice(1).join(' ').trim());
       return;
     }
 
     if (cmd === '/plan') {
-      setIsPlanMode(prev => {
+      setIsPlanMode((prev) => {
         const next = !prev;
-        setMessages((msgs) => [
-          ...msgs,
-          { 
-            type: 'system', 
-            content: next 
-              ? 'Plan mode enabled. The agent will focus on planning before making changes.' 
-              : 'Plan mode disabled.' 
-          },
-        ]);
+        addSystemMessage(next
+          ? 'Plan mode enabled. The agent will focus on planning before making changes.'
+          : 'Plan mode disabled.');
         return next;
       });
       return;
     }
 
     if (cmd === '/debug-mode' || cmd === '/debug') {
-      // Support "/debug-mode true", "/debug false", or just toggle
-      let nextDebug: boolean;
-
-      if (arg === 'true') nextDebug = true;
-      else if (arg === 'false') nextDebug = false;
-      else nextDebug = !debugMode;
+      const nextDebug = arg === 'true'
+        ? true
+        : arg === 'false'
+          ? false
+          : !debugMode;
 
       setDebugMode(nextDebug);
       if (!nextDebug) setLastError(null);
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: `Debug mode ${nextDebug ? 'enabled' : 'disabled'}.` },
-      ]);
+      addSystemMessage(`Debug mode ${nextDebug ? 'enabled' : 'disabled'}.`);
       return;
     }
 
     if (cmd === '/tools') {
       const arg2 = parts[1]?.toLowerCase();
-      let nextEnabled: boolean;
-
-      if (arg2 === 'on' || arg2 === 'true') nextEnabled = true;
-      else if (arg2 === 'off' || arg2 === 'false') nextEnabled = false;
-      else nextEnabled = !toolsEnabled;
+      const nextEnabled = arg2 === 'on' || arg2 === 'true'
+        ? true
+        : arg2 === 'off' || arg2 === 'false'
+          ? false
+          : !toolsEnabled;
 
       setToolsEnabled(nextEnabled);
-      setMessages((prev) => [
-        ...prev,
-        { type: 'system', content: `Tool calling ${nextEnabled ? 'enabled' : 'disabled'}.` },
-      ]);
+      addSystemMessage(`Tool calling ${nextEnabled ? 'enabled' : 'disabled'}.`);
       return;
     }
 
     if (cmd === '/help') {
-      setMessages((prev) => [
-        ...prev,
+      addMessages([
         { type: 'system', content: 'Available commands:' },
-        { type: 'system', content: '  /provider     - Manage LLM providers (fix provider errors here)' },
-        { type: 'system', content: '  /model        - Select or list registry models for this session' },
-        { type: 'system', content: '  /plan         - Toggle Plan Mode (agent plans first, makes no edits)' },
-        { type: 'system', content: '  /debug-mode   - Toggle debug mode (prints full errors to console)' },
-        { type: 'system', content: '  /tools        - Toggle tool calling (useful for debugging provider errors)' },
-        { type: 'system', content: '  /help         - Show this help' },
-        { type: 'system', content: '  /exit         - Quit' },
+        { type: 'system', content: '  /provider     Manage LLM providers' },
+        { type: 'system', content: '  /model        Select or list registry models for this session' },
+        { type: 'system', content: '  /plan         Toggle planning behavior' },
+        { type: 'system', content: '  /debug        Toggle debug mode' },
+        { type: 'system', content: '  /tools        Toggle tool calling' },
+        { type: 'system', content: '  /exit         Quit' },
       ]);
       return;
     }
@@ -466,13 +366,37 @@ export const App: React.FC = () => {
       return;
     }
 
-    setMessages((prev) => [...prev, { type: 'system', content: `Unknown command: ${command}` }]);
+    addSystemMessage(`Unknown command: ${command}`);
+  };
+
+  const handleModelCommand = (modelArg: string) => {
+    if (!modelArg) {
+      setScreen('model-picker');
+      return;
+    }
+
+    if (modelArg.toLowerCase() === 'list') {
+      addMessages([
+        { type: 'system', content: 'Available models:' },
+        ...formatModelListLines().map((line) => ({ type: 'system' as const, content: `  ${line}` })),
+      ]);
+      return;
+    }
+
+    const selectedModel = resolveTuiModelSelection(modelArg);
+    if (!selectedModel) {
+      addSystemMessage(`Unknown model: ${modelArg}. Type /model list or /model to browse.`);
+      return;
+    }
+
+    setSelectedModelOverride(selectedModel.id);
+    addSystemMessage(`Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})`);
   };
 
   const handleProviderSelected = (name: string) => {
     const success = configManager.setActiveProvider(name);
     if (success) {
-      setMessages((prev) => [...prev, { type: 'system', content: `Switched to provider: ${name}` }]);
+      addSystemMessage(`Switched to provider: ${name}`);
       setSelectedModelOverride(undefined);
     }
     setScreen('chat');
@@ -485,15 +409,9 @@ export const App: React.FC = () => {
   const handleModelSelected = (modelId: string) => {
     const selectedModel = resolveTuiModelSelection(modelId);
     setSelectedModelOverride(modelId);
-    setMessages((prev) => [
-      ...prev,
-      {
-        type: 'system',
-        content: selectedModel
-          ? `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})`
-          : `Model set for this session: ${modelId}`,
-      },
-    ]);
+    addSystemMessage(selectedModel
+      ? `Model set for this session: ${selectedModel.displayName} (${selectedModel.provider})`
+      : `Model set for this session: ${modelId}`);
     setScreen('chat');
   };
 
@@ -508,28 +426,31 @@ export const App: React.FC = () => {
   const handleAddProviderDone = (providerName?: string) => {
     setScreen('chat');
 
-    if (providerName) {
-      // Automatically switch to the newly added provider
-      const switched = configManager.setActiveProvider(providerName);
-
-      if (switched) {
-        setMessages((prev) => [
-          ...prev,
-          { type: 'system', content: `Added and switched to provider: ${providerName}` },
-        ]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          { type: 'system', content: `Provider added: ${providerName}` },
-        ]);
-      }
-    } else {
-      setMessages((prev) => [...prev, { type: 'system', content: 'Provider added successfully.' }]);
+    if (!providerName) {
+      addSystemMessage('Provider added successfully.');
+      return;
     }
+
+    const switched = configManager.setActiveProvider(providerName);
+    addSystemMessage(switched
+      ? `Added and switched to provider: ${providerName}`
+      : `Provider added: ${providerName}`);
   };
 
   const handleAddProviderCancel = () => {
     setScreen('provider-picker');
+  };
+
+  const addMessage = (message: ChatMessage) => {
+    setMessages((prev) => [...prev, message]);
+  };
+
+  const addMessages = (newMessages: ChatMessage[]) => {
+    setMessages((prev) => [...prev, ...newMessages]);
+  };
+
+  const addSystemMessage = (content: string) => {
+    setMessages((prev) => [...prev, { type: 'system', content }]);
   };
 
   if (screen === 'add-provider') {
@@ -561,180 +482,131 @@ export const App: React.FC = () => {
     );
   }
 
-  const showLogo = messages.length <= 2;
-
-  // Calculate visible messages for scrolling (Grok Build style)
-  const chatHeight = Math.max(8, terminalRows - 6); // leave room for input + status
-  const visibleMessages = messages.slice(scrollOffset, scrollOffset + chatHeight);
-
+  const terminalHeight = Math.max(20, rows || terminalRows);
+  const terminalWidth = Math.max(64, columns || process.stdout.columns || 96);
+  const showLogo = messages.every((message) => message.type === 'system');
+  const chatHeight = Math.max(7, terminalHeight - 14);
+  const visibleMessages = showLogo
+    ? messages
+    : messages.slice(scrollOffset, scrollOffset + chatHeight);
   const canScrollUp = scrollOffset < messages.length - 1;
   const canScrollDown = scrollOffset > 0;
+  const activeFile = deriveActiveFile(messages);
+  const estimatedTokens = estimateTokens(messages);
+  const contextPercent = Math.min(99, Math.round((estimatedTokens / 200000) * 100));
+  const estimatedCost = Number(((estimatedTokens / 1000) * 0.003).toFixed(4));
 
   return (
-    <Box flexDirection="column" height="100%">
-      {/* Scrollable messages area with right-side scroll indicator (Grok Build style) */}
-      <Box 
-        flexGrow={1} 
-        flexDirection="row"
-        overflow="hidden"
-      >
-        {/* Main chat content */}
-        <Box 
-          flexGrow={1} 
-          flexDirection="column" 
-          paddingX={1} 
-          paddingTop={1}
-        >
-        {showLogo && <Logo />}
-
-        {/* Scroll indicator */}
-        {(canScrollUp || canScrollDown) && (
-          <Text color="gray" dimColor>
-            {canScrollUp ? '↑ ' : '  '}Scroll with ↑↓ / PgUp/PgDn / Home/End {canScrollDown ? '↓' : ''}
-          </Text>
-        )}
-
-        <Box flexDirection="column">
-          {visibleMessages.map((msg, index) => {
-            const realIndex = scrollOffset + index;
-
-            if (msg.type === 'user') {
-              return (
-                <Box key={realIndex} marginBottom={1}>
-                  <Text color="blueBright">
-                    {`> ${msg.content}`}
-                  </Text>
-                </Box>
-              );
-            }
-
-            if (msg.type === 'assistant') {
-              const isStreaming = realIndex === streamingMessageIndex;
-              return (
-                <Box key={realIndex} marginBottom={1} flexDirection="row">
-                  <Text color="cyan" dimColor>● </Text>
-                  <Box flexDirection="column" flexGrow={1}>
-                    <MessageRenderer content={msg.content} />
-                    {isStreaming && (
-                      <Text color="cyan" dimColor>▌</Text>
-                    )}
-                  </Box>
-                </Box>
-              );
-            }
-
-            if (msg.type === 'tool-call') {
-              const hasResult = !!msg.result;
-              return (
-                <Box key={realIndex} marginBottom={0}>
-                  <ToolCallRenderer
-                    name={msg.name}
-                    args={msg.args}
-                    result={msg.result}
-                    status={hasResult ? 'success' : 'running'}
-                  />
-                </Box>
-              );
-            }
-
-            if (msg.type === 'tool-result') {
-              // Legacy separate results are no longer created; ignore for cleanliness
-              return null;
-            }
-
-            // system messages
-            return (
-              <Box key={realIndex} marginBottom={1}>
-                <Text color="gray" dimColor>
-                  {msg.content}
-                </Text>
-              </Box>
-            );
-          })}
-
-          {isThinking && <ThinkingSpinner />}
-        </Box>
-        </Box>
-      </Box>
-
-      {/* Scroll position (Grok Build style) */}
-      {(canScrollUp || canScrollDown) && (
-        <Box paddingX={1} justifyContent="flex-end">
-          <Text color="gray" dimColor>
-            {scrollOffset + 1}/{messages.length}{canScrollUp ? ' ↑' : ''}{canScrollDown ? ' ↓' : ''}
-          </Text>
-        </Box>
-      )}
-
-      {/* Command suggestions */}
-      {suggestions.length > 0 && (
-        <Box paddingX={2} paddingBottom={0}>
-          <Text color="gray" dimColor>
-            Suggestions: {suggestions.map((s, i) => (
-              <Text key={i} color={i === 0 ? 'cyan' : 'gray'}>{s}{i < suggestions.length - 1 ? '  ' : ''}</Text>
-            ))} (Tab to autocomplete)
-          </Text>
-        </Box>
-      )}
-
-      {/* Debug error box */}
-      {debugMode && lastError && (
-        <Box 
-          borderStyle="single" 
-          borderColor="red" 
-          paddingX={1} 
-          paddingY={0} 
-          marginBottom={1}
-        >
-          <Text color="red" bold>⚠ Debug Error</Text>
-          <Text color="gray" dimColor>
-            {lastError.message || String(lastError)}
-          </Text>
-          {lastError.stack && (
-            <Text color="gray" dimColor>
-              {lastError.stack.split('\n').slice(0, 8).join('\n')}
-            </Text>
-          )}
-          <Text color="cyan" dimColor>
-            (Full details in terminal • /debug-mode false to hide)
-          </Text>
-        </Box>
-      )}
-
-      {/* Input box at the bottom */}
-      <Box
-        borderStyle="single"
-        borderColor={isPlanMode ? 'green' : 'gray'}
-        paddingX={1}
-        paddingY={0}
-        flexDirection="row"
-        justifyContent="space-between"
-        alignItems="center"
-      >
-        {/* Left: prompt + input */}
-        <Box flexDirection="row">
-          <Text color={isPlanMode ? 'green' : 'greenBright'}>› </Text>
-          <Text color="white">{input}</Text>
-          <Text color="gray">█</Text>
-        </Box>
-
-        {/* Right: Current provider + model */}
-        <Box flexDirection="row">
-          <Text color="cyan" bold>{currentProviderName}</Text>
-          <Text color="gray"> • </Text>
-          <Text color="magenta" dimColor>{currentModel}</Text>
-        </Box>
-      </Box>
-
-      {/* Very subtle status line */}
-      <Box paddingX={1} flexDirection="row">
-        <Text color="gray" dimColor>
-          /help • ↑↓ scroll • Ctrl+C exit
-        </Text>
-        {isPlanMode && (
-          <Text color="green"> • PLAN MODE</Text>
-        )}
-      </Box>
-    </Box>
+    <TuiShell
+      messages={messages}
+      visibleMessages={visibleMessages}
+      scrollOffset={scrollOffset}
+      streamingMessageIndex={streamingMessageIndex}
+      showLogo={showLogo}
+      canScrollUp={canScrollUp}
+      canScrollDown={canScrollDown}
+      input={input}
+      suggestions={suggestions}
+      providerName={currentProviderName}
+      modelName={currentModel}
+      lastError={lastError}
+      isPlanMode={isPlanMode}
+      debugMode={debugMode}
+      toolsEnabled={toolsEnabled}
+      isThinking={isThinking}
+      activeFile={activeFile}
+      branch={git.branch}
+      ahead={git.ahead}
+      behind={git.behind}
+      totalTokens={estimatedTokens}
+      costUsd={estimatedCost}
+      contextPercent={contextPercent}
+      terminalWidth={terminalWidth}
+      terminalHeight={terminalHeight}
+    />
   );
 };
+
+function deriveActiveFile(messages: ChatMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.type === 'tool-call') {
+      try {
+        const args = JSON.parse(m.args);
+        if (typeof args?.path === 'string') return args.path;
+        if (typeof args?.file === 'string') return args.file;
+      } catch {
+        // Ignore non-JSON tool arguments.
+      }
+    }
+  }
+  return undefined;
+}
+
+function estimateTokens(messages: ChatMessage[]): number {
+  const chars = messages.reduce((sum, message) => {
+    const value = (message as any).content ?? (message as any).result ?? '';
+    return sum + (typeof value === 'string' ? value.length : 0);
+  }, 0);
+  return Math.round(chars / 4);
+}
+
+function toFriendlyError(err: any): string {
+  const raw = redactZeroError(err).message;
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('no llm provider configured') || lower.includes('no provider')) {
+    return 'No provider set up. Type /provider to add one.';
+  }
+
+  if (
+    lower.includes('auth') ||
+    lower.includes('unauthorized') ||
+    lower.includes('invalid') ||
+    lower.includes('401') ||
+    lower.includes('api key')
+  ) {
+    return `Authentication failed - check your API key. Type /provider to update it.\n(${raw})`;
+  }
+
+  if (lower.includes('rate') || lower.includes('quota')) {
+    return `Provider rate limit or quota reached. Try again shortly.\n(${raw})`;
+  }
+
+  if (
+    lower.includes('enotfound') ||
+    lower.includes('econnrefused') ||
+    lower.includes('etimedout') ||
+    lower.includes('fetch failed') ||
+    lower.includes('network')
+  ) {
+    return `Network error reaching the provider. Check your connection and base URL.\n(${raw})`;
+  }
+
+  return `Error: ${raw}`;
+}
+
+function logDebugError(err: any): void {
+  try {
+    const red = '\x1b[31m';
+    const reset = '\x1b[0m';
+    const border = '-'.repeat(50);
+    const name = err?.name || 'Error';
+    const message = err?.message || String(err);
+
+    console.error(`\n${red}+${border}+`);
+    console.error(`| FULL PROVIDER ERROR${' '.repeat(30)}|`);
+    console.error(`+${border}+`);
+    console.error(`| Message: ${message.slice(0, 38).padEnd(38)} |`);
+    console.error(`| Name:    ${name.slice(0, 38).padEnd(38)} |`);
+    if (err?.response?.status) {
+      console.error(`| Status:  ${String(err.response.status).padEnd(38)} |`);
+    }
+    console.error(`+${border}+${reset}`);
+    console.error('Full object:');
+    console.dir(err, { depth: 6 });
+    console.error(`${red}${'='.repeat(52)}${reset}\n`);
+  } catch (logErr) {
+    console.error('Failed to log full error:', logErr);
+  }
+}

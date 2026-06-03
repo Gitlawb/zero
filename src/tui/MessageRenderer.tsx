@@ -144,7 +144,7 @@ function renderTextBlock(text: string, keyPrefix: string): React.ReactNode {
           );
         }
 
-        // Paragraph block — join lines and split on double newlines for sub-paragraphs
+        // Paragraph block: join lines and split on double newlines for sub-paragraphs
         const paragraphText = block.lines.join('\n').trim();
         const subParagraphs = paragraphText
           .split(/\n\s*\n/)

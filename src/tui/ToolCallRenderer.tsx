@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { highlightCode } from './highlighter';
+import { tuiTheme } from './theme';
 
 interface ToolCallRendererProps {
   name: string;
@@ -18,15 +19,22 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
   const [highlightedArgs, setHighlightedArgs] = useState<string | null>(null);
   const [highlightedResult, setHighlightedResult] = useState<string | null>(null);
+  const [showFullResult, setShowFullResult] = useState(false);
 
   const hasResult = !!result;
   const isLongResult = hasResult && (result!.length > 400 || result!.split('\n').length > 12);
-  const [showFullResult, setShowFullResult] = useState(false);
-
-  // Generate a nice one-line summary for collapsed state
   const summary = getToolSummary(name, args);
+  const statusColor = status === 'running'
+    ? tuiTheme.colors.warning
+    : status === 'error'
+      ? tuiTheme.colors.danger
+      : tuiTheme.colors.success;
+  const statusLabel = status === 'running'
+    ? 'run'
+    : status === 'error'
+      ? 'err'
+      : 'ok';
 
-  // Highlight arguments (only when expanded)
   useEffect(() => {
     if (!isExpanded) return;
 
@@ -34,21 +42,19 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
       try {
         let jsonArgs = args;
         try {
-          const parsed = JSON.parse(args);
-          jsonArgs = JSON.stringify(parsed, null, 2);
+          jsonArgs = JSON.stringify(JSON.parse(args), null, 2);
         } catch {
-          // not valid JSON
+          // Keep raw arguments when providers send non-JSON text.
         }
-        const ansi = await highlightCode(jsonArgs, 'json');
-        setHighlightedArgs(ansi);
+        setHighlightedArgs(await highlightCode(jsonArgs, 'json'));
       } catch {
         setHighlightedArgs(args);
       }
     };
-    highlight();
+
+    void highlight();
   }, [args, isExpanded]);
 
-  // Highlight result (only when expanded)
   useEffect(() => {
     if (!isExpanded || !result) return;
 
@@ -60,39 +66,23 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
           result.includes('import ') ||
           result.includes('=>') ||
           result.includes('class ');
-
-        const ansi = await highlightCode(result, looksLikeCode ? 'typescript' : 'text');
-        setHighlightedResult(ansi);
+        setHighlightedResult(await highlightCode(result, looksLikeCode ? 'typescript' : 'text'));
       } catch {
         setHighlightedResult(result);
       }
     };
-    highlight();
+
+    void highlight();
   }, [result, isExpanded]);
 
-  const borderColor =
-    status === 'running' ? 'yellow' : status === 'error' ? 'red' : 'green';
-
-  const statusIcon =
-    status === 'running' ? '⟳' : status === 'error' ? '✕' : '✓';
-
-  const statusColor =
-    status === 'running' ? 'yellow' : status === 'error' ? 'red' : 'green';
-
-  // === COLLAPSED VIEW — clean formatter for model actions ===
   if (!isExpanded) {
-    const showToggle = args || hasResult;
-
     return (
       <Box flexDirection="row" paddingX={1} paddingY={0}>
-        <Text color={statusColor} bold>
-          {statusIcon} {name}
-        </Text>
-        <Text color="gray" dimColor>  {summary}</Text>
-
-        {showToggle && (
+        <Text color={statusColor} bold>[{statusLabel}] {name}</Text>
+        <Text color={tuiTheme.colors.muted} dimColor>  {summary}</Text>
+        {(args || hasResult) && (
           <Text
-            color="cyan"
+            color={tuiTheme.colors.brand}
             dimColor
             {...({ onPress: () => setIsExpanded(true) } as any)}
           >
@@ -103,22 +93,18 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
     );
   }
 
-  // === EXPANDED VIEW — formatted details ===
   return (
     <Box
       flexDirection="column"
       borderStyle="single"
-      borderColor={borderColor}
+      borderColor={statusColor}
       paddingX={0}
       paddingY={0}
     >
-      {/* Header */}
       <Box paddingX={1} flexDirection="row" justifyContent="space-between">
-        <Text color={statusColor} bold>
-          {statusIcon} {name}
-        </Text>
+        <Text color={statusColor} bold>[{statusLabel}] {name}</Text>
         <Text
-          color="cyan"
+          color={tuiTheme.colors.brand}
           dimColor
           {...({ onPress: () => setIsExpanded(false) } as any)}
         >
@@ -126,31 +112,21 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
         </Text>
       </Box>
 
-      {/* Arguments */}
-      <Box paddingX={1} paddingTop={0} flexDirection="column">
-        <Text color="gray" dimColor bold>args</Text>
-        {highlightedArgs ? (
-          <Text>{highlightedArgs}</Text>
-        ) : (
-          <Text color="gray" dimColor>…</Text>
-        )}
+      <Box paddingX={1} flexDirection="column">
+        <Text color={tuiTheme.colors.muted} dimColor bold>args</Text>
+        <Text>{highlightedArgs || '...'}</Text>
       </Box>
 
-      {/* Result */}
       {hasResult && (
-        <Box paddingX={1} paddingTop={0} flexDirection="column">
-          <Text color="gray" dimColor bold>result</Text>
-          {highlightedResult || result ? (
-            <Text color="green" dimColor>
-              {isLongResult && !showFullResult
-                ? (highlightedResult || result!).slice(0, 200) + '...'
-                : (highlightedResult || result)}
-            </Text>
-          ) : null}
+        <Box paddingX={1} flexDirection="column">
+          <Text color={tuiTheme.colors.muted} dimColor bold>result</Text>
+          <Text color={tuiTheme.colors.success} dimColor>
+            {formatResult(highlightedResult || result!, isLongResult, showFullResult)}
+          </Text>
 
           {isLongResult && (
             <Text
-              color="cyan"
+              color={tuiTheme.colors.brand}
               dimColor
               {...({ onPress: () => setShowFullResult(!showFullResult) } as any)}
             >
@@ -163,40 +139,42 @@ export const ToolCallRenderer: React.FC<ToolCallRendererProps> = ({
   );
 };
 
-// Smart one-line summary for collapsed tool calls.
-// We want: "tool name + the command it actually ran" (e.g. "read src/App.tsx", "ls -la .")
+function formatResult(result: string, isLongResult: boolean, showFullResult: boolean): string {
+  if (!isLongResult || showFullResult) return result;
+  return `${result.slice(0, 200)}...`;
+}
+
 function getToolSummary(name: string, args: string): string {
   try {
     const parsed = JSON.parse(args);
 
     if (name === 'bash') {
-      const cmd = parsed.command || '';
-      return cmd.length > 65 ? cmd.slice(0, 62) + '...' : cmd;
+      return truncate(parsed.command || '', 65);
     }
 
     if (name === 'read_file') {
-      const path = parsed.path || '';
-      const short = path.length > 60 ? path.slice(0, 57) + '...' : path;
-      return `read ${short}`;
+      return `read ${truncate(parsed.path || '', 60)}`;
     }
 
     if (name === 'edit_file') {
-      const path = parsed.path || '';
-      const short = path.length > 60 ? path.slice(0, 57) + '...' : path;
-      return `edit ${short}`;
+      return `edit ${truncate(parsed.path || '', 60)}`;
     }
 
-    // Fallback for future tools
-    const keys = Object.keys(parsed);
-    if (keys.length > 0) {
-      const firstKey = keys[0]!;
-      const val = String((parsed as any)[firstKey] ?? '');
-      const shortVal = val.length > 50 ? val.slice(0, 47) + '...' : val;
-      return `${firstKey}: ${shortVal}`;
+    if (name === 'write_file') {
+      return `write ${truncate(parsed.path || '', 60)}`;
     }
 
-    return args.length > 65 ? args.slice(0, 62) + '...' : args;
+    const firstKey = Object.keys(parsed)[0];
+    if (firstKey) {
+      return `${firstKey}: ${truncate(String(parsed[firstKey] ?? ''), 50)}`;
+    }
+
+    return truncate(args, 65);
   } catch {
-    return args.length > 65 ? args.slice(0, 62) + '...' : args;
+    return truncate(args, 65);
   }
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
