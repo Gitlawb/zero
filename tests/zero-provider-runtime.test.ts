@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   createZeroProvider,
   resolveZeroProviderRuntime,
+  ZeroPendingProviderError,
 } from '../src/zero-provider-runtime';
 
 describe('resolveZeroProviderRuntime', () => {
@@ -113,7 +114,7 @@ describe('resolveZeroProviderRuntime', () => {
     ).toThrow('Unknown Zero model');
   });
 
-  it('creates implemented OpenAI-compatible providers and rejects pending adapters', () => {
+  it('creates implemented OpenAI-compatible and Anthropic providers', () => {
     const openAI = resolveZeroProviderRuntime({
       provider: 'openai-compatible',
       model: 'local-coder',
@@ -123,10 +124,30 @@ describe('resolveZeroProviderRuntime', () => {
 
     const anthropic = resolveZeroProviderRuntime({
       model: 'sonnet-4.5',
+      apiKey: 'test-anthropic-key',
     });
+    const provider = createZeroProvider(anthropic);
+    expect(provider).toBeDefined();
+    expect((provider as any).maxTokens).toBe(64000);
+  });
+
+  it('requires an API key for the official Anthropic runtime', () => {
+    const anthropic = resolveZeroProviderRuntime({
+      model: 'sonnet-4.5',
+    });
+
     expect(() => createZeroProvider(anthropic)).toThrow(
-      'anthropic provider adapter is not implemented yet'
+      'anthropic provider requires an API key'
     );
+  });
+
+  it('still rejects pending official Google adapters', () => {
+    const google = resolveZeroProviderRuntime({
+      model: 'gemini-flash',
+      apiKey: 'test-google-key',
+    });
+
+    expect(() => createZeroProvider(google)).toThrow(ZeroPendingProviderError);
   });
 
   it('creates OpenAI-compatible providers without an API key for custom gateways', () => {

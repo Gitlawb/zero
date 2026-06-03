@@ -3,7 +3,11 @@ import { resolve } from 'path';
 import { runAgent } from '../agent/loop';
 import { loadProviderConfig } from '../config/provider';
 import type { Provider } from '../providers/types';
-import { createZeroProvider, resolveZeroProviderRuntime } from '../zero-provider-runtime';
+import {
+  createZeroProvider,
+  resolveZeroProviderRuntime,
+  ZeroPendingProviderError,
+} from '../zero-provider-runtime';
 import type { ZeroResolvedProviderRuntime } from '../zero-provider-runtime';
 
 export type ExecOutputFormat = 'text' | 'json';
@@ -100,7 +104,7 @@ export async function runExec(options: RunExecOptions): Promise<number> {
       });
       provider = createZeroProvider(runtime);
     } catch (err: any) {
-      writeExecError(outputFormat, 'provider_error', formatProviderError(err, runtime));
+      writeExecError(outputFormat, 'provider_error', formatProviderError(err));
       return ZERO_EXEC_EXIT_CODES.provider;
     }
 
@@ -229,10 +233,10 @@ function emitJson(format: ExecOutputFormat, payload: Record<string, unknown>): v
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
-function formatProviderError(err: any, runtime: ZeroResolvedProviderRuntime | undefined): string {
+function formatProviderError(err: any): string {
   const message = err?.message ?? String(err);
-  if (runtime?.provider === 'anthropic' || runtime?.provider === 'google') {
-    return `${message}\nZero ${runtime.provider} adapter is not implemented yet. Use an OpenAI-compatible gateway or an OpenAI model for this slice.`;
+  if (err instanceof ZeroPendingProviderError) {
+    return `${message}\nUse an implemented provider, or set provider: "openai-compatible" with a custom gateway.`;
   }
 
   return message;

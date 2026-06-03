@@ -2,6 +2,7 @@ export {
   createZeroProvider,
   createZeroProviderFromInput,
   resolveZeroProviderRuntime,
+  ZeroPendingProviderError,
 } from './resolver';
 
 export type {

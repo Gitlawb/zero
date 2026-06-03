@@ -1,4 +1,5 @@
 import { OpenAIProvider } from '../providers/openai';
+import { AnthropicProvider } from '../providers/anthropic';
 import type { Provider } from '../providers/types';
 import {
   getZeroModel,
@@ -22,6 +23,18 @@ const OFFICIAL_OPENAI_BASE_URLS = new Set([
   DEFAULT_BASE_URL.openai,
   'https://api.openai.com',
 ]);
+
+const MIN_REGISTRY_ANTHROPIC_MAX_TOKENS = 8192;
+
+export class ZeroPendingProviderError extends Error {
+  constructor(readonly provider: ZeroProviderRuntimeKind) {
+    super(
+      `Zero ${provider} provider adapter is not implemented yet. ` +
+      'The provider resolver can identify the model, but the streaming adapter lands in a later M1 slice.'
+    );
+    this.name = 'ZeroPendingProviderError';
+  }
+}
 
 export function resolveZeroProviderRuntime(
   input: ZeroProviderRuntimeInput
@@ -89,10 +102,20 @@ export function createZeroProvider(
     });
   }
 
-  throw new Error(
-    `Zero ${runtime.provider} provider adapter is not implemented yet. ` +
-    `The provider resolver can identify the model, but the streaming adapter lands in a later M1 slice.`
-  );
+  if (runtime.provider === 'anthropic') {
+    if (!runtime.apiKey) {
+      throw new Error('Zero anthropic provider requires an API key');
+    }
+
+    return new AnthropicProvider({
+      apiKey: runtime.apiKey,
+      baseURL: runtime.baseURL,
+      model: runtime.apiModel,
+      maxTokens: resolveAnthropicMaxTokens(runtime),
+    });
+  }
+
+  throw new ZeroPendingProviderError(runtime.provider);
 }
 
 export function createZeroProviderFromInput(
@@ -166,6 +189,14 @@ function ensureOpenAICompatibleGatewayBaseURL(baseURL: string | undefined): asse
       'Use provider: "openai" for the official OpenAI API.'
     );
   }
+}
+
+function resolveAnthropicMaxTokens(runtime: ZeroResolvedProviderRuntime): number | undefined {
+  if (!runtime.model) return undefined;
+  return Math.max(
+    runtime.model.context.maxOutputTokens,
+    MIN_REGISTRY_ANTHROPIC_MAX_TOKENS
+  );
 }
 
 function normalizeRequired(value: string, label: string): string {

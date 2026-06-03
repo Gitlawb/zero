@@ -12,7 +12,8 @@
     "test": "bun test ./tests --timeout 15000",
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/build.ts",
-    "smoke:build": "bun run scripts/smoke-build.ts"
+    "smoke:build": "bun run scripts/smoke-build.ts",
+    "package:release": "bun run scripts/package-release.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
