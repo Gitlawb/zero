@@ -103,9 +103,19 @@ describe('Zero config inspection backend', () => {
       expect(report.layers.find((layer) => layer.source === 'user')).toMatchObject({
         present: true,
         status: 'invalid',
+        path: userConfigPath,
+      });
+      expect(report.layers.find((layer) => layer.source === 'user')?.errors?.[0]).toMatchObject({
+        fieldPath: 'providers.0.baseURL',
+        path: userConfigPath,
+      });
+      expect(report.issues.find((issue) => issue.id === 'config.user.invalid')).toMatchObject({
+        path: userConfigPath,
+        fieldPath: 'providers.0.baseURL',
       });
       expect(report.issues.some((issue) => issue.id === 'config.user.invalid')).toBe(true);
       expect(output).toContain('[invalid] user');
+      expect(output).toContain('providers.0.baseURL');
       expect(output).toContain('config.user.invalid');
       expect(output).not.toContain('sk-proj-abcdefghijklmnopqrstuvwxyz1234567890');
     } finally {

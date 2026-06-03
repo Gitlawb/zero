@@ -1,8 +1,15 @@
-import type { ProviderProfile, ZeroConfig } from '../config/loader';
+import type {
+  ConfigDiagnostic,
+  ConfigLayerSource,
+  ConfigLayerStatus,
+  ProviderProfile,
+  ZeroConfig,
+} from '../config/loader';
 import type { ProviderProfileKind } from '../config/types';
 
-export type ZeroConfigLayerSource = 'defaults' | 'user' | 'project' | 'env' | 'cli';
-export type ZeroConfigLayerStatus = 'loaded' | 'invalid';
+export type ZeroConfigLayerSource = ConfigLayerSource;
+export type ZeroConfigLayerStatus = ConfigLayerStatus;
+export type ZeroConfigValidationError = ConfigDiagnostic;
 export type ZeroConfigIssueSeverity = 'warning' | 'error';
 export type ZeroConfigProviderSource = 'profile' | 'environment' | 'provider-command' | 'none';
 
@@ -20,7 +27,7 @@ export interface ZeroConfigLayerInspection {
   present: boolean;
   path?: string;
   config: Partial<ZeroConfig>;
-  errors?: string[];
+  errors?: ZeroConfigValidationError[];
 }
 
 export interface ZeroConfigIssue {
@@ -29,6 +36,7 @@ export interface ZeroConfigIssue {
   source: ZeroConfigLayerSource | 'provider';
   message: string;
   path?: string;
+  fieldPath?: string;
 }
 
 export interface ZeroConfigProviderInspection {

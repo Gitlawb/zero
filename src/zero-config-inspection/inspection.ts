@@ -1,9 +1,8 @@
-import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import {
   mergeLayers,
-  ZeroConfigSchema,
+  readConfigLayer as readZeroConfigLayer,
   type ZeroConfig,
 } from '../config/loader';
 import {
@@ -21,7 +20,7 @@ import type {
   ZeroConfigInspectionReport,
   ZeroConfigIssue,
   ZeroConfigLayerInspection,
-  ZeroConfigLayerSource,
+  ZeroConfigValidationError,
   ZeroConfigProviderInspection,
 } from './types';
 
@@ -50,13 +49,13 @@ export function inspectZeroConfig(
   ];
   const issues: ZeroConfigIssue[] = [];
 
-  const userLayer = readConfigLayer('user', userConfigPath);
+  const userLayer = toInspectionLayer(readZeroConfigLayer('user', userConfigPath));
   if (userLayer) {
     layers.push(userLayer);
     collectLayerIssues(userLayer, issues);
   }
 
-  const projectLayer = readConfigLayer('project', projectConfigPath);
+  const projectLayer = toInspectionLayer(readZeroConfigLayer('project', projectConfigPath));
   if (projectLayer) {
     layers.push(projectLayer);
     collectLayerIssues(projectLayer, issues);
@@ -124,7 +123,7 @@ export function formatZeroConfigInspection(report: ZeroConfigInspectionReport): 
     const layerSummary = formatLayerConfig(layer.config);
     if (layerSummary) lines.push(`    ${layerSummary}`);
     for (const error of layer.errors ?? []) {
-      lines.push(`    error: ${redactZeroString(error)}`);
+      lines.push(`    error: ${formatLayerError(error)}`);
     }
   }
 
@@ -139,8 +138,9 @@ export function formatZeroConfigInspection(report: ZeroConfigInspectionReport): 
   if (report.issues.length > 0) {
     lines.push('Issues:');
     for (const issue of report.issues) {
+      const location = formatIssueLocation(issue);
       lines.push(
-        `  [${issue.severity}] ${redactZeroString(issue.id)} - ${redactZeroString(issue.message)}`
+        `  [${issue.severity}] ${redactZeroString(issue.id)}${location} - ${redactZeroString(issue.message)}`
       );
     }
   }
@@ -148,43 +148,25 @@ export function formatZeroConfigInspection(report: ZeroConfigInspectionReport): 
   return lines.join('\n');
 }
 
-function readConfigLayer(
-  source: Extract<ZeroConfigLayerSource, 'user' | 'project'>,
-  path: string
+function toInspectionLayer(
+  layer: ReturnType<typeof readZeroConfigLayer>
 ): ZeroConfigLayerInspection | undefined {
-  if (!existsSync(path)) return undefined;
+  if (!layer) return undefined;
+  return {
+    ...layer,
+    present: true,
+  };
+}
 
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8'));
-    const result = ZeroConfigSchema.partial().safeParse(parsed);
-    if (!result.success) {
-      return {
-        source,
-        status: 'invalid',
-        present: true,
-        path,
-        config: {},
-        errors: result.error.issues.map((issue) => issue.message),
-      };
-    }
+function formatLayerError(error: ZeroConfigValidationError): string {
+  const field = error.fieldPath ? `${redactZeroString(error.fieldPath)}: ` : '';
+  return `${field}${redactZeroString(error.message)}`;
+}
 
-    return {
-      source,
-      status: 'loaded',
-      present: true,
-      path,
-      config: result.data,
-    };
-  } catch (err: unknown) {
-    return {
-      source,
-      status: 'invalid',
-      present: true,
-      path,
-      config: {},
-      errors: [redactZeroErrorMessage(err)],
-    };
-  }
+function formatIssueLocation(issue: ZeroConfigIssue): string {
+  const parts = [issue.path, issue.fieldPath].filter((part): part is string => Boolean(part));
+  if (parts.length === 0) return '';
+  return ` (${redactZeroString(parts.join(' '))})`;
 }
 
 function collectLayerIssues(
@@ -193,13 +175,29 @@ function collectLayerIssues(
 ): void {
   if (layer.status !== 'invalid') return;
 
-  issues.push({
-    id: `config.${layer.source}.invalid`,
-    severity: 'error',
-    source: layer.source,
-    path: layer.path,
-    message: `${layer.source} config is invalid: ${(layer.errors ?? []).join('; ')}`,
-  });
+  const errors = layer.errors ?? [];
+  if (errors.length === 0) {
+    issues.push({
+      id: `config.${layer.source}.invalid`,
+      severity: 'error',
+      source: layer.source,
+      path: layer.path,
+      message: `${layer.source} config is invalid.`,
+    });
+    return;
+  }
+
+  for (const error of errors) {
+    const field = error.fieldPath ? `${error.fieldPath}: ` : '';
+    issues.push({
+      id: `config.${layer.source}.invalid`,
+      severity: 'error',
+      source: layer.source,
+      path: error.path ?? layer.path,
+      fieldPath: error.fieldPath,
+      message: `${layer.source} config is invalid: ${field}${error.message}`,
+    });
+  }
 }
 
 function inspectEnvConfig(
@@ -217,6 +215,7 @@ function inspectEnvConfig(
         id: 'config.env.ZERO_MAX_TURNS.invalid',
         severity: 'error',
         source: 'env',
+        fieldPath: 'ZERO_MAX_TURNS',
         message: `ZERO_MAX_TURNS must be an integer, received "${env.ZERO_MAX_TURNS}".`,
       });
     }
@@ -237,6 +236,7 @@ function inspectEnvConfig(
         id: 'config.env.ZERO_PROVIDER.invalid',
         severity: 'error',
         source: 'env',
+        fieldPath: 'ZERO_PROVIDER',
         message: redactZeroErrorMessage(err),
       });
     }

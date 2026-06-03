@@ -45,9 +45,24 @@ const DEFAULT_CONFIG: ZeroConfig = {
   debug: false,
 };
 
+export type ConfigLayerSource = 'defaults' | 'user' | 'project' | 'env' | 'cli';
+export type ConfigLayerStatus = 'loaded' | 'invalid';
+export type ConfigDiagnosticKind = 'io' | 'json' | 'schema' | 'env';
+
+export interface ConfigDiagnostic {
+  source: ConfigLayerSource;
+  kind: ConfigDiagnosticKind;
+  message: string;
+  path?: string;
+  fieldPath?: string;
+}
+
 export interface ConfigLayer {
-  source: 'defaults' | 'user' | 'project' | 'env' | 'cli';
+  source: ConfigLayerSource;
+  status: ConfigLayerStatus;
+  path?: string;
   config: Partial<ZeroConfig>;
+  errors?: ConfigDiagnostic[];
 }
 
 export interface LoadConfigOptions {
@@ -65,29 +80,108 @@ const userConfigPath = (): string => join(homedir(), '.config', 'zero', 'config.
 const projectConfigPath = (): string => join(process.cwd(), '.zero', 'config.json');
 
 /**
- * Read and parse a single config file. Returns `{}` for any I/O or
- * parse error so a single bad file never blocks startup.
+ * Read and parse a single config file. Invalid files are returned as
+ * diagnostics so a single bad file never blocks startup.
  */
-function readConfigFile(path: string): ZeroConfig {
-  if (!existsSync(path)) return {};
+export function readConfigLayer(
+  source: Extract<ConfigLayerSource, 'user' | 'project'>,
+  path: string
+): ConfigLayer | undefined {
+  if (!existsSync(path)) return undefined;
+
+  let text: string;
   try {
-    const text = readFileSync(path, 'utf-8');
-    const parsed = JSON.parse(text);
-    return ZeroConfigSchema.partial().parse(parsed);
-  } catch {
-    return {};
+    text = readFileSync(path, 'utf-8');
+  } catch (err: unknown) {
+    return invalidConfigLayer(source, path, [{
+      source,
+      kind: 'io',
+      path,
+      message: errorMessage(err),
+    }]);
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err: unknown) {
+    return invalidConfigLayer(source, path, [{
+      source,
+      kind: 'json',
+      path,
+      message: errorMessage(err),
+    }]);
+  }
+
+  const result = ZeroConfigSchema.partial().safeParse(parsed);
+  if (!result.success) {
+    return invalidConfigLayer(
+      source,
+      path,
+      result.error.issues.map((issue) => ({
+        source,
+        kind: 'schema',
+        path,
+        fieldPath: formatConfigFieldPath(issue.path),
+        message: issue.message,
+      }))
+    );
+  }
+
+  return {
+    source,
+    status: 'loaded',
+    path,
+    config: result.data,
+  };
 }
 
-function envLayer(env: NodeJS.ProcessEnv = process.env): ZeroConfig {
+function invalidConfigLayer(
+  source: Extract<ConfigLayerSource, 'user' | 'project'>,
+  path: string,
+  errors: ConfigDiagnostic[]
+): ConfigLayer {
+  return {
+    source,
+    status: 'invalid',
+    path,
+    config: {},
+    errors,
+  };
+}
+
+function formatConfigFieldPath(path: PropertyKey[]): string | undefined {
+  if (path.length === 0) return undefined;
+  return path.map((part) => String(part)).join('.');
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function envLayer(env: NodeJS.ProcessEnv = process.env): {
+  config: ZeroConfig;
+  diagnostics: ConfigDiagnostic[];
+} {
   const layer: ZeroConfig = {};
+  const diagnostics: ConfigDiagnostic[] = [];
+
   if (env.ZERO_MAX_TURNS) {
     const n = parseInt(env.ZERO_MAX_TURNS, 10);
-    if (!Number.isNaN(n)) layer.maxTurns = n;
+    if (!Number.isNaN(n)) {
+      layer.maxTurns = n;
+    } else {
+      diagnostics.push({
+        source: 'env',
+        kind: 'env',
+        fieldPath: 'ZERO_MAX_TURNS',
+        message: `ZERO_MAX_TURNS must be an integer, received "${env.ZERO_MAX_TURNS}".`,
+      });
+    }
   }
   if (env.ZERO_PLAN_MODE === '1' || env.ZERO_PLAN_MODE === 'true') layer.planMode = true;
   if (env.ZERO_DEBUG === '1' || env.ZERO_DEBUG === 'true') layer.debug = true;
-  return layer;
+  return { config: layer, diagnostics };
 }
 
 /**
@@ -124,27 +218,40 @@ export function mergeLayers(...layers: ZeroConfig[]): ZeroConfig {
 export function loadConfigWithLayers(options: LoadConfigOptions = {}): {
   effective: ZeroConfig;
   layers: ConfigLayer[];
+  diagnostics: ConfigDiagnostic[];
 } {
   const userPath = options.userConfigPath ?? userConfigPath();
   const projectPath = options.projectConfigPath ?? projectConfigPath();
 
   const defaults: ZeroConfig = { ...DEFAULT_CONFIG };
 
-  const user: ZeroConfig = readConfigFile(userPath);
-  const project: ZeroConfig = readConfigFile(projectPath);
-  const env: ZeroConfig = envLayer(options.env);
+  const user = readConfigLayer('user', userPath);
+  const project = readConfigLayer('project', projectPath);
+  const { config: env, diagnostics: envDiagnostics } = envLayer(options.env);
   const cli: ZeroConfig = options.cliOverrides ?? {};
 
   const layers: ConfigLayer[] = [
-    { source: 'defaults', config: defaults },
-    ...(Object.keys(user).length ? [{ source: 'user' as const, config: user }] : []),
-    ...(Object.keys(project).length ? [{ source: 'project' as const, config: project }] : []),
-    ...(Object.keys(env).length ? [{ source: 'env' as const, config: env }] : []),
-    ...(Object.keys(cli).length ? [{ source: 'cli' as const, config: cli }] : []),
+    { source: 'defaults', status: 'loaded', config: defaults },
+    ...(user ? [user] : []),
+    ...(project ? [project] : []),
+    ...(Object.keys(env).length || envDiagnostics.length
+      ? [{
+          source: 'env' as const,
+          status: Object.keys(env).length ? 'loaded' as const : 'invalid' as const,
+          config: env,
+          ...(envDiagnostics.length ? { errors: envDiagnostics } : {}),
+        }]
+      : []),
+    ...(Object.keys(cli).length ? [{ source: 'cli' as const, status: 'loaded' as const, config: cli }] : []),
   ];
 
-  const effective = mergeLayers(defaults, user, project, env, cli);
-  return { effective, layers };
+  const diagnostics = layers.flatMap((layer) => layer.errors ?? []);
+  const effective = mergeLayers(
+    ...(layers
+      .filter((layer) => layer.status === 'loaded')
+      .map((layer) => layer.config) as ZeroConfig[])
+  );
+  return { effective, layers, diagnostics };
 }
 
 /**
