@@ -141,13 +141,25 @@ describe('resolveZeroProviderRuntime', () => {
     );
   });
 
-  it('still rejects pending official Google adapters', () => {
+  it('creates implemented Google Gemini providers', () => {
     const google = resolveZeroProviderRuntime({
       model: 'gemini-flash',
       apiKey: 'test-google-key',
     });
 
-    expect(() => createZeroProvider(google)).toThrow(ZeroPendingProviderError);
+    const provider = createZeroProvider(google);
+    expect(provider).toBeDefined();
+    expect((provider as any).maxTokens).toBe(65536);
+  });
+
+  it('requires an API key for the official Google runtime', () => {
+    const google = resolveZeroProviderRuntime({
+      model: 'gemini-flash',
+    });
+
+    expect(() => createZeroProvider(google)).toThrow(
+      'google provider requires an API key'
+    );
   });
 
   it('creates OpenAI-compatible providers without an API key for custom gateways', () => {

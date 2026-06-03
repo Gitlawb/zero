@@ -1,5 +1,6 @@
 import { OpenAIProvider } from '../providers/openai';
 import { AnthropicProvider } from '../providers/anthropic';
+import { GeminiProvider } from '../providers/gemini';
 import type { Provider } from '../providers/types';
 import {
   getZeroModel,
@@ -115,6 +116,19 @@ export function createZeroProvider(
     });
   }
 
+  if (runtime.provider === 'google') {
+    if (!runtime.apiKey) {
+      throw new Error('Zero google provider requires an API key');
+    }
+
+    return new GeminiProvider({
+      apiKey: runtime.apiKey,
+      baseURL: runtime.baseURL,
+      model: runtime.apiModel,
+      maxTokens: resolveGoogleMaxTokens(runtime),
+    });
+  }
+
   throw new ZeroPendingProviderError(runtime.provider);
 }
 
@@ -197,6 +211,10 @@ function resolveAnthropicMaxTokens(runtime: ZeroResolvedProviderRuntime): number
     runtime.model.context.maxOutputTokens,
     MIN_REGISTRY_ANTHROPIC_MAX_TOKENS
   );
+}
+
+function resolveGoogleMaxTokens(runtime: ZeroResolvedProviderRuntime): number | undefined {
+  return runtime.model?.context.maxOutputTokens;
 }
 
 function normalizeRequired(value: string, label: string): string {
