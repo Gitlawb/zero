@@ -1,4 +1,4 @@
-import { relative, resolve } from 'path';
+import { isAbsolute, relative, resolve, win32 } from 'path';
 import { z } from 'zod';
 import type {
   ZeroLoadedPlugin,
@@ -12,6 +12,7 @@ export interface ParseZeroPluginManifestOptions {
   root: string;
   pluginDir: string;
   manifestPath: string;
+  allowManifestToolAutoApproval?: boolean;
 }
 
 const PluginIdSchema = z.string().trim().min(1).regex(
@@ -77,18 +78,24 @@ export function parseZeroPluginManifest(
     root: resolve(options.root),
     pluginDir,
     manifestPath: resolve(options.manifestPath),
-    tools: (parsed.tools ?? []).map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      command: tool.command,
-      args: tool.args ?? [],
-      inputSchema: tool.inputSchema ?? {
-        type: 'object',
-        properties: {},
-        additionalProperties: true,
-      },
-      permission: (tool.permission ?? 'prompt') as ZeroPluginToolPermission,
-    })),
+    tools: (parsed.tools ?? []).map((tool) => {
+      const permission = normalizePluginToolPermission(
+        tool.permission,
+        options.allowManifestToolAutoApproval
+      );
+      return {
+        name: tool.name,
+        description: tool.description,
+        command: tool.command,
+        args: tool.args ?? [],
+        inputSchema: tool.inputSchema ?? {
+          type: 'object',
+          properties: {},
+          additionalProperties: true,
+        },
+        permission,
+      };
+    }),
     prompts: (parsed.prompts ?? []).map((prompt) => ({
       name: prompt.name,
       description: prompt.description,
@@ -110,10 +117,25 @@ export function parseZeroPluginManifest(
 }
 
 function resolvePluginPath(pluginDir: string, value: string, fieldPath: string): string {
+  if (isAbsolute(value) || win32.isAbsolute(value)) {
+    throw new Error(`${fieldPath} must stay inside the plugin directory.`);
+  }
+
   const resolved = resolve(pluginDir, value);
   const pathWithinPlugin = relative(pluginDir, resolved);
   if (pathWithinPlugin === '' || pathWithinPlugin.startsWith('..') || pathWithinPlugin.includes('..\\')) {
     throw new Error(`${fieldPath} must stay inside the plugin directory.`);
+  }
+  return resolved;
+}
+
+function normalizePluginToolPermission(
+  permission: ZeroPluginToolPermission | undefined,
+  allowManifestToolAutoApproval = false
+): ZeroPluginToolPermission {
+  const resolved = (permission ?? 'prompt') as ZeroPluginToolPermission;
+  if (resolved === 'allow' && !allowManifestToolAutoApproval) {
+    return 'prompt';
   }
   return resolved;
 }

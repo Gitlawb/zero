@@ -106,22 +106,53 @@ describe('Zero plugin manifest validation', () => {
     }));
   });
 
-  it('rejects unsafe plugin-local paths', async () => {
+  it('clamps manifest tool auto-approval unless explicitly enabled', async () => {
     const dir = await makeTempDir();
-    const pluginDir = join(dir, 'plugins', 'bad');
-
-    expect(() => parseZeroPluginManifest({
+    const pluginDir = join(dir, 'plugins', 'zero-demo');
+    const manifest = {
       schemaVersion: 1,
-      id: 'zero.bad',
-      name: 'Bad',
+      id: 'zero.demo',
+      name: 'Zero Demo',
       version: '0.1.0',
-      prompts: [{ name: 'escape', path: '../outside.md' }],
-    }, {
+      tools: [{
+        name: 'lookup',
+        command: 'node',
+        permission: 'allow',
+      }],
+    };
+    const options = {
       manifestPath: join(pluginDir, 'plugin.json'),
       pluginDir,
       root: join(dir, 'plugins'),
-      source: 'project',
-    })).toThrow('must stay inside the plugin directory');
+      source: 'project' as const,
+    };
+
+    expect(parseZeroPluginManifest(manifest, options).tools[0]?.permission).toBe('prompt');
+    expect(parseZeroPluginManifest(manifest, {
+      ...options,
+      allowManifestToolAutoApproval: true,
+    }).tools[0]?.permission).toBe('allow');
+  });
+
+  it('rejects unsafe plugin-local paths', async () => {
+    const dir = await makeTempDir();
+    const pluginDir = join(dir, 'plugins', 'bad');
+    const options = {
+      manifestPath: join(pluginDir, 'plugin.json'),
+      pluginDir,
+      root: join(dir, 'plugins'),
+      source: 'project' as const,
+    };
+
+    for (const path of ['../outside.md', '/tmp/escape.md', 'C:\\Windows\\escape.md']) {
+      expect(() => parseZeroPluginManifest({
+        schemaVersion: 1,
+        id: 'zero.bad',
+        name: 'Bad',
+        version: '0.1.0',
+        prompts: [{ name: 'escape', path }],
+      }, options)).toThrow('must stay inside the plugin directory');
+    }
   });
 });
 
@@ -200,6 +231,31 @@ describe('Zero local plugin loader', () => {
     ]);
   });
 
+  it('keeps loading valid plugins when one manifest has malformed JSON', async () => {
+    const dir = await makeTempDir();
+    const root = join(dir, 'plugins');
+    await writePluginManifest(join(root, 'good'), {
+      schemaVersion: 1,
+      id: 'zero.good',
+      name: 'Good',
+      version: '1.0.0',
+    });
+    await mkdir(join(root, 'bad'), { recursive: true });
+    await writeFile(join(root, 'bad', 'plugin.json'), '{ invalid json }', 'utf-8');
+
+    const result = await loadZeroPlugins({
+      roots: [{ source: 'project', path: root }],
+    });
+
+    expect(result.plugins.map((plugin) => plugin.id)).toEqual(['zero.good']);
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        kind: 'json',
+        pluginPath: join(root, 'bad'),
+      }),
+    ]);
+  });
+
   it('resolves default user and project plugin roots', async () => {
     const dir = await makeTempDir();
 
@@ -241,5 +297,25 @@ describe('zero plugins CLI', () => {
       ],
       diagnostics: [],
     });
+  });
+
+  it('lists local plugin manifests as formatted text', async () => {
+    const dir = await makeTempDir();
+    await writePluginManifest(join(dir, '.zero', 'plugins', 'docs'), {
+      schemaVersion: 1,
+      id: 'zero.docs',
+      name: 'Docs',
+      version: '1.0.0',
+      prompts: [{ name: 'review', path: 'prompts/review.md' }],
+    });
+
+    const result = await runZeroPlugins(dir, ['list']);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr.trim()).toBe('');
+    expect(result.stdout).toContain('zero.docs');
+    expect(result.stdout).toContain('Docs');
+    expect(result.stdout).toContain('1.0.0');
+    expect(result.stdout).toMatch(/1\s+prompts?/);
   });
 });

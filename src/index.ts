@@ -116,7 +116,7 @@ function formatZeroPluginList(
         `${plugin.hooks.length} hooks`,
       ].join(', ');
       lines.push(
-        `  ${plugin.id}@${plugin.version} [${plugin.source}] ${plugin.enabled ? 'enabled' : 'disabled'} - ${counts}`
+        `  ${plugin.id}@${plugin.version} ${plugin.name} [${plugin.source}] ${plugin.enabled ? 'enabled' : 'disabled'} - ${counts}`
       );
     }
   }
