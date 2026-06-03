@@ -12,6 +12,22 @@ bun install --frozen-lockfile
 bun run dev
 ```
 
+## Install From Release
+
+Linux/macOS:
+
+```bash
+scripts/install.sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+```
+
+See `docs/INSTALL.md` for version, repository, and install path overrides.
+
 ## Checks
 
 ```bash

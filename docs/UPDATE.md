@@ -18,4 +18,4 @@ The release endpoint resolves in this order:
 
 `options.endpoint` and `ZERO_UPDATE_RELEASE_URL` may be a full URL or an `owner/repo` slug.
 
-Installer scripts should use this command before downloading the matching release asset for the local platform.
+Installer scripts download the matching release asset for the local platform and verify its `.sha256` file. If Zero is already installed, use this command before re-running the installer.
