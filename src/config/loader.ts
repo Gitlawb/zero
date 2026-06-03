@@ -3,6 +3,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { z } from 'zod';
 import { PROVIDER_PROFILE_KINDS } from './types';
+import { ZeroMcpConfigSchema, normalizeZeroMcpConfig } from '../zero-mcp/config';
 
 /**
  * Layered configuration loader for Zero.
@@ -30,6 +31,7 @@ export const ProviderProfileSchema = z.object({
 export const ZeroConfigSchema = z.object({
   activeProvider: z.string().optional(),
   providers: z.array(ProviderProfileSchema).optional(),
+  mcp: ZeroMcpConfigSchema.optional(),
   maxTurns: z.number().int().min(1).max(100).optional(),
   planMode: z.boolean().optional(),
   debug: z.boolean().optional(),
@@ -204,6 +206,16 @@ export function mergeLayers(...layers: ZeroConfig[]): ZeroConfig {
       }
     }
     if (layer.activeProvider !== undefined) result.activeProvider = layer.activeProvider;
+    if (layer.mcp !== undefined) {
+      const normalized = normalizeZeroMcpConfig(layer.mcp);
+      result.mcp = {
+        ...result.mcp,
+        servers: {
+          ...(result.mcp?.servers ?? {}),
+          ...(normalized.servers ?? {}),
+        },
+      };
+    }
     if (layer.maxTurns !== undefined) result.maxTurns = layer.maxTurns;
     if (layer.planMode !== undefined) result.planMode = layer.planMode;
     if (layer.debug !== undefined) result.debug = layer.debug;

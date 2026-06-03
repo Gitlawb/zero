@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { runExec } from './cli';
+import { loadConfig } from './config/loader';
 import { configManager } from './config/manager';
 import { DEFAULT_UPDATE_CHECK_TIMEOUT_MS, checkForUpdate, formatUpdateCheck } from './update/check';
 import { ZERO_VERSION } from './version';
@@ -12,6 +13,12 @@ import {
 import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from './zero-doctor';
 import { redactZeroErrorMessage, redactZeroSecrets } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
+import {
+  ZeroMcpClientManager,
+  createZeroMcpToolName,
+  type ZeroMcpServerStatus,
+  type ZeroMcpToolDescriptor,
+} from './zero-mcp';
 
 const program = new Command();
 
@@ -28,6 +35,44 @@ function parseNonNegativeIntegerOption(name: string, value: string | undefined):
   }
 
   return Number(normalized);
+}
+
+function formatZeroMcpServerList(servers: ZeroMcpServerStatus[]): string {
+  if (servers.length === 0) {
+    return 'No MCP servers configured.';
+  }
+
+  return [
+    'MCP Servers:',
+    ...servers.map((server) =>
+      `  ${server.name} [${server.type}] ${server.enabled ? 'enabled' : 'disabled'} ${server.identity}`
+    ),
+  ].join('\n');
+}
+
+function formatZeroMcpToolList(tools: ZeroMcpToolDescriptor[]): string {
+  if (tools.length === 0) {
+    return 'No MCP tools discovered.';
+  }
+
+  return [
+    'MCP Tools:',
+    ...tools.map((tool) =>
+      `  ${createZeroMcpToolName(tool.serverName, tool.name)} (${tool.serverName}/${tool.name})` +
+      (tool.description ? ` - ${tool.description}` : '')
+    ),
+  ].join('\n');
+}
+
+function toZeroMcpToolJson(tool: ZeroMcpToolDescriptor): Record<string, unknown> {
+  return {
+    serverName: tool.serverName,
+    serverIdentity: tool.serverIdentity,
+    name: tool.name,
+    zeroToolName: createZeroMcpToolName(tool.serverName, tool.name),
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  };
 }
 
 program
@@ -179,6 +224,43 @@ program
     } catch (err: unknown) {
       console.error(`[zero] ${getErrorMessage(err)}`);
       process.exitCode = 2;
+    }
+  });
+
+const mcpCmd = program
+  .command('mcp')
+  .description('Inspect configured MCP servers and tools');
+
+mcpCmd
+  .command('list')
+  .description('List configured MCP servers')
+  .option('--json', 'Print MCP server or tool data as JSON')
+  .option('--tools', 'Connect to enabled servers and list MCP tools')
+  .action(async (options: { json?: boolean; tools?: boolean }) => {
+    const manager = new ZeroMcpClientManager(loadConfig().mcp?.servers ?? {});
+
+    try {
+      if (options.tools) {
+        const tools = await manager.listTools();
+        if (options.json) {
+          console.log(JSON.stringify({ tools: tools.map(toZeroMcpToolJson) }, null, 2));
+        } else {
+          console.log(formatZeroMcpToolList(tools));
+        }
+        return;
+      }
+
+      const servers = manager.listServers();
+      if (options.json) {
+        console.log(JSON.stringify({ servers }, null, 2));
+      } else {
+        console.log(formatZeroMcpServerList(servers));
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] MCP list failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
+    } finally {
+      await manager.closeAll();
     }
   });
 

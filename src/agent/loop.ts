@@ -87,9 +87,11 @@ export async function runAgent(
       ? executableTools.map(t => {
           // Convert Zod schema to proper JSON Schema (critical for many providers).
           // zod v4 ships this natively — no external package needed.
-          const jsonSchema = z.toJSONSchema(t.parameters, {
-            target: 'draft-7',
-          }) as any;
+          const jsonSchema = typeof t.toJSONSchema === 'function'
+            ? t.toJSONSchema() as any
+            : z.toJSONSchema(t.parameters, {
+                target: 'draft-7',
+              }) as any;
 
           // Remove $schema if present (some providers dislike it)
           delete jsonSchema.$schema;
