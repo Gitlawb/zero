@@ -91,6 +91,9 @@ func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (str
 	if err != nil {
 		return "", "", err
 	}
+	if err := recheckWorkspaceWriteTarget(root, target); err != nil {
+		return "", "", err
+	}
 
 	existing := target
 	missingSegments := []string{}
