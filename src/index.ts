@@ -14,6 +14,10 @@ import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from './
 import { redactZeroErrorMessage, redactZeroSecrets } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
 import {
+  formatZeroHookList,
+  loadZeroHooksConfig,
+} from './zero-hooks';
+import {
   ZeroMcpClientManager,
   ZeroMcpPermissionStore,
   createZeroMcpToolName,
@@ -420,6 +424,29 @@ program
       }
     } catch (err: unknown) {
       console.error(`[zero] Plugin list failed: ${redactZeroErrorMessage(err)}`);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('hooks')
+  .description('Inspect Zero hook configuration and audit data')
+  .command('list')
+  .description('List configured Zero hooks')
+  .option('--json', 'Print hook config as JSON')
+  .action(async (options: { json?: boolean }) => {
+    try {
+      const result = await loadZeroHooksConfig();
+      if (options.json) {
+        console.log(JSON.stringify(redactZeroSecrets({
+          hooks: result.config,
+          diagnostics: result.diagnostics,
+        }), null, 2));
+      } else {
+        console.log(formatZeroHookList(result.config, result.diagnostics));
+      }
+    } catch (err: unknown) {
+      console.error(`[zero] Hook list failed: ${redactZeroErrorMessage(err)}`);
       process.exitCode = 1;
     }
   });
