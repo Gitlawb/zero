@@ -15,7 +15,7 @@ func TestDefaultResolveOptionsUsesExistingConfigPathsAndProviderCommand(t *testi
 	projectPath := filepath.Join(workspaceRoot, ".zero", "config.json")
 	writeFileAt(t, userPath, "{}")
 	writeFileAt(t, projectPath, "{}")
-	t.Setenv("ZERO_PROVIDER_COMMAND", "zero-provider")
+	t.Setenv("ZERO_PROVIDER_COMMAND", "  zero-provider  ")
 
 	options, err := DefaultResolveOptions(workspaceRoot)
 	if err != nil {

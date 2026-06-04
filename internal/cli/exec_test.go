@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,28 +19,122 @@ import (
 )
 
 func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	exitCode := Run([]string{"exec", "--help"}, &stdout, &stderr)
-
-	if exitCode != 0 {
-		t.Fatalf("expected exit code 0, got %d", exitCode)
-	}
-	for _, want := range []string{
-		"-f, --file",
-		"-m, --model",
-		"-C, --cwd",
-		"-o, --output-format text|json",
-		"--skip-permissions-unsafe",
+	for _, args := range [][]string{
+		{"exec", "--help"},
+		{"exec", "--help", "--model", "m1"},
 	} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("expected exec help to contain %q, got %q", want, stdout.String())
-		}
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := Run(args, &stdout, &stderr)
+
+			if exitCode != 0 {
+				t.Fatalf("expected exit code 0, got %d", exitCode)
+			}
+			for _, want := range []string{
+				"-f, --file",
+				"-m, --model",
+				"-C, --cwd",
+				"-o, --output-format text|json",
+				"--prompt",
+				"--skip-permissions-unsafe",
+			} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("expected exec help to contain %q, got %q", want, stdout.String())
+				}
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected empty stderr, got %q", stderr.String())
+			}
+		})
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+}
+
+func TestRunExecJSONRunStartWriteFailureSkipsAgent(t *testing.T) {
+	cwd := t.TempDir()
+	called := false
+
+	exitCode := runWithDeps([]string{"exec", "-o", "json", "hello"}, failingWriter{}, io.Discard, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return recordingExecProvider{called: &called}, nil
+		},
+	})
+
+	if exitCode != exitCrash {
+		t.Fatalf("expected exit code %d, got %d", exitCrash, exitCode)
 	}
+	if called {
+		t.Fatal("expected agent provider not to run after run_start write failure")
+	}
+}
+
+func TestRunExecUnsafeWarningWriteFailureSkipsAgent(t *testing.T) {
+	cwd := t.TempDir()
+	called := false
+
+	exitCode := runWithDeps([]string{"exec", "--skip-permissions-unsafe", "hello"}, io.Discard, failingWriter{}, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return recordingExecProvider{called: &called}, nil
+		},
+	})
+
+	if exitCode != exitCrash {
+		t.Fatalf("expected exit code %d, got %d", exitCrash, exitCode)
+	}
+	if called {
+		t.Fatal("expected agent provider not to run after warning write failure")
+	}
+}
+
+func TestRunExecJSONProviderErrorWriteFailureReturnsCrash(t *testing.T) {
+	cwd := t.TempDir()
+
+	exitCode := runWithDeps([]string{"exec", "-o", "json", "hello"}, failingWriter{}, io.Discard, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, errors.New("provider config failed")
+		},
+	})
+
+	if exitCode != exitCrash {
+		t.Fatalf("expected exit code %d, got %d", exitCrash, exitCode)
+	}
+}
+
+func execResolvedConfig() config.ResolvedConfig {
+	return config.ResolvedConfig{
+		ActiveProvider: "echo",
+		Provider: config.ProviderProfile{
+			Name:         "echo",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "http://127.0.0.1/v1",
+			Model:        "echo-model",
+		},
+	}
+}
+
+type recordingExecProvider struct {
+	called *bool
+}
+
+func (provider recordingExecProvider) StreamCompletion(context.Context, zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	*provider.called = true
+	return nil, errors.New("provider should not run")
 }
 
 func TestRunPromptFlagRoutesToExecRunner(t *testing.T) {

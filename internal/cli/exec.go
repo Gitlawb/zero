@@ -96,8 +96,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		streamedText: &strings.Builder{},
 	}
 	writer.runStart(workspaceRoot, resolved.Provider, permissionMode)
+	if writer.err != nil {
+		return exitCrash
+	}
 	if options.skipPermissionsUnsafe {
 		writer.warning("Unsafe permissions are active for this run because --skip-permissions-unsafe was passed.")
+		if writer.err != nil {
+			return exitCrash
+		}
 	}
 
 	result, err := agent.Run(context.Background(), prompt, provider, agent.Options{
@@ -133,10 +139,7 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		arg := args[index]
 		switch {
 		case arg == "-h" || arg == "--help" || arg == "help":
-			if len(args) == 1 {
-				return options, true, nil
-			}
-			options.promptParts = append(options.promptParts, arg)
+			return options, true, nil
 		case arg == "--skip-permissions-unsafe":
 			options.skipPermissionsUnsafe = true
 		case arg == "-f" || arg == "--file":
@@ -286,15 +289,19 @@ func writeExecUsageError(stderr io.Writer, message string) int {
 
 func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutputFormat, code string, message string) int {
 	if format == execOutputJSON {
-		_ = writeJSONLine(stdout, map[string]any{
+		if err := writeJSONLine(stdout, map[string]any{
 			"type":    "error",
 			"code":    code,
 			"message": message,
-		})
-		_ = writeJSONLine(stdout, map[string]any{
+		}); err != nil {
+			return exitCrash
+		}
+		if err := writeJSONLine(stdout, map[string]any{
 			"type":      "done",
 			"exit_code": exitProvider,
-		})
+		}); err != nil {
+			return exitCrash
+		}
 		return exitProvider
 	}
 	if _, err := fmt.Fprintf(stderr, "[zero] %s\n", message); err != nil {

@@ -180,11 +180,14 @@ func hasProviderFields(profile ProviderProfile) bool {
 }
 
 func normalizeProviders(providers []ProviderProfile, activeName string) ([]ProviderProfile, ProviderProfile, error) {
+	activeName = strings.TrimSpace(activeName)
 	if len(providers) == 0 {
+		if activeName != "" {
+			return nil, ProviderProfile{}, fmt.Errorf("active provider %q not found", activeName)
+		}
 		return []ProviderProfile{}, ProviderProfile{}, nil
 	}
 
-	activeName = strings.TrimSpace(activeName)
 	if activeName == "" && len(providers) == 1 {
 		activeName = providers[0].Name
 	}

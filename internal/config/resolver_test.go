@@ -186,6 +186,30 @@ func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsActiveProviderWithoutConfiguredProfiles(t *testing.T) {
+	path := writeConfig(t, `{"activeProvider":"ghost","providers":[]}`)
+
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want missing active provider error")
+	}
+	if !strings.Contains(err.Error(), `active provider "ghost" not found`) {
+		t.Fatalf("error = %q, want active provider missing message", err.Error())
+	}
+	if resolved.ActiveProvider != "" {
+		t.Fatalf("ActiveProvider = %q, want empty", resolved.ActiveProvider)
+	}
+	if len(resolved.Providers) != 0 {
+		t.Fatalf("Providers = %#v, want empty", resolved.Providers)
+	}
+	if resolved.Provider != (ProviderProfile{}) {
+		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
+	}
+	if resolved.MaxTurns != 0 {
+		t.Fatalf("MaxTurns = %d, want zero on failed resolve", resolved.MaxTurns)
+	}
+}
+
 func TestResolveTrimsProviderProfileAliasesBeforeFallback(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",

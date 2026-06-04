@@ -185,7 +185,7 @@ func writePromptRequired(stderr io.Writer) int {
 
 func writeExecHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
-  zero exec [flags] <prompt>
+  zero exec [flags] [prompt]
 
 Runs a one-shot prompt through the Go agent runtime.
 
@@ -194,6 +194,7 @@ Flags:
   -m, --model <model>                Select the model for provider setup
   -C, --cwd <path>                   Set the workspace directory
   -o, --output-format text|json      Select text or newline-delimited JSON output
+      --prompt <prompt>              Provide prompt text as a flag
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
 `)
 	return err

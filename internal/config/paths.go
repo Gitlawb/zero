@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DefaultResolveOptions builds config resolution inputs from the local process
@@ -27,7 +28,7 @@ func DefaultResolveOptions(workspaceRoot string) (ResolveOptions, error) {
 	return ResolveOptions{
 		UserConfigPath:    userConfigPath,
 		ProjectConfigPath: projectConfigPath,
-		ProviderCommand:   os.Getenv("ZERO_PROVIDER_COMMAND"),
+		ProviderCommand:   strings.TrimSpace(os.Getenv("ZERO_PROVIDER_COMMAND")),
 	}, nil
 }
 
