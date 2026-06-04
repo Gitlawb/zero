@@ -100,3 +100,11 @@ func readOnlySafety(reason string) Safety {
 		Reason:     reason,
 	}
 }
+
+func promptSafety(sideEffect SideEffect, reason string) Safety {
+	return Safety{
+		SideEffect: sideEffect,
+		Permission: PermissionPrompt,
+		Reason:     reason,
+	}
+}
