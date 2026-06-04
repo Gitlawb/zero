@@ -1,0 +1,103 @@
+package tools
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+type listDirectoryTool struct {
+	baseTool
+	workspaceRoot string
+}
+
+func NewListDirectoryTool(workspaceRoot string) Tool {
+	return listDirectoryTool{
+		baseTool: baseTool{
+			name:        "list_directory",
+			description: "List files and directories in a workspace path with optional recursion.",
+			parameters: Schema{
+				Type: "object",
+				Properties: map[string]PropertySchema{
+					"path":      {Type: "string", Description: "Directory to list. Defaults to workspace root.", Default: "."},
+					"recursive": {Type: "boolean", Description: "Whether to list recursively.", Default: false},
+					"max_depth": {Type: "integer", Description: "Maximum recursion depth when recursive is true.", Default: 2, Minimum: intPtr(1), Maximum: intPtr(5)},
+				},
+				AdditionalProperties: false,
+			},
+			safety: readOnlySafety("Lists directory entries without modifying files."),
+		},
+		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+	}
+}
+
+func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result {
+	requestedPath, err := stringArg(args, "path", ".", false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for list_directory: " + err.Error())
+	}
+	recursive, err := boolArg(args, "recursive", false)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for list_directory: " + err.Error())
+	}
+	maxDepth, err := intArg(args, "max_depth", 2, 1, 5)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for list_directory: " + err.Error())
+	}
+	if !recursive {
+		maxDepth = 0
+	}
+
+	absolutePath, relativePath, err := resolveWorkspacePath(tool.workspaceRoot, requestedPath)
+	if err != nil {
+		return errorResult("Error listing directory " + requestedPath + ": " + err.Error())
+	}
+
+	entries, err := listDirectoryEntries(absolutePath, 0, maxDepth)
+	if err != nil {
+		return errorResult("Error listing directory " + relativePath + ": " + err.Error())
+	}
+	if len(entries) == 0 {
+		return okResult("Directory is empty: " + relativePath)
+	}
+	return okResult("Contents of " + relativePath + ":\n\n" + strings.Join(entries, "\n"))
+}
+
+func listDirectoryEntries(path string, depth int, maxDepth int) ([]string, error) {
+	dirEntries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(dirEntries, func(left int, right int) bool {
+		if dirEntries[left].IsDir() != dirEntries[right].IsDir() {
+			return dirEntries[left].IsDir()
+		}
+		return dirEntries[left].Name() < dirEntries[right].Name()
+	})
+
+	results := make([]string, 0, len(dirEntries))
+	for _, entry := range dirEntries {
+		if entry.IsDir() && shouldSkipDirectory(entry.Name()) {
+			continue
+		}
+
+		indent := strings.Repeat("  ", depth)
+		if entry.IsDir() {
+			results = append(results, indent+entry.Name()+"/")
+			if depth < maxDepth {
+				children, err := listDirectoryEntries(filepath.Join(path, entry.Name()), depth+1, maxDepth)
+				if err == nil {
+					results = append(results, children...)
+				}
+			}
+			continue
+		}
+
+		results = append(results, fmt.Sprintf("%s%s", indent, entry.Name()))
+	}
+
+	return results, nil
+}
