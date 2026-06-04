@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 )
@@ -62,7 +63,7 @@ func (err execUsageError) Error() string {
 func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseExecArgs(args)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 	if help {
 		if err := writeExecHelp(stdout); err != nil {
@@ -73,30 +74,33 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 
 	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
 	if err := validateExecToolFilters(options, registry); err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 	permissionMode, err := resolveExecPermissionMode(options)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 	if options.listTools {
+		if options.outputFormat == execOutputStreamJSON {
+			return writeExecStreamJSONFinal(stdout, workspaceRoot, execRunMetadata{}, permissionMode, formatExecToolList(registry, options, permissionMode), exitSuccess)
+		}
 		if err := writeExecToolList(stdout, registry, options, permissionMode); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
 	if err := preflightExecSession(options); err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
 	prompt, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
 	overrides := config.Overrides{}
@@ -118,6 +122,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	runMetadata, err := resolveExecRunMetadata(resolved.Provider)
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
+	}
 
 	preparedSession := sessions.PreparedExec{}
 	agentPrompt := prompt
@@ -126,17 +134,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			Title:        createSessionTitle(prompt),
 			Cwd:          workspaceRoot,
 			ModelID:      resolved.Provider.Model,
-			Provider:     resolved.Provider.Name,
+			Provider:     runMetadata.Provider,
 			Resume:       options.resume,
 			ResumeLatest: options.resumeLatest,
 			Fork:         options.fork,
 		})
 		if err != nil {
-			return writeExecUsageError(stderr, err.Error())
+			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 		}
 		agentPrompt = sessions.FormatExecPrompt(prompt, preparedSession)
 	}
-	runID := streamjson.CreateRunID(time.Now())
+	runID, err := streamjson.CreateRunID(time.Now())
+	if err != nil {
+		return writeAppError(stderr, "failed to create run id: "+err.Error(), exitCrash)
+	}
 	writer := execEventWriter{
 		stdout:       stdout,
 		stderr:       stderr,
@@ -145,7 +156,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		sessionID:    preparedSession.Session.SessionID,
 		streamedText: &strings.Builder{},
 	}
-	writer.runStart(workspaceRoot, resolved.Provider, permissionMode)
+	writer.runStart(workspaceRoot, runMetadata, permissionMode)
 	if writer.err != nil {
 		return exitCrash
 	}
@@ -307,6 +318,13 @@ func writeExecUsageError(stderr io.Writer, message string) int {
 	return exitUsage
 }
 
+func writeExecFormatUsageError(stdout io.Writer, stderr io.Writer, format execOutputFormat, message string) int {
+	if format == execOutputStreamJSON {
+		return writeStreamJSONError(stdout, "usage_error", message, false, exitUsage)
+	}
+	return writeExecUsageError(stderr, message)
+}
+
 func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutputFormat, code string, message string) int {
 	if format == execOutputStreamJSON {
 		return writeStreamJSONError(stdout, code, message, false, exitProvider)
@@ -331,4 +349,44 @@ func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutpu
 		return exitCrash
 	}
 	return exitProvider
+}
+
+func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, error) {
+	metadata, err := providers.ResolveRuntimeMetadata(profile, providers.Options{})
+	if err != nil {
+		return execRunMetadata{}, err
+	}
+	provider := strings.TrimSpace(string(metadata.ProviderKind))
+	if provider == "" {
+		provider = strings.TrimSpace(profile.Name)
+	}
+	apiModel := strings.TrimSpace(metadata.APIModel)
+	if apiModel == "" {
+		apiModel = strings.TrimSpace(profile.Model)
+	}
+	return execRunMetadata{
+		Provider: provider,
+		Model:    strings.TrimSpace(profile.Model),
+		APIModel: apiModel,
+	}, nil
+}
+
+func writeExecStreamJSONFinal(stdout io.Writer, cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode, text string, exitCode int) int {
+	runID, err := streamjson.CreateRunID(time.Now())
+	if err != nil {
+		return exitCrash
+	}
+	writer := execEventWriter{
+		stdout:       stdout,
+		format:       execOutputStreamJSON,
+		runID:        runID,
+		streamedText: &strings.Builder{},
+	}
+	writer.runStart(cwd, metadata, permissionMode)
+	writer.final(text)
+	writer.runEnd("success", exitCode)
+	if writer.err != nil {
+		return exitCrash
+	}
+	return exitCode
 }

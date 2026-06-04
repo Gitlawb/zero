@@ -75,8 +75,11 @@ func TestParseInputRejectsUnknownFields(t *testing.T) {
 }
 
 func TestCreateRunIDUsesStablePrefix(t *testing.T) {
-	runID := CreateRunID(time.Date(2026, 6, 4, 12, 34, 56, 0, time.UTC))
+	runID, err := CreateRunID(time.Date(2026, 6, 4, 12, 34, 56, 0, time.UTC))
 
+	if err != nil {
+		t.Fatalf("CreateRunID returned error: %v", err)
+	}
 	if !strings.HasPrefix(runID, "run_20260604123456_") {
 		t.Fatalf("run id = %q", runID)
 	}

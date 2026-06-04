@@ -227,6 +227,43 @@ func TestRunRejectsFilteredToolCalls(t *testing.T) {
 	}
 }
 
+func TestRunRejectsToolCallsOutsideEnabledList(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "read_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{"path":"README.md"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "read", provider, Options{
+		Registry:     registry,
+		EnabledTools: []string{"grep"},
+		MaxTurns:     2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after filtered tool result, got %q", result.FinalAnswer)
+	}
+	lastMessage := result.Messages[len(result.Messages)-2]
+	if !strings.Contains(lastMessage.Content, "not enabled") {
+		t.Fatalf("expected filtered tool error message, got %#v", result.Messages)
+	}
+}
+
 func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\n")

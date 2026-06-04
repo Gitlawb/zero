@@ -8,8 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -71,6 +73,38 @@ func TestRunExecListsFilteredToolsWithoutPromptOrProvider(t *testing.T) {
 	}
 }
 
+func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--list-tools", "--output-format", "stream-json", "--enabled-tools", "read_file"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) != 3 {
+		t.Fatalf("expected run_start, final, run_end events, got %#v", events)
+	}
+	if events[0]["type"] != "run_start" || events[1]["type"] != "final" || events[2]["type"] != "run_end" {
+		t.Fatalf("unexpected stream-json tool list events: %#v", events)
+	}
+	if text, _ := events[1]["text"].(string); !strings.Contains(text, "Tools visible to model") || !strings.Contains(text, "read_file") {
+		t.Fatalf("expected final event to contain tool list, got %#v", events[1])
+	}
+}
+
 func TestRunExecRejectsInvalidProtocolOptionsBeforeRuntime(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -99,6 +133,56 @@ func TestRunExecRejectsInvalidProtocolOptionsBeforeRuntime(t *testing.T) {
 				t.Fatalf("expected stderr to contain %q, got %q", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestRunExecRejectsFlagShapedMissingValues(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec", "--model", "--output-format", "json", "hello"}, &stdout, &stderr)
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "--model requires a value") {
+		t.Fatalf("expected missing model value error, got %q", got)
+	}
+}
+
+func TestRunExecStreamJSONUsageErrorsStayInProtocol(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--input-format", "stream-json", "--output-format", "stream-json"}, &stdout, &stderr, appDeps{
+		stdin: strings.NewReader("{bad\n"),
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, errors.New("provider should not be resolved for invalid stream-json input")
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) != 2 || events[0]["type"] != "error" || events[1]["type"] != "run_end" {
+		t.Fatalf("expected stream-json error and run_end, got %#v", events)
+	}
+	if events[0]["code"] != "usage_error" || !strings.Contains(events[0]["message"].(string), "Invalid stream-json input") {
+		t.Fatalf("expected usage error event, got %#v", events[0])
+	}
+	if events[1]["exitCode"] != float64(exitUsage) {
+		t.Fatalf("expected usage exit code, got %#v", events[1])
 	}
 }
 
@@ -140,6 +224,9 @@ func TestRunExecStreamJSONOutputsRunEndAndRecordsSession(t *testing.T) {
 	if !ok || sessionID == "" {
 		t.Fatalf("expected run_start sessionId, got %#v", runStart)
 	}
+	if runStart["provider"] != "openai-compatible" || runStart["apiModel"] != "echo-model" {
+		t.Fatalf("expected resolved runtime metadata in run_start, got %#v", runStart)
+	}
 	if got := events[len(events)-1]["type"]; got != "run_end" {
 		t.Fatalf("expected last event run_end, got %#v", events[len(events)-1])
 	}
@@ -153,6 +240,77 @@ func TestRunExecStreamJSONOutputsRunEndAndRecordsSession(t *testing.T) {
 	}
 	if len(recorded) != 2 || recorded[0].Type != sessions.EventMessage || recorded[1].Type != sessions.EventMessage {
 		t.Fatalf("recorded events = %#v", recorded)
+	}
+}
+
+func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				ActiveProvider: "work",
+				Provider: config.ProviderProfile{
+					Name:  "work",
+					Model: "sonnet-4.5",
+				},
+				MaxTurns: 2,
+			}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	events := decodeJSONLines(t, stdout.String())
+	runStart := events[0]
+	if runStart["provider"] != "anthropic" {
+		t.Fatalf("expected resolved provider kind anthropic, got %#v", runStart)
+	}
+	if runStart["model"] != "sonnet-4.5" {
+		t.Fatalf("expected logical model alias, got %#v", runStart)
+	}
+	if runStart["apiModel"] != "claude-sonnet-4-5-20250929" {
+		t.Fatalf("expected resolved API model, got %#v", runStart)
+	}
+}
+
+func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
+	var stdout bytes.Buffer
+	writer := execEventWriter{
+		stdout:       &stdout,
+		format:       execOutputStreamJSON,
+		runID:        "run_test",
+		streamedText: &strings.Builder{},
+	}
+	writer.toolResult(agent.ToolResult{
+		ToolCallID: "call_1",
+		Name:       "read_file",
+		Status:     tools.StatusOK,
+		Output:     strings.Repeat("x", streamJSONToolResultOutputLimit+100),
+	})
+	if writer.err != nil {
+		t.Fatalf("toolResult returned writer error: %v", writer.err)
+	}
+
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) != 1 {
+		t.Fatalf("expected one tool_result event, got %#v", events)
+	}
+	if events[0]["truncated"] != true {
+		t.Fatalf("expected truncated=true, got %#v", events[0])
+	}
+	output := events[0]["output"].(string)
+	if len(output) >= streamJSONToolResultOutputLimit+100 || !strings.Contains(output, "[truncated]") {
+		t.Fatalf("expected shortened output with marker, got len=%d", len(output))
 	}
 }
 

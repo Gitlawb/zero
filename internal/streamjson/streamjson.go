@@ -76,12 +76,12 @@ func (err ProtocolError) Error() string {
 	return err.message
 }
 
-func CreateRunID(now time.Time) string {
+func CreateRunID(now time.Time) (string, error) {
 	random := make([]byte, 3)
 	if _, err := rand.Read(random); err != nil {
-		copy(random, []byte{byte(now.Nanosecond()), byte(now.Second()), byte(now.Minute())})
+		return "", err
 	}
-	return fmt.Sprintf("run_%s_%s", now.UTC().Format("20060102150405"), hex.EncodeToString(random))
+	return fmt.Sprintf("run_%s_%s", now.UTC().Format("20060102150405"), hex.EncodeToString(random)), nil
 }
 
 func FormatEvent(event Event) (string, error) {

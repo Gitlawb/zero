@@ -65,6 +65,11 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 }
 
 func writeExecToolList(w io.Writer, registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) error {
+	_, err := fmt.Fprintln(w, formatExecToolList(registry, options, permissionMode))
+	return err
+}
+
+func formatExecToolList(registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) string {
 	visible := visibleExecTools(registry, options, permissionMode)
 	lines := []string{"Tools visible to model:"}
 	for _, tool := range visible {
@@ -74,18 +79,14 @@ func writeExecToolList(w io.Writer, registry *tools.Registry, options execOption
 	if len(visible) == 0 {
 		lines = append(lines, "  (none)")
 	}
-	_, err := fmt.Fprintln(w, strings.Join(lines, "\n"))
-	return err
+	return strings.Join(lines, "\n")
 }
 
 func visibleExecTools(registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) []tools.Tool {
 	all := registry.All()
 	visible := []tools.Tool{}
 	for _, tool := range all {
-		if !execToolAllowedByFilters(tool.Name(), options) {
-			continue
-		}
-		if !execToolAdvertised(tool, permissionMode) {
+		if !agent.ToolVisible(tool, permissionMode, options.enabledTools, options.disabledTools) {
 			continue
 		}
 		visible = append(visible, tool)
@@ -94,23 +95,6 @@ func visibleExecTools(registry *tools.Registry, options execOptions, permissionM
 		return visible[i].Name() < visible[j].Name()
 	})
 	return visible
-}
-
-func execToolAllowedByFilters(name string, options execOptions) bool {
-	if len(options.enabledTools) > 0 && !toolListContains(options.enabledTools, name) {
-		return false
-	}
-	return !toolListContains(options.disabledTools, name)
-}
-
-func execToolAdvertised(tool tools.Tool, permissionMode agent.PermissionMode) bool {
-	if tool.Safety().Permission == tools.PermissionDeny {
-		return false
-	}
-	if permissionMode == agent.PermissionModeAuto {
-		return tool.Safety().Permission == tools.PermissionAllow
-	}
-	return true
 }
 
 func toolListContains(values []string, want string) bool {

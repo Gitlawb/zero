@@ -66,6 +66,26 @@ type resolvedProfile struct {
 	maxOutputTokens int
 }
 
+// RuntimeMetadata describes the provider identity and concrete API model used
+// after Zero model aliases and provider-kind defaults are resolved.
+type RuntimeMetadata struct {
+	ProviderKind config.ProviderKind
+	APIModel     string
+}
+
+// ResolveRuntimeMetadata returns the provider kind and API model that New would
+// use for a profile, without constructing a network client.
+func ResolveRuntimeMetadata(profile config.ProviderProfile, options Options) (RuntimeMetadata, error) {
+	resolved, err := resolveProfile(profile, options)
+	if err != nil {
+		return RuntimeMetadata{}, err
+	}
+	return RuntimeMetadata{
+		ProviderKind: resolved.providerKind,
+		APIModel:     resolved.apiModel,
+	}, nil
+}
+
 func resolveProfile(profile config.ProviderProfile, options Options) (resolvedProfile, error) {
 	model := strings.TrimSpace(profile.Model)
 	if model == "" {

@@ -42,7 +42,9 @@ type PreparedExec struct {
 }
 
 func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
-	if (options.Resume != "" || options.ResumeLatest) && options.Fork != "" {
+	resumeID := strings.TrimSpace(options.Resume)
+	forkID := strings.TrimSpace(options.Fork)
+	if (resumeID != "" || options.ResumeLatest) && forkID != "" {
 		return PreparedExec{}, ExecError{"Use either --resume or --fork, not both."}
 	}
 
@@ -51,13 +53,13 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		store = NewStore(StoreOptions{})
 	}
 
-	if options.Fork != "" {
-		parent, err := store.Get(options.Fork)
+	if forkID != "" {
+		parent, err := store.Get(forkID)
 		if err != nil {
 			return PreparedExec{}, err
 		}
 		if parent == nil {
-			return PreparedExec{}, ExecError{"Zero session not found: " + options.Fork}
+			return PreparedExec{}, ExecError{"Zero session not found: " + forkID}
 		}
 		contextEvents, err := store.ReadEvents(parent.SessionID)
 		if err != nil {
@@ -76,9 +78,9 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		return PreparedExec{Mode: ModeFork, Session: session, ContextEvents: contextEvents, Store: store}, nil
 	}
 
-	if options.Resume != "" || options.ResumeLatest {
-		sessionID := strings.TrimSpace(options.Resume)
-		if sessionID == "" {
+	if resumeID != "" || options.ResumeLatest {
+		sessionID := resumeID
+		if sessionID == "" && options.ResumeLatest {
 			latest, err := store.Latest()
 			if err != nil {
 				return PreparedExec{}, err
@@ -173,6 +175,12 @@ func extractText(value any) string {
 	switch typed := value.(type) {
 	case string:
 		return typed
+	case json.RawMessage:
+		var decoded any
+		if err := json.Unmarshal(typed, &decoded); err == nil {
+			return extractText(decoded)
+		}
+		return string(typed)
 	case float64, bool, int:
 		return fmt.Sprint(typed)
 	case []any:

@@ -1,44 +1,25 @@
 package sessions
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestDefaultRootUsesXDGDataHome(t *testing.T) {
-	root, err := DefaultRoot(DefaultRootOptions{
-		Env: map[string]string{
-			"XDG_DATA_HOME": "/tmp/zero-data",
-			"HOME":          "/tmp/home",
-		},
-	})
-
-	if err != nil {
-		t.Fatalf("DefaultRoot returned error: %v", err)
-	}
-	if root != filepath.Join("/tmp/zero-data", "zero", "sessions") {
-		t.Fatalf("root = %q", root)
-	}
-}
-
-func TestStoreCreatesAppendsListsAndReadsSessions(t *testing.T) {
-	store := NewStore(StoreOptions{
-		RootDir: t.TempDir(),
-		Now: sequenceClock([]time.Time{
-			time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 1, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 2, 0, time.UTC),
-		}),
-	})
+func TestStoreCreatesAppendsListsAndReadsEvents(t *testing.T) {
+	now := fixedClock("2026-06-04T10:00:00Z")
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: now})
 
 	session, err := store.Create(CreateInput{
-		SessionID: "session_one",
-		Title:     "Build headless",
-		Cwd:       "/repo/zero",
+		SessionID: "zero_test_1",
+		Title:     "First run",
+		Cwd:       "/repo",
 		ModelID:   "gpt-4.1",
 		Provider:  "openai",
 	})
@@ -46,80 +27,196 @@ func TestStoreCreatesAppendsListsAndReadsSessions(t *testing.T) {
 		t.Fatalf("Create returned error: %v", err)
 	}
 	if session.EventCount != 0 || session.CreatedAt != "2026-06-04T10:00:00Z" {
-		t.Fatalf("session metadata = %#v", session)
+		t.Fatalf("unexpected session metadata: %#v", session)
 	}
 
 	event, err := store.AppendEvent(session.SessionID, AppendEventInput{
-		Type:    EventMessage,
-		Payload: map[string]any{"role": "user", "content": "hello"},
+		Type: EventMessage,
+		Payload: map[string]any{
+			"role":    "user",
+			"content": "searchable hello",
+		},
 	})
 	if err != nil {
 		t.Fatalf("AppendEvent returned error: %v", err)
 	}
-	if event.ID != "session_one:1" || event.Sequence != 1 {
-		t.Fatalf("event = %#v", event)
+	if event.ID != "zero_test_1:1" || event.Sequence != 1 {
+		t.Fatalf("unexpected event identity: %#v", event)
+	}
+
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if loaded == nil || loaded.EventCount != 1 || loaded.LastEventType != EventMessage {
+		t.Fatalf("metadata was not updated after append: %#v", loaded)
 	}
 
 	events, err := store.ReadEvents(session.SessionID)
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	if len(events) != 1 || events[0].Type != EventMessage {
-		t.Fatalf("events = %#v", events)
+	if len(events) != 1 {
+		t.Fatalf("expected one event, got %#v", events)
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if payload["content"] != "searchable hello" {
+		t.Fatalf("unexpected payload: %#v", payload)
 	}
 
-	latest, err := store.Latest()
+	sessions, err := store.List()
 	if err != nil {
-		t.Fatalf("Latest returned error: %v", err)
+		t.Fatalf("List returned error: %v", err)
 	}
-	if latest == nil || latest.SessionID != session.SessionID || latest.EventCount != 1 {
-		t.Fatalf("latest = %#v", latest)
-	}
-
-	metadataPath := filepath.Join(store.RootDir, session.SessionID, MetadataFile)
-	if _, err := os.Stat(metadataPath); err != nil {
-		t.Fatalf("expected metadata file at %s: %v", metadataPath, err)
+	if len(sessions) != 1 || sessions[0].SessionID != session.SessionID {
+		t.Fatalf("unexpected session list: %#v", sessions)
 	}
 }
 
-func TestStoreForkCopiesEventsAndRecordsLineage(t *testing.T) {
-	store := NewStore(StoreOptions{
-		RootDir: t.TempDir(),
-		Now: sequenceClock([]time.Time{
-			time.Date(2026, 6, 4, 10, 0, 0, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 1, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 2, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 3, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 4, 0, time.UTC),
-			time.Date(2026, 6, 4, 10, 0, 5, 0, time.UTC),
-		}),
-	})
-	if _, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"}); err != nil {
-		t.Fatal(err)
+func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
+	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
 	}
-	if _, err := store.AppendEvent("parent", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "first"}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AppendEvent("parent", AppendEventInput{Type: EventToolResult, Payload: map[string]any{"output": "done"}}); err != nil {
-		t.Fatal(err)
+	for _, content := range []string{"first", "second"} {
+		if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatalf("AppendEvent returned error: %v", err)
+		}
 	}
 
-	fork, err := store.Fork("parent", ForkInput{SessionID: "forked", Cwd: "/repo/new"})
+	fork, err := store.Fork(parent.SessionID, ForkInput{SessionID: "fork"})
 	if err != nil {
 		t.Fatalf("Fork returned error: %v", err)
 	}
-	if fork.ParentSessionID != "parent" || fork.ForkedFromEventID != "parent:2" || fork.EventCount != 3 {
-		t.Fatalf("fork metadata = %#v", fork)
+	if fork.ParentSessionID != parent.SessionID || fork.ForkedFromEventID != "parent:2" || fork.ForkedFromSequence != 2 {
+		t.Fatalf("fork lineage not recorded: %#v", fork)
 	}
-
-	events, err := store.ReadEvents("forked")
+	if fork.EventCount != 3 || fork.LastEventType != EventSessionFork {
+		t.Fatalf("fork event count/type wrong: %#v", fork)
+	}
+	events, err := store.ReadEvents(fork.SessionID)
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
+	if len(events) != 3 || events[0].ID != "fork:1" || events[2].Type != EventSessionFork {
+		t.Fatalf("fork events not copied/remapped: %#v", events)
+	}
 	got := []EventType{events[0].Type, events[1].Type, events[2].Type}
-	want := []EventType{EventMessage, EventToolResult, EventSessionFork}
+	want := []EventType{EventMessage, EventMessage, EventSessionFork}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fork event types = %#v, want %#v", got, want)
+	}
+}
+
+func TestDefaultRootHonorsXDGDataHome(t *testing.T) {
+	got := DefaultRoot(map[string]string{
+		"XDG_DATA_HOME": "/tmp/zero-data",
+		"HOME":          "/tmp/home",
+	})
+	want := filepath.Join("/tmp/zero-data", "zero", "sessions")
+	if got != want {
+		t.Fatalf("DefaultRoot = %q, want %q", got, want)
+	}
+}
+
+func TestStoreRejectsUnsafeSessionIDsAndBadJSONL(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T12:00:00Z")})
+	if _, err := store.Create(CreateInput{SessionID: "../escape"}); err == nil {
+		t.Fatal("expected unsafe session id to be rejected")
+	}
+
+	if err := os.MkdirAll(filepath.Join(store.RootDir, "bad"), 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RootDir, "bad", "metadata.json"), []byte(`{"sessionId":"bad","createdAt":"x","updatedAt":"x","eventCount":1}`), 0o600); err != nil {
+		t.Fatalf("metadata write failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(store.RootDir, "bad", "events.jsonl"), []byte("{not-json}\n"), 0o600); err != nil {
+		t.Fatalf("events write failed: %v", err)
+	}
+
+	_, err := store.ReadEvents("bad")
+	if err == nil || !strings.Contains(err.Error(), "events.jsonl at line 1") {
+		t.Fatalf("expected JSONL line error, got %v", err)
+	}
+}
+
+func TestStoreGeneratesUniqueIDsWithFixedClock(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T12:30:00Z")})
+	first, err := store.Create(CreateInput{})
+	if err != nil {
+		t.Fatalf("Create first returned error: %v", err)
+	}
+	second, err := store.Create(CreateInput{})
+	if err != nil {
+		t.Fatalf("Create second returned error: %v", err)
+	}
+	if first.SessionID == second.SessionID {
+		t.Fatalf("generated session ids collided: %q", first.SessionID)
+	}
+}
+
+func TestStoreAppendEventSerializesConcurrentWriters(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T13:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "concurrent"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+
+	const total = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, total)
+	for index := 0; index < total; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_, err := store.AppendEvent(session.SessionID, AppendEventInput{
+				Type:    EventMessage,
+				Payload: map[string]int{"index": index},
+			})
+			errs <- err
+		}(index)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendEvent returned error: %v", err)
+		}
+	}
+
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	if len(events) != total {
+		t.Fatalf("expected %d events, got %d: %#v", total, len(events), events)
+	}
+	seen := map[int]bool{}
+	for _, event := range events {
+		if seen[event.Sequence] {
+			t.Fatalf("duplicate event sequence %d in %#v", event.Sequence, events)
+		}
+		seen[event.Sequence] = true
+		if event.ID != fmt.Sprintf("%s:%d", session.SessionID, event.Sequence) {
+			t.Fatalf("event id/sequence mismatch: %#v", event)
+		}
+	}
+	for sequence := 1; sequence <= total; sequence++ {
+		if !seen[sequence] {
+			t.Fatalf("missing event sequence %d in %#v", sequence, events)
+		}
+	}
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if loaded == nil || loaded.EventCount != total || loaded.LastEventType != EventMessage {
+		t.Fatalf("metadata not updated after concurrent append: %#v", loaded)
 	}
 }
 
@@ -161,6 +258,29 @@ func TestPrepareExecSessionResolvesResumeAndFork(t *testing.T) {
 	if forked.Mode != ModeFork || forked.Session.ParentSessionID != "latest" {
 		t.Fatalf("prepared fork = %#v", forked)
 	}
+}
+
+func TestPrepareExecWhitespaceResumeDoesNotFallbackToLatest(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T14:00:00Z")})
+	if _, err := store.Create(CreateInput{SessionID: "latest"}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := PrepareExec(PrepareExecOptions{Store: store, Resume: "   ", SessionID: "new_session"})
+	if err != nil {
+		t.Fatalf("PrepareExec returned error: %v", err)
+	}
+	if prepared.Mode != ModeNew || prepared.Session.SessionID != "new_session" {
+		t.Fatalf("expected whitespace resume to create a new session, got %#v", prepared)
+	}
+}
+
+func fixedClock(value string) func() time.Time {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		panic(err)
+	}
+	return func() time.Time { return parsed }
 }
 
 func sequenceClock(values []time.Time) func() time.Time {

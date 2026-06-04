@@ -107,7 +107,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			}
 		}
 	}
-	if !toolAllowedByFilters(call.Name, options) {
+	if !ToolAllowedByFilters(call.Name, options.EnabledTools, options.DisabledTools) {
 		return ToolResult{
 			ToolCallID: call.ID,
 			Name:       call.Name,
@@ -136,10 +136,7 @@ func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode, op
 	registeredTools := registry.All()
 	definitions := make([]zeroruntime.ToolDefinition, 0, len(registeredTools))
 	for _, tool := range registeredTools {
-		if !toolAllowedByFilters(tool.Name(), options) {
-			continue
-		}
-		if !isAdvertised(tool, permissionMode) {
+		if !ToolVisible(tool, permissionMode, options.EnabledTools, options.DisabledTools) {
 			continue
 		}
 		definitions = append(definitions, zeroruntime.ToolDefinition{
@@ -155,13 +152,17 @@ func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode, op
 	return definitions
 }
 
-func toolAllowedByFilters(name string, options Options) bool {
-	if len(options.EnabledTools) > 0 {
-		if !containsToolName(options.EnabledTools, name) {
+func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {
+	return ToolAllowedByFilters(tool.Name(), enabledTools, disabledTools) && ToolAdvertised(tool, permissionMode)
+}
+
+func ToolAllowedByFilters(name string, enabledTools []string, disabledTools []string) bool {
+	if len(enabledTools) > 0 {
+		if !containsToolName(enabledTools, name) {
 			return false
 		}
 	}
-	if containsToolName(options.DisabledTools, name) {
+	if containsToolName(disabledTools, name) {
 		return false
 	}
 	return true
@@ -219,7 +220,7 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 	return schema
 }
 
-func isAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
+func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if tool.Safety().Permission == tools.PermissionDeny {
 		return false
 	}

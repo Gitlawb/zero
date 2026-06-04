@@ -7,10 +7,17 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
+
+const streamJSONToolResultOutputLimit = 10 * 1024
+
+type execRunMetadata struct {
+	Provider string
+	Model    string
+	APIModel string
+}
 
 type execEventWriter struct {
 	stdout       io.Writer
@@ -22,14 +29,15 @@ type execEventWriter struct {
 	err          error
 }
 
-func (writer *execEventWriter) runStart(cwd string, provider config.ProviderProfile, permissionMode agent.PermissionMode) {
+func (writer *execEventWriter) runStart(cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode) {
 	switch writer.format {
 	case execOutputJSON:
 		writer.writeJSON(map[string]any{
 			"type":            "run_start",
 			"cwd":             cwd,
-			"provider":        provider.Name,
-			"model":           provider.Model,
+			"provider":        metadata.Provider,
+			"model":           metadata.Model,
+			"api_model":       metadata.APIModel,
 			"permission_mode": string(permissionMode),
 		})
 	case execOutputStreamJSON:
@@ -38,9 +46,9 @@ func (writer *execEventWriter) runStart(cwd string, provider config.ProviderProf
 			RunID:     writer.runID,
 			SessionID: writer.sessionID,
 			Cwd:       cwd,
-			Provider:  provider.Name,
-			Model:     provider.Model,
-			APIModel:  provider.Model,
+			Provider:  metadata.Provider,
+			Model:     metadata.Model,
+			APIModel:  metadata.APIModel,
 		})
 	}
 }
@@ -106,13 +114,13 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 		return
 	}
 	if writer.format == execOutputStreamJSON {
-		truncated := false
+		output, truncated := truncateForStreamJSONOutput(result.Output)
 		writer.writeStreamJSON(streamjson.Event{
 			Type:      streamjson.EventToolResult,
 			RunID:     writer.runID,
 			ID:        result.ToolCallID,
 			Status:    string(result.Status),
-			Output:    result.Output,
+			Output:    output,
 			Truncated: &truncated,
 		})
 		return
@@ -276,11 +284,22 @@ func truncateForStatus(value string) string {
 	return compact
 }
 
+func truncateForStreamJSONOutput(value string) (string, bool) {
+	if len(value) <= streamJSONToolResultOutputLimit {
+		return value, false
+	}
+	return value[:streamJSONToolResultOutputLimit] + "\n[truncated]", true
+}
+
 func writeStreamJSONError(stdout io.Writer, code string, message string, recoverable bool, exitCode int) int {
+	runID, err := streamjson.CreateRunID(timeNow())
+	if err != nil {
+		return exitCrash
+	}
 	writer := execEventWriter{
 		stdout: stdout,
 		format: execOutputStreamJSON,
-		runID:  streamjson.CreateRunID(timeNow()),
+		runID:  runID,
 	}
 	writer.errorEvent(code, message, recoverable)
 	writer.runEnd("error", exitCode)

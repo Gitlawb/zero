@@ -193,10 +193,24 @@ func parseExecMaxTurns(value string) (int, error) {
 }
 
 func nextFlagValue(args []string, index int, flag string) (string, int, error) {
-	if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
+	if index+1 >= len(args) {
 		return "", index, execUsageError{fmt.Sprintf("%s requires a value", flag)}
 	}
-	return strings.TrimSpace(args[index+1]), index + 1, nil
+	next := strings.TrimSpace(args[index+1])
+	if next == "" || flagValueLooksLikeOption(next) {
+		return "", index, execUsageError{fmt.Sprintf("%s requires a value", flag)}
+	}
+	return next, index + 1, nil
+}
+
+func flagValueLooksLikeOption(value string) bool {
+	if !strings.HasPrefix(value, "-") {
+		return false
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return false
+	}
+	return true
 }
 
 func parseExecOutputFormat(value string) (execOutputFormat, error) {
