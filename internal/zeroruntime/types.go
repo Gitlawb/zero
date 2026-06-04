@@ -17,9 +17,9 @@ const (
 
 const (
 	StreamEventText          StreamEventType = "text"
-	StreamEventToolCallStart StreamEventType = "tool_call_start"
-	StreamEventToolCallDelta StreamEventType = "tool_call_delta"
-	StreamEventToolCallEnd   StreamEventType = "tool_call_end"
+	StreamEventToolCallStart StreamEventType = "tool-call-start"
+	StreamEventToolCallDelta StreamEventType = "tool-call-delta"
+	StreamEventToolCallEnd   StreamEventType = "tool-call-end"
 	StreamEventUsage         StreamEventType = "usage"
 	StreamEventDone          StreamEventType = "done"
 	StreamEventError         StreamEventType = "error"

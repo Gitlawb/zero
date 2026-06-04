@@ -10,6 +10,12 @@ type CollectedStream struct {
 	Error     string
 }
 
+// CollectOptions provides callbacks for consumers that need live stream updates.
+type CollectOptions struct {
+	OnText  func(string)
+	OnUsage func(Usage)
+}
+
 // SeedMessages creates the initial system and user turns for a request.
 func SeedMessages(systemPrompt string, userPrompt string) []Message {
 	return []Message{
@@ -20,6 +26,11 @@ func SeedMessages(systemPrompt string, userPrompt string) []Message {
 
 // CollectStream drains provider events into text, tool calls, usage, and error state.
 func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStream {
+	return CollectStreamWithOptions(ctx, events, CollectOptions{})
+}
+
+// CollectStreamWithOptions drains provider events and emits optional live callbacks.
+func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, options CollectOptions) CollectedStream {
 	collected := CollectedStream{}
 	pendingToolCalls := make(map[string]*ToolCall)
 	toolCallOrder := []string{}
@@ -38,16 +49,15 @@ func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStre
 			switch event.Type {
 			case StreamEventText:
 				collected.Text += event.Content
+				if options.OnText != nil {
+					options.OnText(event.Content)
+				}
 			case StreamEventToolCallStart:
-				pendingToolCalls[event.ToolCallID] = &ToolCall{
-					ID:   event.ToolCallID,
-					Name: event.ToolName,
-				}
-				toolCallOrder = append(toolCallOrder, event.ToolCallID)
+				toolCall := ensurePendingToolCall(event.ToolCallID, pendingToolCalls, &toolCallOrder)
+				toolCall.Name = event.ToolName
 			case StreamEventToolCallDelta:
-				if toolCall, ok := pendingToolCalls[event.ToolCallID]; ok {
-					toolCall.Arguments += event.ArgumentsFragment
-				}
+				toolCall := ensurePendingToolCall(event.ToolCallID, pendingToolCalls, &toolCallOrder)
+				toolCall.Arguments += event.ArgumentsFragment
 			case StreamEventToolCallEnd:
 				if toolCall, ok := pendingToolCalls[event.ToolCallID]; ok {
 					collected.ToolCalls = append(collected.ToolCalls, *toolCall)
@@ -57,6 +67,9 @@ func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStre
 				collected.Usage.PromptTokens += event.Usage.PromptTokens
 				collected.Usage.CompletionTokens += event.Usage.CompletionTokens
 				collected.Usage.CachedInputTokens += event.Usage.CachedInputTokens
+				if options.OnUsage != nil {
+					options.OnUsage(event.Usage)
+				}
 			case StreamEventError:
 				collected.Error = event.Error
 				appendOpenToolCalls(&collected, toolCallOrder, pendingToolCalls)
@@ -67,6 +80,22 @@ func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStre
 			}
 		}
 	}
+}
+
+func ensurePendingToolCall(
+	toolCallID string,
+	pendingToolCalls map[string]*ToolCall,
+	toolCallOrder *[]string,
+) *ToolCall {
+	toolCall, ok := pendingToolCalls[toolCallID]
+	if ok {
+		return toolCall
+	}
+
+	toolCall = &ToolCall{ID: toolCallID}
+	pendingToolCalls[toolCallID] = toolCall
+	*toolCallOrder = append(*toolCallOrder, toolCallID)
+	return toolCall
 }
 
 func appendOpenToolCalls(

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const version = "0.1.0"
@@ -129,23 +130,23 @@ Runs a one-shot prompt through the Go agent runtime.
 
 type offlineProvider struct{}
 
-func (offlineProvider) StreamCompletion(ctx context.Context, request agent.CompletionRequest) (<-chan agent.StreamEvent, error) {
+func (offlineProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	prompt := ""
 	for index := len(request.Messages) - 1; index >= 0; index-- {
-		if request.Messages[index].Role == agent.RoleUser {
+		if request.Messages[index].Role == zeroruntime.MessageRoleUser {
 			prompt = request.Messages[index].Content
 			break
 		}
 	}
 
-	ch := make(chan agent.StreamEvent, 2)
+	ch := make(chan zeroruntime.StreamEvent, 2)
 	select {
 	case <-ctx.Done():
 		close(ch)
 		return ch, ctx.Err()
-	case ch <- agent.StreamEvent{Type: agent.EventText, Content: "Go agent runtime ready: " + prompt}:
+	case ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "Go agent runtime ready: " + prompt}:
 	}
-	ch <- agent.StreamEvent{Type: agent.EventDone}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
 	close(ch)
 	return ch, nil
 }

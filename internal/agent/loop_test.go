@@ -8,22 +8,23 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type mockProvider struct {
-	turns    [][]StreamEvent
-	requests []CompletionRequest
+	turns    [][]zeroruntime.StreamEvent
+	requests []zeroruntime.CompletionRequest
 }
 
-func (provider *mockProvider) StreamCompletion(ctx context.Context, request CompletionRequest) (<-chan StreamEvent, error) {
+func (provider *mockProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
 	provider.requests = append(provider.requests, request)
 
-	events := []StreamEvent{{Type: EventDone}}
+	events := []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}}
 	if len(provider.turns) >= len(provider.requests) {
 		events = provider.turns[len(provider.requests)-1]
 	}
 
-	ch := make(chan StreamEvent, len(events))
+	ch := make(chan zeroruntime.StreamEvent, len(events))
 	for _, event := range events {
 		ch <- event
 	}
@@ -33,10 +34,10 @@ func (provider *mockProvider) StreamCompletion(ctx context.Context, request Comp
 
 func TestRunReturnsProviderText(t *testing.T) {
 	provider := &mockProvider{
-		turns: [][]StreamEvent{{
-			{Type: EventText, Content: "hello"},
-			{Type: EventText, Content: " zero"},
-			{Type: EventDone},
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "hello"},
+			{Type: zeroruntime.StreamEventText, Content: " zero"},
+			{Type: zeroruntime.StreamEventDone},
 		}},
 	}
 
@@ -53,16 +54,16 @@ func TestRunReturnsProviderText(t *testing.T) {
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider turn, got %d", len(provider.requests))
 	}
-	assertMessage(t, provider.requests[0].Messages[0], RoleSystem, "")
-	assertMessage(t, provider.requests[0].Messages[1], RoleUser, "say hi")
+	assertMessage(t, provider.requests[0].Messages[0], zeroruntime.MessageRoleSystem, "")
+	assertMessage(t, provider.requests[0].Messages[1], zeroruntime.MessageRoleUser, "say hi")
 }
 
 func TestRunEmitsTextDeltas(t *testing.T) {
 	provider := &mockProvider{
-		turns: [][]StreamEvent{{
-			{Type: EventText, Content: "hello"},
-			{Type: EventText, Content: " zero"},
-			{Type: EventDone},
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "hello"},
+			{Type: zeroruntime.StreamEventText, Content: " zero"},
+			{Type: zeroruntime.StreamEventDone},
 		}},
 	}
 
@@ -82,17 +83,17 @@ func TestRunEmitsTextDeltas(t *testing.T) {
 
 func TestRunEmitsUsageEvents(t *testing.T) {
 	provider := &mockProvider{
-		turns: [][]StreamEvent{{
-			{Type: EventUsage, PromptTokens: 12, CompletionTokens: 5},
-			{Type: EventText, Content: "done"},
-			{Type: EventDone},
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{PromptTokens: 12, CompletionTokens: 5, CachedInputTokens: 2}},
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
 		}},
 	}
 
-	var usages []Usage
+	var usages []zeroruntime.Usage
 	_, err := Run(context.Background(), "track usage", provider, Options{
 		Registry: tools.NewRegistry(),
-		OnUsage:  func(usage Usage) { usages = append(usages, usage) },
+		OnUsage:  func(usage zeroruntime.Usage) { usages = append(usages, usage) },
 	})
 
 	if err != nil {
@@ -101,8 +102,61 @@ func TestRunEmitsUsageEvents(t *testing.T) {
 	if len(usages) != 1 {
 		t.Fatalf("expected one usage event, got %#v", usages)
 	}
-	if usages[0].PromptTokens != 12 || usages[0].CompletionTokens != 5 {
+	if usages[0].PromptTokens != 12 || usages[0].CompletionTokens != 5 || usages[0].CachedInputTokens != 2 {
 		t.Fatalf("unexpected usage event: %#v", usages[0])
+	}
+}
+
+func TestRunAdvertisesRuntimeToolDefinitions(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "what tools exist?", provider, Options{
+		Registry: registry,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 {
+		t.Fatalf("expected one advertised tool, got %#v", provider.requests[0].Tools)
+	}
+
+	toolDefinition := provider.requests[0].Tools[0]
+	if toolDefinition.Name != "read_file" {
+		t.Fatalf("expected read_file definition, got %#v", toolDefinition)
+	}
+	parameters := toolDefinition.Parameters
+	if parameters["type"] != "object" {
+		t.Fatalf("expected object schema, got %#v", parameters)
+	}
+	if parameters["additionalProperties"] != false {
+		t.Fatalf("expected additionalProperties=false, got %#v", parameters["additionalProperties"])
+	}
+	properties, ok := parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %#v", parameters["properties"])
+	}
+	pathProperty, ok := properties["path"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected path property map, got %#v", properties["path"])
+	}
+	if pathProperty["type"] != "string" || pathProperty["description"] == "" {
+		t.Fatalf("unexpected path property schema: %#v", pathProperty)
+	}
+	required, ok := parameters["required"].([]string)
+	if !ok || len(required) != 1 || required[0] != "path" {
+		t.Fatalf("unexpected required fields: %#v", parameters["required"])
 	}
 }
 
@@ -112,16 +166,16 @@ func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(root))
 	provider := &mockProvider{
-		turns: [][]StreamEvent{
+		turns: [][]zeroruntime.StreamEvent{
 			{
-				{Type: EventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
-				{Type: EventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
-				{Type: EventToolCallEnd, ToolCallID: "call-1"},
-				{Type: EventDone},
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
 			},
 			{
-				{Type: EventText, Content: "read done"},
-				{Type: EventDone},
+				{Type: zeroruntime.StreamEventText, Content: "read done"},
+				{Type: zeroruntime.StreamEventDone},
 			},
 		},
 	}
@@ -142,7 +196,7 @@ func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 		t.Fatalf("expected provider to be called twice, got %d", len(provider.requests))
 	}
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-	assertMessage(t, lastMessage, RoleTool, "alpha")
+	assertMessage(t, lastMessage, zeroruntime.MessageRoleTool, "alpha")
 	if lastMessage.ToolCallID != "call-1" {
 		t.Fatalf("expected tool_call_id call-1, got %q", lastMessage.ToolCallID)
 	}
@@ -209,11 +263,11 @@ func TestRunStopsAfterMaxTurns(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(root))
 	provider := &mockProvider{
-		turns: [][]StreamEvent{{
-			{Type: EventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
-			{Type: EventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
-			{Type: EventToolCallEnd, ToolCallID: "call-1"},
-			{Type: EventDone},
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
 		}},
 	}
 
@@ -235,22 +289,22 @@ func TestRunStopsAfterMaxTurns(t *testing.T) {
 
 func providerCallingWriteFileThenAnswer(answer string) *mockProvider {
 	return &mockProvider{
-		turns: [][]StreamEvent{
+		turns: [][]zeroruntime.StreamEvent{
 			{
-				{Type: EventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
-				{Type: EventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"hello"}`},
-				{Type: EventToolCallEnd, ToolCallID: "call-1"},
-				{Type: EventDone},
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
 			},
 			{
-				{Type: EventText, Content: answer},
-				{Type: EventDone},
+				{Type: zeroruntime.StreamEventText, Content: answer},
+				{Type: zeroruntime.StreamEventDone},
 			},
 		},
 	}
 }
 
-func assertMessage(t *testing.T, message Message, role Role, contentContains string) {
+func assertMessage(t *testing.T, message zeroruntime.Message, role zeroruntime.MessageRole, contentContains string) {
 	t.Helper()
 
 	if message.Role != role {

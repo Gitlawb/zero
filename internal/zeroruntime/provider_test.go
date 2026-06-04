@@ -41,6 +41,24 @@ func TestSeedMessagesProducesSystemAndUserTurns(t *testing.T) {
 	}
 }
 
+func TestStreamEventNamesMatchProviderContract(t *testing.T) {
+	cases := map[StreamEventType]string{
+		StreamEventText:          "text",
+		StreamEventToolCallStart: "tool-call-start",
+		StreamEventToolCallDelta: "tool-call-delta",
+		StreamEventToolCallEnd:   "tool-call-end",
+		StreamEventUsage:         "usage",
+		StreamEventDone:          "done",
+		StreamEventError:         "error",
+	}
+
+	for eventType, want := range cases {
+		if string(eventType) != want {
+			t.Fatalf("event type %s = %q, want %q", eventType, string(eventType), want)
+		}
+	}
+}
+
 func TestCollectStreamAccumulatesTextToolCallsAndUsage(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {
@@ -72,6 +90,59 @@ func TestCollectStreamAccumulatesTextToolCallsAndUsage(t *testing.T) {
 	}
 	if collected.Usage.TotalTokens() != 20 {
 		t.Fatalf("total tokens = %d, want 20", collected.Usage.TotalTokens())
+	}
+}
+
+func TestCollectStreamWithOptionsEmitsTextAndUsageCallbacks(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventText, Content: "Hello "}
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{PromptTokens: 12, CompletionTokens: 5, CachedInputTokens: 2}}
+		events <- StreamEvent{Type: StreamEventText, Content: "zero"}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+
+	var textDeltas []string
+	var usageEvents []Usage
+	collected := CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnText:  func(delta string) { textDeltas = append(textDeltas, delta) },
+		OnUsage: func(usage Usage) { usageEvents = append(usageEvents, usage) },
+	})
+
+	if collected.Text != "Hello zero" {
+		t.Fatalf("text = %q, want Hello zero", collected.Text)
+	}
+	if len(textDeltas) != 2 || textDeltas[0] != "Hello " || textDeltas[1] != "zero" {
+		t.Fatalf("unexpected text callbacks: %#v", textDeltas)
+	}
+	if len(usageEvents) != 1 {
+		t.Fatalf("expected one usage callback, got %#v", usageEvents)
+	}
+	if usageEvents[0].PromptTokens != 12 || usageEvents[0].CompletionTokens != 5 || usageEvents[0].CachedInputTokens != 2 {
+		t.Fatalf("unexpected usage callback: %#v", usageEvents[0])
+	}
+}
+
+func TestCollectStreamKeepsArgumentDeltasBeforeToolCallStart(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventToolCallDelta, ToolCallID: "call_buffered", ArgumentsFragment: `{"path":`}
+		events <- StreamEvent{Type: StreamEventToolCallStart, ToolCallID: "call_buffered", ToolName: "read_file"}
+		events <- StreamEvent{Type: StreamEventToolCallDelta, ToolCallID: "call_buffered", ArgumentsFragment: `"README.md"}`}
+		events <- StreamEvent{Type: StreamEventToolCallEnd, ToolCallID: "call_buffered"}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+
+	collected := CollectStream(context.Background(), events)
+
+	if len(collected.ToolCalls) != 1 {
+		t.Fatalf("expected one buffered tool call, got %d", len(collected.ToolCalls))
+	}
+	toolCall := collected.ToolCalls[0]
+	if toolCall.ID != "call_buffered" || toolCall.Name != "read_file" || toolCall.Arguments != `{"path":"README.md"}` {
+		t.Fatalf("unexpected buffered tool call: %#v", toolCall)
 	}
 }
 

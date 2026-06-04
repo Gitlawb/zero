@@ -7,16 +7,11 @@ import (
 	"sort"
 
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const defaultSystemPrompt = "You are Zero, a terminal coding agent. Help with the current workspace and use tools when needed."
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
-
-type pendingToolCall struct {
-	id        string
-	name      string
-	arguments string
-}
 
 func Run(ctx context.Context, prompt string, provider Provider, options Options) (Result, error) {
 	if provider == nil {
@@ -38,15 +33,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		permissionMode = PermissionModeAuto
 	}
 
-	messages := []Message{
-		{Role: RoleSystem, Content: defaultSystemPrompt},
-		{Role: RoleUser, Content: prompt},
-	}
+	messages := zeroruntime.SeedMessages(defaultSystemPrompt, prompt)
 
 	result := Result{Messages: copyMessages(messages)}
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
-		request := CompletionRequest{
+		request := zeroruntime.CompletionRequest{
 			Messages: copyMessages(messages),
 			Tools:    toolDefinitions(registry, permissionMode),
 		}
@@ -57,25 +49,32 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			return result, err
 		}
 
-		currentText, toolCalls, err := collectTurn(ctx, stream, options.OnText, options.OnUsage)
-		if err != nil {
+		collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
+			OnText:  options.OnText,
+			OnUsage: options.OnUsage,
+		})
+		if collected.Error != "" {
 			result.Messages = copyMessages(messages)
-			return result, err
+			return result, errors.New(collected.Error)
+		}
+		if ctx.Err() != nil {
+			result.Messages = copyMessages(messages)
+			return result, ctx.Err()
 		}
 
-		messages = append(messages, Message{
-			Role:      RoleAssistant,
-			Content:   currentText,
-			ToolCalls: toolCalls,
+		messages = append(messages, zeroruntime.Message{
+			Role:      zeroruntime.MessageRoleAssistant,
+			Content:   collected.Text,
+			ToolCalls: collected.ToolCalls,
 		})
 
-		if len(toolCalls) == 0 {
-			result.FinalAnswer = currentText
+		if len(collected.ToolCalls) == 0 {
+			result.FinalAnswer = collected.Text
 			result.Messages = copyMessages(messages)
 			return result, nil
 		}
 
-		for _, call := range toolCalls {
+		for _, call := range collected.ToolCalls {
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
 			}
@@ -83,8 +82,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
-			messages = append(messages, Message{
-				Role:       RoleTool,
+			messages = append(messages, zeroruntime.Message{
+				Role:       zeroruntime.MessageRoleTool,
 				Content:    toolResult.Output,
 				ToolCallID: toolResult.ToolCallID,
 			})
@@ -94,73 +93,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	result.FinalAnswer = maxTurnsAnswer
 	result.Messages = copyMessages(messages)
 	return result, nil
-}
-
-func collectTurn(ctx context.Context, stream <-chan StreamEvent, onText func(string), onUsage func(Usage)) (string, []ToolCall, error) {
-	currentText := ""
-	pending := make(map[string]*pendingToolCall)
-	order := make([]string, 0)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return "", nil, ctx.Err()
-		case event, ok := <-stream:
-			if !ok {
-				return currentText, buildToolCalls(order, pending), nil
-			}
-
-			switch event.Type {
-			case EventText:
-				currentText += event.Content
-				if onText != nil {
-					onText(event.Content)
-				}
-			case EventToolCallStart:
-				call := pending[event.ToolCallID]
-				if call == nil {
-					call = &pendingToolCall{id: event.ToolCallID}
-					pending[event.ToolCallID] = call
-					order = append(order, event.ToolCallID)
-				}
-				call.name = event.ToolName
-			case EventToolCallDelta:
-				call := pending[event.ToolCallID]
-				if call == nil {
-					call = &pendingToolCall{id: event.ToolCallID}
-					pending[event.ToolCallID] = call
-					order = append(order, event.ToolCallID)
-				}
-				call.arguments += event.ArgumentsFragment
-			case EventToolCallEnd:
-			case EventUsage:
-				if onUsage != nil {
-					onUsage(Usage{
-						PromptTokens:     event.PromptTokens,
-						CompletionTokens: event.CompletionTokens,
-					})
-				}
-			case EventDone:
-				return currentText, buildToolCalls(order, pending), nil
-			}
-		}
-	}
-}
-
-func buildToolCalls(order []string, pending map[string]*pendingToolCall) []ToolCall {
-	calls := make([]ToolCall, 0, len(order))
-	for _, id := range order {
-		call := pending[id]
-		if call == nil {
-			continue
-		}
-		calls = append(calls, ToolCall{
-			ID:        call.id,
-			Name:      call.name,
-			Arguments: call.arguments,
-		})
-	}
-	return calls
 }
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode) ToolResult {
@@ -192,17 +124,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 }
 
-func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode) []ToolDefinition {
+func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode) []zeroruntime.ToolDefinition {
 	registeredTools := registry.All()
-	definitions := make([]ToolDefinition, 0, len(registeredTools))
+	definitions := make([]zeroruntime.ToolDefinition, 0, len(registeredTools))
 	for _, tool := range registeredTools {
 		if !isAdvertised(tool, permissionMode) {
 			continue
 		}
-		definitions = append(definitions, ToolDefinition{
+		definitions = append(definitions, zeroruntime.ToolDefinition{
 			Name:        tool.Name(),
 			Description: tool.Description(),
-			Parameters:  tool.Parameters(),
+			Parameters:  schemaToRuntimeMap(tool.Parameters()),
 		})
 	}
 
@@ -210,6 +142,49 @@ func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode) []
 		return definitions[left].Name < definitions[right].Name
 	})
 	return definitions
+}
+
+func schemaToRuntimeMap(schema tools.Schema) map[string]any {
+	parameters := map[string]any{
+		"type":                 schema.Type,
+		"additionalProperties": schema.AdditionalProperties,
+	}
+
+	if len(schema.Required) > 0 {
+		parameters["required"] = append([]string{}, schema.Required...)
+	}
+
+	if len(schema.Properties) > 0 {
+		properties := make(map[string]any, len(schema.Properties))
+		for name, property := range schema.Properties {
+			properties[name] = propertyToRuntimeMap(property)
+		}
+		parameters["properties"] = properties
+	}
+
+	return parameters
+}
+
+func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
+	schema := map[string]any{
+		"type": property.Type,
+	}
+	if property.Description != "" {
+		schema["description"] = property.Description
+	}
+	if len(property.Enum) > 0 {
+		schema["enum"] = append([]string{}, property.Enum...)
+	}
+	if property.Default != nil {
+		schema["default"] = property.Default
+	}
+	if property.Minimum != nil {
+		schema["minimum"] = *property.Minimum
+	}
+	if property.Maximum != nil {
+		schema["maximum"] = *property.Maximum
+	}
+	return schema
 }
 
 func isAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
