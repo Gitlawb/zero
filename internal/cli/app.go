@@ -188,6 +188,7 @@ Commands:
   exec       Run a one-shot prompt through the Go agent runtime
   doctor     Run backend health checks for config and provider setup
   search     Search persisted local Zero session events
+  find       Alias for search
   help       Show this help
   version    Print version
 

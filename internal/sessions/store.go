@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -84,8 +86,11 @@ type StoreOptions struct {
 }
 
 type Store struct {
-	RootDir string
-	now     func() time.Time
+	RootDir      string
+	now          func() time.Time
+	locksMu      sync.Mutex
+	sessionLocks map[string]*sync.Mutex
+	idCounter    atomic.Uint64
 }
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
@@ -99,7 +104,7 @@ func NewStore(options StoreOptions) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{RootDir: rootDir, now: now}
+	return &Store{RootDir: rootDir, now: now, sessionLocks: map[string]*sync.Mutex{}}
 }
 
 func DefaultRoot(env map[string]string) string {
@@ -150,7 +155,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	}
 	if err := os.Mkdir(store.sessionPath(sessionID), 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return Metadata{}, fmt.Errorf("Zero session already exists: %s", sessionID)
+			return Metadata{}, fmt.Errorf("zero session already exists: %s", sessionID)
 		}
 		return Metadata{}, fmt.Errorf("create Zero session directory: %w", err)
 	}
@@ -226,7 +231,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		return Metadata{}, err
 	}
 	if parent == nil {
-		return Metadata{}, fmt.Errorf("Zero session not found: %s", parentSessionID)
+		return Metadata{}, fmt.Errorf("zero session not found: %s", parentSessionID)
 	}
 	events, err := store.ReadEvents(parentSessionID)
 	if err != nil {
@@ -283,8 +288,12 @@ func (store *Store) AppendEvent(sessionID string, input AppendEventInput) (Event
 		return Event{}, fmt.Errorf("invalid Zero session id %q", sessionID)
 	}
 	if strings.TrimSpace(string(input.Type)) == "" {
-		return Event{}, fmt.Errorf("Zero session event type is required")
+		return Event{}, fmt.Errorf("zero session event type is required")
 	}
+	lock := store.sessionLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	session, err := store.readMetadata(sessionID)
 	if err != nil {
 		return Event{}, err
@@ -358,7 +367,22 @@ func (store *Store) timestamp() string {
 }
 
 func (store *Store) createID() string {
-	return fmt.Sprintf("zero_%s_%d", store.now().UTC().Format("20060102150405"), store.now().UTC().UnixNano()%1_000_000)
+	timestamp := store.now().UTC()
+	return fmt.Sprintf("zero_%s_%d_%d", timestamp.Format("20060102150405"), timestamp.UnixNano(), store.idCounter.Add(1))
+}
+
+func (store *Store) sessionLock(sessionID string) *sync.Mutex {
+	store.locksMu.Lock()
+	defer store.locksMu.Unlock()
+	if store.sessionLocks == nil {
+		store.sessionLocks = map[string]*sync.Mutex{}
+	}
+	lock := store.sessionLocks[sessionID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		store.sessionLocks[sessionID] = lock
+	}
+	return lock
 }
 
 func (store *Store) sessionPath(sessionID string) string {

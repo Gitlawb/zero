@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -220,6 +221,45 @@ func FormatResult(result Result) string {
 	return strings.Join(lines, "\n")
 }
 
+func RedactResult(result Result) Result {
+	options := redaction.Options{}
+	redacted := result
+	redacted.Query = redaction.RedactString(redacted.Query, options)
+	redacted.NormalizedQuery = redaction.RedactString(redacted.NormalizedQuery, options)
+	redacted.RootDir = redaction.RedactString(redacted.RootDir, options)
+	redacted.Hits = make([]Hit, len(result.Hits))
+	for index, hit := range result.Hits {
+		redacted.Hits[index] = Hit{
+			Session: redactMetadata(hit.Session, options),
+			Event:   redactEventSummary(hit.Event, options),
+			Context: redaction.RedactString(hit.Context, options),
+			Match:   hit.Match,
+		}
+	}
+	return redacted
+}
+
+func redactMetadata(session sessions.Metadata, options redaction.Options) sessions.Metadata {
+	session.SessionID = redaction.RedactString(session.SessionID, options)
+	session.Title = redaction.RedactString(session.Title, options)
+	session.Cwd = redaction.RedactString(session.Cwd, options)
+	session.ModelID = redaction.RedactString(session.ModelID, options)
+	session.Provider = redaction.RedactString(session.Provider, options)
+	session.ParentSessionID = redaction.RedactString(session.ParentSessionID, options)
+	session.ForkedFromEventID = redaction.RedactString(session.ForkedFromEventID, options)
+	session.CreatedAt = redaction.RedactString(session.CreatedAt, options)
+	session.UpdatedAt = redaction.RedactString(session.UpdatedAt, options)
+	session.LastEventType = sessions.EventType(redaction.RedactString(string(session.LastEventType), options))
+	return session
+}
+
+func redactEventSummary(event EventSummary, options redaction.Options) EventSummary {
+	event.ID = redaction.RedactString(event.ID, options)
+	event.Type = sessions.EventType(redaction.RedactString(string(event.Type), options))
+	event.CreatedAt = redaction.RedactString(event.CreatedAt, options)
+	return event
+}
+
 func NormalizeQuery(query string) string {
 	return strings.ToLower(strings.Join(strings.Fields(query), " "))
 }
@@ -242,7 +282,14 @@ func ExtractText(value any) string {
 		return strings.Join(parts, " ")
 	case map[string]any:
 		parts := []string{}
-		for _, item := range typed {
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			parts = append(parts, key)
+			item := typed[key]
 			if text := ExtractText(item); text != "" {
 				parts = append(parts, text)
 			}

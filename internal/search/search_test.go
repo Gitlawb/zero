@@ -81,6 +81,25 @@ func TestSearchSessionsSupportsFiltersAndEmptyQuery(t *testing.T) {
 	}
 }
 
+func TestSearchSessionsMatchesMapKeys(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedSearchClock("2026-06-04T14:45:00Z")})
+	session, err := store.Create(sessions.CreateInput{SessionID: "map_keys"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventError, Payload: map[string]any{"error": "", "status": "success"}}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+
+	result, err := Sessions("error", Options{Store: store})
+	if err != nil {
+		t.Fatalf("Sessions returned error: %v", err)
+	}
+	if result.TotalHits != 1 || result.Hits[0].Event.Type != sessions.EventError {
+		t.Fatalf("expected map key search hit, got %#v", result)
+	}
+}
+
 func fixedSearchClock(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

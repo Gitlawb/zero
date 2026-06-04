@@ -139,6 +139,9 @@ func providerModelCheck(profile config.ProviderProfile) Check {
 	}
 	model, err := registry.Require(profile.Model)
 	if err != nil {
+		if profile.ProviderKind == config.ProviderKindOpenAICompatible {
+			return check("provider.model", "Provider model", StatusWarn, "Custom OpenAI-compatible model was not found in the Zero registry; runtime will pass it through to the configured provider.", map[string]any{"model": profile.Model, "provider": providerName(profile)})
+		}
 		return check("provider.model", "Provider model", StatusFail, "Provider model is invalid: "+err.Error(), map[string]any{"model": profile.Model})
 	}
 	if !model.AllowsProvider(toModelProvider(profile)) {
@@ -210,8 +213,7 @@ func formatDetails(details map[string]any) string {
 		return ""
 	}
 	keys := make([]string, 0, len(details))
-	for key, value := range details {
-		_ = value
+	for key := range details {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)

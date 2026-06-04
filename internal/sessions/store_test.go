@@ -2,9 +2,11 @@ package sessions
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -134,6 +136,81 @@ func TestStoreRejectsUnsafeSessionIDsAndBadJSONL(t *testing.T) {
 	_, err := store.ReadEvents("bad")
 	if err == nil || !strings.Contains(err.Error(), "events.jsonl at line 1") {
 		t.Fatalf("expected JSONL line error, got %v", err)
+	}
+}
+
+func TestStoreGeneratesUniqueIDsWithFixedClock(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T12:30:00Z")})
+	first, err := store.Create(CreateInput{})
+	if err != nil {
+		t.Fatalf("Create first returned error: %v", err)
+	}
+	second, err := store.Create(CreateInput{})
+	if err != nil {
+		t.Fatalf("Create second returned error: %v", err)
+	}
+	if first.SessionID == second.SessionID {
+		t.Fatalf("generated session ids collided: %q", first.SessionID)
+	}
+}
+
+func TestStoreAppendEventSerializesConcurrentWriters(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T13:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "concurrent"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+
+	const total = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, total)
+	for index := 0; index < total; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_, err := store.AppendEvent(session.SessionID, AppendEventInput{
+				Type:    EventMessage,
+				Payload: map[string]int{"index": index},
+			})
+			errs <- err
+		}(index)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("AppendEvent returned error: %v", err)
+		}
+	}
+
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	if len(events) != total {
+		t.Fatalf("expected %d events, got %d: %#v", total, len(events), events)
+	}
+	seen := map[int]bool{}
+	for _, event := range events {
+		if seen[event.Sequence] {
+			t.Fatalf("duplicate event sequence %d in %#v", event.Sequence, events)
+		}
+		seen[event.Sequence] = true
+		if event.ID != fmt.Sprintf("%s:%d", session.SessionID, event.Sequence) {
+			t.Fatalf("event id/sequence mismatch: %#v", event)
+		}
+	}
+	for sequence := 1; sequence <= total; sequence++ {
+		if !seen[sequence] {
+			t.Fatalf("missing event sequence %d in %#v", sequence, events)
+		}
+	}
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if loaded == nil || loaded.EventCount != total || loaded.LastEventType != EventMessage {
+		t.Fatalf("metadata not updated after concurrent append: %#v", loaded)
 	}
 }
 

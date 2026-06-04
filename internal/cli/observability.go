@@ -101,7 +101,7 @@ func runSearch(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	if options.json {
-		if err := writePrettyJSON(stdout, result); err != nil {
+		if err := writePrettyJSON(stdout, zsearch.RedactResult(result)); err != nil {
 			return exitCrash
 		}
 		return exitSuccess

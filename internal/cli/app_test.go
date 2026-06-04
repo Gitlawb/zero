@@ -206,6 +206,7 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 		{"exec"},
 		{"doctor"},
 		{"search"},
+		{"find"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout bytes.Buffer

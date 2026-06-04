@@ -157,6 +157,60 @@ func TestRunSearchJSONAndValidation(t *testing.T) {
 	}
 }
 
+func TestRunSearchJSONRedactsQueryAndSessionMetadata(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T18:00:00Z")})
+	querySecret := "sk-proj-querysecret1234567890"
+	metadataSecret := "sk-proj-metadatasecret1234567890"
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"search", "--json", querySecret}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), querySecret) {
+		t.Fatalf("search JSON leaked raw query secret: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[REDACTED]") {
+		t.Fatalf("expected redacted query marker in JSON output: %q", stdout.String())
+	}
+
+	session, err := store.Create(sessions.CreateInput{
+		SessionID: "json_metadata_secret",
+		Title:     "Title " + metadataSecret,
+		Cwd:       "/repo/" + metadataSecret,
+		ModelID:   "model-" + metadataSecret,
+		Provider:  "provider-token=" + metadataSecret,
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]string{"content": "metadata needle"}}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"search", "--json", "metadata", "needle"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), metadataSecret) {
+		t.Fatalf("search JSON leaked session metadata secret: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[REDACTED]") {
+		t.Fatalf("expected redacted metadata marker in JSON output: %q", stdout.String())
+	}
+}
+
 func fixedCLITime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

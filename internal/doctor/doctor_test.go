@@ -64,6 +64,26 @@ func TestRunReportFailsInvalidModelAndMissingProvider(t *testing.T) {
 	}
 }
 
+func TestRunReportWarnsForUnknownOpenAICompatibleModel(t *testing.T) {
+	report := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "local",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "http://127.0.0.1:11434/v1",
+			Model:        "local-custom-model",
+		},
+	})
+
+	if !report.OK {
+		t.Fatalf("unknown custom model should warn, not fail: %#v", report)
+	}
+	if check := report.Check("provider.model"); check == nil || check.Status != StatusWarn || !strings.Contains(check.Message, "pass it through") {
+		t.Fatalf("expected custom model warning: %#v", report.Checks)
+	}
+}
+
 func fixedDoctorClock(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
