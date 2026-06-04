@@ -10,9 +10,12 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "test": "bun test ./tests --timeout 15000",
+    "test:go": "go test ./...",
     "typecheck": "bunx tsc --noEmit",
     "build": "bun run scripts/build.ts",
+    "build:go": "go build ./cmd/zero",
     "smoke:build": "bun run scripts/smoke-build.ts",
+    "smoke:go": "bun run scripts/smoke-go.ts",
     "review:pr": "bun run scripts/pr-review.ts",
     "package:release": "bun run scripts/package-release.ts",
     "verify:release": "bun run scripts/release-checksums.ts",

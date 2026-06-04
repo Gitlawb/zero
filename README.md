@@ -142,6 +142,8 @@ Write/shell tools route through the permission policy before any side effect.
 ## Project layout
 
 ```
+cmd/zero                # Go-native entrypoint
+internal/cli            # minimal Go CLI surface during migration
 src/
   agent/                 # agent loop + system prompts
   cli/                   # headless exec + command surface
@@ -166,9 +168,12 @@ tests/                   # bun test suite
 
 ```bash
 bun test            # run the test suite
+bun run test:go     # run Go tests
 bun run typecheck   # tsc --noEmit
 bun run build       # compile a standalone binary
+bun run build:go    # compile the Go entrypoint
 bun run smoke:build # verify the built binary
+bun run smoke:go    # verify the Go entrypoint binary
 bun run perf:bench  # performance benchmarks (see docs/PERFORMANCE.md)
 ```
 
@@ -190,6 +195,7 @@ and [`docs/UPDATE.md`](docs/UPDATE.md) for the update flow.
 - [Product Requirements (PRD)](docs/PRD.md) — vision, goals, full feature spec, roadmap
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md) — headless I/O contract
 - [Headless exec PRD](docs/M1_HEADLESS_EXEC_PRD.md)
+- [npm wrapper smoke checklist](docs/NPM_WRAPPER_SMOKE.md)
 - [Performance](docs/PERFORMANCE.md) · [Install](docs/INSTALL.md) · [Update](docs/UPDATE.md)
 
 ## Contributing

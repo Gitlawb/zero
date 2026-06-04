@@ -37,10 +37,13 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Go test
-        run: go test ./...
+        run: bun run test:go
 
       - name: Go build
-        run: go build ./cmd/zero
+        run: bun run build:go
+
+      - name: Go smoke
+        run: bun run smoke:go
 
       - name: Test
         run: bun run test

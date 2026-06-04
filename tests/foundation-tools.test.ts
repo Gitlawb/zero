@@ -22,8 +22,31 @@ describe('package scripts', () => {
 
     expect(pkg.scripts.typecheck).toBe('bunx tsc --noEmit');
     expect(pkg.scripts.test).toBe('bun test ./tests --timeout 15000');
+    expect(pkg.scripts['test:go']).toBe('go test ./...');
     expect(pkg.scripts.build).toBe('bun run scripts/build.ts');
+    expect(pkg.scripts['build:go']).toBe('go build ./cmd/zero');
     expect(pkg.scripts['smoke:build']).toBe('bun run scripts/smoke-build.ts');
+    expect(pkg.scripts['smoke:go']).toBe('bun run scripts/smoke-go.ts');
+  });
+
+  it('keeps CI wired to the stable project commands', async () => {
+    const workflow = await readFile(join(process.cwd(), '.github/workflows/ci.yml'), 'utf-8');
+
+    expect(workflow).toContain('run: bun run test:go');
+    expect(workflow).toContain('run: bun run build:go');
+    expect(workflow).toContain('run: bun run smoke:go');
+    expect(workflow).toContain('run: bun run test');
+    expect(workflow).toContain('run: bun run typecheck');
+    expect(workflow).toContain('run: bun run smoke:build');
+  });
+
+  it('documents the npm wrapper smoke checklist', async () => {
+    const checklist = await readFile(join(process.cwd(), 'docs/NPM_WRAPPER_SMOKE.md'), 'utf-8');
+
+    expect(checklist).toContain('bun install --frozen-lockfile');
+    expect(checklist).toContain('bun run smoke:build');
+    expect(checklist).toContain('node_modules/.bin');
+    expect(checklist).toContain('bun run smoke:go');
   });
 });
 
