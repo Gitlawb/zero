@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -95,7 +96,8 @@ func TestGlobToolFindsMatchesWithLimit(t *testing.T) {
 	if result.Truncated != true {
 		t.Fatalf("expected truncated result")
 	}
-	if got := strings.Count(result.Output, ".go"); got != 1 {
+	matchedPaths := regexp.MustCompile(`(?m)^[^\n]*\.go\b`).FindAllString(result.Output, -1)
+	if got := len(matchedPaths); got != 1 {
 		t.Fatalf("expected exactly one go match, got %d in %q", got, result.Output)
 	}
 }
@@ -162,6 +164,9 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 		"pattern":     "needle",
 		"output_mode": "count",
 	})
+	if count.Status != StatusOK {
+		t.Fatalf("expected count result, got %s: %s", count.Status, count.Output)
+	}
 	if count.Output != "3 matches found" {
 		t.Fatalf("expected count output, got %q", count.Output)
 	}

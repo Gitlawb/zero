@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -93,7 +92,7 @@ func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, 
 	matches := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 		if path == root {
 			return nil
@@ -115,9 +114,6 @@ func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, 
 		}
 		return nil
 	})
-	if errors.Is(err, filepath.SkipDir) {
-		return matches, nil
-	}
 	return matches, err
 }
 

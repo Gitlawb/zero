@@ -63,7 +63,9 @@ func (tool readFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
 
-	lines := strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n")
+	normalizedContent := strings.ReplaceAll(string(content), "\r\n", "\n")
+	normalizedContent = strings.TrimSuffix(normalizedContent, "\n")
+	lines := strings.Split(normalizedContent, "\n")
 	total := len(lines)
 	if startLine > total {
 		return okResult(fmt.Sprintf("File: %s\n(start_line %d is past the end of the file, which has %d lines)", relativePath, startLine, total))

@@ -168,7 +168,7 @@ func grepFiles(workspaceRoot string, target string, globMatcher *regexp.Regexp) 
 	files := []string{}
 	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 		if path == target {
 			return nil

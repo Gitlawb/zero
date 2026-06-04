@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -37,6 +36,10 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 	if err != nil {
 		return "", "", err
 	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", err
+	}
 
 	target := requestedPath
 	if !filepath.IsAbs(target) {
@@ -47,15 +50,9 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 	if err != nil {
 		return "", "", err
 	}
-
-	if resolved, err := os.Readlink(target); err == nil {
-		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(filepath.Dir(target), resolved)
-		}
-		target, err = filepath.Abs(resolved)
-		if err != nil {
-			return "", "", err
-		}
+	target, err = filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", "", err
 	}
 
 	relative, err := filepath.Rel(root, target)
