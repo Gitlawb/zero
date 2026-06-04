@@ -139,6 +139,53 @@ func TestResolveUsesOpenAIEnvFallback(t *testing.T) {
 	}
 }
 
+func TestResolveProviderCommandOverridesEnvProviderFields(t *testing.T) {
+	command := writeCommand(t, commandScript{
+		Stdout: `{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}`,
+	})
+
+	resolved, err := Resolve(ResolveOptions{
+		ProviderCommand: command,
+		Env: map[string]string{
+			"OPENAI_API_KEY": "sk-env",
+			"OPENAI_MODEL":   "gpt-env",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.ActiveProvider != "cmd" {
+		t.Fatalf("ActiveProvider = %q, want cmd", resolved.ActiveProvider)
+	}
+	if resolved.Provider.APIKey != "sk-command" {
+		t.Fatalf("APIKey = %q, want provider command key", resolved.Provider.APIKey)
+	}
+	if resolved.Provider.Model != "gpt-command" {
+		t.Fatalf("Model = %q, want provider command model", resolved.Provider.Model)
+	}
+}
+
+func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.ActiveProvider != "" {
+		t.Fatalf("ActiveProvider = %q, want empty", resolved.ActiveProvider)
+	}
+	if len(resolved.Providers) != 0 {
+		t.Fatalf("Providers = %#v, want empty", resolved.Providers)
+	}
+	if resolved.Provider != (ProviderProfile{}) {
+		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
+	}
+	if resolved.MaxTurns != defaultMaxTurns {
+		t.Fatalf("MaxTurns = %d, want %d", resolved.MaxTurns, defaultMaxTurns)
+	}
+}
+
 func TestResolveTrimsProviderProfileAliasesBeforeFallback(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",
