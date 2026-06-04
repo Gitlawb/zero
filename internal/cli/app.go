@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -17,10 +19,12 @@ import (
 var version = "dev"
 
 type appDeps struct {
-	getwd         func() (string, error)
-	resolveConfig func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	newProvider   func(config.ProviderProfile) (zeroruntime.Provider, error)
-	runTUI        func(context.Context, tui.Options) int
+	getwd           func() (string, error)
+	resolveConfig   func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	newProvider     func(config.ProviderProfile) (zeroruntime.Provider, error)
+	newSessionStore func() *sessions.Store
+	runTUI          func(context.Context, tui.Options) int
+	now             func() time.Time
 }
 
 // Run executes the minimal Go CLI surface. It returns an exit code so tests can
@@ -43,7 +47,11 @@ func defaultAppDeps() appDeps {
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			return providers.New(profile, providers.Options{UserAgent: userAgent()})
 		},
+		newSessionStore: func() *sessions.Store {
+			return sessions.NewStore(sessions.StoreOptions{})
+		},
 		runTUI: tui.Run,
+		now:    time.Now,
 	}
 }
 
@@ -77,6 +85,10 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
 		return runExec(args[1:], stdout, stderr, deps)
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr, deps)
+	case "search", "find":
+		return runSearch(args[1:], stdout, stderr, deps)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -99,8 +111,14 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.newProvider == nil {
 		deps.newProvider = defaults.newProvider
 	}
+	if deps.newSessionStore == nil {
+		deps.newSessionStore = defaults.newSessionStore
+	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
+	}
+	if deps.now == nil {
+		deps.now = defaults.now
 	}
 	return deps
 }
@@ -168,6 +186,8 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  doctor     Run backend health checks for config and provider setup
+  search     Search persisted local Zero session events
   help       Show this help
   version    Print version
 
