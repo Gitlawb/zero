@@ -139,6 +139,30 @@ func TestModelEntryRejectsInvalidSourceLastVerifiedDate(t *testing.T) {
 	}
 }
 
+func TestModelCostRequiresCompleteBasePricing(t *testing.T) {
+	model := validModelEntry()
+	model.Cost.InputPerMillion = 0
+
+	err := model.Validate()
+	if err == nil {
+		t.Fatal("expected incomplete base pricing validation error")
+	}
+	if !strings.Contains(err.Error(), "base input and output rates") {
+		t.Fatalf("error = %q, want base input and output rates", err.Error())
+	}
+
+	model = validModelEntry()
+	model.Cost.OutputPerMillion = 0
+
+	err = model.Validate()
+	if err == nil {
+		t.Fatal("expected incomplete base pricing validation error")
+	}
+	if !strings.Contains(err.Error(), "base input and output rates") {
+		t.Fatalf("error = %q, want base input and output rates", err.Error())
+	}
+}
+
 func TestModelRegistryResolvesStablePatterns(t *testing.T) {
 	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
 	if err != nil {
@@ -151,6 +175,33 @@ func TestModelRegistryResolvesStablePatterns(t *testing.T) {
 	}
 	if model.ID != "gpt-4.1-mini" {
 		t.Fatalf("model ID = %q, want gpt-4.1-mini", model.ID)
+	}
+}
+
+func TestModelRegistryClonesLookupEntriesOnConstruction(t *testing.T) {
+	entries := []ModelEntry{validModelEntry()}
+	entries[0].Cost.Notes = []string{"original note"}
+	registry, err := NewRegistry(entries)
+	if err != nil {
+		t.Fatalf("NewRegistry returned error: %v", err)
+	}
+
+	entries[0].Aliases[0] = "mutated-alias"
+	entries[0].Capabilities[0] = ModelCapabilityVision
+	entries[0].Cost.Notes[0] = "caller-owned mutation"
+
+	model, ok := registry.Get("openai:gpt-4.1-mini")
+	if !ok {
+		t.Fatal("expected original alias to remain registered")
+	}
+	if model.Aliases[0] != "openai:gpt-4.1-mini" {
+		t.Fatalf("alias = %q, want original alias", model.Aliases[0])
+	}
+	if model.Capabilities[0] != ModelCapabilityChat {
+		t.Fatalf("capability = %q, want original capability", model.Capabilities[0])
+	}
+	if len(model.Cost.Notes) != 1 || model.Cost.Notes[0] != "original note" {
+		t.Fatalf("cost notes = %#v, want original note", model.Cost.Notes)
 	}
 }
 

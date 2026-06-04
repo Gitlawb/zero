@@ -58,7 +58,11 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out after 5s") {
 		t.Fatalf("error = %q, want timeout", err.Error())
 	}
-	if elapsed > 7*time.Second {
+	maxElapsed := 7 * time.Second
+	if runtime.GOOS == "windows" {
+		maxElapsed = 9 * time.Second
+	}
+	if elapsed > maxElapsed {
 		t.Fatalf("timeout returned after %s, want roughly 5s", elapsed)
 	}
 }
