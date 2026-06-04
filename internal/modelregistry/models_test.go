@@ -154,6 +154,19 @@ func TestModelRegistryResolvesStablePatterns(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsInvalidModelEntries(t *testing.T) {
+	model := validModelEntry()
+	model.ContextLimits.MaxOutputTokens = model.ContextLimits.ContextWindow + 1
+
+	_, err := NewRegistry([]ModelEntry{model})
+	if err == nil {
+		t.Fatal("expected invalid model validation error")
+	}
+	if !strings.Contains(err.Error(), "max output tokens") {
+		t.Fatalf("error = %q, want max output tokens", err.Error())
+	}
+}
+
 func TestRegistryDetectsDuplicateNormalizedLookupKeys(t *testing.T) {
 	first := validModelEntry()
 	second := validModelEntry()

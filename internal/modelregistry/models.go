@@ -192,6 +192,9 @@ func NewRegistry(entries []ModelEntry) (Registry, error) {
 	registry := Registry{entries: make(map[string]ModelEntry)}
 	seenModelIDs := make(map[string]struct{})
 	for _, entry := range entries {
+		if err := entry.Validate(); err != nil {
+			return Registry{}, fmt.Errorf("invalid model %q: %w", entry.ID, err)
+		}
 		modelID := normalizePattern(entry.ID)
 		if modelID == "" {
 			return Registry{}, fmt.Errorf("model id is required")
