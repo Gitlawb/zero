@@ -173,11 +173,18 @@ tests/                   # bun test suite
 bun test            # run the test suite
 bun run test:go     # run Go tests
 bun run typecheck   # tsc --noEmit
-bun run build       # compile a standalone binary
-bun run build:go    # compile the Go entrypoint
-bun run smoke:build # verify the built binary
-bun run smoke:go    # verify the Go entrypoint binary
+bun run build       # compile the release-facing Go binary
+bun run build:go    # same Go binary builder, kept as a stable validation command
+bun run smoke:build # verify the release-facing Go binary
+bun run smoke:go    # verify the Go binary through the Go smoke path
 bun run perf:bench  # performance benchmarks (see docs/PERFORMANCE.md)
+```
+
+Cross-compile by passing Go targets to the builder:
+
+```bash
+bun run scripts/build.ts --goos linux --goarch amd64
+bun run scripts/build.ts --goos windows --goarch amd64 --output dist/zero.exe
 ```
 
 ### Install from a release

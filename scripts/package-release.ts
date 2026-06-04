@@ -7,17 +7,8 @@ import {
   zeroArtifactName,
   zeroArtifactPath,
 } from './artifact';
+import { parsePackageVersion } from './build';
 import { writeSha256Checksum } from './release-checksums';
-
-function parsePackageVersion(packageText: string): string {
-  const parsed = JSON.parse(packageText) as { version?: unknown };
-
-  if (typeof parsed.version !== 'string' || parsed.version.trim() === '') {
-    throw new Error('package.json must contain a non-empty string version');
-  }
-
-  return parsed.version;
-}
 
 function quotePowerShellPath(path: string): string {
   return `'${path.replaceAll("'", "''")}'`;

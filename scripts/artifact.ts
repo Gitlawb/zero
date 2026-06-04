@@ -4,6 +4,26 @@ export function getZeroArtifactName(platform = process.platform): string {
   return platform === 'win32' ? 'zero.exe' : 'zero';
 }
 
+export function getZeroArtifactNameForGoOS(goos: string): string {
+  return goos === 'windows' ? 'zero.exe' : 'zero';
+}
+
+export function getZeroArtifactPath(platform = process.platform, cwd = process.cwd()): string {
+  return join(cwd, getZeroArtifactName(platform));
+}
+
+export function getGoOS(platform = process.platform): string {
+  if (platform === 'win32') return 'windows';
+  if (platform === 'darwin') return 'darwin';
+  return platform;
+}
+
+export function getGoArch(arch = process.arch): string {
+  if (arch === 'x64') return 'amd64';
+  if (arch === 'ia32') return '386';
+  return arch;
+}
+
 export function getReleasePlatform(platform = process.platform): string {
   if (platform === 'darwin') return 'macos';
   if (platform === 'win32') return 'windows';
@@ -31,4 +51,4 @@ export function getReleaseArchiveName(
 }
 
 export const zeroArtifactName = getZeroArtifactName();
-export const zeroArtifactPath = join(process.cwd(), zeroArtifactName);
+export const zeroArtifactPath = getZeroArtifactPath();

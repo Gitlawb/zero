@@ -11,7 +11,7 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
-const version = "0.1.0"
+var version = "dev"
 
 // Run executes the minimal Go CLI surface. It returns an exit code so tests can
 // exercise command behavior without terminating the test process.

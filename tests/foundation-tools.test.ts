@@ -24,7 +24,7 @@ describe('package scripts', () => {
     expect(pkg.scripts.test).toBe('bun test ./tests --timeout 15000');
     expect(pkg.scripts['test:go']).toBe('go test ./...');
     expect(pkg.scripts.build).toBe('bun run scripts/build.ts');
-    expect(pkg.scripts['build:go']).toBe('go build ./cmd/zero');
+    expect(pkg.scripts['build:go']).toBe('bun run scripts/build.ts');
     expect(pkg.scripts['smoke:build']).toBe('bun run scripts/smoke-build.ts');
     expect(pkg.scripts['smoke:go']).toBe('bun run scripts/smoke-go.ts');
   });

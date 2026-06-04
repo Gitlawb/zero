@@ -25,7 +25,7 @@ func TestRunPrintsVersion(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
 	}
-	if got := stdout.String(); got != "zero 0.1.0\n" {
+	if got := stdout.String(); got != "zero dev\n" {
 		t.Fatalf("expected version output, got %q", got)
 	}
 	if stderr.Len() != 0 {
