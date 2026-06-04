@@ -18,7 +18,8 @@ export interface ResolveNpmWrapperTargetOptions {
 }
 
 export interface RunNpmWrapperOptions extends ResolveNpmWrapperTargetOptions {
-  stderr?: Pick<typeof process.stderr, 'write'>;
+  spawn?: typeof Bun.spawn;
+  stderr?: { write(chunk: string): unknown };
 }
 
 export function zeroBinaryName(platform: NodeJS.Platform = process.platform): string {
@@ -57,17 +58,24 @@ export function resolveNpmWrapperTarget(
 
 export async function runNpmWrapper(options: RunNpmWrapperOptions = {}): Promise<number> {
   const target = resolveNpmWrapperTarget(options);
+  const stderr = options.stderr ?? process.stderr;
   if (target == null) {
-    const stderr = options.stderr ?? process.stderr;
-    stderr.write('[zero] No native zero binary found. Run `bun run build` before using the npm wrapper.\n');
+    stderr.write('[zero] No runnable wrapper target found (native binary or src/index.ts). Run `bun run build` before using the npm wrapper.\n');
     return 1;
   }
 
-  const child = Bun.spawn(target.command, {
-    stdin: 'inherit',
-    stdout: 'inherit',
-    stderr: 'inherit',
-  });
+  try {
+    const spawn = options.spawn ?? Bun.spawn;
+    const child = spawn(target.command, {
+      stdin: 'inherit',
+      stdout: 'inherit',
+      stderr: 'inherit',
+    });
 
-  return await child.exited;
+    return await child.exited;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    stderr.write(`[zero] Failed to launch wrapper target: ${message}\n`);
+    return 1;
+  }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { resolveNpmWrapperTarget } from '../src/npm-wrapper';
+import { resolveNpmWrapperTarget, runNpmWrapper } from '../src/npm-wrapper';
 import {
   getGoArch,
   getGoOS,
@@ -145,5 +145,46 @@ describe('npm wrapper entrypoint', () => {
       path: join(root, 'src', 'index.ts'),
       command: ['bun', join(root, 'src', 'index.ts'), '--version'],
     });
+  });
+
+  it('returns null when neither native nor TS fallback target exists', () => {
+    const target = resolveNpmWrapperTarget({
+      root: join('repo'),
+      platform: 'win32',
+      bunPath: 'bun',
+      args: ['--version'],
+      exists: () => false,
+    });
+
+    expect(target).toBeNull();
+  });
+
+  it('reports the full no-target state without crashing', async () => {
+    let stderr = '';
+    const code = await runNpmWrapper({
+      root: join('repo'),
+      platform: 'linux',
+      exists: () => false,
+      stderr: { write: (chunk: string) => { stderr += chunk; return true; } },
+    });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain('No runnable wrapper target found');
+    expect(stderr).toContain('native binary or src/index.ts');
+  });
+
+  it('returns a clean exit code when launching the wrapper target throws', async () => {
+    let stderr = '';
+    const code = await runNpmWrapper({
+      root: join('repo'),
+      platform: 'linux',
+      exists: (path) => path === join('repo', 'zero'),
+      spawn: () => { throw new Error('spawn failed'); },
+      stderr: { write: (chunk: string) => { stderr += chunk; return true; } },
+    });
+
+    expect(code).toBe(1);
+    expect(stderr).toContain('Failed to launch wrapper target');
+    expect(stderr).toContain('spawn failed');
   });
 });

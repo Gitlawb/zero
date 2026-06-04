@@ -384,8 +384,45 @@ func helpText() string {
 	return "Commands:\n" + strings.Join(formatCommandHelpLines(), "\n") + "\nSubmit text to ask the assistant."
 }
 
+const defaultCommandFooterText = "/help  /model  /provider  /context  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
+
 func commandFooterText() string {
-	return "/help  /model  /provider  /context  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
+	return formatCommandFooterText(commandDefinitions)
+}
+
+func formatCommandFooterText(commands []commandDefinition) string {
+	if len(commands) == 0 {
+		return defaultCommandFooterText
+	}
+
+	namesByKind := make(map[commandKind]string, len(commands))
+	for _, command := range commands {
+		namesByKind[command.kind] = command.name
+	}
+
+	featured := []commandKind{
+		commandHelp,
+		commandModel,
+		commandProvider,
+		commandContext,
+		commandTools,
+		commandPermissions,
+		commandClear,
+		commandExit,
+	}
+	parts := make([]string, 0, len(featured)+2)
+	for _, kind := range featured {
+		name := namesByKind[kind]
+		if name != "" {
+			parts = append(parts, name)
+		}
+	}
+	if len(parts) == 0 {
+		return defaultCommandFooterText
+	}
+
+	parts = append(parts, "Esc clear", "Ctrl+C quit")
+	return strings.Join(parts, "  ")
 }
 
 func renderRow(row transcriptRow) string {

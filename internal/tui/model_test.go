@@ -119,6 +119,26 @@ func TestInitialRenderContainsHeaderInputAndFooter(t *testing.T) {
 	assertContains(t, view, "Ctrl+C")
 }
 
+func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
+	footer := commandFooterText()
+
+	for _, command := range []string{"/help", "/model", "/provider", "/context", "/tools", "/permissions", "/clear", "/exit"} {
+		assertContains(t, footer, command)
+	}
+	assertContains(t, footer, "Esc clear")
+	assertContains(t, footer, "Ctrl+C quit")
+}
+
+func TestCommandFooterTextFallsBackWhenRegistryIsEmpty(t *testing.T) {
+	footer := formatCommandFooterText(nil)
+
+	for _, command := range []string{"/help", "/model", "/provider", "/context", "/tools", "/permissions", "/clear", "/exit"} {
+		assertContains(t, footer, command)
+	}
+	assertContains(t, footer, "Esc clear")
+	assertContains(t, footer, "Ctrl+C quit")
+}
+
 func TestHelpCommandAppendsHelpRow(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/help")
