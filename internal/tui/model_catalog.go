@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -20,7 +21,14 @@ func (m model) modelListText() string {
 		"provider: " + displayValue(m.providerName, "none"),
 		"Available models:",
 	}
-	for _, model := range registry.List(modelregistry.ListOptions{}) {
+	models := registry.List(modelregistry.ListOptions{})
+	sort.SliceStable(models, func(i, j int) bool {
+		if models[i].Provider == models[j].Provider {
+			return models[i].ID < models[j].ID
+		}
+		return models[i].Provider < models[j].Provider
+	})
+	for _, model := range models {
 		marker := " "
 		if activeID != "" && model.ID == activeID {
 			marker = "*"

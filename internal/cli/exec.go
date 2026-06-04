@@ -239,8 +239,8 @@ func parseExecMaxTurns(value string) (int, error) {
 		return 0, execUsageError{"--max-turns requires a value"}
 	}
 	maxTurns, err := strconv.Atoi(trimmed)
-	if err != nil || maxTurns < 0 {
-		return 0, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a non-negative integer.", value)}
+	if err != nil || maxTurns <= 0 {
+		return 0, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a positive integer.", value)}
 	}
 	return maxTurns, nil
 }

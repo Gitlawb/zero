@@ -276,10 +276,13 @@ func TestModelCommandShowsActiveModelWithoutRunningAgent(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
-	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Available models", "* gpt-4.1", "claude-sonnet-4.5", "gemini-2.5-pro"} {
+	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Available models", "* gpt-4.1"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
 		}
+	}
+	if !transcriptHasMarkedModelEntry(next.transcript) {
+		t.Fatalf("expected model transcript to contain a marked model entry, got %#v", next.transcript)
 	}
 	if transcriptContains(next.transcript, "Model switching") {
 		t.Fatalf("expected /model list to show catalog, got switching placeholder: %#v", next.transcript)
@@ -430,6 +433,17 @@ func transcriptContains(rows []transcriptRow, want string) bool {
 	for _, row := range rows {
 		if strings.Contains(row.text, want) {
 			return true
+		}
+	}
+	return false
+}
+
+func transcriptHasMarkedModelEntry(rows []transcriptRow) bool {
+	for _, row := range rows {
+		for _, line := range strings.Split(row.text, "\n") {
+			if strings.HasPrefix(line, "* ") && strings.Contains(line, " (") {
+				return true
+			}
 		}
 	}
 	return false

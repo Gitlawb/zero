@@ -59,6 +59,7 @@ func TestRunExecRejectsInvalidMaxTurnsBeforeRuntime(t *testing.T) {
 	}{
 		{value: "nope", want: "invalid --max-turns"},
 		{value: "-1", want: "invalid --max-turns"},
+		{value: "0", want: "invalid --max-turns"},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			var stdout bytes.Buffer
@@ -77,6 +78,23 @@ func TestRunExecRejectsInvalidMaxTurnsBeforeRuntime(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("equals-empty", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		exitCode := Run([]string{"exec", "--max-turns=", "hello"}, &stdout, &stderr)
+
+		if exitCode != exitUsage {
+			t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("expected empty stdout before runtime, got %q", stdout.String())
+		}
+		if got := stderr.String(); !strings.Contains(got, "--max-turns requires a value") {
+			t.Fatalf("expected empty max-turns validation error, got %q", got)
+		}
+	})
 }
 
 func TestRunExecMaxTurnsReachesConfigOverrides(t *testing.T) {
