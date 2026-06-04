@@ -2,9 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
+
+var errWriteFailed = errors.New("write failed")
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errWriteFailed
+}
 
 func TestRunPrintsVersion(t *testing.T) {
 	var stdout bytes.Buffer
@@ -24,10 +34,25 @@ func TestRunPrintsVersion(t *testing.T) {
 }
 
 func TestRunPrintsHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"},
+		{"-h"},
+		{"help"},
+		{},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			assertHelpOutput(t, args)
+		})
+	}
+}
+
+func assertHelpOutput(t *testing.T, args []string) {
+	t.Helper()
+
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	exitCode := Run([]string{"--help"}, &stdout, &stderr)
+	exitCode := Run(args, &stdout, &stderr)
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", exitCode)
@@ -46,6 +71,22 @@ func TestRunPrintsHelp(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunReturnsFailureWhenStdoutWriteFails(t *testing.T) {
+	exitCode := Run([]string{"--version"}, failingWriter{}, io.Discard)
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+}
+
+func TestRunReturnsFailureWhenStderrWriteFails(t *testing.T) {
+	exitCode := Run([]string{"wat"}, io.Discard, failingWriter{})
+
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
 	}
 }
 

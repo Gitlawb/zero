@@ -11,26 +11,36 @@ const version = "0.1.0"
 // exercise command behavior without terminating the test process.
 func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		printHelp(stdout)
+		if err := writeHelp(stdout); err != nil {
+			return 1
+		}
 		return 0
 	}
 
 	switch args[0] {
 	case "-h", "--help", "help":
-		printHelp(stdout)
+		if err := writeHelp(stdout); err != nil {
+			return 1
+		}
 		return 0
 	case "-v", "--version", "version":
-		fmt.Fprintf(stdout, "zero %s\n", version)
+		if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
+			return 1
+		}
 		return 0
 	default:
-		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
-		fmt.Fprintln(stderr, "Run zero --help for usage.")
+		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
+			return 1
+		}
+		if _, err := fmt.Fprintln(stderr, "Run zero --help for usage."); err != nil {
+			return 1
+		}
 		return 2
 	}
 }
 
-func printHelp(w io.Writer) {
-	fmt.Fprint(w, `ZERO terminal coding agent
+func writeHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `ZERO terminal coding agent
 
 Usage:
   zero [command]
@@ -43,4 +53,5 @@ Flags:
   -h, --help       Show this help
   -v, --version    Print version
 `)
+	return err
 }
