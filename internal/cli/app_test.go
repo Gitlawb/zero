@@ -93,19 +93,27 @@ func TestRunExecPrintsOfflineRuntimeResponse(t *testing.T) {
 }
 
 func TestRunExecRequiresPrompt(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	for _, args := range [][]string{
+		{"exec"},
+		{"exec", ""},
+		{"exec", "   "},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
 
-	exitCode := Run([]string{"exec"}, &stdout, &stderr)
+			exitCode := Run(args, &stdout, &stderr)
 
-	if exitCode != 2 {
-		t.Fatalf("expected exit code 2, got %d", exitCode)
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("expected empty stdout, got %q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "Prompt required") {
-		t.Fatalf("expected prompt error, got %q", stderr.String())
+			if exitCode != 2 {
+				t.Fatalf("expected exit code 2, got %d", exitCode)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "Prompt required") {
+				t.Fatalf("expected prompt error, got %q", stderr.String())
+			}
+		})
 	}
 }
 

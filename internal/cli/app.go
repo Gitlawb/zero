@@ -67,10 +67,7 @@ Flags:
 
 func runExec(args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
-		if _, err := fmt.Fprintln(stderr, "Prompt required. Use `zero exec \"prompt\"`."); err != nil {
-			return 1
-		}
-		return 2
+		return writePromptRequired(stderr)
 	}
 
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
@@ -78,6 +75,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	}
+
+	prompt := strings.TrimSpace(strings.Join(args, " "))
+	if prompt == "" {
+		return writePromptRequired(stderr)
 	}
 
 	workspaceRoot, err := os.Getwd()
@@ -93,7 +95,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer) int {
 		registry.Register(tool)
 	}
 
-	prompt := strings.Join(args, " ")
 	result, err := agent.Run(context.Background(), prompt, offlineProvider{}, agent.Options{
 		Registry: registry,
 	})
@@ -108,6 +109,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func writePromptRequired(stderr io.Writer) int {
+	if _, err := fmt.Fprintln(stderr, "Prompt required. Use `zero exec \"prompt\"`."); err != nil {
+		return 1
+	}
+	return 2
 }
 
 func writeExecHelp(w io.Writer) error {
