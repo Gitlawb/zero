@@ -78,6 +78,19 @@ func TestModelEntryRejectsOpenAICompatibleAsPrimaryProvider(t *testing.T) {
 	}
 }
 
+func TestModelEntryRejectsProviderNotInAPIProviders(t *testing.T) {
+	model := validModelEntry()
+	model.APIProviders = []ProviderKind{ProviderAnthropic}
+
+	err := model.Validate()
+	if err == nil {
+		t.Fatal("expected provider/api providers validation error")
+	}
+	if !strings.Contains(err.Error(), "api providers") {
+		t.Fatalf("error = %q, want api providers", err.Error())
+	}
+}
+
 func TestModelEntryRejectsUnknownContractEnums(t *testing.T) {
 	model := validModelEntry()
 	model.Capabilities = ModelCapabilities{"telepathy"}
@@ -113,8 +126,24 @@ func TestModelEntryRejectsUnknownContractEnums(t *testing.T) {
 	}
 }
 
+func TestModelEntryRejectsInvalidSourceLastVerifiedDate(t *testing.T) {
+	model := validModelEntry()
+	model.Cost.SourceLastVerified = "2026/06/02"
+
+	err := model.Validate()
+	if err == nil {
+		t.Fatal("expected source last verified date validation error")
+	}
+	if !strings.Contains(err.Error(), "YYYY-MM-DD") {
+		t.Fatalf("error = %q, want YYYY-MM-DD", err.Error())
+	}
+}
+
 func TestModelRegistryResolvesStablePatterns(t *testing.T) {
-	registry := NewRegistry([]ModelEntry{validModelEntry()})
+	registry, err := NewRegistry([]ModelEntry{validModelEntry()})
+	if err != nil {
+		t.Fatalf("NewRegistry returned error: %v", err)
+	}
 
 	model, ok := registry.Get("OPENAI:GPT-4.1-MINI")
 	if !ok {
@@ -122,6 +151,38 @@ func TestModelRegistryResolvesStablePatterns(t *testing.T) {
 	}
 	if model.ID != "gpt-4.1-mini" {
 		t.Fatalf("model ID = %q, want gpt-4.1-mini", model.ID)
+	}
+}
+
+func TestRegistryDetectsDuplicateNormalizedLookupKeys(t *testing.T) {
+	first := validModelEntry()
+	second := validModelEntry()
+	second.ID = "other-model"
+	second.DisplayName = "Other model"
+	second.APIModel = "other-model"
+	second.Aliases = []string{"GPT-4.1-MINI"}
+
+	_, err := NewRegistry([]ModelEntry{first, second})
+	if err == nil {
+		t.Fatal("expected duplicate lookup key validation error")
+	}
+	if !strings.Contains(err.Error(), "duplicate model lookup key") {
+		t.Fatalf("error = %q, want duplicate model lookup key", err.Error())
+	}
+}
+
+func TestRegistryDetectsDuplicateModelIDs(t *testing.T) {
+	first := validModelEntry()
+	second := validModelEntry()
+	second.APIModel = "other-api-model"
+	second.Aliases = []string{"other:model"}
+
+	_, err := NewRegistry([]ModelEntry{first, second})
+	if err == nil {
+		t.Fatal("expected duplicate model id validation error")
+	}
+	if !strings.Contains(err.Error(), "duplicate model id") {
+		t.Fatalf("error = %q, want duplicate model id", err.Error())
 	}
 }
 

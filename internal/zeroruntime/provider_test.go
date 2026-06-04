@@ -205,6 +205,39 @@ func TestCollectStreamAccumulatesNormalizedUsageAliases(t *testing.T) {
 	}
 }
 
+func TestCollectStreamAccumulatesMixedUsageShapes(t *testing.T) {
+	normalizedUsage, err := NormalizeUsage(TokenUsage{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 2})
+	if err != nil {
+		t.Fatalf("NormalizeUsage returned error: %v", err)
+	}
+
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{PromptTokens: 10, CompletionTokens: 4, CachedInputTokens: 3}}
+		events <- StreamEvent{Type: StreamEventUsage, Usage: normalizedUsage}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+
+	collected := CollectStream(context.Background(), events)
+
+	if collected.Usage.EffectiveInputTokens() != 16 {
+		t.Fatalf("input tokens = %d, want 16", collected.Usage.EffectiveInputTokens())
+	}
+	if collected.Usage.EffectiveOutputTokens() != 7 {
+		t.Fatalf("output tokens = %d, want 7", collected.Usage.EffectiveOutputTokens())
+	}
+	if collected.Usage.CachedInputTokens != 3 {
+		t.Fatalf("cached input tokens = %d, want 3", collected.Usage.CachedInputTokens)
+	}
+	if collected.Usage.ReasoningTokens != 2 {
+		t.Fatalf("reasoning tokens = %d, want 2", collected.Usage.ReasoningTokens)
+	}
+	if collected.Usage.TotalTokens() != 25 {
+		t.Fatalf("total tokens = %d, want 25", collected.Usage.TotalTokens())
+	}
+}
+
 func TestCollectStreamWithOptionsEmitsTextAndUsageCallbacks(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {

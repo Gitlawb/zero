@@ -3,6 +3,7 @@ package modelregistry
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 type ProviderKind string
@@ -133,6 +134,9 @@ func (model ModelEntry) Validate() error {
 			return fmt.Errorf("unknown api provider %q", provider)
 		}
 	}
+	if len(model.APIProviders) > 0 && !model.AllowsProvider(model.Provider) {
+		return fmt.Errorf("primary provider %q not allowed by api providers", model.Provider)
+	}
 	return nil
 }
 
@@ -149,8 +153,12 @@ func (cost ModelCost) Validate() error {
 	if strings.TrimSpace(cost.Source) == "" {
 		return fmt.Errorf("model cost source is required")
 	}
-	if strings.TrimSpace(cost.SourceLastVerified) == "" {
+	sourceLastVerified := strings.TrimSpace(cost.SourceLastVerified)
+	if sourceLastVerified == "" {
 		return fmt.Errorf("model cost source last verified date is required")
+	}
+	if _, err := time.Parse("2006-01-02", sourceLastVerified); err != nil {
+		return fmt.Errorf("model cost source last verified date must use YYYY-MM-DD format")
 	}
 	return nil
 }
@@ -180,16 +188,31 @@ type Registry struct {
 	entries map[string]ModelEntry
 }
 
-func NewRegistry(entries []ModelEntry) Registry {
+func NewRegistry(entries []ModelEntry) (Registry, error) {
 	registry := Registry{entries: make(map[string]ModelEntry)}
+	seenModelIDs := make(map[string]struct{})
 	for _, entry := range entries {
-		registry.register(entry.ID, entry)
-		registry.register(entry.APIModel, entry)
+		modelID := normalizePattern(entry.ID)
+		if modelID == "" {
+			return Registry{}, fmt.Errorf("model id is required")
+		}
+		if _, ok := seenModelIDs[modelID]; ok {
+			return Registry{}, fmt.Errorf("duplicate model id %q", modelID)
+		}
+		seenModelIDs[modelID] = struct{}{}
+		if err := registry.register(entry.ID, entry); err != nil {
+			return Registry{}, err
+		}
+		if err := registry.register(entry.APIModel, entry); err != nil {
+			return Registry{}, err
+		}
 		for _, alias := range entry.Aliases {
-			registry.register(alias, entry)
+			if err := registry.register(alias, entry); err != nil {
+				return Registry{}, err
+			}
 		}
 	}
-	return registry
+	return registry, nil
 }
 
 func (registry Registry) Get(pattern string) (ModelEntry, bool) {
@@ -197,12 +220,16 @@ func (registry Registry) Get(pattern string) (ModelEntry, bool) {
 	return entry, ok
 }
 
-func (registry Registry) register(pattern string, entry ModelEntry) {
+func (registry Registry) register(pattern string, entry ModelEntry) error {
 	normalized := normalizePattern(pattern)
 	if normalized == "" {
-		return
+		return nil
+	}
+	if existing, ok := registry.entries[normalized]; ok && existing.ID != entry.ID {
+		return fmt.Errorf("duplicate model lookup key %q for %q and %q", normalized, existing.ID, entry.ID)
 	}
 	registry.entries[normalized] = entry
+	return nil
 }
 
 func normalizePattern(pattern string) string {
