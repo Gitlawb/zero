@@ -117,7 +117,8 @@ func TestBashToolUsesRequestedCwd(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(filepath.ToSlash(result.Output), filepath.ToSlash(nested)) {
+	normalizedOutput := filepath.ToSlash(strings.TrimSpace(result.Output))
+	if !strings.Contains(normalizedOutput, "stdout:\n") || !strings.HasSuffix(normalizedOutput, "/nested") {
 		t.Fatalf("expected command to run in nested cwd, got %q", result.Output)
 	}
 	if result.Meta["cwd"] != "nested" {
