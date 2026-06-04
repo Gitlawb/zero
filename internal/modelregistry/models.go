@@ -61,8 +61,18 @@ type ModelCost struct {
 	InputPerMillion       float64
 	OutputPerMillion      float64
 	CachedInputPerMillion float64
+	Tiers                 []ModelCostTier
 	Source                string
 	SourceLastVerified    string
+	Notes                 []string
+}
+
+type ModelCostTier struct {
+	UpToInputTokens       int
+	InputPerMillion       float64
+	OutputPerMillion      float64
+	CachedInputPerMillion float64
+	Note                  string
 }
 
 type ModelEntry struct {
@@ -150,6 +160,12 @@ func (cost ModelCost) Validate() error {
 	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 {
 		return fmt.Errorf("model cost values must be non-negative")
 	}
+	if len(cost.Tiers) == 0 && cost.InputPerMillion == 0 && cost.OutputPerMillion == 0 {
+		return fmt.Errorf("model cost must include base pricing or pricing tiers")
+	}
+	if err := validateCostTiers(cost.Tiers); err != nil {
+		return err
+	}
 	if strings.TrimSpace(cost.Source) == "" {
 		return fmt.Errorf("model cost source is required")
 	}
@@ -159,6 +175,31 @@ func (cost ModelCost) Validate() error {
 	}
 	if _, err := time.Parse("2006-01-02", sourceLastVerified); err != nil {
 		return fmt.Errorf("model cost source last verified date must use YYYY-MM-DD format")
+	}
+	return nil
+}
+
+func validateCostTiers(tiers []ModelCostTier) error {
+	seenFallback := false
+	for index, tier := range tiers {
+		if tier.UpToInputTokens < 0 {
+			return fmt.Errorf("model cost tier input ceiling must be non-negative")
+		}
+		if tier.InputPerMillion <= 0 || tier.OutputPerMillion <= 0 {
+			return fmt.Errorf("model cost tier input and output rates must be positive")
+		}
+		if tier.CachedInputPerMillion < 0 {
+			return fmt.Errorf("model cost tier cached input rate must be non-negative")
+		}
+		if tier.UpToInputTokens == 0 {
+			if seenFallback {
+				return fmt.Errorf("model cost tiers can include only one fallback tier")
+			}
+			if index != len(tiers)-1 {
+				return fmt.Errorf("model cost fallback tier must be last")
+			}
+			seenFallback = true
+		}
 	}
 	return nil
 }
@@ -186,10 +227,14 @@ func (model ModelEntry) AllowsProvider(provider ProviderKind) bool {
 
 type Registry struct {
 	entries map[string]ModelEntry
+	models  []ModelEntry
 }
 
 func NewRegistry(entries []ModelEntry) (Registry, error) {
-	registry := Registry{entries: make(map[string]ModelEntry)}
+	registry := Registry{
+		entries: make(map[string]ModelEntry),
+		models:  make([]ModelEntry, 0, len(entries)),
+	}
 	seenModelIDs := make(map[string]struct{})
 	for _, entry := range entries {
 		if err := entry.Validate(); err != nil {
@@ -214,13 +259,17 @@ func NewRegistry(entries []ModelEntry) (Registry, error) {
 				return Registry{}, err
 			}
 		}
+		registry.models = append(registry.models, cloneModelEntry(entry))
 	}
 	return registry, nil
 }
 
 func (registry Registry) Get(pattern string) (ModelEntry, bool) {
 	entry, ok := registry.entries[normalizePattern(pattern)]
-	return entry, ok
+	if !ok {
+		return ModelEntry{}, false
+	}
+	return cloneModelEntry(entry), true
 }
 
 func (registry Registry) register(pattern string, entry ModelEntry) error {
