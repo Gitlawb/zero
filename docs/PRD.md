@@ -3,7 +3,7 @@
 **Status:** DRAFT v1.0
 **Target:** Compete with Claude Code + Cursor + OpenCode
 **Timeline:** 6-12 months
-**Stack:** TypeScript + Bun
+**Stack:** Go native core + npm distribution wrapper
 
 ---
 
@@ -16,7 +16,7 @@ It combines the best of:
 - **Cursor** — IDE integration + smart editing
 - **OpenCode** — multi-provider + headless
 
-**One TypeScript codebase. Three surfaces. Zero lock-in.**
+**One Go-native agent core. Three surfaces. Zero lock-in.**
 
 ---
 
@@ -25,7 +25,7 @@ It combines the best of:
 ### 2.1 Terminal (TUI) — Primary
 - Interactive coding agent in terminal
 - Streaming, append-style (like Claude Code)
-- Ink + React-based
+- Bubble Tea + Lip Gloss-based
 - Full keyboard control
 - Mouse support
 
@@ -107,7 +107,7 @@ It combines the best of:
 - `notebook_edit` — Jupyter notebooks
 
 **Tool Requirements:**
-- Zod schema → JSON Schema
+- Go typed parameter schemas -> JSON Schema
 - Side-effect class: `read | write | shell | network | out_of_workspace`
 - Structured results: `{ status, output, truncated?, meta? }`
 - Atomic execution
@@ -123,18 +123,18 @@ It combines the best of:
 
 **Model Registry:**
 
-```ts
-interface ModelEntry {
-  id: string
-  name: string
-  provider: "anthropic" | "openai" | "google" | "xai" | string
-  apiProviders: string[]          // endpoints that can serve
-  contextLimits: { input: number; output: number }
-  reasoningEffort: { supported: string[]; default: string }
-  capabilities: { tools, thinking, vision, pdf }
-  cost: { inputPerMTok, outputPerMTok, tokenMultiplier }
-  tier: "standard" | "premium"
-  matchPatterns?: RegExp[]        // fuzzy id resolution
+```go
+type ModelEntry struct {
+  ID              string
+  Name            string
+  Provider        string
+  APIProviders    []string
+  ContextLimits   ContextLimits
+  ReasoningEffort ReasoningEffort
+  Capabilities    ModelCapabilities
+  Cost            ModelCost
+  Tier            string
+  MatchPatterns   []string
 }
 ```
 
@@ -146,7 +146,7 @@ interface ModelEntry {
 
 ### F4 — Terminal UI (P0)
 - **Layout:** header (cwd · git · model) → tool rows → diff → response → input → footer
-- **Streaming:** Ink `<Static>` for transcript, live tail for streaming
+- **Streaming:** append-only transcript model with live tail updates
 - **Markdown:** full CommonMark + syntax highlighting
 - **Tool rows:** collapsible with one-line summaries
 - **Input:** `/` commands, `@` files, `!` bash, `Esc` interrupt
@@ -230,7 +230,8 @@ interface ModelEntry {
 - No marketplace in v1 (manual install)
 
 ### F13 — Distribution (P0)
-- **Single binary** via `bun build --compile`
+- **Single binary** via Go cross-compilation
+- npm package as a thin installer/launcher for the platform binary
 - Cross-platform: Linux, macOS, Windows
 - `zero update [--check]` self-update
 - Checksum verification
@@ -354,13 +355,20 @@ interface ModelEntry {
 
 ### 5.3 Tool Contract
 
-```ts
-interface Tool {
-  name: string
-  description: string
-  parameters: ZodObject
-  sideEffect: "read" | "write" | "shell" | "network" | "out_of_workspace"
-  execute(args, ctx): Promise<{ status: "ok"|"error", output: string, truncated?: boolean, meta?: object }>
+```go
+type Tool interface {
+  Name() string
+  Description() string
+  Parameters() JSONSchema
+  SideEffect() SideEffect
+  Execute(ctx ToolContext, args map[string]any) ToolResult
+}
+
+type ToolResult struct {
+  Status    string
+  Output    string
+  Truncated bool
+  Meta      map[string]any
 }
 ```
 
@@ -425,11 +433,11 @@ interface Tool {
 ## 7. Milestones
 
 ### M0 — Foundation (Weeks 1-2)
-- Bun + TypeScript setup
+- Go module setup
 - Agent core skeleton
 - 8 core tools (read, write, edit, bash, grep, glob, apply_patch, update_plan)
 - OpenAI-compatible provider
-- Basic Ink TUI
+- Basic Bubble Tea TUI
 - Permission gate (read vs mutate)
 - Session persistence
 
@@ -511,7 +519,7 @@ interface Tool {
 |---|------|------------|
 | R1 | Scope creep | Stick to milestones, defer features |
 | R2 | Provider API changes | Abstract via interface, test with mocks |
-| R3 | TUI complexity | Use Ink, copy Claude Code patterns |
+| R3 | TUI complexity | Use Bubble Tea/Lip Gloss, follow mature terminal agent UX patterns |
 | R4 | Performance | Benchmark early, optimize streaming |
 | R5 | Security vulnerabilities | Permission gate from day 1, security review |
 | R6 | Cross-platform bugs | CI on Win/Mac/Linux from M0 |
@@ -556,7 +564,7 @@ interface Tool {
 
 ## 11. Open Decisions
 
-1. **TUI library:** Ink (React) vs OpenTUI (Solid) — **Decide: Ink** (mature, large ecosystem)
+1. **TUI library:** Bubble Tea + Lip Gloss — **Decide: Go-native TUI** (single-binary friendly, mature terminal ecosystem)
 2. **Storage:** JSONL files vs SQLite — **Decide: JSONL** (inspectable, simple)
 3. **Package structure:** Single vs monorepo — **Decide: Single** until M4
 4. **Provider abstraction:** Direct API vs wrapper — **Decide: Direct** (portability)
@@ -585,8 +593,8 @@ interface Tool {
 1. **Proven patterns** — Based on clean-room analysis of existing terminal coding-agent UX patterns
 2. **Multi-provider** — Unique advantage vs Claude Code/Cursor
 3. **Open source** — Community contributions
-4. **TypeScript** — Type safety, fast iteration
-5. **Bun** — Fast runtime, single binary
+4. **Go** — Native binary, fast startup, strong concurrency, cross-platform CLI ergonomics
+5. **npm distribution wrapper** — Keeps JavaScript ecosystem installation while the runtime stays native
 6. **Clear milestones** — Ship early, iterate
 
 ---

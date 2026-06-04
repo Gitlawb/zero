@@ -44,7 +44,7 @@ These rules prevent future conflicts:
 
 | Person | Primary role | Owns | Does not own |
 |---|---|---|---|
-| Vasanth | Product lead, TUI, tools UX | Ink TUI, slash command UI, tool result rendering, local tool UX, permission prompts, themes, command palette, user-facing flows | Provider internals, session protocol, MCP transports, release pipeline |
+| Vasanth | Product lead, TUI, tools UX | Bubble Tea TUI, slash command UI, tool result rendering, local tool UX, permission prompts, themes, command palette, user-facing flows | Provider internals, session protocol, MCP transports, release pipeline |
 | Gnanam | Runtime backend, providers, protocols | Model registry, provider factory, Anthropic/Gemini, usage/cost, session store, stream-json, config validation, doctor/search backend, MCP/plugin backend, permissions/grants, sandbox policy | TUI rendering, binary packaging, VS Code extension UI |
 | Anandan | Infra, distribution, external integrations | CI, build, single binary, release packages, installers, self-update, performance benchmarks, VS Code extension, GitHub PR integration, Windows sandbox, release security | Provider internals, TUI command rendering, model registry |
 
@@ -70,9 +70,9 @@ Current status: PR #6 covers much of M0. This v2 treats M0 as the baseline and s
 
 ### Vasanth
 
-- ToolBase with Zod schema validation.
+- Tool interface with JSON Schema-compatible parameter validation.
 - Core file tools: read, write, edit, grep, list directory, bash, plan.
-- Basic Ink TUI and message/tool rendering.
+- Basic Bubble Tea TUI and message/tool rendering.
 - Basic agent loop integration.
 - PR: existing PR #6 plus follow-up fixes if needed.
 
@@ -86,17 +86,17 @@ Current status: PR #6 covers much of M0. This v2 treats M0 as the baseline and s
 
 ### Anandan
 
-- Add stable package scripts: `bun test`, `bun run build`, `bun run typecheck`.
+- Add stable project commands: `go test ./...`, `go build ./cmd/zero`, and npm wrapper smoke checks.
 - Add initial CI smoke job.
-- Verify Bun version and lockfile behavior.
+- Verify Go toolchain version, module cache behavior, and npm wrapper lockfile behavior.
 - Add build artifact smoke check.
 - PR: `feat/m0-ci-scripts`.
 
 ### M0 Done
 
-- `bun test` passes.
-- `bun run typecheck` exists and passes.
-- `bun run build` exists or has a documented placeholder until binary work.
+- `go test ./...` passes.
+- `go build ./cmd/zero` exists and passes or has a documented placeholder until the Go entrypoint lands.
+- npm wrapper smoke check exists when npm packaging files are touched.
 - `zero` can run, read a file, edit a file, and stream a response.
 
 ## Milestone M1: Multi-Provider And Headless Foundation, Weeks 3-4
@@ -130,7 +130,7 @@ Goal: Zero can select models/providers, use Claude/Gemini/OpenAI-compatible prov
 
 ### Anandan: Build And CI
 
-- Single binary build spike with `bun build --compile`.
+- Single binary build spike with Go cross-compilation.
 - CI matrix for Linux/macOS/Windows test and build smoke.
 - Release packaging formats: tar.gz for Unix, zip for Windows.
 - Artifact upload on tags or manual workflow.
@@ -154,7 +154,7 @@ Goal: Zero can select models/providers, use Claude/Gemini/OpenAI-compatible prov
 - OpenAI-compatible provider still works.
 - Anthropic and Gemini providers pass mocked stream tests.
 - Model selector reads registry data.
-- CI runs tests and typecheck on PR.
+- CI runs tests and build checks on PR.
 - Binary build has at least one working platform artifact or documented blocker.
 
 ## Milestone M2: Core Commands, Cost, Observability, Install Flow, Weeks 5-8
@@ -179,7 +179,7 @@ Goal: Core slash commands work, cost and diagnostics are visible, sessions have 
 
 - Minimal session event store to support cost/search/resume later.
 - Cost tracking from normalized usage and model registry.
-- `zero doctor` backend checks: Bun, config, provider, connectivity, model validity.
+- `zero doctor` backend checks: binary, config, provider, connectivity, model validity.
 - `zero search` backend over local session events.
 - Config inspection and validation API for `/config`.
 - Secret redaction helper used by logs, provider errors, doctor, feedback.
@@ -521,9 +521,9 @@ Headless `exec` is split to avoid conflict:
 Every PR must include:
 
 - Tests for changed behavior.
-- `bun test` passes.
-- `bun run typecheck` passes.
-- `bun run build` passes or the PR explicitly documents why build is not applicable.
+- `go test ./...` passes when Go code exists or the PR documents why it is not applicable.
+- `go build ./cmd/zero` passes when the Go entrypoint exists or the PR documents why it is not applicable.
+- npm wrapper checks pass when npm distribution files are changed.
 - PR description explains what changed and why.
 - No unrelated refactors.
 - Redaction used for secrets in logs/errors/tests.
