@@ -19,6 +19,8 @@ const HookIdSchema = z.string().trim().min(1).regex(
 );
 const HookEventSchema = z.enum(['beforeTool', 'afterTool', 'sessionStart', 'sessionEnd']);
 
+const SESSION_HOOK_EVENTS = new Set(['sessionStart', 'sessionEnd']);
+
 const HookDefinitionSchema = z.object({
   id: HookIdSchema,
   name: z.string().trim().min(1).optional(),
@@ -28,6 +30,14 @@ const HookDefinitionSchema = z.object({
   matcher: z.string().trim().min(1).optional(),
   command: z.string().trim().min(1),
   args: z.array(z.string()).optional(),
+}).superRefine((hook, ctx) => {
+  if (hook.matcher && SESSION_HOOK_EVENTS.has(hook.event)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['matcher'],
+      message: 'matcher is only supported for beforeTool and afterTool hooks.',
+    });
+  }
 });
 
 const HooksConfigSchema = z.object({
@@ -107,6 +117,7 @@ export async function writeZeroHooksConfig(path: string, config: Partial<ZeroHoo
 }
 
 export class ZeroHookConfigStore {
+  private static readonly mutationQueues = new Map<string, Promise<void>>();
   private readonly configPath: string;
 
   constructor(options: ZeroHookConfigStoreOptions = {}) {
@@ -122,42 +133,68 @@ export class ZeroHookConfigStore {
   }
 
   async upsert(hook: Omit<ZeroHookDefinition, 'enabled'> & { enabled?: boolean }): Promise<ZeroHookDefinition> {
-    const config = await this.list();
-    const normalized = normalizeHookDefinition(hook);
-    const nextHooks = config.hooks.filter((existing) => existing.id !== normalized.id);
-    nextHooks.push(normalized);
-    await writeZeroHooksConfig(this.configPath, {
-      enabled: config.enabled,
-      hooks: nextHooks,
+    return await this.withMutationLock(async () => {
+      const config = await this.list();
+      const normalized = normalizeHookDefinition(hook);
+      const nextHooks = config.hooks.filter((existing) => existing.id !== normalized.id);
+      nextHooks.push(normalized);
+      await writeZeroHooksConfig(this.configPath, {
+        enabled: config.enabled,
+        hooks: nextHooks,
+      });
+      return normalized;
     });
-    return normalized;
   }
 
   async remove(hookId: string): Promise<boolean> {
-    const config = await this.list();
-    const nextHooks = config.hooks.filter((hook) => hook.id !== hookId);
-    if (nextHooks.length === config.hooks.length) return false;
-    await writeZeroHooksConfig(this.configPath, {
-      enabled: config.enabled,
-      hooks: nextHooks,
+    return await this.withMutationLock(async () => {
+      const config = await this.list();
+      const nextHooks = config.hooks.filter((hook) => hook.id !== hookId);
+      if (nextHooks.length === config.hooks.length) return false;
+      await writeZeroHooksConfig(this.configPath, {
+        enabled: config.enabled,
+        hooks: nextHooks,
+      });
+      return true;
     });
-    return true;
   }
 
   async setEnabled(hookId: string, enabled: boolean): Promise<boolean> {
-    const config = await this.list();
-    let changed = false;
-    const nextHooks = config.hooks.map((hook) => {
-      if (hook.id !== hookId) return hook;
-      changed = true;
-      return { ...hook, enabled };
+    return await this.withMutationLock(async () => {
+      const config = await this.list();
+      let changed = false;
+      const nextHooks = config.hooks.map((hook) => {
+        if (hook.id !== hookId) return hook;
+        changed = true;
+        return { ...hook, enabled };
+      });
+      if (!changed) return false;
+      await writeZeroHooksConfig(this.configPath, {
+        enabled: config.enabled,
+        hooks: nextHooks,
+      });
+      return true;
     });
-    if (!changed) return false;
-    await writeZeroHooksConfig(this.configPath, {
-      enabled: config.enabled,
-      hooks: nextHooks,
+  }
+
+  private async withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = ZeroHookConfigStore.mutationQueues.get(this.configPath) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolveCurrent) => {
+      release = resolveCurrent;
     });
-    return true;
+    const next = previous.then(() => current, () => current);
+    ZeroHookConfigStore.mutationQueues.set(this.configPath, next);
+
+    await previous.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (ZeroHookConfigStore.mutationQueues.get(this.configPath) === next) {
+        ZeroHookConfigStore.mutationQueues.delete(this.configPath);
+      }
+    }
   }
 }
 
@@ -278,9 +315,7 @@ function normalizeHooksConfig(value: unknown): ZeroHooksConfig {
   };
 }
 
-function normalizeHookDefinition(
-  value: z.infer<typeof HookDefinitionSchema>
-): ZeroHookDefinition {
+function normalizeHookDefinition(value: z.input<typeof HookDefinitionSchema>): ZeroHookDefinition {
   const parsed = HookDefinitionSchema.parse(value);
   return {
     id: parsed.id,
@@ -298,11 +333,30 @@ function matchesHookMatcher(matcher: string, toolName: string): boolean {
   if (matcher === '*') return true;
   if (!matcher.includes('*')) return matcher === toolName;
 
-  const escaped = matcher
-    .split('*')
-    .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.*');
-  return new RegExp(`^${escaped}$`).test(toolName);
+  const segments = matcher.split('*');
+  let cursor = 0;
+  let searchEnd = toolName.length;
+
+  if (!matcher.startsWith('*')) {
+    const first = segments.shift() ?? '';
+    if (!toolName.startsWith(first)) return false;
+    cursor = first.length;
+  }
+
+  if (!matcher.endsWith('*')) {
+    const last = segments.pop() ?? '';
+    if (!toolName.endsWith(last)) return false;
+    searchEnd = toolName.length - last.length;
+  }
+
+  for (const segment of segments) {
+    if (!segment) continue;
+    const index = toolName.indexOf(segment, cursor);
+    if (index === -1 || index + segment.length > searchEnd) return false;
+    cursor = index + segment.length;
+  }
+
+  return cursor <= searchEnd;
 }
 
 function toHookDiagnostic(

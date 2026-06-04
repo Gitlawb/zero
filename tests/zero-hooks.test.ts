@@ -32,7 +32,8 @@ async function runZeroHooks(
   cwd: string,
   args: string[] = []
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn([process.execPath, join(process.cwd(), 'src/index.ts'), 'hooks', ...args], {
+  const cliEntrypoint = join(import.meta.dir, '..', 'src', 'index.ts');
+  const child = Bun.spawn([process.execPath, cliEntrypoint, 'hooks', ...args], {
     cwd,
     env: {
       ...process.env,
@@ -132,6 +133,32 @@ describe('Zero hook config backend', () => {
     ]);
   });
 
+  it('rejects matchers on session hooks with a schema diagnostic', async () => {
+    const dir = await makeTempDir();
+    const projectConfigPath = join(dir, 'hooks.json');
+    await writeJson(projectConfigPath, {
+      hooks: [{
+        id: 'zero.session',
+        event: 'sessionStart',
+        matcher: 'bash',
+        command: 'node',
+      }],
+    });
+
+    const result = await loadZeroHooksConfig({
+      userConfigPath: join(dir, 'missing-user-hooks.json'),
+      projectConfigPath,
+    });
+
+    expect(result.config.hooks).toEqual([]);
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        kind: 'schema',
+        fieldPath: 'hooks.0.matcher',
+      }),
+    ]);
+  });
+
   it('persists hook updates through the config store', async () => {
     const dir = await makeTempDir();
     const configPath = join(dir, 'hooks.json');
@@ -160,8 +187,34 @@ describe('Zero hook config backend', () => {
     expect((await store.list()).hooks).toEqual([]);
   });
 
+  it('serializes concurrent config store mutations for the same path', async () => {
+    const dir = await makeTempDir();
+    const configPath = join(dir, 'hooks.json');
+    const first = new ZeroHookConfigStore({ configPath });
+    const second = new ZeroHookConfigStore({ configPath });
+
+    await Promise.all([
+      first.upsert({
+        id: 'zero.first',
+        event: 'beforeTool',
+        matcher: 'read_*',
+        command: 'node',
+        args: [],
+      }),
+      second.upsert({
+        id: 'zero.second',
+        event: 'afterTool',
+        matcher: 'write_*',
+        command: 'node',
+        args: [],
+      }),
+    ]);
+
+    expect((await first.list()).hooks.map((hook) => hook.id)).toEqual(['zero.first', 'zero.second']);
+  });
+
   it('selects enabled hooks by event and matcher', () => {
-    const selected = selectZeroHooks({
+    const config = {
       enabled: true,
       hooks: [
         {
@@ -187,13 +240,31 @@ describe('Zero hook config backend', () => {
           args: [],
           enabled: true,
         },
+        {
+          id: 'zero.shell-edit',
+          event: 'beforeTool',
+          matcher: 'shell_*_edit',
+          command: 'node',
+          args: [],
+          enabled: true,
+        },
       ],
-    }, {
+    } satisfies Parameters<typeof selectZeroHooks>[0];
+
+    expect(selectZeroHooks(config, {
       event: 'beforeTool',
       toolName: 'read_file',
-    });
+    }).map((hook) => hook.id)).toEqual(['zero.reads']);
 
-    expect(selected.map((hook) => hook.id)).toEqual(['zero.reads']);
+    expect(selectZeroHooks(config, {
+      event: 'beforeTool',
+      toolName: 'shell_safe_edit',
+    }).map((hook) => hook.id)).toEqual(['zero.shell-edit']);
+
+    expect(selectZeroHooks(config, {
+      event: 'beforeTool',
+      toolName: 'shell_safe_view',
+    })).toEqual([]);
   });
 
   it('formats hook config for CLI and UI consumers', () => {
@@ -253,18 +324,66 @@ describe('Zero hook audit backend', () => {
       }),
     ]);
   });
+
+  it('serializes concurrent appends and skips malformed audit lines', async () => {
+    const dir = await makeTempDir();
+    const auditPath = join(dir, 'audit.jsonl');
+    await writeFile(auditPath, [
+      JSON.stringify({
+        sequence: 1,
+        createdAt: '2026-06-04T00:00:00.000Z',
+        type: 'hook_execution_started',
+        hookId: 'zero.seed',
+        event: 'sessionStart',
+        commands: [{ command: 'node', args: [] }],
+      }),
+      '{not-json',
+      JSON.stringify({
+        sequence: 2,
+        createdAt: '2026-06-04T00:00:01.000Z',
+        type: 'hook_execution_completed',
+        hookId: 'zero.seed',
+        event: 'sessionStart',
+        status: 'completed',
+      }),
+      '',
+    ].join('\n'), 'utf-8');
+    const audit = new ZeroHookAuditStore({
+      auditPath,
+      now: () => new Date('2026-06-04T00:00:02.000Z'),
+    });
+
+    expect((await audit.readEvents()).map((event) => event.sequence)).toEqual([1, 2]);
+
+    const appended = await Promise.all([
+      audit.appendStarted({
+        hookId: 'zero.one',
+        event: 'sessionStart',
+        commands: [{ command: 'node', args: [] }],
+      }),
+      audit.appendStarted({
+        hookId: 'zero.two',
+        event: 'sessionStart',
+        commands: [{ command: 'node', args: [] }],
+      }),
+    ]);
+
+    expect(appended.map((event) => event.sequence)).toEqual([3, 4]);
+    expect((await audit.readEvents()).map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
+  });
 });
 
 describe('zero hooks CLI', () => {
   it('lists project hook config as JSON and formatted text', async () => {
     const dir = await makeTempDir();
+    const syntheticSecret = `sk-proj-${'a'.repeat(24)}`;
     await writeJson(join(dir, '.zero', 'hooks.json'), {
       hooks: [{
         id: 'zero.preflight',
         event: 'beforeTool',
         matcher: 'bash',
         command: 'node',
-        args: ['hooks/preflight.mjs'],
+        args: ['hooks/preflight.mjs', syntheticSecret],
       }],
     });
 
@@ -278,6 +397,8 @@ describe('zero hooks CLI', () => {
       }),
       diagnostics: [],
     });
+    expect(jsonResult.stdout).toContain('[REDACTED]');
+    expect(jsonResult.stdout).not.toContain(syntheticSecret);
 
     const textResult = await runZeroHooks(dir, ['list']);
     expect(textResult.exitCode).toBe(0);
@@ -285,5 +406,7 @@ describe('zero hooks CLI', () => {
     expect(textResult.stdout).toContain('Zero Hooks');
     expect(textResult.stdout).toContain('zero.preflight');
     expect(textResult.stdout).toContain('beforeTool');
+    expect(textResult.stdout).toContain('[REDACTED]');
+    expect(textResult.stdout).not.toContain(syntheticSecret);
   });
 });

@@ -11,7 +11,7 @@ import {
   type ZeroConfigInspectionReport,
 } from './zero-config-inspection';
 import { formatZeroDoctorReport, runZeroDoctor, type ZeroDoctorReport } from './zero-doctor';
-import { redactZeroErrorMessage, redactZeroSecrets } from './zero-redaction';
+import { redactZeroErrorMessage, redactZeroSecrets, redactZeroString } from './zero-redaction';
 import { formatZeroSearchResult, searchZeroSessions } from './zero-search';
 import {
   formatZeroHookList,
@@ -443,7 +443,7 @@ program
           diagnostics: result.diagnostics,
         }), null, 2));
       } else {
-        console.log(formatZeroHookList(result.config, result.diagnostics));
+        console.log(redactZeroString(formatZeroHookList(result.config, result.diagnostics)));
       }
     } catch (err: unknown) {
       console.error(`[zero] Hook list failed: ${redactZeroErrorMessage(err)}`);

@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
+import { redactZeroString } from '../zero-redaction';
 import { resolveZeroHookPaths } from './config';
 import type {
   AppendZeroHookCompletedInput,
@@ -17,6 +18,7 @@ export interface ZeroHookAuditStoreOptions {
 export class ZeroHookAuditStore {
   private readonly auditPath: string;
   private readonly now: () => Date;
+  private appendQueue: Promise<unknown> = Promise.resolve();
 
   constructor(options: ZeroHookAuditStoreOptions = {}) {
     this.auditPath = resolve(options.auditPath ?? resolveZeroHookPaths().auditPath);
@@ -55,7 +57,7 @@ export class ZeroHookAuditStore {
       try {
         events.push(JSON.parse(line) as ZeroHookAuditEvent);
       } catch {
-        throw new Error(`Invalid JSON in Zero hook audit at line ${index + 1}`);
+        console.warn(`[zero] Ignoring malformed hook audit line ${index + 1}: ${redactZeroString(line)}`);
       }
     }
     return events;
@@ -64,15 +66,22 @@ export class ZeroHookAuditStore {
   private async append<T extends Omit<ZeroHookAuditEvent, 'sequence' | 'createdAt'>>(
     input: T
   ): Promise<T & { sequence: number; createdAt: string }> {
-    const sequence = (await this.readEvents()).length + 1;
-    const event = {
-      sequence,
-      createdAt: this.now().toISOString(),
-      ...input,
+    const run = async (): Promise<T & { sequence: number; createdAt: string }> => {
+      const events = await this.readEvents();
+      const sequence = events.reduce((highest, event) => Math.max(highest, event.sequence), 0) + 1;
+      const event = {
+        sequence,
+        createdAt: this.now().toISOString(),
+        ...input,
+      };
+
+      await mkdir(dirname(this.auditPath), { recursive: true });
+      await appendFile(this.auditPath, `${JSON.stringify(event)}\n`, 'utf-8');
+      return event;
     };
 
-    await mkdir(dirname(this.auditPath), { recursive: true });
-    await appendFile(this.auditPath, `${JSON.stringify(event)}\n`, 'utf-8');
-    return event;
+    const next = this.appendQueue.then(run, run);
+    this.appendQueue = next.then(() => undefined, () => undefined);
+    return await next;
   }
 }
