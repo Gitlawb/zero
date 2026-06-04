@@ -29,6 +29,8 @@ type Options struct {
 	MaxTurns       int
 	Registry       *tools.Registry
 	PermissionMode PermissionMode
+	EnabledTools   []string
+	DisabledTools  []string
 	OnText         func(string)
 	OnToolCall     func(ToolCall)
 	OnToolResult   func(ToolResult)

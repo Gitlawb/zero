@@ -160,6 +160,73 @@ func TestRunAdvertisesRuntimeToolDefinitions(t *testing.T) {
 	}
 }
 
+func TestRunFiltersAdvertisedTools(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	registry.Register(tools.NewGrepTool(root))
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "what tools exist?", provider, Options{
+		Registry:      registry,
+		EnabledTools:  []string{"read_file", "grep"},
+		DisabledTools: []string{"grep"},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "read_file" {
+		t.Fatalf("expected only read_file to be advertised, got %#v", provider.requests[0].Tools)
+	}
+}
+
+func TestRunRejectsFilteredToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "read_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{"path":"README.md"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "read", provider, Options{
+		Registry:      registry,
+		DisabledTools: []string{"read_file"},
+		MaxTurns:      2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after filtered tool result, got %q", result.FinalAnswer)
+	}
+	lastMessage := result.Messages[len(result.Messages)-2]
+	if !strings.Contains(lastMessage.Content, "not enabled") {
+		t.Fatalf("expected filtered tool error message, got %#v", result.Messages)
+	}
+}
+
 func TestRunExecutesToolCallThroughRegistry(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\nbeta\n")

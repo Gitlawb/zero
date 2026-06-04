@@ -1,0 +1,123 @@
+package cli
+
+import (
+	"fmt"
+	"io"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func parseToolList(value string) []string {
+	seen := map[string]bool{}
+	tools := []string{}
+	for _, name := range strings.FieldsFunc(value, func(char rune) bool {
+		return char == ',' || char == ' ' || char == '\t' || char == '\n' || char == '\r'
+	}) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		tools = append(tools, name)
+	}
+	return tools
+}
+
+func validateExecToolFilters(options execOptions, registry *tools.Registry) error {
+	for _, name := range append(append([]string{}, options.enabledTools...), options.disabledTools...) {
+		if !toolNamePattern.MatchString(name) {
+			return execUsageError{fmt.Sprintf("Invalid tool name %q.", name)}
+		}
+		if _, ok := registry.Get(name); !ok {
+			return execUsageError{fmt.Sprintf("Unknown tool: %s", name)}
+		}
+	}
+	disabled := map[string]bool{}
+	for _, name := range options.disabledTools {
+		disabled[name] = true
+	}
+	for _, name := range options.enabledTools {
+		if disabled[name] {
+			return execUsageError{fmt.Sprintf("Tool cannot be both enabled and disabled: %s", name)}
+		}
+	}
+	return nil
+}
+
+func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error) {
+	if options.skipPermissionsUnsafe {
+		return agent.PermissionModeUnsafe, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(options.autonomy)) {
+	case "", "low", "medium":
+		return agent.PermissionModeAuto, nil
+	case "high":
+		return agent.PermissionModeUnsafe, nil
+	default:
+		return "", execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", options.autonomy)}
+	}
+}
+
+func writeExecToolList(w io.Writer, registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) error {
+	visible := visibleExecTools(registry, options, permissionMode)
+	lines := []string{"Tools visible to model:"}
+	for _, tool := range visible {
+		safety := tool.Safety()
+		lines = append(lines, fmt.Sprintf("  %s [%s/%s] - %s", tool.Name(), safety.SideEffect, safety.Permission, tool.Description()))
+	}
+	if len(visible) == 0 {
+		lines = append(lines, "  (none)")
+	}
+	_, err := fmt.Fprintln(w, strings.Join(lines, "\n"))
+	return err
+}
+
+func visibleExecTools(registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) []tools.Tool {
+	all := registry.All()
+	visible := []tools.Tool{}
+	for _, tool := range all {
+		if !execToolAllowedByFilters(tool.Name(), options) {
+			continue
+		}
+		if !execToolAdvertised(tool, permissionMode) {
+			continue
+		}
+		visible = append(visible, tool)
+	}
+	sort.Slice(visible, func(i, j int) bool {
+		return visible[i].Name() < visible[j].Name()
+	})
+	return visible
+}
+
+func execToolAllowedByFilters(name string, options execOptions) bool {
+	if len(options.enabledTools) > 0 && !toolListContains(options.enabledTools, name) {
+		return false
+	}
+	return !toolListContains(options.disabledTools, name)
+}
+
+func execToolAdvertised(tool tools.Tool, permissionMode agent.PermissionMode) bool {
+	if tool.Safety().Permission == tools.PermissionDeny {
+		return false
+	}
+	if permissionMode == agent.PermissionModeAuto {
+		return tool.Safety().Permission == tools.PermissionAllow
+	}
+	return true
+}
+
+func toolListContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

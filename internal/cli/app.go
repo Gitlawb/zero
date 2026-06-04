@@ -18,6 +18,7 @@ var version = "dev"
 
 type appDeps struct {
 	getwd         func() (string, error)
+	stdin         io.Reader
 	resolveConfig func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	newProvider   func(config.ProviderProfile) (zeroruntime.Provider, error)
 	runTUI        func(context.Context, tui.Options) int
@@ -32,6 +33,7 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 func defaultAppDeps() appDeps {
 	return appDeps{
 		getwd: os.Getwd,
+		stdin: os.Stdin,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
@@ -92,6 +94,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	defaults := defaultAppDeps()
 	if deps.getwd == nil {
 		deps.getwd = defaults.getwd
+	}
+	if deps.stdin == nil {
+		deps.stdin = defaults.stdin
 	}
 	if deps.resolveConfig == nil {
 		deps.resolveConfig = defaults.resolveConfig
@@ -196,9 +201,18 @@ Flags:
   -f, --file <path>                  Read prompt text from a file
   -m, --model <model>                Select the model for provider setup
       --max-turns <number>           Override the maximum agent loop turns
+      --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
+      --enabled-tools <tools>        Only expose these comma or space separated tools
+      --disabled-tools <tools>       Hide these comma or space separated tools
+      --list-tools                   List model-visible tools and exit
   -C, --cwd <path>                   Set the workspace directory
-  -o, --output-format text|json      Select text or newline-delimited JSON output
+  -i, --input-format text|stream-json
+                                    Select prompt input format
+  -o, --output-format text|json|stream-json
+                                    Select text, JSON, or schema-versioned JSONL output
       --prompt <prompt>              Provide prompt text as a flag
+      --resume [id]                  Resume a session; omit id to use the latest
+      --fork <id>                    Fork an existing session into a new session
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
 `)
 	return err

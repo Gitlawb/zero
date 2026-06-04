@@ -1,0 +1,295 @@
+package cli
+
+import (
+	"encoding/json"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+type execEventWriter struct {
+	stdout       io.Writer
+	stderr       io.Writer
+	format       execOutputFormat
+	runID        string
+	sessionID    string
+	streamedText *strings.Builder
+	err          error
+}
+
+func (writer *execEventWriter) runStart(cwd string, provider config.ProviderProfile, permissionMode agent.PermissionMode) {
+	switch writer.format {
+	case execOutputJSON:
+		writer.writeJSON(map[string]any{
+			"type":            "run_start",
+			"cwd":             cwd,
+			"provider":        provider.Name,
+			"model":           provider.Model,
+			"permission_mode": string(permissionMode),
+		})
+	case execOutputStreamJSON:
+		writer.writeStreamJSON(streamjson.Event{
+			Type:      streamjson.EventRunStart,
+			RunID:     writer.runID,
+			SessionID: writer.sessionID,
+			Cwd:       cwd,
+			Provider:  provider.Name,
+			Model:     provider.Model,
+			APIModel:  provider.Model,
+		})
+	}
+}
+
+func (writer *execEventWriter) warning(message string) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{"type": "warning", "message": message})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{Type: streamjson.EventWarning, RunID: writer.runID, Message: message})
+		return
+	}
+	writer.writeStderr("[zero] WARNING: " + message + "\n")
+}
+
+func (writer *execEventWriter) text(delta string) {
+	writer.streamedText.WriteString(delta)
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{"type": "text", "delta": delta})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{Type: streamjson.EventText, RunID: writer.runID, Delta: delta})
+		return
+	}
+	writer.writeStdout(delta)
+}
+
+func (writer *execEventWriter) toolCall(call agent.ToolCall, registry *tools.Registry) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":      "tool_call",
+			"id":        call.ID,
+			"name":      call.Name,
+			"arguments": call.Arguments,
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{
+			Type:       streamjson.EventToolCall,
+			RunID:      writer.runID,
+			ID:         call.ID,
+			Name:       call.Name,
+			Args:       parseToolCallArgs(call.Arguments),
+			SideEffect: streamJSONSideEffect(call.Name, registry),
+		})
+		return
+	}
+	writer.writeStderr("[tool] " + call.Name + "\n")
+}
+
+func (writer *execEventWriter) toolResult(result agent.ToolResult) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":         "tool_result",
+			"tool_call_id": result.ToolCallID,
+			"name":         result.Name,
+			"status":       string(result.Status),
+			"output":       result.Output,
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		truncated := false
+		writer.writeStreamJSON(streamjson.Event{
+			Type:      streamjson.EventToolResult,
+			RunID:     writer.runID,
+			ID:        result.ToolCallID,
+			Status:    string(result.Status),
+			Output:    result.Output,
+			Truncated: &truncated,
+		})
+		return
+	}
+	writer.writeStderr("[result] " + truncateForStatus(result.Output) + "\n")
+}
+
+func (writer *execEventWriter) usage(usage agent.Usage) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{
+			"type":              "usage",
+			"prompt_tokens":     usage.PromptTokens,
+			"completion_tokens": usage.CompletionTokens,
+			"total_tokens":      usage.TotalTokens(),
+		})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		promptTokens := usage.EffectiveInputTokens()
+		completionTokens := usage.EffectiveOutputTokens()
+		totalTokens := usage.TotalTokens()
+		writer.writeStreamJSON(streamjson.Event{
+			Type:             streamjson.EventUsage,
+			RunID:            writer.runID,
+			PromptTokens:     &promptTokens,
+			CompletionTokens: &completionTokens,
+			TotalTokens:      &totalTokens,
+		})
+	}
+}
+
+func (writer *execEventWriter) final(answer string) {
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{"type": "final", "text": answer})
+		writer.writeJSON(map[string]any{"type": "done", "exit_code": exitSuccess})
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{Type: streamjson.EventFinal, RunID: writer.runID, Text: answer})
+		return
+	}
+
+	if writer.streamedText.Len() == 0 && answer != "" {
+		writer.writeStdout(answer)
+		writer.streamedText.WriteString(answer)
+	}
+	if writer.streamedText.Len() > 0 && !strings.HasSuffix(writer.streamedText.String(), "\n") {
+		writer.writeStdout("\n")
+	}
+}
+
+func (writer *execEventWriter) errorEvent(code string, message string, recoverable bool) {
+	if writer.format == execOutputStreamJSON {
+		writer.writeStreamJSON(streamjson.Event{
+			Type:        streamjson.EventError,
+			RunID:       writer.runID,
+			Code:        code,
+			Message:     message,
+			Recoverable: &recoverable,
+		})
+		return
+	}
+	if writer.format == execOutputJSON {
+		writer.writeJSON(map[string]any{"type": "error", "code": code, "message": message})
+		return
+	}
+	writer.writeStderr("[zero] " + message + "\n")
+}
+
+func (writer *execEventWriter) runEnd(status string, exitCode int) {
+	if writer.format != execOutputStreamJSON {
+		return
+	}
+	writer.writeStreamJSON(streamjson.Event{
+		Type:     streamjson.EventRunEnd,
+		RunID:    writer.runID,
+		Status:   status,
+		ExitCode: &exitCode,
+	})
+}
+
+func (writer *execEventWriter) writeStreamJSON(event streamjson.Event) {
+	if writer.err != nil {
+		return
+	}
+	line, err := streamjson.FormatEvent(event)
+	if err != nil {
+		writer.err = err
+		return
+	}
+	writer.writeStdout(line + "\n")
+}
+
+func (writer *execEventWriter) writeJSON(payload map[string]any) {
+	if writer.err != nil {
+		return
+	}
+	writer.err = writeJSONLine(writer.stdout, payload)
+}
+
+func (writer *execEventWriter) writeStdout(value string) {
+	if writer.err != nil {
+		return
+	}
+	_, writer.err = io.WriteString(writer.stdout, value)
+}
+
+func (writer *execEventWriter) writeStderr(value string) {
+	if writer.err != nil {
+		return
+	}
+	_, writer.err = io.WriteString(writer.stderr, value)
+}
+
+func writeJSONLine(w io.Writer, payload map[string]any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseToolCallArgs(arguments string) any {
+	if strings.TrimSpace(arguments) == "" {
+		return nil
+	}
+	var args any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return arguments
+	}
+	return args
+}
+
+func streamJSONSideEffect(name string, registry *tools.Registry) string {
+	tool, ok := registry.Get(name)
+	if !ok {
+		return "unknown"
+	}
+	switch tool.Safety().SideEffect {
+	case tools.SideEffectRead:
+		return "read"
+	case tools.SideEffectWrite:
+		return "write"
+	case tools.SideEffectShell:
+		return "shell"
+	case tools.SideEffectNetwork:
+		return "network"
+	default:
+		return "unknown"
+	}
+}
+
+func truncateForStatus(value string) string {
+	compact := strings.Join(strings.Fields(value), " ")
+	if len(compact) > 200 {
+		return compact[:200] + "..."
+	}
+	return compact
+}
+
+func writeStreamJSONError(stdout io.Writer, code string, message string, recoverable bool, exitCode int) int {
+	writer := execEventWriter{
+		stdout: stdout,
+		format: execOutputStreamJSON,
+		runID:  streamjson.CreateRunID(timeNow()),
+	}
+	writer.errorEvent(code, message, recoverable)
+	writer.runEnd("error", exitCode)
+	if writer.err != nil {
+		return exitCrash
+	}
+	return exitCode
+}
+
+func timeNow() time.Time {
+	return time.Now()
+}

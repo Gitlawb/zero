@@ -2,16 +2,17 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 const (
@@ -22,10 +23,14 @@ const (
 )
 
 type execOutputFormat string
+type execInputFormat string
 
 const (
-	execOutputText execOutputFormat = "text"
-	execOutputJSON execOutputFormat = "json"
+	execOutputText       execOutputFormat = "text"
+	execOutputJSON       execOutputFormat = "json"
+	execOutputStreamJSON execOutputFormat = "stream-json"
+	execInputText        execInputFormat  = "text"
+	execInputStreamJSON  execInputFormat  = "stream-json"
 )
 
 type execOptions struct {
@@ -34,7 +39,15 @@ type execOptions struct {
 	model                 string
 	maxTurns              int
 	cwd                   string
+	inputFormat           execInputFormat
 	outputFormat          execOutputFormat
+	autonomy              string
+	enabledTools          []string
+	disabledTools         []string
+	listTools             bool
+	resume                string
+	resumeLatest          bool
+	fork                  string
 	skipPermissionsUnsafe bool
 }
 
@@ -63,7 +76,25 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecUsageError(stderr, err.Error())
 	}
 
-	prompt, err := resolveExecPrompt(options, workspaceRoot)
+	registry := newCoreRegistry(workspaceRoot)
+	if err := validateExecToolFilters(options, registry); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	permissionMode, err := resolveExecPermissionMode(options)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if options.listTools {
+		if err := writeExecToolList(stdout, registry, options, permissionMode); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if err := preflightExecSession(options); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	prompt, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -88,16 +119,30 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
 
-	permissionMode := agent.PermissionModeAuto
-	if options.skipPermissionsUnsafe {
-		permissionMode = agent.PermissionModeUnsafe
+	preparedSession := sessions.PreparedExec{}
+	agentPrompt := prompt
+	if shouldUseExecSession(options) {
+		preparedSession, err = sessions.PrepareExec(sessions.PrepareExecOptions{
+			Title:        createSessionTitle(prompt),
+			Cwd:          workspaceRoot,
+			ModelID:      resolved.Provider.Model,
+			Provider:     resolved.Provider.Name,
+			Resume:       options.resume,
+			ResumeLatest: options.resumeLatest,
+			Fork:         options.fork,
+		})
+		if err != nil {
+			return writeExecUsageError(stderr, err.Error())
+		}
+		agentPrompt = sessions.FormatExecPrompt(prompt, preparedSession)
 	}
-
-	registry := newCoreRegistry(workspaceRoot)
+	runID := streamjson.CreateRunID(time.Now())
 	writer := execEventWriter{
 		stdout:       stdout,
 		stderr:       stderr,
 		format:       options.outputFormat,
+		runID:        runID,
+		sessionID:    preparedSession.Session.SessionID,
 		streamedText: &strings.Builder{},
 	}
 	writer.runStart(workspaceRoot, resolved.Provider, permissionMode)
@@ -111,156 +156,71 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 	}
 
-	result, err := agent.Run(context.Background(), prompt, provider, agent.Options{
+	sessionRecorder := execSessionRecorder{prepared: preparedSession}
+	sessionRecorder.append(sessions.EventMessage, map[string]any{
+		"role":    "user",
+		"content": prompt,
+	})
+
+	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
 		MaxTurns:       resolved.MaxTurns,
 		Registry:       registry,
 		PermissionMode: permissionMode,
+		EnabledTools:   options.enabledTools,
+		DisabledTools:  options.disabledTools,
 		OnText:         writer.text,
-		OnToolCall:     writer.toolCall,
-		OnToolResult:   writer.toolResult,
-		OnUsage:        writer.usage,
+		OnToolCall: func(call agent.ToolCall) {
+			writer.toolCall(call, registry)
+			sessionRecorder.append(sessions.EventToolCall, map[string]any{
+				"id":        call.ID,
+				"name":      call.Name,
+				"arguments": call.Arguments,
+			})
+		},
+		OnToolResult: func(result agent.ToolResult) {
+			writer.toolResult(result)
+			sessionRecorder.append(sessions.EventToolResult, map[string]any{
+				"toolCallId": result.ToolCallID,
+				"name":       result.Name,
+				"status":     string(result.Status),
+				"output":     result.Output,
+			})
+		},
+		OnUsage: func(usage agent.Usage) {
+			writer.usage(usage)
+			sessionRecorder.append(sessions.EventUsage, map[string]any{
+				"promptTokens":     usage.EffectiveInputTokens(),
+				"completionTokens": usage.EffectiveOutputTokens(),
+				"totalTokens":      usage.TotalTokens(),
+			})
+		},
 	})
 	if writer.err != nil {
 		return exitCrash
 	}
 	if err != nil {
+		sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
+		if options.outputFormat == execOutputStreamJSON {
+			writer.errorEvent("provider_error", err.Error(), false)
+			writer.runEnd("error", exitProvider)
+			if writer.err != nil {
+				return exitCrash
+			}
+			return exitProvider
+		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	sessionRecorder.append(sessions.EventMessage, map[string]any{
+		"role":    "assistant",
+		"content": result.FinalAnswer,
+	})
 
 	writer.final(result.FinalAnswer)
+	writer.runEnd("success", exitSuccess)
 	if writer.err != nil {
 		return exitCrash
 	}
 	return exitSuccess
-}
-
-func parseExecArgs(args []string) (execOptions, bool, error) {
-	options := execOptions{outputFormat: execOutputText}
-	if len(args) == 0 {
-		return options, false, execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
-	}
-
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		switch {
-		case arg == "-h" || arg == "--help" || arg == "help":
-			return options, true, nil
-		case arg == "--skip-permissions-unsafe":
-			options.skipPermissionsUnsafe = true
-		case arg == "-f" || arg == "--file":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, false, err
-			}
-			options.file = value
-			index = next
-		case strings.HasPrefix(arg, "--file="):
-			options.file = strings.TrimSpace(strings.TrimPrefix(arg, "--file="))
-		case arg == "-m" || arg == "--model":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, false, err
-			}
-			options.model = value
-			index = next
-		case strings.HasPrefix(arg, "--model="):
-			options.model = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
-		case arg == "--max-turns":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, false, err
-			}
-			maxTurns, err := parseExecMaxTurns(value)
-			if err != nil {
-				return options, false, err
-			}
-			options.maxTurns = maxTurns
-			index = next
-		case strings.HasPrefix(arg, "--max-turns="):
-			maxTurns, err := parseExecMaxTurns(strings.TrimSpace(strings.TrimPrefix(arg, "--max-turns=")))
-			if err != nil {
-				return options, false, err
-			}
-			options.maxTurns = maxTurns
-		case arg == "-C" || arg == "--cwd":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, false, err
-			}
-			options.cwd = value
-			index = next
-		case strings.HasPrefix(arg, "--cwd="):
-			options.cwd = strings.TrimSpace(strings.TrimPrefix(arg, "--cwd="))
-		case arg == "-o" || arg == "--output-format":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, false, err
-			}
-			format, err := parseExecOutputFormat(value)
-			if err != nil {
-				return options, false, err
-			}
-			options.outputFormat = format
-			index = next
-		case strings.HasPrefix(arg, "--output-format="):
-			format, err := parseExecOutputFormat(strings.TrimSpace(strings.TrimPrefix(arg, "--output-format=")))
-			if err != nil {
-				return options, false, err
-			}
-			options.outputFormat = format
-		case arg == "--prompt":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, false, err
-			}
-			options.promptParts = append(options.promptParts, value)
-			index = next
-		case strings.HasPrefix(arg, "--prompt="):
-			options.promptParts = append(options.promptParts, strings.TrimSpace(strings.TrimPrefix(arg, "--prompt=")))
-		case arg == "--":
-			options.promptParts = append(options.promptParts, args[index+1:]...)
-			index = len(args)
-		case strings.HasPrefix(arg, "-"):
-			return options, false, execUsageError{fmt.Sprintf("unknown exec flag %q", arg)}
-		default:
-			options.promptParts = append(options.promptParts, arg)
-		}
-	}
-
-	if options.file == "" && strings.TrimSpace(strings.Join(options.promptParts, " ")) == "" {
-		return options, false, execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
-	}
-	return options, false, nil
-}
-
-func parseExecMaxTurns(value string) (int, error) {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return 0, execUsageError{"--max-turns requires a value"}
-	}
-	maxTurns, err := strconv.Atoi(trimmed)
-	if err != nil || maxTurns <= 0 {
-		return 0, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a positive integer.", value)}
-	}
-	return maxTurns, nil
-}
-
-func nextFlagValue(args []string, index int, flag string) (string, int, error) {
-	if index+1 >= len(args) || strings.TrimSpace(args[index+1]) == "" {
-		return "", index, execUsageError{fmt.Sprintf("%s requires a value", flag)}
-	}
-	return strings.TrimSpace(args[index+1]), index + 1, nil
-}
-
-func parseExecOutputFormat(value string) (execOutputFormat, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", string(execOutputText):
-		return execOutputText, nil
-	case string(execOutputJSON):
-		return execOutputJSON, nil
-	default:
-		return "", execUsageError{fmt.Sprintf("invalid output format %q. Expected text or json.", value)}
-	}
 }
 
 func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {
@@ -284,7 +244,33 @@ func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {
 	return workspaceRoot, nil
 }
 
-func resolveExecPrompt(options execOptions, workspaceRoot string) (string, error) {
+func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reader) (string, error) {
+	if options.inputFormat == execInputStreamJSON {
+		input := ""
+		if options.file != "" {
+			promptPath := options.file
+			if !filepath.IsAbs(promptPath) {
+				promptPath = filepath.Join(workspaceRoot, promptPath)
+			}
+			data, err := os.ReadFile(promptPath)
+			if err != nil {
+				return "", execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
+			}
+			input = string(data)
+		} else {
+			data, err := io.ReadAll(stdin)
+			if err != nil {
+				return "", execUsageError{fmt.Sprintf("failed to read stream-json input: %v", err)}
+			}
+			input = string(data)
+		}
+		prompt, err := streamjson.ParsePrompt(input)
+		if err != nil {
+			return "", execUsageError{err.Error()}
+		}
+		return prompt, nil
+	}
+
 	parts := []string{}
 	inlinePrompt := strings.TrimSpace(strings.Join(options.promptParts, " "))
 	if inlinePrompt != "" {
@@ -322,6 +308,9 @@ func writeExecUsageError(stderr io.Writer, message string) int {
 }
 
 func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutputFormat, code string, message string) int {
+	if format == execOutputStreamJSON {
+		return writeStreamJSONError(stdout, code, message, false, exitProvider)
+	}
 	if format == execOutputJSON {
 		if err := writeJSONLine(stdout, map[string]any{
 			"type":    "error",
@@ -342,137 +331,4 @@ func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutpu
 		return exitCrash
 	}
 	return exitProvider
-}
-
-type execEventWriter struct {
-	stdout       io.Writer
-	stderr       io.Writer
-	format       execOutputFormat
-	streamedText *strings.Builder
-	err          error
-}
-
-func (writer *execEventWriter) runStart(cwd string, provider config.ProviderProfile, permissionMode agent.PermissionMode) {
-	if writer.format != execOutputJSON {
-		return
-	}
-	writer.writeJSON(map[string]any{
-		"type":            "run_start",
-		"cwd":             cwd,
-		"provider":        provider.Name,
-		"model":           provider.Model,
-		"permission_mode": string(permissionMode),
-	})
-}
-
-func (writer *execEventWriter) warning(message string) {
-	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{"type": "warning", "message": message})
-		return
-	}
-	writer.writeStderr("[zero] WARNING: " + message + "\n")
-}
-
-func (writer *execEventWriter) text(delta string) {
-	writer.streamedText.WriteString(delta)
-	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{"type": "text", "delta": delta})
-		return
-	}
-	writer.writeStdout(delta)
-}
-
-func (writer *execEventWriter) toolCall(call agent.ToolCall) {
-	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{
-			"type":      "tool_call",
-			"id":        call.ID,
-			"name":      call.Name,
-			"arguments": call.Arguments,
-		})
-		return
-	}
-	writer.writeStderr("[tool] " + call.Name + "\n")
-}
-
-func (writer *execEventWriter) toolResult(result agent.ToolResult) {
-	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{
-			"type":         "tool_result",
-			"tool_call_id": result.ToolCallID,
-			"name":         result.Name,
-			"status":       string(result.Status),
-			"output":       result.Output,
-		})
-		return
-	}
-	writer.writeStderr("[result] " + truncateForStatus(result.Output) + "\n")
-}
-
-func (writer *execEventWriter) usage(usage agent.Usage) {
-	if writer.format != execOutputJSON {
-		return
-	}
-	writer.writeJSON(map[string]any{
-		"type":              "usage",
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens(),
-	})
-}
-
-func (writer *execEventWriter) final(answer string) {
-	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{"type": "final", "text": answer})
-		writer.writeJSON(map[string]any{"type": "done", "exit_code": exitSuccess})
-		return
-	}
-
-	if writer.streamedText.Len() == 0 && answer != "" {
-		writer.writeStdout(answer)
-		writer.streamedText.WriteString(answer)
-	}
-	if writer.streamedText.Len() > 0 && !strings.HasSuffix(writer.streamedText.String(), "\n") {
-		writer.writeStdout("\n")
-	}
-}
-
-func (writer *execEventWriter) writeJSON(payload map[string]any) {
-	if writer.err != nil {
-		return
-	}
-	writer.err = writeJSONLine(writer.stdout, payload)
-}
-
-func (writer *execEventWriter) writeStdout(value string) {
-	if writer.err != nil {
-		return
-	}
-	_, writer.err = io.WriteString(writer.stdout, value)
-}
-
-func (writer *execEventWriter) writeStderr(value string) {
-	if writer.err != nil {
-		return
-	}
-	_, writer.err = io.WriteString(writer.stderr, value)
-}
-
-func writeJSONLine(w io.Writer, payload map[string]any) error {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	if _, err := w.Write(append(data, '\n')); err != nil {
-		return err
-	}
-	return nil
-}
-
-func truncateForStatus(value string) string {
-	compact := strings.Join(strings.Fields(value), " ")
-	if len(compact) > 200 {
-		return compact[:200] + "..."
-	}
-	return compact
 }
