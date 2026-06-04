@@ -9,6 +9,9 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -23,6 +26,9 @@ type appDeps struct {
 	resolveConfig   func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	newProvider     func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newSessionStore func() *sessions.Store
+	loadPlugins     func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks       func(hooks.LoadOptions) (hooks.LoadResult, error)
+	newMCPStore     func() (*mcp.PermissionStore, error)
 	runTUI          func(context.Context, tui.Options) int
 	now             func() time.Time
 }
@@ -49,6 +55,11 @@ func defaultAppDeps() appDeps {
 		},
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
+		},
+		loadPlugins: plugins.Load,
+		loadHooks:   hooks.LoadConfig,
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return mcp.NewPermissionStore(mcp.StoreOptions{})
 		},
 		runTUI: tui.Run,
 		now:    time.Now,
@@ -89,6 +100,12 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runDoctor(args[1:], stdout, stderr, deps)
 	case "search", "find":
 		return runSearch(args[1:], stdout, stderr, deps)
+	case "plugins", "plugin":
+		return runPlugins(args[1:], stdout, stderr, deps)
+	case "hooks":
+		return runHooks(args[1:], stdout, stderr, deps)
+	case "mcp":
+		return runMCP(args[1:], stdout, stderr, deps)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -113,6 +130,15 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
+	}
+	if deps.loadPlugins == nil {
+		deps.loadPlugins = defaults.loadPlugins
+	}
+	if deps.loadHooks == nil {
+		deps.loadHooks = defaults.loadHooks
+	}
+	if deps.newMCPStore == nil {
+		deps.newMCPStore = defaults.newMCPStore
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
@@ -189,6 +215,9 @@ Commands:
   doctor     Run backend health checks for config and provider setup
   search     Search persisted local Zero session events
   find       Alias for search
+  plugins    Inspect local Zero plugin manifests
+  hooks      Inspect Zero hook configuration
+  mcp        Manage MCP backend settings
   help       Show this help
   version    Print version
 
