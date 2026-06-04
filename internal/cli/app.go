@@ -1,8 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 const version = "0.1.0"
@@ -28,6 +34,8 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "exec":
+		return runExec(args[1:], stdout, stderr)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -46,6 +54,7 @@ Usage:
   zero [command]
 
 Commands:
+  exec       Run a one-shot prompt through the Go agent runtime
   help       Show this help
   version    Print version
 
@@ -54,4 +63,81 @@ Flags:
   -v, --version    Print version
 `)
 	return err
+}
+
+func runExec(args []string, stdout io.Writer, stderr io.Writer) int {
+	if len(args) == 0 {
+		if _, err := fmt.Fprintln(stderr, "Prompt required. Use `zero exec \"prompt\"`."); err != nil {
+			return 1
+		}
+		return 2
+	}
+
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
+		if err := writeExecHelp(stdout); err != nil {
+			return 1
+		}
+		return 0
+	}
+
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		if _, writeErr := fmt.Fprintf(stderr, "failed to resolve workspace: %v\n", err); writeErr != nil {
+			return 1
+		}
+		return 1
+	}
+
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreTools(workspaceRoot) {
+		registry.Register(tool)
+	}
+
+	prompt := strings.Join(args, " ")
+	result, err := agent.Run(context.Background(), prompt, offlineProvider{}, agent.Options{
+		Registry: registry,
+	})
+	if err != nil {
+		if _, writeErr := fmt.Fprintf(stderr, "agent runtime failed: %v\n", err); writeErr != nil {
+			return 1
+		}
+		return 1
+	}
+
+	if _, err := fmt.Fprintln(stdout, result.FinalAnswer); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func writeExecHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero exec <prompt>
+
+Runs a one-shot prompt through the Go agent runtime.
+`)
+	return err
+}
+
+type offlineProvider struct{}
+
+func (offlineProvider) StreamCompletion(ctx context.Context, request agent.CompletionRequest) (<-chan agent.StreamEvent, error) {
+	prompt := ""
+	for index := len(request.Messages) - 1; index >= 0; index-- {
+		if request.Messages[index].Role == agent.RoleUser {
+			prompt = request.Messages[index].Content
+			break
+		}
+	}
+
+	ch := make(chan agent.StreamEvent, 2)
+	select {
+	case <-ctx.Done():
+		close(ch)
+		return ch, ctx.Err()
+	case ch <- agent.StreamEvent{Type: agent.EventText, Content: "Go agent runtime ready: " + prompt}:
+	}
+	ch <- agent.StreamEvent{Type: agent.EventDone}
+	close(ch)
+	return ch, nil
 }

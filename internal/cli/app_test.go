@@ -63,6 +63,7 @@ func assertHelpOutput(t *testing.T, args []string) {
 		"ZERO terminal coding agent",
 		"Usage:",
 		"zero [command]",
+		"exec",
 		"--version",
 	} {
 		if !strings.Contains(output, want) {
@@ -71,6 +72,40 @@ func assertHelpOutput(t *testing.T, args []string) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunExecPrintsOfflineRuntimeResponse(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec", "hello", "zero"}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "hello zero") {
+		t.Fatalf("expected exec response to include prompt, got %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunExecRequiresPrompt(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec"}, &stdout, &stderr)
+
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2, got %d", exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Prompt required") {
+		t.Fatalf("expected prompt error, got %q", stderr.String())
 	}
 }
 
