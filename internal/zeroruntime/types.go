@@ -8,11 +8,26 @@ type MessageRole string
 // StreamEventType identifies one event in a provider completion stream.
 type StreamEventType string
 
+// AgentEventType is the stable PRD-level event stream shared by TUI,
+// headless output, sessions, and future editor integrations.
+type AgentEventType string
+
 const (
 	MessageRoleSystem    MessageRole = "system"
 	MessageRoleUser      MessageRole = "user"
 	MessageRoleAssistant MessageRole = "assistant"
 	MessageRoleTool      MessageRole = "tool"
+)
+
+const (
+	AgentEventText       AgentEventType = "text"
+	AgentEventToolCall   AgentEventType = "tool_call"
+	AgentEventToolResult AgentEventType = "tool_result"
+	AgentEventThinking   AgentEventType = "thinking"
+	AgentEventUsage      AgentEventType = "usage"
+	AgentEventPlanUpdate AgentEventType = "plan_update"
+	AgentEventError      AgentEventType = "error"
+	AgentEventTurnEnd    AgentEventType = "turn_end"
 )
 
 const (
@@ -47,16 +62,47 @@ type ToolDefinition struct {
 	Parameters  map[string]any
 }
 
+// TokenUsage accepts provider-specific token aliases before normalization.
+type TokenUsage struct {
+	InputTokens       int
+	PromptTokens      int
+	CachedInputTokens int
+	OutputTokens      int
+	CompletionTokens  int
+	ReasoningTokens   int
+}
+
 // Usage records normalized token accounting reported by a provider.
 type Usage struct {
+	InputTokens       int
+	OutputTokens      int
 	PromptTokens      int
 	CompletionTokens  int
 	CachedInputTokens int
+	ReasoningTokens   int
 }
 
 // TotalTokens returns prompt plus completion tokens.
 func (usage Usage) TotalTokens() int {
-	return usage.PromptTokens + usage.CompletionTokens
+	return usage.EffectiveInputTokens() + usage.EffectiveOutputTokens() + usage.ReasoningTokens
+}
+
+func (usage Usage) EffectiveInputTokens() int {
+	if usage.InputTokens != 0 {
+		return usage.InputTokens
+	}
+	return usage.PromptTokens
+}
+
+func (usage Usage) EffectiveOutputTokens() int {
+	if usage.OutputTokens != 0 {
+		return usage.OutputTokens
+	}
+	return usage.CompletionTokens
+}
+
+func (usage Usage) BillableOutputTokens() int {
+	return usage.EffectiveOutputTokens() + usage.ReasoningTokens
 }
 
 // StreamEvent is one normalized event emitted by a streaming provider.

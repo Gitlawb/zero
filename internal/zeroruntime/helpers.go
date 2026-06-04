@@ -65,9 +65,12 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 					delete(pendingToolCalls, event.ToolCallID)
 				}
 			case StreamEventUsage:
+				collected.Usage.InputTokens += event.Usage.InputTokens
+				collected.Usage.OutputTokens += event.Usage.OutputTokens
 				collected.Usage.PromptTokens += event.Usage.PromptTokens
 				collected.Usage.CompletionTokens += event.Usage.CompletionTokens
 				collected.Usage.CachedInputTokens += event.Usage.CachedInputTokens
+				collected.Usage.ReasoningTokens += event.Usage.ReasoningTokens
 				if options.OnUsage != nil {
 					options.OnUsage(event.Usage)
 				}
