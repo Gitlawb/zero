@@ -486,7 +486,7 @@ func parseHooks(raw any) ([]HookExtension, error) {
 }
 
 func ResolvePluginPath(pluginDir string, value string, fieldPath string) (string, error) {
-	if filepath.IsAbs(value) || isWindowsAbs(value) {
+	if filepath.IsAbs(value) || isRootedPath(value) || isWindowsAbs(value) {
 		return "", ManifestError{FieldPath: fieldPath, Message: "must stay inside the plugin directory."}
 	}
 
@@ -696,6 +696,10 @@ func parseHookEvent(raw any, field string) (HookEvent, error) {
 
 func isWindowsAbs(value string) bool {
 	return regexp.MustCompile(`^[A-Za-z]:[\\/]|^\\\\`).MatchString(value)
+}
+
+func isRootedPath(value string) bool {
+	return strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`)
 }
 
 func resolveCwd(cwd string) (string, error) {
