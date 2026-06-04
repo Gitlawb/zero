@@ -72,8 +72,15 @@ func CoreWriteTools(workspaceRoot string) []Tool {
 	}
 }
 
+func CoreShellTools(workspaceRoot string) []Tool {
+	return []Tool{
+		NewBashTool(workspaceRoot),
+	}
+}
+
 func CoreTools(workspaceRoot string) []Tool {
 	tools := append([]Tool{}, CoreReadOnlyTools(workspaceRoot)...)
 	tools = append(tools, CoreWriteTools(workspaceRoot)...)
+	tools = append(tools, CoreShellTools(workspaceRoot)...)
 	return tools
 }
