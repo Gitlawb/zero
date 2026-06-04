@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
+import { resolveNpmWrapperTarget } from '../src/npm-wrapper';
 import {
   getGoArch,
   getGoOS,
@@ -98,5 +99,51 @@ describe('Go binary build script', () => {
     expect(goBuildLdflags('0.1.0')).toContain(
       '-X github.com/Gitlawb/zero/internal/cli.version=0.1.0'
     );
+  });
+});
+
+describe('npm wrapper entrypoint', () => {
+  it('points installed zero commands at the wrapper instead of the TS app', async () => {
+    const pkg = await Bun.file('package.json').json() as { bin?: { zero?: string }; module?: string };
+
+    expect(pkg.bin?.zero).toBe('bin/zero.ts');
+    expect(pkg.module).toBe('bin/zero.ts');
+  });
+
+  it('prefers the Go binary and keeps the TS CLI as a local fallback', () => {
+    const root = join('repo');
+    const existing = new Set([
+      join(root, 'zero.exe'),
+      join(root, 'src', 'index.ts'),
+    ]);
+
+    const native = resolveNpmWrapperTarget({
+      root,
+      platform: 'win32',
+      bunPath: 'bun',
+      args: ['--version'],
+      exists: (path) => existing.has(path),
+    });
+
+    expect(native).toEqual({
+      kind: 'native',
+      path: join(root, 'zero.exe'),
+      command: [join(root, 'zero.exe'), '--version'],
+    });
+
+    existing.delete(join(root, 'zero.exe'));
+    const fallback = resolveNpmWrapperTarget({
+      root,
+      platform: 'win32',
+      bunPath: 'bun',
+      args: ['--version'],
+      exists: (path) => existing.has(path),
+    });
+
+    expect(fallback).toEqual({
+      kind: 'typescript',
+      path: join(root, 'src', 'index.ts'),
+      command: ['bun', join(root, 'src', 'index.ts'), '--version'],
+    });
   });
 });

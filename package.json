@@ -2,10 +2,10 @@
   "name": "zero",
   "version": "0.1.0",
   "packageManager": "bun@1.3.14",
-  "module": "src/index.ts",
+  "module": "bin/zero.ts",
   "type": "module",
   "bin": {
-    "zero": "src/index.ts"
+    "zero": "bin/zero.ts"
   },
   "scripts": {
     "dev": "bun run src/index.ts",

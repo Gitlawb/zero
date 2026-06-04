@@ -54,6 +54,10 @@ await $`bun run smoke:build`;
 await cp(zeroArtifactPath, stagedBinaryPath);
 await cp('README.md', join(stagingDir, 'README.md'));
 await cp('package.json', join(stagingDir, 'package.json'));
+await mkdir(join(stagingDir, 'bin'), { recursive: true });
+await mkdir(join(stagingDir, 'src'), { recursive: true });
+await cp(join('bin', 'zero.ts'), join(stagingDir, 'bin', 'zero.ts'));
+await cp(join('src', 'npm-wrapper.ts'), join(stagingDir, 'src', 'npm-wrapper.ts'));
 await writeFile(join(stagingDir, 'VERSION'), `${version}\n`);
 
 if (process.platform === 'win32') {

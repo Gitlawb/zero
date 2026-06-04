@@ -39,8 +39,13 @@ func TestParseCommand(t *testing.T) {
 		{input: "/help", kind: commandHelp},
 		{input: "/clear", kind: commandClear},
 		{input: "/exit", kind: commandExit},
+		{input: "/quit", kind: commandExit},
 		{input: "/tools", kind: commandTools},
 		{input: "/permissions", kind: commandPermissions},
+		{input: "/context", kind: commandContext},
+		{input: "/model", kind: commandModel},
+		{input: "/model list", kind: commandModel, text: "list"},
+		{input: "/debug-mode", kind: commandDebug},
 		{input: "hello zero", kind: commandPrompt, text: "hello zero"},
 	}
 
@@ -51,6 +56,25 @@ func TestParseCommand(t *testing.T) {
 				t.Fatalf("expected kind=%v text=%q, got kind=%v text=%q", tc.kind, tc.text, command.kind, command.text)
 			}
 		})
+	}
+}
+
+func TestCommandRegistryResolvesAliasesAndFormatsHelp(t *testing.T) {
+	names := listCommandNames()
+	for _, name := range []string{"/help", "/model", "/provider", "/context", "/debug-mode", "/quit"} {
+		if !stringSliceContains(names, name) {
+			t.Fatalf("expected command names to contain %s, got %#v", name, names)
+		}
+	}
+
+	resolved, ok := resolveCommand("/quit")
+	if !ok || resolved.kind != commandExit {
+		t.Fatalf("expected /quit to resolve to exit, got ok=%v command=%#v", ok, resolved)
+	}
+
+	help := strings.Join(formatCommandHelpLines(), "\n")
+	for _, want := range []string{"/model", "/context", "/debug", "/permissions", "model"} {
+		assertContains(t, help, want)
 	}
 }
 
@@ -105,6 +129,9 @@ func TestHelpCommandAppendsHelpRow(t *testing.T) {
 	if !transcriptContains(next.transcript, "/tools") {
 		t.Fatalf("expected help transcript to mention /tools, got %#v", next.transcript)
 	}
+	if !transcriptContains(next.transcript, "/model") || !transcriptContains(next.transcript, "/context") {
+		t.Fatalf("expected help transcript to mention model and context commands, got %#v", next.transcript)
+	}
 }
 
 func TestClearCommandResetsTranscript(t *testing.T) {
@@ -131,6 +158,58 @@ func TestToolsCommandListsRegisteredTools(t *testing.T) {
 
 	if !transcriptContains(next.transcript, "read_file") {
 		t.Fatalf("expected tools transcript to list read_file, got %#v", next.transcript)
+	}
+}
+
+func TestContextCommandShowsSessionState(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool("."))
+	m := newModel(context.Background(), Options{
+		Cwd:            `D:\codings\Opensource\Zero`,
+		ProviderName:   "openai",
+		ModelName:      "gpt-4.1",
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAsk,
+	})
+	m.input.SetValue("/context")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /context to be handled without starting an agent run")
+	}
+	for _, want := range []string{
+		`D:\codings\Opensource\Zero`,
+		"provider: openai",
+		"model: gpt-4.1",
+		"permission mode: ask",
+		"tools: 1",
+	} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected context transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+func TestModelCommandShowsActiveModelWithoutRunningAgent(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     &fakeProvider{},
+	})
+	m.input.SetValue("/model list")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Model switching"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
+		}
 	}
 }
 
@@ -256,6 +335,15 @@ func assertContains(t *testing.T, text string, want string) {
 func transcriptContains(rows []transcriptRow, want string) bool {
 	for _, row := range rows {
 		if strings.Contains(row.text, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}
