@@ -66,7 +66,7 @@ These contracts are required before dependent work starts:
 
 Goal: Zero runs locally, has basic tools, one OpenAI-compatible provider, basic TUI, tests, and project scripts.
 
-Current status: PR #6 covers much of M0. This v2 treats M0 as the baseline and starts workload balancing from M1.
+Current status: the earlier TS/Bun M0 baseline is historical context only. The Go migration resets M0 around a new Go module, `cmd/zero` entrypoint, Bubble Tea TUI shell, core tools, tests, and validation commands. M1 work should start only after these Go foundation PRs are merged.
 
 ### Vasanth
 
@@ -74,15 +74,15 @@ Current status: PR #6 covers much of M0. This v2 treats M0 as the baseline and s
 - Core file tools: read, write, edit, grep, list directory, bash, plan.
 - Basic Bubble Tea TUI and message/tool rendering.
 - Basic agent loop integration.
-- PR: existing PR #6 plus follow-up fixes if needed.
+- PR: `feat/go-m0-tools-tui`.
 
 ### Gnanam
 
-- Review and stabilize provider contract from PR #6.
+- Define the first Go provider contract for the M0 OpenAI-compatible provider.
 - Define first draft of normalized `Usage` type.
 - Define first draft of model registry type.
 - Review config loader and list missing provider/config fields.
-- PR: `feat/m0-runtime-contracts` if not already covered.
+- PR: `feat/go-m0-runtime-contracts`.
 
 ### Anandan
 
@@ -563,10 +563,10 @@ This keeps workload balanced while preserving clean ownership boundaries.
 
 ## Immediate Next Steps
 
-1. Merge or close PR #6 with M0 baseline decision.
-2. Anandan adds/validates project scripts and CI baseline if missing.
-3. Gnanam starts `feat/m1-model-registry`.
-4. Vasanth starts model selector UI only after registry API shape is agreed.
-5. Gnanam starts provider factory before Anthropic/Gemini providers.
-6. Anandan starts CI matrix and binary build spike in parallel.
+1. Reset M0 for the Go migration and treat old TS/Bun PR #6 as historical only.
+2. Anandan starts `feat/go-m0-module-entrypoint` with `go.mod`, `cmd/zero`, `go test ./...`, and `go build ./cmd/zero`.
+3. Gnanam starts `feat/go-m0-runtime-contracts` for the Go provider/tool/runtime contracts.
+4. Vasanth starts `feat/go-m0-tools-tui` for core tools, Bubble Tea startup shell, and basic agent loop integration.
+5. Anandan adds CI smoke coverage for the Go commands and the npm wrapper smoke checklist when wrapper files land.
+6. Start M1 model registry, provider factory, and model selector work only after the Go M0 foundation PRs are merged.
 
