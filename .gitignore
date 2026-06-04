@@ -35,5 +35,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 .cursor
 
-zero
-zero.exe
+/zero
+/zero.exe
