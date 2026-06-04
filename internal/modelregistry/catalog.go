@@ -101,7 +101,7 @@ func (registry Registry) RequireProvider(pattern string, provider ProviderKind) 
 		return ModelEntry{}, err
 	}
 	if model.Provider != provider {
-		return ModelEntry{}, fmt.Errorf("Zero model %s belongs to %s, not %s", model.ID, model.Provider, provider)
+		return ModelEntry{}, fmt.Errorf("zero model %s belongs to %s, not %s", model.ID, model.Provider, provider)
 	}
 	return model, nil
 }

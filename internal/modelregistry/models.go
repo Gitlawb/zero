@@ -160,8 +160,13 @@ func (cost ModelCost) Validate() error {
 	if cost.InputPerMillion < 0 || cost.OutputPerMillion < 0 || cost.CachedInputPerMillion < 0 {
 		return fmt.Errorf("model cost values must be non-negative")
 	}
-	if len(cost.Tiers) == 0 && cost.InputPerMillion == 0 && cost.OutputPerMillion == 0 {
-		return fmt.Errorf("model cost must include base pricing or pricing tiers")
+	if len(cost.Tiers) == 0 {
+		if cost.InputPerMillion == 0 && cost.OutputPerMillion == 0 {
+			return fmt.Errorf("model cost must include base pricing or pricing tiers")
+		}
+		if cost.InputPerMillion == 0 || cost.OutputPerMillion == 0 {
+			return fmt.Errorf("model cost base input and output rates must be positive")
+		}
 	}
 	if err := validateCostTiers(cost.Tiers); err != nil {
 		return err
@@ -240,6 +245,7 @@ func NewRegistry(entries []ModelEntry) (Registry, error) {
 		if err := entry.Validate(); err != nil {
 			return Registry{}, fmt.Errorf("invalid model %q: %w", entry.ID, err)
 		}
+		clonedEntry := cloneModelEntry(entry)
 		modelID := normalizePattern(entry.ID)
 		if modelID == "" {
 			return Registry{}, fmt.Errorf("model id is required")
@@ -248,18 +254,18 @@ func NewRegistry(entries []ModelEntry) (Registry, error) {
 			return Registry{}, fmt.Errorf("duplicate model id %q", modelID)
 		}
 		seenModelIDs[modelID] = struct{}{}
-		if err := registry.register(entry.ID, entry); err != nil {
+		if err := registry.register(entry.ID, clonedEntry); err != nil {
 			return Registry{}, err
 		}
-		if err := registry.register(entry.APIModel, entry); err != nil {
+		if err := registry.register(entry.APIModel, clonedEntry); err != nil {
 			return Registry{}, err
 		}
 		for _, alias := range entry.Aliases {
-			if err := registry.register(alias, entry); err != nil {
+			if err := registry.register(alias, clonedEntry); err != nil {
 				return Registry{}, err
 			}
 		}
-		registry.models = append(registry.models, cloneModelEntry(entry))
+		registry.models = append(registry.models, clonedEntry)
 	}
 	return registry, nil
 }
