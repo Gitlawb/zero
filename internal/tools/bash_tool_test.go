@@ -183,7 +183,7 @@ func helperCommand(name string) string {
 
 func shellQuote(value string) string {
 	if runtime.GOOS == "windows" {
-		return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
