@@ -160,7 +160,7 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 	}
 
 	profile := ProviderProfile{
-		Name:         env.Name,
+		Name:         providerEnvTargetName(cfg, providerKind, env.Name),
 		ProviderKind: providerKind,
 		APIKey:       apiKey,
 		BaseURL:      baseURL,
@@ -173,6 +173,39 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 		profile.ProviderKind = ProviderKindOpenAICompatible
 	}
 	mergeProvider(cfg, profile)
+}
+
+func providerEnvTargetName(cfg *FileConfig, providerKind ProviderKind, fallback string) string {
+	if activeName := strings.TrimSpace(cfg.ActiveProvider); activeName != "" {
+		for _, provider := range cfg.Providers {
+			if strings.TrimSpace(provider.Name) != activeName {
+				continue
+			}
+			if normalizedProfileKind(provider) == providerKind {
+				return activeName
+			}
+			break
+		}
+	}
+
+	for _, provider := range cfg.Providers {
+		if normalizedProfileKind(provider) != providerKind {
+			continue
+		}
+		if name := strings.TrimSpace(provider.Name); name != "" {
+			return name
+		}
+	}
+
+	return strings.TrimSpace(fallback)
+}
+
+func normalizedProfileKind(profile ProviderProfile) ProviderKind {
+	kind := strings.TrimSpace(string(profile.ProviderKind))
+	if kind == "" {
+		kind = strings.TrimSpace(profile.Provider)
+	}
+	return ProviderKind(strings.ToLower(kind))
 }
 
 func envValue(env map[string]string, key string) string {

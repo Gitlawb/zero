@@ -44,7 +44,7 @@ func New(options Options) (*Provider, error) {
 	if model == "" {
 		return nil, errors.New("gemini provider requires a model")
 	}
-	maxTokens, err := providerio.PositiveOrDefault(options.MaxTokens, defaultMaxTokens, "Zero Gemini provider maxTokens")
+	maxTokens, err := providerio.PositiveOrDefault(options.MaxTokens, defaultMaxTokens, "zero Gemini provider maxTokens")
 	if err != nil {
 		return nil, err
 	}
@@ -141,9 +141,13 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 	}
 	if payload.Error != nil {
 		message := firstNonEmpty(payload.Error.Message, payload.Error.Status, "Gemini stream error")
+		status := payload.Error.Code
+		if status == 0 {
+			status = http.StatusInternalServerError
+		}
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
-			Error: provider.classifiedError(http.StatusInternalServerError, message),
+			Error: provider.classifiedError(status, message),
 		})
 		state.done = true
 		return false
@@ -249,7 +253,7 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 		return generateContentRequest{}, err
 	}
 	if len(contents) == 0 {
-		return generateContentRequest{}, errors.New("Zero Gemini provider requires at least one non-system message")
+		return generateContentRequest{}, errors.New("zero Gemini provider requires at least one non-system message")
 	}
 
 	mapped := generateContentRequest{
@@ -286,7 +290,7 @@ func mapMessages(messages []zeroruntime.Message) (*geminiContent, []geminiConten
 			}
 		case zeroruntime.MessageRoleTool:
 			if message.ToolCallID == "" {
-				return nil, nil, errors.New("Zero Gemini provider requires toolCallId on tool result messages")
+				return nil, nil, errors.New("zero Gemini provider requires toolCallId on tool result messages")
 			}
 			name := toolNamesByID[message.ToolCallID]
 			if name == "" {
@@ -327,7 +331,7 @@ func mapMessages(messages []zeroruntime.Message) (*geminiContent, []geminiConten
 	}
 	var systemInstruction *geminiContent
 	if len(systemParts) > 0 {
-		systemInstruction = &geminiContent{Role: "system", Parts: systemParts}
+		systemInstruction = &geminiContent{Parts: systemParts}
 	}
 	return systemInstruction, contents, nil
 }
@@ -346,11 +350,11 @@ func parseToolArguments(argumentsJSON string, toolName string) (map[string]any, 
 	}
 	var parsed any
 	if err := json.Unmarshal([]byte(argumentsJSON), &parsed); err != nil {
-		return nil, fmt.Errorf("Zero Gemini provider could not parse tool arguments for %s as JSON", toolName)
+		return nil, fmt.Errorf("zero Gemini provider could not parse tool arguments for %s as JSON", toolName)
 	}
 	object, ok := parsed.(map[string]any)
 	if !ok || object == nil {
-		return nil, fmt.Errorf("Zero Gemini provider requires tool arguments for %s to be a JSON object", toolName)
+		return nil, fmt.Errorf("zero Gemini provider requires tool arguments for %s to be a JSON object", toolName)
 	}
 	return object, nil
 }
@@ -361,7 +365,7 @@ func normalizeFunctionCallArgs(value any, toolName string) (map[string]any, erro
 	}
 	object, ok := value.(map[string]any)
 	if !ok || object == nil {
-		return nil, fmt.Errorf("Zero Gemini provider requires streamed tool arguments for %s to be a JSON object", toolName)
+		return nil, fmt.Errorf("zero Gemini provider requires streamed tool arguments for %s to be a JSON object", toolName)
 	}
 	return object, nil
 }

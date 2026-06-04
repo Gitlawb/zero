@@ -174,6 +174,49 @@ func TestResolveUsesAnthropicEnvFallback(t *testing.T) {
 	}
 }
 
+func TestResolveUsesAnthropicEnvFallbackWithCustomProfile(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "claude-prod",
+		"providers": [{
+			"name": "claude-prod",
+			"provider_kind": "anthropic",
+			"description": "production Claude"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"ZERO_PROVIDER":      "claude-prod",
+			"ANTHROPIC_API_KEY":  "sk-ant-env",
+			"ANTHROPIC_BASE_URL": "https://anthropic.example",
+			"ANTHROPIC_MODEL":    "claude-sonnet-4.5",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.ActiveProvider != "claude-prod" {
+		t.Fatalf("ActiveProvider = %q, want claude-prod", resolved.ActiveProvider)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindAnthropic {
+		t.Fatalf("ProviderKind = %q, want anthropic", resolved.Provider.ProviderKind)
+	}
+	if resolved.Provider.APIKey != "sk-ant-env" || resolved.Provider.Model != "claude-sonnet-4.5" {
+		t.Fatalf("Provider = %#v, want Anthropic env credentials/model on custom profile", resolved.Provider)
+	}
+	if resolved.Provider.BaseURL != "https://anthropic.example" {
+		t.Fatalf("BaseURL = %q, want Anthropic env URL", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.Description != "production Claude" {
+		t.Fatalf("Description = %q, want existing custom profile metadata preserved", resolved.Provider.Description)
+	}
+	if len(resolved.Providers) != 1 {
+		t.Fatalf("Providers = %#v, want only custom Anthropic profile", resolved.Providers)
+	}
+}
+
 func TestResolveUsesGoogleEnvFallbackAliases(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		Env: map[string]string{

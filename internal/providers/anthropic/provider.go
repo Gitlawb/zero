@@ -48,7 +48,7 @@ func New(options Options) (*Provider, error) {
 	if model == "" {
 		return nil, errors.New("anthropic provider requires a model")
 	}
-	maxTokens, err := providerio.PositiveOrDefault(options.MaxTokens, defaultMaxTokens, "Zero Anthropic provider maxTokens")
+	maxTokens, err := providerio.PositiveOrDefault(options.MaxTokens, defaultMaxTokens, "zero Anthropic provider maxTokens")
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +245,7 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		return messagesRequest{}, err
 	}
 	if len(messages) == 0 {
-		return messagesRequest{}, errors.New("Zero Anthropic provider requires at least one non-system message")
+		return messagesRequest{}, errors.New("zero Anthropic provider requires at least one non-system message")
 	}
 
 	mapped := messagesRequest{
@@ -281,7 +281,7 @@ func mapMessages(messages []zeroruntime.Message) (string, []anthropicMessage, er
 			}
 		case zeroruntime.MessageRoleTool:
 			if message.ToolCallID == "" {
-				return "", nil, errors.New("Zero Anthropic provider requires toolCallId on tool result messages")
+				return "", nil, errors.New("zero Anthropic provider requires toolCallId on tool result messages")
 			}
 			appendUserBlocks(&mapped, []map[string]any{{
 				"type":        "tool_result",
@@ -350,11 +350,11 @@ func parseToolArguments(argumentsJSON string, toolName string) (map[string]any, 
 	}
 	var parsed any
 	if err := json.Unmarshal([]byte(argumentsJSON), &parsed); err != nil {
-		return nil, fmt.Errorf("Zero Anthropic provider could not parse tool arguments for %s as JSON", toolName)
+		return nil, fmt.Errorf("zero Anthropic provider could not parse tool arguments for %s as JSON", toolName)
 	}
 	object, ok := parsed.(map[string]any)
 	if !ok || object == nil {
-		return nil, fmt.Errorf("Zero Anthropic provider requires tool arguments for %s to be a JSON object", toolName)
+		return nil, fmt.Errorf("zero Anthropic provider requires tool arguments for %s to be a JSON object", toolName)
 	}
 	return object, nil
 }

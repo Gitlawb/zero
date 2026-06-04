@@ -81,8 +81,8 @@ func TestStreamCompletionPostsGenerateContentRequest(t *testing.T) {
 		t.Fatalf("User-Agent = %q, want zero-test", gotUserAgent)
 	}
 	systemInstruction := gotBody["systemInstruction"].(map[string]any)
-	if systemInstruction["role"] != "system" {
-		t.Fatalf("systemInstruction = %#v, want system role", systemInstruction)
+	if _, ok := systemInstruction["role"]; ok {
+		t.Fatalf("systemInstruction = %#v, want omitted role", systemInstruction)
 	}
 	generationConfig := gotBody["generationConfig"].(map[string]any)
 	if generationConfig["maxOutputTokens"] != float64(65_536) {
@@ -209,15 +209,15 @@ func TestStreamCompletionClassifiesHTTPAndPromptBlockErrors(t *testing.T) {
 
 func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 	provider := newTestProviderWithKey(t, "sk-google", func(w http.ResponseWriter, r *http.Request) {
-		writeSSE(w, `{"error":{"message":"stream failed sk-google","status":"UNAVAILABLE"}}`)
+		writeSSE(w, `{"error":{"code":429,"message":"stream failed sk-google","status":"RESOURCE_EXHAUSTED"}}`)
 	})
 
 	events := collectProviderEvents(t, provider)
 	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
 		t.Fatalf("events = %#v, want one error", events)
 	}
-	if !strings.HasPrefix(events[0].Error, "provider error:") {
-		t.Fatalf("error = %q, want provider error prefix", events[0].Error)
+	if !strings.HasPrefix(events[0].Error, "rate limit error:") {
+		t.Fatalf("error = %q, want rate limit error prefix", events[0].Error)
 	}
 	if strings.Contains(events[0].Error, "sk-google") {
 		t.Fatalf("error leaked token: %q", events[0].Error)
