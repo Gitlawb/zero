@@ -124,24 +124,52 @@ func applyEnv(cfg *FileConfig, env map[string]string) {
 		cfg.ActiveProvider = activeProvider
 	}
 
-	apiKey := envValue(env, "OPENAI_API_KEY")
-	baseURL := strings.TrimSpace(envValue(env, "OPENAI_BASE_URL"))
-	model := strings.TrimSpace(envValue(env, "OPENAI_MODEL"))
+	applyProviderEnv(cfg, ProviderKindOpenAI, envProfile{
+		Name:    string(ProviderKindOpenAI),
+		APIKey:  envValue(env, "OPENAI_API_KEY"),
+		BaseURL: envValue(env, "OPENAI_BASE_URL"),
+		Model:   envValue(env, "OPENAI_MODEL"),
+	})
+	applyProviderEnv(cfg, ProviderKindAnthropic, envProfile{
+		Name:    string(ProviderKindAnthropic),
+		APIKey:  envValue(env, "ANTHROPIC_API_KEY"),
+		BaseURL: envValue(env, "ANTHROPIC_BASE_URL"),
+		Model:   envValue(env, "ANTHROPIC_MODEL"),
+	})
+	applyProviderEnv(cfg, ProviderKindGoogle, envProfile{
+		Name:    string(ProviderKindGoogle),
+		APIKey:  firstNonEmpty(envValue(env, "GEMINI_API_KEY"), envValue(env, "GOOGLE_API_KEY")),
+		BaseURL: firstNonEmpty(envValue(env, "GEMINI_BASE_URL"), envValue(env, "GOOGLE_BASE_URL")),
+		Model:   firstNonEmpty(envValue(env, "GEMINI_MODEL"), envValue(env, "GOOGLE_MODEL")),
+	})
+}
+
+type envProfile struct {
+	Name    string
+	APIKey  string
+	BaseURL string
+	Model   string
+}
+
+func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile) {
+	apiKey := strings.TrimSpace(env.APIKey)
+	baseURL := strings.TrimSpace(env.BaseURL)
+	model := strings.TrimSpace(env.Model)
 	if apiKey == "" && baseURL == "" && model == "" {
 		return
 	}
 
 	profile := ProviderProfile{
-		Name:         cfg.ActiveProvider,
-		ProviderKind: ProviderKindOpenAI,
+		Name:         env.Name,
+		ProviderKind: providerKind,
 		APIKey:       apiKey,
 		BaseURL:      baseURL,
 		Model:        model,
 	}
 	if profile.Name == "" {
-		profile.Name = string(ProviderKindOpenAI)
+		profile.Name = string(providerKind)
 	}
-	if baseURL != "" && !isOfficialOpenAIBaseURL(baseURL) {
+	if providerKind == ProviderKindOpenAI && baseURL != "" && !isOfficialOpenAIBaseURL(baseURL) {
 		profile.ProviderKind = ProviderKindOpenAICompatible
 	}
 	mergeProvider(cfg, profile)
@@ -247,6 +275,16 @@ func normalizeProvider(profile ProviderProfile) (ProviderProfile, error) {
 		}
 		if isOfficialOpenAIBaseURL(profile.BaseURL) {
 			return ProviderProfile{}, providerError(profile, "openai-compatible provider %s requires custom baseURL", profile.Name)
+		}
+		return profile, nil
+	case ProviderKindAnthropic:
+		if profile.BaseURL == "" {
+			profile.BaseURL = AnthropicBaseURL
+		}
+		return profile, nil
+	case ProviderKindGoogle:
+		if profile.BaseURL == "" {
+			profile.BaseURL = GoogleBaseURL
 		}
 		return profile, nil
 	default:

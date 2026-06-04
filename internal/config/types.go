@@ -6,11 +6,15 @@ import (
 )
 
 const OpenAIBaseURL = "https://api.openai.com/v1"
+const AnthropicBaseURL = "https://api.anthropic.com"
+const GoogleBaseURL = "https://generativelanguage.googleapis.com"
 
 type ProviderKind string
 
 const (
 	ProviderKindOpenAI           ProviderKind = "openai"
+	ProviderKindAnthropic        ProviderKind = "anthropic"
+	ProviderKindGoogle           ProviderKind = "google"
 	ProviderKindOpenAICompatible ProviderKind = "openai-compatible"
 )
 

@@ -139,6 +139,68 @@ func TestResolveUsesOpenAIEnvFallback(t *testing.T) {
 	}
 }
 
+func TestResolveUsesAnthropicEnvFallback(t *testing.T) {
+	resolved, err := Resolve(ResolveOptions{
+		Env: map[string]string{
+			"ZERO_PROVIDER":      "anthropic",
+			"ANTHROPIC_API_KEY":  "sk-ant-env",
+			"ANTHROPIC_BASE_URL": "https://anthropic.example",
+			"ANTHROPIC_MODEL":    "claude-sonnet-4.5",
+			"OPENAI_API_KEY":     "sk-openai-env",
+			"OPENAI_MODEL":       "gpt-4.1",
+			"GEMINI_API_KEY":     "sk-google-env",
+			"GEMINI_MODEL":       "gemini-2.5-flash",
+			"GEMINI_BASE_URL":    "https://google.example",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.ActiveProvider != "anthropic" {
+		t.Fatalf("ActiveProvider = %q, want anthropic", resolved.ActiveProvider)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindAnthropic {
+		t.Fatalf("ProviderKind = %q, want anthropic", resolved.Provider.ProviderKind)
+	}
+	if resolved.Provider.APIKey != "sk-ant-env" || resolved.Provider.Model != "claude-sonnet-4.5" {
+		t.Fatalf("Provider = %#v, want Anthropic env credentials/model", resolved.Provider)
+	}
+	if resolved.Provider.BaseURL != "https://anthropic.example" {
+		t.Fatalf("BaseURL = %q, want Anthropic env URL", resolved.Provider.BaseURL)
+	}
+	if len(resolved.Providers) != 3 {
+		t.Fatalf("Providers = %#v, want openai, anthropic, and google env profiles", resolved.Providers)
+	}
+}
+
+func TestResolveUsesGoogleEnvFallbackAliases(t *testing.T) {
+	resolved, err := Resolve(ResolveOptions{
+		Env: map[string]string{
+			"ZERO_PROVIDER":   "google",
+			"GOOGLE_API_KEY":  "sk-google-env",
+			"GOOGLE_BASE_URL": "https://google.example",
+			"GOOGLE_MODEL":    "gemini-2.5-pro",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.ActiveProvider != "google" {
+		t.Fatalf("ActiveProvider = %q, want google", resolved.ActiveProvider)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindGoogle {
+		t.Fatalf("ProviderKind = %q, want google", resolved.Provider.ProviderKind)
+	}
+	if resolved.Provider.APIKey != "sk-google-env" || resolved.Provider.Model != "gemini-2.5-pro" {
+		t.Fatalf("Provider = %#v, want Google env credentials/model", resolved.Provider)
+	}
+	if resolved.Provider.BaseURL != "https://google.example" {
+		t.Fatalf("BaseURL = %q, want Google env URL", resolved.Provider.BaseURL)
+	}
+}
+
 func TestResolveProviderCommandOverridesEnvProviderFields(t *testing.T) {
 	command := writeCommand(t, commandScript{
 		Stdout: `{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}`,
@@ -265,6 +327,34 @@ func TestResolveNormalizesOfficialOpenAIBaseURL(t *testing.T) {
 	}
 }
 
+func TestResolveAcceptsOfficialAnthropicAndGoogleProfiles(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "claude",
+		"providers": [
+			{"name": "claude", "provider": "anthropic", "apiKey": "sk-ant", "model": "claude-sonnet-4.5"},
+			{"name": "gemini", "provider": "google", "apiKey": "sk-google", "model": "gemini-2.5-flash"}
+		]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.Provider.ProviderKind != ProviderKindAnthropic {
+		t.Fatalf("ProviderKind = %q, want anthropic", resolved.Provider.ProviderKind)
+	}
+	if resolved.Provider.BaseURL != AnthropicBaseURL {
+		t.Fatalf("BaseURL = %q, want default Anthropic URL", resolved.Provider.BaseURL)
+	}
+	if resolved.Providers[1].ProviderKind != ProviderKindGoogle {
+		t.Fatalf("Google ProviderKind = %q, want google", resolved.Providers[1].ProviderKind)
+	}
+	if resolved.Providers[1].BaseURL != GoogleBaseURL {
+		t.Fatalf("Google BaseURL = %q, want default Google URL", resolved.Providers[1].BaseURL)
+	}
+}
+
 func TestResolveRejectsOpenAICompatibleWithoutBaseURL(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "custom",
@@ -290,9 +380,9 @@ func TestResolveRejectsUnknownProviderKind(t *testing.T) {
 		"activeProvider": "bad",
 		"providers": [{
 			"name": "bad",
-			"provider": "anthropic",
+			"provider": "bedrock",
 			"apiKey": "sk-bad",
-			"model": "claude"
+			"model": "model"
 		}]
 	}`)
 
@@ -300,7 +390,7 @@ func TestResolveRejectsUnknownProviderKind(t *testing.T) {
 	if err == nil {
 		t.Fatal("Resolve() error = nil, want validation error")
 	}
-	if !strings.Contains(err.Error(), `unknown provider kind "anthropic"`) {
+	if !strings.Contains(err.Error(), `unknown provider kind "bedrock"`) {
 		t.Fatalf("error = %q, want unknown provider kind", err.Error())
 	}
 }
