@@ -55,6 +55,17 @@ func TestDefaultRegistryCoversM1ModelCatalog(t *testing.T) {
 	if DefaultModelID != "gpt-4.1" {
 		t.Fatalf("DefaultModelID = %q, want gpt-4.1", DefaultModelID)
 	}
+
+	haiku, err := registry.Require("claude-haiku-4.5")
+	if err != nil {
+		t.Fatalf("claude-haiku-4.5 should be resolvable: %v", err)
+	}
+	if haiku.APIModel != "claude-haiku-4-5-20251001" {
+		t.Fatalf("claude-haiku-4.5 API model = %q, want claude-haiku-4-5-20251001", haiku.APIModel)
+	}
+	if haiku.ContextLimits.ContextWindow != 200_000 || haiku.ContextLimits.MaxOutputTokens != 64_000 {
+		t.Fatalf("claude-haiku-4.5 limits = %#v, want 200k context and 64k max output", haiku.ContextLimits)
+	}
 }
 
 func TestDefaultRegistryResolvesAliasesAndStableFilters(t *testing.T) {
