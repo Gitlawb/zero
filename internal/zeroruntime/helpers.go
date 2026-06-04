@@ -2,12 +2,15 @@ package zeroruntime
 
 import "context"
 
+// CollectedStream is the non-streaming summary of provider events.
 type CollectedStream struct {
 	Text      string
 	ToolCalls []ToolCall
 	Usage     Usage
+	Error     string
 }
 
+// SeedMessages creates the initial system and user turns for a request.
 func SeedMessages(systemPrompt string, userPrompt string) []Message {
 	return []Message{
 		{Role: MessageRoleSystem, Content: systemPrompt},
@@ -15,6 +18,7 @@ func SeedMessages(systemPrompt string, userPrompt string) []Message {
 	}
 }
 
+// CollectStream drains provider events into text, tool calls, usage, and error state.
 func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStream {
 	collected := CollectedStream{}
 	pendingToolCalls := make(map[string]*ToolCall)
@@ -23,9 +27,11 @@ func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStre
 	for {
 		select {
 		case <-ctx.Done():
+			appendOpenToolCalls(&collected, toolCallOrder, pendingToolCalls)
 			return collected
 		case event, ok := <-events:
 			if !ok {
+				appendOpenToolCalls(&collected, toolCallOrder, pendingToolCalls)
 				return collected
 			}
 
@@ -51,6 +57,10 @@ func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStre
 				collected.Usage.PromptTokens += event.Usage.PromptTokens
 				collected.Usage.CompletionTokens += event.Usage.CompletionTokens
 				collected.Usage.CachedInputTokens += event.Usage.CachedInputTokens
+			case StreamEventError:
+				collected.Error = event.Error
+				appendOpenToolCalls(&collected, toolCallOrder, pendingToolCalls)
+				return collected
 			case StreamEventDone:
 				appendOpenToolCalls(&collected, toolCallOrder, pendingToolCalls)
 				return collected

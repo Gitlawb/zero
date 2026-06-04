@@ -75,6 +75,70 @@ func TestCollectStreamAccumulatesTextToolCallsAndUsage(t *testing.T) {
 	}
 }
 
+func TestCollectStreamFlushesOpenToolCallsWhenChannelCloses(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventToolCallStart, ToolCallID: "call_closed", ToolName: "grep"}
+		events <- StreamEvent{Type: StreamEventToolCallDelta, ToolCallID: "call_closed", ArgumentsFragment: `{"query":"`}
+		events <- StreamEvent{Type: StreamEventToolCallDelta, ToolCallID: "call_closed", ArgumentsFragment: `zero"}`}
+	}()
+
+	collected := CollectStream(context.Background(), events)
+
+	if len(collected.ToolCalls) != 1 {
+		t.Fatalf("expected one flushed tool call, got %d", len(collected.ToolCalls))
+	}
+	toolCall := collected.ToolCalls[0]
+	if toolCall.ID != "call_closed" || toolCall.Name != "grep" || toolCall.Arguments != `{"query":"zero"}` {
+		t.Fatalf("unexpected flushed tool call: %#v", toolCall)
+	}
+}
+
+func TestCollectStreamFlushesOpenToolCallsWhenContextCancels(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make(chan StreamEvent)
+
+	go func() {
+		events <- StreamEvent{Type: StreamEventToolCallStart, ToolCallID: "call_cancelled", ToolName: "read_file"}
+		events <- StreamEvent{Type: StreamEventToolCallDelta, ToolCallID: "call_cancelled", ArgumentsFragment: `{"path":"README`}
+		cancel()
+	}()
+
+	collected := CollectStream(ctx, events)
+
+	if len(collected.ToolCalls) != 1 {
+		t.Fatalf("expected one flushed tool call, got %d", len(collected.ToolCalls))
+	}
+	toolCall := collected.ToolCalls[0]
+	if toolCall.ID != "call_cancelled" || toolCall.Name != "read_file" || toolCall.Arguments != `{"path":"README` {
+		t.Fatalf("unexpected flushed tool call after cancel: %#v", toolCall)
+	}
+}
+
+func TestCollectStreamSurfacesStreamErrors(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventToolCallStart, ToolCallID: "call_error", ToolName: "bash"}
+		events <- StreamEvent{Type: StreamEventToolCallDelta, ToolCallID: "call_error", ArgumentsFragment: `{"command":"go test`}
+		events <- StreamEvent{Type: StreamEventError, Error: "provider stream failed"}
+	}()
+
+	collected := CollectStream(context.Background(), events)
+
+	if collected.Error != "provider stream failed" {
+		t.Fatalf("error = %q, want provider stream failed", collected.Error)
+	}
+	if len(collected.ToolCalls) != 1 {
+		t.Fatalf("expected one flushed tool call, got %d", len(collected.ToolCalls))
+	}
+	toolCall := collected.ToolCalls[0]
+	if toolCall.ID != "call_error" || toolCall.Name != "bash" || toolCall.Arguments != `{"command":"go test` {
+		t.Fatalf("unexpected flushed tool call after error: %#v", toolCall)
+	}
+}
+
 func TestProviderContractCanBeImplementedByMock(t *testing.T) {
 	var provider Provider = mockProvider{
 		events: []StreamEvent{
