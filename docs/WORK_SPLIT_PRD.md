@@ -86,7 +86,7 @@ Current status: PR #6 covers much of M0. This v2 treats M0 as the baseline and s
 
 ### Anandan
 
-- Add stable project commands: `go test ./...`, `go build ./cmd/zero`, and npm wrapper smoke checks.
+- Add stable project commands: `go test ./...`, `go build ./cmd/zero`, and the npm wrapper smoke checklist.
 - Add initial CI smoke job.
 - Verify Go toolchain version, module cache behavior, and npm wrapper lockfile behavior.
 - Add build artifact smoke check.
@@ -95,9 +95,19 @@ Current status: PR #6 covers much of M0. This v2 treats M0 as the baseline and s
 ### M0 Done
 
 - `go test ./...` passes.
-- `go build ./cmd/zero` exists and passes or has a documented placeholder until the Go entrypoint lands.
-- npm wrapper smoke check exists when npm packaging files are touched.
+- `go build ./cmd/zero` passes.
+- npm wrapper smoke checklist exists when npm packaging files are touched.
 - `zero` can run, read a file, edit a file, and stream a response.
+
+### npm Wrapper Smoke Checklist
+
+When npm distribution files are changed, the smoke check must verify:
+
+- `package.json` exists with the expected package name and version.
+- `npm ci` succeeds from the wrapper package directory.
+- The wrapper binary resolves through the package `bin` entry and `node_modules/.bin`.
+- `zero --version` or `zero --help` exits 0 and reports the expected version or command surface.
+- The designated npm smoke/build script exits 0.
 
 ## Milestone M1: Multi-Provider And Headless Foundation, Weeks 3-4
 
@@ -521,9 +531,9 @@ Headless `exec` is split to avoid conflict:
 Every PR must include:
 
 - Tests for changed behavior.
-- `go test ./...` passes when Go code exists or the PR documents why it is not applicable.
-- `go build ./cmd/zero` passes when the Go entrypoint exists or the PR documents why it is not applicable.
-- npm wrapper checks pass when npm distribution files are changed.
+- `go test ./...` must pass when the PR modifies any Go code; docs-only PRs are exempt and must say so in the PR description.
+- `go build ./cmd/zero` must pass when the PR modifies `cmd/zero` or runtime packages used by the entrypoint; docs-only and npm-wrapper-only PRs are exempt and must say so in the PR description.
+- The npm wrapper smoke checklist must pass when the PR modifies npm distribution files.
 - PR description explains what changed and why.
 - No unrelated refactors.
 - Redaction used for secrets in logs/errors/tests.
