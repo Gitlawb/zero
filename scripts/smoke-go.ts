@@ -28,7 +28,12 @@ if (exitCode !== 0) {
 let expectedVersion: string;
 
 try {
-  expectedVersion = JSON.parse(packageText).version;
+  const parsedPackage = JSON.parse(packageText);
+  if (typeof parsedPackage?.version !== 'string') {
+    console.error(`Invalid package.json: version is not a string (${JSON.stringify(parsedPackage?.version)})`);
+    process.exit(1);
+  }
+  expectedVersion = parsedPackage.version;
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Failed to parse package.json: ${message}`);
