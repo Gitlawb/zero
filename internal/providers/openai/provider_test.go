@@ -397,3 +397,23 @@ func TestStreamCompletionDoesNotHangOnEOFWithOpenToolCall(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamCompletionSkipsNamelessToolCallOnEOF(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"{\"path\":\"README.md\"}"}}]}}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	if len(eventsOfType(events, zeroruntime.StreamEventToolCallStart)) != 0 {
+		t.Fatalf("events = %#v, want no start for nameless tool call", events)
+	}
+	if len(eventsOfType(events, zeroruntime.StreamEventToolCallDelta)) != 0 {
+		t.Fatalf("events = %#v, want no delta for nameless tool call", events)
+	}
+	if len(eventsOfType(events, zeroruntime.StreamEventToolCallEnd)) != 0 {
+		t.Fatalf("events = %#v, want no end for nameless tool call", events)
+	}
+	if len(eventsOfType(events, zeroruntime.StreamEventDone)) != 1 {
+		t.Fatalf("events = %#v, want done event", events)
+	}
+}

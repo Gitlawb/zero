@@ -34,11 +34,15 @@ type model struct {
 	input          textinput.Model
 	pending        bool
 	exiting        bool
+	runCancel      context.CancelFunc
+	runID          int
+	activeRunID    int
 }
 
 type agentResponseMsg struct {
-	rows []transcriptRow
-	err  error
+	runID int
+	rows  []transcriptRow
+	err   error
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -97,17 +101,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			m.cancelRun()
 			m.exiting = true
 			return m, tea.Quit
 		case tea.KeyEsc:
 			m.input.SetValue("")
-			m.pending = false
+			if m.pending {
+				m.cancelRun()
+			}
 			return m, nil
 		case tea.KeyEnter:
 			return m.handleSubmit()
 		}
 	case agentResponseMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
 		m.pending = false
+		m.runCancel = nil
+		m.activeRunID = 0
 		for _, row := range msg.rows {
 			m.transcript = appendRow(m.transcript, row.kind, row.text)
 		}
@@ -150,6 +162,9 @@ func (m model) View() string {
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	command := parseCommand(m.input.Value())
+	if command.kind == commandPrompt && m.pending {
+		return m, nil
+	}
 	m.input.SetValue("")
 
 	switch command.kind {
@@ -185,14 +200,27 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		runCtx, cancel := context.WithCancel(m.ctx)
+		m.runID++
+		m.activeRunID = m.runID
+		m.runCancel = cancel
 		m.pending = true
-		return m, m.runAgent(command.text)
+		return m, m.runAgent(m.activeRunID, runCtx, command.text)
 	default:
 		return m, nil
 	}
 }
 
-func (m model) runAgent(prompt string) tea.Cmd {
+func (m *model) cancelRun() {
+	if m.runCancel != nil {
+		m.runCancel()
+	}
+	m.pending = false
+	m.runCancel = nil
+	m.activeRunID = 0
+}
+
+func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
 	return func() tea.Msg {
 		rows := []transcriptRow{}
 		options := m.agentOptions
@@ -211,20 +239,28 @@ func (m model) runAgent(prompt string) tea.Cmd {
 		options.OnToolResult = func(result agent.ToolResult) {
 			rows = append(rows, transcriptRow{
 				kind: rowToolResult,
-				text: fmt.Sprintf("tool result: %s %s %s", result.Name, result.Status, result.Output),
+				text: toolResultRowText(result),
 			})
 			if onToolResult != nil {
 				onToolResult(result)
 			}
 		}
 
-		result, err := agent.Run(m.ctx, prompt, m.provider, options)
+		result, err := agent.Run(runCtx, prompt, m.provider, options)
 		if err != nil {
-			return agentResponseMsg{rows: rows, err: err}
+			return agentResponseMsg{runID: runID, rows: rows, err: err}
 		}
 		rows = append(rows, transcriptRow{kind: rowAssistant, text: result.FinalAnswer})
-		return agentResponseMsg{rows: rows}
+		return agentResponseMsg{runID: runID, rows: rows}
 	}
+}
+
+func toolResultRowText(result agent.ToolResult) string {
+	status := result.Status
+	if status == "" {
+		status = tools.StatusOK
+	}
+	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, result.Output)
 }
 
 func (m model) providerStatus() string {

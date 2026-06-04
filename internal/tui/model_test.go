@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -159,6 +160,74 @@ func TestPromptSubmitAppendsUserAndAssistantRows(t *testing.T) {
 	next = updated.(model)
 	if !transcriptContains(next.transcript, "hello back") {
 		t.Fatalf("expected assistant row after agent response, got %#v", next.transcript)
+	}
+}
+
+func TestPromptSubmitDoesNotStartAnotherRunWhilePending(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Provider: &fakeProvider{},
+		Registry: tools.NewRegistry(),
+	})
+	m.pending = true
+	m.input.SetValue("second prompt")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected no command while another run is pending")
+	}
+	if transcriptContains(next.transcript, "second prompt") {
+		t.Fatalf("pending prompt should not be appended, got %#v", next.transcript)
+	}
+	if !next.pending {
+		t.Fatal("expected existing pending run to remain pending")
+	}
+}
+
+func TestEscCancelsPendingRun(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	cancelled := false
+	m.pending = true
+	m.activeRunID = 1
+	m.runCancel = func() { cancelled = true }
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(model)
+
+	if !cancelled {
+		t.Fatal("expected Esc to cancel pending run")
+	}
+	if next.pending {
+		t.Fatal("expected Esc to clear pending state")
+	}
+	if next.activeRunID != 0 || next.runCancel != nil {
+		t.Fatalf("expected active run state to clear, got id=%d cancel=%v", next.activeRunID, next.runCancel)
+	}
+}
+
+func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.pending = false
+	m.activeRunID = 0
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "new prompt"})
+
+	updated, _ := m.Update(agentResponseMsg{
+		runID: 1,
+		rows:  []transcriptRow{{kind: rowAssistant, text: "stale response"}},
+	})
+	next := updated.(model)
+
+	if transcriptContains(next.transcript, "stale response") {
+		t.Fatalf("stale response should be ignored, got %#v", next.transcript)
+	}
+}
+
+func TestToolResultRowDefaultsEmptyStatusToOK(t *testing.T) {
+	text := toolResultRowText(agent.ToolResult{Name: "read_file", Output: "done"})
+
+	if !strings.Contains(text, "read_file ok done") {
+		t.Fatalf("expected empty status to render as ok, got %q", text)
 	}
 }
 

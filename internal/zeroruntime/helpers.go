@@ -38,6 +38,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 	for {
 		select {
 		case <-ctx.Done():
+			collected.Error = ctx.Err().Error()
 			appendOpenToolCalls(&collected, toolCallOrder, pendingToolCalls)
 			return collected
 		case event, ok := <-events:

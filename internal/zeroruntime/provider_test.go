@@ -185,6 +185,12 @@ func TestCollectStreamFlushesOpenToolCallsWhenContextCancels(t *testing.T) {
 	if toolCall.ID != "call_cancelled" || toolCall.Name != "read_file" || toolCall.Arguments != `{"path":"README` {
 		t.Fatalf("unexpected flushed tool call after cancel: %#v", toolCall)
 	}
+	if collected.Error == "" {
+		t.Fatal("expected context cancellation to surface as collected error")
+	}
+	if collected.Error != context.Canceled.Error() {
+		t.Fatalf("error = %q, want %q", collected.Error, context.Canceled.Error())
+	}
 }
 
 func TestCollectStreamSurfacesStreamErrors(t *testing.T) {

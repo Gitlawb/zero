@@ -75,7 +75,7 @@ func (state *toolState) closeOpen(ctx context.Context, events chan<- zeroruntime
 
 	for _, index := range indexes {
 		call := state.calls[index]
-		if call == nil || call.ended || call.id == "" {
+		if call == nil || call.ended || call.id == "" || call.name == "" {
 			continue
 		}
 		if !call.started {
