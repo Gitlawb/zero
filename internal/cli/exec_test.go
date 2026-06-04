@@ -330,8 +330,12 @@ func TestRunExecUsesProjectConfigAndOpenAICompatibleProvider(t *testing.T) {
 	}
 
 	var gotAuth string
+	var gotMethod string
+	var gotPath string
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode provider request: %v", err)
@@ -371,11 +375,23 @@ func TestRunExecUsesProjectConfigAndOpenAICompatibleProvider(t *testing.T) {
 	if gotAuth != "Bearer sk-local" {
 		t.Fatalf("Authorization = %q, want project config token", gotAuth)
 	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodPost)
+	}
+	if !strings.HasSuffix(gotPath, "/chat/completions") {
+		t.Fatalf("path = %q, want suffix /chat/completions", gotPath)
+	}
 	if gotBody["model"] != "local-model" {
 		t.Fatalf("provider model = %v, want local-model", gotBody["model"])
 	}
-	messages := gotBody["messages"].([]any)
-	lastMessage := messages[len(messages)-1].(map[string]any)
+	messages, ok := gotBody["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		t.Fatalf("messages = %#v, want non-empty []any", gotBody["messages"])
+	}
+	lastMessage, ok := messages[len(messages)-1].(map[string]any)
+	if !ok {
+		t.Fatalf("last message = %#v, want map[string]any", messages[len(messages)-1])
+	}
 	if lastMessage["content"] != "hello provider" {
 		t.Fatalf("last provider message = %#v, want prompt", lastMessage)
 	}
