@@ -195,6 +195,7 @@ Runs a one-shot prompt through the Go agent runtime.
 Flags:
   -f, --file <path>                  Read prompt text from a file
   -m, --model <model>                Select the model for provider setup
+      --max-turns <number>           Override the maximum agent loop turns
   -C, --cwd <path>                   Set the workspace directory
   -o, --output-format text|json      Select text or newline-delimited JSON output
       --prompt <prompt>              Provide prompt text as a flag

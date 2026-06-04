@@ -35,6 +35,7 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 			for _, want := range []string{
 				"-f, --file",
 				"-m, --model",
+				"--max-turns",
 				"-C, --cwd",
 				"-o, --output-format text|json",
 				"--prompt",
@@ -48,6 +49,57 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 				t.Fatalf("expected empty stderr, got %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunExecRejectsInvalidMaxTurnsBeforeRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{value: "nope", want: "invalid --max-turns"},
+		{value: "-1", want: "invalid --max-turns"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := Run([]string{"exec", "--max-turns", tc.value, "hello"}, &stdout, &stderr)
+
+			if exitCode != exitUsage {
+				t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout before runtime, got %q", stdout.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, tc.want) {
+				t.Fatalf("expected max-turns validation error containing %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestRunExecMaxTurnsReachesConfigOverrides(t *testing.T) {
+	cwd := t.TempDir()
+	var gotMaxTurns int
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--max-turns", "7", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			gotMaxTurns = overrides.MaxTurns
+			return config.ResolvedConfig{}, errors.New("stop before provider")
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider exit %d, got %d", exitProvider, exitCode)
+	}
+	if gotMaxTurns != 7 {
+		t.Fatalf("overrides.MaxTurns = %d, want 7", gotMaxTurns)
 	}
 }
 

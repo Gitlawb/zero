@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -31,6 +32,7 @@ type execOptions struct {
 	promptParts           []string
 	file                  string
 	model                 string
+	maxTurns              int
 	cwd                   string
 	outputFormat          execOutputFormat
 	skipPermissionsUnsafe bool
@@ -69,6 +71,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	overrides := config.Overrides{}
 	if options.model != "" {
 		overrides.Provider.Model = options.model
+	}
+	if options.maxTurns > 0 {
+		overrides.MaxTurns = options.maxTurns
 	}
 	resolved, err := deps.resolveConfig(workspaceRoot, overrides)
 	if err != nil {
@@ -160,6 +165,23 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--model="):
 			options.model = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+		case arg == "--max-turns":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			maxTurns, err := parseExecMaxTurns(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.maxTurns = maxTurns
+			index = next
+		case strings.HasPrefix(arg, "--max-turns="):
+			maxTurns, err := parseExecMaxTurns(strings.TrimSpace(strings.TrimPrefix(arg, "--max-turns=")))
+			if err != nil {
+				return options, false, err
+			}
+			options.maxTurns = maxTurns
 		case arg == "-C" || arg == "--cwd":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -209,6 +231,18 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		return options, false, execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
 	}
 	return options, false, nil
+}
+
+func parseExecMaxTurns(value string) (int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, execUsageError{"--max-turns requires a value"}
+	}
+	maxTurns, err := strconv.Atoi(trimmed)
+	if err != nil || maxTurns < 0 {
+		return 0, execUsageError{fmt.Sprintf("invalid --max-turns %q. Expected a non-negative integer.", value)}
+	}
+	return maxTurns, nil
 }
 
 func nextFlagValue(args []string, index int, flag string) (string, int, error) {

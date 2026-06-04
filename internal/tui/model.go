@@ -200,7 +200,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandDebug:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
-	case commandDoctor, commandPlan, commandSearch, commandTheme, commandInputStyle:
+	case commandPlan:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
+		return m, nil
+	case commandDoctor, commandSearch, commandTheme, commandInputStyle:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
 			text: shellOnlyCommandText(command.name),
@@ -323,6 +326,11 @@ func (m model) providerText() string {
 }
 
 func (m model) modelText(args string) string {
+	switch strings.ToLower(strings.TrimSpace(args)) {
+	case "list", "ls":
+		return m.modelListText()
+	}
+
 	lines := []string{
 		"Model",
 		"Active model: " + displayValue(m.modelName, "none"),

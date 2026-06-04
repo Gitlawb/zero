@@ -181,6 +181,56 @@ func TestToolsCommandListsRegisteredTools(t *testing.T) {
 	}
 }
 
+func TestPlanCommandShowsCurrentPlan(t *testing.T) {
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	result := planTool.Run(context.Background(), map[string]any{
+		"plan": []any{
+			map[string]any{
+				"id":      "one",
+				"content": "Wire model catalog",
+				"status":  "completed",
+			},
+			map[string]any{
+				"id":      "two",
+				"content": "Add max turns",
+				"status":  "in_progress",
+				"notes":   "Go exec parity",
+			},
+		},
+	})
+	if result.Status != tools.StatusOK {
+		t.Fatalf("update_plan setup failed: %#v", result)
+	}
+	registry.Register(planTool)
+	m := newModel(context.Background(), Options{Registry: registry})
+	m.input.SetValue("/plan")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /plan to be handled without starting an agent run")
+	}
+	for _, want := range []string{"Current Plan", "Wire model catalog", "Add max turns", "in_progress", "Go exec parity"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected plan transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+func TestPlanCommandHandlesMissingPlanTool(t *testing.T) {
+	m := newModel(context.Background(), Options{Registry: tools.NewRegistry()})
+	m.input.SetValue("/plan")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if !transcriptContains(next.transcript, "No plan is active") {
+		t.Fatalf("expected missing plan message, got %#v", next.transcript)
+	}
+}
+
 func TestContextCommandShowsSessionState(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool("."))
@@ -226,7 +276,31 @@ func TestModelCommandShowsActiveModelWithoutRunningAgent(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
-	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Model switching"} {
+	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Available models", "* gpt-4.1", "claude-sonnet-4.5", "gemini-2.5-pro"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	if transcriptContains(next.transcript, "Model switching") {
+		t.Fatalf("expected /model list to show catalog, got switching placeholder: %#v", next.transcript)
+	}
+}
+
+func TestModelCommandKeepsSwitchingStatusExplicit(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     &fakeProvider{},
+	})
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Model switching is not wired"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
 		}
