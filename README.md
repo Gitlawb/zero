@@ -13,15 +13,16 @@
 
 **A clean, terminal-first AI coding agent you fully own — multi-provider, scriptable, and safe by default.**
 
-![runtime](https://img.shields.io/badge/runtime-Bun-14151a?logo=bun&logoColor=fbf0df)
-![typescript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)
-![tui](https://img.shields.io/badge/TUI-Ink-22d3ee)
+![core](https://img.shields.io/badge/core-Go--native-00ADD8?logo=go&logoColor=white)
+![distribution](https://img.shields.io/badge/distribution-npm%20wrapper-cb3837?logo=npm&logoColor=white)
+![transition](https://img.shields.io/badge/TS%2FBun-transitional-14151a?logo=bun&logoColor=fbf0df)
 ![status](https://img.shields.io/badge/status-active%20development-67e8f9)
 
 Zero is a coding agent that lives in your terminal. It runs an agentic tool loop —
 reading, editing, searching, and running commands in your repo — against **whatever
-model you choose**. One TypeScript codebase powers an interactive TUI and a fully
-scriptable headless mode, so the same agent works at your prompt or inside CI.
+model you choose**. Zero is migrating to a **Go-native core** with an npm
+distribution wrapper; the current TypeScript/Bun implementation remains a
+transitional reference while the Go M0 foundation lands.
 
 > Zero treats the **model as a swappable, per-task choice** — no single-vendor lock-in —
 > and never mutates your system without a permission decision.
@@ -31,7 +32,7 @@ scriptable headless mode, so the same agent works at your prompt or inside CI.
 ## Highlights
 
 - 🔌 **Multi-provider** — OpenAI-compatible, Anthropic, and Gemini behind one interface, with a model registry (capabilities, context limits, cost). Bring your own key and endpoint.
-- 🖥️ **Premium TUI** — append-style, scrollback-native Ink interface: streaming responses, compact tool-call rows with inline diffs, a slash-command palette, and a live status footer (model · tokens · cost · context).
+- 🖥️ **Premium TUI** — Bubble Tea/Lip Gloss is the target TUI stack; the current Ink surface remains transitional during the Go migration.
 - 🤖 **Headless & scriptable** — `zero exec` with clean `text` / `json` / `stream-json` I/O and meaningful exit codes for CI and automation.
 - 🧰 **Real tools** — read / write / edit files, `apply_patch`, `grep`, `glob`, `bash`, directory listing, and a live plan/todo.
 - 🛡️ **Safe by default** — mutating tools are permission-gated; `--skip-permissions-unsafe` is an explicit, clearly-labeled opt-out.
@@ -40,7 +41,8 @@ scriptable headless mode, so the same agent works at your prompt or inside CI.
 
 ## Quick start
 
-> Requires [Bun](https://bun.com) (version pinned in `package.json`).
+> Requires [Bun](https://bun.com) for the current transitional npm wrapper and
+> [Go](https://go.dev/) for Go-native validation commands.
 
 ```bash
 bun install --frozen-lockfile
@@ -127,14 +129,15 @@ Write/shell tools route through the permission policy before any side effect.
 ## Architecture
 
 ```
-        TUI (Ink)          headless `exec`           (future) editor ext
+ Terminal (Bubble Tea target)   headless `exec`      (future) editor ext
             └───────────────────┬───────────────────────┘
-                          Agent Core (loop, events, tools)
+                    Go-native core target (loop, events, tools)
    ┌──────────┬───────────┬──────────┬──────────┬───────────┬──────────┐
  providers   tools     sessions    usage     redaction    doctor /   stream-json
  + registry  registry  + search   + cost                  config
 ```
 
+- **Go-native target**: the new `cmd/zero` entrypoint is the foundation for the production core; TS/Bun code remains in place during migration.
 - **Surface-agnostic core**: the agent loop streams text + tool calls, executes tools, and emits a typed event stream consumed identically by every surface.
 - **Edges are interfaces**: `Provider`, `Tool`, `SessionStore`, and the permission policy are swappable.
 - **Model is data**: capabilities, cost, and routing live in the registry — never hard-coded.
@@ -145,11 +148,11 @@ Write/shell tools route through the permission policy before any side effect.
 cmd/zero                # Go-native entrypoint
 internal/cli            # minimal Go CLI surface during migration
 src/
-  agent/                 # agent loop + system prompts
-  cli/                   # headless exec + command surface
+  agent/                 # transitional TS agent loop + system prompts
+  cli/                   # transitional TS headless exec + command surface
   providers/             # openai · anthropic · gemini · base
   tools/                 # read/write/edit/bash/grep/glob/apply_patch/plan
-  tui/                   # Ink interface (splash + working view) + startup/
+  tui/                   # transitional Ink interface + startup/
   config/                # layered configuration
   zero-model-registry/   # models, capabilities, cost
   zero-provider-runtime/ # provider resolution/routing
@@ -209,4 +212,4 @@ License is being finalized; a `LICENSE` file will be added before a public relea
 
 ---
 
-<sub>Built with Bun · TypeScript · Ink. Zero is the from-scratch successor to <em>openclaude</em>.</sub>
+<sub>Targeting a Go-native core with an npm distribution wrapper. The current Bun · TypeScript · Ink implementation is transitional during migration.</sub>
