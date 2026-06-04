@@ -83,6 +83,7 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
+		value = strings.TrimSpace(value)
 		if value != "" {
 			return value
 		}

@@ -64,8 +64,8 @@ func loadConfigFile(path string) (FileConfig, error) {
 }
 
 func mergeConfig(dst *FileConfig, src FileConfig) {
-	if src.ActiveProvider != "" {
-		dst.ActiveProvider = strings.TrimSpace(src.ActiveProvider)
+	if activeProvider := strings.TrimSpace(src.ActiveProvider); activeProvider != "" {
+		dst.ActiveProvider = activeProvider
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
@@ -155,8 +155,8 @@ func envValue(env map[string]string, key string) string {
 }
 
 func applyOverrides(cfg *FileConfig, overrides Overrides) {
-	if overrides.ActiveProvider != "" {
-		cfg.ActiveProvider = strings.TrimSpace(overrides.ActiveProvider)
+	if activeProvider := strings.TrimSpace(overrides.ActiveProvider); activeProvider != "" {
+		cfg.ActiveProvider = activeProvider
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns

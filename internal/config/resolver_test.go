@@ -89,6 +89,30 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 	}
 }
 
+func TestResolveIgnoresWhitespaceOnlyActiveProviderLayers(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"activeProvider": "alpha",
+		"providers": [
+			{"name": "alpha", "provider": "openai", "apiKey": "sk-alpha", "model": "gpt-alpha"},
+			{"name": "beta", "provider": "openai", "apiKey": "sk-beta", "model": "gpt-beta"}
+		]
+	}`)
+	projectPath := writeConfig(t, `{"activeProvider": "   "}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+		Overrides:         Overrides{ActiveProvider: "   "},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.ActiveProvider != "alpha" {
+		t.Fatalf("ActiveProvider = %q, want alpha", resolved.ActiveProvider)
+	}
+}
+
 func TestResolveUsesOpenAIEnvFallback(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		Env: map[string]string{
@@ -112,6 +136,36 @@ func TestResolveUsesOpenAIEnvFallback(t *testing.T) {
 	}
 	if resolved.Provider.BaseURL != "https://env.example/v1" {
 		t.Fatalf("BaseURL = %q, want env URL", resolved.Provider.BaseURL)
+	}
+}
+
+func TestResolveTrimsProviderProfileAliasesBeforeFallback(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "custom",
+		"providers": [{
+			"name": "custom",
+			"provider_kind": "openai-compatible",
+			"baseURL": "   ",
+			"base_url": "https://custom.example/v1",
+			"apiKey": "   ",
+			"api_key": "sk-custom",
+			"model": "   ",
+			"model_id": "custom-model"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Provider.BaseURL != "https://custom.example/v1" {
+		t.Fatalf("BaseURL = %q, want alias fallback", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.APIKey != "sk-custom" {
+		t.Fatalf("APIKey = %q, want alias fallback", resolved.Provider.APIKey)
+	}
+	if resolved.Provider.Model != "custom-model" {
+		t.Fatalf("Model = %q, want alias fallback", resolved.Provider.Model)
 	}
 }
 
