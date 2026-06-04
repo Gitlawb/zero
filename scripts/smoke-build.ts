@@ -27,18 +27,24 @@ if (exitCode !== 0) {
 let expectedVersion: string;
 
 try {
-  expectedVersion = JSON.parse(packageText).version;
+  const parsedPackage = JSON.parse(packageText);
+  if (typeof parsedPackage?.version !== 'string') {
+    console.error(`Invalid package.json: version is not a string (${JSON.stringify(parsedPackage?.version)})`);
+    process.exit(1);
+  }
+  expectedVersion = parsedPackage.version;
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Failed to parse package.json: ${message}`);
   process.exit(1);
 }
 
-const actualVersion = stdout.trim();
+const expectedOutput = `zero ${expectedVersion}`;
+const actualOutput = stdout.trim();
 
-if (actualVersion !== expectedVersion) {
-  console.error(`Expected ${zeroArtifactName} --version to print ${expectedVersion}, got ${actualVersion}`);
+if (actualOutput !== expectedOutput) {
+  console.error(`Expected ${zeroArtifactName} --version to print ${expectedOutput}, got ${actualOutput}`);
   process.exit(1);
 }
 
-console.log(`${zeroArtifactName} smoke check passed (${actualVersion})`);
+console.log(`${zeroArtifactName} smoke check passed (${expectedVersion})`);

@@ -14,8 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-const version = "0.1.0"
-const userAgent = "zero/" + version
+var version = "dev"
 
 type appDeps struct {
 	getwd         func() (string, error)
@@ -42,10 +41,14 @@ func defaultAppDeps() appDeps {
 			return config.Resolve(options)
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
-			return providers.New(profile, providers.Options{UserAgent: userAgent})
+			return providers.New(profile, providers.Options{UserAgent: userAgent()})
 		},
 		runTUI: tui.Run,
 	}
+}
+
+func userAgent() string {
+	return "zero/" + version
 }
 
 func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

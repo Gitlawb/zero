@@ -12,6 +12,10 @@ bun run build
 bun run smoke:build
 ```
 
+`build` and `build:go` both compile the Go-native release binary and inject the
+version from `package.json`. Keep the Bun install/test checks because the npm
+wrapper and transitional TypeScript surface still ship from this package.
+
 Also run the Go checks when the PR changes Go entrypoint, CLI, or release
 artifact behavior:
 
@@ -27,7 +31,7 @@ bun run smoke:go
 - `bun install --frozen-lockfile` succeeds without lockfile changes.
 - The wrapper binary resolves through the package `bin` entry and
   `node_modules/.bin` in a package-install smoke test.
-- The built wrapper exits 0 for `zero --version` or `zero --help`.
-- The reported version matches `package.json`.
+- The built binary exits 0 for `zero --version` or `zero --help`.
+- `zero --version` reports `zero <package.json version>`.
 - Release packaging still emits the expected archive and checksum names when
   package release files change.
