@@ -79,6 +79,9 @@ func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
 	if updated == content {
 		return okResult("No changes: new_string is identical to old_string.")
 	}
+	if err := recheckWorkspaceWriteTarget(tool.workspaceRoot, requestedPath); err != nil {
+		return errorResult("Error writing " + relativePath + ": " + err.Error())
+	}
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}

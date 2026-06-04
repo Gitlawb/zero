@@ -57,12 +57,18 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	patchPath := tempFile.Name()
-	defer os.Remove(patchPath)
+	defer func() {
+		_ = os.Remove(patchPath)
+	}()
 	if _, err := tempFile.WriteString(patch); err != nil {
-		tempFile.Close()
+		_ = tempFile.Close()
 		return errorResult("Error applying patch: " + err.Error())
 	}
 	if err := tempFile.Close(); err != nil {
+		return errorResult("Error applying patch: " + err.Error())
+	}
+
+	if err := recheckPatchWriteTargets(applyRoot, patch); err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
 
@@ -93,6 +99,20 @@ func validatePatchPaths(root string, patch string) error {
 				return fmt.Errorf("patch path %q must stay inside the workspace", path)
 			}
 			if _, _, err := resolveWorkspaceTargetPath(root, path); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func recheckPatchWriteTargets(root string, patch string) error {
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		for _, path := range patchPathsFromLine(line) {
+			if path == "" || path == "/dev/null" {
+				continue
+			}
+			if err := recheckWorkspaceWriteTarget(root, path); err != nil {
 				return err
 			}
 		}

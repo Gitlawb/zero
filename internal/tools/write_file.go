@@ -65,6 +65,9 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	if err := recheckWorkspaceWriteTarget(tool.workspaceRoot, requestedPath); err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}

@@ -148,6 +148,20 @@ func TestWriteFileToolAllowsEmptyContent(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolReportsTypeErrorsForEmptyAllowedStrings(t *testing.T) {
+	result := NewWriteFileTool(t.TempDir()).Run(context.Background(), map[string]any{
+		"path":    "bad.txt",
+		"content": 42,
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s", result.Status)
+	}
+	if !strings.Contains(result.Output, "content must be a string") {
+		t.Fatalf("expected string type error, got %q", result.Output)
+	}
+}
+
 func TestWriteFileToolRejectsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.txt")
@@ -165,6 +179,32 @@ func TestWriteFileToolRejectsOutsideWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); !os.IsNotExist(err) {
 		t.Fatalf("expected outside file to remain absent, stat err=%v", err)
+	}
+}
+
+func TestWriteFileToolRejectsSymlinkParent(t *testing.T) {
+	root := t.TempDir()
+	realDirectory := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDirectory, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	result := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path":    "link/escape.txt",
+		"content": "secret",
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s", result.Status)
+	}
+	if !strings.Contains(result.Output, "must not traverse symlink") {
+		t.Fatalf("expected symlink error, got %q", result.Output)
+	}
+	if _, err := os.Stat(filepath.Join(realDirectory, "escape.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected symlink target file to remain absent, stat err=%v", err)
 	}
 }
 
@@ -283,6 +323,41 @@ func TestApplyPatchToolAppliesUnifiedDiff(t *testing.T) {
 	}
 	if strings.ReplaceAll(string(content), "\r\n", "\n") != "hello\nnew\n" {
 		t.Fatalf("unexpected patched content: %q", string(content))
+	}
+}
+
+func TestApplyPatchToolRejectsSymlinkPath(t *testing.T) {
+	root := t.TempDir()
+	realDirectory := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDirectory, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	patch := strings.Join([]string{
+		"diff --git a/link/new.txt b/link/new.txt",
+		"new file mode 100644",
+		"index 0000000..e965047",
+		"--- /dev/null",
+		"+++ b/link/new.txt",
+		"@@ -0,0 +1 @@",
+		"+hello",
+		"",
+	}, "\n")
+
+	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{
+		"patch": patch,
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s", result.Status)
+	}
+	if !strings.Contains(result.Output, "must not traverse symlink") {
+		t.Fatalf("expected symlink error, got %q", result.Output)
+	}
+	if _, err := os.Stat(filepath.Join(realDirectory, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected symlink target file to remain absent, stat err=%v", err)
 	}
 }
 

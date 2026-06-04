@@ -56,3 +56,29 @@ func TestUpdatePlanToolRejectsInvalidStatus(t *testing.T) {
 		t.Fatalf("unexpected output: %q", result.Output)
 	}
 }
+
+func TestUpdatePlanToolClearPlanResetsState(t *testing.T) {
+	tool := NewUpdatePlanTool()
+
+	result := tool.Run(context.Background(), map[string]any{
+		"plan": []any{
+			map[string]any{"id": "1", "content": "First", "status": "pending"},
+			map[string]any{"id": "2", "content": "Second", "status": "in_progress"},
+		},
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if got := tool.CurrentPlan(); len(got) == 0 {
+		t.Fatalf("expected stored plan before ClearPlan")
+	}
+
+	tool.ClearPlan()
+	if got := tool.CurrentPlan(); len(got) != 0 {
+		t.Fatalf("expected empty plan after ClearPlan, got %d items", len(got))
+	}
+	if got := formatPlan(tool.CurrentPlan()); got != "Plan is currently empty." {
+		t.Fatalf("expected empty plan formatting after ClearPlan, got %q", got)
+	}
+}

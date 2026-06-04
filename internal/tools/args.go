@@ -19,7 +19,10 @@ func stringArgWithEmpty(args map[string]any, key string, fallback string, requir
 	}
 
 	text, ok := value.(string)
-	if !ok || (!allowEmpty && text == "") {
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	if !allowEmpty && text == "" {
 		return "", fmt.Errorf("%s must be a non-empty string", key)
 	}
 	return text, nil
