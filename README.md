@@ -99,6 +99,7 @@ zero models list [--provider anthropic]     # inspect the model registry
 zero search "<query>" [--json --session <id> --type <event>]   # search local sessions
 zero doctor [--connectivity] [--json]        # health checks
 zero config [--json]                          # inspect resolved configuration
+zero serve --mcp [-C <path>]                  # expose Zero read-only tools over MCP stdio
 zero update --check [--json]                  # check for a newer release
 ```
 

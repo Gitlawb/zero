@@ -214,6 +214,7 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 		{"plugin"},
 		{"hooks"},
 		{"mcp"},
+		{"serve"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout bytes.Buffer
@@ -260,6 +261,7 @@ func assertHelpOutput(t *testing.T, args []string) {
 		"plugins",
 		"hooks",
 		"mcp",
+		"serve",
 		"--version",
 	} {
 		if !strings.Contains(output, want) {
