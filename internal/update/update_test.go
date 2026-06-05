@@ -41,8 +41,14 @@ func TestNormalizeVersionTagAndCompareReportInvalidInput(t *testing.T) {
 	if _, err := NormalizeVersionTag("nightly"); err == nil {
 		t.Fatal("NormalizeVersionTag should reject invalid versions")
 	}
+	if _, err := NormalizeVersionTag("v999999999999999999999.0.0"); err == nil {
+		t.Fatal("NormalizeVersionTag should reject oversized version components")
+	}
 	if _, err := CompareSemver("0.2.0", "nightly"); err == nil {
 		t.Fatal("CompareSemver should reject invalid versions")
+	}
+	if _, err := CompareSemver("v999999999999999999999.0.0", "0.1.0"); err == nil {
+		t.Fatal("CompareSemver should reject oversized version components")
 	}
 }
 

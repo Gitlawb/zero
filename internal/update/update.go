@@ -119,12 +119,20 @@ func Check(ctx context.Context, options Options) (Result, error) {
 	if releaseURL == "" {
 		releaseURL = fmt.Sprintf("https://github.com/%s/releases/tag/%s", repository, release.TagName)
 	}
+	latestParts, err := parseSemverNormalized(latestVersion)
+	if err != nil {
+		return Result{}, err
+	}
+	currentParts, err := parseSemverNormalized(currentVersion)
+	if err != nil {
+		return Result{}, err
+	}
 	return Result{
 		CurrentVersion:  currentVersion,
 		LatestVersion:   latestVersion,
 		ReleaseURL:      releaseURL,
 		TagName:         release.TagName,
-		UpdateAvailable: compareSemverParts(parseSemverNormalized(latestVersion), parseSemverNormalized(currentVersion)) > 0,
+		UpdateAvailable: compareSemverParts(latestParts, currentParts) > 0,
 	}, nil
 }
 
@@ -206,7 +214,19 @@ func normalizeVersionTag(version string) (string, error) {
 	if match == nil {
 		return "", fmt.Errorf("invalid semantic version: %s", version)
 	}
-	return fmt.Sprintf("%d.%d.%d", atoi(match[1]), atoi(match[2]), atoi(match[3])), nil
+	major, err := parseVersionComponent(version, match[1])
+	if err != nil {
+		return "", err
+	}
+	minor, err := parseVersionComponent(version, match[2])
+	if err != nil {
+		return "", err
+	}
+	patch, err := parseVersionComponent(version, match[3])
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d.%d.%d", major, minor, patch), nil
 }
 
 func parseSemver(version string) (semverParts, error) {
@@ -214,12 +234,27 @@ func parseSemver(version string) (semverParts, error) {
 	if err != nil {
 		return semverParts{}, err
 	}
-	return parseSemverNormalized(normalized), nil
+	return parseSemverNormalized(normalized)
 }
 
-func parseSemverNormalized(version string) semverParts {
+func parseSemverNormalized(version string) (semverParts, error) {
 	parts := strings.Split(version, ".")
-	return semverParts{atoi(parts[0]), atoi(parts[1]), atoi(parts[2])}
+	if len(parts) != 3 {
+		return semverParts{}, fmt.Errorf("invalid semantic version: %s", version)
+	}
+	major, err := parseVersionComponent(version, parts[0])
+	if err != nil {
+		return semverParts{}, err
+	}
+	minor, err := parseVersionComponent(version, parts[1])
+	if err != nil {
+		return semverParts{}, err
+	}
+	patch, err := parseVersionComponent(version, parts[2])
+	if err != nil {
+		return semverParts{}, err
+	}
+	return semverParts{major, minor, patch}, nil
 }
 
 func compareSemverParts(left semverParts, right semverParts) int {
@@ -241,10 +276,10 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func atoi(value string) int {
-	parsed, err := strconv.Atoi(value)
+func parseVersionComponent(version string, component string) (int, error) {
+	parsed, err := strconv.ParseInt(component, 10, 31)
 	if err != nil {
-		panic(err)
+		return 0, fmt.Errorf("invalid semantic version: %s", version)
 	}
-	return parsed
+	return int(parsed), nil
 }
