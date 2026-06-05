@@ -254,24 +254,17 @@ func redactWorktreeResult(result worktrees.Result) worktrees.Result {
 
 func redactVerifyReport(report verify.Report) verify.Report {
 	report.Root = redactCLIString(report.Root)
-	report.StartedAt = redactCLIString(report.StartedAt)
-	report.EndedAt = redactCLIString(report.EndedAt)
 	for index := range report.Results {
-		report.Results[index].ID = redactCLIString(report.Results[index].ID)
-		report.Results[index].Name = redactCLIString(report.Results[index].Name)
-		report.Results[index].StartedAt = redactCLIString(report.Results[index].StartedAt)
-		report.Results[index].EndedAt = redactCLIString(report.Results[index].EndedAt)
 		report.Results[index].Stdout = redactCLIString(report.Results[index].Stdout)
 		report.Results[index].Stderr = redactCLIString(report.Results[index].Stderr)
 		report.Results[index].Error = redactCLIString(report.Results[index].Error)
-		for commandIndex := range report.Results[index].Command {
-			report.Results[index].Command[commandIndex] = redactCLIString(report.Results[index].Command[commandIndex])
-		}
 	}
 	return report
 }
 
 func redactCLIString(value string) string {
+	// Keep ordinary paths visible; these commands report useful locations.
+	// Central redaction still removes secret-looking tokens embedded in paths.
 	return redaction.RedactString(value, redaction.Options{})
 }
 

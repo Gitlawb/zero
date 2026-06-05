@@ -210,7 +210,10 @@ func TestRunVerifyTextAndJSON(t *testing.T) {
 				if !decoded.OK || decoded.Summary.Passed != 1 {
 					t.Fatalf("unexpected verify JSON: %#v", decoded)
 				}
-			} else if !strings.Contains(stdout.String(), "Zero verification") || !strings.Contains(stdout.String(), "go.test") {
+				if decoded.Root != cwd {
+					t.Fatalf("decoded verify root = %q, want %q", decoded.Root, cwd)
+				}
+			} else if !strings.Contains(stdout.String(), "Zero verification") || !strings.Contains(stdout.String(), "go.test") || !strings.Contains(stdout.String(), cwd) {
 				t.Fatalf("unexpected verify text output: %q", stdout.String())
 			}
 		})
