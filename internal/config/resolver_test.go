@@ -132,8 +132,8 @@ func TestResolveReplacesMCPServerOverlayCollections(t *testing.T) {
 	if got := strings.Join(docs.Args, " "); got != "--project" {
 		t.Fatalf("docs.Args = %q, want project args override", got)
 	}
-	if docs.Env["ZERO_DOCS_TOKEN"] != "" || docs.Env["ZERO_DOCS_PROJECT"] != "1" {
-		t.Fatalf("docs.Env = %#v, want project env replacement", docs.Env)
+	if _, ok := docs.Env["ZERO_DOCS_TOKEN"]; ok || docs.Env["ZERO_DOCS_PROJECT"] != "1" {
+		t.Fatalf("docs.Env = %#v, want ZERO_DOCS_TOKEN absent and ZERO_DOCS_PROJECT=1", docs.Env)
 	}
 	web := resolved.MCP.Servers["web"]
 	if web.Type != "http" || web.URL != "https://example.com/mcp" {
