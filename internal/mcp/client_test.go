@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -361,6 +362,26 @@ func TestHTTPClientReportsNonOKStatus(t *testing.T) {
 	}
 }
 
+func TestCloseResponseBodyMergesCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	var err error
+
+	closeResponseBody(&err, Server{Name: "web", Type: ServerTypeHTTP}, errorCloser{err: closeErr})
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("closeResponseBody() error = %v, want wrapped close error", err)
+	}
+	if !strings.Contains(err.Error(), "close MCP http response from web") {
+		t.Fatalf("closeResponseBody() error = %q, want close context", err.Error())
+	}
+
+	baseErr := errors.New("decode failed")
+	err = baseErr
+	closeResponseBody(&err, Server{Name: "web", Type: ServerTypeHTTP}, errorCloser{err: closeErr})
+	if !errors.Is(err, baseErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("closeResponseBody() merged error = %v, want base and close errors", err)
+	}
+}
+
 func TestConnectRejectsUnsupportedTransport(t *testing.T) {
 	_, err := Connect(context.Background(), Server{Name: "web", Type: ServerType("websocket")})
 	if err == nil {
@@ -405,6 +426,14 @@ func TestClientRequestWaitsForMatchingResponseID(t *testing.T) {
 	if result.Value != "matched" {
 		t.Fatalf("result.Value = %q, want matched response", result.Value)
 	}
+}
+
+type errorCloser struct {
+	err error
+}
+
+func (closer errorCloser) Close() error {
+	return closer.err
 }
 
 func TestMCPStdioHelperProcess(t *testing.T) {

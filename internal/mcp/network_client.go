@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -314,7 +315,7 @@ func (client *remoteSSEClient) notify(ctx context.Context, method string, params
 	})
 }
 
-func (client *networkClient) post(ctx context.Context, message rpcMessage, expectResponse bool) (rpcMessage, error) {
+func (client *networkClient) post(ctx context.Context, message rpcMessage, expectResponse bool) (result rpcMessage, err error) {
 	body, err := json.Marshal(message)
 	if err != nil {
 		return rpcMessage{}, err
@@ -329,7 +330,7 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 	if err != nil {
 		return rpcMessage{}, fmt.Errorf("call MCP %s server %s: %w", client.server.Type, client.server.Name, err)
 	}
-	defer response.Body.Close()
+	defer closeResponseBody(&err, client.server, response.Body)
 
 	if sessionID := strings.TrimSpace(response.Header.Get("Mcp-Session-Id")); sessionID != "" {
 		client.sessionID = sessionID
@@ -362,8 +363,9 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 		return fmt.Errorf("open MCP SSE stream for %s: %w", client.server.Name, err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		defer response.Body.Close()
-		return httpStatusError(client.server, response)
+		err = httpStatusError(client.server, response)
+		closeResponseBody(&err, client.server, response.Body)
+		return err
 	}
 	client.streamBody = response.Body
 
@@ -377,7 +379,7 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 	}
 }
 
-func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) error {
+func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (err error) {
 	endpointURL, err := client.currentEndpoint()
 	if err != nil {
 		return err
@@ -396,7 +398,7 @@ func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) err
 	if err != nil {
 		return fmt.Errorf("post MCP SSE message to %s: %w", client.server.Name, err)
 	}
-	defer response.Body.Close()
+	defer closeResponseBody(&err, client.server, response.Body)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return httpStatusError(client.server, response)
 	}
@@ -428,6 +430,12 @@ func (client *remoteSSEClient) applyPostHeaders(request *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+}
+
+func closeResponseBody(errp *error, server Server, body io.Closer) {
+	if closeErr := body.Close(); closeErr != nil {
+		*errp = errors.Join(*errp, fmt.Errorf("close MCP %s response from %s: %w", server.Type, server.Name, closeErr))
+	}
 }
 
 func (client *networkClient) decodeResponse(response *http.Response) (rpcMessage, error) {
