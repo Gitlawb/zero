@@ -65,9 +65,11 @@ func TestRunWorktreesPrepareTextAndJSON(t *testing.T) {
 }
 
 func TestRunWorktreesPrepareReportsErrors(t *testing.T) {
+	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := runWithDeps([]string{"worktrees", "prepare", "--name", "bad"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
 		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
 			return worktrees.Result{}, errors.New("not a git repository")
 		},
@@ -81,6 +83,27 @@ func TestRunWorktreesPrepareReportsErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not a git repository") {
 		t.Fatalf("expected worktree error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesPrepareRejectsDuplicateNames(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"worktrees", "prepare", "--name", "first", "second"}, &stdout, &stderr, appDeps{
+		prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+			t.Fatal("prepareWorktree should not be called for invalid flags")
+			return worktrees.Result{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "worktree name was provided more than once") {
+		t.Fatalf("expected duplicate name error, got %q", stderr.String())
 	}
 }
 
@@ -235,6 +258,9 @@ func TestRunExecRejectsForkWithWorktree(t *testing.T) {
 	if !strings.Contains(stderr.String(), "--fork cannot be used with --worktree") {
 		t.Fatalf("expected flag conflict error, got %q", stderr.String())
 	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
 }
 
 func TestRunExecRejectsWorktreeDirWithoutWorktree(t *testing.T) {
@@ -252,5 +278,8 @@ func TestRunExecRejectsWorktreeDirWithoutWorktree(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--worktree-dir requires --worktree") {
 		t.Fatalf("expected worktree-dir dependency error, got %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
 	}
 }

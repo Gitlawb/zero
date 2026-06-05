@@ -126,10 +126,14 @@ func parseWorktreeCommandArgs(args []string) (worktreeCommandOptions, bool, erro
 			if err != nil {
 				return options, false, err
 			}
-			options.name = value
+			if err := setWorktreeName(&options, value); err != nil {
+				return options, false, err
+			}
 			index = next
 		case strings.HasPrefix(arg, "--name="):
-			options.name = strings.TrimSpace(strings.TrimPrefix(arg, "--name="))
+			if err := setWorktreeName(&options, strings.TrimPrefix(arg, "--name=")); err != nil {
+				return options, false, err
+			}
 		case arg == "--dir":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -151,13 +155,24 @@ func parseWorktreeCommandArgs(args []string) (worktreeCommandOptions, bool, erro
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown worktrees flag %q", arg)}
 		default:
-			if options.name != "" {
-				return options, false, execUsageError{fmt.Sprintf("unexpected worktrees argument %q", arg)}
+			if err := setWorktreeName(&options, arg); err != nil {
+				return options, false, err
 			}
-			options.name = strings.TrimSpace(arg)
 		}
 	}
 	return options, false, nil
+}
+
+func setWorktreeName(options *worktreeCommandOptions, value string) error {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return nil
+	}
+	if options.name != "" {
+		return execUsageError{"worktree name was provided more than once"}
+	}
+	options.name = name
+	return nil
 }
 
 func parseVerifyCommandArgs(args []string) (verifyCommandOptions, bool, error) {

@@ -97,6 +97,13 @@ func Prepare(ctx context.Context, options Options) (Result, error) {
 		return Result{}, err
 	}
 	if reused {
+		sameRepo, err := sameGitCommonDir(ctx, runGit, repoRoot, target)
+		if err != nil {
+			return Result{}, fmt.Errorf("inspect existing worktree repository: %w", err)
+		}
+		if !sameRepo {
+			return Result{}, fmt.Errorf("worktree path already exists for a different git repository: %s", target)
+		}
 		result.Reused = true
 		return result, nil
 	}
@@ -204,6 +211,37 @@ func gitOutput(ctx context.Context, runGit GitRunner, dir string, args ...string
 		return "", fmt.Errorf("%s", message)
 	}
 	return strings.TrimSpace(result.Stdout), nil
+}
+
+func sameGitCommonDir(ctx context.Context, runGit GitRunner, sourceDir string, targetDir string) (bool, error) {
+	sourceCommonDir, err := gitCommonDir(ctx, runGit, sourceDir)
+	if err != nil {
+		return false, err
+	}
+	targetCommonDir, err := gitCommonDir(ctx, runGit, targetDir)
+	if err != nil {
+		return false, err
+	}
+	return sourceCommonDir == targetCommonDir, nil
+}
+
+func gitCommonDir(ctx context.Context, runGit GitRunner, dir string) (string, error) {
+	value, err := gitOutput(ctx, runGit, dir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(dir, value)
+	}
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResult, error) {

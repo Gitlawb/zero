@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -276,6 +277,7 @@ func filterChecks(checks []Check, only []string) ([]Check, []string) {
 			unknown = append(unknown, id)
 		}
 	}
+	sort.Strings(unknown)
 	return filtered, unknown
 }
 

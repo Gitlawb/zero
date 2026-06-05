@@ -115,6 +115,23 @@ func TestRunReportsUnknownOnlyChecks(t *testing.T) {
 	}
 }
 
+func TestRunReportsUnknownOnlyChecksInStableOrder(t *testing.T) {
+	root := t.TempDir()
+	plan := Plan{Root: root}
+
+	report := Run(context.Background(), plan, RunOptions{
+		Only: []string{"missing.z", "missing.a"},
+		Now:  fixedVerifyTime("2026-06-05T10:56:00Z"),
+	})
+
+	if len(report.Results) != 2 {
+		t.Fatalf("expected two unknown check results, got %#v", report.Results)
+	}
+	if report.Results[0].ID != "missing.a" || report.Results[1].ID != "missing.z" {
+		t.Fatalf("unknown checks are not stable sorted: %#v", report.Results)
+	}
+}
+
 func TestDetectPlanRejectsMissingRoot(t *testing.T) {
 	_, err := DetectPlan(filepath.Join(t.TempDir(), "missing"))
 	if err == nil || !strings.Contains(err.Error(), "verify root must be an existing directory") {

@@ -50,6 +50,10 @@ func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	root := t.TempDir()
 	base := t.TempDir()
+	sourceGit := filepath.Join(root, ".git")
+	if err := os.MkdirAll(sourceGit, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	existing := filepath.Join(base, "zero-worktree-"+repoKey(root), "reuse-me")
 	if err := os.MkdirAll(filepath.Join(existing, ".git"), 0o700); err != nil {
 		t.Fatal(err)
@@ -59,6 +63,8 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 			{Stdout: root + "\n"},
 			{Stdout: "main\n"},
 			{Stdout: "abc1234\n"},
+			{Stdout: sourceGit + "\n"},
+			{Stdout: sourceGit + "\n"},
 		},
 	}
 
@@ -78,8 +84,43 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	if result.Path != existing {
 		t.Fatalf("Path = %q, want existing %q", result.Path, existing)
 	}
-	if len(runner.calls) != 3 {
+	if len(runner.calls) != 5 {
 		t.Fatalf("expected metadata git calls only, got %#v", runner.calls)
+	}
+}
+
+func TestPrepareRejectsExistingWorktreeFromDifferentRepo(t *testing.T) {
+	root := t.TempDir()
+	base := t.TempDir()
+	sourceGit := filepath.Join(root, ".git")
+	otherGit := filepath.Join(t.TempDir(), ".git")
+	for _, dir := range []string{sourceGit, otherGit} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	existing := filepath.Join(base, "zero-worktree-"+repoKey(root), "other-repo")
+	if err := os.MkdirAll(filepath.Join(existing, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{
+		results: []CommandResult{
+			{Stdout: root + "\n"},
+			{Stdout: "main\n"},
+			{Stdout: "abc1234\n"},
+			{Stdout: sourceGit + "\n"},
+			{Stdout: otherGit + "\n"},
+		},
+	}
+
+	_, err := Prepare(context.Background(), Options{
+		Cwd:     root,
+		Name:    "other-repo",
+		BaseDir: base,
+		RunGit:  runner.Run,
+	})
+	if err == nil || !strings.Contains(err.Error(), "different git repository") {
+		t.Fatalf("expected different repository reuse error, got %v", err)
 	}
 }
 
