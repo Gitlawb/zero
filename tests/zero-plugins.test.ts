@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -153,6 +153,32 @@ describe('Zero plugin manifest validation', () => {
         prompts: [{ name: 'escape', path }],
       }, options)).toThrow('must stay inside the plugin directory');
     }
+  });
+
+  it('rejects symlink-parent escapes with a missing leaf', async () => {
+    const dir = await makeTempDir();
+    const pluginDir = join(dir, 'plugins', 'bad');
+    const outside = join(dir, 'outside');
+    await mkdir(pluginDir, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    try {
+      await symlink(outside, join(pluginDir, 'link'), 'dir');
+    } catch {
+      return;
+    }
+
+    expect(() => parseZeroPluginManifest({
+      schemaVersion: 1,
+      id: 'zero.bad',
+      name: 'Bad',
+      version: '0.1.0',
+      prompts: [{ name: 'escape', path: join('link', 'missing.md') }],
+    }, {
+      manifestPath: join(pluginDir, 'plugin.json'),
+      pluginDir,
+      root: join(dir, 'plugins'),
+      source: 'project',
+    })).toThrow('must stay inside the plugin directory');
   });
 });
 

@@ -163,6 +163,52 @@ func TestParseManifestRejectsSymlinkEscapes(t *testing.T) {
 	}
 }
 
+func TestParseManifestRejectsSymlinkEscapesWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "bad")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(pluginDir, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	_, err := ParseManifest(map[string]any{
+		"schemaVersion": float64(1),
+		"id":            "zero.bad",
+		"name":          "Bad",
+		"version":       "0.1.0",
+		"prompts":       []any{map[string]any{"name": "escape", "path": filepath.Join("link", "missing.md")}},
+	}, ParseManifestOptions{
+		Source:       SourceProject,
+		Root:         root,
+		PluginDir:    pluginDir,
+		ManifestPath: filepath.Join(pluginDir, "plugin.json"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "must stay inside the plugin directory") {
+		t.Fatalf("expected missing-leaf symlink escape error, got %v", err)
+	}
+}
+
+func TestFormatListIncludesDiagnosticLocations(t *testing.T) {
+	output := FormatList(nil, []Diagnostic{{
+		Kind:         DiagnosticSchema,
+		Message:      "bad prompt path",
+		ManifestPath: "/plugins/bad/plugin.json",
+		FieldPath:    "prompts.escape.path",
+	}})
+	for _, want := range []string{"[schema] bad prompt path", "manifestPath=/plugins/bad/plugin.json", "fieldPath=prompts.escape.path"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("diagnostic output missing %q: %s", want, output)
+		}
+	}
+}
+
 func TestToDiagnosticClassifiesManifestAndIOErrors(t *testing.T) {
 	root := Root{Source: SourceProject}
 	schemaDiagnostic := toDiagnostic(ManifestError{FieldPath: "prompts.0.path", Message: "bad path"}, root, "/plugins", "/plugins/bad", "/plugins/bad/plugin.json")

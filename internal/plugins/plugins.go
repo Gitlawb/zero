@@ -354,10 +354,28 @@ func FormatList(plugins []LoadedPlugin, diagnostics []Diagnostic) string {
 	if len(diagnostics) > 0 {
 		lines = append(lines, "Plugin diagnostics:")
 		for _, diagnostic := range diagnostics {
-			lines = append(lines, fmt.Sprintf("  [%s] %s", diagnostic.Kind, diagnostic.Message))
+			line := fmt.Sprintf("  [%s] %s", diagnostic.Kind, diagnostic.Message)
+			if location := formatDiagnosticLocation(diagnostic); location != "" {
+				line += " [" + location + "]"
+			}
+			lines = append(lines, line)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatDiagnosticLocation(diagnostic Diagnostic) string {
+	parts := []string{}
+	if diagnostic.ManifestPath != "" {
+		parts = append(parts, "manifestPath="+diagnostic.ManifestPath)
+	}
+	if diagnostic.FieldPath != "" {
+		parts = append(parts, "fieldPath="+diagnostic.FieldPath)
+	}
+	if diagnostic.PluginPath != "" {
+		parts = append(parts, "pluginPath="+diagnostic.PluginPath)
+	}
+	return strings.Join(parts, " ")
 }
 
 func parseTools(raw any, allowAutoApproval bool) ([]ToolExtension, error) {
@@ -497,6 +515,11 @@ func ResolvePluginPath(pluginDir string, value string, fieldPath string) (string
 	rootCheck := root
 	if realRoot, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
 		rootCheck = realRoot
+	} else if errors.Is(evalErr, os.ErrNotExist) {
+		rootCheck, err = resolveMissingPathSymlinks(root)
+		if err != nil {
+			return "", err
+		}
 	}
 	resolved, err := filepath.Abs(filepath.Join(root, value))
 	if err != nil {
@@ -505,6 +528,11 @@ func ResolvePluginPath(pluginDir string, value string, fieldPath string) (string
 	resolvedCheck := resolved
 	if realResolved, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil {
 		resolvedCheck = realResolved
+	} else if errors.Is(evalErr, os.ErrNotExist) {
+		resolvedCheck, err = resolveMissingPathSymlinks(resolved)
+		if err != nil {
+			return "", err
+		}
 	}
 	relative, err := filepath.Rel(rootCheck, resolvedCheck)
 	if err != nil {
@@ -514,6 +542,31 @@ func ResolvePluginPath(pluginDir string, value string, fieldPath string) (string
 		return "", ManifestError{FieldPath: fieldPath, Message: "must stay inside the plugin directory."}
 	}
 	return resolved, nil
+}
+
+func resolveMissingPathSymlinks(path string) (string, error) {
+	existing := path
+	missing := []string{}
+	for {
+		if _, err := os.Stat(existing); err == nil {
+			realExisting, err := filepath.EvalSymlinks(existing)
+			if err != nil {
+				return "", err
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				realExisting = filepath.Join(realExisting, missing[index])
+			}
+			return realExisting, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return path, nil
+		}
+		missing = append(missing, filepath.Base(existing))
+		existing = parent
+	}
 }
 
 func mergePlugins(discovered []LoadedPlugin, diagnostics *[]Diagnostic) []LoadedPlugin {
