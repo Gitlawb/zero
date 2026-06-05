@@ -238,12 +238,57 @@ func redactValue(value any) any {
 	case map[string]any:
 		next := make(map[string]any, len(typed))
 		for key, item := range typed {
+			if isSensitiveKey(key) {
+				next[key] = "[REDACTED]"
+				continue
+			}
 			next[key] = redactValue(item)
 		}
 		return next
 	default:
 		return value
 	}
+}
+
+var sensitiveKeyNames = map[string]bool{
+	"accesstoken":   true,
+	"apikey":        true,
+	"authorization": true,
+	"bearer":        true,
+	"clientsecret":  true,
+	"credential":    true,
+	"credentials":   true,
+	"idtoken":       true,
+	"password":      true,
+	"passwd":        true,
+	"privatekey":    true,
+	"pwd":           true,
+	"refreshtoken":  true,
+	"secret":        true,
+	"token":         true,
+}
+
+func isSensitiveKey(key string) bool {
+	normalized := normalizeSensitiveKey(key)
+	if sensitiveKeyNames[normalized] {
+		return true
+	}
+	for _, suffix := range []string{"apikey", "clientsecret", "accesstoken", "refreshtoken", "idtoken", "privatekey"} {
+		if strings.HasSuffix(normalized, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeSensitiveKey(key string) string {
+	var normalized strings.Builder
+	for _, char := range strings.ToLower(key) {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
+			normalized.WriteRune(char)
+		}
+	}
+	return normalized.String()
 }
 
 func redactString(value string) string {

@@ -41,6 +41,49 @@ func TestFormatEventRedactsSecretsAndSerializesOneLine(t *testing.T) {
 	}
 }
 
+func TestFormatEventRedactsSensitiveObjectKeys(t *testing.T) {
+	apiKey := "plain-api-key-value"
+	accessToken := "plain-access-token-value"
+
+	line, err := FormatEvent(Event{
+		SchemaVersion: SchemaVersion,
+		Type:          EventToolCall,
+		RunID:         "run_test",
+		ID:            "call_1",
+		Name:          "bash",
+		Args: map[string]any{
+			"api_key": apiKey,
+			"nested": map[string]any{
+				"accessToken":  accessToken,
+				"promptTokens": 12,
+			},
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("FormatEvent returned error: %v", err)
+	}
+	if strings.Contains(line, apiKey) || strings.Contains(line, accessToken) {
+		t.Fatalf("expected sensitive object values to be redacted, got %q", line)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatalf("expected valid JSON, got %q: %v", line, err)
+	}
+	args := decoded["args"].(map[string]any)
+	if args["api_key"] != "[REDACTED]" {
+		t.Fatalf("expected api_key to be redacted, got %#v", args["api_key"])
+	}
+	nested := args["nested"].(map[string]any)
+	if nested["accessToken"] != "[REDACTED]" {
+		t.Fatalf("expected accessToken to be redacted, got %#v", nested["accessToken"])
+	}
+	if nested["promptTokens"] != float64(12) {
+		t.Fatalf("expected non-sensitive token counter to remain numeric, got %#v", nested["promptTokens"])
+	}
+}
+
 func TestParseInputPromptCombinesPromptAndUserMessages(t *testing.T) {
 	input := strings.Join([]string{
 		`{"schemaVersion":1,"type":"message","role":"user","content":"Inspect this repo."}`,

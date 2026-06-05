@@ -96,12 +96,3 @@ func visibleExecTools(registry *tools.Registry, options execOptions, permissionM
 	})
 	return visible
 }
-
-func toolListContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}

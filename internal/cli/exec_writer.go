@@ -119,6 +119,7 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 			Type:      streamjson.EventToolResult,
 			RunID:     writer.runID,
 			ID:        result.ToolCallID,
+			Name:      result.Name,
 			Status:    string(result.Status),
 			Output:    output,
 			Truncated: &truncated,

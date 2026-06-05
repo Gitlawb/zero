@@ -314,6 +314,9 @@ func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
 	if events[0]["truncated"] != true {
 		t.Fatalf("expected truncated=true, got %#v", events[0])
 	}
+	if events[0]["name"] != "read_file" {
+		t.Fatalf("expected tool_result name to be read_file, got %#v", events[0])
+	}
 	output := events[0]["output"].(string)
 	if len(output) >= streamJSONToolResultOutputLimit+100 || !strings.Contains(output, "[truncated]") {
 		t.Fatalf("expected shortened output with marker, got len=%d", len(output))
