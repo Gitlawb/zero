@@ -31,6 +31,52 @@ func SchemaFromMCP(input map[string]any) tools.Schema {
 	return schema
 }
 
+func SchemaToMCP(schema tools.Schema) map[string]any {
+	schemaType := strings.TrimSpace(schema.Type)
+	if schemaType == "" {
+		schemaType = "object"
+	}
+	output := map[string]any{
+		"type":                 schemaType,
+		"additionalProperties": schema.AdditionalProperties,
+	}
+	if len(schema.Required) > 0 {
+		output["required"] = append([]string{}, schema.Required...)
+	}
+	if len(schema.Properties) > 0 {
+		properties := make(map[string]any, len(schema.Properties))
+		for name, property := range schema.Properties {
+			properties[name] = propertyToMCP(property)
+		}
+		output["properties"] = properties
+	}
+	return output
+}
+
+func propertyToMCP(property tools.PropertySchema) map[string]any {
+	propertyType := strings.TrimSpace(property.Type)
+	if propertyType == "" {
+		propertyType = "string"
+	}
+	output := map[string]any{"type": propertyType}
+	if property.Description != "" {
+		output["description"] = property.Description
+	}
+	if len(property.Enum) > 0 {
+		output["enum"] = append([]string{}, property.Enum...)
+	}
+	if property.Default != nil {
+		output["default"] = property.Default
+	}
+	if property.Minimum != nil {
+		output["minimum"] = *property.Minimum
+	}
+	if property.Maximum != nil {
+		output["maximum"] = *property.Maximum
+	}
+	return output
+}
+
 func propertyFromMCP(input map[string]any) tools.PropertySchema {
 	property := tools.PropertySchema{
 		Type:        firstString(input["type"], "string"),

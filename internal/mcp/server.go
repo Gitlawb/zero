@@ -1,0 +1,161 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+const defaultProtocolVersion = "2024-11-05"
+
+const (
+	jsonRPCMethodNotFound = -32601
+	jsonRPCInvalidParams  = -32602
+	jsonRPCInternalError  = -32603
+)
+
+type ServeOptions struct {
+	Name              string
+	Version           string
+	PermissionGranted bool
+}
+
+func Serve(ctx context.Context, input io.Reader, output io.Writer, registry *tools.Registry, options ServeOptions) error {
+	if registry == nil {
+		return errors.New("MCP server tool registry is required")
+	}
+	reader := newMessageReader(input)
+	writer := newMessageWriter(output)
+	server := toolServer{
+		registry: registry,
+		options:  options.withDefaults(),
+		writer:   writer,
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		message, err := reader.read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if err := server.handle(ctx, message); err != nil {
+			return err
+		}
+	}
+}
+
+func (options ServeOptions) withDefaults() ServeOptions {
+	if strings.TrimSpace(options.Name) == "" {
+		options.Name = "zero"
+	}
+	if strings.TrimSpace(options.Version) == "" {
+		options.Version = "dev"
+	}
+	return options
+}
+
+type toolServer struct {
+	registry *tools.Registry
+	options  ServeOptions
+	writer   *messageWriter
+}
+
+func (server toolServer) handle(ctx context.Context, message rpcMessage) error {
+	if message.ID == nil && strings.HasPrefix(message.Method, "notifications/") {
+		return nil
+	}
+	if message.ID == nil {
+		return nil
+	}
+
+	switch message.Method {
+	case "initialize":
+		return server.writeResult(message.ID, map[string]any{
+			"protocolVersion": defaultProtocolVersion,
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo": map[string]any{
+				"name":    server.options.Name,
+				"version": server.options.Version,
+			},
+		})
+	case "tools/list":
+		return server.writeResult(message.ID, map[string]any{
+			"tools": server.remoteTools(),
+		})
+	case "tools/call":
+		result, err := server.callTool(ctx, message.Params)
+		if err != nil {
+			return server.writeError(message.ID, jsonRPCInvalidParams, err.Error())
+		}
+		return server.writeResult(message.ID, result)
+	default:
+		return server.writeError(message.ID, jsonRPCMethodNotFound, "method not found")
+	}
+}
+
+func (server toolServer) remoteTools() []RemoteTool {
+	registered := server.registry.All()
+	sort.Slice(registered, func(left int, right int) bool {
+		return registered[left].Name() < registered[right].Name()
+	})
+
+	remote := make([]RemoteTool, 0, len(registered))
+	for _, tool := range registered {
+		remote = append(remote, RemoteTool{
+			Name:        tool.Name(),
+			Description: tool.Description(),
+			InputSchema: SchemaToMCP(tool.Parameters()),
+		})
+	}
+	return remote
+}
+
+func (server toolServer) callTool(ctx context.Context, rawParams json.RawMessage) (CallToolResult, error) {
+	var params struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if len(rawParams) > 0 {
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return CallToolResult{}, fmt.Errorf("invalid tools/call params: %w", err)
+		}
+	}
+	params.Name = strings.TrimSpace(params.Name)
+	if params.Name == "" {
+		return CallToolResult{}, errors.New("tools/call requires a tool name")
+	}
+	if params.Arguments == nil {
+		params.Arguments = map[string]any{}
+	}
+
+	result := server.registry.RunWithOptions(ctx, params.Name, params.Arguments, tools.RunOptions{
+		PermissionGranted: server.options.PermissionGranted,
+	})
+	return CallToolResult{
+		Content: []Content{{Type: "text", Text: result.Output}},
+		IsError: result.Status != tools.StatusOK,
+	}, nil
+}
+
+func (server toolServer) writeResult(id any, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return server.writeError(id, jsonRPCInternalError, err.Error())
+	}
+	return server.writer.write(rpcMessage{ID: id, Result: raw})
+}
+
+func (server toolServer) writeError(id any, code int, message string) error {
+	return server.writer.write(rpcMessage{ID: id, Error: &rpcError{Code: code, Message: message}})
+}
