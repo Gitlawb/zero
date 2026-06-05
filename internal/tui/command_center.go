@@ -112,12 +112,18 @@ func (m model) handleModelCommand(args string) (model, string) {
 	m.provider = nextProvider
 	m.providerName = displayValue(nextProfile.Name, string(metadata.ProviderKind))
 	m.modelName = entry.ID
+	effortLine := "effort: " + m.effortDisplay()
+	if m.reasoningEffort != "" && !reasoningEffortAllowed(registry.ReasoningEfforts(entry.ID), m.reasoningEffort) {
+		m.reasoningEffort = ""
+		effortLine = "effort: auto (unsupported preference reset)"
+	}
 	return m, strings.Join([]string{
 		"Model",
 		"Switched model for this TUI session.",
 		"model: " + entry.ID,
 		"provider: " + string(metadata.ProviderKind),
 		"api model: " + metadata.APIModel,
+		effortLine,
 	}, "\n")
 }
 

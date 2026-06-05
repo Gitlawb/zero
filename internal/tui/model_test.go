@@ -53,6 +53,9 @@ func TestParseCommand(t *testing.T) {
 		{input: "/find needle", kind: commandSearch, text: "needle"},
 		{input: "/resume", kind: commandResume},
 		{input: "/sessions", kind: commandResume},
+		{input: "/compact", kind: commandCompact},
+		{input: "/effort high", kind: commandEffort, text: "high"},
+		{input: "/style concise", kind: commandStyle, text: "concise"},
 		{input: "/debug-mode", kind: commandDebug},
 		{input: "hello zero", kind: commandPrompt, text: "hello zero"},
 	}

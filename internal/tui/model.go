@@ -14,8 +14,10 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -25,33 +27,42 @@ var (
 )
 
 const tuiToolOutputLimit = 240
+const defaultResponseStyle = "balanced"
 
 type model struct {
-	ctx             context.Context
-	cwd             string
-	providerName    string
-	modelName       string
-	providerProfile config.ProviderProfile
-	provider        zeroruntime.Provider
-	newProvider     func(config.ProviderProfile) (zeroruntime.Provider, error)
-	registry        *tools.Registry
-	sessionStore    *sessions.Store
-	agentOptions    agent.Options
-	permissionMode  agent.PermissionMode
-	transcript      []transcriptRow
-	input           textinput.Model
-	pending         bool
-	exiting         bool
-	runCancel       context.CancelFunc
-	runID           int
-	activeRunID     int
-	now             func() time.Time
+	ctx              context.Context
+	cwd              string
+	providerName     string
+	modelName        string
+	providerProfile  config.ProviderProfile
+	provider         zeroruntime.Provider
+	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
+	registry         *tools.Registry
+	sessionStore     *sessions.Store
+	usageTracker     *usage.Tracker
+	agentOptions     agent.Options
+	permissionMode   agent.PermissionMode
+	reasoningEffort  modelregistry.ReasoningEffort
+	responseStyle    string
+	compactRequests  int
+	unpricedRequests int
+	unpricedTokens   int
+	transcript       []transcriptRow
+	input            textinput.Model
+	pending          bool
+	exiting          bool
+	runCancel        context.CancelFunc
+	runID            int
+	activeRunID      int
+	now              func() time.Time
 }
 
 type agentResponseMsg struct {
-	runID int
-	rows  []transcriptRow
-	err   error
+	runID        int
+	rows         []transcriptRow
+	usageEvents  []zeroruntime.Usage
+	usageModelID string
+	err          error
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -76,6 +87,10 @@ func newModel(ctx context.Context, options Options) model {
 	sessionStore := options.SessionStore
 	if sessionStore == nil {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
+	}
+	usageTracker := options.UsageTracker
+	if usageTracker == nil {
+		usageTracker = usage.NewTracker(usage.TrackerOptions{})
 	}
 
 	permissionMode := options.PermissionMode
@@ -103,6 +118,9 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore:    sessionStore,
 		agentOptions:    options.AgentOptions,
 		permissionMode:  permissionMode,
+		reasoningEffort: options.ReasoningEffort,
+		responseStyle:   defaultedResponseStyle(options.ResponseStyle),
+		usageTracker:    usageTracker,
 		transcript:      initialTranscript(),
 		input:           input,
 		now:             time.Now,
@@ -137,6 +155,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending = false
 		m.runCancel = nil
 		m.activeRunID = 0
+		for _, event := range msg.usageEvents {
+			var usageRows []transcriptRow
+			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+			for _, row := range usageRows {
+				m.transcript = appendRow(m.transcript, row.kind, row.text)
+			}
+		}
 		for _, row := range msg.rows {
 			m.transcript = appendRow(m.transcript, row.kind, row.text)
 		}
@@ -231,6 +256,21 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandResume:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.resumeText(command.text)})
 		return m, nil
+	case commandCompact:
+		text := ""
+		m, text = m.handleCompactCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandEffort:
+		text := ""
+		m, text = m.handleEffortCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandStyle:
+		text := ""
+		m, text = m.handleStyleCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
 	case commandTheme, commandInputStyle:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
@@ -275,6 +315,8 @@ func (m *model) cancelRun() {
 func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
 	return func() tea.Msg {
 		rows := []transcriptRow{}
+		usageEvents := []zeroruntime.Usage{}
+		usageModelID := m.modelName
 		options := m.agentOptions
 		options.Registry = m.registry
 		options.PermissionMode = m.permissionMode
@@ -298,12 +340,20 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 			}
 		}
 
+		onUsage := options.OnUsage
+		options.OnUsage = func(event zeroruntime.Usage) {
+			usageEvents = append(usageEvents, event)
+			if onUsage != nil {
+				onUsage(event)
+			}
+		}
+
 		result, err := agent.Run(runCtx, prompt, m.provider, options)
 		if err != nil {
-			return agentResponseMsg{runID: runID, rows: rows, err: err}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, err: err}
 		}
 		rows = append(rows, transcriptRow{kind: rowAssistant, text: result.FinalAnswer})
-		return agentResponseMsg{runID: runID, rows: rows}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID}
 	}
 }
 
@@ -370,6 +420,10 @@ func (m model) contextText() string {
 		"provider: " + displayValue(m.providerName, "none"),
 		"model: " + displayValue(m.modelName, "none"),
 		"permission mode: " + string(m.permissionMode),
+		"effort: " + m.effortDisplay(),
+		"style: " + m.responseStyle,
+		"usage: " + m.usageSummaryText(),
+		"compaction: " + m.compactionStatus(),
 		fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
 		"session root: " + displayValue(m.sessionStore.RootDir, "unknown"),
 		fmt.Sprintf("tools: %d", len(m.registry.All())),
@@ -398,95 +452,4 @@ func (m model) debugText() string {
 		"active run: " + fmt.Sprint(m.activeRunID),
 		"Debug mode is not wired in Go TUI yet.",
 	}, "\n")
-}
-
-func displayValue(value string, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
-func (m model) runState() string {
-	if m.pending {
-		return "running"
-	}
-	return "ready"
-}
-
-func shellOnlyCommandText(name string) string {
-	return fmt.Sprintf("%s is registered in the Go TUI shell but is not wired yet.", name)
-}
-
-func helpText() string {
-	return "Commands:\n" + strings.Join(formatCommandHelpLines(), "\n") + "\nSubmit text to ask the assistant."
-}
-
-const defaultCommandFooterText = "/help  /model  /provider  /context  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
-
-func commandFooterText() string {
-	return formatCommandFooterText(commandDefinitions, false)
-}
-
-func (m model) footerText() string {
-	return formatCommandFooterText(commandDefinitions, m.pending)
-}
-
-func formatCommandFooterText(commands []commandDefinition, pending bool) string {
-	if len(commands) == 0 {
-		return defaultCommandFooterText
-	}
-
-	namesByKind := make(map[commandKind]string, len(commands))
-	for _, command := range commands {
-		namesByKind[command.kind] = command.name
-	}
-
-	featured := []commandKind{
-		commandHelp,
-		commandModel,
-		commandProvider,
-		commandContext,
-		commandTools,
-		commandPermissions,
-		commandClear,
-		commandExit,
-	}
-	parts := make([]string, 0, len(featured)+2)
-	for _, kind := range featured {
-		name := namesByKind[kind]
-		if name != "" {
-			parts = append(parts, name)
-		}
-	}
-	if len(parts) == 0 {
-		return defaultCommandFooterText
-	}
-
-	if pending {
-		parts = append(parts, "Esc cancel")
-	} else {
-		parts = append(parts, "Esc clear")
-	}
-	parts = append(parts, "Ctrl+C quit")
-	return strings.Join(parts, "  ")
-}
-
-func renderRow(row transcriptRow) string {
-	switch row.kind {
-	case rowWelcome:
-		return row.text
-	case rowUser:
-		return "user: " + row.text
-	case rowAssistant:
-		return "assistant: " + row.text
-	case rowToolCall:
-		return row.text
-	case rowToolResult:
-		return row.text
-	case rowError:
-		return "error: " + row.text
-	default:
-		return row.text
-	}
 }

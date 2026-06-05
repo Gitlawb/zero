@@ -21,6 +21,9 @@ const (
 	commandPlan
 	commandSearch
 	commandResume
+	commandCompact
+	commandEffort
+	commandStyle
 	commandTheme
 	commandInputStyle
 	commandUnknown
@@ -116,6 +119,27 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "List recent sessions or show resume guidance.",
 		kind:        commandResume,
+	},
+	{
+		name:        "/compact",
+		usage:       "/compact [status]",
+		group:       commandGroupSession,
+		description: "Show or request transcript compaction shell status.",
+		kind:        commandCompact,
+	},
+	{
+		name:        "/effort",
+		usage:       "/effort [list|low|medium|high|auto]",
+		group:       commandGroupModel,
+		description: "Show or set reasoning effort for supported models.",
+		kind:        commandEffort,
+	},
+	{
+		name:        "/style",
+		usage:       "/style [list|balanced|concise|explanatory|review]",
+		group:       commandGroupSession,
+		description: "Show or set the response style preference.",
+		kind:        commandStyle,
 	},
 	{
 		name:        "/doctor",
