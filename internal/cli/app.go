@@ -130,6 +130,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runDoctor(args[1:], stdout, stderr, deps)
 	case "search", "find":
 		return runSearch(args[1:], stdout, stderr, deps)
+	case "sessions", "session":
+		return runSessions(args[1:], stdout, stderr, deps)
 	case "plugins", "plugin":
 		return runPlugins(args[1:], stdout, stderr, deps)
 	case "hooks":
@@ -276,6 +278,7 @@ Commands:
   doctor     Run backend health checks for config and provider setup
   search     Search persisted local Zero session events
   find       Alias for search
+  sessions   Inspect local Zero session lineage
   plugins    Inspect local Zero plugin manifests
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings

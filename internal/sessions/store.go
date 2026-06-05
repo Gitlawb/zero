@@ -30,32 +30,52 @@ const (
 	EventUsage         EventType = EventProviderUsage
 	EventError         EventType = "error"
 	EventSessionFork   EventType = "session_fork"
+	EventSessionChild  EventType = "session_child"
+)
+
+type SessionKind string
+
+const (
+	SessionKindFork  SessionKind = "fork"
+	SessionKindChild SessionKind = "child"
 )
 
 type Metadata struct {
-	SessionID          string    `json:"sessionId"`
-	Title              string    `json:"title,omitempty"`
-	Cwd                string    `json:"cwd,omitempty"`
-	ModelID            string    `json:"modelId,omitempty"`
-	Provider           string    `json:"provider,omitempty"`
-	ParentSessionID    string    `json:"parentSessionId,omitempty"`
-	ForkedFromEventID  string    `json:"forkedFromEventId,omitempty"`
-	ForkedFromSequence int       `json:"forkedFromSequence,omitempty"`
-	CreatedAt          string    `json:"createdAt"`
-	UpdatedAt          string    `json:"updatedAt"`
-	EventCount         int       `json:"eventCount"`
-	LastEventType      EventType `json:"lastEventType,omitempty"`
+	SessionID           string      `json:"sessionId"`
+	SessionKind         SessionKind `json:"sessionKind,omitempty"`
+	Title               string      `json:"title,omitempty"`
+	Cwd                 string      `json:"cwd,omitempty"`
+	ModelID             string      `json:"modelId,omitempty"`
+	Provider            string      `json:"provider,omitempty"`
+	ParentSessionID     string      `json:"parentSessionId,omitempty"`
+	RootSessionID       string      `json:"rootSessionId,omitempty"`
+	AgentName           string      `json:"agentName,omitempty"`
+	TaskID              string      `json:"taskId,omitempty"`
+	ForkedFromEventID   string      `json:"forkedFromEventId,omitempty"`
+	ForkedFromSequence  int         `json:"forkedFromSequence,omitempty"`
+	SpawnedFromEventID  string      `json:"spawnedFromEventId,omitempty"`
+	SpawnedFromSequence int         `json:"spawnedFromSequence,omitempty"`
+	CreatedAt           string      `json:"createdAt"`
+	UpdatedAt           string      `json:"updatedAt"`
+	EventCount          int         `json:"eventCount"`
+	LastEventType       EventType   `json:"lastEventType,omitempty"`
 }
 
 type CreateInput struct {
-	SessionID          string
-	Title              string
-	Cwd                string
-	ModelID            string
-	Provider           string
-	ParentSessionID    string
-	ForkedFromEventID  string
-	ForkedFromSequence int
+	SessionID           string
+	SessionKind         SessionKind
+	Title               string
+	Cwd                 string
+	ModelID             string
+	Provider            string
+	ParentSessionID     string
+	RootSessionID       string
+	AgentName           string
+	TaskID              string
+	ForkedFromEventID   string
+	ForkedFromSequence  int
+	SpawnedFromEventID  string
+	SpawnedFromSequence int
 }
 
 type ForkInput struct {
@@ -64,6 +84,22 @@ type ForkInput struct {
 	Cwd       string
 	ModelID   string
 	Provider  string
+}
+
+type ChildInput struct {
+	SessionID string
+	Title     string
+	Cwd       string
+	ModelID   string
+	Provider  string
+	AgentName string
+	TaskID    string
+	Prompt    string
+}
+
+type TreeNode struct {
+	Session  Metadata   `json:"session"`
+	Children []TreeNode `json:"children"`
 }
 
 type AppendEventInput struct {
@@ -138,17 +174,23 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 
 	timestamp := store.timestamp()
 	session := Metadata{
-		SessionID:          sessionID,
-		Title:              strings.TrimSpace(input.Title),
-		Cwd:                strings.TrimSpace(input.Cwd),
-		ModelID:            strings.TrimSpace(input.ModelID),
-		Provider:           strings.TrimSpace(input.Provider),
-		ParentSessionID:    strings.TrimSpace(input.ParentSessionID),
-		ForkedFromEventID:  strings.TrimSpace(input.ForkedFromEventID),
-		ForkedFromSequence: input.ForkedFromSequence,
-		CreatedAt:          timestamp,
-		UpdatedAt:          timestamp,
-		EventCount:         0,
+		SessionID:           sessionID,
+		SessionKind:         input.SessionKind,
+		Title:               strings.TrimSpace(input.Title),
+		Cwd:                 strings.TrimSpace(input.Cwd),
+		ModelID:             strings.TrimSpace(input.ModelID),
+		Provider:            strings.TrimSpace(input.Provider),
+		ParentSessionID:     strings.TrimSpace(input.ParentSessionID),
+		RootSessionID:       strings.TrimSpace(input.RootSessionID),
+		AgentName:           strings.TrimSpace(input.AgentName),
+		TaskID:              strings.TrimSpace(input.TaskID),
+		ForkedFromEventID:   strings.TrimSpace(input.ForkedFromEventID),
+		ForkedFromSequence:  input.ForkedFromSequence,
+		SpawnedFromEventID:  strings.TrimSpace(input.SpawnedFromEventID),
+		SpawnedFromSequence: input.SpawnedFromSequence,
+		CreatedAt:           timestamp,
+		UpdatedAt:           timestamp,
+		EventCount:          0,
 	}
 
 	if err := os.MkdirAll(store.RootDir, 0o700); err != nil {
@@ -249,11 +291,13 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	}
 	fork, err := store.Create(CreateInput{
 		SessionID:          input.SessionID,
+		SessionKind:        SessionKindFork,
 		Title:              title,
 		Cwd:                firstNonEmpty(input.Cwd, parent.Cwd),
 		ModelID:            firstNonEmpty(input.ModelID, parent.ModelID),
 		Provider:           firstNonEmpty(input.Provider, parent.Provider),
 		ParentSessionID:    parent.SessionID,
+		RootSessionID:      firstNonEmpty(parent.RootSessionID, parent.SessionID),
 		ForkedFromEventID:  last.ID,
 		ForkedFromSequence: last.Sequence,
 	})

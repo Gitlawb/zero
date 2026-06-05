@@ -112,6 +112,128 @@ func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesChildSessionsAndRecordsLineageEvents(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:30:00Z")})
+	parent, err := store.Create(CreateInput{
+		SessionID: "parent",
+		Title:     "Parent",
+		Cwd:       "/repo",
+		ModelID:   "gpt-4.1",
+		Provider:  "openai",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "plan"}}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+
+	child, err := store.CreateChild(parent.SessionID, ChildInput{
+		SessionID: "child",
+		Title:     "Review agent",
+		AgentName: "code-review",
+		TaskID:    "task-1",
+		Prompt:    "Review the diff",
+	})
+	if err != nil {
+		t.Fatalf("CreateChild returned error: %v", err)
+	}
+	if child.SessionKind != SessionKindChild || child.ParentSessionID != parent.SessionID || child.RootSessionID != parent.SessionID {
+		t.Fatalf("child lineage metadata = %#v", child)
+	}
+	if child.Cwd != parent.Cwd || child.ModelID != parent.ModelID || child.Provider != parent.Provider {
+		t.Fatalf("child did not inherit parent runtime context: %#v", child)
+	}
+	if child.AgentName != "code-review" || child.TaskID != "task-1" || child.SpawnedFromEventID != "parent:1" || child.SpawnedFromSequence != 1 {
+		t.Fatalf("child agent metadata = %#v", child)
+	}
+
+	childEvents, err := store.ReadEvents(child.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents child returned error: %v", err)
+	}
+	if len(childEvents) != 1 || childEvents[0].Type != EventSessionChild {
+		t.Fatalf("child events = %#v, want one session_child event", childEvents)
+	}
+	var childPayload map[string]any
+	if err := json.Unmarshal(childEvents[0].Payload, &childPayload); err != nil {
+		t.Fatalf("decode child payload: %v", err)
+	}
+	if childPayload["parentSessionId"] != parent.SessionID || childPayload["prompt"] != "Review the diff" {
+		t.Fatalf("child payload = %#v, want parent and prompt", childPayload)
+	}
+
+	parentEvents, err := store.ReadEvents(parent.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents parent returned error: %v", err)
+	}
+	if len(parentEvents) != 2 || parentEvents[1].Type != EventSessionChild {
+		t.Fatalf("parent events = %#v, want child linkage event", parentEvents)
+	}
+	var parentPayload map[string]any
+	if err := json.Unmarshal(parentEvents[1].Payload, &parentPayload); err != nil {
+		t.Fatalf("decode parent payload: %v", err)
+	}
+	if parentPayload["childSessionId"] != child.SessionID || parentPayload["agentName"] != "code-review" {
+		t.Fatalf("parent payload = %#v, want child linkage", parentPayload)
+	}
+}
+
+func TestStoreListsChildrenLineageAndTree(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
+		time.Date(2026, 6, 4, 11, 45, 0, 0, time.UTC),
+		time.Date(2026, 6, 4, 11, 45, 1, 0, time.UTC),
+		time.Date(2026, 6, 4, 11, 45, 2, 0, time.UTC),
+		time.Date(2026, 6, 4, 11, 45, 3, 0, time.UTC),
+		time.Date(2026, 6, 4, 11, 45, 4, 0, time.UTC),
+		time.Date(2026, 6, 4, 11, 45, 5, 0, time.UTC),
+		time.Date(2026, 6, 4, 11, 45, 6, 0, time.UTC),
+	})})
+	root, err := store.Create(CreateInput{SessionID: "root", Title: "Root"})
+	if err != nil {
+		t.Fatalf("Create root returned error: %v", err)
+	}
+	first, err := store.CreateChild(root.SessionID, ChildInput{SessionID: "first", AgentName: "review"})
+	if err != nil {
+		t.Fatalf("CreateChild first returned error: %v", err)
+	}
+	second, err := store.CreateChild(root.SessionID, ChildInput{SessionID: "second", AgentName: "test-gen"})
+	if err != nil {
+		t.Fatalf("CreateChild second returned error: %v", err)
+	}
+	grandchild, err := store.CreateChild(first.SessionID, ChildInput{SessionID: "grandchild", AgentName: "security"})
+	if err != nil {
+		t.Fatalf("CreateChild grandchild returned error: %v", err)
+	}
+
+	children, err := store.ListChildren(root.SessionID)
+	if err != nil {
+		t.Fatalf("ListChildren returned error: %v", err)
+	}
+	if got := []string{children[0].SessionID, children[1].SessionID}; !reflect.DeepEqual(got, []string{second.SessionID, first.SessionID}) {
+		t.Fatalf("children order = %#v, want newest direct children first", got)
+	}
+
+	lineage, err := store.Lineage(grandchild.SessionID)
+	if err != nil {
+		t.Fatalf("Lineage returned error: %v", err)
+	}
+	if got := []string{lineage[0].SessionID, lineage[1].SessionID, lineage[2].SessionID}; !reflect.DeepEqual(got, []string{root.SessionID, first.SessionID, grandchild.SessionID}) {
+		t.Fatalf("lineage = %#v, want root to child path", got)
+	}
+
+	tree, err := store.Tree(root.SessionID)
+	if err != nil {
+		t.Fatalf("Tree returned error: %v", err)
+	}
+	if tree.Session.SessionID != root.SessionID || len(tree.Children) != 2 {
+		t.Fatalf("tree root = %#v, want two children", tree)
+	}
+	if tree.Children[1].Session.SessionID != first.SessionID || len(tree.Children[1].Children) != 1 {
+		t.Fatalf("tree nested children = %#v, want grandchild under first", tree.Children)
+	}
+}
+
 func TestDefaultRootHonorsXDGDataHome(t *testing.T) {
 	got := DefaultRoot(map[string]string{
 		"XDG_DATA_HOME": "/tmp/zero-data",
