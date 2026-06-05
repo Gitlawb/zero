@@ -87,6 +87,12 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
 		return runExec(args[1:], stdout, stderr, deps)
+	case "config":
+		return runConfig(args[1:], stdout, stderr, deps)
+	case "models":
+		return runModels(args[1:], stdout, stderr)
+	case "providers":
+		return runProviders(args[1:], stdout, stderr, deps)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr, deps)
 	case "search", "find":
@@ -147,11 +153,14 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 	registry := newCoreRegistry(workspaceRoot)
 	permissionMode := agent.PermissionModeAuto
 	return deps.runTUI(context.Background(), tui.Options{
-		Cwd:          workspaceRoot,
-		ProviderName: resolved.Provider.Name,
-		ModelName:    resolved.Provider.Model,
-		Provider:     provider,
-		Registry:     registry,
+		Cwd:             workspaceRoot,
+		ProviderName:    resolved.Provider.Name,
+		ModelName:       resolved.Provider.Model,
+		ProviderProfile: resolved.Provider,
+		Provider:        provider,
+		NewProvider:     deps.newProvider,
+		Registry:        registry,
+		SessionStore:    deps.newSessionStore(),
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,
@@ -191,6 +200,9 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  config     Inspect resolved Go configuration without leaking secrets
+  models     List Zero model registry entries
+  providers  Inspect resolved provider profiles
   doctor     Run backend health checks for config and provider setup
   search     Search persisted local Zero session events
   find       Alias for search

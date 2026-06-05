@@ -2,12 +2,16 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -45,6 +49,10 @@ func TestParseCommand(t *testing.T) {
 		{input: "/context", kind: commandContext},
 		{input: "/model", kind: commandModel},
 		{input: "/model list", kind: commandModel, text: "list"},
+		{input: "/search needle", kind: commandSearch, text: "needle"},
+		{input: "/find needle", kind: commandSearch, text: "needle"},
+		{input: "/resume", kind: commandResume},
+		{input: "/sessions", kind: commandResume},
 		{input: "/debug-mode", kind: commandDebug},
 		{input: "hello zero", kind: commandPrompt, text: "hello zero"},
 	}
@@ -130,13 +138,25 @@ func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
 }
 
 func TestCommandFooterTextFallsBackWhenRegistryIsEmpty(t *testing.T) {
-	footer := formatCommandFooterText(nil)
+	footer := formatCommandFooterText(nil, false)
 
 	for _, command := range []string{"/help", "/model", "/provider", "/context", "/tools", "/permissions", "/clear", "/exit"} {
 		assertContains(t, footer, command)
 	}
 	assertContains(t, footer, "Esc clear")
 	assertContains(t, footer, "Ctrl+C quit")
+}
+
+func TestCommandFooterTextShowsCancelWhilePending(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+
+	footer := m.footerText()
+
+	assertContains(t, footer, "Esc cancel")
+	if strings.Contains(footer, "Esc clear") {
+		t.Fatalf("pending footer should not show clear hint, got %q", footer)
+	}
 }
 
 func TestHelpCommandAppendsHelpRow(t *testing.T) {
@@ -254,6 +274,8 @@ func TestContextCommandShowsSessionState(t *testing.T) {
 		"provider: openai",
 		"model: gpt-4.1",
 		"permission mode: ask",
+		"max turns:",
+		"session root:",
 		"tools: 1",
 	} {
 		if !transcriptContains(next.transcript, want) {
@@ -289,11 +311,24 @@ func TestModelCommandShowsActiveModelWithoutRunningAgent(t *testing.T) {
 	}
 }
 
-func TestModelCommandKeepsSwitchingStatusExplicit(t *testing.T) {
+func TestModelCommandSwitchesSessionModel(t *testing.T) {
+	var rebuilt config.ProviderProfile
+	nextProvider := &fakeProvider{}
 	m := newModel(context.Background(), Options{
 		ProviderName: "openai",
 		ModelName:    "gpt-4.1",
-		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			APIKey:       "sk-test",
+			Model:        "gpt-4.1",
+		},
+		Provider: &fakeProvider{},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			rebuilt = profile
+			return nextProvider, nil
+		},
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
@@ -303,10 +338,202 @@ func TestModelCommandKeepsSwitchingStatusExplicit(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
-	for _, want := range []string{"Active model: gpt-4.1", "provider: openai", "Model switching is not wired"} {
+	if next.modelName != "gpt-4.1-mini" || next.provider != nextProvider {
+		t.Fatalf("expected model/provider to update, got model=%q provider=%#v", next.modelName, next.provider)
+	}
+	if rebuilt.Model != "gpt-4.1-mini" {
+		t.Fatalf("expected provider rebuild with selected model, got %#v", rebuilt)
+	}
+	for _, want := range []string{"Switched model", "model: gpt-4.1-mini", "api model: gpt-4.1-mini"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
 		}
+	}
+}
+
+func TestModelCommandRequiresProviderRebuildForSwitch(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			Model:        "gpt-4.1",
+		},
+	})
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-4.1" {
+		t.Fatalf("expected active model to remain unchanged, got %q", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "Provider rebuild is not available") {
+		t.Fatalf("expected provider rebuild availability error, got %#v", next.transcript)
+	}
+}
+
+func TestModelCommandRejectsSwitchWhilePending(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			Model:        "gpt-4.1",
+		},
+	})
+	m.pending = true
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-4.1" {
+		t.Fatalf("expected active model to remain unchanged, got %q", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "Cannot switch models while a run is active") {
+		t.Fatalf("expected pending switch error, got %#v", next.transcript)
+	}
+}
+
+func TestModelCommandReportsProviderRebuildErrors(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			Model:        "gpt-4.1",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return nil, errors.New("rebuild failed")
+		},
+	})
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if next.modelName != "gpt-4.1" {
+		t.Fatalf("expected active model to remain unchanged, got %q", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "rebuild failed") {
+		t.Fatalf("expected rebuild error, got %#v", next.transcript)
+	}
+}
+
+func TestDoctorCommandUsesCurrentProviderProfile(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			Model:        "gpt-4.1",
+		},
+	})
+	m.input.SetValue("/doctor")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /doctor to be handled without starting an agent run")
+	}
+	for _, want := range []string{"Zero doctor report", "provider.config", "provider.model"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected doctor transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+func TestSearchCommandUsesSessionStore(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "Searchable", Cwd: "repo", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{
+		Type: sessions.EventMessage,
+		Payload: map[string]any{
+			"role":    "assistant",
+			"content": "needle appears here",
+		},
+	}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.input.SetValue("/search needle")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /search to be handled without starting an agent run")
+	}
+	if !transcriptContains(next.transcript, "Found 1 local session event") || !transcriptContains(next.transcript, "needle appears here") {
+		t.Fatalf("expected search hit in transcript, got %#v", next.transcript)
+	}
+}
+
+func TestSearchCommandRequiresQuery(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("/search")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if !transcriptContains(next.transcript, "usage: /search <query>") {
+		t.Fatalf("expected search usage, got %#v", next.transcript)
+	}
+}
+
+func TestResumeCommandListsRecentSessions(t *testing.T) {
+	store := testSessionStore(t)
+	first, err := store.Create(sessions.CreateInput{Title: "Older", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create older returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(first.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"content": "old"}}); err != nil {
+		t.Fatalf("Append older returned error: %v", err)
+	}
+	second, err := store.Create(sessions.CreateInput{Title: "Newer", ModelID: "claude-sonnet-4.5", Provider: "anthropic"})
+	if err != nil {
+		t.Fatalf("Create newer returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(second.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"content": "new"}}); err != nil {
+		t.Fatalf("Append newer returned error: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.input.SetValue("/resume")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /resume to be handled without starting an agent run")
+	}
+	if !transcriptContains(next.transcript, "Sessions") || !transcriptContains(next.transcript, "Newer") || !transcriptContains(next.transcript, "Older") {
+		t.Fatalf("expected session list in transcript, got %#v", next.transcript)
+	}
+}
+
+func TestResumeCommandWithIDShowsHeadlessGuidance(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("/resume zero_123")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if !transcriptContains(next.transcript, "zero exec --resume zero_123") {
+		t.Fatalf("expected resume guidance, got %#v", next.transcript)
 	}
 }
 
@@ -407,6 +634,14 @@ func TestToolResultRowDefaultsEmptyStatusToOK(t *testing.T) {
 	}
 }
 
+func TestToolResultRowTruncatesLongOutput(t *testing.T) {
+	text := toolResultRowText(agent.ToolResult{Name: "read_file", Output: strings.Repeat("x", tuiToolOutputLimit+20)})
+
+	if !strings.Contains(text, "[truncated]") || len(text) >= tuiToolOutputLimit+80 {
+		t.Fatalf("expected truncated tool output, got len=%d text=%q", len(text), text)
+	}
+}
+
 func TestCtrlCExits(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 
@@ -456,4 +691,17 @@ func stringSliceContains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func testSessionStore(t *testing.T) *sessions.Store {
+	t.Helper()
+
+	now := time.Date(2026, 6, 5, 10, 0, 0, 0, time.UTC)
+	return sessions.NewStore(sessions.StoreOptions{
+		RootDir: t.TempDir(),
+		Now: func() time.Time {
+			now = now.Add(time.Minute)
+			return now
+		},
+	})
 }

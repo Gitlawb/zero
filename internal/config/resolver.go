@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/modelregistry"
 )
 
 const defaultMaxTurns = 12
@@ -155,6 +157,9 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 	apiKey := strings.TrimSpace(env.APIKey)
 	baseURL := strings.TrimSpace(env.BaseURL)
 	model := strings.TrimSpace(env.Model)
+	if providerKind == ProviderKindOpenAI && apiKey != "" && model == "" {
+		model = modelregistry.DefaultModelID
+	}
 	if apiKey == "" && baseURL == "" && model == "" {
 		return
 	}

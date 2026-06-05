@@ -94,7 +94,8 @@ stdout carries **only** program output; logs go to stderr. See
 ### Other commands
 
 ```bash
-zero providers list|switch <name>|current   # manage provider profiles
+zero providers list|current                 # inspect resolved provider profiles
+zero models list [--provider anthropic]     # inspect the model registry
 zero search "<query>" [--json --session <id> --type <event>]   # search local sessions
 zero doctor [--connectivity] [--json]        # health checks
 zero config [--json]                          # inspect resolved configuration

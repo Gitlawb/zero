@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -78,4 +79,13 @@ func appendRow(rows []transcriptRow, kind rowKind, text string) []transcriptRow 
 	next := append([]transcriptRow{}, rows...)
 	next = append(next, transcriptRow{kind: kind, text: text})
 	return next
+}
+
+func truncateTUIOutput(output string, limit int) string {
+	output = strings.TrimSpace(strings.ReplaceAll(output, "\r\n", "\n"))
+	output = strings.ReplaceAll(output, "\n", " ")
+	if limit <= 0 || len(output) <= limit {
+		return output
+	}
+	return output[:limit] + " [truncated]"
 }

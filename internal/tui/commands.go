@@ -20,6 +20,7 @@ const (
 	commandDoctor
 	commandPlan
 	commandSearch
+	commandResume
 	commandTheme
 	commandInputStyle
 	commandUnknown
@@ -102,10 +103,19 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/search",
+		aliases:     []string{"/find"},
 		usage:       "/search",
-		group:       commandGroupSession,
-		description: "Show code search shell status.",
+		group:       commandGroupTools,
+		description: "Search local session events.",
 		kind:        commandSearch,
+	},
+	{
+		name:        "/resume",
+		aliases:     []string{"/sessions"},
+		usage:       "/resume [id]",
+		group:       commandGroupSession,
+		description: "List recent sessions or show resume guidance.",
+		kind:        commandResume,
 	},
 	{
 		name:        "/doctor",

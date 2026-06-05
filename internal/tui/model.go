@@ -6,12 +6,15 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -21,22 +24,28 @@ var (
 	footerStyle = lipgloss.NewStyle().Faint(true)
 )
 
+const tuiToolOutputLimit = 240
+
 type model struct {
-	ctx            context.Context
-	cwd            string
-	providerName   string
-	modelName      string
-	provider       zeroruntime.Provider
-	registry       *tools.Registry
-	agentOptions   agent.Options
-	permissionMode agent.PermissionMode
-	transcript     []transcriptRow
-	input          textinput.Model
-	pending        bool
-	exiting        bool
-	runCancel      context.CancelFunc
-	runID          int
-	activeRunID    int
+	ctx             context.Context
+	cwd             string
+	providerName    string
+	modelName       string
+	providerProfile config.ProviderProfile
+	provider        zeroruntime.Provider
+	newProvider     func(config.ProviderProfile) (zeroruntime.Provider, error)
+	registry        *tools.Registry
+	sessionStore    *sessions.Store
+	agentOptions    agent.Options
+	permissionMode  agent.PermissionMode
+	transcript      []transcriptRow
+	input           textinput.Model
+	pending         bool
+	exiting         bool
+	runCancel       context.CancelFunc
+	runID           int
+	activeRunID     int
+	now             func() time.Time
 }
 
 type agentResponseMsg struct {
@@ -64,6 +73,10 @@ func newModel(ctx context.Context, options Options) model {
 	if registry == nil {
 		registry = tools.NewRegistry()
 	}
+	sessionStore := options.SessionStore
+	if sessionStore == nil {
+		sessionStore = sessions.NewStore(sessions.StoreOptions{})
+	}
 
 	permissionMode := options.PermissionMode
 	if permissionMode == "" {
@@ -79,16 +92,20 @@ func newModel(ctx context.Context, options Options) model {
 	input.Focus()
 
 	return model{
-		ctx:            ctx,
-		cwd:            cwd,
-		providerName:   options.ProviderName,
-		modelName:      options.ModelName,
-		provider:       options.Provider,
-		registry:       registry,
-		agentOptions:   options.AgentOptions,
-		permissionMode: permissionMode,
-		transcript:     initialTranscript(),
-		input:          input,
+		ctx:             ctx,
+		cwd:             cwd,
+		providerName:    options.ProviderName,
+		modelName:       options.ModelName,
+		providerProfile: options.ProviderProfile,
+		provider:        options.Provider,
+		newProvider:     options.NewProvider,
+		registry:        registry,
+		sessionStore:    sessionStore,
+		agentOptions:    options.AgentOptions,
+		permissionMode:  permissionMode,
+		transcript:      initialTranscript(),
+		input:           input,
+		now:             time.Now,
 	}
 }
 
@@ -140,7 +157,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var builder strings.Builder
 
-	builder.WriteString(headerStyle.Render(fmt.Sprintf("ZERO  %s  %s", m.cwd, m.providerStatus())))
+	builder.WriteString(headerStyle.Render(fmt.Sprintf("ZERO  %s  %s  %s  %s", m.cwd, m.providerStatus(), m.permissionMode, m.runState())))
 	builder.WriteString("\n\n")
 
 	for _, row := range m.transcript {
@@ -155,7 +172,7 @@ func (m model) View() string {
 	builder.WriteString("\n")
 	builder.WriteString(m.input.View())
 	builder.WriteString("\n\n")
-	builder.WriteString(footerStyle.Render(commandFooterText()))
+	builder.WriteString(footerStyle.Render(m.footerText()))
 
 	return builder.String()
 }
@@ -189,7 +206,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.modelText(command.text)})
+		text := ""
+		m, text = m.handleModelCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
@@ -203,7 +222,16 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandPlan:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
 		return m, nil
-	case commandDoctor, commandSearch, commandTheme, commandInputStyle:
+	case commandDoctor:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.doctorText()})
+		return m, nil
+	case commandSearch:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
+		return m, nil
+	case commandResume:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.resumeText(command.text)})
+		return m, nil
+	case commandTheme, commandInputStyle:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
 			text: shellOnlyCommandText(command.name),
@@ -284,7 +312,7 @@ func toolResultRowText(result agent.ToolResult) string {
 	if status == "" {
 		status = tools.StatusOK
 	}
-	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, result.Output)
+	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
 }
 
 func (m model) providerStatus() string {
@@ -326,21 +354,12 @@ func (m model) providerText() string {
 }
 
 func (m model) modelText(args string) string {
-	switch strings.ToLower(strings.TrimSpace(args)) {
-	case "list", "ls":
-		return m.modelListText()
-	}
-
 	lines := []string{
 		"Model",
 		"Active model: " + displayValue(m.modelName, "none"),
 		"provider: " + displayValue(m.providerName, "none"),
 	}
-	if args != "" {
-		lines = append(lines, "Model switching is not wired in Go TUI yet.")
-	} else {
-		lines = append(lines, "Use /model list to inspect the current model shell.")
-	}
+	lines = append(lines, "Use /model list to inspect models or /model <id> to switch this TUI session.")
 	return strings.Join(lines, "\n")
 }
 
@@ -351,6 +370,8 @@ func (m model) contextText() string {
 		"provider: " + displayValue(m.providerName, "none"),
 		"model: " + displayValue(m.modelName, "none"),
 		"permission mode: " + string(m.permissionMode),
+		fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
+		"session root: " + displayValue(m.sessionStore.RootDir, "unknown"),
 		fmt.Sprintf("tools: %d", len(m.registry.All())),
 	}, "\n")
 }
@@ -360,7 +381,9 @@ func (m model) configText() string {
 		"Config",
 		"provider: " + displayValue(m.providerName, "none"),
 		"model: " + displayValue(m.modelName, "none"),
+		fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
 		"permission mode: " + string(m.permissionMode),
+		"api key: " + apiKeyState(strings.TrimSpace(m.providerProfile.APIKey) != ""),
 	}, "\n")
 }
 
@@ -384,6 +407,13 @@ func displayValue(value string, fallback string) string {
 	return value
 }
 
+func (m model) runState() string {
+	if m.pending {
+		return "running"
+	}
+	return "ready"
+}
+
 func shellOnlyCommandText(name string) string {
 	return fmt.Sprintf("%s is registered in the Go TUI shell but is not wired yet.", name)
 }
@@ -395,10 +425,14 @@ func helpText() string {
 const defaultCommandFooterText = "/help  /model  /provider  /context  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
 
 func commandFooterText() string {
-	return formatCommandFooterText(commandDefinitions)
+	return formatCommandFooterText(commandDefinitions, false)
 }
 
-func formatCommandFooterText(commands []commandDefinition) string {
+func (m model) footerText() string {
+	return formatCommandFooterText(commandDefinitions, m.pending)
+}
+
+func formatCommandFooterText(commands []commandDefinition, pending bool) string {
 	if len(commands) == 0 {
 		return defaultCommandFooterText
 	}
@@ -429,7 +463,12 @@ func formatCommandFooterText(commands []commandDefinition) string {
 		return defaultCommandFooterText
 	}
 
-	parts = append(parts, "Esc clear", "Ctrl+C quit")
+	if pending {
+		parts = append(parts, "Esc cancel")
+	} else {
+		parts = append(parts, "Esc clear")
+	}
+	parts = append(parts, "Ctrl+C quit")
 	return strings.Join(parts, "  ")
 }
 

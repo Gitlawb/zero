@@ -139,6 +139,27 @@ func TestResolveUsesOpenAIEnvFallback(t *testing.T) {
 	}
 }
 
+func TestResolveUsesOpenAIAPIKeyOnlyWithDefaultModel(t *testing.T) {
+	resolved, err := Resolve(ResolveOptions{
+		Env: map[string]string{
+			"OPENAI_API_KEY": "sk-env",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.ActiveProvider != "openai" {
+		t.Fatalf("ActiveProvider = %q, want openai", resolved.ActiveProvider)
+	}
+	if resolved.Provider.ProviderKind != ProviderKindOpenAI {
+		t.Fatalf("ProviderKind = %q, want openai", resolved.Provider.ProviderKind)
+	}
+	if resolved.Provider.Model != "gpt-4.1" {
+		t.Fatalf("Model = %q, want registry default model", resolved.Provider.Model)
+	}
+}
+
 func TestResolveUsesAnthropicEnvFallback(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		Env: map[string]string{
