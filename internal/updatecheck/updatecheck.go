@@ -72,9 +72,18 @@ func NormalizeVersionTag(version string) (string, error) {
 		return "", fmt.Errorf("invalid semantic version: %s", version)
 	}
 
-	major, _ := strconv.Atoi(matches[1])
-	minor, _ := strconv.Atoi(matches[2])
-	patch, _ := strconv.Atoi(matches[3])
+	major, err := parseSemverComponent(matches[1], version)
+	if err != nil {
+		return "", err
+	}
+	minor, err := parseSemverComponent(matches[2], version)
+	if err != nil {
+		return "", err
+	}
+	patch, err := parseSemverComponent(matches[3], version)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("%d.%d.%d", major, minor, patch), nil
 }
 
@@ -229,20 +238,28 @@ func resolveReleaseEndpoint(endpointOrRepository string, repository string) (end
 	return endpointResolution{URL: value, Repository: repository}, nil
 }
 
-func parseSemver(version string) ([3]int, error) {
+func parseSemver(version string) ([3]uint64, error) {
 	normalized, err := NormalizeVersionTag(version)
 	if err != nil {
-		return [3]int{}, err
+		return [3]uint64{}, err
 	}
 
 	parts := strings.Split(normalized, ".")
-	parsed := [3]int{}
+	parsed := [3]uint64{}
 	for index, part := range parts {
-		value, err := strconv.Atoi(part)
+		value, err := parseSemverComponent(part, version)
 		if err != nil {
-			return [3]int{}, err
+			return [3]uint64{}, err
 		}
 		parsed[index] = value
 	}
 	return parsed, nil
+}
+
+func parseSemverComponent(component string, originalVersion string) (uint64, error) {
+	value, err := strconv.ParseUint(component, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid semantic version: %s", originalVersion)
+	}
+	return value, nil
 }

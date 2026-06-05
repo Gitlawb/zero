@@ -50,6 +50,13 @@ func TestNormalizeVersionTag(t *testing.T) {
 	}
 }
 
+func TestNormalizeVersionTagRejectsOverflowingComponents(t *testing.T) {
+	_, err := NormalizeVersionTag("v999999999999999999999999999999999999.0.0")
+	if err == nil || !strings.Contains(err.Error(), "invalid semantic version") {
+		t.Fatalf("expected overflow to be rejected as an invalid semantic version, got %v", err)
+	}
+}
+
 func TestCompareSemver(t *testing.T) {
 	assertComparison(t, "0.2.0", "0.1.9", 1)
 	assertComparison(t, "1.0.0", "0.99.99", 1)
