@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/testrunner"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
@@ -330,9 +331,11 @@ func TestRunVerifyReturnsProviderExitWhenChecksFail(t *testing.T) {
 func TestRunVerifyAttemptsUsesSelfVerifyLoop(t *testing.T) {
 	cwd := t.TempDir()
 	plan := verify.Plan{Root: cwd, Checks: []verify.Check{{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}}}}
-	loopReport := verify.LoopReport{
-		OK: true,
-		Attempts: []verify.Attempt{
+	loopReport := selfverify.Report{
+		Root:       cwd,
+		OK:         true,
+		StopReason: selfverify.StopReasonPassed,
+		Attempts: []selfverify.Attempt{
 			{Number: 1, Report: verify.Report{Root: cwd, OK: false, Summary: verify.Summary{Total: 1, Failed: 1}}},
 			{Number: 2, Report: verify.Report{Root: cwd, OK: true, Summary: verify.Summary{Total: 1, Passed: 1}}},
 		},
@@ -348,7 +351,7 @@ func TestRunVerifyAttemptsUsesSelfVerifyLoop(t *testing.T) {
 			}
 			return plan, nil
 		},
-		runVerifyLoop: func(ctx context.Context, gotPlan verify.Plan, options verify.LoopOptions) verify.LoopReport {
+		runSelfVerify: func(ctx context.Context, gotPlan verify.Plan, options selfverify.Options) selfverify.Report {
 			if options.MaxAttempts != 2 {
 				t.Fatalf("MaxAttempts = %d, want 2", options.MaxAttempts)
 			}
@@ -359,12 +362,53 @@ func TestRunVerifyAttemptsUsesSelfVerifyLoop(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	var decoded verify.LoopReport
+	var decoded selfverify.Report
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode verify loop JSON: %v\n%s", err, stdout.String())
 	}
-	if len(decoded.Attempts) != 2 || !decoded.OK {
+	if len(decoded.Attempts) != 2 || !decoded.OK || decoded.StopReason != selfverify.StopReasonPassed {
 		t.Fatalf("unexpected loop JSON: %#v", decoded)
+	}
+}
+
+func TestRunVerifyAttemptsFormatsSelfVerifyText(t *testing.T) {
+	cwd := t.TempDir()
+	plan := verify.Plan{Root: cwd, Checks: []verify.Check{{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}}}}
+	loopReport := selfverify.Report{
+		Root:       cwd,
+		OK:         true,
+		StopReason: selfverify.StopReasonPassed,
+		Summary:    verify.Summary{Total: 1, Passed: 1},
+		Attempts: []selfverify.Attempt{
+			{
+				Number:      1,
+				Report:      verify.Report{Root: cwd, OK: false, Summary: verify.Summary{Total: 1, Failed: 1}},
+				Remediation: &selfverify.Remediation{Applied: true, Message: "prepared retry"},
+			},
+			{Number: 2, Report: verify.Report{Root: cwd, OK: true, Summary: verify.Summary{Total: 1, Passed: 1}}},
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"verify", "--attempts=2"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		detectVerifyPlan: func(string) (verify.Plan, error) {
+			return plan, nil
+		},
+		runSelfVerify: func(context.Context, verify.Plan, selfverify.Options) selfverify.Report {
+			return loopReport
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{"Zero self-verification", "root: " + cwd, "stop: passed", "attempt 1: failed", "remediation: applied - prepared retry", "attempt 2: passed"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected %q in output: %q", want, output)
+		}
 	}
 }
 

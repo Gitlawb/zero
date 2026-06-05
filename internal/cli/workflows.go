@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/testrunner"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
@@ -108,7 +109,7 @@ func runVerifyCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return writeExecUsageError(stderr, err.Error())
 	}
 	if options.attempts > 1 {
-		loopReport := deps.runVerifyLoop(context.Background(), plan, verify.LoopOptions{
+		loopReport := deps.runSelfVerify(context.Background(), plan, selfverify.Options{
 			RunOptions: verify.RunOptions{
 				Only:      options.only,
 				TimeoutMS: options.timeoutMS,
@@ -461,10 +462,19 @@ func redactVerifyReport(report verify.Report) verify.Report {
 	return report
 }
 
-func redactVerifyLoopReport(report verify.LoopReport) verify.LoopReport {
+func redactVerifyLoopReport(report selfverify.Report) selfverify.Report {
+	report.Root = redactCLIString(report.Root)
 	report.Error = redactCLIString(report.Error)
 	for index := range report.Attempts {
 		report.Attempts[index].Report = redactVerifyReport(report.Attempts[index].Report)
+		if report.Attempts[index].Remediation != nil {
+			remediation := *report.Attempts[index].Remediation
+			remediation.StartedAt = redactCLIString(remediation.StartedAt)
+			remediation.EndedAt = redactCLIString(remediation.EndedAt)
+			remediation.Message = redactCLIString(remediation.Message)
+			remediation.Error = redactCLIString(remediation.Error)
+			report.Attempts[index].Remediation = &remediation
+		}
 	}
 	return report
 }
@@ -555,23 +565,47 @@ func formatVerifyTestSummary(summary *testrunner.Summary) string {
 	return line
 }
 
-func formatVerifyLoopReport(report verify.LoopReport) string {
+func formatVerifyLoopReport(report selfverify.Report) string {
 	lines := []string{
 		"Zero self-verification",
-		fmt.Sprintf("attempts: %d", len(report.Attempts)),
-		fmt.Sprintf("summary: %d total, %d passed, %d failed, %d errors", report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.Errors),
 	}
+	if report.Root != "" {
+		lines = append(lines, "root: "+report.Root)
+	}
+	lines = append(lines,
+		fmt.Sprintf("attempts: %d", len(report.Attempts)),
+		"stop: "+string(report.StopReason),
+		fmt.Sprintf("summary: %d total, %d passed, %d failed, %d errors", report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.Errors),
+	)
 	for _, attempt := range report.Attempts {
 		status := "failed"
 		if attempt.Report.OK {
 			status = "passed"
 		}
 		lines = append(lines, fmt.Sprintf("  attempt %d: %s", attempt.Number, status))
+		if attempt.Remediation != nil {
+			lines = append(lines, "    remediation: "+formatRemediation(*attempt.Remediation))
+		}
 	}
 	if report.Error != "" {
 		lines = append(lines, "error: "+report.Error)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatRemediation(remediation selfverify.Remediation) string {
+	status := "not applied"
+	if remediation.Applied {
+		status = "applied"
+	}
+	details := []string{status}
+	if remediation.Message != "" {
+		details = append(details, remediation.Message)
+	}
+	if remediation.Error != "" {
+		details = append(details, "error: "+remediation.Error)
+	}
+	return strings.Join(details, " - ")
 }
 
 func formatChangeSummary(summary zerogit.ChangeSummary) string {

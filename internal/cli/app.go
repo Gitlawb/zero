@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
@@ -39,7 +40,7 @@ type appDeps struct {
 	prepareWorktree  func(context.Context, worktrees.Options) (worktrees.Result, error)
 	detectVerifyPlan func(string) (verify.Plan, error)
 	runVerify        func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runVerifyLoop    func(context.Context, verify.Plan, verify.LoopOptions) verify.LoopReport
+	runSelfVerify    func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
 	inspectChanges   func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
 	commitChanges    func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
 	runTUI           func(context.Context, tui.Options) int
@@ -99,7 +100,7 @@ func defaultAppDeps() appDeps {
 		prepareWorktree:  worktrees.Prepare,
 		detectVerifyPlan: verify.DetectPlan,
 		runVerify:        verify.Run,
-		runVerifyLoop:    verify.RunLoop,
+		runSelfVerify:    selfverify.Run,
 		inspectChanges:   zerogit.Inspect,
 		commitChanges:    zerogit.Commit,
 		runTUI:           tui.Run,
@@ -218,8 +219,8 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.runVerify == nil {
 		deps.runVerify = defaults.runVerify
 	}
-	if deps.runVerifyLoop == nil {
-		deps.runVerifyLoop = defaults.runVerifyLoop
+	if deps.runSelfVerify == nil {
+		deps.runSelfVerify = defaults.runSelfVerify
 	}
 	if deps.inspectChanges == nil {
 		deps.inspectChanges = defaults.inspectChanges
