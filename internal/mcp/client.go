@@ -38,13 +38,14 @@ type ToolClient interface {
 }
 
 type Client struct {
-	server Server
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	reader *messageReader
-	writer *messageWriter
-	mu     sync.Mutex
-	nextID int
+	server  Server
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	reader  *messageReader
+	writer  *messageWriter
+	mu      sync.Mutex
+	closeMu sync.Mutex
+	nextID  int
 }
 
 const stdioCloseWaitTimeout = 500 * time.Millisecond
@@ -137,15 +138,22 @@ func (client *Client) CallTool(ctx context.Context, name string, args map[string
 }
 
 func (client *Client) Close() error {
+	client.closeMu.Lock()
+	defer client.closeMu.Unlock()
+
 	var err error
-	if client.stdin != nil {
-		err = client.stdin.Close()
-		client.stdin = nil
+	stdin := client.stdin
+	cmd := client.cmd
+	client.stdin = nil
+	client.cmd = nil
+
+	if stdin != nil {
+		err = stdin.Close()
 	}
-	if client.cmd != nil && client.cmd.Process != nil {
+	if cmd != nil && cmd.Process != nil {
 		waitDone := make(chan error, 1)
 		go func() {
-			waitDone <- client.cmd.Wait()
+			waitDone <- cmd.Wait()
 		}()
 
 		select {
@@ -155,7 +163,7 @@ func (client *Client) Close() error {
 			}
 		case <-time.After(stdioCloseWaitTimeout):
 			killed := false
-			killErr := client.cmd.Process.Kill()
+			killErr := cmd.Process.Kill()
 			if killErr == nil {
 				killed = true
 			} else if err == nil && !errors.Is(killErr, os.ErrProcessDone) {
@@ -166,7 +174,6 @@ func (client *Client) Close() error {
 				err = waitErr
 			}
 		}
-		client.cmd = nil
 	}
 	return err
 }

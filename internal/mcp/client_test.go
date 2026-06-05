@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,6 +60,46 @@ func TestStdioClientListsAndCallsTools(t *testing.T) {
 	}
 	if got := TextContent(result.Content); got != "lookup: zero" {
 		t.Fatalf("CallTool() text = %q, want lookup result", got)
+	}
+}
+
+func TestStdioClientCloseAllowsConcurrentCallers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := Connect(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeStdio,
+		Command: executable,
+		Args:    []string{"-test.run=TestMCPStdioHelperProcess", "--"},
+		Env:     map[string]string{"ZERO_MCP_STDIO_HELPER": "1"},
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			errs <- client.Close()
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
 	}
 }
 
