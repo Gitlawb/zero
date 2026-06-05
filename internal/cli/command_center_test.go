@@ -53,6 +53,38 @@ func TestRunConfigPrintsJSONSummary(t *testing.T) {
 	}
 }
 
+func TestRunConfigAndProvidersRedactBaseURLSecrets(t *testing.T) {
+	deps := commandCenterSecretBaseURLDeps(t)
+	commands := [][]string{
+		{"config", "--json"},
+		{"providers", "current"},
+		{"providers", "current", "--json"},
+	}
+
+	for _, command := range commands {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		exitCode := runWithDeps(command, &stdout, &stderr, deps)
+
+		if exitCode != exitSuccess {
+			t.Fatalf("%v: expected exit code %d, got %d: %s", command, exitSuccess, exitCode, stderr.String())
+		}
+		output := stdout.String()
+		for _, leaked := range []string{"user:", "super-secret", "query-secret", "sk-test"} {
+			if strings.Contains(output, leaked) {
+				t.Fatalf("%v: output leaked %q: %q", command, leaked, output)
+			}
+		}
+		if !strings.Contains(output, "https://proxy.example/v1") {
+			t.Fatalf("%v: expected sanitized provider base URL host/path, got %q", command, output)
+		}
+		if !strings.Contains(output, "api_key=[REDACTED]") {
+			t.Fatalf("%v: expected redacted query secret, got %q", command, output)
+		}
+	}
+}
+
 func TestRunConfigRejectsModelOnlyFlags(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -212,6 +244,28 @@ func commandCenterDeps(t *testing.T) appDeps {
 			return commandCenterProvider{}, nil
 		},
 	}
+}
+
+func commandCenterSecretBaseURLDeps(t *testing.T) appDeps {
+	t.Helper()
+
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:         "gateway",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://user:super-secret@proxy.example/v1?api_key=query-secret&mode=test",
+			APIKey:       "sk-test",
+			Model:        "gateway-model",
+		}
+		return config.ResolvedConfig{
+			ActiveProvider: "gateway",
+			Providers:      []config.ProviderProfile{profile},
+			Provider:       profile,
+			MaxTurns:       7,
+		}, nil
+	}
+	return deps
 }
 
 type commandCenterProvider struct{}

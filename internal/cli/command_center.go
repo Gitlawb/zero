@@ -3,12 +3,14 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type commandCenterOptions struct {
@@ -241,7 +243,7 @@ func summarizeProvider(profile config.ProviderProfile, active bool) providerSumm
 	summary := providerSummary{
 		Name:         profile.Name,
 		ProviderKind: string(profile.ProviderKind),
-		BaseURL:      profile.BaseURL,
+		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey),
 		Model:        profile.Model,
 		Active:       active,
 		APIKeySet:    strings.TrimSpace(profile.APIKey) != "",
@@ -256,6 +258,24 @@ func summarizeProvider(profile config.ProviderProfile, active bool) providerSumm
 	summary.ProviderKind = string(metadata.ProviderKind)
 	summary.APIModel = metadata.APIModel
 	return summary
+}
+
+func redactProviderBaseURL(baseURL string, apiKey string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return ""
+	}
+	safeURL := stripURLCredentials(baseURL)
+	return redaction.RedactString(safeURL, redaction.Options{ExtraSecretValues: []string{apiKey}})
+}
+
+func stripURLCredentials(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 func listModelSummaries(registry modelregistry.Registry, options commandCenterOptions) ([]modelSummary, error) {
