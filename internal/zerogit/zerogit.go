@@ -279,7 +279,7 @@ func stagedSnapshotDiff(ctx context.Context, runGit EnvRunner, root string) (str
 	if err != nil {
 		return "", "", fmt.Errorf("prepare preview index: %w", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tempDir, "index")}
 	if _, err := gitRawOutputEnv(ctx, runGit, root, env, "rev-parse", "--verify", "HEAD"); err != nil {

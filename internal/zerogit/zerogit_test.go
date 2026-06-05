@@ -264,7 +264,13 @@ func initGitRepo(t *testing.T, withCommit bool) string {
 
 func runGitCommand(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
+	ctx := context.Background()
+	if deadline, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = dir
 	output, err := command.CombinedOutput()
 	if err != nil {
