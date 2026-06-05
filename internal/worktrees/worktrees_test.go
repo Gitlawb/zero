@@ -175,8 +175,9 @@ func TestDefaultBaseDirFallsBackForWindowsUserProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultBaseDir returned error: %v", err)
 	}
-	if !strings.Contains(got, filepath.Join(profile, "AppData", "Local", "zero", "worktrees")) {
-		t.Fatalf("DefaultBaseDir = %q, want under USERPROFILE AppData", got)
+	expected := filepath.Join(profile, "AppData", "Local", "zero", "worktrees")
+	if filepath.Clean(got) != filepath.Clean(expected) {
+		t.Fatalf("DefaultBaseDir = %q, want %q", got, expected)
 	}
 }
 
