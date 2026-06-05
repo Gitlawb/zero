@@ -106,6 +106,7 @@ type LoopOptions struct {
 }
 
 const defaultTimeoutMS = 120000
+const maxOutputSummaryLines = 8
 
 func DetectPlan(root string) (Plan, error) {
 	resolvedRoot, err := resolveRoot(root)
@@ -254,6 +255,7 @@ func detectPackageChecks(root string) []Check {
 
 func summarizeOutput(values ...string) *OutputSummary {
 	lines := []string{}
+	fallback := ""
 	contextLines := 0
 	truncated := false
 	for _, value := range values {
@@ -262,25 +264,34 @@ func summarizeOutput(values ...string) *OutputSummary {
 			if trimmed == "" {
 				continue
 			}
+			if fallback == "" {
+				fallback = trimmed
+			}
+			include := false
 			if isFailureLine(trimmed) {
-				lines = append(lines, trimmed)
+				include = true
 				contextLines = 2
 			} else if contextLines > 0 {
-				lines = append(lines, trimmed)
+				include = true
 				contextLines--
-			} else {
+			}
+			if !include {
 				continue
 			}
-			if len(lines) >= 8 {
+			if len(lines) >= maxOutputSummaryLines {
 				truncated = true
 				break
 			}
+			lines = append(lines, trimmed)
 		}
 		if truncated {
 			break
 		}
 	}
 	if len(lines) == 0 {
+		if fallback != "" {
+			return &OutputSummary{Lines: []string{fallback}}
+		}
 		return nil
 	}
 	return &OutputSummary{Lines: lines, Truncated: truncated}

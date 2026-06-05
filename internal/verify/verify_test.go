@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +100,54 @@ func TestRunParsesStructuredFailureSummary(t *testing.T) {
 	}
 	if strings.Contains(lines, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
 		t.Fatalf("failure summary leaked secret: %q", lines)
+	}
+}
+
+func TestRunSummarizesPlainCommandErrors(t *testing.T) {
+	root := t.TempDir()
+	plan := Plan{Root: root, Checks: []Check{
+		{ID: "bun.test", Name: "Bun tests", Command: []string{"bun", "test"}},
+	}}
+
+	report := Run(context.Background(), plan, RunOptions{
+		Runner: func(context.Context, string, []string, time.Duration) (CommandResult, error) {
+			return CommandResult{}, errors.New(`exec: "bun": executable file not found in $PATH`)
+		},
+		Now: fixedVerifyTime("2026-06-05T11:16:00Z"),
+	})
+
+	summary := report.Results[0].OutputSummary
+	if summary == nil {
+		t.Fatalf("expected plain command error summary, got %#v", report.Results[0])
+	}
+	if len(summary.Lines) != 1 || !strings.Contains(summary.Lines[0], "executable file not found") {
+		t.Fatalf("unexpected plain command error summary: %#v", summary)
+	}
+	if summary.Truncated {
+		t.Fatalf("plain command error summary should not be truncated: %#v", summary)
+	}
+}
+
+func TestRunFailureSummaryTruncatesOnlyOnOverflow(t *testing.T) {
+	lines := []string{}
+	for index := 0; index < maxOutputSummaryLines; index++ {
+		lines = append(lines, "--- FAIL: TestExact (0.00s)")
+	}
+	exact := summarizeOutput(strings.Join(lines, "\n"))
+	if exact == nil || len(exact.Lines) != maxOutputSummaryLines {
+		t.Fatalf("expected exact-limit summary, got %#v", exact)
+	}
+	if exact.Truncated {
+		t.Fatalf("exact-limit summary should not be truncated: %#v", exact)
+	}
+
+	overflowLines := append(append([]string{}, lines...), "--- FAIL: TestOverflow (0.00s)")
+	overflow := summarizeOutput(strings.Join(overflowLines, "\n"))
+	if overflow == nil || len(overflow.Lines) != maxOutputSummaryLines {
+		t.Fatalf("expected capped overflow summary, got %#v", overflow)
+	}
+	if !overflow.Truncated {
+		t.Fatalf("overflow summary should be truncated: %#v", overflow)
 	}
 }
 

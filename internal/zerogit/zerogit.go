@@ -13,6 +13,7 @@ import (
 )
 
 type Runner func(context.Context, string, ...string) (CommandResult, error)
+type EnvRunner func(context.Context, string, []string, ...string) (CommandResult, error)
 
 type CommandResult struct {
 	Stdout   string
@@ -24,6 +25,7 @@ type InspectOptions struct {
 	Cwd          string
 	MaxDiffBytes int
 	RunGit       Runner
+	RunGitEnv    EnvRunner
 }
 
 type CommitOptions struct {
@@ -32,6 +34,7 @@ type CommitOptions struct {
 	DryRun       bool
 	MaxDiffBytes int
 	RunGit       Runner
+	RunGitEnv    EnvRunner
 }
 
 type FileChange struct {
@@ -69,10 +72,7 @@ func Inspect(ctx context.Context, options InspectOptions) (ChangeSummary, error)
 	if err != nil {
 		return ChangeSummary{}, err
 	}
-	runGit := options.RunGit
-	if runGit == nil {
-		runGit = defaultRunGit
-	}
+	runGit, runGitEnv := resolveRunners(options.RunGit, options.RunGitEnv)
 
 	root, err := gitOutput(ctx, runGit, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -85,13 +85,9 @@ func Inspect(ctx context.Context, options InspectOptions) (ChangeSummary, error)
 	if err != nil {
 		return ChangeSummary{}, fmt.Errorf("inspect git status: %w", err)
 	}
-	diffStat, err := gitRawOutput(ctx, runGit, root, "diff", "--stat", "HEAD", "--")
+	diffStat, diff, err := stagedSnapshotDiff(ctx, runGitEnv, root)
 	if err != nil {
-		return ChangeSummary{}, fmt.Errorf("inspect git diff stat: %w", err)
-	}
-	diff, err := gitRawOutput(ctx, runGit, root, "diff", "HEAD", "--")
-	if err != nil {
-		return ChangeSummary{}, fmt.Errorf("inspect git diff: %w", err)
+		return ChangeSummary{}, err
 	}
 
 	maxDiffBytes := firstPositive(options.MaxDiffBytes, defaultMaxDiffBytes)
@@ -114,6 +110,7 @@ func Commit(ctx context.Context, options CommitOptions) (CommitResult, error) {
 		Cwd:          options.Cwd,
 		MaxDiffBytes: options.MaxDiffBytes,
 		RunGit:       options.RunGit,
+		RunGitEnv:    options.RunGitEnv,
 	})
 	if err != nil {
 		return CommitResult{}, err
@@ -139,10 +136,7 @@ func Commit(ctx context.Context, options CommitOptions) (CommitResult, error) {
 		return result, nil
 	}
 
-	runGit := options.RunGit
-	if runGit == nil {
-		runGit = defaultRunGit
-	}
+	runGit, _ := resolveRunners(options.RunGit, options.RunGitEnv)
 	if _, err := gitOutput(ctx, runGit, summary.Root, "add", "-A"); err != nil {
 		return CommitResult{}, fmt.Errorf("stage changes: %w", err)
 	}
@@ -258,6 +252,15 @@ func gitOutput(ctx context.Context, runGit Runner, dir string, args ...string) (
 
 func gitRawOutput(ctx context.Context, runGit Runner, dir string, args ...string) (string, error) {
 	result, err := runGit(ctx, dir, args...)
+	return gitResultOutput(result, err)
+}
+
+func gitRawOutputEnv(ctx context.Context, runGit EnvRunner, dir string, env []string, args ...string) (string, error) {
+	result, err := runGit(ctx, dir, env, args...)
+	return gitResultOutput(result, err)
+}
+
+func gitResultOutput(result CommandResult, err error) (string, error) {
 	if err != nil {
 		return "", err
 	}
@@ -271,9 +274,45 @@ func gitRawOutput(ctx context.Context, runGit Runner, dir string, args ...string
 	return result.Stdout, nil
 }
 
+func stagedSnapshotDiff(ctx context.Context, runGit EnvRunner, root string) (string, string, error) {
+	tempDir, err := os.MkdirTemp("", "zero-git-index-")
+	if err != nil {
+		return "", "", fmt.Errorf("prepare preview index: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tempDir, "index")}
+	if _, err := gitRawOutputEnv(ctx, runGit, root, env, "rev-parse", "--verify", "HEAD"); err != nil {
+		if _, emptyErr := gitRawOutputEnv(ctx, runGit, root, env, "read-tree", "--empty"); emptyErr != nil {
+			return "", "", fmt.Errorf("prepare empty preview index: %w", emptyErr)
+		}
+	} else if _, err := gitRawOutputEnv(ctx, runGit, root, env, "read-tree", "HEAD"); err != nil {
+		return "", "", fmt.Errorf("prepare preview index from HEAD: %w", err)
+	}
+	if _, err := gitRawOutputEnv(ctx, runGit, root, env, "add", "-A"); err != nil {
+		return "", "", fmt.Errorf("stage preview index: %w", err)
+	}
+	diffStat, err := gitRawOutputEnv(ctx, runGit, root, env, "diff", "--cached", "--stat", "--")
+	if err != nil {
+		return "", "", fmt.Errorf("inspect git diff stat: %w", err)
+	}
+	diff, err := gitRawOutputEnv(ctx, runGit, root, env, "diff", "--cached", "--")
+	if err != nil {
+		return "", "", fmt.Errorf("inspect git diff: %w", err)
+	}
+	return diffStat, diff, nil
+}
+
 func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResult, error) {
+	return defaultRunGitEnv(ctx, dir, nil, args...)
+}
+
+func defaultRunGitEnv(ctx context.Context, dir string, env []string, args ...string) (CommandResult, error) {
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = dir
+	if len(env) > 0 {
+		command.Env = append(os.Environ(), env...)
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -290,20 +329,38 @@ func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResu
 	return CommandResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, err
 }
 
+func resolveRunners(runGit Runner, runGitEnv EnvRunner) (Runner, EnvRunner) {
+	if runGit == nil {
+		runGit = defaultRunGit
+		if runGitEnv == nil {
+			runGitEnv = defaultRunGitEnv
+		}
+	} else if runGitEnv == nil {
+		runGitEnv = func(ctx context.Context, dir string, _ []string, args ...string) (CommandResult, error) {
+			return runGit(ctx, dir, args...)
+		}
+	}
+	return runGit, runGitEnv
+}
+
 func truncateString(value string, maxBytes int) (string, bool) {
 	if maxBytes <= 0 || len(value) <= maxBytes {
 		return value, false
 	}
 	suffix := "\n[truncated]"
 	if maxBytes <= len(suffix) {
-		return suffix, true
+		return suffix[:maxBytes], true
 	}
 	head := value[:maxBytes-len(suffix)]
 	if strings.Contains(value, redaction.RedactedSecret) && !strings.Contains(head, redaction.RedactedSecret) {
 		marker := "\n" + redaction.RedactedSecret
 		budget := maxBytes - len(suffix) - len(marker)
 		if budget <= 0 {
-			return redaction.RedactedSecret + suffix, true
+			allowed := maxBytes - len(suffix)
+			if allowed > len(redaction.RedactedSecret) {
+				allowed = len(redaction.RedactedSecret)
+			}
+			return redaction.RedactedSecret[:allowed] + suffix, true
 		}
 		return value[:budget] + marker + suffix, true
 	}

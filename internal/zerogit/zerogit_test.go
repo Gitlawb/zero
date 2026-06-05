@@ -2,8 +2,13 @@ package zerogit
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
@@ -13,6 +18,9 @@ func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
 		{Stdout: "feature/m5\n"},
 		{Stdout: "abc1234\n"},
 		{Stdout: " M internal/verify/verify.go\n?? internal/zerogit/zerogit.go\n"},
+		{Stdout: "abc1234\n"},
+		{},
+		{},
 		{Stdout: " internal/verify/verify.go | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"},
 		{Stdout: "diff --git a/internal/verify/verify.go b/internal/verify/verify.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz\n"},
 	}}
@@ -50,6 +58,12 @@ func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
 	if got := runner.commandLine(3); got != "git status --short --untracked-files=all" {
 		t.Fatalf("status command = %q", got)
 	}
+	if got := runner.commandLine(6); got != "git add -A" {
+		t.Fatalf("preview stage command = %q", got)
+	}
+	if got := runner.commandLine(7); got != "git diff --cached --stat --" {
+		t.Fatalf("preview diff stat command = %q", got)
+	}
 }
 
 func TestCommitStagesAllChangesAndUsesGeneratedMessage(t *testing.T) {
@@ -59,6 +73,9 @@ func TestCommitStagesAllChangesAndUsesGeneratedMessage(t *testing.T) {
 		{Stdout: "main\n"},
 		{Stdout: "abc1234\n"},
 		{Stdout: " M internal/verify/verify.go\n?? internal/zerogit/zerogit.go\n"},
+		{Stdout: "abc1234\n"},
+		{},
+		{},
 		{Stdout: " 2 files changed, 10 insertions(+)\n"},
 		{Stdout: "diff --git a/internal/verify/verify.go b/internal/verify/verify.go\n"},
 		{},
@@ -80,10 +97,10 @@ func TestCommitStagesAllChangesAndUsesGeneratedMessage(t *testing.T) {
 	if result.Message == "" || len(result.Message) > 72 || !strings.Contains(result.Message, "2 files") {
 		t.Fatalf("unexpected generated commit message: %q", result.Message)
 	}
-	if got := runner.commandLine(6); got != "git add -A" {
+	if got := runner.commandLine(9); got != "git add -A" {
 		t.Fatalf("stage command = %q", got)
 	}
-	if got := runner.commandLine(7); !strings.HasPrefix(got, "git commit -m ") {
+	if got := runner.commandLine(10); !strings.HasPrefix(got, "git commit -m ") {
 		t.Fatalf("commit command = %q", got)
 	}
 }
@@ -95,6 +112,9 @@ func TestCommitDryRunDoesNotMutateRepository(t *testing.T) {
 		{Stdout: "main\n"},
 		{Stdout: "abc1234\n"},
 		{Stdout: " M README.md\n"},
+		{Stdout: "abc1234\n"},
+		{},
+		{},
 		{Stdout: " README.md | 1 +\n"},
 		{Stdout: "diff --git a/README.md b/README.md\n"},
 	}}
@@ -112,7 +132,7 @@ func TestCommitDryRunDoesNotMutateRepository(t *testing.T) {
 	if result.Committed || !result.DryRun || result.Message != "Update README" {
 		t.Fatalf("unexpected dry-run result: %#v", result)
 	}
-	if len(runner.calls) != 6 {
+	if len(runner.calls) != 9 {
 		t.Fatalf("dry-run should only inspect changes, got calls %#v", runner.calls)
 	}
 }
@@ -124,6 +144,9 @@ func TestCommitRejectsCleanTreeAndInvalidMessage(t *testing.T) {
 		{Stdout: "main\n"},
 		{Stdout: "abc1234\n"},
 		{Stdout: ""},
+		{Stdout: "abc1234\n"},
+		{},
+		{},
 		{Stdout: ""},
 		{Stdout: ""},
 	}}
@@ -132,6 +155,68 @@ func TestCommitRejectsCleanTreeAndInvalidMessage(t *testing.T) {
 	}
 	if err := ValidateMessage("   "); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("expected message validation error, got %v", err)
+	}
+}
+
+func TestInspectPreviewIncludesUntrackedOnlyChanges(t *testing.T) {
+	root := initGitRepo(t, true)
+	writeTestFile(t, filepath.Join(root, "notes.md"), "hello zero\n")
+
+	summary, err := Inspect(context.Background(), InspectOptions{Cwd: root})
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	if summary.Clean {
+		t.Fatalf("Clean = true, want false")
+	}
+	if len(summary.Files) != 1 || summary.Files[0].Path != "notes.md" || !summary.Files[0].Untracked {
+		t.Fatalf("unexpected untracked summary: %#v", summary.Files)
+	}
+	if !strings.Contains(summary.DiffStat, "notes.md") {
+		t.Fatalf("diff stat does not include untracked file: %q", summary.DiffStat)
+	}
+	if !strings.Contains(summary.Diff, "diff --git a/notes.md b/notes.md") || !strings.Contains(summary.Diff, "+hello zero") {
+		t.Fatalf("diff does not include untracked file content: %q", summary.Diff)
+	}
+	if staged := runGitCommand(t, root, "diff", "--cached", "--name-only"); strings.TrimSpace(staged) != "" {
+		t.Fatalf("Inspect mutated the real index, staged files: %q", staged)
+	}
+}
+
+func TestInspectPreviewWorksWithUnbornHead(t *testing.T) {
+	root := initGitRepo(t, false)
+	writeTestFile(t, filepath.Join(root, "README.md"), "new repository\n")
+
+	summary, err := Inspect(context.Background(), InspectOptions{Cwd: root})
+	if err != nil {
+		t.Fatalf("Inspect returned error for unborn HEAD: %v", err)
+	}
+
+	if summary.Clean {
+		t.Fatalf("Clean = true, want false")
+	}
+	if len(summary.Files) != 1 || summary.Files[0].Path != "README.md" || !summary.Files[0].Untracked {
+		t.Fatalf("unexpected unborn HEAD summary: %#v", summary.Files)
+	}
+	if !strings.Contains(summary.DiffStat, "README.md") || !strings.Contains(summary.Diff, "+new repository") {
+		t.Fatalf("unborn HEAD preview did not include README: stat=%q diff=%q", summary.DiffStat, summary.Diff)
+	}
+	if staged := runGitCommand(t, root, "diff", "--cached", "--name-only"); strings.TrimSpace(staged) != "" {
+		t.Fatalf("Inspect mutated the real unborn index, staged files: %q", staged)
+	}
+}
+
+func TestTruncateStringHonorsMaxBytesWithRedactionMarker(t *testing.T) {
+	value := strings.Repeat("a", 32) + redaction.RedactedSecret + strings.Repeat("b", 32)
+	for maxBytes := 1; maxBytes < len(redaction.RedactedSecret)+len("\n[truncated]"); maxBytes++ {
+		truncated, ok := truncateString(value, maxBytes)
+		if !ok {
+			t.Fatalf("truncateString truncated = false for maxBytes=%d", maxBytes)
+		}
+		if len(truncated) > maxBytes {
+			t.Fatalf("truncateString returned %d bytes for maxBytes=%d: %q", len(truncated), maxBytes, truncated)
+		}
 	}
 }
 
@@ -160,4 +245,37 @@ func (runner *fakeRunner) commandLine(index int) string {
 type gitCall struct {
 	dir  string
 	args []string
+}
+
+func initGitRepo(t *testing.T, withCommit bool) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	root := t.TempDir()
+	runGitCommand(t, root, "init")
+	if withCommit {
+		writeTestFile(t, filepath.Join(root, "README.md"), "initial\n")
+		runGitCommand(t, root, "add", "README.md")
+		runGitCommand(t, root, "-c", "user.name=Zero", "-c", "user.email=zero@example.invalid", "commit", "-m", "Initial commit")
+	}
+	return root
+}
+
+func runGitCommand(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = dir
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+	}
+	return string(output)
+}
+
+func writeTestFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
 }
