@@ -130,7 +130,7 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 			return nil, err
 		}
 		if latest == nil {
-			return nil, errors.New("No Zero sessions available to resume.")
+			return nil, errors.New("no zero sessions available to resume")
 		}
 		return latest, nil
 	}
@@ -140,7 +140,7 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 		return nil, err
 	}
 	if session == nil {
-		return nil, fmt.Errorf("Zero session not found: %s", args)
+		return nil, fmt.Errorf("zero session not found: %s", args)
 	}
 	return session, nil
 }

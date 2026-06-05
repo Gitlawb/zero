@@ -161,7 +161,7 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
 	}
-	updated, _ = next.Update(cmd())
+	_, _ = next.Update(cmd())
 
 	list, err := store.List()
 	if err != nil {
@@ -351,7 +351,7 @@ func TestResumedPromptIncludesSessionContext(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected resumed prompt to start an agent run")
 	}
-	updated, _ = next.Update(cmd())
+	_, _ = next.Update(cmd())
 
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider request, got %d", len(provider.requests))
@@ -375,7 +375,7 @@ func TestResumeCommandReportsMissingSession(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
-	if !transcriptContains(next.transcript, "Zero session not found: missing_session") {
+	if !transcriptContains(next.transcript, "zero session not found: missing_session") {
 		t.Fatalf("expected missing session error, got %#v", next.transcript)
 	}
 }

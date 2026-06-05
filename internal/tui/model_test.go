@@ -535,7 +535,7 @@ func TestResumeCommandWithUnknownIDReportsMissingSession(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
-	if !transcriptContains(next.transcript, "Zero session not found: zero_123") {
+	if !transcriptContains(next.transcript, "zero session not found: zero_123") {
 		t.Fatalf("expected missing session message, got %#v", next.transcript)
 	}
 }
