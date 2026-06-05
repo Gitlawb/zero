@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
+	"github.com/Gitlawb/zero/internal/zerogit"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -299,6 +300,111 @@ func TestRunVerifyReturnsProviderExitWhenChecksFail(t *testing.T) {
 	if !strings.Contains(stdout.String(), "failed") {
 		t.Fatalf("expected failure summary in stdout, got %q", stdout.String())
 	}
+}
+
+func TestRunVerifyAttemptsUsesSelfVerifyLoop(t *testing.T) {
+	cwd := t.TempDir()
+	plan := verify.Plan{Root: cwd, Checks: []verify.Check{{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}}}}
+	loopReport := verify.LoopReport{
+		OK: true,
+		Attempts: []verify.Attempt{
+			{Number: 1, Report: verify.Report{Root: cwd, OK: false, Summary: verify.Summary{Total: 1, Failed: 1}}},
+			{Number: 2, Report: verify.Report{Root: cwd, OK: true, Summary: verify.Summary{Total: 1, Passed: 1}}},
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"verify", "--attempts", "2", "--json"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		detectVerifyPlan: func(root string) (verify.Plan, error) {
+			if root != cwd {
+				t.Fatalf("verify root = %q, want %q", root, cwd)
+			}
+			return plan, nil
+		},
+		runVerifyLoop: func(ctx context.Context, gotPlan verify.Plan, options verify.LoopOptions) verify.LoopReport {
+			if options.MaxAttempts != 2 {
+				t.Fatalf("MaxAttempts = %d, want 2", options.MaxAttempts)
+			}
+			return loopReport
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var decoded verify.LoopReport
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode verify loop JSON: %v\n%s", err, stdout.String())
+	}
+	if len(decoded.Attempts) != 2 || !decoded.OK {
+		t.Fatalf("unexpected loop JSON: %#v", decoded)
+	}
+}
+
+func TestRunChangesInspectAndCommit(t *testing.T) {
+	cwd := t.TempDir()
+	summary := zerogit.ChangeSummary{
+		Root:   cwd,
+		Branch: "main",
+		Commit: "abc1234",
+		Files:  []zerogit.FileChange{{Path: "README.md", Status: "modified", Unstaged: true}},
+	}
+	commit := zerogit.CommitResult{
+		Root:       cwd,
+		Message:    "Update README",
+		DryRun:     true,
+		Committed:  false,
+		Before:     summary,
+		CommitHash: "",
+	}
+
+	t.Run("inspect json", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "inspect", "--json"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+				if options.Cwd != cwd {
+					t.Fatalf("inspect cwd = %q, want %q", options.Cwd, cwd)
+				}
+				return summary, nil
+			},
+		})
+
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+		var decoded zerogit.ChangeSummary
+		if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+			t.Fatalf("decode changes JSON: %v\n%s", err, stdout.String())
+		}
+		if len(decoded.Files) != 1 || decoded.Files[0].Path != "README.md" {
+			t.Fatalf("unexpected changes JSON: %#v", decoded)
+		}
+	})
+
+	t.Run("commit dry-run", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"changes", "commit", "--message", "Update README", "--dry-run"}, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return cwd, nil },
+			commitChanges: func(ctx context.Context, options zerogit.CommitOptions) (zerogit.CommitResult, error) {
+				if options.Cwd != cwd || options.Message != "Update README" || !options.DryRun {
+					t.Fatalf("unexpected commit options: %#v", options)
+				}
+				return commit, nil
+			},
+		})
+
+		if exitCode != exitSuccess {
+			t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Zero changes commit") || !strings.Contains(stdout.String(), "dry-run: true") {
+			t.Fatalf("unexpected changes commit output: %q", stdout.String())
+		}
+	})
 }
 
 func TestRunExecWorktreeUsesPreparedWorkspace(t *testing.T) {
