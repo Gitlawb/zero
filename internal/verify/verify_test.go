@@ -71,6 +71,74 @@ func TestRunExecutesPlanAndRedactsOutput(t *testing.T) {
 	}
 }
 
+func TestRunParsesStructuredFailureSummary(t *testing.T) {
+	root := t.TempDir()
+	plan := Plan{Root: root, Checks: []Check{
+		{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}},
+	}}
+	runner := &fakeCommandRunner{results: []CommandResult{{
+		ExitCode: 1,
+		Stdout: strings.Join([]string{
+			"--- FAIL: TestSecret (0.00s)",
+			"    secret_test.go:12: token sk-proj-abcdefghijklmnopqrstuvwxyz",
+			"FAIL",
+		}, "\n"),
+	}}}
+
+	report := Run(context.Background(), plan, RunOptions{
+		Runner: runner.Run,
+		Now:    fixedVerifyTime("2026-06-05T11:15:00Z"),
+	})
+
+	if report.Results[0].OutputSummary == nil {
+		t.Fatalf("expected output summary, got %#v", report.Results[0])
+	}
+	lines := strings.Join(report.Results[0].OutputSummary.Lines, "\n")
+	if !strings.Contains(lines, "TestSecret") || !strings.Contains(lines, "[REDACTED]") {
+		t.Fatalf("expected redacted failure summary lines, got %q", lines)
+	}
+	if strings.Contains(lines, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
+		t.Fatalf("failure summary leaked secret: %q", lines)
+	}
+}
+
+func TestRunLoopRetriesUntilVerificationPasses(t *testing.T) {
+	root := t.TempDir()
+	plan := Plan{Root: root, Checks: []Check{
+		{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}},
+	}}
+	runner := &fakeCommandRunner{results: []CommandResult{
+		{ExitCode: 1, Stdout: "--- FAIL: TestOne\nFAIL\n"},
+		{ExitCode: 0, Stdout: "ok\n"},
+	}}
+	retryCount := 0
+
+	report := RunLoop(context.Background(), plan, LoopOptions{
+		RunOptions: RunOptions{
+			Runner: runner.Run,
+			Now:    fixedVerifyTime("2026-06-05T11:20:00Z"),
+		},
+		MaxAttempts: 2,
+		OnFailure: func(ctx context.Context, attempt Attempt) error {
+			retryCount++
+			if attempt.Number != 1 || attempt.Report.OK {
+				t.Fatalf("unexpected failed attempt passed to hook: %#v", attempt)
+			}
+			return nil
+		},
+	})
+
+	if !report.OK {
+		t.Fatalf("expected loop to pass, got %#v", report)
+	}
+	if len(report.Attempts) != 2 || !report.Attempts[1].Report.OK {
+		t.Fatalf("unexpected attempts: %#v", report.Attempts)
+	}
+	if retryCount != 1 {
+		t.Fatalf("retry hook called %d times, want 1", retryCount)
+	}
+}
+
 func TestRunFiltersChecksByID(t *testing.T) {
 	root := t.TempDir()
 	plan := Plan{Root: root, Checks: []Check{

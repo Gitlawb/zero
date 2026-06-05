@@ -42,17 +42,18 @@ type Summary struct {
 }
 
 type Result struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Command    []string `json:"command"`
-	Status     Status   `json:"status"`
-	ExitCode   int      `json:"exitCode"`
-	Stdout     string   `json:"stdout,omitempty"`
-	Stderr     string   `json:"stderr,omitempty"`
-	StartedAt  string   `json:"startedAt"`
-	EndedAt    string   `json:"endedAt"`
-	DurationMs int      `json:"durationMs"`
-	Error      string   `json:"error,omitempty"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Command       []string       `json:"command"`
+	Status        Status         `json:"status"`
+	ExitCode      int            `json:"exitCode"`
+	Stdout        string         `json:"stdout,omitempty"`
+	Stderr        string         `json:"stderr,omitempty"`
+	StartedAt     string         `json:"startedAt"`
+	EndedAt       string         `json:"endedAt"`
+	DurationMs    int            `json:"durationMs"`
+	Error         string         `json:"error,omitempty"`
+	OutputSummary *OutputSummary `json:"outputSummary,omitempty"`
 }
 
 type Report struct {
@@ -62,6 +63,25 @@ type Report struct {
 	OK        bool     `json:"ok"`
 	Summary   Summary  `json:"summary"`
 	Results   []Result `json:"results"`
+}
+
+type OutputSummary struct {
+	Lines     []string `json:"lines,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
+}
+
+type Attempt struct {
+	Number int    `json:"number"`
+	Report Report `json:"report"`
+}
+
+type LoopReport struct {
+	StartedAt string    `json:"startedAt"`
+	EndedAt   string    `json:"endedAt"`
+	OK        bool      `json:"ok"`
+	Summary   Summary   `json:"summary"`
+	Attempts  []Attempt `json:"attempts"`
+	Error     string    `json:"error,omitempty"`
 }
 
 type CommandResult struct {
@@ -77,6 +97,12 @@ type RunOptions struct {
 	TimeoutMS int
 	Runner    Runner
 	Now       func() time.Time
+}
+
+type LoopOptions struct {
+	RunOptions
+	MaxAttempts int
+	OnFailure   func(context.Context, Attempt) error
 }
 
 const defaultTimeoutMS = 120000
@@ -129,12 +155,14 @@ func Run(ctx context.Context, plan Plan, options RunOptions) Report {
 		if err != nil {
 			result.Status = StatusError
 			result.Error = redaction.RedactString(err.Error(), redaction.Options{})
+			result.OutputSummary = summarizeOutput(result.Stdout, result.Stderr, result.Error)
 			report.Summary.Errors++
 		} else if commandResult.ExitCode == 0 {
 			result.Status = StatusPass
 			report.Summary.Passed++
 		} else {
 			result.Status = StatusFail
+			result.OutputSummary = summarizeOutput(result.Stdout, result.Stderr)
 			report.Summary.Failed++
 		}
 		report.Results = append(report.Results, result)
@@ -154,6 +182,37 @@ func Run(ctx context.Context, plan Plan, options RunOptions) Report {
 	}
 	report.Summary.Total = len(report.Results)
 	report.OK = report.Summary.Failed == 0 && report.Summary.Errors == 0
+	report.EndedAt = formatTime(now())
+	return report
+}
+
+func RunLoop(ctx context.Context, plan Plan, options LoopOptions) LoopReport {
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	start := now()
+	report := LoopReport{
+		StartedAt: formatTime(start),
+		OK:        false,
+	}
+	maxAttempts := firstPositive(options.MaxAttempts, 1)
+	for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
+		attemptReport := Run(ctx, plan, options.RunOptions)
+		attempt := Attempt{Number: attemptNumber, Report: attemptReport}
+		report.Attempts = append(report.Attempts, attempt)
+		report.Summary = attemptReport.Summary
+		if attemptReport.OK {
+			report.OK = true
+			break
+		}
+		if attemptNumber < maxAttempts && options.OnFailure != nil {
+			if err := options.OnFailure(ctx, attempt); err != nil {
+				report.Error = redaction.RedactString(err.Error(), redaction.Options{})
+				break
+			}
+		}
+	}
 	report.EndedAt = formatTime(now())
 	return report
 }
@@ -191,6 +250,51 @@ func detectPackageChecks(root string) []Check {
 		})
 	}
 	return checks
+}
+
+func summarizeOutput(values ...string) *OutputSummary {
+	lines := []string{}
+	contextLines := 0
+	truncated := false
+	for _, value := range values {
+		for _, line := range strings.Split(value, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			if isFailureLine(trimmed) {
+				lines = append(lines, trimmed)
+				contextLines = 2
+			} else if contextLines > 0 {
+				lines = append(lines, trimmed)
+				contextLines--
+			} else {
+				continue
+			}
+			if len(lines) >= 8 {
+				truncated = true
+				break
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return &OutputSummary{Lines: lines, Truncated: truncated}
+}
+
+func isFailureLine(line string) bool {
+	lower := strings.ToLower(line)
+	return strings.HasPrefix(line, "--- FAIL:") ||
+		strings.HasPrefix(line, "FAIL") ||
+		strings.HasPrefix(lower, "panic:") ||
+		strings.HasPrefix(lower, "error:") ||
+		strings.HasPrefix(lower, "not ok") ||
+		strings.Contains(lower, " assertion") ||
+		strings.Contains(lower, " failed")
 }
 
 func defaultRunner(ctx context.Context, dir string, command []string, timeout time.Duration) (CommandResult, error) {
