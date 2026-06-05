@@ -405,6 +405,9 @@ func (store *PermissionStore) readState() (permissionFile, error) {
 		state.Tools = map[string]map[string]storedGrant{}
 	}
 	for serverName, grant := range state.Servers {
+		if err := ValidateServerName(serverName); err != nil {
+			return permissionFile{}, fmt.Errorf("invalid MCP permissions file at %s: %w", store.filePath, err)
+		}
 		normalized, err := normalizeStoredGrant(grant, "servers."+serverName)
 		if err != nil {
 			return permissionFile{}, fmt.Errorf("invalid MCP permissions file at %s: %w", store.filePath, err)
@@ -412,11 +415,17 @@ func (store *PermissionStore) readState() (permissionFile, error) {
 		state.Servers[serverName] = normalized
 	}
 	for serverName, serverTools := range state.Tools {
+		if err := ValidateServerName(serverName); err != nil {
+			return permissionFile{}, fmt.Errorf("invalid MCP permissions file at %s: %w", store.filePath, err)
+		}
 		if serverTools == nil {
 			state.Tools[serverName] = map[string]storedGrant{}
 			continue
 		}
 		for toolName, grant := range serverTools {
+			if err := validateToolName(toolName); err != nil {
+				return permissionFile{}, fmt.Errorf("invalid MCP permissions file at %s: %w", store.filePath, err)
+			}
 			normalized, err := normalizeStoredGrant(grant, "tools."+serverName+"."+toolName)
 			if err != nil {
 				return permissionFile{}, fmt.Errorf("invalid MCP permissions file at %s: %w", store.filePath, err)
@@ -447,20 +456,29 @@ func (store *PermissionStore) writeState(state permissionFile) error {
 }
 
 func (store *PermissionStore) lockStateFile() (func(), error) {
-	lockPath := store.filePath + ".lock"
+	lockPath := store.filePath + ".lockfile"
 	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
 		return nil, err
 	}
 	deadline := time.Now().Add(permissionLockTimeout)
 	for {
-		err := os.Mkdir(lockPath, 0o700)
-		if err == nil {
-			return func() { _ = os.Remove(lockPath) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
+		locked, err := tryLockPermissionFile(file)
+		if err != nil {
+			_ = file.Close()
 			return nil, err
 		}
+		if locked {
+			return func() {
+				_ = unlockPermissionFile(file)
+				_ = file.Close()
+			}, nil
+		}
 		if time.Now().After(deadline) {
+			_ = file.Close()
 			return nil, fmt.Errorf("timed out waiting for MCP permissions lock at %s", lockPath)
 		}
 		time.Sleep(permissionLockRetry)

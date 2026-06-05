@@ -198,6 +198,56 @@ func TestPermissionStoreSerializesConcurrentStoreInstances(t *testing.T) {
 	}
 }
 
+func TestPermissionStoreDoesNotBlockOnStaleDirectoryLock(t *testing.T) {
+	store := newTestPermissionStore(t)
+	if err := os.Mkdir(store.FilePath()+".lock", 0o700); err != nil {
+		t.Fatalf("failed to create stale directory lock: %v", err)
+	}
+
+	if _, err := store.GrantServer(GrantServerInput{
+		ServerName:     "docs",
+		ServerIdentity: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		MaxAutonomy:    AutonomyLow,
+	}); err != nil {
+		t.Fatalf("GrantServer should ignore stale directory locks, got %v", err)
+	}
+}
+
+func TestPermissionStoreRejectsInvalidPersistedKeys(t *testing.T) {
+	validGrant := `{"serverIdentity":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","maxAutonomy":"low","approvedAt":"2026-06-03T09:30:00Z"}`
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "server key",
+			body: `{"schemaVersion":1,"servers":{"../escape":` + validGrant + `},"tools":{}}`,
+			want: "invalid MCP server name",
+		},
+		{
+			name: "tool key",
+			body: `{"schemaVersion":1,"servers":{},"tools":{"docs":{"":` + validGrant + `}}}`,
+			want: "MCP tool name is required",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "mcp-permissions.json")
+			if err := os.WriteFile(filePath, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewPermissionStore(StoreOptions{FilePath: filePath})
+			if err != nil {
+				t.Fatalf("NewPermissionStore returned error: %v", err)
+			}
+			_, err = store.List()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestResolvePermissionPathHonorsOverrideAndConfigHome(t *testing.T) {
 	dir := t.TempDir()
 	override, err := ResolvePermissionPath(map[string]string{"ZERO_MCP_PERMISSIONS_PATH": filepath.Join(dir, "custom.json")})
