@@ -77,7 +77,7 @@ Inside the TUI: type to chat and press **Enter** to send. `/` opens command sugg
 
 ```bash
 # one-shot
-zero exec "explain src/agent/loop.ts and suggest one improvement"
+zero exec "explain internal/agent/loop.go and suggest one improvement"
 
 # from a file, with a specific model, as JSON for scripts
 zero exec --file task.md --model claude-sonnet-4.5 --output-format json

@@ -11,6 +11,13 @@ import {
 } from '../scripts/perf-bench';
 
 describe('performance benchmark helpers', () => {
+  it('does not import the legacy TypeScript agent runtime', async () => {
+    const source = await Bun.file('scripts/perf-bench.ts').text();
+
+    expect(source).not.toContain('../src/agent/loop');
+    expect(source).not.toContain('../src/providers/types');
+  });
+
   it('summarizes samples with stable sorted output', () => {
     const stats = summarizeSamples([30.333, 10.111, 20.222, 40.444]);
 
@@ -76,6 +83,7 @@ describe('performance benchmark helpers', () => {
       iterations: 1,
       warmupIterations: 0,
       coldStartCommand: [process.execPath, '--version'],
+      ttftCommand: [process.execPath, '--version'],
       thresholds: {
         coldStartP95Ms: 60_000,
         ttftP95Ms: 60_000,
@@ -109,6 +117,7 @@ describe('performance benchmark helpers', () => {
         bunVersion: '1.3.14',
       },
       coldStartCommand: ['/repo/zero', '--version'],
+      ttftCommand: ['/repo/zero', '--version'],
       iterations: 2,
       warmupIterations: 1,
       thresholds: DEFAULT_PERF_THRESHOLDS,

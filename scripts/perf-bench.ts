@@ -1,7 +1,5 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { runAgent } from '../src/agent/loop';
-import type { Message, Provider, StreamEvent, ToolDefinition } from '../src/providers/types';
 import { zeroArtifactName, zeroArtifactPath } from './artifact';
 
 export interface PerfThresholds {
@@ -45,6 +43,7 @@ export interface PerfBenchResult {
     bunVersion: string;
   };
   coldStartCommand: string[];
+  ttftCommand: string[];
   iterations: number;
   warmupIterations: number;
   thresholds: PerfThresholds;
@@ -58,6 +57,7 @@ export interface PerfBenchOptions {
   warmupIterations: number;
   thresholds: PerfThresholds;
   coldStartCommand?: string[];
+  ttftCommand?: string[];
 }
 
 export interface PerfBenchCliOptions extends PerfBenchOptions {
@@ -131,6 +131,7 @@ export function formatPerfSummary(result: PerfBenchResult): string {
   const lines = [
     `Zero performance benchmark (${result.platform.os}/${result.platform.arch}, Bun ${result.platform.bunVersion})`,
     `command: ${formatCommand(result.coldStartCommand)}`,
+    `TTFT command: ${formatCommand(result.ttftCommand)}`,
     `iterations: ${result.iterations} measured, ${result.warmupIterations} warmup`,
     `cold start: median ${formatMetric(result.metrics.coldStartMs.median, 'ms')}, p95 ${formatMetric(result.metrics.coldStartMs.p95, 'ms')} (warn > ${formatMetric(result.thresholds.coldStartP95Ms, 'ms')})`,
     `TTFT: median ${formatMetric(result.metrics.ttftMs.median, 'ms')}, p95 ${formatMetric(result.metrics.ttftMs.p95, 'ms')} (warn > ${formatMetric(result.thresholds.ttftP95Ms, 'ms')})`,
@@ -275,17 +276,18 @@ export function perfBenchHelp(): string {
 export async function runPerfBench(options: PerfBenchOptions): Promise<PerfBenchResult> {
   const benchmarkStartedAt = performance.now();
   const coldStartCommand = options.coldStartCommand ?? await resolveColdStartCommand();
+  const ttftCommand = options.ttftCommand ?? await resolveTtftCommand();
   const coldStartSamples: number[] = [];
   const ttftSamples: TtftSample[] = [];
 
   for (let i = 0; i < options.warmupIterations; i++) {
     await measureColdStart(coldStartCommand);
-    await measureTtft();
+    await measureTtft(ttftCommand);
   }
 
   for (let i = 0; i < options.iterations; i++) {
     coldStartSamples.push(await measureColdStart(coldStartCommand));
-    ttftSamples.push(await measureTtft());
+    ttftSamples.push(await measureTtft(ttftCommand));
   }
 
   const metrics: PerfMetrics = {
@@ -305,6 +307,7 @@ export async function runPerfBench(options: PerfBenchOptions): Promise<PerfBench
       bunVersion: Bun.version,
     },
     coldStartCommand,
+    ttftCommand,
     iterations: options.iterations,
     warmupIterations: options.warmupIterations,
     thresholds: options.thresholds,
@@ -361,6 +364,14 @@ async function resolveColdStartCommand(): Promise<string[]> {
   throw new Error(`No ${zeroArtifactName} binary found. Run \`bun run build\` before running the performance benchmark.`);
 }
 
+async function resolveTtftCommand(): Promise<string[]> {
+  if (await Bun.file(zeroArtifactPath).exists()) {
+    return [zeroArtifactPath, '--version'];
+  }
+
+  throw new Error(`No ${zeroArtifactName} binary found. Run \`bun run build\` before running the performance benchmark.`);
+}
+
 async function measureColdStart(command: string[]): Promise<number> {
   const startedAt = performance.now();
   const child = Bun.spawn(command, {
@@ -388,48 +399,41 @@ async function measureColdStart(command: string[]): Promise<number> {
   return durationMs;
 }
 
-async function measureTtft(): Promise<TtftSample> {
+async function measureTtft(command: string[]): Promise<TtftSample> {
   const rssBefore = readRssMb();
   const startedAt = performance.now();
-  let providerFirstByteAt: number | undefined;
-  let firstTextAt: number | undefined;
-
-  const provider = new ImmediateTextProvider((at) => {
-    providerFirstByteAt = at;
+  const child = Bun.spawn(command, {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: offlineBenchmarkEnv(),
   });
 
-  await runAgent('Reply with "ok".', provider, {
-    maxTurns: 1,
-    onText: () => {
-      firstTextAt ??= performance.now();
-    },
-  });
-
+  let firstOutputAt: number | undefined;
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    readTimedSpawnStream(child.stdout, () => {
+      firstOutputAt ??= performance.now();
+    }),
+    readTimedSpawnStream(child.stderr, () => {
+      firstOutputAt ??= performance.now();
+    }),
+  ]);
   const finishedAt = performance.now();
   const rssAfter = readRssMb();
-  const observedFirstTextAt = firstTextAt ?? finishedAt;
-  const streamOverheadMs =
-    providerFirstByteAt === undefined ? 0 : observedFirstTextAt - providerFirstByteAt;
+  const observedFirstOutputAt = firstOutputAt ?? finishedAt;
+
+  if (exitCode !== 0) {
+    throw new Error(
+      `${formatCommand(command)} exited with ${exitCode}: ${stderr.trim() || stdout.trim() || 'no output'}`
+    );
+  }
 
   return {
-    ttftMs: roundMetric(observedFirstTextAt - startedAt),
-    streamOverheadMs: roundMetric(Math.max(0, streamOverheadMs)),
+    ttftMs: roundMetric(observedFirstOutputAt - startedAt),
+    streamOverheadMs: roundMetric(Math.max(0, finishedAt - observedFirstOutputAt)),
     agentRssMb: roundMetric(rssAfter),
     agentRssDeltaMb: roundMetric(Math.max(0, rssAfter - rssBefore)),
   };
-}
-
-class ImmediateTextProvider implements Provider {
-  constructor(private readonly onFirstByte: (at: number) => void) {}
-
-  async *streamCompletion(
-    _messages: Message[],
-    _tools: ToolDefinition[]
-  ): AsyncIterable<StreamEvent> {
-    this.onFirstByte(performance.now());
-    yield { type: 'text', content: 'ok' };
-    yield { type: 'done' };
-  }
 }
 
 function createWarning(
@@ -465,6 +469,62 @@ function readRssMb(): number {
 async function readSpawnStream(stream: ReadableStream<Uint8Array> | null): Promise<string> {
   if (!stream) return '';
   return new Response(stream).text();
+}
+
+async function readTimedSpawnStream(
+  stream: ReadableStream<Uint8Array> | null,
+  onFirstChunk: () => void
+): Promise<string> {
+  if (!stream) return '';
+
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value.length > 0 && chunks.length === 0) {
+      onFirstChunk();
+    }
+    if (value.length > 0) {
+      chunks.push(value);
+    }
+  }
+
+  return new TextDecoder().decode(joinChunks(chunks));
+}
+
+function joinChunks(chunks: Uint8Array[]): Uint8Array {
+  const length = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const joined = new Uint8Array(length);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return joined;
+}
+
+function offlineBenchmarkEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.ZERO_PROVIDER_COMMAND;
+  delete env.ZERO_PROVIDER;
+  delete env.OPENAI_API_KEY;
+  delete env.OPENAI_BASE_URL;
+  delete env.OPENAI_MODEL;
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_BASE_URL;
+  delete env.ANTHROPIC_MODEL;
+  delete env.GEMINI_API_KEY;
+  delete env.GEMINI_BASE_URL;
+  delete env.GEMINI_MODEL;
+  delete env.GOOGLE_API_KEY;
+  delete env.GOOGLE_BASE_URL;
+  delete env.GOOGLE_MODEL;
+  env.NO_COLOR = '1';
+  return env;
 }
 
 function percentile(sortedSamples: number[], percentileValue: number): number {

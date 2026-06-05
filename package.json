@@ -25,10 +25,5 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.9.3"
-  },
-  "dependencies": {
-    "execa": "^9.6.1",
-    "openai": "^6.39.1",
-    "zod": "^4.4.3"
   }
 }
