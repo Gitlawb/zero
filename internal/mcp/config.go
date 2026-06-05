@@ -1,0 +1,176 @@
+package mcp
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/config"
+)
+
+type ServerType string
+
+const (
+	ServerTypeStdio ServerType = "stdio"
+	ServerTypeHTTP  ServerType = "http"
+	ServerTypeSSE   ServerType = "sse"
+)
+
+type Server struct {
+	Name     string
+	Type     ServerType
+	Command  string
+	Args     []string
+	Env      map[string]string
+	URL      string
+	Headers  map[string]string
+	Identity string
+}
+
+func NormalizeConfig(cfg config.MCPConfig) ([]Server, error) {
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	servers := make([]Server, 0, len(names))
+	for _, name := range names {
+		raw := cfg.Servers[name]
+		if raw.Disabled {
+			continue
+		}
+		server, err := normalizeServer(name, raw)
+		if err != nil {
+			return nil, err
+		}
+		servers = append(servers, server)
+	}
+	return servers, nil
+}
+
+func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
+	name = strings.TrimSpace(name)
+	if err := ValidateServerName(name); err != nil {
+		return Server{}, err
+	}
+
+	serverType := ServerType(strings.ToLower(strings.TrimSpace(raw.Type)))
+	if serverType == "" {
+		if strings.TrimSpace(raw.URL) != "" {
+			serverType = ServerTypeHTTP
+		} else {
+			serverType = ServerTypeStdio
+		}
+	}
+
+	server := Server{
+		Name:    name,
+		Type:    serverType,
+		Command: strings.TrimSpace(raw.Command),
+		Args:    trimStringSlice(raw.Args),
+		Env:     copyStringMap(raw.Env),
+		URL:     strings.TrimSpace(raw.URL),
+		Headers: copyStringMap(raw.Headers),
+	}
+
+	switch server.Type {
+	case ServerTypeStdio:
+		if server.Command == "" {
+			return Server{}, fmt.Errorf("MCP server %s requires command for stdio transport", server.Name)
+		}
+		if server.URL != "" {
+			return Server{}, fmt.Errorf("MCP server %s url is only supported for http or sse transports", server.Name)
+		}
+		if len(server.Headers) > 0 {
+			return Server{}, fmt.Errorf("MCP server %s headers are only supported for http or sse transports", server.Name)
+		}
+	case ServerTypeHTTP, ServerTypeSSE:
+		if server.URL == "" {
+			return Server{}, fmt.Errorf("MCP server %s requires url for %s transport", server.Name, server.Type)
+		}
+		if server.Command != "" || len(server.Args) > 0 {
+			return Server{}, fmt.Errorf("MCP server %s command and args are only supported for stdio transport", server.Name)
+		}
+		if len(server.Env) > 0 {
+			return Server{}, fmt.Errorf("MCP server %s env is only supported for stdio transport", server.Name)
+		}
+		if err := validateHTTPURL(server.Name, server.URL); err != nil {
+			return Server{}, err
+		}
+	default:
+		return Server{}, fmt.Errorf("MCP server %s has unsupported type %q", server.Name, raw.Type)
+	}
+
+	server.Identity = computeServerIdentity(server)
+	return server, nil
+}
+
+func validateHTTPURL(serverName string, value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("MCP server %s url must be a valid http or https URL", serverName)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("MCP server %s url must use http or https", serverName)
+	}
+	return nil
+}
+
+func computeServerIdentity(server Server) string {
+	canonical := struct {
+		Type    ServerType        `json:"type"`
+		Command string            `json:"command,omitempty"`
+		Args    []string          `json:"args,omitempty"`
+		Env     map[string]string `json:"env,omitempty"`
+		URL     string            `json:"url,omitempty"`
+		Headers map[string]string `json:"headers,omitempty"`
+	}{
+		Type:    server.Type,
+		Command: server.Command,
+		Args:    append([]string{}, server.Args...),
+		Env:     copyStringMap(server.Env),
+		URL:     server.URL,
+		Headers: copyStringMap(server.Headers),
+	}
+	data, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+func trimStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		trimmed = append(trimmed, value)
+	}
+	return trimmed
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		copied[key] = value
+	}
+	if len(copied) == 0 {
+		return nil
+	}
+	return copied
+}
