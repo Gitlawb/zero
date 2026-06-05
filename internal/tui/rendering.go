@@ -27,7 +27,7 @@ func helpText() string {
 	return "Commands:\n" + strings.Join(formatCommandHelpLines(), "\n") + "\nSubmit text to ask the assistant."
 }
 
-const defaultCommandFooterText = "/help  /model  /provider  /context  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
+const defaultCommandFooterText = "/help  /model  /provider  /context  /compact  /effort  /style  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
 
 func commandFooterText() string {
 	return formatCommandFooterText(commandDefinitions, false)
@@ -57,6 +57,9 @@ func formatCommandFooterText(commands []commandDefinition, pending bool) string 
 		commandModel,
 		commandProvider,
 		commandContext,
+		commandCompact,
+		commandEffort,
+		commandStyle,
 		commandTools,
 		commandPermissions,
 		commandClear,

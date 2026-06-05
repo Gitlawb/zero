@@ -230,6 +230,35 @@ func TestUsageEventsForCustomModelUseTokenOnlyFallback(t *testing.T) {
 	}
 }
 
+func TestInvalidUsageEventsAppendTranscriptError(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: -1, OutputTokens: 20}},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		Provider:  provider,
+		Registry:  tools.NewRegistry(),
+	})
+	m.input.SetValue("track usage")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt to start agent run")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
+
+	if !transcriptContains(next.transcript, "usage: expected inputTokens to be non-negative") {
+		t.Fatalf("expected invalid usage transcript error, got %#v", next.transcript)
+	}
+	if next.unpricedRequests != 0 || strings.Contains(next.footerText(), "cost unavailable") {
+		t.Fatalf("invalid usage should not be counted as unpriced, requests=%d footer=%q", next.unpricedRequests, next.footerText())
+	}
+}
+
 func TestStaleAgentUsageResponseIsIgnored(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
 

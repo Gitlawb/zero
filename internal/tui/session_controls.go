@@ -176,20 +176,42 @@ func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model,
 	if m.usageTracker == nil || strings.TrimSpace(modelID) == "" {
 		return m, nil
 	}
-	normalized, _, err := usage.Normalize(event)
+	normalized, runtimeUsage, err := usage.Normalize(event)
 	if err != nil {
 		return m, []transcriptRow{{kind: rowError, text: "usage: " + err.Error()}}
 	}
 	if _, err := m.usageTracker.Record(usage.RecordInput{
 		ModelID: modelID,
-		Usage:   event,
+		Usage:   runtimeUsage,
 		Source:  "tui",
 	}); err != nil {
-		m.unpricedRequests++
-		m.unpricedTokens += normalized.TotalTokens
-		return m, nil
+		if isUnpricedUsageError(err) {
+			m.unpricedRequests++
+			m.unpricedTokens += normalized.TotalTokens
+			return m, nil
+		}
+		return m, []transcriptRow{{kind: rowError, text: "usage: " + err.Error()}}
 	}
 	return m, nil
+}
+
+func isUnpricedUsageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"unknown zero model",
+		"missing model input pricing rate",
+		"missing model output pricing rate",
+		"invalid model cached input pricing rate",
+		"no model cost tier covers",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m model) usageSummaryText() string {

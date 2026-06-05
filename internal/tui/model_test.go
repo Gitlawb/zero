@@ -133,7 +133,7 @@ func TestInitialRenderContainsHeaderInputAndFooter(t *testing.T) {
 func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
 	footer := commandFooterText()
 
-	for _, command := range []string{"/help", "/model", "/provider", "/context", "/tools", "/permissions", "/clear", "/exit"} {
+	for _, command := range []string{"/help", "/model", "/provider", "/context", "/compact", "/effort", "/style", "/tools", "/permissions", "/clear", "/exit"} {
 		assertContains(t, footer, command)
 	}
 	assertContains(t, footer, "Esc clear")
@@ -143,7 +143,7 @@ func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
 func TestCommandFooterTextFallsBackWhenRegistryIsEmpty(t *testing.T) {
 	footer := formatCommandFooterText(nil, false)
 
-	for _, command := range []string{"/help", "/model", "/provider", "/context", "/tools", "/permissions", "/clear", "/exit"} {
+	for _, command := range []string{"/help", "/model", "/provider", "/context", "/compact", "/effort", "/style", "/tools", "/permissions", "/clear", "/exit"} {
 		assertContains(t, footer, command)
 	}
 	assertContains(t, footer, "Esc clear")
