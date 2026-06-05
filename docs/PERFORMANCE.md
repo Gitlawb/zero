@@ -3,10 +3,16 @@
 The M2 performance harness tracks three release-facing signals:
 
 - Cold start: process startup time for `zero --version`.
-- TTFT: time from starting the local agent loop to the first streamed text event from a deterministic provider.
-- Memory: peak RSS for the benchmarked in-process agent path.
+- Binary first output: time from spawning the built `zero --version` command to
+  the first stdout or stderr chunk.
+- Harness memory: peak RSS for the Bun benchmark harness before and after the
+  spawned command.
 
 Cold start uses the built Go binary at `./zero` or `./zero.exe`. Run `bun run build` before the benchmark so it measures the production runtime rather than the old TypeScript entrypoint.
+
+This smoke benchmark does not measure provider TTFT or Go agent memory. A
+provider-aware Go benchmark should be added separately when the runtime exposes a
+deterministic local streaming path.
 
 ## Run Locally
 
@@ -30,15 +36,15 @@ bun run perf:smoke
 Default warning thresholds:
 
 - Cold start p95: 300 ms
-- TTFT p95: 500 ms
-- Agent RSS peak: 256 MB
+- Binary first-output p95: 500 ms
+- Harness RSS peak: 256 MB
 
 The default sample count is intentionally small for CI smoke coverage. `p95` uses nearest-rank percentile selection, so with the default 5 measured samples it is the slowest sample. Increase `--iterations` for local baseline investigations.
 
 Override thresholds with CLI flags:
 
 ```bash
-bun run scripts/perf-bench.ts --cold-start-warn-ms=350 --ttft-warn-ms=600 --rss-warn-mb=384
+bun run scripts/perf-bench.ts --cold-start-warn-ms=350 --first-output-warn-ms=600 --harness-rss-warn-mb=384
 ```
 
 Or with environment variables:
@@ -52,8 +58,8 @@ Supported environment variables:
 - `ZERO_PERF_ITERATIONS`
 - `ZERO_PERF_WARMUP_ITERATIONS`
 - `ZERO_PERF_COLD_START_WARN_MS`
-- `ZERO_PERF_TTFT_WARN_MS`
-- `ZERO_PERF_RSS_WARN_MB`
+- `ZERO_PERF_FIRST_OUTPUT_WARN_MS`
+- `ZERO_PERF_HARNESS_RSS_WARN_MB`
 
 ## CI Behavior
 

@@ -147,25 +147,25 @@ Write/shell tools route through the permission policy before any side effect.
 ## Project layout
 
 ```
-cmd/zero                # Go-native entrypoint
-internal/cli            # minimal Go CLI surface during migration
-src/
-  agent/                 # transitional TS agent loop + system prompts
-  cli/                   # transitional TS headless exec + command surface
-  providers/             # openai · anthropic · gemini · base
-  tools/                 # read/write/edit/bash/grep/glob/apply_patch/plan
-  config/                # layered configuration
-  zero-model-registry/   # models, capabilities, cost
-  zero-provider-runtime/ # provider resolution/routing
-  zero-sessions/         # append-only session event store
-  zero-search/           # session search
-  zero-usage/            # token usage tracking
-  zero-redaction/        # secret redaction
-  zero-doctor/           # health checks
-  zero-config-inspection/# config inspection
-  zero-stream-json/      # headless stream-json protocol
+cmd/
+  zero/                  # production Go CLI entrypoint
+  zero-pr-review/        # deterministic PR review helper
+internal/
+  agent/                 # Go agent loop and tool-call orchestration
+  cli/                   # interactive/headless command surface
+  config/                # layered configuration and provider profiles
+  providers/             # OpenAI-compatible, Anthropic, Gemini adapters
+  tools/                 # read/write/edit/bash/grep/glob/apply_patch tools
+  tui/                   # Bubble Tea terminal interface
+  sessions/ search/      # append-only sessions and local search
+  usage/ modelregistry/  # token usage and model metadata/costs
+  doctor/ verify/        # diagnostics and self-verification
+  streamjson/            # headless stream-json protocol
+  mcp/ plugins/ hooks/   # extension-facing runtime surfaces
+bin/                     # npm wrapper entrypoint
+scripts/                 # Bun build, release, install, smoke, perf scripts
+tests/                   # Bun tests for wrapper/build/release scripts
 docs/                    # PRD + protocol/install/perf docs
-tests/                   # bun test suite
 ```
 
 ## Development
