@@ -45,12 +45,14 @@ type Client struct {
 	nextID int
 }
 
-func Connect(ctx context.Context, server Server) (*Client, error) {
+func Connect(ctx context.Context, server Server) (ToolClient, error) {
 	switch server.Type {
 	case ServerTypeStdio:
 		return connectStdio(ctx, server)
-	case ServerTypeHTTP, ServerTypeSSE:
-		return nil, fmt.Errorf("MCP %s transport is not implemented yet for server %s", server.Type, server.Name)
+	case ServerTypeHTTP:
+		return connectNetwork(ctx, server)
+	case ServerTypeSSE:
+		return connectRemoteSSE(ctx, server)
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport %q for server %s", server.Type, server.Name)
 	}

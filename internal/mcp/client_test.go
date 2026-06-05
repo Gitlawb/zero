@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -56,17 +58,255 @@ func TestStdioClientListsAndCallsTools(t *testing.T) {
 	}
 }
 
-func TestConnectRejectsUnsupportedRunnableTransports(t *testing.T) {
-	_, err := Connect(context.Background(), Server{
+func TestHTTPClientListsAndCallsTools(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", request.Method)
+			http.Error(response, "bad method", http.StatusMethodNotAllowed)
+			return
+		}
+		if request.URL.Path != "/mcp" {
+			t.Errorf("path = %s, want /mcp", request.URL.Path)
+			http.Error(response, "bad path", http.StatusNotFound)
+			return
+		}
+		if got := request.Header.Get("Authorization"); got != "Bearer test" {
+			t.Errorf("Authorization = %q, want bearer header", got)
+			http.Error(response, "missing auth", http.StatusUnauthorized)
+			return
+		}
+
+		message := readHTTPRPCMessage(t, request)
+		switch message.Method {
+		case "initialize":
+			response.Header().Set("Mcp-Session-Id", "session-123")
+			writeHTTPRPCResponse(t, response, message.ID, map[string]any{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+				"serverInfo":      map[string]any{"name": "http-docs", "version": "1.0.0"},
+			})
+		case "notifications/initialized":
+			if got := request.Header.Get("Mcp-Session-Id"); got != "session-123" {
+				t.Errorf("initialized session header = %q, want session-123", got)
+				http.Error(response, "missing session", http.StatusBadRequest)
+				return
+			}
+			response.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			if got := request.Header.Get("Mcp-Session-Id"); got != "session-123" {
+				t.Errorf("tools/list session header = %q, want session-123", got)
+				http.Error(response, "missing session", http.StatusBadRequest)
+				return
+			}
+			writeHTTPRPCResponse(t, response, message.ID, map[string]any{
+				"tools": []map[string]any{{
+					"name":        "lookup",
+					"description": "Lookup documentation",
+					"inputSchema": map[string]any{"type": "object"},
+				}},
+			})
+		case "tools/call":
+			var params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			}
+			if err := json.Unmarshal(message.Params, &params); err != nil {
+				t.Errorf("decode tools/call params: %v", err)
+				http.Error(response, "bad params", http.StatusBadRequest)
+				return
+			}
+			if params.Name != "lookup" || params.Arguments["query"] != "zero" {
+				t.Errorf("tools/call params = %#v", params)
+				http.Error(response, "bad tool call", http.StatusBadRequest)
+				return
+			}
+			writeHTTPRPCResponse(t, response, message.ID, map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "lookup: zero"}},
+			})
+		default:
+			t.Errorf("unexpected method %q", message.Method)
+			writeHTTPRPCError(t, response, message.ID, "method not found")
+		}
+	}))
+	defer testServer.Close()
+
+	client, err := Connect(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeHTTP,
+		URL:     testServer.URL + "/mcp",
+		Headers: map[string]string{"Authorization": "Bearer test"},
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer client.Close()
+
+	listed, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].Name != "lookup" {
+		t.Fatalf("listed tools = %#v, want lookup", listed)
+	}
+
+	result, err := client.CallTool(ctx, "lookup", map[string]any{"query": "zero"})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if got := TextContent(result.Content); got != "lookup: zero" {
+		t.Fatalf("CallTool() text = %q, want lookup result", got)
+	}
+}
+
+func TestSSEClientListsAndCallsToolsFromRemoteStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	events := make(chan string, 4)
+	testServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if got := request.Header.Get("Authorization"); got != "Bearer test" {
+			t.Errorf("Authorization = %q, want bearer header", got)
+			http.Error(response, "missing auth", http.StatusUnauthorized)
+			return
+		}
+
+		if request.Method == http.MethodGet && request.URL.Path == "/sse" {
+			if got := request.Header.Get("Accept"); !strings.Contains(got, "text/event-stream") {
+				t.Errorf("Accept = %q, want text/event-stream", got)
+				http.Error(response, "bad accept", http.StatusBadRequest)
+				return
+			}
+			flusher, ok := response.(http.Flusher)
+			if !ok {
+				t.Fatal("test response writer does not support flushing")
+			}
+			response.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(response, "event: endpoint\ndata: /messages\n\n")
+			flusher.Flush()
+			for {
+				select {
+				case event := <-events:
+					fmt.Fprint(response, event)
+					flusher.Flush()
+				case <-request.Context().Done():
+					return
+				}
+			}
+		}
+
+		if request.Method != http.MethodPost || request.URL.Path != "/messages" {
+			t.Errorf("request = %s %s, want POST /messages", request.Method, request.URL.Path)
+			http.Error(response, "bad request", http.StatusNotFound)
+			return
+		}
+
+		message := readHTTPRPCMessage(t, request)
+		switch message.Method {
+		case "initialize":
+			events <- formatSSERPCResponse(t, message.ID, map[string]any{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+				"serverInfo":      map[string]any{"name": "sse-docs", "version": "1.0.0"},
+			})
+			response.WriteHeader(http.StatusAccepted)
+		case "notifications/initialized":
+			response.WriteHeader(http.StatusNoContent)
+		case "tools/list":
+			events <- formatSSERPCResponse(t, message.ID, map[string]any{
+				"tools": []map[string]any{{
+					"name":        "lookup",
+					"description": "Lookup documentation",
+					"inputSchema": map[string]any{"type": "object"},
+				}},
+			})
+			response.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			var params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			}
+			if err := json.Unmarshal(message.Params, &params); err != nil {
+				t.Errorf("decode tools/call params: %v", err)
+				http.Error(response, "bad params", http.StatusBadRequest)
+				return
+			}
+			if params.Name != "lookup" || params.Arguments["query"] != "zero" {
+				t.Errorf("tools/call params = %#v", params)
+				http.Error(response, "bad tool call", http.StatusBadRequest)
+				return
+			}
+			events <- formatSSERPCResponse(t, message.ID, map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "lookup: zero"}},
+			})
+			response.WriteHeader(http.StatusAccepted)
+		default:
+			t.Errorf("unexpected method %q", message.Method)
+			events <- formatSSERPCError(t, message.ID, "method not found")
+			response.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer testServer.Close()
+
+	client, err := Connect(ctx, Server{
+		Name:    "docs",
+		Type:    ServerTypeSSE,
+		URL:     testServer.URL + "/sse",
+		Headers: map[string]string{"Authorization": "Bearer test"},
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer client.Close()
+
+	listed, err := client.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].Name != "lookup" {
+		t.Fatalf("listed tools = %#v, want lookup", listed)
+	}
+
+	result, err := client.CallTool(ctx, "lookup", map[string]any{"query": "zero"})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if got := TextContent(result.Content); got != "lookup: zero" {
+		t.Fatalf("CallTool() text = %q, want lookup result", got)
+	}
+}
+
+func TestHTTPClientReportsNonOKStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	testServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Error(response, "server failed", http.StatusBadGateway)
+	}))
+	defer testServer.Close()
+
+	_, err := Connect(ctx, Server{
 		Name: "web",
 		Type: ServerTypeHTTP,
-		URL:  "https://example.com/mcp",
+		URL:  testServer.URL + "/mcp",
 	})
+	if err == nil {
+		t.Fatal("Connect() error = nil, want status error")
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Fatalf("error = %q, want HTTP status", err.Error())
+	}
+}
+
+func TestConnectRejectsUnsupportedTransport(t *testing.T) {
+	_, err := Connect(context.Background(), Server{Name: "web", Type: ServerType("websocket")})
 	if err == nil {
 		t.Fatal("Connect() error = nil, want unsupported transport error")
 	}
-	if !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("error = %q, want not implemented", err.Error())
+	if !strings.Contains(err.Error(), "unsupported MCP transport") {
+		t.Fatalf("error = %q, want unsupported transport", err.Error())
 	}
 }
 
@@ -188,6 +428,91 @@ func mustRaw(value any) json.RawMessage {
 		panic(err)
 	}
 	return data
+}
+
+func readHTTPRPCMessage(t *testing.T, request *http.Request) rpcMessage {
+	t.Helper()
+
+	defer request.Body.Close()
+	var message rpcMessage
+	if err := json.NewDecoder(request.Body).Decode(&message); err != nil {
+		t.Fatalf("decode HTTP JSON-RPC request: %v", err)
+	}
+	return message
+}
+
+func writeHTTPRPCResponse(t *testing.T, response http.ResponseWriter, id any, result any) {
+	t.Helper()
+
+	response.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(response).Encode(rpcMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  mustRaw(result),
+	}); err != nil {
+		t.Fatalf("write HTTP JSON-RPC response: %v", err)
+	}
+}
+
+func writeHTTPRPCError(t *testing.T, response http.ResponseWriter, id any, message string) {
+	t.Helper()
+
+	response.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(response).Encode(rpcMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &rpcError{Code: -32601, Message: message},
+	}); err != nil {
+		t.Fatalf("write HTTP JSON-RPC error: %v", err)
+	}
+}
+
+func writeSSERPCResponse(t *testing.T, response http.ResponseWriter, id any, result any) {
+	t.Helper()
+
+	response.Header().Set("Content-Type", "text/event-stream")
+	if _, err := fmt.Fprint(response, formatSSERPCResponse(t, id, result)); err != nil {
+		t.Fatalf("write SSE JSON-RPC response: %v", err)
+	}
+}
+
+func formatSSERPCResponse(t *testing.T, id any, result any) string {
+	t.Helper()
+
+	message := rpcMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  mustRaw(result),
+	}
+	body, err := json.Marshal(message)
+	if err != nil {
+		t.Fatalf("marshal SSE JSON-RPC response: %v", err)
+	}
+	return fmt.Sprintf("event: message\ndata: %s\n\n", body)
+}
+
+func writeSSERPCError(t *testing.T, response http.ResponseWriter, id any, message string) {
+	t.Helper()
+
+	response.Header().Set("Content-Type", "text/event-stream")
+	if _, err := fmt.Fprint(response, formatSSERPCError(t, id, message)); err != nil {
+		t.Fatalf("write SSE JSON-RPC error: %v", err)
+	}
+}
+
+func formatSSERPCError(t *testing.T, id any, message string) string {
+	t.Helper()
+
+	payload := rpcMessage{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &rpcError{Code: -32601, Message: message},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal SSE JSON-RPC error: %v", err)
+	}
+	return fmt.Sprintf("event: message\ndata: %s\n\n", body)
 }
 
 func TestSchemaFromMCPInputSchema(t *testing.T) {
