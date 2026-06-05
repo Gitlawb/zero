@@ -71,9 +71,16 @@ func TestRunConfigAndProvidersRedactBaseURLSecrets(t *testing.T) {
 			t.Fatalf("%v: expected exit code %d, got %d: %s", command, exitSuccess, exitCode, stderr.String())
 		}
 		output := stdout.String()
+		errorOutput := stderr.String()
+		if errorOutput != "" {
+			t.Fatalf("%v: expected empty stderr, got %q", command, errorOutput)
+		}
 		for _, leaked := range []string{"user:", "super-secret", "query-secret", "sk-test"} {
 			if strings.Contains(output, leaked) {
 				t.Fatalf("%v: output leaked %q: %q", command, leaked, output)
+			}
+			if strings.Contains(errorOutput, leaked) {
+				t.Fatalf("%v: stderr leaked %q: %q", command, leaked, errorOutput)
 			}
 		}
 		if !strings.Contains(output, "https://proxy.example/v1") {
@@ -250,7 +257,14 @@ func commandCenterSecretBaseURLDeps(t *testing.T) appDeps {
 	t.Helper()
 
 	deps := commandCenterDeps(t)
+	cwd, err := deps.getwd()
+	if err != nil {
+		t.Fatalf("getwd error: %v", err)
+	}
 	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		if workspaceRoot != cwd {
+			t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+		}
 		profile := config.ProviderProfile{
 			Name:         "gateway",
 			ProviderKind: config.ProviderKindOpenAICompatible,
