@@ -100,8 +100,14 @@ func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
 	if events[0]["type"] != "run_start" || events[1]["type"] != "final" || events[2]["type"] != "run_end" {
 		t.Fatalf("unexpected stream-json tool list events: %#v", events)
 	}
-	if text, _ := events[1]["text"].(string); !strings.Contains(text, "Tools visible to model") || !strings.Contains(text, "read_file") {
+	text, _ := events[1]["text"].(string)
+	if !strings.Contains(text, "Tools visible to model") || !strings.Contains(text, "read_file") {
 		t.Fatalf("expected final event to contain tool list, got %#v", events[1])
+	}
+	for _, name := range []string{"bash", "grep", "write_file"} {
+		if strings.Contains(text, name) {
+			t.Fatalf("unexpected non-enabled tool %q leaked into stream-json output: %#v", name, events[1])
+		}
 	}
 }
 
