@@ -17,6 +17,8 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
+	"github.com/Gitlawb/zero/internal/verify"
+	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -33,6 +35,9 @@ type appDeps struct {
 	loadHooks        func(hooks.LoadOptions) (hooks.LoadResult, error)
 	newMCPStore      func() (*mcp.PermissionStore, error)
 	registerMCPTools func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree  func(context.Context, worktrees.Options) (worktrees.Result, error)
+	detectVerifyPlan func(string) (verify.Plan, error)
+	runVerify        func(context.Context, verify.Plan, verify.RunOptions) verify.Report
 	runTUI           func(context.Context, tui.Options) int
 	checkUpdate      func(context.Context, update.Options) (update.Result, error)
 	now              func() time.Time
@@ -87,9 +92,12 @@ func defaultAppDeps() appDeps {
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
-		runTUI:      tui.Run,
-		checkUpdate: update.Check,
-		now:         time.Now,
+		prepareWorktree:  worktrees.Prepare,
+		detectVerifyPlan: verify.DetectPlan,
+		runVerify:        verify.Run,
+		runTUI:           tui.Run,
+		checkUpdate:      update.Check,
+		now:              time.Now,
 	}
 }
 
@@ -143,6 +151,10 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runMCP(args[1:], stdout, stderr, deps)
 	case "update":
 		return runUpdate(args[1:], stdout, stderr, deps)
+	case "worktrees", "worktree":
+		return runWorktrees(args[1:], stdout, stderr, deps)
+	case "verify":
+		return runVerifyCommand(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
 	default:
@@ -187,6 +199,15 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.registerMCPTools == nil {
 		deps.registerMCPTools = defaults.registerMCPTools
+	}
+	if deps.prepareWorktree == nil {
+		deps.prepareWorktree = defaults.prepareWorktree
+	}
+	if deps.detectVerifyPlan == nil {
+		deps.detectVerifyPlan = defaults.detectVerifyPlan
+	}
+	if deps.runVerify == nil {
+		deps.runVerify = defaults.runVerify
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
@@ -272,6 +293,10 @@ func writeAppError(stderr io.Writer, message string, exitCode int) int {
 	return exitCode
 }
 
+func writeUsageError(stderr io.Writer, message string) int {
+	return writeExecUsageError(stderr, message)
+}
+
 func writeHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `ZERO terminal coding agent
 
@@ -291,6 +316,8 @@ Commands:
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings
   update     Check for Zero CLI updates
+  worktrees  Prepare isolated git worktrees
+  verify     Detect and run local verification checks
   serve      Run Zero protocol servers
   help       Show this help
   version    Print version
@@ -327,6 +354,8 @@ Flags:
       --profile <profile>            Accept legacy model profile selection
   -r, --reasoning-effort <effort>    Accept legacy reasoning effort selection
   -C, --cwd <path>                   Set the workspace directory
+  -w, --worktree [name]              Run from an isolated git worktree
+      --worktree-dir <path>          Base directory for created worktrees
   -i, --input-format text|stream-json
                                     Select prompt input format
   -o, --output-format text|json|stream-json

@@ -16,7 +16,7 @@ type updateOptions struct {
 func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseUpdateArgs(args)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return writeUsageError(stderr, err.Error())
 	}
 	if help {
 		if err := writeUpdateHelp(stdout); err != nil {
@@ -25,7 +25,7 @@ func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 		return exitSuccess
 	}
 	if !options.check {
-		return writeExecUsageError(stderr, "Only `zero update --check` is available right now.")
+		return writeUsageError(stderr, "Only `zero update --check` is available right now.")
 	}
 	result, err := deps.checkUpdate(context.Background(), update.Options{CurrentVersion: version})
 	if err != nil {

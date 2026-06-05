@@ -345,4 +345,3 @@ describe('Zero hook audit backend', () => {
     expect((await audit.readEvents()).map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
   });
 });
-

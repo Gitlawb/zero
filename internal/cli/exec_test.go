@@ -36,6 +36,8 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 				"-f, --file",
 				"-m, --model",
 				"--max-turns",
+				"--profile <profile>",
+				"-r, --reasoning-effort <effort>",
 				"-C, --cwd",
 				"-o, --output-format text|json",
 				"--prompt",

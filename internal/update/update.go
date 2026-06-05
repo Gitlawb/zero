@@ -31,12 +31,16 @@ type Result struct {
 	UpdateAvailable bool   `json:"updateAvailable"`
 }
 
+// Options configures a release update check.
 type Options struct {
 	CurrentVersion string
-	Endpoint       string
-	Repository     string
-	Timeout        time.Duration
-	Fetch          func(context.Context, string) (Release, error)
+	// Endpoint accepts a full release API URL, an owner/repo slug, or a data:
+	// endpoint for deterministic tests.
+	Endpoint   string
+	Repository string
+	Timeout    time.Duration
+	// Fetch overrides the release fetcher for tests and alternate transports.
+	Fetch func(context.Context, string) (Release, error)
 }
 
 type semverParts [3]int
@@ -46,42 +50,32 @@ var (
 	repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 )
 
+// Endpoint returns the GitHub latest-release API endpoint for a repository.
 func Endpoint(repository string) string {
 	return fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repository)
 }
 
-func ResolveEndpoint(endpointOrRepository string, repository string) string {
-	value := strings.TrimSpace(endpointOrRepository)
-	if value == "" {
-		return Endpoint(repository)
-	}
-	if repositoryPattern.MatchString(value) {
-		return Endpoint(value)
-	}
-	parsed, err := url.ParseRequestURI(value)
-	if err != nil || parsed.Scheme == "" {
-		panic(fmt.Sprintf("Invalid update endpoint %q. Use a full URL or an owner/repo slug like %s.", value, repository))
-	}
-	return value
+// ResolveEndpoint resolves a URL or owner/repo slug into a release API endpoint.
+func ResolveEndpoint(endpointOrRepository string, repository string) (string, error) {
+	return resolveEndpoint(endpointOrRepository, repository)
 }
 
-func NormalizeVersionTag(version string) string {
-	match := versionPattern.FindStringSubmatch(strings.TrimSpace(version))
-	if match == nil {
-		panic(fmt.Sprintf("Invalid semantic version: %s", version))
-	}
-	return fmt.Sprintf("%d.%d.%d", atoi(match[1]), atoi(match[2]), atoi(match[3]))
+// NormalizeVersionTag returns a comparable x.y.z version from a release tag.
+func NormalizeVersionTag(version string) (string, error) {
+	return normalizeVersionTag(version)
 }
 
-func CompareSemver(left string, right string) int {
-	leftParts := parseSemver(left)
-	rightParts := parseSemver(right)
-	for index := range leftParts {
-		if leftParts[index] != rightParts[index] {
-			return leftParts[index] - rightParts[index]
-		}
+// CompareSemver compares two semver-ish release tags.
+func CompareSemver(left string, right string) (int, error) {
+	leftParts, err := parseSemver(left)
+	if err != nil {
+		return 0, err
 	}
-	return 0
+	rightParts, err := parseSemver(right)
+	if err != nil {
+		return 0, err
+	}
+	return compareSemverParts(leftParts, rightParts), nil
 }
 
 func Check(ctx context.Context, options Options) (Result, error) {
@@ -95,6 +89,9 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		return Result{}, err
 	}
 	timeout := options.Timeout
+	if timeout < 0 {
+		return Result{}, fmt.Errorf("timeout must be non-negative")
+	}
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
@@ -112,7 +109,7 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		return Result{}, err
 	}
 	if strings.TrimSpace(release.TagName) == "" {
-		return Result{}, fmt.Errorf("GitHub release response did not include a tag_name")
+		return Result{}, fmt.Errorf("github release response did not include a tag_name")
 	}
 	latestVersion, err := normalizeVersionTag(release.TagName)
 	if err != nil {
@@ -145,7 +142,7 @@ func Format(result Result) string {
 	}, "\n")
 }
 
-func fetchRelease(ctx context.Context, endpoint string) (Release, error) {
+func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {
 	if strings.HasPrefix(endpoint, "data:") {
 		return fetchDataRelease(endpoint)
 	}
@@ -159,11 +156,14 @@ func fetchRelease(ctx context.Context, endpoint string) (Release, error) {
 	if err != nil {
 		return Release{}, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close update response: %w", closeErr)
+		}
+	}()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return Release{}, fmt.Errorf("GitHub release check failed (%s)", response.Status)
+		return Release{}, fmt.Errorf("github release check failed (%s)", response.Status)
 	}
-	var release Release
 	if err := json.NewDecoder(response.Body).Decode(&release); err != nil {
 		return Release{}, err
 	}
@@ -196,7 +196,7 @@ func resolveEndpoint(endpointOrRepository string, repository string) (string, er
 	}
 	parsed, err := url.ParseRequestURI(value)
 	if err != nil || parsed.Scheme == "" {
-		return "", fmt.Errorf("Invalid update endpoint %q. Use a full URL or an owner/repo slug like %s.", value, repository)
+		return "", fmt.Errorf("invalid update endpoint %q: use a full URL or an owner/repo slug like %s", value, repository)
 	}
 	return value, nil
 }
@@ -204,14 +204,17 @@ func resolveEndpoint(endpointOrRepository string, repository string) (string, er
 func normalizeVersionTag(version string) (string, error) {
 	match := versionPattern.FindStringSubmatch(strings.TrimSpace(version))
 	if match == nil {
-		return "", fmt.Errorf("Invalid semantic version: %s", version)
+		return "", fmt.Errorf("invalid semantic version: %s", version)
 	}
 	return fmt.Sprintf("%d.%d.%d", atoi(match[1]), atoi(match[2]), atoi(match[3])), nil
 }
 
-func parseSemver(version string) semverParts {
-	normalized := NormalizeVersionTag(version)
-	return parseSemverNormalized(normalized)
+func parseSemver(version string) (semverParts, error) {
+	normalized, err := NormalizeVersionTag(version)
+	if err != nil {
+		return semverParts{}, err
+	}
+	return parseSemverNormalized(normalized), nil
 }
 
 func parseSemverNormalized(version string) semverParts {
