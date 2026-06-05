@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { resolveNpmWrapperTarget, runNpmWrapper } from '../src/npm-wrapper';
+import { resolveNpmWrapperTarget, runNpmWrapper } from '../scripts/npm-wrapper';
 import {
   getGoArch,
   getGoOS,
@@ -104,13 +104,18 @@ describe('Go binary build script', () => {
 
 describe('npm wrapper entrypoint', () => {
   it('points installed zero commands at the wrapper instead of the TS app', async () => {
-    const pkg = await Bun.file('package.json').json() as { bin?: { zero?: string }; module?: string };
+    const pkg = await Bun.file('package.json').json() as {
+      bin?: { zero?: string };
+      module?: string;
+      scripts?: { dev?: string };
+    };
 
     expect(pkg.bin?.zero).toBe('bin/zero.ts');
     expect(pkg.module).toBe('bin/zero.ts');
+    expect(pkg.scripts?.dev).toBe('go run ./cmd/zero');
   });
 
-  it('prefers the Go binary and keeps the TS CLI as a local fallback', () => {
+  it('uses the Go binary and does not fall back to the TS CLI', () => {
     const root = join('repo');
     const existing = new Set([
       join(root, 'zero.exe'),
@@ -120,7 +125,6 @@ describe('npm wrapper entrypoint', () => {
     const native = resolveNpmWrapperTarget({
       root,
       platform: 'win32',
-      bunPath: 'bun',
       args: ['--version'],
       exists: (path) => existing.has(path),
     });
@@ -135,23 +139,17 @@ describe('npm wrapper entrypoint', () => {
     const fallback = resolveNpmWrapperTarget({
       root,
       platform: 'win32',
-      bunPath: 'bun',
       args: ['--version'],
       exists: (path) => existing.has(path),
     });
 
-    expect(fallback).toEqual({
-      kind: 'typescript',
-      path: join(root, 'src', 'index.ts'),
-      command: ['bun', join(root, 'src', 'index.ts'), '--version'],
-    });
+    expect(fallback).toBeNull();
   });
 
-  it('returns null when neither native nor TS fallback target exists', () => {
+  it('returns null when the native binary is missing', () => {
     const target = resolveNpmWrapperTarget({
       root: join('repo'),
       platform: 'win32',
-      bunPath: 'bun',
       args: ['--version'],
       exists: () => false,
     });
@@ -169,8 +167,9 @@ describe('npm wrapper entrypoint', () => {
     });
 
     expect(code).toBe(1);
-    expect(stderr).toContain('No runnable wrapper target found');
-    expect(stderr).toContain('native binary or src/index.ts');
+    expect(stderr).toContain('No native binary found');
+    expect(stderr).toContain('native binary');
+    expect(stderr).not.toContain('src/index.ts');
   });
 
   it('returns a clean exit code when launching the wrapper target throws', async () => {

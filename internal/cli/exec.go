@@ -38,6 +38,8 @@ type execOptions struct {
 	promptParts           []string
 	file                  string
 	model                 string
+	modelProfile          string
+	reasoningEffort       string
 	maxTurns              int
 	cwd                   string
 	inputFormat           execInputFormat

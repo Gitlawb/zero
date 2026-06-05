@@ -8,7 +8,7 @@
     "zero": "bin/zero.ts"
   },
   "scripts": {
-    "dev": "bun run src/index.ts",
+    "dev": "go run ./cmd/zero",
     "test": "bun test ./tests --timeout 15000",
     "test:go": "go test ./...",
     "typecheck": "bunx tsc --noEmit",
@@ -24,19 +24,11 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/react": "^19.2.15",
-    "react-devtools-core": "^7.0.1",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "commander": "^15.0.0",
     "execa": "^9.6.1",
-    "ink": "^7.0.4",
-    "ink-spinner": "^5.0.0",
-    "ink-text-input": "^6.0.0",
     "openai": "^6.39.1",
-    "react": "^19.2.6",
-    "shiki": "^4.1.0",
     "zod": "^4.4.3"
   }
 }

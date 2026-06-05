@@ -28,33 +28,6 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(value, null, 2), 'utf-8');
 }
 
-async function runZeroHooks(
-  cwd: string,
-  args: string[] = []
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const cliEntrypoint = join(import.meta.dir, '..', 'src', 'index.ts');
-  const child = Bun.spawn([process.execPath, cliEntrypoint, 'hooks', ...args], {
-    cwd,
-    env: {
-      ...process.env,
-      HOME: join(cwd, 'home'),
-      USERPROFILE: join(cwd, 'home'),
-      XDG_CONFIG_HOME: join(cwd, 'xdg-config'),
-      XDG_DATA_HOME: join(cwd, 'xdg-data'),
-    },
-    stderr: 'pipe',
-    stdout: 'pipe',
-  });
-
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-
-  return { exitCode, stdout, stderr };
-}
-
 describe('Zero hook config backend', () => {
   it('resolves default hook config and audit paths', async () => {
     const dir = await makeTempDir();
@@ -373,40 +346,3 @@ describe('Zero hook audit backend', () => {
   });
 });
 
-describe('zero hooks CLI', () => {
-  it('lists project hook config as JSON and formatted text', async () => {
-    const dir = await makeTempDir();
-    const syntheticSecret = `sk-proj-${'a'.repeat(24)}`;
-    await writeJson(join(dir, '.zero', 'hooks.json'), {
-      hooks: [{
-        id: 'zero.preflight',
-        event: 'beforeTool',
-        matcher: 'bash',
-        command: 'node',
-        args: ['hooks/preflight.mjs', syntheticSecret],
-      }],
-    });
-
-    const jsonResult = await runZeroHooks(dir, ['list', '--json']);
-    expect(jsonResult.exitCode).toBe(0);
-    expect(jsonResult.stderr.trim()).toBe('');
-    expect(JSON.parse(jsonResult.stdout)).toEqual({
-      hooks: expect.objectContaining({
-        enabled: true,
-        hooks: [expect.objectContaining({ id: 'zero.preflight', enabled: true })],
-      }),
-      diagnostics: [],
-    });
-    expect(jsonResult.stdout).toContain('[REDACTED]');
-    expect(jsonResult.stdout).not.toContain(syntheticSecret);
-
-    const textResult = await runZeroHooks(dir, ['list']);
-    expect(textResult.exitCode).toBe(0);
-    expect(textResult.stderr.trim()).toBe('');
-    expect(textResult.stdout).toContain('Zero Hooks');
-    expect(textResult.stdout).toContain('zero.preflight');
-    expect(textResult.stdout).toContain('beforeTool');
-    expect(textResult.stdout).toContain('[REDACTED]');
-    expect(textResult.stdout).not.toContain(syntheticSecret);
-  });
-});

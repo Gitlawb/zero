@@ -57,6 +57,7 @@ export interface PerfBenchOptions {
   iterations: number;
   warmupIterations: number;
   thresholds: PerfThresholds;
+  coldStartCommand?: string[];
 }
 
 export interface PerfBenchCliOptions extends PerfBenchOptions {
@@ -273,7 +274,7 @@ export function perfBenchHelp(): string {
 
 export async function runPerfBench(options: PerfBenchOptions): Promise<PerfBenchResult> {
   const benchmarkStartedAt = performance.now();
-  const coldStartCommand = await resolveColdStartCommand();
+  const coldStartCommand = options.coldStartCommand ?? await resolveColdStartCommand();
   const coldStartSamples: number[] = [];
   const ttftSamples: TtftSample[] = [];
 
@@ -357,7 +358,7 @@ async function resolveColdStartCommand(): Promise<string[]> {
     return [zeroArtifactPath, '--version'];
   }
 
-  return [process.execPath, 'src/index.ts', '--version'];
+  throw new Error(`No ${zeroArtifactName} binary found. Run \`bun run build\` before running the performance benchmark.`);
 }
 
 async function measureColdStart(command: string[]): Promise<number> {

@@ -2,7 +2,7 @@
 
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runNpmWrapper } from '../src/npm-wrapper';
+import { runNpmWrapper } from '../scripts/npm-wrapper';
 
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 

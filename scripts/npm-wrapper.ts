@@ -4,7 +4,7 @@ import { join } from 'node:path';
 type Exists = (path: string) => boolean;
 
 export interface NpmWrapperTarget {
-  kind: 'native' | 'typescript';
+  kind: 'native';
   path: string;
   command: string[];
 }
@@ -12,7 +12,6 @@ export interface NpmWrapperTarget {
 export interface ResolveNpmWrapperTargetOptions {
   root?: string;
   platform?: NodeJS.Platform;
-  bunPath?: string;
   args?: string[];
   exists?: Exists;
 }
@@ -33,34 +32,24 @@ export function resolveNpmWrapperTarget(
   const args = options.args ?? process.argv.slice(2);
   const exists = options.exists ?? existsSync;
   const platform = options.platform ?? process.platform;
-  const bunPath = options.bunPath ?? process.execPath;
   const nativePath = join(root, zeroBinaryName(platform));
 
-  if (exists(nativePath)) {
-    return {
-      kind: 'native',
-      path: nativePath,
-      command: [nativePath, ...args],
-    };
+  if (!exists(nativePath)) {
+    return null;
   }
 
-  const tsPath = join(root, 'src', 'index.ts');
-  if (exists(tsPath)) {
-    return {
-      kind: 'typescript',
-      path: tsPath,
-      command: [bunPath, tsPath, ...args],
-    };
-  }
-
-  return null;
+  return {
+    kind: 'native',
+    path: nativePath,
+    command: [nativePath, ...args],
+  };
 }
 
 export async function runNpmWrapper(options: RunNpmWrapperOptions = {}): Promise<number> {
   const target = resolveNpmWrapperTarget(options);
   const stderr = options.stderr ?? process.stderr;
   if (target == null) {
-    stderr.write('[zero] No runnable wrapper target found (native binary or src/index.ts). Run `bun run build` before using the npm wrapper.\n');
+    stderr.write('[zero] No native binary found. Run `bun run build` before using the npm wrapper.\n');
     return 1;
   }
 

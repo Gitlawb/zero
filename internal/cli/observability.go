@@ -158,12 +158,12 @@ func parseSearchArgs(args []string) (searchOptions, bool, error) {
 				return options, false, err
 			}
 			options.limit = limit
-		case arg == "--context-chars":
+		case arg == "--context-chars" || arg == "--context":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
 				return options, false, err
 			}
-			contextChars, err := parsePositiveOrZeroInt(value, "--context-chars")
+			contextChars, err := parsePositiveOrZeroInt(value, arg)
 			if err != nil {
 				return options, false, err
 			}
@@ -175,7 +175,13 @@ func parseSearchArgs(args []string) (searchOptions, bool, error) {
 				return options, false, err
 			}
 			options.contextChars = contextChars
-		case arg == "--session-id":
+		case strings.HasPrefix(arg, "--context="):
+			contextChars, err := parsePositiveOrZeroInt(strings.TrimSpace(strings.TrimPrefix(arg, "--context=")), "--context")
+			if err != nil {
+				return options, false, err
+			}
+			options.contextChars = contextChars
+		case arg == "--session-id" || arg == "--session":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
 				return options, false, err
@@ -184,6 +190,8 @@ func parseSearchArgs(args []string) (searchOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--session-id="):
 			options.sessionID = strings.TrimSpace(strings.TrimPrefix(arg, "--session-id="))
+		case strings.HasPrefix(arg, "--session="):
+			options.sessionID = strings.TrimSpace(strings.TrimPrefix(arg, "--session="))
 		case arg == "--type":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {

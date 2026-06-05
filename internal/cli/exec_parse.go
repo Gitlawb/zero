@@ -66,6 +66,24 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--model="):
 			options.model = strings.TrimSpace(strings.TrimPrefix(arg, "--model="))
+		case arg == "--profile":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.modelProfile = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--profile="):
+			options.modelProfile = strings.TrimSpace(strings.TrimPrefix(arg, "--profile="))
+		case arg == "-r" || arg == "--reasoning-effort":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.reasoningEffort = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--reasoning-effort="):
+			options.reasoningEffort = strings.TrimSpace(strings.TrimPrefix(arg, "--reasoning-effort="))
 		case arg == "--max-turns":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {

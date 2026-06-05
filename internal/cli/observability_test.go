@@ -122,6 +122,35 @@ func TestRunSearchFindsSessionEventsFromInjectedStore(t *testing.T) {
 	}
 }
 
+func TestRunSearchAcceptsLegacyAliasFlags(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T17:15:00Z")})
+	session, err := store.Create(sessions.CreateInput{SessionID: "legacy_search", Title: "CLI Search", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]string{"content": "needle alias context"}}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"search", "--context", "4", "--session", "legacy_search", "needle"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "legacy_search") {
+		t.Fatalf("expected legacy search alias to find session, got %q", stdout.String())
+	}
+}
+
 func TestRunSearchJSONAndValidation(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T17:30:00Z")})
 

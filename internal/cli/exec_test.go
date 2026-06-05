@@ -121,6 +121,27 @@ func TestRunExecMaxTurnsReachesConfigOverrides(t *testing.T) {
 	}
 }
 
+func TestRunExecAcceptsLegacyModelProfileFlags(t *testing.T) {
+	exitCode, stdout, stderr := runExecWithEcho(t, []string{
+		"exec",
+		"--profile",
+		"fast",
+		"--reasoning-effort",
+		"low",
+		"hello",
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	if !strings.Contains(stdout, "hello") {
+		t.Fatalf("expected prompt output, got %q", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+}
+
 func TestRunExecJSONRunStartWriteFailureSkipsAgent(t *testing.T) {
 	cwd := t.TempDir()
 	called := false

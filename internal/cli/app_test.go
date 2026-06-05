@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
+	"github.com/Gitlawb/zero/internal/update"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -216,6 +218,7 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 		{"plugin"},
 		{"hooks"},
 		{"mcp"},
+		{"update"},
 		{"serve"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -234,6 +237,50 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 				t.Fatalf("TUI launcher should not be called for args %#v", args)
 			}
 		})
+	}
+}
+
+func TestRunUpdateCheckTextAndJSON(t *testing.T) {
+	deps := appDeps{
+		checkUpdate: func(ctx context.Context, options update.Options) (update.Result, error) {
+			return update.Result{
+				CurrentVersion:  options.CurrentVersion,
+				LatestVersion:   "0.2.0",
+				ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+				TagName:         "v0.2.0",
+				UpdateAvailable: true,
+			}, nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"update", "--check"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Update available: dev -> 0.2.0") {
+		t.Fatalf("unexpected update text: %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"update", "--check", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var payload struct {
+		CurrentVersion  string `json:"currentVersion"`
+		UpdateAvailable bool   `json:"updateAvailable"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("update JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload.CurrentVersion != "dev" || !payload.UpdateAvailable {
+		t.Fatalf("unexpected update JSON: %#v", payload)
 	}
 }
 

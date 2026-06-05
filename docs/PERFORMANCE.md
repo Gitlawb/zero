@@ -6,7 +6,7 @@ The M2 performance harness tracks three release-facing signals:
 - TTFT: time from starting the local agent loop to the first streamed text event from a deterministic provider.
 - Memory: peak RSS for the benchmarked in-process agent path.
 
-When a built Go binary exists at `./zero` or `./zero.exe`, cold start uses that artifact. Otherwise it falls back to `bun src/index.ts --version` so the benchmark can run before a local build.
+Cold start uses the built Go binary at `./zero` or `./zero.exe`. Run `bun run build` before the benchmark so it measures the production runtime rather than the old TypeScript entrypoint.
 
 ## Run Locally
 

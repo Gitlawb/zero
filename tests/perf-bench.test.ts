@@ -75,6 +75,7 @@ describe('performance benchmark helpers', () => {
     const result = await runPerfBench({
       iterations: 1,
       warmupIterations: 0,
+      coldStartCommand: [process.execPath, '--version'],
       thresholds: {
         coldStartP95Ms: 60_000,
         ttftP95Ms: 60_000,

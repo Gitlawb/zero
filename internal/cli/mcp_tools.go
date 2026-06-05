@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -73,6 +74,31 @@ func formatMCPToolList(items []mcpToolListItem) string {
 	lines := []string{"MCP Tools:"}
 	for _, item := range items {
 		lines = append(lines, fmt.Sprintf("  %s [%s/%s] - %s", item.Name, item.SideEffect, item.Permission, item.Description))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatMCPServerList(servers map[string]config.MCPServerConfig) string {
+	if len(servers) == 0 {
+		return "No MCP servers configured."
+	}
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	lines := []string{"MCP Servers:"}
+	for _, name := range names {
+		server := servers[name]
+		state := "enabled"
+		if server.Disabled {
+			state = "disabled"
+		}
+		identity := strings.TrimSpace(server.Command)
+		if identity == "" {
+			identity = strings.TrimSpace(server.URL)
+		}
+		lines = append(lines, fmt.Sprintf("  %s [%s] %s %s", name, server.Type, state, identity))
 	}
 	return strings.Join(lines, "\n")
 }

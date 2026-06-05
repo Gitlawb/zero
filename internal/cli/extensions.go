@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/plugins"
@@ -24,6 +25,11 @@ type hookListOptions struct {
 type mcpCommandOptions struct {
 	json    bool
 	confirm bool
+}
+
+type mcpLegacyListOptions struct {
+	json  bool
+	tools bool
 }
 
 func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -138,9 +144,56 @@ func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
 	case "tools":
 		return runMCPTools(args[1:], stdout, stderr, deps)
+	case "list":
+		return runMCPLegacyList(args[1:], stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown mcp subcommand %q", args[0]))
 	}
+}
+
+func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseMCPLegacyListArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeMCPLegacyListHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if options.tools {
+		forwarded := []string{"list"}
+		if options.json {
+			forwarded = append(forwarded, "--json")
+		}
+		return runMCPTools(forwarded, stdout, stderr, deps)
+	}
+
+	cwd, err := deps.getwd()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
+	}
+	cfg, err := deps.resolveMCPConfig(cwd)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if cfg.Servers == nil {
+		cfg.Servers = map[string]config.MCPServerConfig{}
+	}
+	if options.json {
+		payload := struct {
+			Servers map[string]config.MCPServerConfig `json:"servers"`
+		}{Servers: cfg.Servers}
+		if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, formatMCPServerList(cfg.Servers)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
 }
 
 func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -390,6 +443,23 @@ func parseMCPCommandOptions(args []string) (mcpCommandOptions, bool, error) {
 	return options, false, nil
 }
 
+func parseMCPLegacyListArgs(args []string) (mcpLegacyListOptions, bool, error) {
+	options := mcpLegacyListOptions{}
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "help":
+			return options, true, nil
+		case "--json":
+			options.json = true
+		case "--tools":
+			options.tools = true
+		default:
+			return options, false, execUsageError{fmt.Sprintf("unknown mcp list flag %q", arg)}
+		}
+	}
+	return options, false, nil
+}
+
 func parseMCPPositionalCommand(args []string) (mcpCommandOptions, []string, bool, error) {
 	options := mcpCommandOptions{}
 	positional := []string{}
@@ -458,8 +528,21 @@ func writeMCPHelp(w io.Writer) error {
   zero mcp <command>
 
 Commands:
+  list           List configured MCP servers, or tools with --tools
   permissions    Manage persistent MCP tool permissions
   tools          Inspect configured MCP tools
+`)
+	return err
+}
+
+func writeMCPLegacyListHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero mcp list [flags]
+
+Flags:
+      --json     Print MCP servers or tools as JSON
+      --tools    Connect to enabled servers and list MCP tools
+  -h, --help     Show this help
 `)
 	return err
 }

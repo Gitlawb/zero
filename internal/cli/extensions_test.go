@@ -259,6 +259,52 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 	}
 }
 
+func TestRunMCPLegacyListAliases(t *testing.T) {
+	cwd := t.TempDir()
+	closeCalls := 0
+	deps := appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "stdio", Command: "docs-mcp"},
+			}}, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registry.Register(cliFakeMCPRegistryTool{})
+			return closeFunc(func() error {
+				closeCalls++
+				return nil
+			}), nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"mcp", "list", "--tools", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"tools"`) || !strings.Contains(stdout.String(), "mcp_docs_lookup") {
+		t.Fatalf("unexpected legacy mcp tools list output: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"mcp", "list", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"servers"`) || !strings.Contains(stdout.String(), `"docs"`) {
+		t.Fatalf("unexpected legacy mcp server list output: %s", stdout.String())
+	}
+	if closeCalls != 1 {
+		t.Fatalf("legacy server list should not connect tools, closeCalls = %d", closeCalls)
+	}
+}
+
 func TestRunMCPPermissionsHelpDoesNotOpenStore(t *testing.T) {
 	deps := appDeps{
 		newMCPStore: func() (*mcp.PermissionStore, error) {

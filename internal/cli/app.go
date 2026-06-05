@@ -16,6 +16,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
+	"github.com/Gitlawb/zero/internal/update"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -33,6 +34,7 @@ type appDeps struct {
 	newMCPStore      func() (*mcp.PermissionStore, error)
 	registerMCPTools func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
 	runTUI           func(context.Context, tui.Options) int
+	checkUpdate      func(context.Context, update.Options) (update.Result, error)
 	now              func() time.Time
 }
 
@@ -85,8 +87,9 @@ func defaultAppDeps() appDeps {
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
-		runTUI: tui.Run,
-		now:    time.Now,
+		runTUI:      tui.Run,
+		checkUpdate: update.Check,
+		now:         time.Now,
 	}
 }
 
@@ -138,6 +141,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runHooks(args[1:], stdout, stderr, deps)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr, deps)
+	case "update":
+		return runUpdate(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
 	default:
@@ -185,6 +190,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
+	}
+	if deps.checkUpdate == nil {
+		deps.checkUpdate = defaults.checkUpdate
 	}
 	if deps.now == nil {
 		deps.now = defaults.now
@@ -282,6 +290,7 @@ Commands:
   plugins    Inspect local Zero plugin manifests
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings
+  update     Check for Zero CLI updates
   serve      Run Zero protocol servers
   help       Show this help
   version    Print version
@@ -315,6 +324,8 @@ Flags:
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools
       --list-tools                   List model-visible tools and exit
+      --profile <profile>            Accept legacy model profile selection
+  -r, --reasoning-effort <effort>    Accept legacy reasoning effort selection
   -C, --cwd <path>                   Set the workspace directory
   -i, --input-format text|stream-json
                                     Select prompt input format
