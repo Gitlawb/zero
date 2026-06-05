@@ -104,9 +104,9 @@ var commandDefinitions = []commandDefinition{
 	{
 		name:        "/search",
 		aliases:     []string{"/find"},
-		usage:       "/search",
+		usage:       "/search <query>",
 		group:       commandGroupTools,
-		description: "Search local session events.",
+		description: "Search local session events. Requires a query argument.",
 		kind:        commandSearch,
 	},
 	{

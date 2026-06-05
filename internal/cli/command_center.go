@@ -84,6 +84,12 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		command = strings.ToLower(strings.TrimSpace(args[0]))
 		args = args[1:]
 	}
+	if command == "help" {
+		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
 	if command != "list" && command != "current" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown providers command %q", command))
 	}

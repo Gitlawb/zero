@@ -145,6 +145,26 @@ func TestRunProvidersCurrentJSONIncludesRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestRunProvidersPositionalHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "help"}, &stdout, &stderr, commandCenterDeps(t))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{"Usage:", "zero providers", "list", "current"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected providers help to contain %q, got %q", want, output)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunProvidersRejectsModelOnlyFlags(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

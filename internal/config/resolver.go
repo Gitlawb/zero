@@ -157,7 +157,7 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 	apiKey := strings.TrimSpace(env.APIKey)
 	baseURL := strings.TrimSpace(env.BaseURL)
 	model := strings.TrimSpace(env.Model)
-	if providerKind == ProviderKindOpenAI && apiKey != "" && model == "" {
+	if providerKind == ProviderKindOpenAI && apiKey != "" && model == "" && isOfficialOpenAIBaseURL(baseURL) {
 		model = modelregistry.DefaultModelID
 	}
 	if apiKey == "" && baseURL == "" && model == "" {
