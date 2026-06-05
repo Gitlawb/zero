@@ -89,7 +89,7 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 	}
 }
 
-func TestResolveMergesMCPServerConfig(t *testing.T) {
+func TestResolveReplacesMCPServerOverlayCollections(t *testing.T) {
 	userPath := writeConfig(t, `{
 		"mcp": {
 			"servers": {
