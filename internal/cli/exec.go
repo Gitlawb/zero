@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/worktrees"
 )
 
 const (
@@ -49,6 +50,9 @@ type execOptions struct {
 	resume                string
 	resumeLatest          bool
 	fork                  string
+	worktree              bool
+	worktreeName          string
+	worktreeDir           string
 	skipPermissionsUnsafe bool
 }
 
@@ -75,6 +79,18 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	if options.worktree {
+		preparedWorktree, err := deps.prepareWorktree(context.Background(), worktrees.Options{
+			Cwd:     workspaceRoot,
+			Name:    options.worktreeName,
+			BaseDir: options.worktreeDir,
+			Now:     deps.now,
+		})
+		if err != nil {
+			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+		}
+		workspaceRoot = preparedWorktree.Path
 	}
 
 	registry := newCoreRegistry(workspaceRoot)

@@ -216,6 +216,9 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 		{"plugin"},
 		{"hooks"},
 		{"mcp"},
+		{"worktrees"},
+		{"worktree"},
+		{"verify"},
 		{"serve"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -263,6 +266,8 @@ func assertHelpOutput(t *testing.T, args []string) {
 		"plugins",
 		"hooks",
 		"mcp",
+		"worktrees",
+		"verify",
 		"serve",
 		"--version",
 	} {

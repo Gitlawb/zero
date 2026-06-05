@@ -158,6 +158,24 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--fork="):
 			options.fork = strings.TrimSpace(strings.TrimPrefix(arg, "--fork="))
+		case arg == "-w" || arg == "--worktree":
+			options.worktree = true
+			if index+1 < len(args) && !flagValueLooksLikeOption(strings.TrimSpace(args[index+1])) && strings.TrimSpace(args[index+1]) != "" {
+				options.worktreeName = strings.TrimSpace(args[index+1])
+				index++
+			}
+		case strings.HasPrefix(arg, "--worktree="):
+			options.worktree = true
+			options.worktreeName = strings.TrimSpace(strings.TrimPrefix(arg, "--worktree="))
+		case arg == "--worktree-dir":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.worktreeDir = value
+			index = next
+		case strings.HasPrefix(arg, "--worktree-dir="):
+			options.worktreeDir = strings.TrimSpace(strings.TrimPrefix(arg, "--worktree-dir="))
 		case arg == "--":
 			options.promptParts = append(options.promptParts, args[index+1:]...)
 			index = len(args)
@@ -170,6 +188,12 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 
 	if (options.resume != "" || options.resumeLatest) && options.fork != "" {
 		return options, false, execUsageError{"Use either --resume or --fork, not both."}
+	}
+	if options.worktree && options.fork != "" {
+		return options, false, execUsageError{"--fork cannot be used with --worktree. Forked sessions must continue in the source session workspace."}
+	}
+	if options.worktreeDir != "" && !options.worktree {
+		return options, false, execUsageError{"--worktree-dir requires --worktree."}
 	}
 	if options.inputFormat == execInputStreamJSON && strings.TrimSpace(strings.Join(options.promptParts, " ")) != "" {
 		return options, false, execUsageError{"Stream-json input does not accept positional prompt text. Pipe JSONL or use --file."}
