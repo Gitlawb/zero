@@ -14,9 +14,7 @@ func SchemaFromMCP(input map[string]any) tools.Schema {
 		AdditionalProperties: boolValue(input["additionalProperties"], false),
 	}
 
-	for _, required := range stringSlice(input["required"]) {
-		schema.Required = append(schema.Required, required)
-	}
+	schema.Required = append(schema.Required, stringSlice(input["required"])...)
 
 	if properties, ok := input["properties"].(map[string]any); ok {
 		for name, raw := range properties {
@@ -39,9 +37,6 @@ func propertyFromMCP(input map[string]any) tools.PropertySchema {
 		Description: stringValue(input["description"]),
 		Enum:        stringSlice(input["enum"]),
 		Default:     input["default"],
-	}
-	if property.Type == "number" {
-		property.Type = "number"
 	}
 	if min, ok := intValue(input["minimum"]); ok {
 		property.Minimum = &min

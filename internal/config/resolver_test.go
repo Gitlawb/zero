@@ -132,12 +132,76 @@ func TestResolveMergesMCPServerConfig(t *testing.T) {
 	if got := strings.Join(docs.Args, " "); got != "--project" {
 		t.Fatalf("docs.Args = %q, want project args override", got)
 	}
-	if docs.Env["ZERO_DOCS_TOKEN"] != "user-token" || docs.Env["ZERO_DOCS_PROJECT"] != "1" {
-		t.Fatalf("docs.Env = %#v, want merged env", docs.Env)
+	if docs.Env["ZERO_DOCS_TOKEN"] != "" || docs.Env["ZERO_DOCS_PROJECT"] != "1" {
+		t.Fatalf("docs.Env = %#v, want project env replacement", docs.Env)
 	}
 	web := resolved.MCP.Servers["web"]
 	if web.Type != "http" || web.URL != "https://example.com/mcp" {
 		t.Fatalf("web server = %#v, want root mcpServers alias loaded", web)
+	}
+}
+
+func TestResolveMCPServerLayersCanClearAndReenable(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"mcp": {
+			"servers": {
+				"docs": {
+					"type": "stdio",
+					"command": "docs-mcp",
+					"args": ["--user"],
+					"env": {"ZERO_DOCS_TOKEN": "user-token"},
+					"disabled": true
+				}
+			}
+		}
+	}`)
+	projectPath := writeConfig(t, `{
+		"mcpServers": {
+			"docs": {
+				"args": [],
+				"env": {},
+				"disabled": false
+			}
+		}
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	docs := resolved.MCP.Servers["docs"]
+	if docs.Disabled {
+		t.Fatalf("docs.Disabled = true, want project layer to re-enable")
+	}
+	if len(docs.Args) != 0 {
+		t.Fatalf("docs.Args = %#v, want project layer to clear inherited args", docs.Args)
+	}
+	if len(docs.Env) != 0 {
+		t.Fatalf("docs.Env = %#v, want project layer to clear inherited env", docs.Env)
+	}
+}
+
+func TestResolveRejectsDuplicateMCPRootAliases(t *testing.T) {
+	path := writeConfig(t, `{
+		"mcpServers": {
+			"docs": {"type": "stdio", "command": "docs-mcp"}
+		},
+		"mcp_servers": {
+			"docs": {"type": "stdio", "command": "other-docs-mcp"}
+		}
+	}`)
+
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want duplicate MCP alias error")
+	}
+	if !strings.Contains(err.Error(), `defined in both mcpServers and mcp_servers`) {
+		t.Fatalf("error = %q, want duplicate MCP alias message", err.Error())
 	}
 }
 

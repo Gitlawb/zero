@@ -162,6 +162,42 @@ func TestRunExecListsMCPToolsWithoutProviderResolution(t *testing.T) {
 	}
 }
 
+func TestRunExecLogsMCPRuntimeCloseError(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--list-tools", "--enabled-tools", "mcp_docs_lookup"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "stdio", Command: "docs-mcp"},
+			}}, nil
+		},
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return nil, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registry.Register(cliFakeMCPRegistryTool{})
+			return closeFunc(func() error {
+				return errors.New("close failed")
+			}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "mcp_close_error: close failed") {
+		t.Fatalf("stderr = %q, want MCP close error", stderr.String())
+	}
+}
+
 func TestRunExecRejectsInvalidProtocolOptionsBeforeRuntime(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -201,6 +201,7 @@ func TestRunMCPPermissionsListRevokeAndClear(t *testing.T) {
 
 func TestRunMCPToolsListJSONAndText(t *testing.T) {
 	cwd := t.TempDir()
+	closeCalls := 0
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
@@ -213,7 +214,10 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 		},
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			registry.Register(cliFakeMCPRegistryTool{})
-			return closeFunc(func() error { return nil }), nil
+			return closeFunc(func() error {
+				closeCalls++
+				return nil
+			}), nil
 		},
 	}
 
@@ -235,6 +239,9 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 	if len(payload.Tools) != 1 || payload.Tools[0].Name != "mcp_docs_lookup" || payload.Tools[0].Permission != string(tools.PermissionAllow) {
 		t.Fatalf("unexpected MCP tools JSON: %#v", payload)
 	}
+	if closeCalls != 1 {
+		t.Fatalf("MCP runtime close calls after JSON list = %d, want 1", closeCalls)
+	}
 
 	stdout.Reset()
 	stderr.Reset()
@@ -246,6 +253,9 @@ func TestRunMCPToolsListJSONAndText(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("MCP tools text missing %q: %s", want, stdout.String())
 		}
+	}
+	if closeCalls != 2 {
+		t.Fatalf("MCP runtime close calls after text list = %d, want 2", closeCalls)
 	}
 }
 

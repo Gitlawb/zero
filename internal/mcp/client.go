@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -176,6 +177,9 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 		if message.ID == nil {
 			continue
 		}
+		if !rpcIDMatches(message.ID, id) {
+			continue
+		}
 		if message.Error != nil {
 			return fmt.Errorf("MCP %s failed: %s", method, message.Error.Message)
 		}
@@ -185,6 +189,24 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 			}
 		}
 		return nil
+	}
+}
+
+func rpcIDMatches(value any, id int) bool {
+	switch typed := value.(type) {
+	case int:
+		return typed == id
+	case int64:
+		return typed == int64(id)
+	case float64:
+		return typed == float64(id)
+	case json.Number:
+		parsed, err := typed.Int64()
+		return err == nil && parsed == int64(id)
+	case string:
+		return typed == strconv.Itoa(id)
+	default:
+		return false
 	}
 }
 

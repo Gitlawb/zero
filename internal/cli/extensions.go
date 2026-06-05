@@ -175,7 +175,7 @@ func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
-		defer runtime.Close()
+		defer closeMCPRuntime(stderr, runtime)
 		items := mcpToolList(registry)
 		if options.json {
 			payload := struct {

@@ -61,6 +61,8 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 
 	serverType := ServerType(strings.ToLower(strings.TrimSpace(raw.Type)))
 	if serverType == "" {
+		// When type is omitted, a URL makes the server use HTTP validation; otherwise
+		// command-based stdio remains the default.
 		if strings.TrimSpace(raw.URL) != "" {
 			serverType = ServerTypeHTTP
 		} else {
@@ -137,8 +139,12 @@ func computeServerIdentity(server Server) string {
 		URL:     server.URL,
 		Headers: copyStringMap(server.Headers),
 	}
+	// Marshal cannot fail for this canonical shape because it only contains
+	// JSON-serializable primitive, slice, and map fields.
 	data, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(data)
+	// The first 32 hex characters give a stable 128-bit identity while keeping
+	// permission records compact.
 	return hex.EncodeToString(sum[:])[:32]
 }
 
@@ -157,6 +163,9 @@ func trimStringSlice(values []string) []string {
 	return trimmed
 }
 
+// copyStringMap trims and filters keys while preserving values verbatim. Env
+// and header values may intentionally contain surrounding whitespace, unlike
+// scalar fields such as Command and URL.
 func copyStringMap(values map[string]string) map[string]string {
 	if len(values) == 0 {
 		return nil

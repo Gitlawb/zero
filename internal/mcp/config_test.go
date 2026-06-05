@@ -89,19 +89,62 @@ func TestNormalizeConfigValidatesTransportBoundaries(t *testing.T) {
 }
 
 func TestServerIdentityChangesWithTransportFields(t *testing.T) {
-	first, err := NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"docs": {Type: "stdio", Command: "docs-mcp", Args: []string{"--one"}},
-	}})
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name   string
+		first  config.MCPServerConfig
+		second config.MCPServerConfig
+	}{
+		{
+			name:   "command",
+			first:  config.MCPServerConfig{Type: "stdio", Command: "docs-mcp"},
+			second: config.MCPServerConfig{Type: "stdio", Command: "other-docs-mcp"},
+		},
+		{
+			name:   "args",
+			first:  config.MCPServerConfig{Type: "stdio", Command: "docs-mcp", Args: []string{"--one"}},
+			second: config.MCPServerConfig{Type: "stdio", Command: "docs-mcp", Args: []string{"--two"}},
+		},
+		{
+			name:   "env",
+			first:  config.MCPServerConfig{Type: "stdio", Command: "docs-mcp", Env: map[string]string{"TOKEN": "one"}},
+			second: config.MCPServerConfig{Type: "stdio", Command: "docs-mcp", Env: map[string]string{"TOKEN": "two"}},
+		},
+		{
+			name:   "url",
+			first:  config.MCPServerConfig{Type: "http", URL: "https://one.example/mcp"},
+			second: config.MCPServerConfig{Type: "http", URL: "https://two.example/mcp"},
+		},
+		{
+			name:   "headers",
+			first:  config.MCPServerConfig{Type: "http", URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer one"}},
+			second: config.MCPServerConfig{Type: "http", URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer two"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, err := NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{"docs": tc.first}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{"docs": tc.second}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first[0].Identity == second[0].Identity {
+				t.Fatalf("identity did not change when %s changed: %s", tc.name, first[0].Identity)
+			}
+		})
 	}
-	second, err := NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"docs": {Type: "stdio", Command: "docs-mcp", Args: []string{"--two"}},
-	}})
-	if err != nil {
-		t.Fatal(err)
+}
+
+func TestCopyStringMapTrimsKeysAndPreservesValues(t *testing.T) {
+	copied := copyStringMap(map[string]string{
+		" TOKEN ": "  keep surrounding spaces  ",
+		"   ":     "ignored",
+	})
+	if len(copied) != 1 {
+		t.Fatalf("copied = %#v, want one trimmed key", copied)
 	}
-	if first[0].Identity == second[0].Identity {
-		t.Fatalf("identity did not change when args changed: %s", first[0].Identity)
+	if copied["TOKEN"] != "  keep surrounding spaces  " {
+		t.Fatalf("copied[TOKEN] = %q, want value preserved verbatim", copied["TOKEN"])
 	}
 }

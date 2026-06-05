@@ -273,28 +273,29 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig 
 		base.Args = append([]string{}, next.Args...)
 	}
 	if next.Env != nil {
-		if base.Env == nil {
-			base.Env = map[string]string{}
-		}
-		for key, value := range next.Env {
-			base.Env[key] = value
-		}
+		base.Env = copyMCPStringMap(next.Env)
 	}
 	if strings.TrimSpace(next.URL) != "" {
 		base.URL = next.URL
 	}
 	if next.Headers != nil {
-		if base.Headers == nil {
-			base.Headers = map[string]string{}
-		}
-		for key, value := range next.Headers {
-			base.Headers[key] = value
-		}
+		base.Headers = copyMCPStringMap(next.Headers)
 	}
-	if next.Disabled {
-		base.Disabled = true
+	if next.disabledSet || next.Disabled {
+		base.Disabled = next.Disabled
 	}
 	return base
+}
+
+func copyMCPStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }
 
 func hasProviderFields(profile ProviderProfile) bool {

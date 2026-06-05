@@ -86,7 +86,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 	}
-	defer mcpRuntime.Close()
+	defer closeMCPRuntime(stderr, mcpRuntime)
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}

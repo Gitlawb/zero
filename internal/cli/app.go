@@ -203,7 +203,7 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
-	defer mcpRuntime.Close()
+	defer closeMCPRuntime(stderr, mcpRuntime)
 	permissionMode := agent.PermissionModeAuto
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:          workspaceRoot,
@@ -233,6 +233,15 @@ func newCoreRegistry(workspaceRoot string) *tools.Registry {
 		registry.Register(tool)
 	}
 	return registry
+}
+
+func closeMCPRuntime(stderr io.Writer, runtime mcpToolRuntime) {
+	if runtime == nil {
+		return
+	}
+	if err := runtime.Close(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "[zero] mcp_close_error: %s\n", err)
+	}
 }
 
 func writeAppError(stderr io.Writer, message string, exitCode int) int {

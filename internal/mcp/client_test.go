@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,6 +67,42 @@ func TestConnectRejectsUnsupportedRunnableTransports(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not implemented") {
 		t.Fatalf("error = %q, want not implemented", err.Error())
+	}
+}
+
+func TestClientRequestWaitsForMatchingResponseID(t *testing.T) {
+	var incoming bytes.Buffer
+	incomingWriter := newMessageWriter(&incoming)
+	if err := incomingWriter.write(rpcMessage{Method: "notifications/progress"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := incomingWriter.write(rpcMessage{
+		ID:    99,
+		Error: &rpcError{Code: -32000, Message: "wrong response"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := incomingWriter.write(rpcMessage{
+		ID:     1,
+		Result: mustRaw(map[string]any{"value": "matched"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var outgoing bytes.Buffer
+	client := &Client{
+		reader: newMessageReader(&incoming),
+		writer: newMessageWriter(&outgoing),
+		nextID: 1,
+	}
+	var result struct {
+		Value string `json:"value"`
+	}
+	if err := client.request(context.Background(), "tools/list", map[string]any{}, &result); err != nil {
+		t.Fatalf("request() error = %v", err)
+	}
+	if result.Value != "matched" {
+		t.Fatalf("result.Value = %q, want matched response", result.Value)
 	}
 }
 

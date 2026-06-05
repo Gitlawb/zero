@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -64,13 +65,14 @@ type MCPConfig struct {
 }
 
 type MCPServerConfig struct {
-	Type     string            `json:"type,omitempty"`
-	Command  string            `json:"command,omitempty"`
-	Args     []string          `json:"args,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	URL      string            `json:"url,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-	Disabled bool              `json:"disabled,omitempty"`
+	Type        string            `json:"type,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Disabled    bool              `json:"disabled,omitempty"`
+	disabledSet bool
 }
 
 func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
@@ -98,7 +100,40 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		cfg.MCP.Servers[name] = server
 	}
 	for name, server := range raw.MCPServersSnake {
+		if _, exists := cfg.MCP.Servers[name]; exists {
+			return fmt.Errorf("MCP server %q is defined in both mcpServers and mcp_servers; mcp_servers would override mcpServers", name)
+		}
 		cfg.MCP.Servers[name] = server
+	}
+	return nil
+}
+
+func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
+	type rawServer struct {
+		Type     string            `json:"type"`
+		Command  string            `json:"command"`
+		Args     []string          `json:"args"`
+		Env      map[string]string `json:"env"`
+		URL      string            `json:"url"`
+		Headers  map[string]string `json:"headers"`
+		Disabled *bool             `json:"disabled"`
+	}
+
+	var raw rawServer
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	server.Type = raw.Type
+	server.Command = raw.Command
+	server.Args = raw.Args
+	server.Env = raw.Env
+	server.URL = raw.URL
+	server.Headers = raw.Headers
+	server.Disabled = false
+	server.disabledSet = false
+	if raw.Disabled != nil {
+		server.Disabled = *raw.Disabled
+		server.disabledSet = true
 	}
 	return nil
 }
