@@ -1,0 +1,180 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
+)
+
+func TestRunSandboxGrantsAllowListDenyRevokeAndClear(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil }}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "grants", "allow", "write_file", "--auto", "medium", "--reason", "workspace edits", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("allow exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var allowPayload struct {
+		Grant sandbox.Grant `json:"grant"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &allowPayload); err != nil {
+		t.Fatalf("decode allow JSON: %v\n%s", err, stdout.String())
+	}
+	if allowPayload.Grant.ToolName != "write_file" || allowPayload.Grant.Decision != sandbox.GrantAllow || allowPayload.Grant.MaxAutonomy != sandbox.AutonomyMedium {
+		t.Fatalf("unexpected allow payload: %#v", allowPayload)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sandbox", "grants", "deny", "bash", "--auto=high", "--reason=network blocked"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("deny exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "bash") || !strings.Contains(stdout.String(), "deny") {
+		t.Fatalf("unexpected deny text: %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sandbox", "grants", "list", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("list exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var listPayload struct {
+		Grants []sandbox.Grant `json:"grants"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &listPayload); err != nil {
+		t.Fatalf("decode list JSON: %v\n%s", err, stdout.String())
+	}
+	if len(listPayload.Grants) != 2 || listPayload.Grants[0].ToolName != "bash" || listPayload.Grants[1].ToolName != "write_file" {
+		t.Fatalf("unexpected sorted grants: %#v", listPayload.Grants)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sandbox", "grants", "revoke", "bash", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("revoke exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var revokePayload struct {
+		Revoked int `json:"revoked"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &revokePayload); err != nil {
+		t.Fatalf("decode revoke JSON: %v\n%s", err, stdout.String())
+	}
+	if revokePayload.Revoked != 1 {
+		t.Fatalf("revoked = %d, want 1", revokePayload.Revoked)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sandbox", "grants", "clear", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitUsage {
+		t.Fatalf("clear without confirm exit = %d, want usage", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--confirm") {
+		t.Fatalf("expected confirm error, got %q", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sandbox", "grants", "clear", "--confirm", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("clear exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var clearPayload struct {
+		Cleared int `json:"cleared"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &clearPayload); err != nil {
+		t.Fatalf("decode clear JSON: %v\n%s", err, stdout.String())
+	}
+	if clearPayload.Cleared != 1 {
+		t.Fatalf("cleared = %d, want 1", clearPayload.Cleared)
+	}
+}
+
+func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		getwd:           func() (string, error) { return t.TempDir(), nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"}
+		},
+	}
+
+	for _, args := range [][]string{
+		{"sandbox", "policy"},
+		{"sandbox", "policy", "--json"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(args, &stdout, &stderr, deps)
+			if exitCode != exitSuccess {
+				t.Fatalf("policy exit = %d, stderr %q", exitCode, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected empty stderr, got %q", stderr.String())
+			}
+			if strings.Contains(strings.Join(args, " "), "--json") {
+				var payload struct {
+					Policy  sandbox.Policy  `json:"policy"`
+					Backend sandbox.Backend `json:"backend"`
+					Grants  string          `json:"grantsPath"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+					t.Fatalf("decode policy JSON: %v\n%s", err, stdout.String())
+				}
+				if payload.Policy.Mode != sandbox.ModeEnforce || payload.Backend.Name != sandbox.BackendPolicyOnly || payload.Grants == "" {
+					t.Fatalf("unexpected policy JSON: %#v", payload)
+				}
+			} else if !strings.Contains(stdout.String(), "Zero sandbox policy") || !strings.Contains(stdout.String(), "policy-only") {
+				t.Fatalf("unexpected policy text: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunSandboxHelpDoesNotOpenStore(t *testing.T) {
+	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) {
+		t.Fatal("newSandboxStore should not be called for help")
+		return nil, nil
+	}}
+	for _, args := range [][]string{
+		{"sandbox", "--help"},
+		{"sandbox", "grants", "--help"},
+		{"sandbox", "grants", "allow", "--help"},
+		{"sandbox", "policy", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(args, &stdout, &stderr, deps)
+			if exitCode != exitSuccess {
+				t.Fatalf("help exit = %d, stderr %q", exitCode, stderr.String())
+			}
+			if stdout.Len() == 0 {
+				t.Fatalf("expected help output")
+			}
+		})
+	}
+}
+
+func newSandboxTestStore(t *testing.T) *sandbox.GrantStore {
+	t.Helper()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedCLITime("2026-06-05T14:45:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	return store
+}

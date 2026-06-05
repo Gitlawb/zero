@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -27,25 +28,27 @@ import (
 var version = "dev"
 
 type appDeps struct {
-	getwd            func() (string, error)
-	stdin            io.Reader
-	resolveConfig    func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig func(workspaceRoot string) (config.MCPConfig, error)
-	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
-	newSessionStore  func() *sessions.Store
-	loadPlugins      func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks        func(hooks.LoadOptions) (hooks.LoadResult, error)
-	newMCPStore      func() (*mcp.PermissionStore, error)
-	registerMCPTools func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree  func(context.Context, worktrees.Options) (worktrees.Result, error)
-	detectVerifyPlan func(string) (verify.Plan, error)
-	runVerify        func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify    func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	inspectChanges   func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges    func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	runTUI           func(context.Context, tui.Options) int
-	checkUpdate      func(context.Context, update.Options) (update.Result, error)
-	now              func() time.Time
+	getwd                func() (string, error)
+	stdin                io.Reader
+	resolveConfig        func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	resolveMCPConfig     func(workspaceRoot string) (config.MCPConfig, error)
+	newProvider          func(config.ProviderProfile) (zeroruntime.Provider, error)
+	newSessionStore      func() *sessions.Store
+	loadPlugins          func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
+	newMCPStore          func() (*mcp.PermissionStore, error)
+	newSandboxStore      func() (*sandbox.GrantStore, error)
+	selectSandboxBackend func(sandbox.BackendOptions) sandbox.Backend
+	registerMCPTools     func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree      func(context.Context, worktrees.Options) (worktrees.Result, error)
+	detectVerifyPlan     func(string) (verify.Plan, error)
+	runVerify            func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify        func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	inspectChanges       func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges        func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	runTUI               func(context.Context, tui.Options) int
+	checkUpdate          func(context.Context, update.Options) (update.Result, error)
+	now                  func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -94,6 +97,10 @@ func defaultAppDeps() appDeps {
 		newMCPStore: func() (*mcp.PermissionStore, error) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{})
 		},
+		newSandboxStore: func() (*sandbox.GrantStore, error) {
+			return sandbox.NewGrantStore(sandbox.StoreOptions{})
+		},
+		selectSandboxBackend: sandbox.SelectBackend,
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
@@ -157,6 +164,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runHooks(args[1:], stdout, stderr, deps)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr, deps)
+	case "sandbox":
+		return runSandbox(args[1:], stdout, stderr, deps)
 	case "update":
 		return runUpdate(args[1:], stdout, stderr, deps)
 	case "worktrees", "worktree":
@@ -206,6 +215,12 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.newMCPStore == nil {
 		deps.newMCPStore = defaults.newMCPStore
+	}
+	if deps.newSandboxStore == nil {
+		deps.newSandboxStore = defaults.newSandboxStore
+	}
+	if deps.selectSandboxBackend == nil {
+		deps.selectSandboxBackend = defaults.selectSandboxBackend
 	}
 	if deps.registerMCPTools == nil {
 		deps.registerMCPTools = defaults.registerMCPTools
@@ -334,6 +349,7 @@ Commands:
   plugins    Inspect local Zero plugin manifests
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings
+  sandbox    Inspect sandbox policy and persistent grants
   update     Check for Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
