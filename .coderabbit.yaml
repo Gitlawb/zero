@@ -5,8 +5,8 @@ tone_instructions: "Be direct and prioritize actionable correctness, safety, CLI
 
 reviews:
   profile: "chill"
-  # Keep CodeRabbit as a review signal without letting stale bot reviews block merges.
-  request_changes_workflow: false
+  # Allow explicit @coderabbitai approve / resolve commands to submit review verdicts.
+  request_changes_workflow: true
   high_level_summary: true
   poem: false
   # Avoid noisy "review skipped" status comments when CodeRabbit decides not to run.
