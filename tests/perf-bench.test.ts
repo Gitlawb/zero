@@ -33,8 +33,8 @@ describe('performance benchmark helpers', () => {
       coldStartMs: summarizeSamples([120, 301]),
       firstOutputMs: summarizeSamples([12, 18]),
       processDrainMs: summarizeSamples([0.2, 0.4]),
-      harnessRssMb: summarizeSamples([80, 90]),
-      harnessRssDeltaMb: summarizeSamples([1, 3]),
+      harnessEndRssMb: summarizeSamples([80, 90]),
+      harnessEndRssDeltaMb: summarizeSamples([1, 3]),
     };
 
     const warnings = evaluatePerfWarnings(metrics, DEFAULT_PERF_THRESHOLDS);
@@ -62,7 +62,7 @@ describe('performance benchmark helpers', () => {
       ],
       {
         ZERO_PERF_COLD_START_WARN_MS: '250',
-        ZERO_PERF_HARNESS_RSS_WARN_MB: '384',
+        ZERO_PERF_HARNESS_END_RSS_WARN_MB: '384',
       }
     );
 
@@ -71,11 +71,16 @@ describe('performance benchmark helpers', () => {
     expect(options.thresholds).toEqual({
       coldStartP95Ms: 250,
       firstOutputP95Ms: 600,
-      harnessRssMaxMb: 384,
+      harnessEndRssMaxMb: 384,
     });
     expect(options.output).toBe('dist/perf/report.json');
     expect(options.ci).toBe(true);
     expect(options.failOnWarning).toBe(true);
+
+    const envOnly = parsePerfBenchArgs([], {
+      ZERO_PERF_FIRST_OUTPUT_WARN_MS: '610',
+    });
+    expect(envOnly.thresholds.firstOutputP95Ms).toBe(610);
   });
 
   it('runs a minimal benchmark end to end', async () => {
@@ -87,7 +92,7 @@ describe('performance benchmark helpers', () => {
       thresholds: {
         coldStartP95Ms: 60_000,
         firstOutputP95Ms: 60_000,
-        harnessRssMaxMb: 4096,
+        harnessEndRssMaxMb: 4096,
       },
     });
 
@@ -95,7 +100,7 @@ describe('performance benchmark helpers', () => {
     expect(result.iterations).toBe(1);
     expect(result.metrics.coldStartMs.samples).toHaveLength(1);
     expect(result.metrics.firstOutputMs.samples).toHaveLength(1);
-    expect(result.metrics.harnessRssMb.max).toBeGreaterThan(0);
+    expect(result.metrics.harnessEndRssMb.max).toBeGreaterThan(0);
     expect(result.warnings).toEqual([]);
   });
 
@@ -104,8 +109,8 @@ describe('performance benchmark helpers', () => {
       coldStartMs: summarizeSamples([100, 110]),
       firstOutputMs: summarizeSamples([20, 30]),
       processDrainMs: summarizeSamples([0.1, 0.2]),
-      harnessRssMb: summarizeSamples([300, 310]),
-      harnessRssDeltaMb: summarizeSamples([2, 4]),
+      harnessEndRssMb: summarizeSamples([300, 310]),
+      harnessEndRssDeltaMb: summarizeSamples([2, 4]),
     };
     const warnings = evaluatePerfWarnings(metrics, DEFAULT_PERF_THRESHOLDS);
     const result: PerfBenchResult = {
@@ -130,8 +135,8 @@ describe('performance benchmark helpers', () => {
 
     expect(summary).toContain('Zero performance benchmark');
     expect(summary).toContain('cold start: median 105.00 ms');
-    expect(summary).toContain('harness RSS: peak 310.00 MB');
+    expect(summary).toContain('harness end RSS: max 310.00 MB');
     expect(summary).toContain('warnings:');
-    expect(summary).toContain('Benchmark harness RSS peak 310.00 MB');
+    expect(summary).toContain('Benchmark harness end RSS 310.00 MB');
   });
 });

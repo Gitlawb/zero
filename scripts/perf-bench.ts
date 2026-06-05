@@ -5,7 +5,7 @@ import { zeroArtifactName, zeroArtifactPath } from './artifact';
 export interface PerfThresholds {
   coldStartP95Ms: number;
   firstOutputP95Ms: number;
-  harnessRssMaxMb: number;
+  harnessEndRssMaxMb: number;
 }
 
 export interface NumericStats {
@@ -21,8 +21,8 @@ export interface PerfMetrics {
   coldStartMs: NumericStats;
   firstOutputMs: NumericStats;
   processDrainMs: NumericStats;
-  harnessRssMb: NumericStats;
-  harnessRssDeltaMb: NumericStats;
+  harnessEndRssMb: NumericStats;
+  harnessEndRssDeltaMb: NumericStats;
 }
 
 export interface PerfWarning {
@@ -71,8 +71,8 @@ export interface PerfBenchCliOptions extends PerfBenchOptions {
 interface FirstOutputSample {
   firstOutputMs: number;
   processDrainMs: number;
-  harnessRssMb: number;
-  harnessRssDeltaMb: number;
+  harnessEndRssMb: number;
+  harnessEndRssDeltaMb: number;
 }
 
 const DEFAULT_ITERATIONS = 5;
@@ -81,7 +81,7 @@ const DEFAULT_WARMUP_ITERATIONS = 1;
 export const DEFAULT_PERF_THRESHOLDS: PerfThresholds = {
   coldStartP95Ms: 300,
   firstOutputP95Ms: 500,
-  harnessRssMaxMb: 256,
+  harnessEndRssMaxMb: 256,
 };
 
 export function summarizeSamples(samples: number[]): NumericStats {
@@ -124,12 +124,12 @@ export function evaluatePerfWarnings(
       'Binary first-output p95'
     ),
     createWarning(
-      'harnessRssMb',
+      'harnessEndRssMb',
       'max',
-      metrics.harnessRssMb.max,
-      thresholds.harnessRssMaxMb,
+      metrics.harnessEndRssMb.max,
+      thresholds.harnessEndRssMaxMb,
       'MB',
-      'Benchmark harness RSS peak'
+      'Benchmark harness end RSS'
     ),
   ].filter((warning): warning is PerfWarning => warning !== undefined);
 }
@@ -143,7 +143,7 @@ export function formatPerfSummary(result: PerfBenchResult): string {
     `cold start: median ${formatMetric(result.metrics.coldStartMs.median, 'ms')}, p95 ${formatMetric(result.metrics.coldStartMs.p95, 'ms')} (warn > ${formatMetric(result.thresholds.coldStartP95Ms, 'ms')})`,
     `binary first output: median ${formatMetric(result.metrics.firstOutputMs.median, 'ms')}, p95 ${formatMetric(result.metrics.firstOutputMs.p95, 'ms')} (warn > ${formatMetric(result.thresholds.firstOutputP95Ms, 'ms')})`,
     `process drain: median ${formatMetric(result.metrics.processDrainMs.median, 'ms')}, p95 ${formatMetric(result.metrics.processDrainMs.p95, 'ms')}`,
-    `harness RSS: peak ${formatMetric(result.metrics.harnessRssMb.max, 'MB')}, max delta ${formatMetric(result.metrics.harnessRssDeltaMb.max, 'MB')} (warn > ${formatMetric(result.thresholds.harnessRssMaxMb, 'MB')})`,
+    `harness end RSS: max ${formatMetric(result.metrics.harnessEndRssMb.max, 'MB')}, max end delta ${formatMetric(result.metrics.harnessEndRssDeltaMb.max, 'MB')} (warn > ${formatMetric(result.thresholds.harnessEndRssMaxMb, 'MB')})`,
   ];
 
   if (result.warnings.length > 0) {
@@ -180,10 +180,10 @@ export function parsePerfBenchArgs(
         'ZERO_PERF_FIRST_OUTPUT_WARN_MS',
         DEFAULT_PERF_THRESHOLDS.firstOutputP95Ms
       ),
-      harnessRssMaxMb: readPositiveNumberEnv(
+      harnessEndRssMaxMb: readPositiveNumberEnv(
         env,
-        'ZERO_PERF_HARNESS_RSS_WARN_MB',
-        DEFAULT_PERF_THRESHOLDS.harnessRssMaxMb
+        'ZERO_PERF_HARNESS_END_RSS_WARN_MB',
+        DEFAULT_PERF_THRESHOLDS.harnessEndRssMaxMb
       ),
     },
     ci: env.GITHUB_ACTIONS === 'true',
@@ -222,8 +222,8 @@ export function parsePerfBenchArgs(
         );
         if (inlineValue !== undefined) index--;
         break;
-      case '--harness-rss-warn-mb':
-        options.thresholds.harnessRssMaxMb = parsePositiveNumber(
+      case '--harness-end-rss-warn-mb':
+        options.thresholds.harnessEndRssMaxMb = parsePositiveNumber(
           flag,
           readOptionValue(args, inlineValue, ++index, flag)
         );
@@ -267,7 +267,8 @@ export function perfBenchHelp(): string {
     '  --warmup <n>                 Warmup samples to discard (default: 1)',
     '  --cold-start-warn-ms <n>     Warn when cold-start p95 is above n ms',
     '  --first-output-warn-ms <n>   Warn when binary first-output p95 is above n ms',
-    '  --harness-rss-warn-mb <n>    Warn when harness RSS peak is above n MB',
+    '  --harness-end-rss-warn-mb <n>',
+    '                               Warn when harness end-state RSS is above n MB',
     '  --output <path>              Write the JSON report to path',
     '  --json                       Print only the JSON report',
     '  --ci                         Emit GitHub Actions warning annotations',
@@ -277,7 +278,7 @@ export function perfBenchHelp(): string {
     'Environment overrides:',
     '  ZERO_PERF_ITERATIONS, ZERO_PERF_WARMUP_ITERATIONS',
     '  ZERO_PERF_COLD_START_WARN_MS, ZERO_PERF_FIRST_OUTPUT_WARN_MS',
-    '  ZERO_PERF_HARNESS_RSS_WARN_MB',
+    '  ZERO_PERF_HARNESS_END_RSS_WARN_MB',
   ].join('\n');
 }
 
@@ -302,9 +303,11 @@ export async function runPerfBench(options: PerfBenchOptions): Promise<PerfBench
     coldStartMs: summarizeSamples(coldStartSamples),
     firstOutputMs: summarizeSamples(firstOutputSamples.map((sample) => sample.firstOutputMs)),
     processDrainMs: summarizeSamples(firstOutputSamples.map((sample) => sample.processDrainMs)),
-    harnessRssMb: summarizeSamples(firstOutputSamples.map((sample) => sample.harnessRssMb)),
-    harnessRssDeltaMb: summarizeSamples(
-      firstOutputSamples.map((sample) => sample.harnessRssDeltaMb)
+    harnessEndRssMb: summarizeSamples(
+      firstOutputSamples.map((sample) => sample.harnessEndRssMb)
+    ),
+    harnessEndRssDeltaMb: summarizeSamples(
+      firstOutputSamples.map((sample) => sample.harnessEndRssDeltaMb)
     ),
   };
 
@@ -441,8 +444,8 @@ async function measureFirstOutput(command: string[]): Promise<FirstOutputSample>
   return {
     firstOutputMs: roundMetric(observedFirstOutputAt - startedAt),
     processDrainMs: roundMetric(Math.max(0, finishedAt - observedFirstOutputAt)),
-    harnessRssMb: roundMetric(rssAfter),
-    harnessRssDeltaMb: roundMetric(Math.max(0, rssAfter - rssBefore)),
+    harnessEndRssMb: roundMetric(rssAfter),
+    harnessEndRssDeltaMb: roundMetric(Math.max(0, rssAfter - rssBefore)),
   };
 }
 

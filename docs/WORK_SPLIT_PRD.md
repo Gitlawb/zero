@@ -204,7 +204,7 @@ Goal: Core slash commands work, cost and diagnostics are visible, sessions have 
 
 - Self-update design and `zero update --check`.
 - Install scripts for Linux/macOS and PowerShell draft for Windows.
-- Performance benchmark harness: cold start, binary first-output latency, harness memory.
+- Performance benchmark harness: cold start, binary first-output latency, harness end memory.
 - CI performance smoke job with threshold warnings.
 - Release checksum generation.
 - PRs:
