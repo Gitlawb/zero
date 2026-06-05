@@ -75,6 +75,23 @@ func TestDetectUsesPackageManagerLockfiles(t *testing.T) {
 	}
 }
 
+func TestDetectDefaultsPlainNodeWorkspacesToNPM(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "package.json"), `{"scripts":{"test":"node --test"}}`)
+
+	checks, err := Detect(root)
+	if err != nil {
+		t.Fatalf("Detect returned error: %v", err)
+	}
+
+	if len(checks) != 1 {
+		t.Fatalf("checks = %#v, want one package test check", checks)
+	}
+	if checks[0].ID != "npm.test" || checks[0].Framework != FrameworkNode || !equalStrings(checks[0].Command, []string{"npm", "run", "test"}) {
+		t.Fatalf("plain node check = %#v, want npm.test with npm run test", checks[0])
+	}
+}
+
 func TestParseSummaryExtractsGoFailures(t *testing.T) {
 	check := Check{ID: "go.test", Framework: FrameworkGo}
 	output := `=== RUN   TestPass
@@ -97,6 +114,28 @@ FAIL`
 	}
 	if summary.Failures[0].File != "secret_test.go:12" || summary.Failures[0].Message == "" {
 		t.Fatalf("unexpected failure detail: %#v", summary.Failures[0])
+	}
+}
+
+func TestParseSummaryCountsNonVerboseGoPackagePassesWithFailures(t *testing.T) {
+	check := Check{ID: "go.test", Framework: FrameworkGo}
+	output := `--- FAIL: TestBroken (0.00s)
+    broken_test.go:12: expected value
+FAIL
+FAIL	example.com/app/internal/broken	0.02s
+ok  	example.com/app/internal/healthy	0.12s
+`
+
+	summary := ParseSummary(check, output, "")
+
+	if summary == nil {
+		t.Fatal("expected parsed summary")
+	}
+	if summary.Total != 2 || summary.Passed != 1 || summary.Failed != 1 {
+		t.Fatalf("unexpected mixed non-verbose summary: %#v", summary)
+	}
+	if len(summary.Failures) != 1 || summary.Failures[0].Name != "TestBroken" {
+		t.Fatalf("unexpected failures: %#v", summary.Failures)
 	}
 }
 

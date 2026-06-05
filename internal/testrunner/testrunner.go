@@ -202,7 +202,7 @@ func detectPackageManager(root string, declared string) packageManager {
 	case fileExists(filepath.Join(root, "package-lock.json")) || declaredName == "npm":
 		return packageManager{Name: "npm", IDPrefix: "npm", Framework: FrameworkNode}
 	default:
-		return packageManager{Name: "bun", IDPrefix: "bun", Framework: FrameworkBun}
+		return packageManager{Name: "npm", IDPrefix: "npm", Framework: FrameworkNode}
 	}
 }
 
@@ -226,20 +226,19 @@ func parseGoSummary(output string) *Summary {
 	lines := splitLines(output)
 	failureByName := map[string]int{}
 	packagePasses := 0
-	sawDetailedTest := false
+	sawVerbosePerTestOutput := false
 	for index, line := range lines {
 		switch {
 		case goRunPattern.MatchString(line):
-			sawDetailedTest = true
+			sawVerbosePerTestOutput = true
 			summary.Total++
 		case goPassPattern.MatchString(line):
-			sawDetailedTest = true
+			sawVerbosePerTestOutput = true
 			summary.Passed++
 		case goSkipPattern.MatchString(line):
-			sawDetailedTest = true
+			sawVerbosePerTestOutput = true
 			summary.Skipped++
 		case goFailPattern.MatchString(line):
-			sawDetailedTest = true
 			summary.Failed++
 			match := goFailPattern.FindStringSubmatch(line)
 			name := safeSubmatch(match, 1)
@@ -255,7 +254,7 @@ func parseGoSummary(output string) *Summary {
 			packagePasses++
 		}
 	}
-	if !sawDetailedTest {
+	if !sawVerbosePerTestOutput {
 		summary.Passed += packagePasses
 	}
 	for index, line := range lines {
