@@ -249,11 +249,15 @@ func WriteConfig(path string, config Config) error {
 	if err != nil {
 		return err
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d", resolved, os.Getpid())
+	tempPath := fmt.Sprintf("%s.tmp-%d-%d", resolved, os.Getpid(), time.Now().UnixNano())
 	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, resolved)
+	if err := os.Rename(tempPath, resolved); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
 }
 
 type ConfigStore struct {
@@ -277,14 +281,7 @@ func NewConfigStore(options StoreOptions) (*ConfigStore, error) {
 }
 
 func (store *ConfigStore) List() (Config, error) {
-	result, err := LoadConfig(LoadOptions{
-		UserConfigPath:    store.configPath + ".user-missing",
-		ProjectConfigPath: store.configPath,
-	})
-	if err != nil {
-		return Config{}, err
-	}
-	return result.Config, nil
+	return readSingleConfig(store.configPath)
 }
 
 func (store *ConfigStore) Upsert(hook Definition) (Definition, error) {
@@ -557,6 +554,19 @@ func readLayer(source ConfigSource, path string, diagnostics *[]Diagnostic) (hoo
 		return hookLayer{}, false
 	}
 	return hookLayer{source: source, path: path, config: config}, true
+}
+
+func readSingleConfig(path string) (Config, error) {
+	diagnostics := []Diagnostic{}
+	layer, ok := readLayer(SourceProject, path, &diagnostics)
+	if len(diagnostics) > 0 {
+		diagnostic := diagnostics[0]
+		return Config{}, fmt.Errorf("invalid Zero hook config at %s: %s", diagnostic.Path, diagnostic.Message)
+	}
+	if !ok {
+		return Config{Enabled: true, Hooks: []Definition{}}, nil
+	}
+	return layer.config, nil
 }
 
 func mergeLayers(layers []hookLayer, diagnostics *[]Diagnostic) Config {

@@ -176,6 +176,37 @@ func TestConfigStorePersistsUpdates(t *testing.T) {
 	}
 }
 
+func TestConfigStoreListReadsOnlyStorePath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, configPath, map[string]any{
+		"hooks": []any{map[string]any{
+			"id":      "zero.real",
+			"event":   "beforeTool",
+			"command": "node",
+		}},
+	})
+	writeHookJSON(t, configPath+".user-missing", map[string]any{
+		"hooks": []any{map[string]any{
+			"id":      "zero.fake",
+			"event":   "afterTool",
+			"command": "node",
+		}},
+	})
+	store, err := NewConfigStore(StoreOptions{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("NewConfigStore returned error: %v", err)
+	}
+
+	config, err := store.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if got := hookIDs(config.Hooks); !reflect.DeepEqual(got, []string{"zero.real"}) {
+		t.Fatalf("hook ids = %#v", got)
+	}
+}
+
 func TestSelectMatchesEnabledHooksByEventAndWildcard(t *testing.T) {
 	config := Config{Enabled: true, Hooks: []Definition{
 		{ID: "zero.reads", Event: EventBeforeTool, Matcher: "read_*", Command: "node", Enabled: true},

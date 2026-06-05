@@ -435,7 +435,7 @@ func (store *PermissionStore) writeState(state permissionFile) error {
 	if err != nil {
 		return err
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d-%d", store.filePath, os.Getpid(), time.Now().UnixNano())
+	tempPath := fmt.Sprintf("%s.tmp-%d-%d", store.filePath, os.Getpid(), store.now().UnixNano())
 	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
 		return err
 	}
