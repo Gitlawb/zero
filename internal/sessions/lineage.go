@@ -45,10 +45,10 @@ func (store *Store) CreateChild(parentSessionID string, input ChildInput) (Metad
 	}
 
 	payload := childLinkPayload(parent, child, input, lastParentEvent)
-	if _, err := store.AppendEvent(child.SessionID, AppendEventInput{Type: EventSessionChild, Payload: payload}); err != nil {
+	if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventSessionChild, Payload: payload}); err != nil {
 		return Metadata{}, err
 	}
-	if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventSessionChild, Payload: payload}); err != nil {
+	if _, err := store.AppendEvent(child.SessionID, AppendEventInput{Type: EventSessionChild, Payload: payload}); err != nil {
 		return Metadata{}, err
 	}
 	loaded, err := store.readMetadata(child.SessionID)

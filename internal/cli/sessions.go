@@ -28,6 +28,9 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	store := deps.newSessionStore()
 	switch command {
 	case "list":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions list does not accept positional arguments")
+		}
 		return runSessionsList(store, options, stdout, stderr)
 	case "children":
 		if len(remaining) != 1 {
@@ -52,6 +55,7 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, bool, error) {
 	options := sessionCommandOptions{}
 	command := "list"
+	commandExplicit := false
 	remaining := []string{}
 	for _, arg := range args {
 		switch arg {
@@ -63,9 +67,13 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			if strings.HasPrefix(arg, "-") {
 				return command, remaining, options, false, execUsageError{fmt.Sprintf("unknown sessions flag %q", arg)}
 			}
-			if command == "list" && len(remaining) == 0 && isSessionsCommand(arg) {
+			if !commandExplicit && len(remaining) == 0 && isSessionsCommand(arg) {
 				command = arg
+				commandExplicit = true
 				continue
+			}
+			if !commandExplicit && len(remaining) == 0 {
+				return command, remaining, options, false, execUsageError{fmt.Sprintf("unknown sessions command %q", arg)}
 			}
 			remaining = append(remaining, arg)
 		}

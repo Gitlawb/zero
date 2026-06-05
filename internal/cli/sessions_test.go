@@ -96,6 +96,31 @@ func TestRunSessionsValidatesArgs(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Zero session not found: missing") {
 		t.Fatalf("sessions children stderr = %q, want missing-session error", stderr.String())
 	}
+
+	for _, test := range []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{name: "unknown command", args: []string{"sessions", "foo"}, wantStderr: `unknown sessions command "foo"`},
+		{name: "list extra arg", args: []string{"sessions", "list", "extra"}, wantStderr: "sessions list does not accept positional arguments"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			exitCode := runWithDeps(test.args, &stdout, &stderr, appDeps{
+				newSessionStore: func() *sessions.Store {
+					return store
+				},
+			})
+			if exitCode != exitUsage {
+				t.Fatalf("%v exit = %d, want usage", test.args, exitCode)
+			}
+			if !strings.Contains(stderr.String(), test.wantStderr) {
+				t.Fatalf("%v stderr = %q, want %q", test.args, stderr.String(), test.wantStderr)
+			}
+		})
+	}
 }
 
 func sequenceClockCLI(values []time.Time) func() time.Time {
