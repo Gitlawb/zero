@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -143,6 +145,56 @@ func TestPermissionStoreRejectsInvalidAutonomyBeforeWriting(t *testing.T) {
 	}
 	if len(grants) != 0 {
 		t.Fatalf("expected no grants after invalid write, got %#v", grants)
+	}
+}
+
+func TestPermissionStoreSerializesConcurrentStoreInstances(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "mcp-permissions.json")
+	const grantCount = 16
+	var wait sync.WaitGroup
+	errs := make(chan error, grantCount)
+
+	for index := 0; index < grantCount; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			store, err := NewPermissionStore(StoreOptions{
+				FilePath: filePath,
+				Now:      func() time.Time { return time.Date(2026, 6, 3, 9, 30, index, 0, time.UTC) },
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			_, err = store.GrantTool(GrantToolInput{
+				ServerName:     fmt.Sprintf("docs_%02d", index),
+				ServerIdentity: fmt.Sprintf("%032d", index),
+				ToolName:       "lookup",
+				MaxAutonomy:    AutonomyLow,
+			})
+			if err != nil {
+				errs <- err
+			}
+		}(index)
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent grant failed: %v", err)
+		}
+	}
+
+	store, err := NewPermissionStore(StoreOptions{FilePath: filePath})
+	if err != nil {
+		t.Fatalf("NewPermissionStore returned error: %v", err)
+	}
+	grants, err := store.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(grants) != grantCount {
+		t.Fatalf("grant count = %d, want %d: %#v", len(grants), grantCount, grants)
 	}
 }
 

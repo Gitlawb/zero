@@ -115,9 +115,12 @@ func TestLoadConfigRejectsMatchersOnSessionHooks(t *testing.T) {
 
 func TestConfigStorePersistsUpdates(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "hooks.json")
-	store := NewConfigStore(StoreOptions{ConfigPath: configPath})
+	store, err := NewConfigStore(StoreOptions{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("NewConfigStore returned error: %v", err)
+	}
 
-	_, err := store.Upsert(Definition{
+	_, err = store.Upsert(Definition{
 		ID:      "zero.preflight",
 		Name:    "Preflight",
 		Event:   EventBeforeTool,
@@ -135,6 +138,18 @@ func TestConfigStorePersistsUpdates(t *testing.T) {
 	if !config.Hooks[0].Enabled {
 		t.Fatalf("new hooks should default to enabled: %#v", config.Hooks[0])
 	}
+	upserted, err := store.Upsert(Definition{
+		ID:      "zero.explicit",
+		Event:   EventAfterTool,
+		Command: "node",
+		Enabled: false,
+	})
+	if err != nil {
+		t.Fatalf("Upsert with zero-value Enabled returned error: %v", err)
+	}
+	if !upserted.Enabled {
+		t.Fatalf("Upsert should default zero-value Enabled to true; use SetEnabled to disable: %#v", upserted)
+	}
 	changed, err := store.SetEnabled("zero.preflight", false)
 	if err != nil || !changed {
 		t.Fatalf("SetEnabled changed=%v err=%v", changed, err)
@@ -144,8 +159,9 @@ func TestConfigStorePersistsUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if config.Hooks[0].Enabled || config.Hooks[0].Matcher != "bash" {
-		t.Fatalf("unexpected stored hook: %#v", config.Hooks[0])
+	preflight := findHook(config.Hooks, "zero.preflight")
+	if preflight == nil || preflight.Enabled || preflight.Matcher != "bash" {
+		t.Fatalf("unexpected stored hook: %#v", preflight)
 	}
 	removed, err := store.Remove("zero.preflight")
 	if err != nil || !removed {
@@ -155,8 +171,8 @@ func TestConfigStorePersistsUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
-	if len(config.Hooks) != 0 {
-		t.Fatalf("expected no hooks after remove, got %#v", config.Hooks)
+	if findHook(config.Hooks, "zero.preflight") != nil {
+		t.Fatalf("expected zero.preflight to be removed, got %#v", config.Hooks)
 	}
 }
 
@@ -189,10 +205,13 @@ func TestAuditStoreAppendsAndSkipsMalformedLines(t *testing.T) {
 	}, "\n")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := NewAuditStore(AuditStoreOptions{
+	store, err := NewAuditStore(AuditStoreOptions{
 		AuditPath: auditPath,
 		Now:       func() time.Time { return time.Date(2026, 6, 4, 0, 0, 2, 0, time.UTC) },
 	})
+	if err != nil {
+		t.Fatalf("NewAuditStore returned error: %v", err)
+	}
 
 	events, err := store.ReadEvents()
 	if err != nil {
@@ -236,6 +255,15 @@ func hookIDs(definitions []Definition) []string {
 		ids = append(ids, definition.ID)
 	}
 	return ids
+}
+
+func findHook(definitions []Definition, id string) *Definition {
+	for index := range definitions {
+		if definitions[index].ID == id {
+			return &definitions[index]
+		}
+	}
+	return nil
 }
 
 func hasHookDiagnostic(diagnostics []Diagnostic, kind DiagnosticKind, hookID string, fieldPath string) bool {

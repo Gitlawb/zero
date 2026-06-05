@@ -150,11 +150,6 @@ func runMCPPermissions(args []string, stdout io.Writer, stderr io.Writer, deps a
 		return exitSuccess
 	}
 
-	store, err := deps.newMCPStore()
-	if err != nil {
-		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
-	}
-
 	switch args[0] {
 	case "list":
 		options, help, err := parseMCPCommandOptions(args[1:])
@@ -166,6 +161,10 @@ func runMCPPermissions(args []string, stdout io.Writer, stderr io.Writer, deps a
 				return exitCrash
 			}
 			return exitSuccess
+		}
+		store, err := deps.newMCPStore()
+		if err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 		permissions, err := store.List()
 		if err != nil {
@@ -185,15 +184,15 @@ func runMCPPermissions(args []string, stdout io.Writer, stderr io.Writer, deps a
 		}
 		return exitSuccess
 	case "revoke":
-		return runMCPPermissionsRevoke(args[1:], stdout, stderr, store)
+		return runMCPPermissionsRevoke(args[1:], stdout, stderr, deps)
 	case "clear":
-		return runMCPPermissionsClear(args[1:], stdout, stderr, store)
+		return runMCPPermissionsClear(args[1:], stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown mcp permissions subcommand %q", args[0]))
 	}
 }
 
-func runMCPPermissionsRevoke(args []string, stdout io.Writer, stderr io.Writer, store *mcp.PermissionStore) int {
+func runMCPPermissionsRevoke(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, positional, help, err := parseMCPPositionalCommand(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -205,9 +204,13 @@ func runMCPPermissionsRevoke(args []string, stdout io.Writer, stderr io.Writer, 
 		return exitSuccess
 	}
 	if len(positional) == 0 || len(positional) > 2 {
-		return writeExecUsageError(stderr, "usage: zero mcp permissions revoke <server> [tool] [--json]")
+		return writeExecUsageError(stderr, "usage: zero mcp permissions revoke <server> [<tool>] [--json]")
 	}
 
+	store, err := deps.newMCPStore()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
 	serverName := positional[0]
 	if len(positional) == 2 {
 		revoked, err := store.RevokeTool(serverName, positional[1])
@@ -249,7 +252,7 @@ func runMCPPermissionsRevoke(args []string, stdout io.Writer, stderr io.Writer, 
 	return exitSuccess
 }
 
-func runMCPPermissionsClear(args []string, stdout io.Writer, stderr io.Writer, store *mcp.PermissionStore) int {
+func runMCPPermissionsClear(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseMCPCommandOptions(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -262,6 +265,10 @@ func runMCPPermissionsClear(args []string, stdout io.Writer, stderr io.Writer, s
 	}
 	if !options.confirm {
 		return writeAppError(stderr, "Pass --confirm to clear all MCP permission grants.", exitCrash)
+	}
+	store, err := deps.newMCPStore()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	cleared, err := store.Clear()
 	if err != nil {
@@ -406,7 +413,7 @@ func writeMCPPermissionsHelp(w io.Writer) error {
 
 Commands:
   list                  List all persistent MCP permissions
-  revoke <server> [tool] Revoke an MCP server or tool permission
+  revoke <server> [<tool>] Revoke an MCP server or tool permission
   clear --confirm       Clear all persistent MCP permissions
 
 Flags:

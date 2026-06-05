@@ -260,17 +260,20 @@ type ConfigStore struct {
 	configPath string
 }
 
-func NewConfigStore(options StoreOptions) *ConfigStore {
+func NewConfigStore(options StoreOptions) (*ConfigStore, error) {
 	path := options.ConfigPath
 	if strings.TrimSpace(path) == "" {
-		paths, _ := ResolvePaths(ResolvePathOptions{})
+		paths, err := ResolvePaths(ResolvePathOptions{})
+		if err != nil {
+			return nil, err
+		}
 		path = paths.ProjectConfigPath
 	}
 	resolved, err := filepath.Abs(path)
-	if err == nil {
-		path = resolved
+	if err != nil {
+		return nil, err
 	}
-	return &ConfigStore{configPath: path}
+	return &ConfigStore{configPath: resolved}, nil
 }
 
 func (store *ConfigStore) List() (Config, error) {
@@ -294,6 +297,8 @@ func (store *ConfigStore) Upsert(hook Definition) (Definition, error) {
 		return Definition{}, err
 	}
 	raw := definitionToRaw(hook)
+	// Upsert treats the zero-value Enabled field as omitted so new hooks default
+	// to enabled. Disable persisted hooks explicitly with SetEnabled.
 	if !hook.Enabled {
 		delete(raw, "enabled")
 	}
@@ -420,17 +425,24 @@ type AuditStore struct {
 	mu        sync.Mutex
 }
 
-func NewAuditStore(options AuditStoreOptions) *AuditStore {
+func NewAuditStore(options AuditStoreOptions) (*AuditStore, error) {
 	path := options.AuditPath
 	if strings.TrimSpace(path) == "" {
-		paths, _ := ResolvePaths(ResolvePathOptions{})
+		paths, err := ResolvePaths(ResolvePathOptions{})
+		if err != nil {
+			return nil, err
+		}
 		path = paths.AuditPath
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
 	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &AuditStore{auditPath: path, now: now}
+	return &AuditStore{auditPath: resolved, now: now}, nil
 }
 
 func (store *AuditStore) AppendStarted(input AppendStartedInput) (AuditEvent, error) {
@@ -457,6 +469,9 @@ func (store *AuditStore) AppendCompleted(input AppendCompletedInput) (AuditEvent
 	})
 }
 
+// ReadEvents deliberately does not acquire store.mu. append holds store.mu while
+// writing a single O_APPEND JSONL record, and lock-free readers may miss or skip
+// an in-progress append while still avoiding deadlocks with append's read step.
 func (store *AuditStore) ReadEvents() ([]AuditEvent, error) {
 	data, err := os.ReadFile(store.auditPath)
 	if err != nil {
@@ -466,14 +481,13 @@ func (store *AuditStore) ReadEvents() ([]AuditEvent, error) {
 		return nil, err
 	}
 	events := []AuditEvent{}
-	for index, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		var event AuditEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			_ = index
 			continue
 		}
 		events = append(events, event)

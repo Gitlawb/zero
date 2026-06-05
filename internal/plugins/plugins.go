@@ -494,11 +494,19 @@ func ResolvePluginPath(pluginDir string, value string, fieldPath string) (string
 	if err != nil {
 		return "", err
 	}
+	rootCheck := root
+	if realRoot, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
+		rootCheck = realRoot
+	}
 	resolved, err := filepath.Abs(filepath.Join(root, value))
 	if err != nil {
 		return "", err
 	}
-	relative, err := filepath.Rel(root, resolved)
+	resolvedCheck := resolved
+	if realResolved, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil {
+		resolvedCheck = realResolved
+	}
+	relative, err := filepath.Rel(rootCheck, resolvedCheck)
 	if err != nil {
 		return "", err
 	}
@@ -549,7 +557,7 @@ func toDiagnostic(err error, root Root, rootPath string, pluginDir string, manif
 		}
 	}
 	return Diagnostic{
-		Kind:         DiagnosticSchema,
+		Kind:         DiagnosticIO,
 		Source:       root.Source,
 		Root:         rootPath,
 		PluginPath:   pluginDir,

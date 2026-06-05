@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -192,5 +193,34 @@ func TestRunMCPPermissionsListRevokeAndClear(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"cleared": 1`) {
 		t.Fatalf("unexpected clear output: %s", stdout.String())
+	}
+}
+
+func TestRunMCPPermissionsHelpDoesNotOpenStore(t *testing.T) {
+	deps := appDeps{
+		newMCPStore: func() (*mcp.PermissionStore, error) {
+			return nil, errors.New("store should not be opened for help")
+		},
+	}
+
+	for _, args := range [][]string{
+		{"mcp", "permissions", "list", "--help"},
+		{"mcp", "permissions", "revoke", "--help"},
+		{"mcp", "permissions", "clear", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(args, &stdout, &stderr, deps)
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected empty stderr, got %q", stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "zero mcp permissions") {
+				t.Fatalf("expected help output, got %q", stdout.String())
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,54 @@ func TestParseManifestRejectsUnsafePluginLocalPaths(t *testing.T) {
 				t.Fatalf("expected unsafe path error, got %v", err)
 			}
 		})
+	}
+}
+
+func TestParseManifestRejectsSymlinkEscapes(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "bad")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "escape.md"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(pluginDir, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	_, err := ParseManifest(map[string]any{
+		"schemaVersion": float64(1),
+		"id":            "zero.bad",
+		"name":          "Bad",
+		"version":       "0.1.0",
+		"prompts":       []any{map[string]any{"name": "escape", "path": filepath.Join("link", "escape.md")}},
+	}, ParseManifestOptions{
+		Source:       SourceProject,
+		Root:         root,
+		PluginDir:    pluginDir,
+		ManifestPath: filepath.Join(pluginDir, "plugin.json"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "must stay inside the plugin directory") {
+		t.Fatalf("expected symlink escape error, got %v", err)
+	}
+}
+
+func TestToDiagnosticClassifiesManifestAndIOErrors(t *testing.T) {
+	root := Root{Source: SourceProject}
+	schemaDiagnostic := toDiagnostic(ManifestError{FieldPath: "prompts.0.path", Message: "bad path"}, root, "/plugins", "/plugins/bad", "/plugins/bad/plugin.json")
+	if schemaDiagnostic.Kind != DiagnosticSchema || schemaDiagnostic.FieldPath != "prompts.0.path" {
+		t.Fatalf("manifest error diagnostic = %#v", schemaDiagnostic)
+	}
+
+	ioDiagnostic := toDiagnostic(errors.New("read failed"), root, "/plugins", "/plugins/bad", "/plugins/bad/plugin.json")
+	if ioDiagnostic.Kind != DiagnosticIO || ioDiagnostic.Message != "read failed" {
+		t.Fatalf("io error diagnostic = %#v", ioDiagnostic)
 	}
 }
 

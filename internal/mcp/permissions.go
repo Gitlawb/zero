@@ -27,7 +27,11 @@ const (
 	AutonomyHigh   PermissionAutonomy = "high"
 )
 
-const permissionSchemaVersion = 1
+const (
+	permissionSchemaVersion = 1
+	permissionLockTimeout   = 5 * time.Second
+	permissionLockRetry     = 10 * time.Millisecond
+)
 
 type PermissionGrant struct {
 	Scope          PermissionScope    `json:"scope"`
@@ -158,6 +162,11 @@ func (store *PermissionStore) GrantServer(input GrantServerInput) (PermissionGra
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return PermissionGrant{}, err
+	}
+	defer unlock()
 
 	state, err := store.readState()
 	if err != nil {
@@ -184,6 +193,11 @@ func (store *PermissionStore) GrantTool(input GrantToolInput) (PermissionGrant, 
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return PermissionGrant{}, err
+	}
+	defer unlock()
 
 	state, err := store.readState()
 	if err != nil {
@@ -264,6 +278,11 @@ func (store *PermissionStore) RevokeTool(serverName string, toolName string) (in
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 
 	state, err := store.readState()
 	if err != nil {
@@ -293,6 +312,11 @@ func (store *PermissionStore) RevokeServer(serverName string) (int, error) {
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 
 	state, err := store.readState()
 	if err != nil {
@@ -318,6 +342,11 @@ func (store *PermissionStore) RevokeServer(serverName string) (int, error) {
 func (store *PermissionStore) Clear() (int, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	unlock, err := store.lockStateFile()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 
 	state, err := store.readState()
 	if err != nil {
@@ -415,6 +444,27 @@ func (store *PermissionStore) writeState(state permissionFile) error {
 		return err
 	}
 	return nil
+}
+
+func (store *PermissionStore) lockStateFile() (func(), error) {
+	lockPath := store.filePath + ".lock"
+	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(permissionLockTimeout)
+	for {
+		err := os.Mkdir(lockPath, 0o700)
+		if err == nil {
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for MCP permissions lock at %s", lockPath)
+		}
+		time.Sleep(permissionLockRetry)
+	}
 }
 
 func emptyState() permissionFile {
