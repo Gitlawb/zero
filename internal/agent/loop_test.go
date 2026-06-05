@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -361,6 +363,38 @@ func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	}
 }
 
+func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWritePathThenAnswer(outside, "sandbox handled")
+
+	result, err := Run(context.Background(), "write outside", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeUnsafe,
+		Autonomy:       string(sandbox.AutonomyHigh),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "sandbox handled" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("expected sandbox to prevent outside write, stat error: %v", err)
+	}
+	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(lastMessage.Content, "Sandbox violation") || !strings.Contains(lastMessage.Content, "outside_workspace") {
+		t.Fatalf("expected sandbox violation tool result, got %q", lastMessage.Content)
+	}
+}
+
 func TestRunStopsAfterMaxTurns(t *testing.T) {
 	root := t.TempDir()
 	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha")
@@ -392,11 +426,15 @@ func TestRunStopsAfterMaxTurns(t *testing.T) {
 }
 
 func providerCallingWriteFileThenAnswer(answer string) *mockProvider {
+	return providerCallingWritePathThenAnswer("notes.txt", answer)
+}
+
+func providerCallingWritePathThenAnswer(path string, answer string) *mockProvider {
 	return &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
 				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
-				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":` + quoteJSONString(path) + `,"content":"hello"}`},
 				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
 				{Type: zeroruntime.StreamEventDone},
 			},
@@ -406,6 +444,11 @@ func providerCallingWriteFileThenAnswer(answer string) *mockProvider {
 			},
 		},
 	}
+}
+
+func quoteJSONString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func assertMessage(t *testing.T, message zeroruntime.Message, role zeroruntime.MessageRole, contentContains string) {

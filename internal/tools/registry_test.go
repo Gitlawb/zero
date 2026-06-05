@@ -2,7 +2,11 @@ package tools
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
@@ -65,5 +69,34 @@ func TestRegistryReportsUnknownTools(t *testing.T) {
 	}
 	if result.Output != `Error: Unknown tool "missing".` {
 		t.Fatalf("unexpected output: %q", result.Output)
+	}
+}
+
+func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	registry := NewRegistry()
+	registry.Register(NewWriteFileTool(root))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+
+	result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path":      outside,
+		"content":   "escape",
+		"overwrite": true,
+	}, RunOptions{
+		PermissionGranted: true,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionUnsafe),
+		Autonomy:          string(sandbox.AutonomyHigh),
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected sandbox violation status, got %s", result.Status)
+	}
+	if !strings.Contains(result.Output, "Sandbox violation") || !strings.Contains(result.Output, "outside_workspace") {
+		t.Fatalf("unexpected sandbox violation output: %q", result.Output)
 	}
 }

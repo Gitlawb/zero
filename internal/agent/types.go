@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -29,6 +30,8 @@ type Options struct {
 	MaxTurns       int
 	Registry       *tools.Registry
 	PermissionMode PermissionMode
+	Autonomy       string
+	Sandbox        *sandbox.Engine
 	EnabledTools   []string
 	DisabledTools  []string
 	OnText         func(string)

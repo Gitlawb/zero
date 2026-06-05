@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/worktrees"
@@ -120,6 +121,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err := preflightExecSession(options); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
+	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, deps)
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
 
 	prompt, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
 	if err != nil {
@@ -200,6 +205,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		MaxTurns:       resolved.MaxTurns,
 		Registry:       registry,
 		PermissionMode: permissionMode,
+		Autonomy:       options.autonomy,
+		Sandbox:        sandboxEngine,
 		EnabledTools:   options.enabledTools,
 		DisabledTools:  options.disabledTools,
 		OnText:         writer.text,
@@ -255,6 +262,21 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func buildExecSandboxEngine(workspaceRoot string, deps appDeps) (*sandbox.Engine, error) {
+	store, err := deps.newSandboxStore()
+	if err != nil {
+		return nil, err
+	}
+	policy := sandbox.DefaultPolicy()
+	backend := deps.selectSandboxBackend(sandbox.BackendOptions{})
+	return sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workspaceRoot,
+		Policy:        policy,
+		Store:         store,
+		Backend:       backend,
+	}), nil
 }
 
 func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {

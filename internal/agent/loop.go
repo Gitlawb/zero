@@ -123,6 +123,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 
 	result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
 		PermissionGranted: permissionGranted,
+		PermissionMode:    string(permissionMode),
+		Autonomy:          options.Autonomy,
+		Sandbox:           options.Sandbox,
 	})
 	return ToolResult{
 		ToolCallID: call.ID,
