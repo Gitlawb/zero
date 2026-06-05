@@ -50,17 +50,18 @@ func SelectBackend(options BackendOptions) Backend {
 }
 
 func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPlan {
-	if policy.Mode == "" {
-		policy = DefaultPolicy()
+	effectivePolicy := policy
+	if effectivePolicy.Mode == "" {
+		effectivePolicy = DefaultPolicy()
 	}
 	restrictions := []string{}
-	if policy.EnforceWorkspace {
+	if effectivePolicy.EnforceWorkspace {
 		restrictions = append(restrictions, "filesystem writes must stay inside workspace")
 	}
-	if policy.Network == NetworkDeny {
+	if effectivePolicy.Network == NetworkDeny {
 		restrictions = append(restrictions, "network access denied unless a future adapter grants it explicitly")
 	}
-	if policy.DenyDestructiveShell {
+	if effectivePolicy.DenyDestructiveShell {
 		restrictions = append(restrictions, "destructive shell patterns denied before execution")
 	}
 	if backend.Name == BackendPolicyOnly {
@@ -69,7 +70,7 @@ func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPla
 	return BackendPlan{
 		Backend:       backend,
 		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
+		Policy:        effectivePolicy,
 		Restrictions:  restrictions,
 	}
 }

@@ -44,7 +44,8 @@ func Classify(request Request) Risk {
 		if destructiveCommandPattern.MatchString(command) {
 			add("destructive", RiskCritical)
 		}
-		if strings.Contains(command, "| sh") || strings.Contains(command, "| bash") {
+		lowerCommand := strings.ToLower(command)
+		if strings.Contains(lowerCommand, "| sh") || strings.Contains(lowerCommand, "| bash") {
 			add("piped_installer", RiskCritical)
 		}
 	}

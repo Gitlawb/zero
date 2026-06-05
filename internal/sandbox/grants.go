@@ -137,6 +137,8 @@ func (store *GrantStore) Lookup(toolName string, requestedAutonomy Autonomy) (Gr
 	if err != nil {
 		return GrantLookup{}, err
 	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	state, err := store.readState()
 	if err != nil {
 		return GrantLookup{}, err
@@ -149,6 +151,8 @@ func (store *GrantStore) Lookup(toolName string, requestedAutonomy Autonomy) (Gr
 }
 
 func (store *GrantStore) List() ([]Grant, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	state, err := store.readState()
 	if err != nil {
 		return nil, err

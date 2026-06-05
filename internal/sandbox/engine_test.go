@@ -164,6 +164,15 @@ func TestEngineClassifiesNetworkAndDestructiveShellCommands(t *testing.T) {
 		t.Fatalf("destructive shell decision = %#v, want critical destructive deny", destructive)
 	}
 
+	pipedInstallerRisk := Classify(Request{
+		ToolName:   "bash",
+		SideEffect: SideEffectShell,
+		Args:       map[string]any{"command": "cat install.sh | BASH"},
+	})
+	if pipedInstallerRisk.Level != RiskCritical || !HasRiskCategory(pipedInstallerRisk, "piped_installer") {
+		t.Fatalf("piped installer risk = %#v, want critical piped_installer category", pipedInstallerRisk)
+	}
+
 	workspaceShell := engine.Evaluate(context.Background(), Request{
 		ToolName:       "bash",
 		SideEffect:     SideEffectShell,

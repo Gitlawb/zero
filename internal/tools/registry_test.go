@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,5 +99,53 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "Sandbox violation") || !strings.Contains(result.Output, "outside_workspace") {
 		t.Fatalf("unexpected sandbox violation output: %q", result.Output)
+	}
+}
+
+func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.Grant(sandbox.GrantInput{
+		ToolName:    "write_file",
+		Decision:    sandbox.GrantAllow,
+		MaxAutonomy: sandbox.AutonomyMedium,
+		Reason:      "workspace writes",
+	}); err != nil {
+		t.Fatalf("Grant returned error: %v", err)
+	}
+
+	registry := NewRegistry()
+	registry.Register(NewWriteFileTool(root))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Store:         store,
+	})
+
+	result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path":      "granted.txt",
+		"content":   "granted",
+		"overwrite": true,
+	}, RunOptions{
+		PermissionGranted: false,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionModeAsk),
+		Autonomy:          string(sandbox.AutonomyMedium),
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected persistent sandbox grant to authorize write_file, got %s: %s", result.Status, result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "granted.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(content) != "granted" {
+		t.Fatalf("written content = %q, want granted", string(content))
 	}
 }

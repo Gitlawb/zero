@@ -48,16 +48,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		return errorResult(`Error: Unknown tool "` + name + `".`)
 	}
 
-	switch tool.Safety().Permission {
-	case PermissionAllow:
-	case PermissionPrompt:
-		if !options.PermissionGranted {
-			return errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
-		}
-	default:
-		return errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
-	}
-
+	sandboxGrantAuthorized := false
 	if options.Sandbox != nil {
 		decision := options.Sandbox.Evaluate(ctx, sandbox.Request{
 			ToolName:          name,
@@ -75,6 +66,17 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		if decision.Action == sandbox.ActionPrompt && !options.PermissionGranted {
 			return errorResult("Error: Sandbox approval required for " + name + ": " + decision.Reason)
 		}
+		sandboxGrantAuthorized = decision.Action == sandbox.ActionAllow && decision.GrantMatched
+	}
+
+	switch tool.Safety().Permission {
+	case PermissionAllow:
+	case PermissionPrompt:
+		if !options.PermissionGranted && !sandboxGrantAuthorized {
+			return errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
+		}
+	default:
+		return errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
 	}
 
 	return tool.Run(ctx, args)
