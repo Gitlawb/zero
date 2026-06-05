@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/testrunner"
 )
 
 func TestDetectPlanFindsBunAndGoChecks(t *testing.T) {
@@ -35,6 +37,13 @@ func TestDetectPlanFindsBunAndGoChecks(t *testing.T) {
 	}
 	if plan.Checks[0].Command[0] != "go" || strings.Join(plan.Checks[0].Command, " ") != "go test ./..." {
 		t.Fatalf("first check = %#v, want go test ./...", plan.Checks[0])
+	}
+	byID := checksByID(plan.Checks)
+	if byID["go.test"].Kind != testrunner.KindTest || byID["go.test"].Framework != testrunner.FrameworkGo {
+		t.Fatalf("go.test metadata = %#v", byID["go.test"])
+	}
+	if byID["bun.typecheck"].Kind != testrunner.KindTypecheck || byID["bun.test"].Framework != testrunner.FrameworkBun {
+		t.Fatalf("bun metadata = typecheck %#v test %#v", byID["bun.typecheck"], byID["bun.test"])
 	}
 }
 
@@ -75,7 +84,7 @@ func TestRunExecutesPlanAndRedactsOutput(t *testing.T) {
 func TestRunParsesStructuredFailureSummary(t *testing.T) {
 	root := t.TempDir()
 	plan := Plan{Root: root, Checks: []Check{
-		{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}},
+		{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}, Kind: testrunner.KindTest, Framework: testrunner.FrameworkGo},
 	}}
 	runner := &fakeCommandRunner{results: []CommandResult{{
 		ExitCode: 1,
@@ -100,6 +109,38 @@ func TestRunParsesStructuredFailureSummary(t *testing.T) {
 	}
 	if strings.Contains(lines, "sk-proj-abcdefghijklmnopqrstuvwxyz") {
 		t.Fatalf("failure summary leaked secret: %q", lines)
+	}
+	if report.Results[0].TestSummary == nil {
+		t.Fatalf("expected parsed test summary, got %#v", report.Results[0])
+	}
+	if report.Results[0].TestSummary.Total != 1 || report.Results[0].TestSummary.Failed != 1 {
+		t.Fatalf("unexpected parsed test summary: %#v", report.Results[0].TestSummary)
+	}
+	if got := report.Results[0].TestSummary.Failures[0]; got.Name != "TestSecret" || got.File != "secret_test.go:12" || !strings.Contains(got.Message, "[REDACTED]") {
+		t.Fatalf("unexpected parsed failure detail: %#v", got)
+	}
+}
+
+func TestRunSkipsStructuredSummaryForNonTestChecks(t *testing.T) {
+	root := t.TempDir()
+	plan := Plan{Root: root, Checks: []Check{
+		{ID: "bun.typecheck", Name: "Bun typecheck", Command: []string{"bun", "run", "typecheck"}, Kind: testrunner.KindTypecheck, Framework: testrunner.FrameworkBun},
+	}}
+	runner := &fakeCommandRunner{results: []CommandResult{{
+		ExitCode: 1,
+		Stdout:   "1 failed, 2 passed while checking types\n",
+	}}}
+
+	report := Run(context.Background(), plan, RunOptions{
+		Runner: runner.Run,
+		Now:    fixedVerifyTime("2026-06-05T11:15:30Z"),
+	})
+
+	if report.Results[0].TestSummary != nil {
+		t.Fatalf("non-test check should not have a parsed test summary: %#v", report.Results[0].TestSummary)
+	}
+	if report.Results[0].OutputSummary == nil {
+		t.Fatalf("expected ordinary failure output summary, got %#v", report.Results[0])
 	}
 }
 
@@ -291,6 +332,14 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func checksByID(checks []Check) map[string]Check {
+	byID := map[string]Check{}
+	for _, check := range checks {
+		byID[check.ID] = check
+	}
+	return byID
 }
 
 func writeFile(t *testing.T, path string, content string) {

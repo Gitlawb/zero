@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/testrunner"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zerogit"
@@ -167,6 +168,13 @@ func TestRunVerifyTextAndJSON(t *testing.T) {
 			Status:   verify.StatusPass,
 			ExitCode: 0,
 			Stdout:   "ok",
+			TestSummary: &testrunner.Summary{
+				Framework: testrunner.FrameworkGo,
+				Total:     2,
+				Passed:    1,
+				Failed:    1,
+				Failures:  []testrunner.Failure{{Name: "TestBroken"}},
+			},
 		}},
 	}
 
@@ -214,7 +222,7 @@ func TestRunVerifyTextAndJSON(t *testing.T) {
 				if decoded.Root != cwd {
 					t.Fatalf("decoded verify root = %q, want %q", decoded.Root, cwd)
 				}
-			} else if !strings.Contains(stdout.String(), "Zero verification") || !strings.Contains(stdout.String(), "go.test") || !strings.Contains(stdout.String(), cwd) {
+			} else if !strings.Contains(stdout.String(), "Zero verification") || !strings.Contains(stdout.String(), "go.test") || !strings.Contains(stdout.String(), cwd) || !strings.Contains(stdout.String(), "tests: 2 total, 1 passed, 1 failed") {
 				t.Fatalf("unexpected verify text output: %q", stdout.String())
 			}
 		})
@@ -234,6 +242,23 @@ func TestRunVerifyRedactsWorkspacePathsInOutput(t *testing.T) {
 		EndedAt:   "2026-06-05T11:05:01Z",
 		OK:        true,
 		Summary:   verify.Summary{},
+		Results: []verify.Result{{
+			ID:            "go.test",
+			Name:          "Go tests",
+			Command:       []string{"go", "test", "./..."},
+			Status:        verify.StatusFail,
+			OutputSummary: &verify.OutputSummary{Lines: []string{"failure at " + secret}},
+			TestSummary: &testrunner.Summary{
+				Framework: testrunner.FrameworkGo,
+				Total:     1,
+				Failed:    1,
+				Failures: []testrunner.Failure{{
+					Name:    secret,
+					File:    filepath.Join(secret, "secret_test.go:12"),
+					Message: "token " + secret,
+				}},
+			},
+		}},
 	}
 
 	for _, args := range [][]string{

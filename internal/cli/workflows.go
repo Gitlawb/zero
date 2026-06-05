@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/testrunner"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zerogit"
@@ -433,10 +434,29 @@ func redactWorktreeResult(result worktrees.Result) worktrees.Result {
 
 func redactVerifyReport(report verify.Report) verify.Report {
 	report.Root = redactCLIString(report.Root)
+	report.Results = append([]verify.Result{}, report.Results...)
 	for index := range report.Results {
 		report.Results[index].Stdout = redactCLIString(report.Results[index].Stdout)
 		report.Results[index].Stderr = redactCLIString(report.Results[index].Stderr)
 		report.Results[index].Error = redactCLIString(report.Results[index].Error)
+		if report.Results[index].OutputSummary != nil {
+			summary := *report.Results[index].OutputSummary
+			summary.Lines = append([]string{}, summary.Lines...)
+			for lineIndex := range summary.Lines {
+				summary.Lines[lineIndex] = redactCLIString(summary.Lines[lineIndex])
+			}
+			report.Results[index].OutputSummary = &summary
+		}
+		if report.Results[index].TestSummary != nil {
+			summary := *report.Results[index].TestSummary
+			summary.Failures = append([]testrunner.Failure{}, summary.Failures...)
+			for failureIndex := range summary.Failures {
+				summary.Failures[failureIndex].Name = redactCLIString(summary.Failures[failureIndex].Name)
+				summary.Failures[failureIndex].File = redactCLIString(summary.Failures[failureIndex].File)
+				summary.Failures[failureIndex].Message = redactCLIString(summary.Failures[failureIndex].Message)
+			}
+			report.Results[index].TestSummary = &summary
+		}
 	}
 	return report
 }
@@ -507,11 +527,32 @@ func formatVerifyReport(report verify.Report) string {
 	}
 	for _, result := range report.Results {
 		lines = append(lines, fmt.Sprintf("  [%s] %s - %s", result.Status, result.ID, strings.Join(result.Command, " ")))
+		if result.TestSummary != nil {
+			lines = append(lines, formatVerifyTestSummary(result.TestSummary))
+			for _, failure := range result.TestSummary.Failures {
+				if failure.Name == "" {
+					continue
+				}
+				detail := failure.Name
+				if failure.File != "" {
+					detail += " at " + failure.File
+				}
+				lines = append(lines, "    failure: "+detail)
+			}
+		}
 		if result.Error != "" {
 			lines = append(lines, "    error: "+result.Error)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatVerifyTestSummary(summary *testrunner.Summary) string {
+	line := fmt.Sprintf("    tests: %d total, %d passed, %d failed", summary.Total, summary.Passed, summary.Failed)
+	if summary.Skipped > 0 {
+		line += fmt.Sprintf(", %d skipped", summary.Skipped)
+	}
+	return line
 }
 
 func formatVerifyLoopReport(report verify.LoopReport) string {

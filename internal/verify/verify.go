@@ -3,7 +3,6 @@ package verify
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/testrunner"
 )
 
 type Status string
@@ -24,9 +24,11 @@ const (
 )
 
 type Check struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Command []string `json:"command"`
+	ID        string               `json:"id"`
+	Name      string               `json:"name"`
+	Command   []string             `json:"command"`
+	Kind      testrunner.Kind      `json:"kind,omitempty"`
+	Framework testrunner.Framework `json:"framework,omitempty"`
 }
 
 type Plan struct {
@@ -42,18 +44,19 @@ type Summary struct {
 }
 
 type Result struct {
-	ID            string         `json:"id"`
-	Name          string         `json:"name"`
-	Command       []string       `json:"command"`
-	Status        Status         `json:"status"`
-	ExitCode      int            `json:"exitCode"`
-	Stdout        string         `json:"stdout,omitempty"`
-	Stderr        string         `json:"stderr,omitempty"`
-	StartedAt     string         `json:"startedAt"`
-	EndedAt       string         `json:"endedAt"`
-	DurationMs    int            `json:"durationMs"`
-	Error         string         `json:"error,omitempty"`
-	OutputSummary *OutputSummary `json:"outputSummary,omitempty"`
+	ID            string              `json:"id"`
+	Name          string              `json:"name"`
+	Command       []string            `json:"command"`
+	Status        Status              `json:"status"`
+	ExitCode      int                 `json:"exitCode"`
+	Stdout        string              `json:"stdout,omitempty"`
+	Stderr        string              `json:"stderr,omitempty"`
+	StartedAt     string              `json:"startedAt"`
+	EndedAt       string              `json:"endedAt"`
+	DurationMs    int                 `json:"durationMs"`
+	Error         string              `json:"error,omitempty"`
+	OutputSummary *OutputSummary      `json:"outputSummary,omitempty"`
+	TestSummary   *testrunner.Summary `json:"testSummary,omitempty"`
 }
 
 type Report struct {
@@ -113,11 +116,20 @@ func DetectPlan(root string) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	checks := []Check{}
-	if fileExists(filepath.Join(resolvedRoot, "go.mod")) {
-		checks = append(checks, Check{ID: "go.test", Name: "Go tests", Command: []string{"go", "test", "./..."}})
+	detected, err := testrunner.Detect(resolvedRoot)
+	if err != nil {
+		return Plan{}, err
 	}
-	checks = append(checks, detectPackageChecks(resolvedRoot)...)
+	checks := make([]Check, 0, len(detected))
+	for _, check := range detected {
+		checks = append(checks, Check{
+			ID:        check.ID,
+			Name:      check.Name,
+			Command:   append([]string{}, check.Command...),
+			Kind:      check.Kind,
+			Framework: check.Framework,
+		})
+	}
 	return Plan{Root: resolvedRoot, Checks: checks}, nil
 }
 
@@ -153,6 +165,15 @@ func Run(ctx context.Context, plan Plan, options RunOptions) Report {
 		result.Stdout = redaction.RedactString(commandResult.Stdout, redaction.Options{})
 		result.Stderr = redaction.RedactString(commandResult.Stderr, redaction.Options{})
 		result.ExitCode = commandResult.ExitCode
+		if shouldParseTestSummary(check) {
+			result.TestSummary = testrunner.ParseSummary(testrunner.Check{
+				ID:        check.ID,
+				Name:      check.Name,
+				Command:   append([]string{}, check.Command...),
+				Kind:      check.Kind,
+				Framework: check.Framework,
+			}, result.Stdout, result.Stderr)
+		}
 		if err != nil {
 			result.Status = StatusError
 			result.Error = redaction.RedactString(err.Error(), redaction.Options{})
@@ -218,39 +239,24 @@ func RunLoop(ctx context.Context, plan Plan, options LoopOptions) LoopReport {
 	return report
 }
 
-func detectPackageChecks(root string) []Check {
-	path := filepath.Join(root, "package.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+func shouldParseTestSummary(check Check) bool {
+	if check.Kind == testrunner.KindTest {
+		return true
 	}
-	var pkg struct {
-		Scripts map[string]string `json:"scripts"`
+	if check.Kind != "" {
+		return false
 	}
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return nil
+	id := strings.ToLower(strings.TrimSpace(check.ID))
+	if strings.Contains(id, ".test") || strings.HasSuffix(id, "test") || strings.Contains(id, "pytest") {
+		return true
 	}
-	checks := []Check{}
-	for _, candidate := range []struct {
-		script string
-		id     string
-		name   string
-	}{
-		{script: "typecheck", id: "bun.typecheck", name: "Bun typecheck"},
-		{script: "test", id: "bun.test", name: "Bun tests"},
-		{script: "build", id: "bun.build", name: "Bun build"},
-		{script: "lint", id: "bun.lint", name: "Bun lint"},
-	} {
-		if strings.TrimSpace(pkg.Scripts[candidate.script]) == "" {
-			continue
+	for _, part := range check.Command {
+		normalized := strings.ToLower(strings.TrimSpace(part))
+		if normalized == "test" || normalized == "pytest" {
+			return true
 		}
-		checks = append(checks, Check{
-			ID:      candidate.id,
-			Name:    candidate.name,
-			Command: []string{"bun", "run", candidate.script},
-		})
 	}
-	return checks
+	return false
 }
 
 func summarizeOutput(values ...string) *OutputSummary {
@@ -394,11 +400,6 @@ func filterChecks(checks []Check, only []string) ([]Check, []string) {
 	}
 	sort.Strings(unknown)
 	return filtered, unknown
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 func formatTime(value time.Time) string {
