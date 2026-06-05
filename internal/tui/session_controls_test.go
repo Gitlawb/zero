@@ -127,9 +127,10 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}}
 	m := newModel(context.Background(), Options{
-		ModelName: "gpt-4.1",
-		Provider:  provider,
-		Registry:  tools.NewRegistry(),
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
 	})
 	m.input.SetValue("track usage")
 
@@ -170,9 +171,10 @@ func TestUsageEventsForwardExistingAgentCallback(t *testing.T) {
 	}}
 	seen := []zeroruntime.Usage{}
 	m := newModel(context.Background(), Options{
-		ModelName: "gpt-4.1",
-		Provider:  provider,
-		Registry:  tools.NewRegistry(),
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
 		AgentOptions: agent.Options{
 			OnUsage: func(event agent.Usage) {
 				seen = append(seen, event)
@@ -205,9 +207,10 @@ func TestUsageEventsForCustomModelUseTokenOnlyFallback(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}}
 	m := newModel(context.Background(), Options{
-		ModelName: "custom-coder",
-		Provider:  provider,
-		Registry:  tools.NewRegistry(),
+		ModelName:    "custom-coder",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
 	})
 	m.input.SetValue("track usage")
 
@@ -237,9 +240,10 @@ func TestInvalidUsageEventsAppendTranscriptError(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}}
 	m := newModel(context.Background(), Options{
-		ModelName: "gpt-4.1",
-		Provider:  provider,
-		Registry:  tools.NewRegistry(),
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
 	})
 	m.input.SetValue("track usage")
 

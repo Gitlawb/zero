@@ -528,15 +528,15 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	}
 }
 
-func TestResumeCommandWithIDShowsHeadlessGuidance(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+func TestResumeCommandWithUnknownIDReportsMissingSession(t *testing.T) {
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t)})
 	m.input.SetValue("/resume zero_123")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
-	if !transcriptContains(next.transcript, "zero exec --resume zero_123") {
-		t.Fatalf("expected resume guidance, got %#v", next.transcript)
+	if !transcriptContains(next.transcript, "Zero session not found: zero_123") {
+		t.Fatalf("expected missing session message, got %#v", next.transcript)
 	}
 }
 
@@ -547,8 +547,9 @@ func TestPromptSubmitAppendsUserAndAssistantRows(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}}
 	m := newModel(context.Background(), Options{
-		Provider: provider,
-		Registry: tools.NewRegistry(),
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
 	})
 	m.input.SetValue("say hi")
 

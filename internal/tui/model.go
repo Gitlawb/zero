@@ -39,6 +39,8 @@ type model struct {
 	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
 	registry         *tools.Registry
 	sessionStore     *sessions.Store
+	activeSession    sessions.Metadata
+	sessionEvents    []sessions.Event
 	usageTracker     *usage.Tracker
 	agentOptions     agent.Options
 	permissionMode   agent.PermissionMode
@@ -58,11 +60,12 @@ type model struct {
 }
 
 type agentResponseMsg struct {
-	runID        int
-	rows         []transcriptRow
-	usageEvents  []zeroruntime.Usage
-	usageModelID string
-	err          error
+	runID         int
+	rows          []transcriptRow
+	usageEvents   []zeroruntime.Usage
+	usageModelID  string
+	sessionEvents []pendingSessionEvent
+	err           error
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -162,6 +165,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcript = appendRow(m.transcript, row.kind, row.text)
 			}
 		}
+		var sessionRows []transcriptRow
+		m, sessionRows = m.appendSessionEvents(msg.sessionEvents)
+		for _, row := range sessionRows {
+			m.transcript = appendRow(m.transcript, row.kind, row.text)
+		}
 		for _, row := range msg.rows {
 			m.transcript = appendRow(m.transcript, row.kind, row.text)
 		}
@@ -254,7 +262,18 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil
 	case commandResume:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.resumeText(command.text)})
+		if m.pending {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendError,
+				text: "Cannot resume sessions while a run is active.",
+			})
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleResumeCommand(command.text)
+		if text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
 		return m, nil
 	case commandCompact:
 		text := ""
@@ -292,6 +311,27 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
+		var err error
+		m, err = m.ensureActiveSession(command.text)
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendError,
+				text: "session create error: " + err.Error(),
+			})
+		} else {
+			agentPrompt := m.sessionPrompt(command.text)
+			m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+				"role":    "user",
+				"content": command.text,
+			})
+			if err != nil {
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{
+					kind: actionAppendError,
+					text: "session record error: " + err.Error(),
+				})
+			}
+			command.text = agentPrompt
+		}
 		runCtx, cancel := context.WithCancel(m.ctx)
 		m.runID++
 		m.activeRunID = m.runID
@@ -307,6 +347,13 @@ func (m *model) cancelRun() {
 	if m.runCancel != nil {
 		m.runCancel()
 	}
+	if m.pending && m.activeSession.SessionID != "" {
+		if next, err := (*m).appendSessionEvent(sessions.EventError, map[string]any{
+			"message": "Run cancelled.",
+		}); err == nil {
+			*m = next
+		}
+	}
 	m.pending = false
 	m.runCancel = nil
 	m.activeRunID = 0
@@ -316,6 +363,7 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 	return func() tea.Msg {
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
+		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
 		options := m.agentOptions
 		options.Registry = m.registry
@@ -324,6 +372,14 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
 			rows = append(rows, transcriptRow{kind: rowToolCall, text: "tool call: " + call.Name})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type: sessions.EventToolCall,
+				Payload: map[string]any{
+					"id":        call.ID,
+					"name":      call.Name,
+					"arguments": call.Arguments,
+				},
+			})
 			if onToolCall != nil {
 				onToolCall(call)
 			}
@@ -335,6 +391,15 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 				kind: rowToolResult,
 				text: toolResultRowText(result),
 			})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type: sessions.EventToolResult,
+				Payload: map[string]any{
+					"toolCallId": result.ToolCallID,
+					"name":       result.Name,
+					"status":     string(result.Status),
+					"output":     result.Output,
+				},
+			})
 			if onToolResult != nil {
 				onToolResult(result)
 			}
@@ -343,6 +408,14 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		onUsage := options.OnUsage
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type: sessions.EventUsage,
+				Payload: map[string]any{
+					"promptTokens":     event.EffectiveInputTokens(),
+					"completionTokens": event.EffectiveOutputTokens(),
+					"totalTokens":      event.TotalTokens(),
+				},
+			})
 			if onUsage != nil {
 				onUsage(event)
 			}
@@ -350,10 +423,21 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 
 		result, err := agent.Run(runCtx, prompt, m.provider, options)
 		if err != nil {
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, err: err}
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventError,
+				Payload: map[string]any{"message": err.Error()},
+			})
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err}
 		}
 		rows = append(rows, transcriptRow{kind: rowAssistant, text: result.FinalAnswer})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID}
+		sessionEvents = append(sessionEvents, pendingSessionEvent{
+			Type: sessions.EventMessage,
+			Payload: map[string]any{
+				"role":    "assistant",
+				"content": result.FinalAnswer,
+			},
+		})
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents}
 	}
 }
 
@@ -425,6 +509,7 @@ func (m model) contextText() string {
 		"usage: " + m.usageSummaryText(),
 		"compaction: " + m.compactionStatus(),
 		fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
+		"active session: " + displayValue(m.activeSession.SessionID, "none"),
 		"session root: " + displayValue(m.sessionStore.RootDir, "unknown"),
 		fmt.Sprintf("tools: %d", len(m.registry.All())),
 	}, "\n")
