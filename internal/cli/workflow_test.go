@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -83,6 +85,47 @@ func TestRunWorktreesPrepareReportsErrors(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not a git repository") {
 		t.Fatalf("expected worktree error, got %q", stderr.String())
+	}
+}
+
+func TestRunWorktreesPrepareRedactsPathsInOutput(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	cwd := filepath.Join(t.TempDir(), secret, "repo")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prepared := worktrees.Result{
+		Name:         "agent-task",
+		Path:         filepath.Join(t.TempDir(), secret, "agent-task"),
+		RepoRoot:     cwd,
+		SourceBranch: "feature/" + secret,
+		SourceCommit: "abc1234",
+	}
+
+	for _, args := range [][]string{
+		{"worktrees", "prepare", "--name", "agent-task"},
+		{"worktrees", "prepare", "--name", "agent-task", "--json"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				prepareWorktree: func(context.Context, worktrees.Options) (worktrees.Result, error) {
+					return prepared, nil
+				},
+			})
+
+			if exitCode != exitSuccess {
+				t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+			}
+			if strings.Contains(stdout.String(), secret) {
+				t.Fatalf("worktree output leaked secret path segment: %q", stdout.String())
+			}
+			if !strings.Contains(stdout.String(), redaction.RedactedSecret) {
+				t.Fatalf("expected redaction marker in worktree output, got %q", stdout.String())
+			}
+		})
 	}
 }
 
@@ -169,6 +212,54 @@ func TestRunVerifyTextAndJSON(t *testing.T) {
 				}
 			} else if !strings.Contains(stdout.String(), "Zero verification") || !strings.Contains(stdout.String(), "go.test") {
 				t.Fatalf("unexpected verify text output: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunVerifyRedactsWorkspacePathsInOutput(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	cwd := filepath.Join(t.TempDir(), secret, "workspace")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := verify.Plan{Root: cwd}
+	report := verify.Report{
+		Root:      cwd,
+		StartedAt: "2026-06-05T11:05:00Z",
+		EndedAt:   "2026-06-05T11:05:01Z",
+		OK:        true,
+		Summary:   verify.Summary{},
+	}
+
+	for _, args := range [][]string{
+		{"verify"},
+		{"verify", "--json"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				detectVerifyPlan: func(root string) (verify.Plan, error) {
+					if root != cwd {
+						t.Fatalf("verify root = %q, want %q", root, cwd)
+					}
+					return plan, nil
+				},
+				runVerify: func(context.Context, verify.Plan, verify.RunOptions) verify.Report {
+					return report
+				},
+			})
+
+			if exitCode != exitSuccess {
+				t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+			}
+			if strings.Contains(stdout.String(), secret) {
+				t.Fatalf("verify output leaked secret path segment: %q", stdout.String())
+			}
+			if !strings.Contains(stdout.String(), redaction.RedactedSecret) {
+				t.Fatalf("expected redaction marker in verify output, got %q", stdout.String())
 			}
 		})
 	}

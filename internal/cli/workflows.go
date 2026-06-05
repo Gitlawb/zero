@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/verify"
 	"github.com/Gitlawb/zero/internal/worktrees"
 )
@@ -63,13 +64,14 @@ func runWorktrees(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
+	safeResult := redactWorktreeResult(result)
 	if options.json {
-		if err := writePrettyJSON(stdout, result); err != nil {
+		if err := writePrettyJSON(stdout, safeResult); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatWorktreeResult(result)); err != nil {
+	if _, err := fmt.Fprintln(stdout, formatWorktreeResult(safeResult)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -99,11 +101,12 @@ func runVerifyCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		TimeoutMS: options.timeoutMS,
 		Now:       deps.now,
 	})
+	safeReport := redactVerifyReport(report)
 	if options.json {
-		if err := writePrettyJSON(stdout, report); err != nil {
+		if err := writePrettyJSON(stdout, safeReport); err != nil {
 			return exitCrash
 		}
-	} else if _, err := fmt.Fprintln(stdout, formatVerifyReport(report)); err != nil {
+	} else if _, err := fmt.Fprintln(stdout, formatVerifyReport(safeReport)); err != nil {
 		return exitCrash
 	}
 	if !report.OK {
@@ -238,6 +241,38 @@ func parsePositiveIntFlag(flag string, value string) (int, error) {
 		return 0, execUsageError{fmt.Sprintf("invalid %s %q. Expected a positive integer.", flag, value)}
 	}
 	return number, nil
+}
+
+func redactWorktreeResult(result worktrees.Result) worktrees.Result {
+	result.Name = redactCLIString(result.Name)
+	result.Path = redactCLIString(result.Path)
+	result.RepoRoot = redactCLIString(result.RepoRoot)
+	result.SourceBranch = redactCLIString(result.SourceBranch)
+	result.SourceCommit = redactCLIString(result.SourceCommit)
+	return result
+}
+
+func redactVerifyReport(report verify.Report) verify.Report {
+	report.Root = redactCLIString(report.Root)
+	report.StartedAt = redactCLIString(report.StartedAt)
+	report.EndedAt = redactCLIString(report.EndedAt)
+	for index := range report.Results {
+		report.Results[index].ID = redactCLIString(report.Results[index].ID)
+		report.Results[index].Name = redactCLIString(report.Results[index].Name)
+		report.Results[index].StartedAt = redactCLIString(report.Results[index].StartedAt)
+		report.Results[index].EndedAt = redactCLIString(report.Results[index].EndedAt)
+		report.Results[index].Stdout = redactCLIString(report.Results[index].Stdout)
+		report.Results[index].Stderr = redactCLIString(report.Results[index].Stderr)
+		report.Results[index].Error = redactCLIString(report.Results[index].Error)
+		for commandIndex := range report.Results[index].Command {
+			report.Results[index].Command[commandIndex] = redactCLIString(report.Results[index].Command[commandIndex])
+		}
+	}
+	return report
+}
+
+func redactCLIString(value string) string {
+	return redaction.RedactString(value, redaction.Options{})
 }
 
 func formatWorktreeResult(result worktrees.Result) string {
