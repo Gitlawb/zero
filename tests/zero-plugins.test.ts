@@ -161,11 +161,7 @@ describe('Zero plugin manifest validation', () => {
     const outside = join(dir, 'outside');
     await mkdir(pluginDir, { recursive: true });
     await mkdir(outside, { recursive: true });
-    try {
-      await symlink(outside, join(pluginDir, 'link'), 'dir');
-    } catch {
-      return;
-    }
+    await symlink(outside, join(pluginDir, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
 
     expect(() => parseZeroPluginManifest({
       schemaVersion: 1,
@@ -179,6 +175,26 @@ describe('Zero plugin manifest validation', () => {
       root: join(dir, 'plugins'),
       source: 'project',
     })).toThrow('must stay inside the plugin directory');
+  });
+
+  it('fails closed when plugin-local realpath resolution fails unexpectedly', async () => {
+    const dir = await makeTempDir();
+    const pluginDir = join(dir, 'plugins', 'bad');
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(join(pluginDir, 'file.md'), 'not a directory', 'utf-8');
+
+    expect(() => parseZeroPluginManifest({
+      schemaVersion: 1,
+      id: 'zero.bad',
+      name: 'Bad',
+      version: '0.1.0',
+      prompts: [{ name: 'escape', path: join('file.md', 'missing.md') }],
+    }, {
+      manifestPath: join(pluginDir, 'plugin.json'),
+      pluginDir,
+      root: join(dir, 'plugins'),
+      source: 'project',
+    })).toThrow();
   });
 });
 

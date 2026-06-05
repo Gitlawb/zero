@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'fs';
-import { basename, dirname, isAbsolute, relative, resolve, win32 } from 'path';
+import { basename, dirname, isAbsolute, relative, resolve, sep, win32 } from 'path';
 import { z } from 'zod';
 import type {
   ZeroLoadedPlugin,
@@ -127,7 +127,15 @@ function resolvePluginPath(pluginDir: string, value: string, fieldPath: string):
   const resolved = resolve(pluginDir, value);
   const resolvedCheck = resolveSymlinkAwarePath(resolved);
   const pathWithinPlugin = relative(pluginRootCheck, resolvedCheck);
-  if (pathWithinPlugin === '' || pathWithinPlugin.startsWith('..') || pathWithinPlugin.includes('..\\')) {
+  const rootBoundary = pluginRootCheck.endsWith(sep) ? pluginRootCheck : `${pluginRootCheck}${sep}`;
+  if (
+    pathWithinPlugin === '' ||
+    isAbsolute(pathWithinPlugin) ||
+    win32.isAbsolute(pathWithinPlugin) ||
+    pathWithinPlugin.startsWith('..') ||
+    pathWithinPlugin.includes('..\\') ||
+    (resolvedCheck !== pluginRootCheck && !resolvedCheck.startsWith(rootBoundary))
+  ) {
     throw new Error(`${fieldPath} must stay inside the plugin directory.`);
   }
   return resolved;
@@ -138,7 +146,7 @@ function resolveSymlinkAwarePath(path: string): string {
     return realpathSync(path);
   } catch (error) {
     if (!isENOENT(error)) {
-      return path;
+      throw error;
     }
   }
 
@@ -155,7 +163,10 @@ function resolveSymlinkAwarePath(path: string): string {
 
   try {
     return resolve(realpathSync(existing), ...missing);
-  } catch {
+  } catch (error) {
+    if (!isENOENT(error)) {
+      throw error;
+    }
     return path;
   }
 }
