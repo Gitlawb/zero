@@ -86,6 +86,47 @@ func TestLoadConfigLayersProjectOverridesAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestLoadConfigPreservesUserDisabledStateWhenProjectOmitsEnabled(t *testing.T) {
+	dir := t.TempDir()
+	userConfigPath := filepath.Join(dir, "user-hooks.json")
+	projectConfigPath := filepath.Join(dir, "project-hooks.json")
+	writeHookJSON(t, userConfigPath, map[string]any{
+		"enabled": false,
+		"hooks": []any{map[string]any{
+			"id":      "zero.format",
+			"event":   "afterTool",
+			"matcher": "edit_file",
+			"command": "bun",
+			"args":    []string{"run", "format"},
+			"enabled": false,
+		}},
+	})
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{map[string]any{
+			"id":      "zero.format",
+			"event":   "afterTool",
+			"matcher": "write_file",
+			"command": "bun",
+			"args":    []string{"run", "lint"},
+		}},
+	})
+
+	result, err := LoadConfig(LoadOptions{UserConfigPath: userConfigPath, ProjectConfigPath: projectConfigPath})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if result.Config.Enabled {
+		t.Fatalf("project layer without enabled should preserve user disabled config: %#v", result.Config)
+	}
+	if len(result.Config.Hooks) != 1 {
+		t.Fatalf("expected one hook, got %#v", result.Config.Hooks)
+	}
+	format := result.Config.Hooks[0]
+	if format.Enabled || format.Matcher != "write_file" || !reflect.DeepEqual(format.Args, []string{"run", "lint"}) {
+		t.Fatalf("project override should preserve user-disabled hook state: %#v", format)
+	}
+}
+
 func TestLoadConfigRejectsMatchersOnSessionHooks(t *testing.T) {
 	dir := t.TempDir()
 	projectConfigPath := filepath.Join(dir, "hooks.json")

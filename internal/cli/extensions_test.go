@@ -178,7 +178,7 @@ func TestRunMCPPermissionsListRevokeAndClear(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	exitCode = runWithDeps([]string{"mcp", "permissions", "clear", "--json"}, &stdout, &stderr, deps)
-	if exitCode != exitCrash {
+	if exitCode != exitUsage {
 		t.Fatalf("clear without confirm exitCode = %d", exitCode)
 	}
 	if !strings.Contains(stderr.String(), "--confirm") {

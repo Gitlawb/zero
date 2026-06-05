@@ -264,7 +264,7 @@ func runMCPPermissionsClear(args []string, stdout io.Writer, stderr io.Writer, d
 		return exitSuccess
 	}
 	if !options.confirm {
-		return writeAppError(stderr, "Pass --confirm to clear all MCP permission grants.", exitCrash)
+		return writeExecUsageError(stderr, "Pass --confirm to clear all MCP permission grants.")
 	}
 	store, err := deps.newMCPStore()
 	if err != nil {

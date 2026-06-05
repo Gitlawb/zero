@@ -164,9 +164,11 @@ func (err manifestError) Error() string {
 }
 
 type hookLayer struct {
-	source ConfigSource
-	path   string
-	config Config
+	source         ConfigSource
+	path           string
+	config         Config
+	enabledSet     bool
+	hookEnabledSet map[string]bool
 }
 
 var (
@@ -548,12 +550,13 @@ func readLayer(source ConfigSource, path string, diagnostics *[]Diagnostic) (hoo
 		*diagnostics = append(*diagnostics, Diagnostic{Kind: DiagnosticJSON, Source: source, Path: path, Message: err.Error()})
 		return hookLayer{}, false
 	}
+	enabledSet, hookEnabledSet := extractLayerEnabledMarkers(raw)
 	config, err := normalizeConfig(raw)
 	if err != nil {
 		*diagnostics = append(*diagnostics, toDiagnostic(err, source, path))
 		return hookLayer{}, false
 	}
-	return hookLayer{source: source, path: path, config: config}, true
+	return hookLayer{source: source, path: path, config: config, enabledSet: enabledSet, hookEnabledSet: hookEnabledSet}, true
 }
 
 func readSingleConfig(path string) (Config, error) {
@@ -574,7 +577,9 @@ func mergeLayers(layers []hookLayer, diagnostics *[]Diagnostic) Config {
 	byID := map[string]Definition{}
 	sourceByID := map[string]hookLayer{}
 	for _, layer := range layers {
-		enabled = layer.config.Enabled
+		if layer.enabledSet {
+			enabled = layer.config.Enabled
+		}
 		for _, hook := range layer.config.Hooks {
 			if previous, ok := sourceByID[hook.ID]; ok {
 				*diagnostics = append(*diagnostics, Diagnostic{
@@ -584,6 +589,9 @@ func mergeLayers(layers []hookLayer, diagnostics *[]Diagnostic) Config {
 					HookID:  hook.ID,
 					Message: fmt.Sprintf("Hook %q from %s overrides %s hook at %s.", hook.ID, layer.source, previous.source, previous.path),
 				})
+				if !layer.hookEnabledSet[hook.ID] {
+					hook.Enabled = byID[hook.ID].Enabled
+				}
 			}
 			byID[hook.ID] = hook
 			sourceByID[hook.ID] = layer
@@ -595,6 +603,33 @@ func mergeLayers(layers []hookLayer, diagnostics *[]Diagnostic) Config {
 	}
 	sortDefinitions(hooks)
 	return Config{Enabled: enabled, Hooks: hooks}
+}
+
+func extractLayerEnabledMarkers(raw any) (bool, map[string]bool) {
+	hookEnabledSet := map[string]bool{}
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return false, hookEnabledSet
+	}
+	_, enabledSet := obj["enabled"]
+	items, ok := obj["hooks"].([]any)
+	if !ok {
+		return enabledSet, hookEnabledSet
+	}
+	for _, item := range items {
+		hook, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, ok := hook["id"].(string)
+		if !ok {
+			continue
+		}
+		if _, ok := hook["enabled"]; ok {
+			hookEnabledSet[strings.TrimSpace(id)] = true
+		}
+	}
+	return enabledSet, hookEnabledSet
 }
 
 func normalizeConfig(raw any) (Config, error) {
