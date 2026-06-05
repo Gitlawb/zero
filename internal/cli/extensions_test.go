@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -9,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/plugins"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestRunPluginsListsJSONAndText(t *testing.T) {
@@ -193,6 +196,56 @@ func TestRunMCPPermissionsListRevokeAndClear(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"cleared": 1`) {
 		t.Fatalf("unexpected clear output: %s", stdout.String())
+	}
+}
+
+func TestRunMCPToolsListJSONAndText(t *testing.T) {
+	cwd := t.TempDir()
+	deps := appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "stdio", Command: "docs-mcp"},
+			}}, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registry.Register(cliFakeMCPRegistryTool{})
+			return closeFunc(func() error { return nil }), nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"mcp", "tools", "list", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	var payload struct {
+		Tools []struct {
+			Name       string `json:"name"`
+			Permission string `json:"permission"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("MCP tools JSON failed to decode: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Tools) != 1 || payload.Tools[0].Name != "mcp_docs_lookup" || payload.Tools[0].Permission != string(tools.PermissionAllow) {
+		t.Fatalf("unexpected MCP tools JSON: %#v", payload)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"mcp", "tools", "list"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	for _, want := range []string{"MCP Tools:", "mcp_docs_lookup", "Lookup documentation", "allow"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("MCP tools text missing %q: %s", want, stdout.String())
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 type pluginListOptions struct {
@@ -134,8 +136,62 @@ func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		return exitSuccess
 	case "permissions":
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
+	case "tools":
+		return runMCPTools(args[1:], stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown mcp subcommand %q", args[0]))
+	}
+}
+
+func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if len(args) == 0 {
+		return writeExecUsageError(stderr, "mcp tools subcommand required. Use `zero mcp tools list`.")
+	}
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		if err := writeMCPToolsHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	switch args[0] {
+	case "list":
+		options, help, err := parseMCPCommandOptions(args[1:])
+		if err != nil {
+			return writeExecUsageError(stderr, err.Error())
+		}
+		if help {
+			if err := writeMCPToolsHelp(stdout); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		}
+		cwd, err := deps.getwd()
+		if err != nil {
+			return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
+		}
+		registry := tools.NewRegistry()
+		runtime, err := registerMCPToolsForWorkspace(context.Background(), cwd, registry, deps, mcp.AutonomyLow)
+		if err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+		defer runtime.Close()
+		items := mcpToolList(registry)
+		if options.json {
+			payload := struct {
+				Tools []mcpToolListItem `json:"tools"`
+			}{Tools: items}
+			if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		}
+		if _, err := fmt.Fprintln(stdout, redaction.RedactString(formatMCPToolList(items), redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	default:
+		return writeExecUsageError(stderr, fmt.Sprintf("unknown mcp tools subcommand %q", args[0]))
 	}
 }
 
@@ -328,7 +384,7 @@ func parseMCPCommandOptions(args []string) (mcpCommandOptions, bool, error) {
 		case "--confirm":
 			options.confirm = true
 		default:
-			return options, false, execUsageError{fmt.Sprintf("unknown mcp permissions flag %q", arg)}
+			return options, false, execUsageError{fmt.Sprintf("unknown mcp flag %q", arg)}
 		}
 	}
 	return options, false, nil
@@ -403,6 +459,21 @@ func writeMCPHelp(w io.Writer) error {
 
 Commands:
   permissions    Manage persistent MCP tool permissions
+  tools          Inspect configured MCP tools
+`)
+	return err
+}
+
+func writeMCPToolsHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero mcp tools <command>
+
+Commands:
+  list    List configured MCP tools
+
+Flags:
+      --json    Print MCP tools as JSON
+  -h, --help    Show this help
 `)
 	return err
 }

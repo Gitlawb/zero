@@ -22,16 +22,28 @@ import (
 var version = "dev"
 
 type appDeps struct {
-	getwd           func() (string, error)
-	stdin           io.Reader
-	resolveConfig   func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	newProvider     func(config.ProviderProfile) (zeroruntime.Provider, error)
-	newSessionStore func() *sessions.Store
-	loadPlugins     func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks       func(hooks.LoadOptions) (hooks.LoadResult, error)
-	newMCPStore     func() (*mcp.PermissionStore, error)
-	runTUI          func(context.Context, tui.Options) int
-	now             func() time.Time
+	getwd            func() (string, error)
+	stdin            io.Reader
+	resolveConfig    func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	resolveMCPConfig func(workspaceRoot string) (config.MCPConfig, error)
+	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
+	newSessionStore  func() *sessions.Store
+	loadPlugins      func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks        func(hooks.LoadOptions) (hooks.LoadResult, error)
+	newMCPStore      func() (*mcp.PermissionStore, error)
+	registerMCPTools func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	runTUI           func(context.Context, tui.Options) int
+	now              func() time.Time
+}
+
+type mcpToolRuntime interface {
+	Close() error
+}
+
+type noopMCPRuntime struct{}
+
+func (noopMCPRuntime) Close() error {
+	return nil
 }
 
 // Run executes the minimal Go CLI surface. It returns an exit code so tests can
@@ -52,6 +64,13 @@ func defaultAppDeps() appDeps {
 			options.Overrides = overrides
 			return config.Resolve(options)
 		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			options, err := config.DefaultResolveOptions(workspaceRoot)
+			if err != nil {
+				return config.MCPConfig{}, err
+			}
+			return config.ResolveMCP(options)
+		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			return providers.New(profile, providers.Options{UserAgent: userAgent()})
 		},
@@ -62,6 +81,9 @@ func defaultAppDeps() appDeps {
 		loadHooks:   hooks.LoadConfig,
 		newMCPStore: func() (*mcp.PermissionStore, error) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{})
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
 		runTUI: tui.Run,
 		now:    time.Now,
@@ -130,6 +152,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.resolveConfig == nil {
 		deps.resolveConfig = defaults.resolveConfig
 	}
+	if deps.resolveMCPConfig == nil {
+		deps.resolveMCPConfig = defaults.resolveMCPConfig
+	}
 	if deps.newProvider == nil {
 		deps.newProvider = defaults.newProvider
 	}
@@ -144,6 +169,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.newMCPStore == nil {
 		deps.newMCPStore = defaults.newMCPStore
+	}
+	if deps.registerMCPTools == nil {
+		deps.registerMCPTools = defaults.registerMCPTools
 	}
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
@@ -171,6 +199,11 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, mcp.AutonomyLow)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	defer mcpRuntime.Close()
 	permissionMode := agent.PermissionModeAuto
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:          workspaceRoot,

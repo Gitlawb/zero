@@ -78,11 +78,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
-	if err := validateExecToolFilters(options, registry); err != nil {
-		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
-	}
 	permissionMode, err := resolveExecPermissionMode(options)
 	if err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options))
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
+	}
+	defer mcpRuntime.Close()
+	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 	if options.listTools {

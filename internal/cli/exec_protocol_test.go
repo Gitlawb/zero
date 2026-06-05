@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -108,6 +110,55 @@ func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
 		if strings.Contains(text, name) {
 			t.Fatalf("unexpected non-enabled tool %q leaked into stream-json output: %#v", name, events[1])
 		}
+	}
+}
+
+func TestRunExecListsMCPToolsWithoutProviderResolution(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	providerResolved := false
+	closed := false
+
+	exitCode := runWithDeps([]string{"exec", "--list-tools", "--enabled-tools", "mcp_docs_lookup"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			providerResolved = true
+			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+		},
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "stdio", Command: "docs-mcp"},
+			}}, nil
+		},
+		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
+			registry.Register(cliFakeMCPRegistryTool{})
+			return closeFunc(func() error {
+				closed = true
+				return nil
+			}), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if providerResolved {
+		t.Fatal("provider config should not be resolved for --list-tools")
+	}
+	if !closed {
+		t.Fatal("MCP runtime was not closed after --list-tools")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "mcp_docs_lookup") || !strings.Contains(stdout.String(), "Lookup documentation") {
+		t.Fatalf("expected MCP tool in list output, got %q", stdout.String())
 	}
 }
 
@@ -384,4 +435,42 @@ func TestRunExecReadsStreamJSONPromptFromStdin(t *testing.T) {
 	if final["type"] != "final" || final["text"] != "from stdin" {
 		t.Fatalf("expected final event from stdin, got %#v", final)
 	}
+}
+
+type cliFakeMCPRegistryTool struct{}
+
+func (cliFakeMCPRegistryTool) Name() string {
+	return "mcp_docs_lookup"
+}
+
+func (cliFakeMCPRegistryTool) Description() string {
+	return "Lookup documentation"
+}
+
+func (cliFakeMCPRegistryTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type:                 "object",
+		AdditionalProperties: false,
+		Properties: map[string]tools.PropertySchema{
+			"query": {Type: "string"},
+		},
+	}
+}
+
+func (cliFakeMCPRegistryTool) Safety() tools.Safety {
+	return tools.Safety{
+		SideEffect: tools.SideEffectNetwork,
+		Permission: tools.PermissionAllow,
+		Reason:     "MCP test tool",
+	}
+}
+
+func (cliFakeMCPRegistryTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: "ok"}
+}
+
+type closeFunc func() error
+
+func (fn closeFunc) Close() error {
+	return fn()
 }
