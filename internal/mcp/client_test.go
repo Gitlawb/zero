@@ -33,7 +33,11 @@ func TestStdioClientListsAndCallsTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
 
 	listed, err := client.ListTools(ctx)
 	if err != nil {
@@ -142,7 +146,11 @@ func TestHTTPClientListsAndCallsTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
 
 	listed, err := client.ListTools(ctx)
 	if err != nil {
@@ -181,15 +189,23 @@ func TestSSEClientListsAndCallsToolsFromRemoteStream(t *testing.T) {
 			}
 			flusher, ok := response.(http.Flusher)
 			if !ok {
-				t.Fatal("test response writer does not support flushing")
+				t.Errorf("test response writer does not support flushing")
+				http.Error(response, "streaming unsupported", http.StatusInternalServerError)
+				return
 			}
 			response.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(response, "event: endpoint\ndata: /messages\n\n")
+			if _, err := fmt.Fprint(response, "event: endpoint\ndata: /messages\n\n"); err != nil {
+				t.Errorf("write endpoint event: %v", err)
+				return
+			}
 			flusher.Flush()
 			for {
 				select {
 				case event := <-events:
-					fmt.Fprint(response, event)
+					if _, err := fmt.Fprint(response, event); err != nil {
+						t.Errorf("write SSE event: %v", err)
+						return
+					}
 					flusher.Flush()
 				case <-request.Context().Done():
 					return
@@ -259,7 +275,11 @@ func TestSSEClientListsAndCallsToolsFromRemoteStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
-	defer client.Close()
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
 
 	listed, err := client.ListTools(ctx)
 	if err != nil {
@@ -433,7 +453,11 @@ func mustRaw(value any) json.RawMessage {
 func readHTTPRPCMessage(t *testing.T, request *http.Request) rpcMessage {
 	t.Helper()
 
-	defer request.Body.Close()
+	defer func() {
+		if err := request.Body.Close(); err != nil {
+			t.Fatalf("close HTTP JSON-RPC request body: %v", err)
+		}
+	}()
 	var message rpcMessage
 	if err := json.NewDecoder(request.Body).Decode(&message); err != nil {
 		t.Fatalf("decode HTTP JSON-RPC request: %v", err)
@@ -467,15 +491,6 @@ func writeHTTPRPCError(t *testing.T, response http.ResponseWriter, id any, messa
 	}
 }
 
-func writeSSERPCResponse(t *testing.T, response http.ResponseWriter, id any, result any) {
-	t.Helper()
-
-	response.Header().Set("Content-Type", "text/event-stream")
-	if _, err := fmt.Fprint(response, formatSSERPCResponse(t, id, result)); err != nil {
-		t.Fatalf("write SSE JSON-RPC response: %v", err)
-	}
-}
-
 func formatSSERPCResponse(t *testing.T, id any, result any) string {
 	t.Helper()
 
@@ -489,15 +504,6 @@ func formatSSERPCResponse(t *testing.T, id any, result any) string {
 		t.Fatalf("marshal SSE JSON-RPC response: %v", err)
 	}
 	return fmt.Sprintf("event: message\ndata: %s\n\n", body)
-}
-
-func writeSSERPCError(t *testing.T, response http.ResponseWriter, id any, message string) {
-	t.Helper()
-
-	response.Header().Set("Content-Type", "text/event-stream")
-	if _, err := fmt.Fprint(response, formatSSERPCError(t, id, message)); err != nil {
-		t.Fatalf("write SSE JSON-RPC error: %v", err)
-	}
 }
 
 func formatSSERPCError(t *testing.T, id any, message string) string {
