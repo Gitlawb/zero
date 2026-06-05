@@ -47,7 +47,25 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Providers:      providers,
 		Provider:       active,
 		MaxTurns:       cfg.MaxTurns,
+		MCP:            cfg.MCP,
 	}, nil
+}
+
+func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
+	cfg := FileConfig{}
+
+	for _, path := range []string{options.UserConfigPath, options.ProjectConfigPath} {
+		if path == "" {
+			continue
+		}
+		fileConfig, err := loadConfigFile(path)
+		if err != nil {
+			return MCPConfig{}, err
+		}
+		mergeMCPConfig(&cfg.MCP, fileConfig.MCP)
+	}
+	mergeMCPConfig(&cfg.MCP, options.Overrides.MCP)
+	return cfg.MCP, nil
 }
 
 func loadConfigFile(path string) (FileConfig, error) {
@@ -73,6 +91,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	for _, provider := range src.Providers {
 		mergeProvider(dst, provider)
 	}
+	mergeMCPConfig(&dst.MCP, src.MCP)
 }
 
 func mergeProvider(cfg *FileConfig, provider ProviderProfile) {
@@ -228,6 +247,54 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	if hasProviderFields(overrides.Provider) {
 		mergeProvider(cfg, overrides.Provider)
 	}
+	mergeMCPConfig(&cfg.MCP, overrides.MCP)
+}
+
+func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {
+	if len(src.Servers) == 0 {
+		return
+	}
+	if dst.Servers == nil {
+		dst.Servers = map[string]MCPServerConfig{}
+	}
+	for name, server := range src.Servers {
+		dst.Servers[name] = mergeMCPServer(dst.Servers[name], server)
+	}
+}
+
+func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig {
+	if strings.TrimSpace(next.Type) != "" {
+		base.Type = next.Type
+	}
+	if strings.TrimSpace(next.Command) != "" {
+		base.Command = next.Command
+	}
+	if next.Args != nil {
+		base.Args = append([]string{}, next.Args...)
+	}
+	if next.Env != nil {
+		if base.Env == nil {
+			base.Env = map[string]string{}
+		}
+		for key, value := range next.Env {
+			base.Env[key] = value
+		}
+	}
+	if strings.TrimSpace(next.URL) != "" {
+		base.URL = next.URL
+	}
+	if next.Headers != nil {
+		if base.Headers == nil {
+			base.Headers = map[string]string{}
+		}
+		for key, value := range next.Headers {
+			base.Headers[key] = value
+		}
+	}
+	if next.Disabled {
+		base.Disabled = true
+	}
+	return base
 }
 
 func hasProviderFields(profile ProviderProfile) bool {

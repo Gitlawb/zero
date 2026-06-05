@@ -89,6 +89,80 @@ func TestResolveSelectsActiveProviderProfile(t *testing.T) {
 	}
 }
 
+func TestResolveMergesMCPServerConfig(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"mcp": {
+			"servers": {
+				"docs": {
+					"type": "stdio",
+					"command": "docs-mcp",
+					"args": ["--user"],
+					"env": {"ZERO_DOCS_TOKEN": "user-token"}
+				}
+			}
+		}
+	}`)
+	projectPath := writeConfig(t, `{
+		"mcpServers": {
+			"docs": {
+				"args": ["--project"],
+				"env": {"ZERO_DOCS_PROJECT": "1"}
+			},
+			"web": {
+				"type": "http",
+				"url": "https://example.com/mcp",
+				"headers": {"Authorization": "Bearer test-token"}
+			}
+		}
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	docs := resolved.MCP.Servers["docs"]
+	if docs.Command != "docs-mcp" {
+		t.Fatalf("docs.Command = %q, want inherited user command", docs.Command)
+	}
+	if got := strings.Join(docs.Args, " "); got != "--project" {
+		t.Fatalf("docs.Args = %q, want project args override", got)
+	}
+	if docs.Env["ZERO_DOCS_TOKEN"] != "user-token" || docs.Env["ZERO_DOCS_PROJECT"] != "1" {
+		t.Fatalf("docs.Env = %#v, want merged env", docs.Env)
+	}
+	web := resolved.MCP.Servers["web"]
+	if web.Type != "http" || web.URL != "https://example.com/mcp" {
+		t.Fatalf("web server = %#v, want root mcpServers alias loaded", web)
+	}
+}
+
+func TestResolveMCPDoesNotRunProviderCommand(t *testing.T) {
+	path := writeConfig(t, `{
+		"mcp": {
+			"servers": {
+				"docs": {"type": "stdio", "command": "docs-mcp"}
+			}
+		}
+	}`)
+
+	resolved, err := ResolveMCP(ResolveOptions{
+		ProjectConfigPath: path,
+		ProviderCommand:   "provider-command-that-should-not-run",
+		Env:               map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("ResolveMCP() error = %v", err)
+	}
+	if resolved.Servers["docs"].Command != "docs-mcp" {
+		t.Fatalf("MCP docs server = %#v", resolved.Servers["docs"])
+	}
+}
+
 func TestResolveIgnoresWhitespaceOnlyActiveProviderLayers(t *testing.T) {
 	userPath := writeConfig(t, `{
 		"activeProvider": "alpha",

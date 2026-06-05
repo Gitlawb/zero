@@ -32,6 +32,7 @@ type FileConfig struct {
 	ActiveProvider string            `json:"activeProvider,omitempty"`
 	Providers      []ProviderProfile `json:"providers,omitempty"`
 	MaxTurns       int               `json:"maxTurns,omitempty"`
+	MCP            MCPConfig         `json:"mcp,omitempty"`
 }
 
 type ResolveOptions struct {
@@ -47,6 +48,7 @@ type Overrides struct {
 	Providers      []ProviderProfile
 	Provider       ProviderProfile
 	MaxTurns       int
+	MCP            MCPConfig
 }
 
 type ResolvedConfig struct {
@@ -54,6 +56,51 @@ type ResolvedConfig struct {
 	Providers      []ProviderProfile
 	Provider       ProviderProfile
 	MaxTurns       int
+	MCP            MCPConfig
+}
+
+type MCPConfig struct {
+	Servers map[string]MCPServerConfig `json:"servers,omitempty"`
+}
+
+type MCPServerConfig struct {
+	Type     string            `json:"type,omitempty"`
+	Command  string            `json:"command,omitempty"`
+	Args     []string          `json:"args,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	URL      string            `json:"url,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
+	Disabled bool              `json:"disabled,omitempty"`
+}
+
+func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
+	type rawConfig struct {
+		ActiveProvider  string                     `json:"activeProvider"`
+		Providers       []ProviderProfile          `json:"providers"`
+		MaxTurns        int                        `json:"maxTurns"`
+		MCP             MCPConfig                  `json:"mcp"`
+		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
+		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
+	}
+
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	cfg.ActiveProvider = raw.ActiveProvider
+	cfg.Providers = raw.Providers
+	cfg.MaxTurns = raw.MaxTurns
+	cfg.MCP = raw.MCP
+	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
+		cfg.MCP.Servers = map[string]MCPServerConfig{}
+	}
+	for name, server := range raw.MCPServers {
+		cfg.MCP.Servers[name] = server
+	}
+	for name, server := range raw.MCPServersSnake {
+		cfg.MCP.Servers[name] = server
+	}
+	return nil
 }
 
 func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
