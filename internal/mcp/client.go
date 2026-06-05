@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type RemoteTool struct {
@@ -44,6 +46,8 @@ type Client struct {
 	mu     sync.Mutex
 	nextID int
 }
+
+const stdioCloseWaitTimeout = 500 * time.Millisecond
 
 func Connect(ctx context.Context, server Server) (ToolClient, error) {
 	switch server.Type {
@@ -139,10 +143,28 @@ func (client *Client) Close() error {
 		client.stdin = nil
 	}
 	if client.cmd != nil && client.cmd.Process != nil {
-		_ = client.cmd.Process.Kill()
-		waitErr := client.cmd.Wait()
-		if err == nil && waitErr != nil && !strings.Contains(waitErr.Error(), "signal: killed") {
-			err = waitErr
+		waitDone := make(chan error, 1)
+		go func() {
+			waitDone <- client.cmd.Wait()
+		}()
+
+		select {
+		case waitErr := <-waitDone:
+			if err == nil && waitErr != nil {
+				err = waitErr
+			}
+		case <-time.After(stdioCloseWaitTimeout):
+			killed := false
+			killErr := client.cmd.Process.Kill()
+			if killErr == nil {
+				killed = true
+			} else if err == nil && !errors.Is(killErr, os.ErrProcessDone) {
+				err = killErr
+			}
+			waitErr := <-waitDone
+			if err == nil && waitErr != nil && !killed {
+				err = waitErr
+			}
 		}
 		client.cmd = nil
 	}
