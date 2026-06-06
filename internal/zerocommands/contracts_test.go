@@ -78,6 +78,36 @@ func TestConfigSnapshotRedactsProviderWarnings(t *testing.T) {
 	}
 }
 
+// TestConfigSnapshotRedactsOnMetadataResolverError covers the explicit CR request:
+// ensure that even when provider metadata resolution hits an error/unavailable path,
+// raw secrets never appear in the resulting snapshot (BaseURL or Message).
+func TestConfigSnapshotRedactsOnMetadataResolverError(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+	// Bad URL pattern that can cause metadata resolution issues.
+	resolved := config.ResolvedConfig{
+		ActiveProvider: "broken",
+		Providers: []config.ProviderProfile{
+			{
+				Name:    "broken",
+				BaseURL: "https://user:" + secret + "@[invalid",
+				APIKey:  secret,
+				Model:   "gpt-4.1",
+			},
+		},
+	}
+
+	snapshot := ConfigSnapshotFromResolved(resolved)
+
+	if len(snapshot.Providers) != 1 {
+		t.Fatalf("expected one provider, got %#v", snapshot.Providers)
+	}
+	p := snapshot.Providers[0]
+	combined := p.BaseURL + p.Message
+	if strings.Contains(combined, secret) || strings.Contains(combined, "sk-") || strings.Contains(p.BaseURL, "user:") {
+		t.Fatalf("error/unavailable metadata path leaked secret into snapshot: %#v", p)
+	}
+}
+
 func TestModelSnapshotsFilterSortAndExposeCapabilities(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {

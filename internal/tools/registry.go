@@ -66,7 +66,15 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			Reason:            tool.Safety().Reason,
 		})
 		if options.OnSandboxDecision != nil {
-			options.OnSandboxDecision(decision)
+			go func(d sandbox.Decision) {
+				defer func() {
+					if r := recover(); r != nil {
+						// Fail-safe: never let a consumer callback panic the tool execution path.
+						// In real use the agent loop or CLI may log this; for now we swallow to keep tools reliable.
+					}
+				}()
+				options.OnSandboxDecision(d)
+			}(decision)
 		}
 		if decision.Action == sandbox.ActionDeny {
 			return errorResult(decision.ErrorString())
