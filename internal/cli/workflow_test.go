@@ -223,6 +223,13 @@ func TestRunVerifyTextAndJSON(t *testing.T) {
 				if decoded.Root != cwd {
 					t.Fatalf("decoded verify root = %q, want %q", decoded.Root, cwd)
 				}
+				var snapshot verify.ReportSnapshot
+				if err := json.Unmarshal(stdout.Bytes(), &snapshot); err != nil {
+					t.Fatalf("decode verify snapshot JSON: %v\n%s", err, stdout.String())
+				}
+				if snapshot.Contract != verify.ReportContractVersion || len(snapshot.Events) == 0 {
+					t.Fatalf("verify JSON did not expose runtime contract: %#v", snapshot)
+				}
 			} else if !strings.Contains(stdout.String(), "Zero verification") || !strings.Contains(stdout.String(), "go.test") || !strings.Contains(stdout.String(), cwd) || !strings.Contains(stdout.String(), "tests: 2 total, 1 passed, 1 failed") {
 				t.Fatalf("unexpected verify text output: %q", stdout.String())
 			}
@@ -369,6 +376,13 @@ func TestRunVerifyAttemptsUsesSelfVerifyLoop(t *testing.T) {
 	if len(decoded.Attempts) != 2 || !decoded.OK || decoded.StopReason != selfverify.StopReasonPassed {
 		t.Fatalf("unexpected loop JSON: %#v", decoded)
 	}
+	var snapshot selfverify.LoopSnapshot
+	if err := json.Unmarshal(stdout.Bytes(), &snapshot); err != nil {
+		t.Fatalf("decode verify loop snapshot JSON: %v\n%s", err, stdout.String())
+	}
+	if snapshot.Contract != selfverify.LoopContractVersion || len(snapshot.Events) == 0 {
+		t.Fatalf("verify loop JSON did not expose runtime contract: %#v", snapshot)
+	}
 }
 
 func TestRunVerifyAttemptsFormatsSelfVerifyText(t *testing.T) {
@@ -451,6 +465,13 @@ func TestRunChangesInspectAndCommit(t *testing.T) {
 		}
 		if len(decoded.Files) != 1 || decoded.Files[0].Path != "README.md" {
 			t.Fatalf("unexpected changes JSON: %#v", decoded)
+		}
+		var snapshot zerogit.ChangeSnapshot
+		if err := json.Unmarshal(stdout.Bytes(), &snapshot); err != nil {
+			t.Fatalf("decode changes snapshot JSON: %v\n%s", err, stdout.String())
+		}
+		if snapshot.Contract != zerogit.ChangeContractVersion || len(snapshot.Events) == 0 {
+			t.Fatalf("changes JSON did not expose runtime contract: %#v", snapshot)
 		}
 	})
 

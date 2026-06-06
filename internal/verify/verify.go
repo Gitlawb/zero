@@ -44,19 +44,21 @@ type Summary struct {
 }
 
 type Result struct {
-	ID            string              `json:"id"`
-	Name          string              `json:"name"`
-	Command       []string            `json:"command"`
-	Status        Status              `json:"status"`
-	ExitCode      int                 `json:"exitCode"`
-	Stdout        string              `json:"stdout,omitempty"`
-	Stderr        string              `json:"stderr,omitempty"`
-	StartedAt     string              `json:"startedAt"`
-	EndedAt       string              `json:"endedAt"`
-	DurationMs    int                 `json:"durationMs"`
-	Error         string              `json:"error,omitempty"`
-	OutputSummary *OutputSummary      `json:"outputSummary,omitempty"`
-	TestSummary   *testrunner.Summary `json:"testSummary,omitempty"`
+	ID            string               `json:"id"`
+	Name          string               `json:"name"`
+	Command       []string             `json:"command"`
+	Kind          testrunner.Kind      `json:"kind,omitempty"`
+	Framework     testrunner.Framework `json:"framework,omitempty"`
+	Status        Status               `json:"status"`
+	ExitCode      int                  `json:"exitCode"`
+	Stdout        string               `json:"stdout,omitempty"`
+	Stderr        string               `json:"stderr,omitempty"`
+	StartedAt     string               `json:"startedAt"`
+	EndedAt       string               `json:"endedAt"`
+	DurationMs    int                  `json:"durationMs"`
+	Error         string               `json:"error,omitempty"`
+	OutputSummary *OutputSummary       `json:"outputSummary,omitempty"`
+	TestSummary   *testrunner.Summary  `json:"testSummary,omitempty"`
 }
 
 type Report struct {
@@ -156,6 +158,8 @@ func Run(ctx context.Context, plan Plan, options RunOptions) Report {
 			ID:        check.ID,
 			Name:      check.Name,
 			Command:   append([]string{}, check.Command...),
+			Kind:      check.Kind,
+			Framework: check.Framework,
 			StartedAt: formatTime(checkStart),
 		}
 		commandResult, err := runner(ctx, plan.Root, check.Command, timeout)

@@ -119,7 +119,7 @@ func runVerifyCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		})
 		safeLoopReport := redactVerifyLoopReport(loopReport)
 		if options.json {
-			if err := writePrettyJSON(stdout, safeLoopReport); err != nil {
+			if err := writePrettyJSON(stdout, selfverify.SnapshotFromReport(safeLoopReport)); err != nil {
 				return exitCrash
 			}
 		} else if _, err := fmt.Fprintln(stdout, formatVerifyLoopReport(safeLoopReport)); err != nil {
@@ -137,7 +137,7 @@ func runVerifyCommand(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	})
 	safeReport := redactVerifyReport(report)
 	if options.json {
-		if err := writePrettyJSON(stdout, safeReport); err != nil {
+		if err := writePrettyJSON(stdout, verify.SnapshotFromReport(safeReport)); err != nil {
 			return exitCrash
 		}
 	} else if _, err := fmt.Fprintln(stdout, formatVerifyReport(safeReport)); err != nil {
@@ -186,7 +186,7 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		}
 		safeSummary := redactChangeSummary(summary)
 		if options.json {
-			if err := writePrettyJSON(stdout, safeSummary); err != nil {
+			if err := writePrettyJSON(stdout, zerogit.SnapshotFromSummary(safeSummary)); err != nil {
 				return exitCrash
 			}
 			return exitSuccess
