@@ -201,7 +201,11 @@ func Format(result Result) string {
 			"Release: " + result.ReleaseURL,
 		}
 		lines = appendAssetLines(lines, result.ReleaseAsset)
-		lines = append(lines, "Download the matching release asset for your platform, then replace the current zero binary.")
+		if target := releaseAssetTarget(result.ReleaseAsset); target != "" {
+			lines = append(lines, "Download the verified "+target+" release asset, then replace the current zero binary.")
+		} else {
+			lines = append(lines, "Download the verified release asset, then replace the current zero binary.")
+		}
 		return strings.Join(lines, "\n")
 	}
 	lines := []string{
@@ -216,11 +220,21 @@ func appendAssetLines(lines []string, asset AssetCheck) []string {
 	if asset.ArchiveName == "" {
 		return lines
 	}
+	if target := releaseAssetTarget(asset); target != "" {
+		lines = append(lines, "Release target: "+target)
+	}
 	lines = append(lines, "Release asset: "+asset.ArchiveName)
 	if asset.ChecksumName != "" {
 		lines = append(lines, "Checksum asset: "+asset.ChecksumName)
 	}
 	return lines
+}
+
+func releaseAssetTarget(asset AssetCheck) string {
+	if asset.Platform == "" || asset.Arch == "" {
+		return ""
+	}
+	return asset.Platform + "-" + asset.Arch
 }
 
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {
