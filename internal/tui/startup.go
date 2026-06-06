@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -64,11 +64,7 @@ func (m model) startupView() string {
 }
 
 func (m model) startupHeader(width int) string {
-	project := strings.ToLower(filepath.Base(m.cwd))
-	if project == "." || project == "" {
-		project = "zero"
-	}
-
+	project := startupProjectName(m.cwd)
 	provider := displayValue(m.providerName, "none")
 	model := displayValue(m.modelName, "none")
 	line := startupHeaderLine(width-4, []headerCandidate{
@@ -82,7 +78,7 @@ func (m model) startupHeader(width int) string {
 		},
 		{
 			left: zeroTheme.accent.Render("ZERO") +
-				zeroTheme.muted.Render(" | cwd: ") + zeroTheme.text.Render(displayValue(filepath.Base(m.cwd), "unknown")) +
+				zeroTheme.muted.Render(" | cwd: ") + zeroTheme.text.Render(displayValue(pathBaseName(m.cwd), "unknown")) +
 				zeroTheme.muted.Render(" | project: ") + zeroTheme.text.Render(project),
 			right: zeroTheme.green.Render("READY") +
 				zeroTheme.muted.Render(" | provider: ") + zeroTheme.accent.Render(provider) +
@@ -98,6 +94,34 @@ func (m model) startupHeader(width int) string {
 		},
 	})
 	return borderedBlock(width, []string{line})
+}
+
+func startupProjectName(cwd string) string {
+	project := strings.ToLower(pathBaseName(cwd))
+	if project == "." || project == "" {
+		return "zero"
+	}
+	return project
+}
+
+// pathBaseName accepts both Windows and POSIX separators so CI can render a
+// Windows workspace path deterministically on Linux and macOS runners.
+func pathBaseName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	value = strings.TrimRight(value, `/\`)
+	if value == "" {
+		return ""
+	}
+
+	separator := maxInt(strings.LastIndex(value, "/"), strings.LastIndex(value, `\`))
+	if separator >= 0 && separator+1 < len(value) {
+		return value[separator+1:]
+	}
+	return value
 }
 
 func (m model) startupLogo(width int) string {
@@ -160,7 +184,8 @@ func borderedBlock(width int, lines []string) string {
 	body = append(body, top)
 	for _, line := range lines {
 		available := width - 4
-		body = append(body, zeroTheme.border.Render("│ ")+fitStyledLine(line, available)+strings.Repeat(" ", maxInt(0, available-lipgloss.Width(line)))+zeroTheme.border.Render(" │"))
+		fitted := fitStyledLine(line, available)
+		body = append(body, zeroTheme.border.Render("│ ")+fitted+strings.Repeat(" ", maxInt(0, available-lipgloss.Width(fitted)))+zeroTheme.border.Render(" │"))
 	}
 	body = append(body, bottom)
 	return strings.Join(body, "\n")
@@ -211,10 +236,80 @@ func indentBlock(block string, spaces int) string {
 }
 
 func fitStyledLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	if lipgloss.Width(line) <= width {
 		return line
 	}
-	return line
+	return truncateStyledLine(line, width)
+}
+
+func truncateStyledLine(line string, width int) string {
+	const resetANSI = "\x1b[0m"
+
+	ellipsis := "…"
+	ellipsisWidth := lipgloss.Width(ellipsis)
+	if width <= ellipsisWidth {
+		return ellipsis
+	}
+
+	targetWidth := width - ellipsisWidth
+	usedWidth := 0
+	sawANSI := false
+
+	var builder strings.Builder
+	for index := 0; index < len(line); {
+		if line[index] == '\x1b' {
+			end := ansiSequenceEnd(line, index)
+			if end > index {
+				builder.WriteString(line[index:end])
+				sawANSI = true
+				index = end
+				continue
+			}
+		}
+
+		glyph, size := utf8.DecodeRuneInString(line[index:])
+		if glyph == utf8.RuneError && size == 0 {
+			break
+		}
+
+		glyphWidth := lipgloss.Width(string(glyph))
+		if usedWidth+glyphWidth > targetWidth {
+			break
+		}
+		builder.WriteString(line[index : index+size])
+		usedWidth += glyphWidth
+		index += size
+	}
+
+	builder.WriteString(ellipsis)
+	if sawANSI {
+		builder.WriteString(resetANSI)
+	}
+	return builder.String()
+}
+
+func ansiSequenceEnd(value string, start int) int {
+	if start >= len(value) || value[start] != '\x1b' {
+		return start
+	}
+	index := start + 1
+	if index >= len(value) {
+		return index
+	}
+
+	if value[index] != '[' {
+		return minInt(start+2, len(value))
+	}
+
+	for index++; index < len(value); index++ {
+		if value[index] >= 0x40 && value[index] <= 0x7e {
+			return index + 1
+		}
+	}
+	return len(value)
 }
 
 func normalizedStartupWidth(width int) int {
@@ -256,6 +351,13 @@ func clamp(value int, minimum int, maximum int) int {
 
 func maxInt(left int, right int) int {
 	if left > right {
+		return left
+	}
+	return right
+}
+
+func minInt(left int, right int) int {
+	if left < right {
 		return left
 	}
 	return right

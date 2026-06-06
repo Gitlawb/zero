@@ -144,10 +144,14 @@ func TestInitialRenderShowsPremiumStartupSplash(t *testing.T) {
 
 func TestStartupSplashCollapsesAfterFirstPrompt(t *testing.T) {
 	m := newModel(context.Background(), Options{})
+	m.width = 96
+	m.height = 30
 	m.input.SetValue("inspect the repo")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
+	next.width = m.width
+	next.height = m.height
 
 	if cmd != nil {
 		t.Fatal("expected missing provider prompt not to start an agent run")
@@ -168,12 +172,20 @@ func TestStartupSplashCollapsesAfterFirstPrompt(t *testing.T) {
 
 func TestStartupSplashStaysVisibleOnEmptySubmit(t *testing.T) {
 	m := newModel(context.Background(), Options{})
+	m.width = 96
+	m.height = 30
 	m.input.SetValue("   ")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
+	next.width = m.width
+	next.height = m.height
 
-	assertContains(t, next.View(), "terminal coding agent")
+	view := next.View()
+	assertContains(t, view, "terminal coding agent")
+	assertNotContains(t, view, "\u258d you")
+	assertNotContains(t, view, "\u25c7 zero")
+	assertNotContains(t, view, "\u25cf ready")
 }
 
 func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
@@ -711,6 +723,14 @@ func assertContains(t *testing.T, text string, want string) {
 
 	if !strings.Contains(text, want) {
 		t.Fatalf("expected %q to contain %q", text, want)
+	}
+}
+
+func assertNotContains(t *testing.T, text string, unwanted string) {
+	t.Helper()
+
+	if strings.Contains(text, unwanted) {
+		t.Fatalf("expected %q not to contain %q", text, unwanted)
 	}
 }
 
