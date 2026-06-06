@@ -2,10 +2,10 @@
   "name": "zero",
   "version": "0.1.0",
   "packageManager": "bun@1.3.14",
-  "module": "bin/zero.ts",
+  "module": "bin/zero.js",
   "type": "module",
   "bin": {
-    "zero": "bin/zero.ts"
+    "zero": "bin/zero.js"
   },
   "scripts": {
     "dev": "go run ./cmd/zero",

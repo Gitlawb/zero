@@ -1,8 +1,8 @@
 # npm Wrapper Smoke Checklist
 
 Run this checklist when a PR changes npm distribution files such as
-`package.json`, `bun.lock`, `bin/zero.ts`, `scripts/npm-wrapper.ts`, Go build or
-release tooling, or the npm `bin` wrapper.
+`package.json`, `bun.lock`, `bin/zero.js`, Go build or release tooling, or the
+npm `bin` wrapper.
 
 ## Required Checks
 
@@ -13,8 +13,8 @@ bun run smoke:build
 ```
 
 `build` and `build:go` both compile the Go-native release binary and inject the
-version from `package.json`. Keep the Bun install/test checks because the npm
-wrapper and remaining JS tooling still ship from this package.
+version from `package.json`. Keep the Bun install/test checks while installer
+script tests still use Bun.
 
 Also run the Go checks when the PR changes Go entrypoint, CLI, or release
 artifact behavior:

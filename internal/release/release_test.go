@@ -329,7 +329,7 @@ func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 			t.Fatalf("createArchive returned error: %v", err)
 		}
 		names := tarArchiveNames(t, archivePath)
-		for _, want := range []string{"zero", "README.md", "bin/zero.ts", "scripts/npm-wrapper.ts", "VERSION"} {
+		for _, want := range []string{"zero", "README.md", "bin/zero.js", "VERSION"} {
 			if !names[want] {
 				t.Fatalf("tar archive missing %s: %#v", want, names)
 			}
@@ -343,7 +343,7 @@ func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 			t.Fatalf("createArchive returned error: %v", err)
 		}
 		names := zipArchiveNames(t, archivePath)
-		for _, want := range []string{"zero", "README.md", "bin/zero.ts", "scripts/npm-wrapper.ts", "VERSION"} {
+		for _, want := range []string{"zero", "README.md", "bin/zero.js", "VERSION"} {
 			if !names[want] {
 				t.Fatalf("zip archive missing %s: %#v", want, names)
 			}
@@ -355,11 +355,10 @@ func packageStagingFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"zero":                   "binary",
-		"README.md":              "readme",
-		"bin/zero.ts":            "wrapper",
-		"scripts/npm-wrapper.ts": "script",
-		"VERSION":                "0.1.0\n",
+		"zero":        "binary",
+		"README.md":   "readme",
+		"bin/zero.js": "wrapper",
+		"VERSION":     "0.1.0\n",
 	}
 	for name, content := range files {
 		path := filepath.Join(dir, name)

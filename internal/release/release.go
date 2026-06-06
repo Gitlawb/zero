@@ -595,10 +595,8 @@ func copyPackageFiles(rootDir string, stagingDir string, artifactPath string, st
 			return err
 		}
 	}
-	for _, path := range []string{filepath.Join("bin", "zero.ts"), filepath.Join("scripts", "npm-wrapper.ts")} {
-		if err := copyFile(filepath.Join(rootDir, path), filepath.Join(stagingDir, path), 0o644); err != nil {
-			return err
-		}
+	if err := copyFile(filepath.Join(rootDir, "bin", "zero.js"), filepath.Join(stagingDir, "bin", "zero.js"), 0o755); err != nil {
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(stagingDir, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
 		return err
