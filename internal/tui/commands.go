@@ -80,7 +80,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/permissions",
 		usage:       "/permissions",
 		group:       commandGroupRuntime,
-		description: "Show the active permission mode.",
+		description: "Show the active permission mode and sandbox grants.",
 		kind:        commandPermissions,
 	},
 	{

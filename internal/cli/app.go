@@ -277,6 +277,16 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
+	sandboxStore, err := deps.newSandboxStore()
+	if err != nil {
+		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
+	}
+	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workspaceRoot,
+		Policy:        sandbox.DefaultPolicy(),
+		Store:         sandboxStore,
+		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
+	})
 	permissionMode := agent.PermissionModeAuto
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
@@ -287,10 +297,13 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 		NewProvider:     deps.newProvider,
 		Registry:        registry,
 		SessionStore:    deps.newSessionStore(),
+		SandboxStore:    sandboxStore,
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,
 			PermissionMode: permissionMode,
+			Autonomy:       string(sandbox.AutonomyLow),
+			Sandbox:        sandboxEngine,
 		},
 		PermissionMode: permissionMode,
 	})

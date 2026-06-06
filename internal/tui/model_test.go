@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -260,6 +262,51 @@ func TestToolsCommandListsRegisteredTools(t *testing.T) {
 	if !transcriptContains(next.transcript, "read_file") {
 		t.Fatalf("expected tools transcript to list read_file, got %#v", next.transcript)
 	}
+}
+
+func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.Grant(sandbox.GrantInput{
+		ToolName:    "bash",
+		Decision:    sandbox.GrantAllow,
+		MaxAutonomy: sandbox.AutonomyHigh,
+		Reason:      "sk-proj-sensitive trusted shell",
+	}); err != nil {
+		t.Fatalf("Grant bash returned error: %v", err)
+	}
+	if _, err := store.Grant(sandbox.GrantInput{
+		ToolName:    "write_file",
+		Decision:    sandbox.GrantDeny,
+		MaxAutonomy: sandbox.AutonomyLow,
+	}); err != nil {
+		t.Fatalf("Grant write_file returned error: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		PermissionMode: agent.PermissionModeAsk,
+		SandboxStore:   store,
+	})
+	m.input.SetValue("/permissions")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /permissions to be handled without starting an agent run")
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Permission mode: ask",
+		"Sandbox grants:",
+		"bash [allow/high]",
+		"write_file [deny/low]",
+		"[REDACTED]",
+	} {
+		assertContains(t, text, want)
+	}
+	assertNotContains(t, text, "sk-proj-sensitive")
 }
 
 func TestPlanCommandShowsCurrentPlan(t *testing.T) {
@@ -722,6 +769,71 @@ func TestAgentResponsePreservesToolResultMetadata(t *testing.T) {
 	assertContains(t, renderRow(row, 80), "@@ -1 +1 @@")
 }
 
+func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
+	event := agent.PermissionEvent{
+		ToolCallID:     "call_1",
+		ToolName:       "write_file",
+		Action:         agent.PermissionActionPrompt,
+		Permission:     "prompt",
+		PermissionMode: agent.PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		SideEffect:     "write",
+		Reason:         "Creates or overwrites files.",
+		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},
+	}
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+
+	updated, _ := m.Update(agentResponseMsg{
+		runID: 7,
+		rows:  []transcriptRow{permissionTranscriptRow(event)},
+	})
+	next := updated.(model)
+
+	row, ok := findTranscriptRow(next.transcript, rowPermission)
+	if !ok {
+		t.Fatalf("expected permission row, got %#v", next.transcript)
+	}
+	if row.tool != "write_file" || row.permission == nil || row.permission.ToolCallID != "call_1" {
+		t.Fatalf("permission metadata was not preserved: %#v", row)
+	}
+	rendered := renderRow(row, 96)
+	for _, want := range []string{"permission", "write_file", "prompt", "risk:high", "mode=ask", "Creates or overwrites files."} {
+		assertContains(t, rendered, want)
+	}
+}
+
+func TestPermissionRowRendersSandboxViolations(t *testing.T) {
+	violation := sandbox.Violation{
+		Code:        sandbox.ViolationOutsideWorkspace,
+		ToolName:    "write_file",
+		Action:      sandbox.ActionDeny,
+		Risk:        sandbox.Risk{Level: sandbox.RiskCritical},
+		Path:        "../secret.txt",
+		Reason:      "writes must stay inside workspace",
+		Recoverable: false,
+	}
+	event := agent.PermissionEvent{
+		ToolCallID:     "call_2",
+		ToolName:       "write_file",
+		Action:         agent.PermissionActionDeny,
+		Permission:     "prompt",
+		PermissionMode: agent.PermissionModeUnsafe,
+		Autonomy:       string(sandbox.AutonomyHigh),
+		SideEffect:     "write",
+		Reason:         "workspace boundary enforced",
+		Risk:           sandbox.Risk{Level: sandbox.RiskCritical},
+		Violation:      &violation,
+	}
+
+	rendered := renderRow(permissionTranscriptRow(event), 96)
+
+	for _, want := range []string{"permission", "write_file", "denied", "risk:critical", "violation=outside_workspace", "../secret.txt"} {
+		assertContains(t, rendered, want)
+	}
+}
+
 func TestAgentEventRenderingMappingCoversRuntimeContract(t *testing.T) {
 	surfaces := map[zeroruntime.AgentEventType]string{
 		zeroruntime.AgentEventText:       "assistant transcript row",
@@ -866,6 +978,17 @@ func transcriptContains(rows []transcriptRow, want string) bool {
 		}
 	}
 	return false
+}
+
+func transcriptText(rows []transcriptRow) string {
+	parts := make([]string, 0, len(rows))
+	for _, row := range rows {
+		parts = append(parts, row.text)
+		if row.detail != "" {
+			parts = append(parts, row.detail)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func findTranscriptRow(rows []transcriptRow, kind rowKind) (transcriptRow, bool) {

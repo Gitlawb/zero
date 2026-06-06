@@ -103,6 +103,8 @@ func renderRow(row transcriptRow, width int) string {
 		return renderToolCallRow(row)
 	case rowToolResult:
 		return renderToolResultRow(row, width)
+	case rowPermission:
+		return renderPermissionRow(row)
 	default:
 		return row.text
 	}
@@ -116,6 +118,46 @@ func renderToolCallRow(row transcriptRow) string {
 	line := zeroTheme.tool.Render("▸ ") + zeroTheme.text.Render(name)
 	if hint := strings.TrimSpace(row.detail); hint != "" {
 		line += "  " + zeroTheme.muted.Render(hint)
+	}
+	return line
+}
+
+func renderPermissionRow(row transcriptRow) string {
+	event := row.permission
+	if event == nil {
+		return zeroTheme.amber.Render("permission") + "  " + zeroTheme.text.Render(row.text)
+	}
+
+	name := event.ToolName
+	if name == "" {
+		name = row.tool
+	}
+	action := strings.TrimSpace(string(event.Action))
+	if action == "" {
+		action = "prompt"
+	}
+
+	actionStyle := zeroTheme.amber
+	actionLabel := action
+	switch event.Action {
+	case "allow":
+		actionStyle = zeroTheme.green
+	case "deny":
+		actionStyle = zeroTheme.red
+		actionLabel = "denied"
+	case "prompt":
+		actionStyle = zeroTheme.amber
+	}
+
+	line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.text.Render(name) + "  " + actionStyle.Render(actionLabel)
+	if event.Risk.Level != "" {
+		line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
+	}
+	if event.GrantMatched {
+		line += "  " + zeroTheme.green.Render("grant")
+	}
+	if detail := strings.TrimSpace(row.detail); detail != "" {
+		line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
 	}
 	return line
 }

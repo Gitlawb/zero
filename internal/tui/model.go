@@ -14,9 +14,11 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
+	"github.com/Gitlawb/zero/internal/zerocommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -34,6 +36,7 @@ type model struct {
 	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
 	registry         *tools.Registry
 	sessionStore     *sessions.Store
+	sandboxStore     *sandbox.GrantStore
 	activeSession    sessions.Metadata
 	sessionEvents    []sessions.Event
 	usageTracker     *usage.Tracker
@@ -89,6 +92,7 @@ func newModel(ctx context.Context, options Options) model {
 	if sessionStore == nil {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
 	}
+	sandboxStore := options.SandboxStore
 	usageTracker := options.UsageTracker
 	if usageTracker == nil {
 		usageTracker = usage.NewTracker(usage.TrackerOptions{})
@@ -118,6 +122,7 @@ func newModel(ctx context.Context, options Options) model {
 		newProvider:     options.NewProvider,
 		registry:        registry,
 		sessionStore:    sessionStore,
+		sandboxStore:    sandboxStore,
 		agentOptions:    options.AgentOptions,
 		permissionMode:  permissionMode,
 		reasoningEffort: options.ReasoningEffort,
@@ -460,6 +465,18 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 			}
 		}
 
+		onPermission := options.OnPermission
+		options.OnPermission = func(event agent.PermissionEvent) {
+			rows = append(rows, permissionTranscriptRow(event))
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventPermission,
+				Payload: event,
+			})
+			if onPermission != nil {
+				onPermission(event)
+			}
+		}
+
 		onUsage := options.OnUsage
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
@@ -531,7 +548,35 @@ func (m model) toolsText() string {
 }
 
 func (m model) permissionsText() string {
-	return "Permission mode: " + string(m.permissionMode)
+	lines := []string{"Permission mode: " + string(m.permissionMode)}
+	if m.sandboxStore == nil {
+		lines = append(lines, "Sandbox grants: unavailable")
+		return strings.Join(lines, "\n")
+	}
+
+	grants, err := m.sandboxStore.List()
+	if err != nil {
+		lines = append(lines, "Sandbox grants: error: "+err.Error())
+		return strings.Join(lines, "\n")
+	}
+	snapshots := zerocommands.SandboxGrantSnapshots(grants)
+	if len(snapshots) == 0 {
+		lines = append(lines, "Sandbox grants: none")
+		return strings.Join(lines, "\n")
+	}
+
+	lines = append(lines, "Sandbox grants:")
+	for _, grant := range snapshots {
+		line := fmt.Sprintf("- %s [%s/%s]", grant.ToolName, grant.Decision, grant.MaxAutonomy)
+		if grant.ApprovedAt != "" {
+			line += " approved " + grant.ApprovedAt
+		}
+		if grant.Reason != "" {
+			line += " - " + grant.Reason
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) providerText() string {

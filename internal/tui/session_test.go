@@ -10,6 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -192,6 +194,84 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 	assertPayloadField(t, events[3], "content", "read complete")
 }
 
+func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_write", ToolName: "write_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_write", ArgumentsFragment: `{"path":"notes.txt","content":"hello"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_write"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "write blocked"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	m := newModel(context.Background(), Options{
+		Cwd:            root,
+		ProviderName:   "openai",
+		ModelName:      "gpt-4.1",
+		Provider:       provider,
+		Registry:       registry,
+		SessionStore:   store,
+		PermissionMode: agent.PermissionModeAsk,
+		AgentOptions: agent.Options{
+			Autonomy: string(sandbox.AutonomyMedium),
+			Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+				WorkspaceRoot: root,
+				Policy:        sandbox.DefaultPolicy(),
+			}),
+		},
+	})
+	m.input.SetValue("write notes")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
+
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected prompt-gated write to stay blocked, stat error: %v", err)
+	}
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected one session, got %d", len(list))
+	}
+	events, err := store.ReadEvents(list[0].SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
+		sessions.EventMessage,
+		sessions.EventToolCall,
+		sessions.EventPermission,
+		sessions.EventToolResult,
+		sessions.EventMessage,
+	}) {
+		t.Fatalf("unexpected event sequence: %#v", got)
+	}
+	assertPayloadField(t, events[2], "toolCallId", "call_write")
+	assertPayloadField(t, events[2], "name", "write_file")
+	assertPayloadField(t, events[2], "action", "prompt")
+	assertPayloadField(t, events[2], "permission", "prompt")
+	assertPayloadField(t, events[2], "permissionMode", "ask")
+	assertPayloadField(t, events[2], "sideEffect", "write")
+	assertPayloadField(t, events[4], "content", "write blocked")
+	if !transcriptContains(next.transcript, "permission: write_file prompt") {
+		t.Fatalf("expected permission row in transcript, got %#v", next.transcript)
+	}
+}
+
 func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	store := testSessionStore(t)
 	session, err := store.Create(sessions.CreateInput{Title: "Hydrate me", Cwd: "repo", ModelID: "gpt-4.1", Provider: "openai"})
@@ -200,6 +280,15 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	}
 	appendTestEvent(t, store, session.SessionID, sessions.EventMessage, map[string]any{"role": "user", "content": "previous request"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventToolCall, map[string]any{"id": "call_1", "name": "grep", "arguments": `{"pattern":"Zero"}`})
+	appendTestEvent(t, store, session.SessionID, sessions.EventPermission, map[string]any{
+		"toolCallId":     "call_1",
+		"name":           "grep",
+		"action":         "allow",
+		"permission":     "allow",
+		"permissionMode": "auto",
+		"sideEffect":     "read",
+		"risk":           map[string]any{"level": "low"},
+	})
 	appendTestEvent(t, store, session.SessionID, sessions.EventToolResult, map[string]any{"toolCallId": "call_1", "name": "grep", "status": "error", "output": "matches"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventMessage, map[string]any{"role": "assistant", "content": "previous answer"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventError, map[string]any{"message": "old error"})
@@ -213,7 +302,7 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /resume to hydrate synchronously")
 	}
-	for _, want := range []string{"Resumed Zero session", session.SessionID, "previous request", "tool call: grep", "tool result: grep error matches", "previous answer", "old error"} {
+	for _, want := range []string{"Resumed Zero session", session.SessionID, "previous request", "tool call: grep", "permission: grep allow", "tool result: grep error matches", "previous answer", "old error"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected resumed transcript to contain %q, got %#v", want, next.transcript)
 		}
@@ -221,6 +310,10 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	toolCall, ok := findTranscriptRow(next.transcript, rowToolCall)
 	if !ok || toolCall.tool != "grep" || toolCall.detail != "Zero" {
 		t.Fatalf("expected hydrated tool call metadata, got ok=%v row=%#v", ok, toolCall)
+	}
+	permissionRow, ok := findTranscriptRow(next.transcript, rowPermission)
+	if !ok || permissionRow.tool != "grep" || permissionRow.permission == nil || permissionRow.permission.Action != agent.PermissionActionAllow {
+		t.Fatalf("expected hydrated permission metadata, got ok=%v row=%#v", ok, permissionRow)
 	}
 	toolResult, ok := findTranscriptRow(next.transcript, rowToolResult)
 	if !ok || toolResult.tool != "grep" || toolResult.status != tools.StatusError || toolResult.detail != "matches" {

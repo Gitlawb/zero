@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -15,16 +16,18 @@ const (
 	rowAssistant
 	rowToolCall
 	rowToolResult
+	rowPermission
 	rowSystem
 	rowError
 )
 
 type transcriptRow struct {
-	kind   rowKind
-	text   string
-	tool   string       // tool name, for tool call/result rows
-	status tools.Status // result status, for tool result rows
-	detail string       // raw multi-line output (e.g. a diff to render as a card)
+	kind       rowKind
+	text       string
+	tool       string       // tool name, for tool call/result rows
+	status     tools.Status // result status, for tool result rows
+	detail     string       // raw multi-line output (e.g. a diff to render as a card)
+	permission *agent.PermissionEvent
 }
 
 type transcriptActionKind int
@@ -96,6 +99,69 @@ func appendTranscriptRow(rows []transcriptRow, row transcriptRow) []transcriptRo
 	next := append([]transcriptRow{}, rows...)
 	next = append(next, row)
 	return next
+}
+
+func permissionTranscriptRow(event agent.PermissionEvent) transcriptRow {
+	return transcriptRow{
+		kind:       rowPermission,
+		text:       permissionRowText(event),
+		tool:       event.ToolName,
+		detail:     permissionDetailText(event),
+		permission: &event,
+	}
+}
+
+func permissionRowText(event agent.PermissionEvent) string {
+	parts := []string{"permission:"}
+	if event.ToolName != "" {
+		parts = append(parts, event.ToolName)
+	}
+	if event.Action != "" {
+		parts = append(parts, string(event.Action))
+	}
+	if event.Risk.Level != "" {
+		parts = append(parts, "risk:"+string(event.Risk.Level))
+	}
+	if event.Violation != nil && event.Violation.Code != "" {
+		parts = append(parts, "violation:"+string(event.Violation.Code))
+	}
+	return strings.Join(parts, " ")
+}
+
+func permissionDetailText(event agent.PermissionEvent) string {
+	parts := []string{}
+	if event.Permission != "" {
+		parts = append(parts, "permission="+event.Permission)
+	}
+	if event.PermissionMode != "" {
+		parts = append(parts, "mode="+string(event.PermissionMode))
+	}
+	if event.Autonomy != "" {
+		parts = append(parts, "autonomy="+event.Autonomy)
+	}
+	if event.SideEffect != "" {
+		parts = append(parts, "side_effect="+event.SideEffect)
+	}
+	if event.Risk.Level != "" {
+		parts = append(parts, "risk="+string(event.Risk.Level))
+	}
+	if event.GrantMatched {
+		parts = append(parts, "grant=matched")
+	}
+	if event.Reason != "" {
+		parts = append(parts, event.Reason)
+	}
+	if event.Violation != nil {
+		violation := "violation=" + string(event.Violation.Code)
+		if event.Violation.Path != "" {
+			violation += " path=" + event.Violation.Path
+		}
+		if event.Violation.Reason != "" {
+			violation += " " + event.Violation.Reason
+		}
+		parts = append(parts, violation)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func truncateTUIOutput(output string, limit int) string {
