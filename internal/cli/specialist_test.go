@@ -75,8 +75,13 @@ func TestRunSpecialistListJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("failed to decode JSON: %v\n%s", err, stdout.String())
 	}
-	if len(payload.Specialists) == 0 || payload.Specialists[0].Name == "" {
+	if len(payload.Specialists) == 0 {
 		t.Fatalf("unexpected JSON payload: %#v", payload)
+	}
+	for _, item := range payload.Specialists {
+		if item.Name == "" || item.Location == "" {
+			t.Fatalf("specialist JSON item missing name or location: %#v", item)
+		}
 	}
 }
 
@@ -93,6 +98,24 @@ func TestRunSpecialistShowMissingReturnsUsage(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not found") {
 		t.Fatalf("expected not found error, got %q", stderr.String())
+	}
+}
+
+func TestRunSpecialistUnknownCommandDoesNotResolveWorkspace(t *testing.T) {
+	deps := appDeps{getwd: func() (string, error) {
+		t.Fatal("getwd should not be called for an unknown specialist command")
+		return "", nil
+	}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"specialist", "missing"}, &stdout, &stderr, deps)
+
+	if exitCode != exitUsage {
+		t.Fatalf("exitCode = %d, want usage", exitCode)
+	}
+	if !strings.Contains(stderr.String(), `unknown specialist command "missing"`) {
+		t.Fatalf("expected unknown command error, got %q", stderr.String())
 	}
 }
 

@@ -117,18 +117,16 @@ func Load(options LoadOptions) (LoadResult, error) {
 	}
 
 	manifests := Builtins()
+	projectManifests, err := loadDirectory(paths.ProjectDir, LocationProject)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	manifests = append(manifests, projectManifests...)
 	userManifests, err := loadDirectory(paths.UserDir, LocationUser)
 	if err != nil {
 		return LoadResult{}, err
 	}
 	manifests = append(manifests, userManifests...)
-	if strings.TrimSpace(paths.ProjectDir) != "" {
-		projectManifests, err := loadDirectory(paths.ProjectDir, LocationProject)
-		if err != nil {
-			return LoadResult{}, err
-		}
-		manifests = append(manifests, projectManifests...)
-	}
 
 	return LoadResult{Paths: paths, Specialists: mergeByName(manifests)}, nil
 }

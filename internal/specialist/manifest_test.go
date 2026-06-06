@@ -75,6 +75,18 @@ description: Project worker override
 tools: [execute]
 ---
 Project prompt.`)
+	writeManifest(t, filepath.Join(projectDir, "conflict.md"), `---
+name: conflict
+description: Project conflict
+tools: [execute]
+---
+Project conflict prompt.`)
+	writeManifest(t, filepath.Join(userDir, "conflict.md"), `---
+name: conflict
+description: User conflict
+tools: [read-only]
+---
+User conflict prompt.`)
 
 	result, err := Load(LoadOptions{Paths: Paths{UserDir: userDir, ProjectDir: projectDir}})
 	if err != nil {
@@ -93,6 +105,13 @@ Project prompt.`)
 	}
 	if worker.Location != LocationProject || !contains(worker.ResolvedTools, "bash") {
 		t.Fatalf("unexpected worker override: %#v", worker)
+	}
+	conflict, ok := Find(result, "conflict")
+	if !ok {
+		t.Fatal("conflict not found")
+	}
+	if conflict.Location != LocationUser || conflict.SystemPrompt != "User conflict prompt." || contains(conflict.ResolvedTools, "bash") {
+		t.Fatalf("user manifest should win same-name conflict, got %#v", conflict)
 	}
 }
 

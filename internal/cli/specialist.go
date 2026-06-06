@@ -24,6 +24,10 @@ func runSpecialists(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return exitSuccess
 	}
 
+	if err := validateSpecialistCommand(command, remaining); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
 	workspaceRoot, err := resolveWorkspaceRoot("", deps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -35,19 +39,10 @@ func runSpecialists(args []string, stdout io.Writer, stderr io.Writer, deps appD
 
 	switch command {
 	case "list":
-		if len(remaining) != 0 {
-			return writeExecUsageError(stderr, "specialist list does not accept positional arguments")
-		}
 		return runSpecialistList(paths, options, stdout, stderr)
 	case "show":
-		if len(remaining) != 1 {
-			return writeExecUsageError(stderr, "specialist show requires a specialist name")
-		}
 		return runSpecialistShow(paths, remaining[0], options, stdout, stderr)
 	case "path":
-		if len(remaining) != 0 {
-			return writeExecUsageError(stderr, "specialist path does not accept positional arguments")
-		}
 		return runSpecialistPath(paths, options, stdout)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown specialist command %q", command))
@@ -78,6 +73,26 @@ func parseSpecialistArgs(args []string) (string, []string, specialistOptions, bo
 		}
 	}
 	return command, remaining, options, false, nil
+}
+
+func validateSpecialistCommand(command string, remaining []string) error {
+	switch command {
+	case "list":
+		if len(remaining) != 0 {
+			return fmt.Errorf("specialist list does not accept positional arguments")
+		}
+	case "show":
+		if len(remaining) != 1 {
+			return fmt.Errorf("specialist show requires a specialist name")
+		}
+	case "path":
+		if len(remaining) != 0 {
+			return fmt.Errorf("specialist path does not accept positional arguments")
+		}
+	default:
+		return fmt.Errorf("unknown specialist command %q", command)
+	}
+	return nil
 }
 
 func runSpecialistList(paths specialist.Paths, options specialistOptions, stdout io.Writer, stderr io.Writer) int {
