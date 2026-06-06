@@ -24,6 +24,7 @@ type ToolResult struct {
 	Name       string
 	Status     tools.Status
 	Output     string
+	Meta       map[string]string
 }
 
 type Options struct {

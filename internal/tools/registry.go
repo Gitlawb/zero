@@ -17,6 +17,10 @@ type RunOptions struct {
 	Sandbox           *sandbox.Engine
 }
 
+type sandboxAwareTool interface {
+	RunWithSandbox(ctx context.Context, args map[string]any, engine *sandbox.Engine) Result
+}
+
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]Tool)}
 }
@@ -79,6 +83,11 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		return errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
 	}
 
+	if options.Sandbox != nil {
+		if sandboxed, ok := tool.(sandboxAwareTool); ok {
+			return sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
+		}
+	}
 	return tool.Run(ctx, args)
 }
 

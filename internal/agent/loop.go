@@ -132,6 +132,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Name:       call.Name,
 		Status:     result.Status,
 		Output:     result.Output,
+		Meta:       result.Meta,
 	}
 }
 

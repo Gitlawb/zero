@@ -34,31 +34,32 @@ const (
 )
 
 type Event struct {
-	SchemaVersion    int       `json:"schemaVersion"`
-	Type             EventType `json:"type"`
-	RunID            string    `json:"runId"`
-	SessionID        string    `json:"sessionId,omitempty"`
-	Cwd              string    `json:"cwd,omitempty"`
-	Provider         string    `json:"provider,omitempty"`
-	Model            string    `json:"model,omitempty"`
-	APIModel         string    `json:"apiModel,omitempty"`
-	Delta            string    `json:"delta,omitempty"`
-	ID               string    `json:"id,omitempty"`
-	Name             string    `json:"name,omitempty"`
-	Args             any       `json:"args,omitempty"`
-	SideEffect       string    `json:"sideEffect,omitempty"`
-	Status           string    `json:"status,omitempty"`
-	Output           string    `json:"output,omitempty"`
-	Truncated        *bool     `json:"truncated,omitempty"`
-	PromptTokens     *int      `json:"promptTokens,omitempty"`
-	CompletionTokens *int      `json:"completionTokens,omitempty"`
-	TotalTokens      *int      `json:"totalTokens,omitempty"`
-	CostUSD          *float64  `json:"costUsd,omitempty"`
-	Text             string    `json:"text,omitempty"`
-	Message          string    `json:"message,omitempty"`
-	Code             string    `json:"code,omitempty"`
-	Recoverable      *bool     `json:"recoverable,omitempty"`
-	ExitCode         *int      `json:"exitCode,omitempty"`
+	SchemaVersion    int               `json:"schemaVersion"`
+	Type             EventType         `json:"type"`
+	RunID            string            `json:"runId"`
+	SessionID        string            `json:"sessionId,omitempty"`
+	Cwd              string            `json:"cwd,omitempty"`
+	Provider         string            `json:"provider,omitempty"`
+	Model            string            `json:"model,omitempty"`
+	APIModel         string            `json:"apiModel,omitempty"`
+	Delta            string            `json:"delta,omitempty"`
+	ID               string            `json:"id,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	Args             any               `json:"args,omitempty"`
+	SideEffect       string            `json:"sideEffect,omitempty"`
+	Status           string            `json:"status,omitempty"`
+	Output           string            `json:"output,omitempty"`
+	Truncated        *bool             `json:"truncated,omitempty"`
+	Meta             map[string]string `json:"meta,omitempty"`
+	PromptTokens     *int              `json:"promptTokens,omitempty"`
+	CompletionTokens *int              `json:"completionTokens,omitempty"`
+	TotalTokens      *int              `json:"totalTokens,omitempty"`
+	CostUSD          *float64          `json:"costUsd,omitempty"`
+	Text             string            `json:"text,omitempty"`
+	Message          string            `json:"message,omitempty"`
+	Code             string            `json:"code,omitempty"`
+	Recoverable      *bool             `json:"recoverable,omitempty"`
+	ExitCode         *int              `json:"exitCode,omitempty"`
 }
 
 type InputEvent struct {

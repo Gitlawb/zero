@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
 const defaultBashTimeoutMS = 120000
@@ -42,6 +44,14 @@ func NewBashTool(workspaceRoot string) Tool {
 }
 
 func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.run(ctx, args, nil)
+}
+
+func (tool bashTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+	return tool.run(ctx, args, engine)
+}
+
+func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
 	commandText, err := stringArg(args, "command", "", true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
@@ -63,8 +73,20 @@ func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
 	commandCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
 	defer cancel()
 
-	command := exec.CommandContext(commandCtx, shellExecutable(), shellArguments(commandText)...)
-	command.Dir = absoluteCwd
+	meta := map[string]string{
+		"cwd":        relativeCwd,
+		"timeout_ms": strconv.Itoa(timeoutMS),
+	}
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, engine)
+	if err != nil {
+		meta["exit_code"] = "-1"
+		return Result{
+			Status: StatusError,
+			Output: "Error preparing sandboxed bash command: " + err.Error(),
+			Meta:   meta,
+		}
+	}
+	addSandboxMeta(meta, plan)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -73,11 +95,7 @@ func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
 
 	err = command.Run()
 	exitCode := commandExitCode(err)
-	meta := map[string]string{
-		"cwd":        relativeCwd,
-		"exit_code":  strconv.Itoa(exitCode),
-		"timeout_ms": strconv.Itoa(timeoutMS),
-	}
+	meta["exit_code"] = strconv.Itoa(exitCode)
 
 	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 		return Result{
@@ -105,6 +123,44 @@ func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {
 		Status: StatusOK,
 		Output: formatBashOutput(stdout.String(), stderr.String(), exitCode),
 		Meta:   meta,
+	}
+}
+
+func buildBashCommand(ctx context.Context, commandText string, absoluteCwd string, engine *zeroSandbox.Engine) (*exec.Cmd, zeroSandbox.CommandPlan, error) {
+	spec := zeroSandbox.CommandSpec{
+		Name: shellExecutable(),
+		Args: shellArguments(commandText),
+		Dir:  absoluteCwd,
+	}
+	if engine != nil {
+		return engine.CommandContext(ctx, spec)
+	}
+	plan := zeroSandbox.CommandPlan{
+		Backend: zeroSandbox.Backend{
+			Name:    zeroSandbox.BackendPolicyOnly,
+			Message: "sandbox engine not provided",
+		},
+		Wrapped: false,
+		Name:    spec.Name,
+		Args:    spec.Args,
+		Dir:     spec.Dir,
+	}
+	command := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	command.Dir = spec.Dir
+	return command, plan, nil
+}
+
+func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
+	if plan.Backend.Name == "" {
+		return
+	}
+	meta["sandbox_backend"] = string(plan.Backend.Name)
+	meta["sandbox_wrapped"] = strconv.FormatBool(plan.Wrapped)
+	if plan.Backend.Message != "" {
+		meta["sandbox_message"] = plan.Backend.Message
+	}
+	if plan.SandboxDir != "" {
+		meta["sandbox_cwd"] = plan.SandboxDir
 	}
 }
 

@@ -220,12 +220,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		},
 		OnToolResult: func(result agent.ToolResult) {
 			writer.toolResult(result)
-			sessionRecorder.append(sessions.EventToolResult, map[string]any{
+			payload := map[string]any{
 				"toolCallId": result.ToolCallID,
 				"name":       result.Name,
 				"status":     string(result.Status),
 				"output":     result.Output,
-			})
+			}
+			if len(result.Meta) > 0 {
+				payload["meta"] = result.Meta
+			}
+			sessionRecorder.append(sessions.EventToolResult, payload)
 		},
 		OnUsage: func(usage agent.Usage) {
 			writer.usage(usage)

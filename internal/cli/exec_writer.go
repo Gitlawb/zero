@@ -104,13 +104,17 @@ func (writer *execEventWriter) toolCall(call agent.ToolCall, registry *tools.Reg
 
 func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 	if writer.format == execOutputJSON {
-		writer.writeJSON(map[string]any{
+		payload := map[string]any{
 			"type":         "tool_result",
 			"tool_call_id": result.ToolCallID,
 			"name":         result.Name,
 			"status":       string(result.Status),
 			"output":       result.Output,
-		})
+		}
+		if len(result.Meta) > 0 {
+			payload["meta"] = result.Meta
+		}
+		writer.writeJSON(payload)
 		return
 	}
 	if writer.format == execOutputStreamJSON {
@@ -123,6 +127,7 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 			Status:    string(result.Status),
 			Output:    output,
 			Truncated: &truncated,
+			Meta:      result.Meta,
 		})
 		return
 	}
