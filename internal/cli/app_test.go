@@ -246,10 +246,21 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 
 func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 	result := update.Result{
-		CurrentVersion:  "dev",
-		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
-		TagName:         "v0.2.0",
+		CurrentVersion: "dev",
+		LatestVersion:  "0.2.0",
+		ReleaseURL:     "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		TagName:        "v0.2.0",
+		ReleaseAsset: update.AssetCheck{
+			Platform:      "linux",
+			Arch:          "x64",
+			ArchiveName:   "zero-v0.2.0-linux-x64.tar.gz",
+			ArchiveURL:    "https://example.test/zero-v0.2.0-linux-x64.tar.gz",
+			ChecksumName:  "zero-v0.2.0-linux-x64.tar.gz.sha256",
+			ChecksumURL:   "https://example.test/zero-v0.2.0-linux-x64.tar.gz.sha256",
+			ArchiveFound:  true,
+			ChecksumFound: true,
+			Verified:      true,
+		},
 		UpdateAvailable: true,
 	}
 	deps := appDeps{
@@ -268,6 +279,9 @@ func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Update available: dev -> 0.2.0") {
 		t.Fatalf("unexpected update text: %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "Release asset: zero-v0.2.0-linux-x64.tar.gz") || !strings.Contains(stdout.String(), "Checksum asset: zero-v0.2.0-linux-x64.tar.gz.sha256") {
+		t.Fatalf("unexpected update asset text: %q", stdout.String())
+	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
@@ -279,11 +293,20 @@ func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
 	var payload struct {
-		CurrentVersion  string `json:"currentVersion"`
-		LatestVersion   string `json:"latestVersion"`
-		ReleaseURL      string `json:"releaseUrl"`
-		TagName         string `json:"tagName"`
-		UpdateAvailable bool   `json:"updateAvailable"`
+		CurrentVersion string `json:"currentVersion"`
+		LatestVersion  string `json:"latestVersion"`
+		ReleaseURL     string `json:"releaseUrl"`
+		TagName        string `json:"tagName"`
+		ReleaseAsset   struct {
+			Platform      string `json:"platform"`
+			Arch          string `json:"arch"`
+			ArchiveName   string `json:"archiveName"`
+			ChecksumName  string `json:"checksumName"`
+			ArchiveFound  bool   `json:"archiveFound"`
+			ChecksumFound bool   `json:"checksumFound"`
+			Verified      bool   `json:"verified"`
+		} `json:"releaseAsset"`
+		UpdateAvailable bool `json:"updateAvailable"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("update JSON did not decode: %v\n%s", err, stdout.String())
@@ -292,6 +315,9 @@ func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 		payload.LatestVersion != result.LatestVersion ||
 		payload.ReleaseURL != result.ReleaseURL ||
 		payload.TagName != result.TagName ||
+		payload.ReleaseAsset.ArchiveName != result.ReleaseAsset.ArchiveName ||
+		payload.ReleaseAsset.ChecksumName != result.ReleaseAsset.ChecksumName ||
+		!payload.ReleaseAsset.Verified ||
 		payload.UpdateAvailable != result.UpdateAvailable {
 		t.Fatalf("unexpected update JSON: %#v", payload)
 	}

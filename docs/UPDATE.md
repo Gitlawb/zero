@@ -9,10 +9,11 @@ For M2 this command is intentionally check-only:
 - It exits with code `1` when the release check cannot be completed.
 - `--json` prints the same result in a machine-readable format for scripts and CI.
 - Release checks time out after 5 seconds by default.
+- It validates that the latest release includes the expected archive and matching `.sha256` asset for the current platform.
 
 The release endpoint resolves in this order:
 
-- `options.endpoint` when calling `checkForUpdate` from code.
+- `Options.Endpoint` when calling `update.Check` from code.
 - `ZERO_UPDATE_RELEASE_URL` from the environment.
 - `https://api.github.com/repos/Gitlawb/zero/releases/latest`.
 

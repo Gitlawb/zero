@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,16 +20,35 @@ const (
 )
 
 type Release struct {
-	TagName string `json:"tag_name"`
-	HTMLURL string `json:"html_url"`
+	TagName string  `json:"tag_name"`
+	HTMLURL string  `json:"html_url"`
+	Assets  []Asset `json:"assets"`
+}
+
+type Asset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url,omitempty"`
 }
 
 type Result struct {
-	CurrentVersion  string `json:"currentVersion"`
-	LatestVersion   string `json:"latestVersion"`
-	ReleaseURL      string `json:"releaseUrl"`
-	TagName         string `json:"tagName"`
-	UpdateAvailable bool   `json:"updateAvailable"`
+	CurrentVersion  string     `json:"currentVersion"`
+	LatestVersion   string     `json:"latestVersion"`
+	ReleaseURL      string     `json:"releaseUrl"`
+	TagName         string     `json:"tagName"`
+	ReleaseAsset    AssetCheck `json:"releaseAsset"`
+	UpdateAvailable bool       `json:"updateAvailable"`
+}
+
+type AssetCheck struct {
+	Platform      string `json:"platform"`
+	Arch          string `json:"arch"`
+	ArchiveName   string `json:"archiveName"`
+	ArchiveURL    string `json:"archiveUrl,omitempty"`
+	ChecksumName  string `json:"checksumName"`
+	ChecksumURL   string `json:"checksumUrl,omitempty"`
+	ArchiveFound  bool   `json:"archiveFound"`
+	ChecksumFound bool   `json:"checksumFound"`
+	Verified      bool   `json:"verified"`
 }
 
 // Options configures a release update check.
@@ -39,6 +59,8 @@ type Options struct {
 	Endpoint   string
 	Repository string
 	Timeout    time.Duration
+	GOOS       string
+	GOARCH     string
 	// Fetch overrides the release fetcher for tests and alternate transports.
 	Fetch func(context.Context, string) (Release, error)
 }
@@ -119,6 +141,10 @@ func Check(ctx context.Context, options Options) (Result, error) {
 	if releaseURL == "" {
 		releaseURL = fmt.Sprintf("https://github.com/%s/releases/tag/%s", repository, release.TagName)
 	}
+	assetCheck, err := verifyReleaseAssets(release, latestVersion, options)
+	if err != nil {
+		return Result{}, err
+	}
 	latestParts, err := parseSemverNormalized(latestVersion)
 	if err != nil {
 		return Result{}, err
@@ -132,22 +158,38 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		LatestVersion:   latestVersion,
 		ReleaseURL:      releaseURL,
 		TagName:         release.TagName,
+		ReleaseAsset:    assetCheck,
 		UpdateAvailable: compareSemverParts(latestParts, currentParts) > 0,
 	}, nil
 }
 
 func Format(result Result) string {
 	if result.UpdateAvailable {
-		return strings.Join([]string{
+		lines := []string{
 			fmt.Sprintf("[zero] Update available: %s -> %s", result.CurrentVersion, result.LatestVersion),
 			"Release: " + result.ReleaseURL,
-			"Download the matching release asset for your platform, then replace the current zero binary.",
-		}, "\n")
+		}
+		lines = appendAssetLines(lines, result.ReleaseAsset)
+		lines = append(lines, "Download the matching release asset for your platform, then replace the current zero binary.")
+		return strings.Join(lines, "\n")
 	}
-	return strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("[zero] up to date (%s)", result.CurrentVersion),
 		"Latest release: " + result.ReleaseURL,
-	}, "\n")
+	}
+	lines = appendAssetLines(lines, result.ReleaseAsset)
+	return strings.Join(lines, "\n")
+}
+
+func appendAssetLines(lines []string, asset AssetCheck) []string {
+	if asset.ArchiveName == "" {
+		return lines
+	}
+	lines = append(lines, "Release asset: "+asset.ArchiveName)
+	if asset.ChecksumName != "" {
+		lines = append(lines, "Checksum asset: "+asset.ChecksumName)
+	}
+	return lines
 }
 
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {
@@ -207,6 +249,82 @@ func resolveEndpoint(endpointOrRepository string, repository string) (string, er
 		return "", fmt.Errorf("invalid update endpoint %q: use a full URL or an owner/repo slug like %s", value, repository)
 	}
 	return value, nil
+}
+
+func verifyReleaseAssets(release Release, version string, options Options) (AssetCheck, error) {
+	assetCheck, err := expectedAssetCheck(version, options.GOOS, options.GOARCH)
+	if err != nil {
+		return AssetCheck{}, err
+	}
+	for _, asset := range release.Assets {
+		name := strings.TrimSpace(asset.Name)
+		switch name {
+		case assetCheck.ArchiveName:
+			assetCheck.ArchiveFound = true
+			assetCheck.ArchiveURL = strings.TrimSpace(asset.BrowserDownloadURL)
+		case assetCheck.ChecksumName:
+			assetCheck.ChecksumFound = true
+			assetCheck.ChecksumURL = strings.TrimSpace(asset.BrowserDownloadURL)
+		}
+	}
+	assetCheck.Verified = assetCheck.ArchiveFound && assetCheck.ChecksumFound
+	if assetCheck.Verified {
+		return assetCheck, nil
+	}
+	missing := []string{}
+	if !assetCheck.ArchiveFound {
+		missing = append(missing, assetCheck.ArchiveName)
+	}
+	if !assetCheck.ChecksumFound {
+		missing = append(missing, assetCheck.ChecksumName)
+	}
+	return AssetCheck{}, fmt.Errorf("release metadata missing expected asset(s) for %s-%s: %s", assetCheck.Platform, assetCheck.Arch, strings.Join(missing, ", "))
+}
+
+func expectedAssetCheck(version string, goos string, goarch string) (AssetCheck, error) {
+	platform, err := releasePlatform(firstNonEmpty(goos, runtime.GOOS))
+	if err != nil {
+		return AssetCheck{}, err
+	}
+	arch, err := releaseArch(firstNonEmpty(goarch, runtime.GOARCH))
+	if err != nil {
+		return AssetCheck{}, err
+	}
+	extension := "tar.gz"
+	if platform == "windows" {
+		extension = "zip"
+	}
+	archiveName := fmt.Sprintf("zero-v%s-%s-%s.%s", version, platform, arch, extension)
+	return AssetCheck{
+		Platform:     platform,
+		Arch:         arch,
+		ArchiveName:  archiveName,
+		ChecksumName: archiveName + ".sha256",
+	}, nil
+}
+
+func releasePlatform(goos string) (string, error) {
+	switch strings.TrimSpace(goos) {
+	case "linux":
+		return "linux", nil
+	case "darwin":
+		return "macos", nil
+	case "windows":
+		return "windows", nil
+	default:
+		return "", fmt.Errorf("unsupported release platform: %s", goos)
+	}
+}
+
+func releaseArch(goarch string) (string, error) {
+	switch strings.TrimSpace(goarch) {
+	case "amd64":
+		return "x64", nil
+	case "arm64":
+		return "arm64", nil
+	default:
+		return "", fmt.Errorf("unsupported release architecture: %s", goarch)
+	}
 }
 
 func normalizeVersionTag(version string) (string, error) {
