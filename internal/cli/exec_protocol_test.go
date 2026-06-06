@@ -434,6 +434,9 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("approved exec exit = %d, stderr = %q", exitCode, stderr.String())
 	}
+	if stderr.String() != "" {
+		t.Fatalf("approved exec wrote stderr = %q", stderr.String())
+	}
 	approvedEvents := decodeJSONLines(t, stdout.String())
 	approvedPermissionEvent := findJSONEvent(t, approvedEvents, "permission")
 	if approvedPermissionEvent["id"] != "call_write_approved" || approvedPermissionEvent["action"] != "allow" {
