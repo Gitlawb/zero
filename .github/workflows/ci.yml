@@ -22,40 +22,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Go test
-        run: bun run test:go
-
-      - name: Go build
-        run: bun run build:go
-
-      - name: Go smoke
-        run: bun run smoke:go
-
       - name: Test
-        run: bun run test
-
-      - name: Typecheck
-        run: bun run typecheck
+        run: go test ./...
 
       - name: Build binary
-        run: bun run build
+        run: go run ./cmd/zero-release build
 
       - name: Smoke binary
-        run: bun run smoke:build
+        run: go run ./cmd/zero-release smoke
 
   performance:
     name: Performance Smoke
@@ -65,25 +45,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
       - name: Build binary
-        run: bun run build
+        run: go run ./cmd/zero-release build
 
       - name: Performance smoke
-        run: bun run perf:smoke --ci
+        run: go run ./cmd/zero-perf-bench --output dist/perf/perf-bench.json --ci
 
       - name: Upload performance report
         if: always()

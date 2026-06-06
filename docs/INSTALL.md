@@ -11,8 +11,8 @@ Each archive must have a matching `.sha256` file. The install scripts download b
 Maintainers can verify the release directory before upload:
 
 ```bash
-bun run package:release
-bun run verify:release
+go run ./cmd/zero-release package
+go run ./cmd/zero-release verify
 ```
 
 `verify:release` requires every archive in `dist/release` to have a same-directory `.sha256` file whose contents are:

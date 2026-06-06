@@ -56,7 +56,6 @@ Builds the deterministic PR review markdown used by GitHub Actions.
 
 Environment:
   ZERO_REVIEW_DIFF_CHECK      Outcome for diff hygiene
-  ZERO_REVIEW_TYPECHECK       Outcome for typecheck
   ZERO_REVIEW_TEST            Outcome for tests
   ZERO_REVIEW_BUILD           Outcome for build
   ZERO_REVIEW_SMOKE           Outcome for smoke build

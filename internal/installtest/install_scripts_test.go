@@ -1,0 +1,242 @@
+package installtest
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestUnixInstallerScriptMatchesReleaseContracts(t *testing.T) {
+	script := readRepoText(t, "scripts/install.sh")
+
+	if !strings.HasPrefix(script, "#!/usr/bin/env bash") {
+		t.Fatalf("install.sh shebang = %q, want bash", strings.SplitN(script, "\n", 2)[0])
+	}
+	containsAll(t, script, []string{
+		"set -euo pipefail",
+		`ZERO_REPO="${ZERO_REPO:-Gitlawb/zero}"`,
+		`ZERO_INSTALL_DIR="${ZERO_INSTALL_DIR:-$HOME/.local/bin}"`,
+		`archive_name="zero-v${version}-${platform}-${arch}.tar.gz"`,
+		`checksum_name="${archive_name}.sha256"`,
+		"curl --fail --location --show-error --silent --header 'Accept: application/vnd.github+json'",
+		`verify_checksum "$checksum_name"`,
+		`tar -xzf "$archive_path" -C "$extract_dir"`,
+		`find_extracted_binary "$extract_dir"`,
+		`cp "$binary_path" "$ZERO_INSTALL_DIR/zero"`,
+	})
+}
+
+func TestPowerShellInstallerScriptMatchesWindowsReleaseContracts(t *testing.T) {
+	script := readRepoText(t, "scripts/install.ps1")
+
+	containsAll(t, script, []string{
+		`[string]$Repository = $(if ($env:ZERO_REPO)`,
+		`Join-Path $env:LOCALAPPDATA "zero\bin"`,
+		`$archiveName = "zero-v$releaseVersion-windows-$arch.zip"`,
+		`$checksumName = "$archiveName.sha256"`,
+		`Get-FileHash -Path $archivePath -Algorithm SHA256`,
+		`Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force`,
+		`Get-ChildItem -Path $extractDir -Filter "zero.exe" -File -Recurse`,
+		`Copy-Item -Path $binaryPath -Destination $targetPath -Force`,
+	})
+}
+
+func TestUnixInstallerInstallsFromPrefixedReleaseArchiveWithoutNetwork(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix installer smoke does not run on Windows")
+	}
+	bash := requireCommand(t, "bash")
+	tar := requireCommand(t, "tar")
+
+	releasePlatform := "linux"
+	if runtime.GOOS == "darwin" {
+		releasePlatform = "macos"
+	}
+	releaseArch := "x64"
+	if runtime.GOARCH == "arm64" {
+		releaseArch = "arm64"
+	}
+
+	packageName := fmt.Sprintf("zero-v0.1.0-%s-%s", releasePlatform, releaseArch)
+	archiveName := packageName + ".tar.gz"
+	checksumName := archiveName + ".sha256"
+	root := t.TempDir()
+	mockBin := filepath.Join(root, "bin")
+	packageDir := filepath.Join(root, "package", packageName)
+	releaseDir := filepath.Join(root, "release")
+	installDir := filepath.Join(root, "install")
+	archivePath := filepath.Join(releaseDir, archiveName)
+	checksumPath := filepath.Join(releaseDir, checksumName)
+
+	mustMkdirAll(t, mockBin)
+	mustMkdirAll(t, packageDir)
+	mustMkdirAll(t, releaseDir)
+	mustMkdirAll(t, installDir)
+	writeFile(t, filepath.Join(packageDir, "zero"), []byte("#!/usr/bin/env sh\necho mock-zero\n"), 0o755)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tarCommand := exec.CommandContext(ctx, tar, "-C", filepath.Join(root, "package"), "-czf", archivePath, packageName)
+	if output, err := tarCommand.CombinedOutput(); err != nil {
+		t.Fatalf("tar failed: %v\n%s", err, output)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("tar timed out: %v", err)
+	}
+
+	archiveBytes, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("ReadFile archive: %v", err)
+	}
+	sum := sha256.Sum256(archiveBytes)
+	writeFile(t, checksumPath, []byte(fmt.Sprintf("%x  %s\n", sum, archiveName)), 0o644)
+
+	mockCurl := fmt.Sprintf(`#!/usr/bin/env sh
+set -eu
+output=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    --output=*)
+      output="${1#--output=}"
+      shift
+      ;;
+    --header)
+      shift 2
+      ;;
+    --header=*)
+      shift
+      ;;
+    --fail|--location|--show-error|--silent)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+case "$url" in
+  */%s)
+    cp %s "$output"
+    ;;
+  */%s)
+    cp %s "$output"
+    ;;
+  *)
+    echo "unexpected url: $url" >&2
+    exit 2
+    ;;
+esac
+`, archiveName, shellQuote(archivePath), checksumName, shellQuote(checksumPath))
+	writeFile(t, filepath.Join(mockBin, "curl"), []byte(mockCurl), 0o755)
+
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, bash, filepath.Join(repoRoot(t), "scripts/install.sh"), "--version", "0.1.0", "--install-dir", installDir)
+	command.Dir = repoRoot(t)
+	command.Env = append(os.Environ(),
+		"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"ZERO_GITHUB_BASE_URL=https://example.test",
+		"ZERO_REPO=Gitlawb/zero",
+	)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+
+	if err := command.Run(); err != nil {
+		t.Fatalf("install.sh failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("install.sh timed out: %v", err)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "" {
+		t.Fatalf("install.sh stderr = %q, want empty", got)
+	}
+	if !strings.Contains(stdout.String(), "Installed "+filepath.Join(installDir, "zero")) {
+		t.Fatalf("install.sh stdout missing install path:\n%s", stdout.String())
+	}
+
+	installed := readFile(t, filepath.Join(installDir, "zero"))
+	if !strings.Contains(string(installed), "mock-zero") {
+		t.Fatalf("installed binary = %q, want mock-zero script", string(installed))
+	}
+}
+
+func containsAll(t *testing.T, value string, wants []string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(value, want) {
+			t.Fatalf("expected content to contain %q", want)
+		}
+	}
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func readRepoText(t *testing.T, relativePath string) string {
+	t.Helper()
+	return string(readFile(t, filepath.Join(repoRoot(t), relativePath)))
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	return data
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", path, err)
+	}
+}
+
+func writeFile(t *testing.T, path string, content []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, content, mode); err != nil {
+		t.Fatalf("WriteFile %s: %v", path, err)
+	}
+	if mode&0o111 != 0 {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("Chmod %s: %v", path, err)
+		}
+	}
+}
+
+func requireCommand(t *testing.T, name string) string {
+	t.Helper()
+	path, err := exec.LookPath(name)
+	if err != nil {
+		t.Skipf("%s is not available", name)
+	}
+	return path
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}

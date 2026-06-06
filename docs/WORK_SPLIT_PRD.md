@@ -37,7 +37,7 @@ Implemented baseline:
 - Core runtime packages live under `internal/`.
 - Current CLI surface includes `exec`, `config`, `models`, `providers`, `doctor`, `search`, `sessions`, `plugins`, `hooks`, `mcp`, `sandbox`, `update`, `worktrees`, `verify`, `changes`, `serve`, `help`, and `version`.
 - Core areas exist for agent flow, provider/model registry, tools, TUI, sessions, search, sandbox, self-verification, stream-json, usage, redaction, hooks, MCP, plugins, update, worktrees, and git/change handling.
-- TypeScript is no longer the runtime. Remaining TypeScript should be treated as npm/package support, scripts, or legacy test support until each file is explicitly retired or rewritten.
+- TypeScript is no longer part of the repository baseline. The npm package keeps a small Node wrapper that delegates to the Go binary.
 
 Still needed before Zero feels production-ready:
 

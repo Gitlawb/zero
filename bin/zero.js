@@ -14,7 +14,7 @@ const nativePath = join(packageRoot, zeroBinaryName());
 
 if (!existsSync(nativePath)) {
   console.error(
-    '[zero] No native binary found next to the npm wrapper. Reinstall the zero package or run `bun run build` from the repository.'
+    '[zero] No native binary found next to the npm wrapper. Reinstall the zero package or run `go run ./cmd/zero-release build` from the repository.'
   );
   process.exit(1);
 }

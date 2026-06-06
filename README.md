@@ -20,9 +20,8 @@
 
 Zero is a coding agent that lives in your terminal. It runs an agentic tool loop —
 reading, editing, searching, and running commands in your repo — against **whatever
-model you choose**. Zero is migrating to a **Go-native core** with an npm
-distribution wrapper; the Go runtime is now the default app path while remaining
-TypeScript modules are retired in focused slices.
+model you choose**. Zero has a **Go-native core** with an npm distribution wrapper;
+the Go runtime is the default app path.
 
 > Zero treats the **model as a swappable, per-task choice** — no single-vendor lock-in —
 > and never mutates your system without a permission decision.
@@ -41,12 +40,11 @@ TypeScript modules are retired in focused slices.
 
 ## Quick start
 
-> Requires [Go](https://go.dev/) for the runtime and release tooling, plus
-> [Bun](https://bun.com) for the npm wrapper, JS scripts, and tests.
+> Requires [Go](https://go.dev/) for local development and release tooling.
+> The npm wrapper uses Node when Zero is installed as an npm package.
 
 ```bash
-bun install --frozen-lockfile
-bun run dev          # launch the interactive TUI
+go run ./cmd/zero    # launch the interactive TUI
 ```
 
 Point Zero at a model — either set environment variables:
@@ -66,7 +64,7 @@ export OPENAI_MODEL=gpt-4.1
 ### Interactive (TUI)
 
 ```bash
-bun run dev          # or: zero
+go run ./cmd/zero    # or: zero after installation
 ```
 
 Inside the TUI: type to chat and press **Enter** to send. `/` opens command suggestions
@@ -139,7 +137,7 @@ Write/shell tools route through the permission policy before any side effect.
  + registry  registry  + search   + cost                  config
 ```
 
-- **Go-native target**: `cmd/zero` is the default production runtime; remaining TS/Bun code is being retired during migration.
+- **Go-native target**: `cmd/zero` is the default production runtime; the npm package delegates to the built Go binary.
 - **Surface-agnostic core**: the agent loop streams text + tool calls, executes tools, and emits a typed event stream consumed identically by every surface.
 - **Edges are interfaces**: `Provider`, `Tool`, `SessionStore`, and the permission policy are swappable.
 - **Model is data**: capabilities, cost, and routing live in the registry — never hard-coded.
@@ -163,29 +161,24 @@ internal/
   streamjson/            # headless stream-json protocol
   mcp/ plugins/ hooks/   # extension-facing runtime surfaces
 bin/                     # npm wrapper entrypoint
-scripts/                 # installers and npm helper scripts
-tests/                   # Bun tests for wrapper/install scripts
+scripts/                 # installers
 docs/                    # PRD + protocol/install/perf docs
 ```
 
 ## Development
 
 ```bash
-bun test            # run the test suite
-bun run test:go     # run Go tests
-bun run typecheck   # tsc --noEmit
-bun run build       # compile the release-facing Go binary
-bun run build:go    # same Go binary builder, kept as a stable validation command
-bun run smoke:build # verify the release-facing Go binary
-bun run smoke:go    # verify the Go binary through the Go smoke path
-bun run perf:bench  # performance benchmarks (see docs/PERFORMANCE.md)
+go test ./...                     # run the test suite
+go run ./cmd/zero-release build   # compile the release-facing Go binary
+go run ./cmd/zero-release smoke   # verify the release-facing Go binary
+go run ./cmd/zero-perf-bench      # performance benchmarks (see docs/PERFORMANCE.md)
 ```
 
 Cross-compile by passing Go targets to the builder:
 
 ```bash
-bun run build --goos linux --goarch amd64
-bun run build --goos windows --goarch amd64 --output dist/zero.exe
+go run ./cmd/zero-release build --goos linux --goarch amd64
+go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero.exe
 ```
 
 ### Install from a release
@@ -212,7 +205,7 @@ and [`docs/UPDATE.md`](docs/UPDATE.md) for the update flow.
 ## Contributing
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please run
-`bun test` and `bun run typecheck` before opening a PR.
+`go test ./...` and the relevant build or smoke command before opening a PR.
 
 ## License
 
@@ -220,4 +213,4 @@ License is being finalized; a `LICENSE` file will be added before a public relea
 
 ---
 
-<sub>Targeting a Go-native core with an npm distribution wrapper. Remaining Bun and TypeScript support code is transitional during migration.</sub>
+<sub>Go-native core with an npm distribution wrapper.</sub>

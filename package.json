@@ -1,29 +1,9 @@
 {
   "name": "zero",
   "version": "0.1.0",
-  "packageManager": "bun@1.3.14",
   "module": "bin/zero.js",
   "type": "module",
   "bin": {
     "zero": "bin/zero.js"
-  },
-  "scripts": {
-    "dev": "go run ./cmd/zero",
-    "test": "bun test ./tests --timeout 15000",
-    "test:go": "go test ./...",
-    "typecheck": "bunx tsc --noEmit",
-    "build": "go run ./cmd/zero-release build",
-    "build:go": "go run ./cmd/zero-release build",
-    "smoke:build": "go run ./cmd/zero-release smoke",
-    "smoke:go": "go run ./cmd/zero-release smoke",
-    "review:pr": "go run ./cmd/zero-pr-review",
-    "package:release": "go run ./cmd/zero-release package",
-    "verify:release": "go run ./cmd/zero-release verify",
-    "perf:bench": "go run ./cmd/zero-perf-bench",
-    "perf:smoke": "go run ./cmd/zero-perf-bench --output dist/perf/perf-bench.json"
-  },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "typescript": "^5.9.3"
   }
 }

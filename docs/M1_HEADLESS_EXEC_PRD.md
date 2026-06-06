@@ -77,9 +77,9 @@ Default headless mode advertises only tools marked `permission: "allow"`.
 
 ## Acceptance Criteria
 
-- `bun run typecheck` passes.
-- `bun test ./tests --timeout 15000` passes.
-- `bun run build` passes.
+- `go test ./...` passes.
+- `go run ./cmd/zero-release build` passes.
+- `go run ./cmd/zero-release smoke` passes.
 - `zero exec --help` documents the M1 flags.
 - Usage errors do not initialize providers.
 - Provider failures return exit code `3`.

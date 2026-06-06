@@ -11,7 +11,6 @@ func TestRunBuildsMarkdownFromEnvironment(t *testing.T) {
 		"ZERO_PR_NUMBER=50",
 		"ZERO_REVIEW_HEAD_SHA=abcdef1234567890",
 		"ZERO_REVIEW_DIFF_CHECK=success",
-		"ZERO_REVIEW_TYPECHECK=success",
 		"ZERO_REVIEW_TEST=success",
 		"ZERO_REVIEW_BUILD=success",
 		"ZERO_REVIEW_SMOKE=success",

@@ -26,7 +26,6 @@ func TestNormalizeOutcome(t *testing.T) {
 func TestBuildChecksFromEnvDetectsBlockers(t *testing.T) {
 	checks := BuildChecksFromEnv(map[string]string{
 		"ZERO_REVIEW_DIFF_CHECK": "success",
-		"ZERO_REVIEW_TYPECHECK":  "success",
 		"ZERO_REVIEW_TEST":       "failure",
 		"ZERO_REVIEW_BUILD":      "success",
 		"ZERO_REVIEW_SMOKE":      "skipped",
@@ -37,7 +36,6 @@ func TestBuildChecksFromEnvDetectsBlockers(t *testing.T) {
 		got = append(got, check.Outcome)
 	}
 	want := []Outcome{
-		OutcomeSuccess,
 		OutcomeSuccess,
 		OutcomeFailure,
 		OutcomeSuccess,
@@ -54,7 +52,6 @@ func TestBuildChecksFromEnvDetectsBlockers(t *testing.T) {
 func TestBuildMarkdownApprovingReview(t *testing.T) {
 	checks := BuildChecksFromEnv(map[string]string{
 		"ZERO_REVIEW_DIFF_CHECK": "success",
-		"ZERO_REVIEW_TYPECHECK":  "success",
 		"ZERO_REVIEW_TEST":       "success",
 		"ZERO_REVIEW_BUILD":      "success",
 		"ZERO_REVIEW_SMOKE":      "success",
@@ -82,8 +79,7 @@ func TestBuildMarkdownApprovingReview(t *testing.T) {
 func TestBuildMarkdownFormatsFailuresAsBlockers(t *testing.T) {
 	checks := BuildChecksFromEnv(map[string]string{
 		"ZERO_REVIEW_DIFF_CHECK": "success",
-		"ZERO_REVIEW_TYPECHECK":  "failure",
-		"ZERO_REVIEW_TEST":       "success",
+		"ZERO_REVIEW_TEST":       "failure",
 		"ZERO_REVIEW_BUILD":      "success",
 		"ZERO_REVIEW_SMOKE":      "success",
 	})
@@ -95,8 +91,8 @@ func TestBuildMarkdownFormatsFailuresAsBlockers(t *testing.T) {
 	if !strings.Contains(markdown, "Verdict: **Changes requested**") {
 		t.Fatalf("expected changes requested verdict:\n%s", markdown)
 	}
-	if !strings.Contains(markdown, "`bun run typecheck` ended with `failure`") {
-		t.Fatalf("expected typecheck blocker:\n%s", markdown)
+	if !strings.Contains(markdown, "`go test ./...` ended with `failure`") {
+		t.Fatalf("expected test blocker:\n%s", markdown)
 	}
 	if FormatOutcome(OutcomeSuccess) != "[pass]" {
 		t.Fatalf("success outcome formatted as %q", FormatOutcome(OutcomeSuccess))

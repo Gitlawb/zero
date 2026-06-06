@@ -32,8 +32,8 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	if pkg.Module != "bin/zero.js" {
 		t.Fatalf("module = %q, want bin/zero.js", pkg.Module)
 	}
-	if pkg.Scripts["dev"] != "go run ./cmd/zero" {
-		t.Fatalf("dev script = %q, want Go CLI", pkg.Scripts["dev"])
+	if len(pkg.Scripts) != 0 {
+		t.Fatalf("package.json scripts = %#v, want no repository build scripts in npm package metadata", pkg.Scripts)
 	}
 }
 
@@ -49,7 +49,7 @@ func TestNodeWrapperIsExecutableAndDoesNotImportBun(t *testing.T) {
 	if firstLine != "#!/usr/bin/env node" {
 		t.Fatalf("wrapper shebang = %q, want node", firstLine)
 	}
-	for _, forbidden := range []string{"#!/usr/bin/env bun", "Bun.", "../scripts/npm-wrapper"} {
+	for _, forbidden := range []string{"#!/usr/bin/env bun", "Bun.", "../scripts/npm-wrapper", "bun run build"} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("wrapper still contains %q", forbidden)
 		}
