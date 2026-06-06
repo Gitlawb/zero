@@ -95,13 +95,9 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 	if err != nil {
 		return PackageResult{}, err
 	}
-	releaseDir := options.ReleaseDir
-	if strings.TrimSpace(releaseDir) == "" {
-		releaseDir = filepath.Join(rootDir, "dist", "release")
-	}
-	stagingRoot := options.StagingRoot
-	if strings.TrimSpace(stagingRoot) == "" {
-		stagingRoot = filepath.Join(rootDir, "dist", "package")
+	releaseDir, stagingRoot, err := resolvePackageDirs(rootDir, options.ReleaseDir, options.StagingRoot)
+	if err != nil {
+		return PackageResult{}, err
 	}
 	stagingDir := filepath.Join(stagingRoot, packageName)
 	archivePath := filepath.Join(releaseDir, archiveName)
@@ -383,6 +379,50 @@ func resolveRootDir(rootDir string) (string, error) {
 		}
 	}
 	return filepath.Abs(rootDir)
+}
+
+func resolvePackageDirs(rootDir string, releaseDir string, stagingRoot string) (string, string, error) {
+	distDir := filepath.Join(rootDir, "dist")
+	resolvedReleaseDir, err := resolvePackageSubdir(rootDir, distDir, releaseDir, "release")
+	if err != nil {
+		return "", "", err
+	}
+	resolvedStagingRoot, err := resolvePackageSubdir(rootDir, distDir, stagingRoot, "package")
+	if err != nil {
+		return "", "", err
+	}
+	if pathsOverlap(resolvedReleaseDir, resolvedStagingRoot) {
+		return "", "", fmt.Errorf("release dir and staging dir must not overlap: %s and %s", resolvedReleaseDir, resolvedStagingRoot)
+	}
+	return resolvedReleaseDir, resolvedStagingRoot, nil
+}
+
+func resolvePackageSubdir(rootDir string, distDir string, value string, defaultName string) (string, error) {
+	path := strings.TrimSpace(value)
+	if path == "" {
+		path = filepath.Join(distDir, defaultName)
+	} else if !filepath.IsAbs(path) {
+		path = filepath.Join(rootDir, path)
+	}
+	path = filepath.Clean(path)
+	if !isStrictSubpath(distDir, path) {
+		return "", fmt.Errorf("release tooling output path must be inside %s: %s", distDir, path)
+	}
+	return path, nil
+}
+
+func isStrictSubpath(parent string, child string) bool {
+	parent = filepath.Clean(parent)
+	child = filepath.Clean(child)
+	relative, err := filepath.Rel(parent, child)
+	if err != nil || relative == "." || relative == "" {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func pathsOverlap(left string, right string) bool {
+	return left == right || isStrictSubpath(left, right) || isStrictSubpath(right, left)
 }
 
 func packageVersion(rootDir string) (string, error) {

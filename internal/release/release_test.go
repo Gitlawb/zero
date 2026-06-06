@@ -209,6 +209,86 @@ func TestPackageRejectsCrossTargetBecauseItSmokesTheBinary(t *testing.T) {
 	}
 }
 
+func TestResolvePackageDirsRejectsDangerousDeleteTargets(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	tests := []struct {
+		name       string
+		releaseDir string
+		stagingDir string
+		want       string
+	}{
+		{
+			name:       "repo root release dir",
+			releaseDir: ".",
+			stagingDir: "dist/package",
+			want:       "inside",
+		},
+		{
+			name:       "dist root release dir",
+			releaseDir: "dist",
+			stagingDir: "dist/package",
+			want:       "inside",
+		},
+		{
+			name:       "outside absolute release dir",
+			releaseDir: home,
+			stagingDir: "dist/package",
+			want:       "inside",
+		},
+		{
+			name:       "same release and staging dir",
+			releaseDir: "dist/release",
+			stagingDir: "dist/release",
+			want:       "overlap",
+		},
+		{
+			name:       "staging contains release dir",
+			releaseDir: "dist/package/release",
+			stagingDir: "dist/package",
+			want:       "overlap",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := resolvePackageDirs(root, tt.releaseDir, tt.stagingDir)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("resolvePackageDirs error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPackageRejectsDangerousDirsBeforeDeleting(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "package.json"), `{"version":"0.1.0"}`)
+	markerPath := filepath.Join(root, "DO_NOT_DELETE")
+	mustWriteFile(t, markerPath, "marker")
+
+	_, err := Package(context.Background(), PackageOptions{
+		RootDir:    root,
+		ReleaseDir: ".",
+	})
+	if err == nil || !strings.Contains(err.Error(), "inside") {
+		t.Fatalf("Package error = %v, want unsafe path rejection", err)
+	}
+	if _, statErr := os.Stat(markerPath); statErr != nil {
+		t.Fatalf("Package removed marker before rejecting unsafe dir: %v", statErr)
+	}
+}
+
+func TestResolvePackageDirsAcceptsDistSubdirs(t *testing.T) {
+	root := t.TempDir()
+	releaseDir, stagingDir, err := resolvePackageDirs(root, "dist/custom-release", "dist/custom-package")
+	if err != nil {
+		t.Fatalf("resolvePackageDirs returned error: %v", err)
+	}
+	if releaseDir != filepath.Join(root, "dist", "custom-release") || stagingDir != filepath.Join(root, "dist", "custom-package") {
+		t.Fatalf("release/staging dirs = %q/%q", releaseDir, stagingDir)
+	}
+}
+
 func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 	t.Run("tar gz", func(t *testing.T) {
 		stagingDir := packageStagingFixture(t)
@@ -259,6 +339,16 @@ func packageStagingFixture(t *testing.T) string {
 		}
 	}
 	return dir
+}
+
+func mustWriteFile(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
 }
 
 func tarArchiveNames(t *testing.T, archivePath string) map[string]bool {
