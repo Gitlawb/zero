@@ -84,6 +84,25 @@ type PermissionEvent struct {
 	Grant             *sandbox.Grant     `json:"grant,omitempty"`
 }
 
+// AskUserQuestion is one clarifying question the agent wants answered.
+type AskUserQuestion struct {
+	Question    string   `json:"question"`
+	Options     []string `json:"options,omitempty"`
+	MultiSelect bool     `json:"multiSelect,omitempty"`
+}
+
+// AskUserRequest is handed to OnAskUser when the model invokes the ask_user tool.
+type AskUserRequest struct {
+	ToolCallID string            `json:"toolCallId"`
+	Header     string            `json:"header,omitempty"`
+	Questions  []AskUserQuestion `json:"questions"`
+}
+
+// AskUserResponse carries the user's answers back to the loop, one per question.
+type AskUserResponse struct {
+	Answers []string `json:"answers"`
+}
+
 type Options struct {
 	MaxTurns            int
 	Registry            *tools.Registry
@@ -96,6 +115,7 @@ type Options struct {
 	OnToolCall          func(ToolCall)
 	OnPermissionRequest func(context.Context, PermissionRequest) (PermissionDecision, error)
 	OnPermission        func(PermissionEvent)
+	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
 	OnToolResult        func(ToolResult)
 	OnUsage             func(Usage)
 }

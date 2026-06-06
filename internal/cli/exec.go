@@ -211,6 +211,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		"content": prompt,
 	})
 
+	// OnAskUser is intentionally left unset: headless runs have no interactive
+	// user, so ask_user degrades to a "proceed with your best assumption" result
+	// rather than blocking. (Future enhancement: collect answers over stream-json
+	// input when a controlling client is attached.)
 	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
 		MaxTurns:       resolved.MaxTurns,
 		Registry:       registry,

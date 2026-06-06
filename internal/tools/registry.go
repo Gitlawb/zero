@@ -137,6 +137,7 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 		NewListDirectoryTool(workspaceRoot),
 		NewGlobTool(workspaceRoot),
 		NewGrepTool(workspaceRoot),
+		NewAskUserTool(),
 	}
 }
 

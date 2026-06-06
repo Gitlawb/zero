@@ -183,6 +183,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
+	// ask_user is intercepted in the loop (like permissions) so the question can
+	// be routed to an interactive front-end instead of blocking inside the tool.
+	// When no front-end is wired up it degrades to the tool's own graceful Run().
+	if call.Name == "ask_user" {
+		return executeAskUser(ctx, registry, call, args, options)
+	}
+
 	tool, toolFound := registry.Get(call.Name)
 	permissionGranted := permissionMode == PermissionModeUnsafe
 	if toolFound && tool.Safety().Permission == tools.PermissionAllow {
@@ -255,6 +262,77 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
 	}
+}
+
+// executeAskUser routes an ask_user call to the interactive front-end via
+// options.OnAskUser, mirroring the async permission flow. If no handler is set,
+// or the handler errors, it falls back to the tool's own graceful result so the
+// loop never blocks forever waiting on a user who isn't there.
+func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any, options Options) ToolResult {
+	questions, err := tools.ParseAskUserQuestions(args)
+	if err != nil {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: Invalid arguments for ask_user: " + err.Error(),
+		}
+	}
+
+	if options.OnAskUser == nil {
+		return askUserFallbackResult(ctx, registry, call, args)
+	}
+
+	header, _ := args["header"].(string)
+	request := AskUserRequest{
+		ToolCallID: call.ID,
+		Header:     strings.TrimSpace(header),
+		Questions:  toAgentAskUserQuestions(questions),
+	}
+	response, err := options.OnAskUser(ctx, request)
+	if err != nil {
+		return askUserFallbackResult(ctx, registry, call, args)
+	}
+
+	return ToolResult{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Status:     tools.StatusOK,
+		Output:     tools.FormatAskUserAnswers(questions, response.Answers),
+	}
+}
+
+// askUserFallbackResult runs the registered ask_user tool (or returns the shared
+// graceful message) so the no-interactive-user path matches the headless path.
+func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any) ToolResult {
+	if _, ok := registry.Get(call.Name); ok {
+		result := registry.Run(ctx, call.Name, args)
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     result.Status,
+			Output:     result.Output,
+			Redacted:   result.Redacted,
+		}
+	}
+	return ToolResult{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Status:     tools.StatusOK,
+		Output:     tools.AskUserNonInteractiveMessage(),
+	}
+}
+
+func toAgentAskUserQuestions(questions []tools.AskUserQuestion) []AskUserQuestion {
+	converted := make([]AskUserQuestion, len(questions))
+	for index, question := range questions {
+		converted[index] = AskUserQuestion{
+			Question:    question.Question,
+			Options:     append([]string{}, question.Options...),
+			MultiSelect: question.MultiSelect,
+		}
+	}
+	return converted
 }
 
 func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options) sandbox.Request {

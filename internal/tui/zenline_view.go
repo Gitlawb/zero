@@ -144,6 +144,8 @@ func (m model) zenlineRows() []zenline.Row {
 			rows = append(rows, zenline.Row{Kind: "toolresult", Tool: r.tool, Status: string(r.status), Detail: r.detail})
 		case rowPermission:
 			rows = append(rows, zenline.Row{Kind: "permission", Text: r.text})
+		case rowAskUser:
+			rows = append(rows, zenline.Row{Kind: "system", Text: r.text, Detail: r.detail})
 		case rowSystem:
 			rows = append(rows, zenline.Row{Kind: "system", Text: r.text})
 		case rowError:

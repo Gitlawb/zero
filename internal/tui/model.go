@@ -57,6 +57,7 @@ type model struct {
 	runID              int
 	activeRunID        int
 	pendingPermission  *pendingPermissionPrompt
+	pendingAskUser     *pendingAskUserPrompt
 	width              int
 	height             int
 	now                func() time.Time
@@ -106,6 +107,25 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+}
+
+// askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
+// agent goroutine sends it (via the runtime sink) and blocks until the model
+// hands answers back through the answer callback.
+type askUserRequestMsg struct {
+	runID   int
+	request agent.AskUserRequest
+	answer  func([]string)
+}
+
+// pendingAskUserPrompt tracks an in-progress questionnaire. Answers are collected
+// one question at a time; once every question has an answer (or the user cancels)
+// the answer callback is invoked exactly once.
+type pendingAskUserPrompt struct {
+	request agent.AskUserRequest
+	answer  func([]string)
+	index   int
+	answers []string
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -198,6 +218,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.exiting = true
 			return m, tea.Quit
 		case tea.KeyEsc:
+			// An active questionnaire is cancelled (not the whole run): deliver
+			// whatever answers were collected so the agent loop unblocks and
+			// degrades to its best-assumption path.
+			if m.pendingAskUser != nil {
+				return m.resolveAskUser(true)
+			}
 			m.input.SetValue("")
 			if m.pending {
 				m.cancelRun()
@@ -207,7 +233,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m, nil
 			}
+			if m.pendingAskUser != nil {
+				return m.submitAskUserAnswer()
+			}
 			return m.handleSubmit()
+		}
+		if m.pendingAskUser != nil {
+			// While a questionnaire is active, all other keys feed the text input
+			// (the answer field); nothing else should react.
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
 		}
 		if m.pendingPermission != nil {
 			return m.handlePermissionKey(msg)
@@ -267,6 +303,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case askUserRequestMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.showSplash = false
+		m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
+		m.pendingAskUser = &pendingAskUserPrompt{
+			request: msg.request,
+			answer:  msg.answer,
+			answers: make([]string, 0, len(msg.request.Questions)),
+		}
+		m.input.SetValue("")
+		return m, nil
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -275,6 +324,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCancel = nil
 		m.activeRunID = 0
 		m.pendingPermission = nil
+		m.pendingAskUser = nil
 		m.streamingText = ""
 		for _, event := range msg.usageEvents {
 			var usageRows []transcriptRow
@@ -342,9 +392,12 @@ func (m model) transcriptView() string {
 
 	if m.pending {
 		builder.WriteString("\n")
-		if m.pendingPermission != nil {
+		switch {
+		case m.pendingPermission != nil:
 			builder.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
-		} else {
+		case m.pendingAskUser != nil:
+			builder.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
+		default:
 			builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
 		}
 		builder.WriteString("\n")
@@ -395,6 +448,45 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 		})
 	}
 	m.pendingPermission = nil
+	return m, nil
+}
+
+// submitAskUserAnswer records the answer to the current question and advances to
+// the next one; once every question is answered it delivers the full answer set.
+func (m model) submitAskUserAnswer() (tea.Model, tea.Cmd) {
+	pending := m.pendingAskUser
+	if pending == nil {
+		return m, nil
+	}
+	pending.answers = append(pending.answers, strings.TrimSpace(m.input.Value()))
+	pending.index++
+	m.input.SetValue("")
+	if pending.index >= len(pending.request.Questions) {
+		return m.resolveAskUser(false)
+	}
+	return m, nil
+}
+
+// resolveAskUser delivers the collected answers (padding to one-per-question when
+// cancelled early) and clears the prompt. cancelled answers stay empty so the
+// loop can degrade to its best-assumption path without deadlocking.
+func (m model) resolveAskUser(cancelled bool) (tea.Model, tea.Cmd) {
+	pending := m.pendingAskUser
+	if pending == nil {
+		return m, nil
+	}
+	answers := pending.answers
+	if cancelled {
+		// Record the question currently on screen as unanswered too.
+		m.input.SetValue("")
+	}
+	for len(answers) < len(pending.request.Questions) {
+		answers = append(answers, "")
+	}
+	if pending.answer != nil {
+		pending.answer(answers)
+	}
+	m.pendingAskUser = nil
 	return m, nil
 }
 
@@ -584,6 +676,7 @@ func (m *model) cancelRun() {
 	m.runCancel = nil
 	m.activeRunID = 0
 	m.pendingPermission = nil
+	m.pendingAskUser = nil
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
@@ -631,6 +724,34 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 				return decision, nil
 			case <-ctx.Done():
 				return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: ctx.Err().Error()}, ctx.Err()
+			}
+		}
+
+		onAskUser := options.OnAskUser
+		options.OnAskUser = func(ctx context.Context, request agent.AskUserRequest) (agent.AskUserResponse, error) {
+			if onAskUser != nil {
+				return onAskUser(ctx, request)
+			}
+			if m.runtimeMessageSink == nil {
+				// No interactive surface: let the loop degrade gracefully.
+				return agent.AskUserResponse{}, fmt.Errorf("ask_user prompt unavailable")
+			}
+			answerCh := make(chan []string, 1)
+			m.sendAskUserRequest(runID, request, func(answers []string) {
+				select {
+				case answerCh <- answers:
+				default:
+				}
+			})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: askUserSessionPayload(request),
+			})
+			select {
+			case answers := <-answerCh:
+				return agent.AskUserResponse{Answers: answers}, nil
+			case <-ctx.Done():
+				return agent.AskUserResponse{}, ctx.Err()
 			}
 		}
 
@@ -762,6 +883,13 @@ func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest,
 		return
 	}
 	m.runtimeMessageSink(permissionRequestMsg{runID: runID, request: request, decide: decide})
+}
+
+func (m model) sendAskUserRequest(runID int, request agent.AskUserRequest, answer func([]string)) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(askUserRequestMsg{runID: runID, request: request, answer: answer})
 }
 
 func tuiPermissionEventType(event agent.PermissionEvent) sessions.EventType {

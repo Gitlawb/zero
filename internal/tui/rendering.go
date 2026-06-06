@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -113,9 +114,19 @@ func renderRow(row transcriptRow, width int) string {
 		return renderToolResultRow(row, width)
 	case rowPermission:
 		return renderPermissionRow(row)
+	case rowAskUser:
+		return renderAskUserRow(row)
 	default:
 		return row.text
 	}
+}
+
+func renderAskUserRow(row transcriptRow) string {
+	line := zeroTheme.zero.Render("ask zero") + "  " + zeroTheme.text.Render(strings.TrimPrefix(row.text, "ask_user: "))
+	if detail := strings.TrimSpace(row.detail); detail != "" {
+		line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
+	}
+	return line
 }
 
 func renderToolCallRow(row transcriptRow) string {
@@ -196,6 +207,37 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) s
 	}
 
 	return borderedBlock(width, []string{header, choices})
+}
+
+func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width int) string {
+	questions := prompt.request.Questions
+	total := len(questions)
+	index := prompt.index
+	if index >= total {
+		index = total - 1
+	}
+	if index < 0 {
+		index = 0
+	}
+
+	lines := []string{}
+	heading := zeroTheme.zero.Render("ask zero")
+	if header := strings.TrimSpace(prompt.request.Header); header != "" {
+		heading += "  " + zeroTheme.text.Render(header)
+	}
+	lines = append(lines, heading)
+
+	if total > 0 {
+		question := questions[index]
+		lines = append(lines, zeroTheme.muted.Render(fmt.Sprintf("question %d of %d", index+1, total)))
+		lines = append(lines, zeroTheme.text.Render(question.Question))
+		if len(question.Options) > 0 {
+			lines = append(lines, zeroTheme.muted.Render("options: "+strings.Join(question.Options, ", ")))
+		}
+	}
+	lines = append(lines, zeroTheme.muted.Render("type an answer, Enter to submit · Esc to skip"))
+
+	return borderedBlock(width, lines)
 }
 
 func renderToolResultRow(row transcriptRow, width int) string {
