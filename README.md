@@ -41,8 +41,8 @@ TypeScript modules are retired in focused slices.
 
 ## Quick start
 
-> Requires [Go](https://go.dev/) for the runtime and [Bun](https://bun.com) for
-> the npm wrapper, tests, and release scripts.
+> Requires [Go](https://go.dev/) for the runtime and release tooling, plus
+> [Bun](https://bun.com) for the npm wrapper, JS scripts, and tests.
 
 ```bash
 bun install --frozen-lockfile
@@ -163,7 +163,7 @@ internal/
   streamjson/            # headless stream-json protocol
   mcp/ plugins/ hooks/   # extension-facing runtime surfaces
 bin/                     # npm wrapper entrypoint
-scripts/                 # Bun build, release, install, smoke, perf scripts
+scripts/                 # Bun build/install/smoke/perf scripts and installers
 tests/                   # Bun tests for wrapper/build/release scripts
 docs/                    # PRD + protocol/install/perf docs
 ```

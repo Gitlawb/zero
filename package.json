@@ -17,8 +17,8 @@
     "smoke:build": "bun run scripts/smoke-build.ts",
     "smoke:go": "bun run scripts/smoke-go.ts",
     "review:pr": "go run ./cmd/zero-pr-review",
-    "package:release": "bun run scripts/package-release.ts",
-    "verify:release": "bun run scripts/release-checksums.ts",
+    "package:release": "go run ./cmd/zero-release package",
+    "verify:release": "go run ./cmd/zero-release verify",
     "perf:bench": "bun run scripts/perf-bench.ts",
     "perf:smoke": "bun run scripts/perf-bench.ts --output dist/perf/perf-bench.json"
   },
