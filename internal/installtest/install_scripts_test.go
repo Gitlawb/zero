@@ -50,41 +50,86 @@ func TestPowerShellInstallerScriptMatchesWindowsReleaseContracts(t *testing.T) {
 }
 
 func TestUnixInstallerInstallsFromPrefixedReleaseArchiveWithoutNetwork(t *testing.T) {
+	fixture := newUnixInstallFixture(t)
+	stdout, stderr, err := runUnixInstaller(t, fixture)
+	if err != nil {
+		t.Fatalf("install.sh failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got := strings.TrimSpace(stderr); got != "" {
+		t.Fatalf("install.sh stderr = %q, want empty", got)
+	}
+	if !strings.Contains(stdout, "Installed "+filepath.Join(fixture.installDir, "zero")) {
+		t.Fatalf("install.sh stdout missing install path:\n%s", stdout)
+	}
+
+	installed := readFile(t, filepath.Join(fixture.installDir, "zero"))
+	if !strings.Contains(string(installed), "mock-zero") {
+		t.Fatalf("installed binary = %q, want mock-zero script", string(installed))
+	}
+}
+
+func TestUnixInstallerRejectsChecksumMismatchWithoutNetwork(t *testing.T) {
+	fixture := newUnixInstallFixture(t)
+	writeFile(t, fixture.checksumPath, []byte(strings.Repeat("0", 64)+"  "+fixture.archiveName+"\n"), 0o644)
+
+	stdout, stderr, err := runUnixInstaller(t, fixture)
+	if err == nil {
+		t.Fatalf("install.sh succeeded with a bad checksum\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	output := stdout + "\n" + stderr
+	if !strings.Contains(output, fixture.archiveName) {
+		t.Fatalf("checksum failure output missing archive name:\n%s", output)
+	}
+	if !strings.Contains(output, "FAILED") || !strings.Contains(strings.ToLower(output), "checksum") {
+		t.Fatalf("checksum failure output missing checksum mismatch detail:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.installDir, "zero")); !os.IsNotExist(err) {
+		t.Fatalf("installed binary exists after checksum failure: %v", err)
+	}
+}
+
+type unixInstallFixture struct {
+	bash         string
+	mockBin      string
+	installDir   string
+	archiveName  string
+	archivePath  string
+	checksumPath string
+}
+
+func newUnixInstallFixture(t *testing.T) unixInstallFixture {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix installer smoke does not run on Windows")
 	}
 	bash := requireCommand(t, "bash")
 	tar := requireCommand(t, "tar")
 
-	releasePlatform := "linux"
-	if runtime.GOOS == "darwin" {
-		releasePlatform = "macos"
-	}
-	releaseArch := "x64"
-	if runtime.GOARCH == "arm64" {
-		releaseArch = "arm64"
-	}
-
+	releasePlatform := unixReleasePlatform(t)
+	releaseArch := unixReleaseArch(t)
 	packageName := fmt.Sprintf("zero-v0.1.0-%s-%s", releasePlatform, releaseArch)
 	archiveName := packageName + ".tar.gz"
 	checksumName := archiveName + ".sha256"
 	root := t.TempDir()
-	mockBin := filepath.Join(root, "bin")
+	fixture := unixInstallFixture{
+		bash:         bash,
+		mockBin:      filepath.Join(root, "bin"),
+		installDir:   filepath.Join(root, "install"),
+		archiveName:  archiveName,
+		archivePath:  filepath.Join(root, "release", archiveName),
+		checksumPath: filepath.Join(root, "release", checksumName),
+	}
 	packageDir := filepath.Join(root, "package", packageName)
-	releaseDir := filepath.Join(root, "release")
-	installDir := filepath.Join(root, "install")
-	archivePath := filepath.Join(releaseDir, archiveName)
-	checksumPath := filepath.Join(releaseDir, checksumName)
 
-	mustMkdirAll(t, mockBin)
+	mustMkdirAll(t, fixture.mockBin)
 	mustMkdirAll(t, packageDir)
-	mustMkdirAll(t, releaseDir)
-	mustMkdirAll(t, installDir)
+	mustMkdirAll(t, filepath.Dir(fixture.archivePath))
+	mustMkdirAll(t, fixture.installDir)
 	writeFile(t, filepath.Join(packageDir, "zero"), []byte("#!/usr/bin/env sh\necho mock-zero\n"), 0o755)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	tarCommand := exec.CommandContext(ctx, tar, "-C", filepath.Join(root, "package"), "-czf", archivePath, packageName)
+	tarCommand := exec.CommandContext(ctx, tar, "-C", filepath.Join(root, "package"), "-czf", fixture.archivePath, packageName)
 	if output, err := tarCommand.CombinedOutput(); err != nil {
 		t.Fatalf("tar failed: %v\n%s", err, output)
 	}
@@ -92,12 +137,9 @@ func TestUnixInstallerInstallsFromPrefixedReleaseArchiveWithoutNetwork(t *testin
 		t.Fatalf("tar timed out: %v", err)
 	}
 
-	archiveBytes, err := os.ReadFile(archivePath)
-	if err != nil {
-		t.Fatalf("ReadFile archive: %v", err)
-	}
+	archiveBytes := readFile(t, fixture.archivePath)
 	sum := sha256.Sum256(archiveBytes)
-	writeFile(t, checksumPath, []byte(fmt.Sprintf("%x  %s\n", sum, archiveName)), 0o644)
+	writeFile(t, fixture.checksumPath, []byte(fmt.Sprintf("%x  %s\n", sum, archiveName)), 0o644)
 
 	mockCurl := fmt.Sprintf(`#!/usr/bin/env sh
 set -eu
@@ -141,15 +183,20 @@ case "$url" in
     exit 2
     ;;
 esac
-`, archiveName, shellQuote(archivePath), checksumName, shellQuote(checksumPath))
-	writeFile(t, filepath.Join(mockBin, "curl"), []byte(mockCurl), 0o755)
+`, archiveName, shellQuote(fixture.archivePath), checksumName, shellQuote(fixture.checksumPath))
+	writeFile(t, filepath.Join(fixture.mockBin, "curl"), []byte(mockCurl), 0o755)
 
-	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	return fixture
+}
+
+func runUnixInstaller(t *testing.T, fixture unixInstallFixture) (string, string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, bash, filepath.Join(repoRoot(t), "scripts/install.sh"), "--version", "0.1.0", "--install-dir", installDir)
+	command := exec.CommandContext(ctx, fixture.bash, filepath.Join(repoRoot(t), "scripts/install.sh"), "--version", "0.1.0", "--install-dir", fixture.installDir)
 	command.Dir = repoRoot(t)
 	command.Env = append(os.Environ(),
-		"PATH="+mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+fixture.mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"ZERO_GITHUB_BASE_URL=https://example.test",
 		"ZERO_REPO=Gitlawb/zero",
 	)
@@ -158,22 +205,36 @@ esac
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 
-	if err := command.Run(); err != nil {
-		t.Fatalf("install.sh failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-	}
+	runErr := command.Run()
 	if err := ctx.Err(); err != nil {
 		t.Fatalf("install.sh timed out: %v", err)
 	}
-	if got := strings.TrimSpace(stderr.String()); got != "" {
-		t.Fatalf("install.sh stderr = %q, want empty", got)
-	}
-	if !strings.Contains(stdout.String(), "Installed "+filepath.Join(installDir, "zero")) {
-		t.Fatalf("install.sh stdout missing install path:\n%s", stdout.String())
-	}
+	return stdout.String(), stderr.String(), runErr
+}
 
-	installed := readFile(t, filepath.Join(installDir, "zero"))
-	if !strings.Contains(string(installed), "mock-zero") {
-		t.Fatalf("installed binary = %q, want mock-zero script", string(installed))
+func unixReleasePlatform(t *testing.T) string {
+	t.Helper()
+	switch runtime.GOOS {
+	case "linux":
+		return "linux"
+	case "darwin":
+		return "macos"
+	default:
+		t.Skipf("Unix installer smoke does not support GOOS=%s", runtime.GOOS)
+		return ""
+	}
+}
+
+func unixReleaseArch(t *testing.T) string {
+	t.Helper()
+	switch runtime.GOARCH {
+	case "amd64", "x86_64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	default:
+		t.Skipf("Unix installer smoke does not support GOARCH=%s", runtime.GOARCH)
+		return ""
 	}
 }
 
