@@ -316,10 +316,14 @@ func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
 	provider := providerCallingWriteFileThenAnswer("write denied")
+	var permissionEvents []PermissionEvent
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
 	})
 
 	if err != nil {
@@ -335,6 +339,19 @@ func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 	if !strings.Contains(lastMessage.Content, "Permission required for write_file") {
 		t.Fatalf("expected permission denial tool result, got %q", lastMessage.Content)
 	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.ToolCallID != "call-1" || event.ToolName != "write_file" || event.Action != PermissionActionPrompt {
+		t.Fatalf("unexpected permission event: %#v", event)
+	}
+	if event.Permission != string(tools.PermissionPrompt) || event.PermissionMode != PermissionModeAsk || event.SideEffect != string(tools.SideEffectWrite) {
+		t.Fatalf("unexpected permission metadata: %#v", event)
+	}
+	if !strings.Contains(event.Reason, "Creates or overwrites files") {
+		t.Fatalf("expected tool safety reason in permission event, got %#v", event)
+	}
 }
 
 func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
@@ -342,10 +359,14 @@ func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
 	provider := providerCallingWriteFileThenAnswer("write done")
+	var permissionEvents []PermissionEvent
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeUnsafe,
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
 	})
 
 	if err != nil {
@@ -361,6 +382,75 @@ func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	if string(content) != "hello" {
 		t.Fatalf("expected written content, got %q", content)
 	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || !event.PermissionGranted {
+		t.Fatalf("expected unsafe approval permission event, got %#v", event)
+	}
+	if event.ToolName != "write_file" || event.PermissionMode != PermissionModeUnsafe {
+		t.Fatalf("unexpected unsafe approval metadata: %#v", event)
+	}
+}
+
+func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := store.Grant(sandbox.GrantInput{
+		ToolName:    "write_file",
+		Decision:    sandbox.GrantAllow,
+		MaxAutonomy: sandbox.AutonomyHigh,
+		Reason:      "trusted workspace edits",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write done")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Store:         store,
+		}),
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("expected written content, got %q", content)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || event.PermissionGranted {
+		t.Fatalf("expected grant-backed allow without unsafe permission, got %#v", event)
+	}
+	if !event.GrantMatched || event.Grant == nil || event.Grant.ToolName != grant.ToolName || event.Grant.Decision != sandbox.GrantAllow {
+		t.Fatalf("expected persistent grant details, got %#v", event)
+	}
 }
 
 func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
@@ -369,6 +459,7 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
 	provider := providerCallingWritePathThenAnswer(outside, "sandbox handled")
+	var permissionEvents []PermissionEvent
 
 	result, err := Run(context.Background(), "write outside", provider, Options{
 		Registry:       registry,
@@ -378,6 +469,9 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
 		}),
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
 	})
 
 	if err != nil {
@@ -392,6 +486,19 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
 	if !strings.Contains(lastMessage.Content, "Sandbox violation") || !strings.Contains(lastMessage.Content, "outside_workspace") {
 		t.Fatalf("expected sandbox violation tool result, got %q", lastMessage.Content)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionDeny {
+		t.Fatalf("expected denied permission event, got %#v", event)
+	}
+	if event.Violation == nil || event.Violation.Code != sandbox.ViolationOutsideWorkspace {
+		t.Fatalf("expected outside_workspace violation in permission event, got %#v", event)
+	}
+	if event.Risk.Level != sandbox.RiskCritical {
+		t.Fatalf("expected critical risk in permission event, got %#v", event)
 	}
 }
 

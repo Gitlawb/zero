@@ -57,6 +57,16 @@ func Classify(request Request) Risk {
 		if path == ".." || strings.HasPrefix(filepath.ToSlash(filepath.Clean(path)), "../") {
 			add("path_escape", RiskCritical)
 		}
+		if request.WorkspaceRoot != "" {
+			if violation := validateWorkspacePath(request.WorkspaceRoot, path); violation != nil {
+				switch violation.Code {
+				case ViolationSymlinkTraversal:
+					add("symlink_traversal", RiskCritical)
+				default:
+					add("out_of_workspace", RiskCritical)
+				}
+			}
+		}
 	}
 
 	names := make([]string, 0, len(categories))

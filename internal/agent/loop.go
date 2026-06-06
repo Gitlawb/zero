@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -116,23 +117,114 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
+	tool, toolFound := registry.Get(call.Name)
 	permissionGranted := permissionMode == PermissionModeUnsafe
-	if tool, ok := registry.Get(call.Name); ok && tool.Safety().Permission == tools.PermissionAllow {
+	if toolFound && tool.Safety().Permission == tools.PermissionAllow {
 		permissionGranted = true
 	}
 
+	var sandboxDecision *sandbox.Decision
 	result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
 		PermissionGranted: permissionGranted,
 		PermissionMode:    string(permissionMode),
 		Autonomy:          options.Autonomy,
 		Sandbox:           options.Sandbox,
+		OnSandboxDecision: func(decision sandbox.Decision) {
+			copied := decision
+			sandboxDecision = &copied
+		},
 	})
+	if toolFound && options.OnPermission != nil {
+		if event, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, sandboxDecision); ok {
+			options.OnPermission(event)
+		}
+	}
 	return ToolResult{
 		ToolCallID: call.ID,
 		Name:       call.Name,
 		Status:     result.Status,
 		Output:     result.Output,
 		Meta:       result.Meta,
+	}
+}
+
+func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options, decision *sandbox.Decision) (PermissionEvent, bool) {
+	safety := tool.Safety()
+	action := PermissionActionAllow
+	reason := safety.Reason
+	risk := sandbox.Classify(sandbox.Request{
+		WorkspaceRoot:     "",
+		ToolName:          call.Name,
+		SideEffect:        sandbox.SideEffect(safety.SideEffect),
+		Permission:        sandbox.Permission(safety.Permission),
+		PermissionGranted: permissionGranted,
+		PermissionMode:    sandbox.PermissionMode(permissionMode),
+		Autonomy:          sandbox.Autonomy(options.Autonomy),
+		Args:              args,
+		Reason:            safety.Reason,
+	})
+	var violation *sandbox.Violation
+	grantMatched := false
+	var grant *sandbox.Grant
+
+	if decision != nil {
+		action = permissionActionFromSandbox(decision.Action)
+		if decision.Reason != "" {
+			reason = decision.Reason
+		}
+		risk = decision.Risk
+		violation = decision.Violation
+		grantMatched = decision.GrantMatched
+		grant = decision.Grant
+	} else {
+		switch safety.Permission {
+		case tools.PermissionDeny:
+			action = PermissionActionDeny
+		case tools.PermissionPrompt:
+			if permissionGranted {
+				action = PermissionActionAllow
+			} else {
+				action = PermissionActionPrompt
+			}
+		default:
+			return PermissionEvent{}, false
+		}
+	}
+
+	if safety.Permission == tools.PermissionAllow && action == PermissionActionAllow && !grantMatched && violation == nil {
+		return PermissionEvent{}, false
+	}
+
+	autonomy := options.Autonomy
+	if normalized, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(autonomy)); err == nil {
+		autonomy = string(normalized)
+	}
+
+	return PermissionEvent{
+		ToolCallID:        call.ID,
+		ToolName:          call.Name,
+		Action:            action,
+		Permission:        string(safety.Permission),
+		PermissionGranted: permissionGranted,
+		PermissionMode:    permissionMode,
+		Autonomy:          autonomy,
+		SideEffect:        string(safety.SideEffect),
+		Reason:            reason,
+		Risk:              risk,
+		Violation:         violation,
+		GrantMatched:      grantMatched,
+		Grant:             grant,
+	}, true
+}
+
+func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
+	switch action {
+	case sandbox.ActionAllow:
+		return PermissionActionAllow
+	case sandbox.ActionDeny:
+		return PermissionActionDeny
+	default:
+		return PermissionActionPrompt
 	}
 }
 

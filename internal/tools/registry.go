@@ -15,6 +15,7 @@ type RunOptions struct {
 	PermissionMode    string
 	Autonomy          string
 	Sandbox           *sandbox.Engine
+	OnSandboxDecision func(sandbox.Decision)
 }
 
 type sandboxAwareTool interface {
@@ -64,6 +65,9 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			Args:              args,
 			Reason:            tool.Safety().Reason,
 		})
+		if options.OnSandboxDecision != nil {
+			options.OnSandboxDecision(decision)
+		}
 		if decision.Action == sandbox.ActionDeny {
 			return errorResult(decision.ErrorString())
 		}
