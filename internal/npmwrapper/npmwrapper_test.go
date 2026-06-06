@@ -1,6 +1,7 @@
 package npmwrapper
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPackageBinPointsToNodeWrapper(t *testing.T) {
@@ -43,8 +45,9 @@ func TestNodeWrapperIsExecutableAndDoesNotImportBun(t *testing.T) {
 		t.Fatalf("ReadFile wrapper: %v", err)
 	}
 	source := string(bytes)
-	if !strings.HasPrefix(source, "#!/usr/bin/env node\n") {
-		t.Fatalf("wrapper shebang = %q, want node", strings.SplitN(source, "\n", 2)[0])
+	firstLine := strings.TrimSuffix(strings.SplitN(source, "\n", 2)[0], "\r")
+	if firstLine != "#!/usr/bin/env node" {
+		t.Fatalf("wrapper shebang = %q, want node", firstLine)
 	}
 	for _, forbidden := range []string{"#!/usr/bin/env bun", "Bun.", "../scripts/npm-wrapper"} {
 		if strings.Contains(source, forbidden) {
@@ -64,7 +67,9 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	node := requireNode(t)
 	wrapperPath := copyWrapperFixture(t)
 
-	command := exec.Command(node, wrapperPath, "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
 	if err == nil {
 		t.Fatalf("wrapper exited successfully without native binary: %s", output)
@@ -90,7 +95,9 @@ func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {
 		t.Fatalf("WriteFile native fixture: %v", err)
 	}
 
-	command := exec.Command(node, wrapperPath, "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("wrapper returned error: %v; output: %s", err, output)

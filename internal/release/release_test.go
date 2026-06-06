@@ -323,7 +323,7 @@ func TestResolvePackageDirsAcceptsDistSubdirs(t *testing.T) {
 
 func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 	t.Run("tar gz", func(t *testing.T) {
-		stagingDir := packageStagingFixture(t)
+		stagingDir := packageStagingFixture(t, "zero")
 		archivePath := filepath.Join(t.TempDir(), "zero-v0.1.0-linux-x64.tar.gz")
 		if err := createArchive(stagingDir, archivePath, "linux"); err != nil {
 			t.Fatalf("createArchive returned error: %v", err)
@@ -337,13 +337,13 @@ func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 	})
 
 	t.Run("zip", func(t *testing.T) {
-		stagingDir := packageStagingFixture(t)
+		stagingDir := packageStagingFixture(t, "zero.exe")
 		archivePath := filepath.Join(t.TempDir(), "zero-v0.1.0-windows-x64.zip")
 		if err := createArchive(stagingDir, archivePath, "windows"); err != nil {
 			t.Fatalf("createArchive returned error: %v", err)
 		}
 		names := zipArchiveNames(t, archivePath)
-		for _, want := range []string{"zero", "README.md", "bin/zero.js", "VERSION"} {
+		for _, want := range []string{"zero.exe", "README.md", "bin/zero.js", "VERSION"} {
 			if !names[want] {
 				t.Fatalf("zip archive missing %s: %#v", want, names)
 			}
@@ -351,11 +351,11 @@ func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 	})
 }
 
-func packageStagingFixture(t *testing.T) string {
+func packageStagingFixture(t *testing.T, binaryName string) string {
 	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
-		"zero":        "binary",
+		binaryName:    "binary",
 		"README.md":   "readme",
 		"bin/zero.js": "wrapper",
 		"VERSION":     "0.1.0\n",
