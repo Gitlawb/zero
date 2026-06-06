@@ -3,6 +3,8 @@ package zenline
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestThemesCount(t *testing.T) {
@@ -102,6 +104,70 @@ func TestPermLayoutMatchesRender(t *testing.T) {
 	}
 }
 
+func TestPermLayoutMatchesRenderClamped(t *testing.T) {
+	// PermLayout is the mouse hit-test and must stay in lockstep with the rendered
+	// modal even at small/clamped sizes: RenderChat floors width to 40 and height
+	// to 8, then centers the modal in a bodyH = height-3 region. If PermLayout
+	// applies different clamps the button row/column drift and clicks miss. These
+	// sizes are below the width floor and at the smallest heights that still fit
+	// the buttons, so they exercise both clamps.
+	for _, sz := range [][2]int{{10, 11}, {20, 12}, {30, 14}, {38, 24}} {
+		w, h := sz[0], sz[1]
+		g := PermLayout(w, h)
+		out := RenderChat(ChatData{
+			Variant: 0, Dark: true, Width: w, Height: h,
+			Perm: &Perm{Tool: "edit_file", Risk: "medium", Reason: "writes a file"},
+		})
+		lines := strings.Split(out, "\n")
+		if g.Allow.Y >= len(lines) {
+			t.Fatalf("size %dx%d: allow row %d beyond frame height %d", w, h, g.Allow.Y, len(lines))
+		}
+		row := stripANSI(lines[g.Allow.Y])
+		if !strings.Contains(row, "allow") || !strings.Contains(row, "deny") {
+			t.Errorf("size %dx%d: button row %d does not contain the buttons: %q", w, h, g.Allow.Y, row)
+		}
+		// The allow button's rendered column must line up exactly with its hitbox.
+		// PermLayout places Allow.X at the modal's content-start (left+2) and the
+		// "[ a · allow ]" bracket renders two columns further in, so the bracket
+		// must sit at exactly Allow.X+2. This only holds if PermLayout centers using
+		// the SAME clamped width RenderChat does (floored to 40); raw width shifts
+		// the box by a column at sub-40 widths and the click would miss.
+		if col := strings.Index(row, "[ a"); col != g.Allow.X+2 {
+			t.Errorf("size %dx%d: allow button rendered at col %d, want Allow.X+2 = %d",
+				w, h, col, g.Allow.X+2)
+		}
+		// The rendered button row must be exactly where PermLayout points (no other
+		// row carries both labels), and a click in each button's center must resolve
+		// to that button.
+		for i, ln := range lines {
+			pl := stripANSI(ln)
+			if i != g.Allow.Y && strings.Contains(pl, "allow") && strings.Contains(pl, "deny") {
+				t.Errorf("size %dx%d: buttons also render on row %d, not just %d", w, h, i, g.Allow.Y)
+			}
+		}
+		mid := func(r Rect) (int, int) { return r.X + r.W/2, r.Y }
+		for name, r := range map[string]Rect{"allow": g.Allow, "always": g.Always, "deny": g.Deny} {
+			x, y := mid(r)
+			if got := g.Hit(x, y); got != name {
+				t.Errorf("size %dx%d: Hit(%d,%d) = %q, want %q", w, h, x, y, got, name)
+			}
+		}
+	}
+
+	// Even at sub-floor heights (where the modal can't fit its buttons) PermLayout
+	// must clamp height like RenderChat so the hitbox never points past the frame.
+	for _, h := range []int{1, 4, 7} {
+		g := PermLayout(50, h)
+		out := RenderChat(ChatData{
+			Variant: 0, Dark: true, Width: 50, Height: h,
+			Perm: &Perm{Tool: "edit_file", Risk: "medium", Reason: "writes a file"},
+		})
+		if frameH := strings.Count(out, "\n") + 1; g.Allow.Y >= frameH {
+			t.Errorf("height %d: Allow.Y %d points past clamped frame height %d", h, g.Allow.Y, frameH)
+		}
+	}
+}
+
 func TestToolResultRenderingCollapsesAndShows(t *testing.T) {
 	d := ChatData{
 		Variant: 0, Dark: true, Width: 100, Height: 40,
@@ -135,6 +201,36 @@ func TestToolResultRenderingCollapsesAndShows(t *testing.T) {
 	// errors are surfaced
 	if !strings.Contains(out, "BUILD-FAILED-HERE") {
 		t.Error("error output should be shown")
+	}
+}
+
+func TestAssistantMarkdownClipsLongLines(t *testing.T) {
+	// glamour does not hard-break unbreakable tokens, so a very long URL or fenced
+	// code line would otherwise emit a line far wider than the frame, blowing out
+	// the fixed-height/full-bleed layout. Each emitted line must fit the budget.
+	s := newStyles(Resolve(0, true), 0, true)
+	tw := 60
+	longURL := "See https://example.com/" + strings.Repeat("verylongpath/", 40) + "end"
+	out := s.renderAssistantMarkdown(longURL, tw)
+	if len(out) == 0 {
+		t.Fatal("renderAssistantMarkdown returned no lines")
+	}
+	for i, ln := range out {
+		if w := lipgloss.Width(ln); w > tw {
+			t.Errorf("line %d width %d exceeds budget %d: %q", i, w, tw, stripANSI(ln))
+		}
+	}
+}
+
+func TestAssistantMarkdownClipsLongFencedCode(t *testing.T) {
+	s := newStyles(Resolve(0, true), 0, true)
+	tw := 50
+	src := "```\n" + strings.Repeat("x", 300) + "\n```"
+	out := s.renderAssistantMarkdown(src, tw)
+	for i, ln := range out {
+		if w := lipgloss.Width(ln); w > tw {
+			t.Errorf("line %d width %d exceeds budget %d: %q", i, w, tw, stripANSI(ln))
+		}
 	}
 }
 

@@ -31,6 +31,7 @@ type mdOutKey struct {
 }
 
 const mdOutCacheMax = 512 // bounded so a resize drag (many widths) can't grow it forever
+const mdCacheMax = 256    // ditto for the renderer cache: a resize mints a width key per frame
 
 var (
 	mdMu     sync.Mutex
@@ -99,6 +100,9 @@ func markdownRenderer(p Pal, variant int, dark bool, width int) *glamour.TermRen
 	)
 	if err != nil {
 		return nil
+	}
+	if len(mdCache) >= mdCacheMax {
+		mdCache = map[mdKey]*glamour.TermRenderer{} // simple bounded reset; cheap to repopulate
 	}
 	mdCache[key] = r
 	return r

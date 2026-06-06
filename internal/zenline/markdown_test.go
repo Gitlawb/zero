@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
@@ -66,6 +67,28 @@ func TestMarkdownRendererCachedPerKey(t *testing.T) {
 	r4 := markdownRenderer(p, 3, true, 80) // variant change -> new renderer
 	if r1 == r4 {
 		t.Error("variant change should produce a distinct renderer")
+	}
+}
+
+func TestMarkdownRendererCacheBounded(t *testing.T) {
+	// A resize drag mints a fresh width key on every frame, so the renderer cache
+	// (the expensive goldmark+chroma objects) must be bounded just like the output
+	// cache — otherwise it grows without limit.
+	p := Resolve(0, true)
+
+	mdMu.Lock()
+	mdCache = map[mdKey]*glamour.TermRenderer{}
+	mdMu.Unlock()
+
+	for w := 1; w <= mdCacheMax*3; w++ {
+		markdownRenderer(p, 0, true, w)
+	}
+
+	mdMu.Lock()
+	n := len(mdCache)
+	mdMu.Unlock()
+	if n > mdCacheMax {
+		t.Errorf("mdCache grew past bound: %d entries, want <= %d", n, mdCacheMax)
 	}
 }
 

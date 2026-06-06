@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -332,6 +333,15 @@ func (g PermGeometry) Hit(x, y int) string {
 	return ""
 }
 
+// permModalRows is the number of lines permModalLines emits and permBtnRow is the
+// 0-based index of the buttons line within it. PermLayout uses these to place the
+// hitboxes exactly where permModal centers the modal; permModalLines asserts the
+// count at construction so the two can never drift.
+const (
+	permModalRows = 8
+	permBtnRow    = 5
+)
+
 func permBoxWidth(w int) int {
 	bw := 52
 	if bw > w-2 {
@@ -344,14 +354,19 @@ func permBoxWidth(w int) int {
 }
 
 // PermLayout computes the button hitboxes for the centered modal. Must stay in
-// lockstep with permModal/permModalLines below.
+// lockstep with permModal/permModalLines below, which means mirroring the exact
+// clamps RenderChat applies before laying out the body: width floored to 40,
+// height to 8, and bodyH = height-3 (floored to 1) with no overlay rows present
+// when a permission prompt is up.
 func PermLayout(width, height int) PermGeometry {
+	width = maxi(width, 40)
+	height = maxi(height, 8)
 	bw := permBoxWidth(width)
 	bodyH := height - 3
-	if bodyH < 8 {
-		bodyH = 8
+	if bodyH < 1 {
+		bodyH = 1
 	}
-	top := (bodyH - 8) / 2
+	top := (bodyH - permModalRows) / 2 // permModal centers a permModalRows-line modal in bodyH
 	if top < 0 {
 		top = 0
 	}
@@ -359,7 +374,7 @@ func PermLayout(width, height int) PermGeometry {
 	if bx < 0 {
 		bx = 0
 	}
-	btnY := 1 + top + 5 // top bar row + modal top + buttons row index
+	btnY := 1 + top + permBtnRow // top bar row + modal top + buttons row index
 	return PermGeometry{
 		Active: true,
 		Allow:  Rect{bx + 2, btnY, 13, 1},
@@ -528,16 +543,22 @@ func (s styles) permModalLines(p *Perm, bw int) []string {
 	denyBtn := s.dim.Render("[ ") + s.acc.Render("d") + s.dim.Render(" · deny ]")
 	buttons := allowBtn + "  " + alwaysBtn + "  " + denyBtn
 
-	return []string{
+	lines := []string{
 		topLine,
 		content(""),
 		content(toolLine),
 		content(meta),
 		content(""),
-		content(buttons),
+		content(buttons), // index permBtnRow
 		content(""),
 		botLine,
 	}
+	// Guard: PermLayout places the button hitboxes assuming this exact shape, so
+	// keep the count and the buttons row in lockstep with the constants.
+	if len(lines) != permModalRows {
+		panic("permModalLines: modal line count drifted from permModalRows")
+	}
+	return lines
 }
 
 func (s styles) transcript(d ChatData, w, h int) string {
@@ -651,10 +672,18 @@ func (s styles) renderAssistantMarkdown(text string, tw int) []string {
 	if strings.TrimSpace(md) == "" {
 		return s.renderAssistantPlain(text, tw)
 	}
+	// glamour word-wraps at wrapW but does NOT hard-break unbreakable tokens (a
+	// long URL or fenced-code line), so it can emit a line far wider than the
+	// frame. Clip each output line to the budget (tw-8, the width left after the
+	// 8-space indent) with an ANSI-aware truncate so styled escapes stay intact.
+	clipW := tw - 8
+	if clipW < 1 {
+		clipW = 1
+	}
 	bg := lipgloss.NewStyle().Background(s.pal.Bg)
 	var out []string
 	for _, ln := range strings.Split(md, "\n") {
-		out = append(out, bg.Render("        ")+ln)
+		out = append(out, bg.Render("        ")+ansi.Truncate(ln, clipW, "…"))
 	}
 	if len(out) == 0 {
 		out = []string{""}
