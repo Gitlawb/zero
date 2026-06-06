@@ -498,18 +498,9 @@ func createTarGzArchive(stagingDir string, archivePath string) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = file.Close()
-	}()
 	gzipWriter := gzip.NewWriter(file)
-	defer func() {
-		_ = gzipWriter.Close()
-	}()
 	tarWriter := tar.NewWriter(gzipWriter)
-	defer func() {
-		_ = tarWriter.Close()
-	}()
-	return filepath.WalkDir(stagingDir, func(path string, entry fs.DirEntry, walkErr error) error {
+	retErr := filepath.WalkDir(stagingDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -535,16 +526,21 @@ func createTarGzArchive(stagingDir string, archivePath string) error {
 		if entry.IsDir() {
 			return nil
 		}
-		file, err := os.Open(path)
+		entryFile, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			_ = file.Close()
-		}()
-		_, err = io.Copy(tarWriter, file)
-		return err
+		_, copyErr := io.Copy(tarWriter, entryFile)
+		closeErr := entryFile.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
 	})
+	retErr = mergeCloseError(retErr, tarWriter.Close())
+	retErr = mergeCloseError(retErr, gzipWriter.Close())
+	retErr = mergeCloseError(retErr, file.Close())
+	return retErr
 }
 
 func createZipArchive(stagingDir string, archivePath string) error {
@@ -552,14 +548,8 @@ func createZipArchive(stagingDir string, archivePath string) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = file.Close()
-	}()
 	zipWriter := zip.NewWriter(file)
-	defer func() {
-		_ = zipWriter.Close()
-	}()
-	return filepath.WalkDir(stagingDir, func(path string, entry fs.DirEntry, walkErr error) error {
+	retErr := filepath.WalkDir(stagingDir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -584,16 +574,30 @@ func createZipArchive(stagingDir string, archivePath string) error {
 		if err != nil {
 			return err
 		}
-		file, err := os.Open(path)
+		entryFile, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			_ = file.Close()
-		}()
-		_, err = io.Copy(writer, file)
-		return err
+		_, copyErr := io.Copy(writer, entryFile)
+		closeErr := entryFile.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
 	})
+	retErr = mergeCloseError(retErr, zipWriter.Close())
+	retErr = mergeCloseError(retErr, file.Close())
+	return retErr
+}
+
+func mergeCloseError(retErr error, closeErr error) error {
+	if retErr == nil {
+		return closeErr
+	}
+	if closeErr == nil {
+		return retErr
+	}
+	return errors.Join(retErr, closeErr)
 }
 
 func assertSafeChecksumFileName(fileName string) error {
