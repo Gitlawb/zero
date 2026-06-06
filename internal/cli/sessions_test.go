@@ -80,6 +80,55 @@ func TestRunSessionsListsLineageAndTree(t *testing.T) {
 	}
 }
 
+func TestRunSessionsPlansRewindAndCompaction(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T19:30:00Z")})
+	session, err := store.Create(sessions.CreateInput{SessionID: "plan", Title: "Plan session"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	for _, content := range []string{"alpha", "beta", "gamma", "delta"} {
+		if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "rewind-plan", session.SessionID, "--sequence", "2", "--json"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions rewind-plan exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	var rewind sessions.RewindPlan
+	if err := json.Unmarshal(stdout.Bytes(), &rewind); err != nil {
+		t.Fatalf("rewind-plan JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if rewind.TargetEventID != "plan:2" || rewind.KeptCount != 2 || rewind.DroppedCount != 2 {
+		t.Fatalf("unexpected rewind plan: %#v", rewind)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sessions", "compact-plan", session.SessionID, "--preserve-last", "1", "--max-prompt-chars", "500", "--json"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions compact-plan exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	var compact sessions.CompactionPlan
+	if err := json.Unmarshal(stdout.Bytes(), &compact); err != nil {
+		t.Fatalf("compact-plan JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if compact.CompactableCount != 3 || compact.PreservedCount != 1 || !strings.Contains(compact.SummaryPrompt, "alpha") {
+		t.Fatalf("unexpected compaction plan: %#v", compact)
+	}
+}
+
 func TestRunSessionsValidatesArgs(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T19:30:00Z")})
 
@@ -104,6 +153,8 @@ func TestRunSessionsValidatesArgs(t *testing.T) {
 	}{
 		{name: "unknown command", args: []string{"sessions", "foo"}, wantStderr: `unknown sessions command "foo"`},
 		{name: "list extra arg", args: []string{"sessions", "list", "extra"}, wantStderr: "sessions list does not accept positional arguments"},
+		{name: "rewind flag on list", args: []string{"sessions", "list", "--sequence", "2"}, wantStderr: "only valid for sessions rewind-plan"},
+		{name: "compaction flag on tree", args: []string{"sessions", "tree", "root", "--preserve-last", "2"}, wantStderr: "only valid for sessions compact-plan"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stdout.Reset()
