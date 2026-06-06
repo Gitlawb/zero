@@ -146,10 +146,88 @@ func TestHookSnapshotFromDefinitionRedactsCommandAndTrimsFields(t *testing.T) {
 	if !snapshot.Enabled {
 		t.Fatal("expected Enabled=true to round-trip")
 	}
+	if len(snapshot.Args) != len(def.Args) {
+		t.Fatalf("expected %d args after redaction (position preserved), got %d", len(def.Args), len(snapshot.Args))
+	}
 	for _, arg := range snapshot.Args {
 		if strings.Contains(arg, "sk-proj-") {
 			t.Fatalf("hook arg should be redacted, got %q", arg)
 		}
+	}
+}
+
+func TestHookSnapshotFromDefinitionPreservesPositionForRedactedArgs(t *testing.T) {
+	def := hooks.Definition{
+		ID:      "hook-2",
+		Event:   hooks.EventBeforeTool,
+		Command: "sh",
+		Args: []string{
+			"-c",
+			"safe arg",
+			"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+			"another safe arg",
+		},
+	}
+	snapshot := HookSnapshotFromDefinition(def, hooks.SourceProject)
+	if len(snapshot.Args) != 4 {
+		t.Fatalf("expected 4 args after redaction, got %d", len(snapshot.Args))
+	}
+	if snapshot.Args[0] != "-c" || snapshot.Args[1] != "safe arg" {
+		t.Fatalf("non-secret args should round-trip verbatim, got %#v", snapshot.Args[:2])
+	}
+	if strings.Contains(snapshot.Args[2], "sk-proj-") {
+		t.Fatalf("third arg (secret) should be redacted, got %q", snapshot.Args[2])
+	}
+	if snapshot.Args[3] != "another safe arg" {
+		t.Fatalf("fourth arg should be preserved, got %q", snapshot.Args[3])
+	}
+}
+
+func TestMCPServerSnapshotStripsURLCredentials(t *testing.T) {
+	server := mcp.Server{
+		Name: "creds",
+		Type: mcp.ServerTypeHTTP,
+		URL:  "https://admin:secret123@api.example.com/v1",
+	}
+	snapshot := MCPServerSnapshotFromServer(server)
+	if strings.Contains(snapshot.URL, "admin") {
+		t.Fatalf("URL must not contain username, got %q", snapshot.URL)
+	}
+	if strings.Contains(snapshot.URL, "secret123") {
+		t.Fatalf("URL must not contain password, got %q", snapshot.URL)
+	}
+	if strings.Contains(snapshot.URL, "@") {
+		t.Fatalf("URL must not contain userinfo separator, got %q", snapshot.URL)
+	}
+	if snapshot.URL != "https://api.example.com/v1" {
+		t.Fatalf("expected sanitized URL, got %q", snapshot.URL)
+	}
+}
+
+func TestMCPServerSnapshotPreservesURLWithoutCredentials(t *testing.T) {
+	server := mcp.Server{
+		Name: "clean",
+		Type: mcp.ServerTypeHTTP,
+		URL:  "https://api.example.com/v1",
+	}
+	snapshot := MCPServerSnapshotFromServer(server)
+	if snapshot.URL != "https://api.example.com/v1" {
+		t.Fatalf("URL without credentials should be preserved, got %q", snapshot.URL)
+	}
+}
+
+func TestMCPServerSnapshotKeepsUnparseableURLInsteadOfEmpty(t *testing.T) {
+	server := mcp.Server{
+		Name: "broken",
+		Type: mcp.ServerTypeHTTP,
+		URL:  "  not a url but still useful  ",
+	}
+	snapshot := MCPServerSnapshotFromServer(server)
+	if snapshot.URL == "" {
+		t.Fatal("unparseable URL should be kept (trimmed) so the operator sees the configured endpoint")
+	}
+	if snapshot.URL != "not a url but still useful" {
+		t.Fatalf("expected trimmed raw URL, got %q", snapshot.URL)
 	}
 }
 

@@ -1,6 +1,7 @@
 package zerocommands
 
 import (
+	"net/url"
 	"sort"
 	"strings"
 
@@ -89,13 +90,18 @@ type BackendLifecycleSnapshot struct {
 
 // MCPServerSnapshotFromServer converts a single mcp.Server into its
 // typed snapshot. Secret material in `Env` and `Headers` is never
-// copied; only the key counts are recorded.
+// copied; only the key counts are recorded. The URL field is run
+// through stripURLCredentialsFromURL so any userinfo embedded in
+// the URL (https://user:token@host) is removed before the snapshot
+// leaves the runtime. A URL that fails to parse is returned
+// trimmed, not empty, so the operator still sees the configured
+// endpoint when triaging a malformed MCP configuration.
 func MCPServerSnapshotFromServer(server mcp.Server) MCPServerSnapshot {
 	return MCPServerSnapshot{
 		Name:        strings.TrimSpace(server.Name),
 		Type:        string(server.Type),
 		Identity:    strings.TrimSpace(server.Identity),
-		URL:         strings.TrimSpace(server.URL),
+		URL:         stripURLCredentialsFromURL(server.URL),
 		Command:     strings.TrimSpace(server.Command),
 		ArgCount:    len(server.Args),
 		EnvKeyCount: len(server.Env),
@@ -250,21 +256,46 @@ func NewBackendLifecycleSnapshot(servers []mcp.Server, hookDefs []hooks.Definiti
 
 // redactStringSlice runs every element of the input slice through
 // the standard redaction pipeline and trims surrounding whitespace.
-// A nil or empty input returns nil so the JSON output omits the
-// field entirely.
+// Position is preserved: a fully-redacted element becomes an empty
+// string in the output, and a whitespace-only input becomes an
+// empty string. The output length always matches the input length
+// so consumers can rely on arg position when correlating with the
+// source definition. A nil or empty input returns nil so the JSON
+// output omits the field entirely.
 func redactStringSlice(values []string) []string {
 	if len(values) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		redacted := redaction.RedactString(strings.TrimSpace(value), redaction.Options{})
-		if redacted != "" {
-			out = append(out, redacted)
+	out := make([]string, len(values))
+	for index, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			out[index] = ""
+			continue
 		}
-	}
-	if len(out) == 0 {
-		return nil
+		out[index] = redaction.RedactString(trimmed, redaction.Options{})
 	}
 	return out
+}
+
+// stripURLCredentialsFromURL returns value with any embedded
+// userinfo (https://user:token@host) removed. The helper is
+// tolerant of malformed input: a URL that fails to parse is
+// returned trimmed, not empty, so the operator still sees the
+// configured endpoint when triaging an MCP configuration that
+// contains an unparseable URL. A blank input returns blank.
+func stripURLCredentialsFromURL(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed == nil {
+		return trimmed
+	}
+	if parsed.User == nil {
+		return trimmed
+	}
+	parsed.User = nil
+	return parsed.String()
 }
