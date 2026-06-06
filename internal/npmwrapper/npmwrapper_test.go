@@ -67,7 +67,7 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	node := requireNode(t)
 	wrapperPath := copyWrapperFixture(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
@@ -98,7 +98,7 @@ func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {
 		t.Fatalf("WriteFile native fixture: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
@@ -124,6 +124,9 @@ func copyWrapperFixture(t *testing.T) string {
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile package fixture: %v", err)
 	}
 	wrapperPath := filepath.Join(binDir, "zero.js")
 	if err := os.WriteFile(wrapperPath, bytes, 0o755); err != nil {
