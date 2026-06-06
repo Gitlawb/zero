@@ -158,6 +158,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSearch(args[1:], stdout, stderr, deps)
 	case "sessions", "session":
 		return runSessions(args[1:], stdout, stderr, deps)
+	case "specialists", "specialist":
+		return runSpecialists(args[1:], stdout, stderr, deps)
 	case "plugins", "plugin":
 		return runPlugins(args[1:], stdout, stderr, deps)
 	case "hooks":
@@ -359,6 +361,7 @@ Commands:
   search     Search persisted local Zero session events
   find       Alias for search
   sessions   Inspect local Zero session lineage
+  specialist Inspect local Zero specialist profiles
   plugins    Inspect local Zero plugin manifests
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings

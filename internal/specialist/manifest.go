@@ -1,0 +1,441 @@
+package specialist
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Location string
+
+const (
+	LocationBuiltin Location = "builtin"
+	LocationUser    Location = "user"
+	LocationProject Location = "project"
+)
+
+type Metadata struct {
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Model           string   `json:"model,omitempty"`
+	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+	Tools           []string `json:"tools,omitempty"`
+}
+
+type Manifest struct {
+	Metadata      Metadata  `json:"metadata"`
+	SystemPrompt  string    `json:"systemPrompt"`
+	ResolvedTools []string  `json:"resolvedTools,omitempty"`
+	Location      Location  `json:"location"`
+	FilePath      string    `json:"filePath"`
+	LastModified  time.Time `json:"lastModified,omitempty"`
+	Warnings      []string  `json:"warnings,omitempty"`
+}
+
+type Summary struct {
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Model           string   `json:"model,omitempty"`
+	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+	Tools           []string `json:"tools,omitempty"`
+	ResolvedTools   []string `json:"resolvedTools,omitempty"`
+	Location        Location `json:"location"`
+	FilePath        string   `json:"filePath"`
+	Warnings        []string `json:"warnings,omitempty"`
+}
+
+type Paths struct {
+	UserDir    string `json:"userDir"`
+	ProjectDir string `json:"projectDir,omitempty"`
+}
+
+type LoadOptions struct {
+	Paths Paths
+}
+
+type LoadResult struct {
+	Paths       Paths      `json:"paths"`
+	Specialists []Manifest `json:"specialists"`
+}
+
+var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
+
+var knownMetadataKeys = map[string]bool{
+	"name":            true,
+	"description":     true,
+	"model":           true,
+	"reasoningEffort": true,
+	"tools":           true,
+}
+
+var toolCategories = map[string][]string{
+	"read-only": {"read_file", "list_directory", "grep", "glob"},
+	"edit":      {"read_file", "list_directory", "grep", "glob", "write_file", "edit_file", "apply_patch"},
+	"execute":   {"read_file", "list_directory", "grep", "glob", "bash"},
+	"plan":      {"update_plan"},
+}
+
+var knownToolNames = map[string]bool{
+	"read_file":      true,
+	"list_directory": true,
+	"glob":           true,
+	"grep":           true,
+	"write_file":     true,
+	"edit_file":      true,
+	"apply_patch":    true,
+	"update_plan":    true,
+	"bash":           true,
+}
+
+func DefaultPaths(workspaceRoot string) (Paths, error) {
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		return Paths{}, fmt.Errorf("resolve user config directory: %w", err)
+	}
+	paths := Paths{
+		UserDir: filepath.Join(userConfigDir, "zero", "specialists"),
+	}
+	if strings.TrimSpace(workspaceRoot) != "" {
+		paths.ProjectDir = filepath.Join(filepath.Clean(workspaceRoot), ".zero", "specialists")
+	}
+	return paths, nil
+}
+
+func Load(options LoadOptions) (LoadResult, error) {
+	paths := options.Paths
+	if strings.TrimSpace(paths.UserDir) == "" {
+		resolved, err := DefaultPaths("")
+		if err != nil {
+			return LoadResult{}, err
+		}
+		paths.UserDir = resolved.UserDir
+	}
+
+	manifests := Builtins()
+	userManifests, err := loadDirectory(paths.UserDir, LocationUser)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	manifests = append(manifests, userManifests...)
+	if strings.TrimSpace(paths.ProjectDir) != "" {
+		projectManifests, err := loadDirectory(paths.ProjectDir, LocationProject)
+		if err != nil {
+			return LoadResult{}, err
+		}
+		manifests = append(manifests, projectManifests...)
+	}
+
+	return LoadResult{Paths: paths, Specialists: mergeByName(manifests)}, nil
+}
+
+func Find(result LoadResult, name string) (Manifest, bool) {
+	name = strings.TrimSpace(name)
+	for _, manifest := range result.Specialists {
+		if manifest.Metadata.Name == name {
+			return manifest, true
+		}
+	}
+	return Manifest{}, false
+}
+
+func Summaries(manifests []Manifest) []Summary {
+	summaries := make([]Summary, 0, len(manifests))
+	for _, manifest := range manifests {
+		summaries = append(summaries, Summary{
+			Name:            manifest.Metadata.Name,
+			Description:     manifest.Metadata.Description,
+			Model:           manifest.Metadata.Model,
+			ReasoningEffort: manifest.Metadata.ReasoningEffort,
+			Tools:           append([]string(nil), manifest.Metadata.Tools...),
+			ResolvedTools:   append([]string(nil), manifest.ResolvedTools...),
+			Location:        manifest.Location,
+			FilePath:        manifest.FilePath,
+			Warnings:        append([]string(nil), manifest.Warnings...),
+		})
+	}
+	return summaries
+}
+
+func ParseMarkdown(content string) (Manifest, error) {
+	frontmatter, body, err := splitFrontmatter(content)
+	if err != nil {
+		return Manifest{}, err
+	}
+	raw, err := parseFrontmatter(frontmatter)
+	if err != nil {
+		return Manifest{}, err
+	}
+	manifest, err := manifestFromRaw(raw)
+	if err != nil {
+		return Manifest{}, err
+	}
+	manifest.SystemPrompt = strings.TrimSpace(body)
+	for key := range raw {
+		if !knownMetadataKeys[key] {
+			manifest.Warnings = append(manifest.Warnings, "unknown frontmatter key: "+key)
+		}
+	}
+	if manifest.SystemPrompt == "" {
+		if manifest.Metadata.Description == "" {
+			return Manifest{}, fmt.Errorf("system prompt cannot be empty")
+		}
+		manifest.SystemPrompt = manifest.Metadata.Description
+		manifest.Warnings = append(manifest.Warnings, "using description as system prompt")
+	}
+	if err := Validate(&manifest); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
+}
+
+func Validate(manifest *Manifest) error {
+	manifest.Metadata.Name = strings.TrimSpace(manifest.Metadata.Name)
+	manifest.Metadata.Description = strings.TrimSpace(manifest.Metadata.Description)
+	manifest.Metadata.Model = strings.TrimSpace(manifest.Metadata.Model)
+	manifest.Metadata.ReasoningEffort = strings.TrimSpace(manifest.Metadata.ReasoningEffort)
+	if manifest.Metadata.Name == "" {
+		return fmt.Errorf("specialist name is required")
+	}
+	if !namePattern.MatchString(manifest.Metadata.Name) {
+		return fmt.Errorf("invalid specialist name %q: use lowercase letters, numbers, and dashes", manifest.Metadata.Name)
+	}
+	if manifest.Metadata.Description == "" {
+		return fmt.Errorf("specialist %q requires a description", manifest.Metadata.Name)
+	}
+	resolved, err := ResolveTools(manifest.Metadata.Tools)
+	if err != nil {
+		return fmt.Errorf("specialist %q: %w", manifest.Metadata.Name, err)
+	}
+	manifest.ResolvedTools = resolved
+	return nil
+}
+
+func ResolveTools(selection []string) ([]string, error) {
+	if len(selection) == 0 {
+		return nil, nil
+	}
+	resolved := []string{}
+	seen := map[string]bool{}
+	for _, item := range selection {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		tools, ok := toolCategories[item]
+		if !ok {
+			if !knownToolNames[item] {
+				return nil, fmt.Errorf("unknown tool or category %q", item)
+			}
+			tools = []string{item}
+		}
+		for _, tool := range tools {
+			if seen[tool] {
+				continue
+			}
+			seen[tool] = true
+			resolved = append(resolved, tool)
+		}
+	}
+	sort.Strings(resolved)
+	return resolved, nil
+}
+
+func splitFrontmatter(content string) (string, string, error) {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", strings.TrimSpace(normalized), nil
+	}
+	for index := 1; index < len(lines); index++ {
+		if strings.TrimSpace(lines[index]) == "---" {
+			return strings.Join(lines[1:index], "\n"), strings.Join(lines[index+1:], "\n"), nil
+		}
+	}
+	return "", "", fmt.Errorf("frontmatter is missing closing ---")
+}
+
+func parseFrontmatter(frontmatter string) (map[string]any, error) {
+	raw := map[string]any{}
+	if strings.TrimSpace(frontmatter) == "" {
+		return raw, nil
+	}
+	lines := strings.Split(frontmatter, "\n")
+	for index := 0; index < len(lines); index++ {
+		line := strings.TrimSpace(lines[index])
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			return nil, fmt.Errorf("invalid frontmatter line %d", index+1)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			return nil, fmt.Errorf("invalid empty frontmatter key on line %d", index+1)
+		}
+		if value == "" && isListKey(key) {
+			values, next, err := parseBlockList(lines, index+1)
+			if err != nil {
+				return nil, err
+			}
+			raw[key] = values
+			index = next - 1
+			continue
+		}
+		if isListKey(key) {
+			values, err := parseInlineList(value)
+			if err != nil {
+				return nil, fmt.Errorf("%s must be an array", key)
+			}
+			raw[key] = values
+			continue
+		}
+		raw[key] = unquote(value)
+	}
+	return raw, nil
+}
+
+func manifestFromRaw(raw map[string]any) (Manifest, error) {
+	metadata := Metadata{}
+	for key, value := range raw {
+		switch key {
+		case "name":
+			metadata.Name = stringValue(value)
+		case "description":
+			metadata.Description = stringValue(value)
+		case "model":
+			metadata.Model = stringValue(value)
+		case "reasoningEffort":
+			metadata.ReasoningEffort = stringValue(value)
+		case "tools":
+			values, ok := value.([]string)
+			if !ok {
+				return Manifest{}, fmt.Errorf("tools must be an array")
+			}
+			metadata.Tools = values
+		}
+	}
+	return Manifest{Metadata: metadata}, nil
+}
+
+func isListKey(key string) bool {
+	return key == "tools"
+}
+
+func parseBlockList(lines []string, start int) ([]string, int, error) {
+	values := []string{}
+	index := start
+	for ; index < len(lines); index++ {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "- ") {
+			break
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "- "))
+		if value == "" {
+			return nil, index, fmt.Errorf("empty list item on frontmatter line %d", index+1)
+		}
+		values = append(values, unquote(value))
+	}
+	return values, index, nil
+}
+
+func parseInlineList(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
+		return nil, fmt.Errorf("not an inline array")
+	}
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
+	if inner == "" {
+		return []string{}, nil
+	}
+	values := []string{}
+	for _, part := range strings.Split(inner, ",") {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		values = append(values, unquote(item))
+	}
+	return values, nil
+}
+
+func unquote(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
+		if value[0] == '"' {
+			if unquoted, err := strconv.Unquote(value); err == nil {
+				return strings.TrimSpace(unquoted)
+			}
+		}
+		return strings.TrimSpace(value[1 : len(value)-1])
+	}
+	return value
+}
+
+func stringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func loadDirectory(dir string, location Location) ([]Manifest, error) {
+	if strings.TrimSpace(dir) == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read specialist directory %s: %w", dir, err)
+	}
+	manifests := []Manifest{}
+	for _, entry := range entries {
+		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read specialist manifest %s: %w", path, err)
+		}
+		manifest, err := ParseMarkdown(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("parse specialist manifest %s: %w", path, err)
+		}
+		manifest.Location = location
+		manifest.FilePath = path
+		if info, err := entry.Info(); err == nil {
+			manifest.LastModified = info.ModTime()
+		}
+		manifests = append(manifests, manifest)
+	}
+	return manifests, nil
+}
+
+func mergeByName(manifests []Manifest) []Manifest {
+	byName := map[string]Manifest{}
+	for _, manifest := range manifests {
+		byName[manifest.Metadata.Name] = manifest
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	merged := make([]Manifest, 0, len(names))
+	for _, name := range names {
+		merged = append(merged, byName[name])
+	}
+	return merged
+}
