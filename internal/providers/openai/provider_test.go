@@ -217,6 +217,8 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 	}{
 		{"auth", http.StatusUnauthorized, `{"error":{"message":"bad key sk-secret","type":"invalid_request_error"}}`, "auth error:"},
 		{"rate limit", http.StatusTooManyRequests, `{"error":{"message":"slow down"}}`, "rate limit error:"},
+		{"service unavailable", http.StatusServiceUnavailable, `{"error":{"message":"overloaded"}}`, "rate limit error:"},
+		{"overloaded 529", 529, `{"error":{"message":"overloaded"}}`, "rate limit error:"},
 		{"bad request", http.StatusBadRequest, `{"error":{"message":"bad request"}}`, "provider request error:"},
 		{"server", http.StatusInternalServerError, `server saw Bearer sk-secret`, "provider error:"},
 	}

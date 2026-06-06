@@ -74,6 +74,19 @@ func propertyToMCP(property tools.PropertySchema) map[string]any {
 	if property.Maximum != nil {
 		output["maximum"] = *property.Maximum
 	}
+	if property.Items != nil {
+		output["items"] = propertyToMCP(*property.Items)
+	}
+	if len(property.Properties) > 0 {
+		nested := make(map[string]any, len(property.Properties))
+		for name, child := range property.Properties {
+			nested[name] = propertyToMCP(child)
+		}
+		output["properties"] = nested
+	}
+	if len(property.Required) > 0 {
+		output["required"] = append([]string{}, property.Required...)
+	}
 	return output
 }
 
@@ -90,6 +103,24 @@ func propertyFromMCP(input map[string]any) tools.PropertySchema {
 	if max, ok := intValue(input["maximum"]); ok {
 		property.Maximum = &max
 	}
+	if items, ok := input["items"].(map[string]any); ok {
+		child := propertyFromMCP(items)
+		property.Items = &child
+	}
+	if properties, ok := input["properties"].(map[string]any); ok {
+		nested := make(map[string]tools.PropertySchema, len(properties))
+		for name, raw := range properties {
+			propertyMap, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			nested[name] = propertyFromMCP(propertyMap)
+		}
+		if len(nested) > 0 {
+			property.Properties = nested
+		}
+	}
+	property.Required = append(property.Required, stringSlice(input["required"])...)
 	return property
 }
 

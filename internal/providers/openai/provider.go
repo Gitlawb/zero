@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -303,32 +304,11 @@ func (provider *Provider) emitHTTPError(ctx context.Context, response *http.Resp
 }
 
 func (provider *Provider) classifiedError(statusCode int, message string) string {
-	prefix := "provider error: "
-	switch statusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		prefix = "auth error: "
-	case http.StatusTooManyRequests:
-		prefix = "rate limit error: "
-	default:
-		if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
-			prefix = "provider request error: "
-		}
-	}
-	return provider.redact(prefix + message)
+	return providerio.ClassifiedError(statusCode, message, provider.apiKey)
 }
 
 func (provider *Provider) redact(message string) string {
-	if provider.apiKey != "" {
-		message = strings.ReplaceAll(message, provider.apiKey, "[REDACTED]")
-	}
-	words := strings.Fields(message)
-	for index := 0; index < len(words)-1; index++ {
-		if strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") {
-			words[index] = "authorization"
-			words[index+1] = "[REDACTED]"
-		}
-	}
-	return strings.Join(words, " ")
+	return providerio.Redact(message, provider.apiKey)
 }
 
 // backoff waits before a retry attempt, returning false if the context is

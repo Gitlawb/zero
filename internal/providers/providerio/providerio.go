@@ -3,16 +3,22 @@ package providerio
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const maxSSELineBytes = 16 * 1024 * 1024
+
+// ErrStreamIdle reports that a streaming upstream stopped sending data without
+// closing the connection. Callers surface it as an idle-timeout error.
+var ErrStreamIdle = errors.New("idle timeout (upstream stopped sending data)")
 
 // NormalizeBaseURL trims trailing slashes and validates an HTTP API base URL.
 func NormalizeBaseURL(baseURL string, defaultBaseURL string, label string) (string, error) {
@@ -53,7 +59,13 @@ func SendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event
 func ScanSSEData(reader io.Reader, handle func(data string) bool) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 4096), maxSSELineBytes)
+	return scanSSEPayloads(scanner, handle)
+}
 
+// scanSSEPayloads accumulates SSE "data:" lines into payloads (joined across
+// continuation lines, flushed on a blank line or EOF) and forwards each to
+// handle. It is the shared core of ScanSSEData and the idle-aware variant.
+func scanSSEPayloads(scanner *bufio.Scanner, handle func(data string) bool) error {
 	dataLines := []string{}
 	flush := func() bool {
 		if len(dataLines) == 0 {
@@ -87,6 +99,94 @@ func ScanSSEData(reader io.Reader, handle func(data string) bool) error {
 	}
 	flush()
 	return nil
+}
+
+// ScanSSEDataWithContext parses SSE data payloads while enforcing an idle
+// timeout and honoring ctx cancellation. The blocking scan runs on a goroutine
+// that forwards each completed payload over a buffered channel; this consumer
+// selects on ctx.Done, the idle timer, and incoming payloads. When the upstream
+// goes silent for idleTimeout, cancel is invoked to abort the in-flight request
+// (unblocking the reader) and ErrStreamIdle is returned. On ctx cancellation
+// ctx.Err() is returned. A non-positive idleTimeout disables the watchdog.
+func ScanSSEDataWithContext(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	reader io.Reader,
+	idleTimeout time.Duration,
+	handle func(data string) bool,
+) error {
+	if idleTimeout <= 0 {
+		return ScanSSEData(reader, handle)
+	}
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 4096), maxSSELineBytes)
+
+	type payload struct {
+		data string
+	}
+	payloads := make(chan payload)
+	scanDone := make(chan error, 1)
+
+	go func() {
+		scanDone <- scanSSEPayloads(scanner, func(data string) bool {
+			select {
+			case payloads <- payload{data: data}:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		})
+		close(payloads)
+	}()
+
+	idle := time.NewTimer(idleTimeout)
+	defer idle.Stop()
+	resetIdle := func() {
+		if !idle.Stop() {
+			select {
+			case <-idle.C:
+			default:
+			}
+		}
+		idle.Reset(idleTimeout)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Abort the in-flight request so the reader goroutine unblocks and
+			// exits on its own; do not wait for it (it may be parked in a read
+			// that only the request-context cancel can interrupt).
+			cancel()
+			return ctx.Err()
+		case <-idle.C:
+			// Upstream went silent without closing. Abort the read and surface
+			// a timeout instead of blocking the agent forever.
+			cancel()
+			return ErrStreamIdle
+		case item, ok := <-payloads:
+			if !ok {
+				// Reader finished: deliver its terminal status (EOF -> nil,
+				// scanner error, or ctx cancel observed inside the goroutine).
+				if err := <-scanDone; err != nil {
+					return err
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return nil
+			}
+			resetIdle()
+			if !handle(item.data) {
+				// The provider asked to stop (e.g. it already emitted an error
+				// for this payload). Abort the read and end like ScanSSEData:
+				// return nil so callers fall through to their post-scan checks.
+				cancel()
+				return nil
+			}
+		}
+	}
 }
 
 // ClassifiedError normalizes provider HTTP/stream errors and redacts secrets.

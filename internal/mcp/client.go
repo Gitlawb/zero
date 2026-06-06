@@ -46,9 +46,30 @@ type Client struct {
 	mu      sync.Mutex
 	closeMu sync.Mutex
 	nextID  int
+
+	// dispatchMu guards the response-dispatch state shared with the single
+	// reader goroutine. It is never held across a blocking read.
+	dispatchMu sync.Mutex
+	readerOnce sync.Once
+	pending    map[int]chan dispatchResult
+	readErr    error
+	readDone   bool
+}
+
+// dispatchResult carries one matched JSON-RPC response (or a terminal reader
+// error) to a waiting caller.
+type dispatchResult struct {
+	message rpcMessage
+	err     error
 }
 
 const stdioCloseWaitTimeout = 500 * time.Millisecond
+
+const (
+	// initializeTimeout bounds the MCP handshake so a non-responsive peer fails
+	// fast instead of hanging startup.
+	initializeTimeout = 30 * time.Second
+)
 
 func Connect(ctx context.Context, server Server) (ToolClient, error) {
 	switch server.Type {
@@ -99,11 +120,16 @@ func connectStdio(ctx context.Context, server Server) (*Client, error) {
 	return client, nil
 }
 
+// initialize performs the MCP handshake under a bounded timeout so a
+// non-responsive peer fails fast instead of hanging startup.
 func (client *Client) initialize(ctx context.Context) error {
+	initCtx, cancel := context.WithTimeout(ctx, initializeTimeout)
+	defer cancel()
+
 	var result struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
-	if err := client.request(ctx, "initialize", map[string]any{
+	if err := client.request(initCtx, "initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
@@ -140,6 +166,11 @@ func (client *Client) CallTool(ctx context.Context, name string, args map[string
 func (client *Client) Close() error {
 	client.closeMu.Lock()
 	defer client.closeMu.Unlock()
+
+	// Fail any callers still waiting on a response. The blocking read in the
+	// reader goroutine is released below when stdin closes and the process
+	// exits (or is killed), EOFing stdout.
+	client.failAll(errors.New("MCP client closed"))
 
 	var err error
 	stdin := client.stdin
@@ -183,34 +214,55 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 		return err
 	}
 
-	client.mu.Lock()
-	defer client.mu.Unlock()
+	client.ensureReader()
 
-	id := client.nextID
-	client.nextID++
 	rawParams, err := json.Marshal(params)
 	if err != nil {
 		return err
 	}
+
+	// Allocate an id, register a response channel, and write the request while
+	// holding client.mu. The mutex serializes writes and id allocation but is
+	// released before the (potentially unbounded) wait for the response, so a
+	// hung server never holds the lock and blocks other callers/Close.
+	client.mu.Lock()
+	id := client.nextID
+	client.nextID++
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	if client.readDone {
+		readErr := client.readErr
+		client.dispatchMu.Unlock()
+		client.mu.Unlock()
+		if readErr != nil {
+			return readErr
+		}
+		return fmt.Errorf("MCP %s failed: connection closed", method)
+	}
+	client.pending[id] = responses
+	client.dispatchMu.Unlock()
+
 	if err := client.writer.write(rpcMessage{
 		ID:     id,
 		Method: method,
 		Params: rawParams,
 	}); err != nil {
+		client.removePending(id)
+		client.mu.Unlock()
 		return err
 	}
+	client.mu.Unlock()
 
-	for {
-		message, err := client.reader.read()
-		if err != nil {
-			return err
+	select {
+	case <-ctx.Done():
+		client.removePending(id)
+		return ctx.Err()
+	case result := <-responses:
+		if result.err != nil {
+			return result.err
 		}
-		if message.ID == nil {
-			continue
-		}
-		if !rpcIDMatches(message.ID, id) {
-			continue
-		}
+		message := result.message
 		if message.Error != nil {
 			return fmt.Errorf("MCP %s failed: %s", method, message.Error.Message)
 		}
@@ -220,6 +272,98 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 			}
 		}
 		return nil
+	}
+}
+
+// ensureReader lazily starts the single reader goroutine. It runs once per
+// client; subsequent calls are no-ops.
+func (client *Client) ensureReader() {
+	client.readerOnce.Do(func() {
+		client.dispatchMu.Lock()
+		if client.pending == nil {
+			client.pending = make(map[int]chan dispatchResult)
+		}
+		client.dispatchMu.Unlock()
+		go client.readLoop()
+	})
+}
+
+// readLoop is the single consumer of the message reader. It dispatches each
+// response to the waiting caller by id and, on a terminal read error (EOF,
+// closed pipe, or a Close-triggered cancel), fails all pending callers so none
+// block forever.
+func (client *Client) readLoop() {
+	for {
+		message, err := client.reader.read()
+		if err != nil {
+			client.failAll(err)
+			return
+		}
+		if message.ID == nil {
+			continue
+		}
+		id, ok := rpcMessageID(message.ID)
+		if !ok {
+			continue
+		}
+		client.dispatchMu.Lock()
+		responses := client.pending[id]
+		if responses != nil {
+			delete(client.pending, id)
+		}
+		client.dispatchMu.Unlock()
+		if responses != nil {
+			responses <- dispatchResult{message: message}
+		}
+	}
+}
+
+func (client *Client) removePending(id int) {
+	client.dispatchMu.Lock()
+	delete(client.pending, id)
+	client.dispatchMu.Unlock()
+}
+
+func (client *Client) failAll(err error) {
+	client.dispatchMu.Lock()
+	if client.readDone {
+		client.dispatchMu.Unlock()
+		return
+	}
+	client.readDone = true
+	client.readErr = err
+	pending := client.pending
+	client.pending = make(map[int]chan dispatchResult)
+	client.dispatchMu.Unlock()
+	for _, responses := range pending {
+		responses <- dispatchResult{err: err}
+	}
+}
+
+// rpcMessageID extracts the integer id from a JSON-RPC id value across the
+// numeric/string encodings a server may use.
+func rpcMessageID(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(parsed), true
+	case string:
+		parsed, err := strconv.Atoi(typed)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
 	}
 }
 

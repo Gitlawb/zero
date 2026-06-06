@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -17,6 +18,11 @@ import (
 
 const defaultBaseURL = "https://generativelanguage.googleapis.com"
 const defaultMaxTokens = 8192
+
+// defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
+// without closing the connection, so a stalled-but-open upstream cannot hang the
+// agent forever.
+const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures a Gemini streamGenerateContent provider.
 type Options struct {
@@ -26,16 +32,20 @@ type Options struct {
 	MaxTokens  int
 	HTTPClient *http.Client
 	UserAgent  string
+	// StreamIdleTimeout aborts the stream if no data arrives for this long.
+	// Zero uses defaultStreamIdleTimeout.
+	StreamIdleTimeout time.Duration
 }
 
 // Provider streams completions from the Gemini API.
 type Provider struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	maxTokens  int
-	httpClient *http.Client
-	userAgent  string
+	apiKey            string
+	baseURL           string
+	model             string
+	maxTokens         int
+	httpClient        *http.Client
+	userAgent         string
+	streamIdleTimeout time.Duration
 }
 
 // New creates a Gemini provider.
@@ -52,13 +62,18 @@ func New(options Options) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	idleTimeout := options.StreamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultStreamIdleTimeout
+	}
 	return &Provider{
-		apiKey:     options.APIKey,
-		baseURL:    baseURL,
-		model:      model,
-		maxTokens:  maxTokens,
-		httpClient: providerio.HTTPClient(options.HTTPClient),
-		userAgent:  options.UserAgent,
+		apiKey:            options.APIKey,
+		baseURL:           baseURL,
+		model:             model,
+		maxTokens:         maxTokens,
+		httpClient:        providerio.HTTPClient(options.HTTPClient),
+		userAgent:         options.UserAgent,
+		streamIdleTimeout: idleTimeout,
 	}, nil
 }
 
@@ -85,7 +100,12 @@ func (provider *Provider) StreamCompletion(
 }
 
 func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.streamURL(), bytes.NewReader(body))
+	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
+	// the request, which unblocks the SSE reader goroutine.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	httpRequest, err := http.NewRequestWithContext(streamCtx, http.MethodPost, provider.streamURL(), bytes.NewReader(body))
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider request error: " + err.Error())})
 		return
@@ -113,9 +133,16 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 
 	state := streamState{}
-	err = providerio.ScanSSEData(response.Body, func(data string) bool {
+	err = providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, provider.streamIdleTimeout, func(data string) bool {
 		return provider.emitPayload(ctx, data, &state, events)
 	})
+	if errors.Is(err, providerio.ErrStreamIdle) {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", provider.streamIdleTimeout)),
+		})
+		return
+	}
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
@@ -125,7 +152,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		return
 	}
 	if !state.done {
-		provider.emitDone(ctx, state, events)
+		provider.emitDone(ctx, &state, events)
 	}
 }
 
@@ -197,7 +224,7 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 	return true
 }
 
-func (provider *Provider) emitDone(ctx context.Context, state streamState, events chan<- zeroruntime.StreamEvent) {
+func (provider *Provider) emitDone(ctx context.Context, state *streamState, events chan<- zeroruntime.StreamEvent) {
 	if state.hasUsage {
 		usage, err := zeroruntime.NormalizeUsage(zeroruntime.TokenUsage{
 			InputTokens:     state.inputTokens,
