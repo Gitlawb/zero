@@ -20,7 +20,7 @@ func TestDetectPlanFindsBunAndGoChecks(t *testing.T) {
 		"scripts": {
 			"test": "bun test ./tests",
 			"typecheck": "tsc --noEmit",
-			"build": "bun run scripts/build.ts",
+			"build": "go run ./cmd/zero-release build",
 			"lint": "eslint ."
 		}
 	}`)

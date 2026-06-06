@@ -190,6 +190,38 @@ func TestReleaseArchiveNamesMatchInstallerContracts(t *testing.T) {
 	}
 }
 
+func TestBuildHelpersMatchScriptContracts(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "package.json"), `{"version":"0.1.0"}`)
+
+	version, err := PackageVersion(root)
+	if err != nil {
+		t.Fatalf("PackageVersion returned error: %v", err)
+	}
+	if version != "0.1.0" {
+		t.Fatalf("PackageVersion = %q, want 0.1.0", version)
+	}
+	if got := DefaultBuildOutput(root, "windows"); got != filepath.Join(root, "zero.exe") {
+		t.Fatalf("DefaultBuildOutput(windows) = %q", got)
+	}
+	if got := DefaultBuildOutput(root, "linux"); got != filepath.Join(root, "zero") {
+		t.Fatalf("DefaultBuildOutput(linux) = %q", got)
+	}
+	if got := BuildLdflags(version); !strings.Contains(got, "-X github.com/Gitlawb/zero/internal/cli.version=0.1.0") {
+		t.Fatalf("BuildLdflags = %q", got)
+	}
+}
+
+func TestSmokeRejectsMissingDefaultArtifact(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "package.json"), `{"version":"0.1.0"}`)
+
+	_, err := Smoke(context.Background(), SmokeOptions{RootDir: root, GOOS: "linux"})
+	if err == nil || !strings.Contains(err.Error(), "build artifact not found: zero") {
+		t.Fatalf("Smoke error = %v, want missing artifact", err)
+	}
+}
+
 func TestPackageRejectsCrossTargetBecauseItSmokesTheBinary(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"version":"0.1.0"}`), 0o644); err != nil {

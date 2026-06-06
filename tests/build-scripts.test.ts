@@ -11,12 +11,6 @@ import {
   getZeroArtifactName,
   getZeroArtifactNameForGoOS,
 } from '../scripts/artifact';
-import {
-  defaultBuildOutput,
-  goBuildLdflags,
-  parseBuildArgs,
-  parsePackageVersion,
-} from '../scripts/build';
 
 describe('build artifact naming', () => {
   it('uses a Windows executable suffix on win32', () => {
@@ -61,44 +55,6 @@ describe('release artifact naming', () => {
     expect(getReleasePackageName('0.1.0', 'darwin', 'arm64')).toBe('zero-v0.1.0-macos-arm64');
     expect(getReleaseArchiveName('0.1.0', 'win32', 'x64')).toBe('zero-v0.1.0-windows-x64.zip');
     expect(getReleaseArchiveName('0.1.0', 'linux', 'x64')).toBe('zero-v0.1.0-linux-x64.tar.gz');
-  });
-});
-
-describe('Go binary build script', () => {
-  it('parses target overrides from environment and CLI flags', () => {
-    expect(parseBuildArgs([], {
-      ZERO_BUILD_GOOS: 'linux',
-      ZERO_BUILD_GOARCH: 'arm64',
-    })).toMatchObject({
-      goos: 'linux',
-      goarch: 'arm64',
-      help: false,
-    });
-
-    expect(parseBuildArgs(['--goos=windows', '--goarch', 'amd64', '--output', 'dist/zero.exe'], {}))
-      .toEqual({
-        goos: 'windows',
-        goarch: 'amd64',
-        output: 'dist/zero.exe',
-        help: false,
-      });
-  });
-
-  it('rejects flag-shaped values for options that require values', () => {
-    expect(() => parseBuildArgs(['-o', '-h'])).toThrow('-o requires a value');
-    expect(() => parseBuildArgs(['--goarch', '-h'])).toThrow('--goarch requires a value');
-  });
-
-  it('builds the expected default output path for the target OS', () => {
-    expect(defaultBuildOutput('windows', '/repo')).toBe(join('/repo', 'zero.exe'));
-    expect(defaultBuildOutput('linux', '/repo')).toBe(join('/repo', 'zero'));
-  });
-
-  it('injects the package version into the Go CLI package', () => {
-    expect(parsePackageVersion('{"version":"0.1.0"}')).toBe('0.1.0');
-    expect(goBuildLdflags('0.1.0')).toContain(
-      '-X github.com/Gitlawb/zero/internal/cli.version=0.1.0'
-    );
   });
 });
 

@@ -163,7 +163,7 @@ internal/
   streamjson/            # headless stream-json protocol
   mcp/ plugins/ hooks/   # extension-facing runtime surfaces
 bin/                     # npm wrapper entrypoint
-scripts/                 # Bun build/install/smoke/perf scripts and installers
+scripts/                 # Bun install/perf scripts, installers, and npm helpers
 tests/                   # Bun tests for wrapper/build/release scripts
 docs/                    # PRD + protocol/install/perf docs
 ```
@@ -184,8 +184,8 @@ bun run perf:bench  # performance benchmarks (see docs/PERFORMANCE.md)
 Cross-compile by passing Go targets to the builder:
 
 ```bash
-bun run scripts/build.ts --goos linux --goarch amd64
-bun run scripts/build.ts --goos windows --goarch amd64 --output dist/zero.exe
+bun run build --goos linux --goarch amd64
+bun run build --goos windows --goarch amd64 --output dist/zero.exe
 ```
 
 ### Install from a release

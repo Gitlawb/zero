@@ -52,6 +52,33 @@ type PackageOptions struct {
 	GOARCH      string
 }
 
+type BuildOptions struct {
+	RootDir string
+	Output  string
+	Version string
+	GOOS    string
+	GOARCH  string
+}
+
+type BuildResult struct {
+	OutputPath string
+	Version    string
+	GOOS       string
+	GOARCH     string
+}
+
+type SmokeOptions struct {
+	RootDir    string
+	BinaryPath string
+	Version    string
+	GOOS       string
+}
+
+type SmokeResult struct {
+	BinaryPath string
+	Version    string
+}
+
 type PackageResult struct {
 	PackageName string
 	ArchiveName string
@@ -64,6 +91,78 @@ type PackageResult struct {
 
 var checksumPattern = regexp.MustCompile(`^([a-fA-F0-9]{64})\s+(.+)$`)
 
+func Build(ctx context.Context, options BuildOptions) (BuildResult, error) {
+	rootDir, err := resolveRootDir(options.RootDir)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	version := strings.TrimSpace(options.Version)
+	if version == "" {
+		version, err = PackageVersion(rootDir)
+		if err != nil {
+			return BuildResult{}, err
+		}
+	}
+	goos := strings.TrimSpace(options.GOOS)
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	goarch := strings.TrimSpace(options.GOARCH)
+	if goarch == "" {
+		goarch = runtime.GOARCH
+	}
+	output := strings.TrimSpace(options.Output)
+	if output == "" {
+		output = DefaultBuildOutput(rootDir, goos)
+	}
+	if err := buildZero(ctx, rootDir, output, version, goos, goarch); err != nil {
+		return BuildResult{}, err
+	}
+	return BuildResult{
+		OutputPath: output,
+		Version:    version,
+		GOOS:       goos,
+		GOARCH:     goarch,
+	}, nil
+}
+
+func Smoke(ctx context.Context, options SmokeOptions) (SmokeResult, error) {
+	rootDir, err := resolveRootDir(options.RootDir)
+	if err != nil {
+		return SmokeResult{}, err
+	}
+	version := strings.TrimSpace(options.Version)
+	if version == "" {
+		version, err = PackageVersion(rootDir)
+		if err != nil {
+			return SmokeResult{}, err
+		}
+	}
+	goos := strings.TrimSpace(options.GOOS)
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	binaryPath := strings.TrimSpace(options.BinaryPath)
+	if binaryPath == "" {
+		binaryPath = DefaultBuildOutput(rootDir, goos)
+	} else if !filepath.IsAbs(binaryPath) {
+		binaryPath = filepath.Join(rootDir, binaryPath)
+	}
+	if _, err := os.Stat(binaryPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return SmokeResult{}, fmt.Errorf("build artifact not found: %s", filepath.Base(binaryPath))
+		}
+		return SmokeResult{}, err
+	}
+	if err := smokeVersion(ctx, binaryPath, version); err != nil {
+		return SmokeResult{}, err
+	}
+	return SmokeResult{
+		BinaryPath: binaryPath,
+		Version:    version,
+	}, nil
+}
+
 func Package(ctx context.Context, options PackageOptions) (PackageResult, error) {
 	rootDir, err := resolveRootDir(options.RootDir)
 	if err != nil {
@@ -71,7 +170,7 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 	}
 	version := strings.TrimSpace(options.Version)
 	if version == "" {
-		version, err = packageVersion(rootDir)
+		version, err = PackageVersion(rootDir)
 		if err != nil {
 			return PackageResult{}, err
 		}
@@ -149,6 +248,14 @@ func ZeroArtifactName(goos string) string {
 		return "zero.exe"
 	}
 	return "zero"
+}
+
+func DefaultBuildOutput(rootDir string, goos string) string {
+	return filepath.Join(rootDir, ZeroArtifactName(goos))
+}
+
+func BuildLdflags(version string) string {
+	return "-s -w -X github.com/Gitlawb/zero/internal/cli.version=" + version
 }
 
 func ReleasePlatform(goos string) (string, error) {
@@ -425,7 +532,7 @@ func pathsOverlap(left string, right string) bool {
 	return left == right || isStrictSubpath(left, right) || isStrictSubpath(right, left)
 }
 
-func packageVersion(rootDir string) (string, error) {
+func PackageVersion(rootDir string) (string, error) {
 	bytes, err := os.ReadFile(filepath.Join(rootDir, "package.json"))
 	if err != nil {
 		return "", err
@@ -443,7 +550,7 @@ func packageVersion(rootDir string) (string, error) {
 }
 
 func buildZero(ctx context.Context, rootDir string, output string, version string, goos string, goarch string) error {
-	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags", "-s -w -X github.com/Gitlawb/zero/internal/cli.version="+version, "-o", output, "./cmd/zero")
+	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags", BuildLdflags(version), "-o", output, "./cmd/zero")
 	command.Dir = rootDir
 	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS="+goos, "GOARCH="+goarch)
 	outputBytes, err := command.CombinedOutput()
