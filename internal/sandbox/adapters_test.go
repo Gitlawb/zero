@@ -24,6 +24,13 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		if backend.Platform != "linux" || backend.Fallback || !backend.CommandWrapping || !backend.NativeIsolation {
 			t.Fatalf("linux backend capabilities = %#v, want native wrapping", backend)
 		}
+		plan := backend.BuildPlan(t.TempDir(), DefaultPolicy())
+		if plan.SupportLevel != BackendSupportNative || len(plan.Warnings) != 0 {
+			t.Fatalf("linux plan = %#v, want native support without warnings", plan)
+		}
+		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityNative {
+			t.Fatalf("linux native isolation capability = %#v, want native", plan.Capabilities)
+		}
 	})
 
 	t.Run("darwin sandbox exec available", func(t *testing.T) {
@@ -57,6 +64,16 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 		if !strings.Contains(backend.Message, "Windows native sandbox adapter is not implemented") {
 			t.Fatalf("expected Windows fallback message, got %q", backend.Message)
+		}
+		plan := backend.BuildPlan(t.TempDir(), DefaultPolicy())
+		if plan.SupportLevel != BackendSupportPolicyOnly {
+			t.Fatalf("windows support level = %q, want policy-only", plan.SupportLevel)
+		}
+		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityUnavailable {
+			t.Fatalf("windows native isolation capability = %#v, want unavailable", plan.Capabilities)
+		}
+		if !restrictionContains(plan.Warnings, "Windows native sandbox adapter is not implemented") {
+			t.Fatalf("windows warnings = %#v, want adapter warning", plan.Warnings)
 		}
 	})
 
@@ -101,6 +118,23 @@ func TestBackendBuildPlanDocumentsBestEffortIsolation(t *testing.T) {
 	}
 }
 
+func TestBackendCapabilitiesReflectDisabledPolicy(t *testing.T) {
+	backend := SelectBackend(BackendOptions{
+		GOOS:             "windows",
+		LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
+	})
+	plan := backend.BuildPlan(t.TempDir(), Policy{Mode: ModeDisabled})
+
+	for _, key := range []string{"policy_evaluation", "workspace_write_guard", "network_guard", "destructive_shell_guard"} {
+		if got := capabilityStatus(plan.Capabilities, key); got != CapabilityDisabled {
+			t.Fatalf("capability %s = %q, want disabled in %#v", key, got, plan.Capabilities)
+		}
+	}
+	if got := capabilityStatus(plan.Capabilities, "command_wrapping"); got != CapabilityUnavailable {
+		t.Fatalf("command_wrapping = %q, want unavailable", got)
+	}
+}
+
 func restrictionContains(restrictions []string, value string) bool {
 	for _, restriction := range restrictions {
 		if strings.Contains(restriction, value) {
@@ -108,4 +142,13 @@ func restrictionContains(restrictions []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func capabilityStatus(capabilities []BackendCapability, key string) CapabilityStatus {
+	for _, capability := range capabilities {
+		if capability.Key == key {
+			return capability.Status
+		}
+	}
+	return ""
 }

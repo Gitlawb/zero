@@ -55,6 +55,7 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	}
 	policy := zeroSandbox.DefaultPolicy()
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
+	plan := backend.BuildPlan(workspaceRoot, policy)
 	if options.json {
 		payload := struct {
 			Policy     zeroSandbox.Policy      `json:"policy"`
@@ -64,7 +65,7 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}{
 			Policy:     policy,
 			Backend:    backend,
-			Plan:       backend.BuildPlan(workspaceRoot, policy),
+			Plan:       plan,
 			GrantsPath: store.FilePath(),
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
@@ -72,7 +73,7 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatSandboxPolicy(workspaceRoot, policy, backend, store.FilePath())); err != nil {
+	if _, err := fmt.Fprintln(stdout, formatSandboxPolicy(workspaceRoot, policy, backend, plan, store.FilePath())); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -307,13 +308,14 @@ func parseSandboxPositionalOptions(args []string) (sandboxCommandOptions, []stri
 	return options, positional, false, nil
 }
 
-func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, grantsPath string) string {
+func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, grantsPath string) string {
 	lines := []string{
 		"Zero sandbox policy",
 		"root: " + workspaceRoot,
 		"mode: " + string(policy.Mode),
 		"network: " + string(policy.Network),
 		"backend: " + string(backend.Name),
+		"support_level: " + string(plan.SupportLevel),
 	}
 	if backend.Platform != "" {
 		lines = append(lines, "backend_platform: "+backend.Platform)
@@ -327,6 +329,9 @@ func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backen
 	)
 	if backend.Message != "" {
 		lines = append(lines, "backend_message: "+backend.Message)
+	}
+	for _, warning := range plan.Warnings {
+		lines = append(lines, "warning: "+warning)
 	}
 	return strings.Join(lines, "\n")
 }

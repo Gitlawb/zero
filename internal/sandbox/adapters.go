@@ -22,10 +22,19 @@ type Backend struct {
 }
 
 type BackendPlan struct {
-	Backend       Backend  `json:"backend"`
-	WorkspaceRoot string   `json:"workspaceRoot"`
-	Policy        Policy   `json:"policy"`
-	Restrictions  []string `json:"restrictions"`
+	Backend       Backend             `json:"backend"`
+	WorkspaceRoot string              `json:"workspaceRoot"`
+	Policy        Policy              `json:"policy"`
+	SupportLevel  BackendSupportLevel `json:"supportLevel"`
+	Capabilities  []BackendCapability `json:"capabilities"`
+	Restrictions  []string            `json:"restrictions"`
+	Warnings      []string            `json:"warnings,omitempty"`
+}
+
+type BackendCapability struct {
+	Key    string           `json:"key"`
+	Status CapabilityStatus `json:"status"`
+	Detail string           `json:"detail"`
 }
 
 func SelectBackend(options BackendOptions) Backend {
@@ -109,6 +118,90 @@ func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPla
 		Backend:       backend,
 		WorkspaceRoot: workspaceRoot,
 		Policy:        effectivePolicy,
+		SupportLevel:  backend.SupportLevel(),
+		Capabilities:  backend.Capabilities(effectivePolicy),
 		Restrictions:  restrictions,
+		Warnings:      backend.Warnings(),
 	}
+}
+
+func (backend Backend) SupportLevel() BackendSupportLevel {
+	if backend.Available && backend.NativeIsolation && backend.CommandWrapping {
+		return BackendSupportNative
+	}
+	return BackendSupportPolicyOnly
+}
+
+func (backend Backend) Warnings() []string {
+	if backend.SupportLevel() == BackendSupportNative {
+		return nil
+	}
+	platform := backend.Platform
+	if platform == "" {
+		platform = "this platform"
+	}
+	warnings := []string{
+		"native process isolation unavailable on " + platform,
+		"shell commands are not wrapped by a native platform sandbox",
+	}
+	if backend.Platform == "windows" {
+		warnings[0] = "Windows native sandbox adapter is not implemented; using policy-only preflight checks"
+	}
+	return warnings
+}
+
+func (backend Backend) Capabilities(policy Policy) []BackendCapability {
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	capabilities := []BackendCapability{
+		{
+			Key:    "policy_evaluation",
+			Status: policyCapabilityStatus(policy.Mode, true),
+			Detail: "tool requests are evaluated against sandbox policy before execution",
+		},
+		{
+			Key:    "workspace_write_guard",
+			Status: policyCapabilityStatus(policy.Mode, policy.EnforceWorkspace),
+			Detail: "filesystem writes are checked against the workspace root before execution",
+		},
+		{
+			Key:    "network_guard",
+			Status: policyCapabilityStatus(policy.Mode, policy.Network == NetworkDeny),
+			Detail: "network-capable tool requests are denied before execution",
+		},
+		{
+			Key:    "destructive_shell_guard",
+			Status: policyCapabilityStatus(policy.Mode, policy.DenyDestructiveShell),
+			Detail: "destructive shell patterns are denied before execution",
+		},
+	}
+	nativeIsolation := BackendCapability{
+		Key:    "native_process_isolation",
+		Status: CapabilityUnavailable,
+		Detail: "no native process sandbox is active for this platform",
+	}
+	if backend.NativeIsolation {
+		nativeIsolation.Status = CapabilityNative
+		nativeIsolation.Detail = "tool subprocesses can run inside " + string(backend.Name)
+	} else if backend.Platform == "windows" {
+		nativeIsolation.Detail = "Windows native sandbox adapter is not implemented yet"
+	}
+	commandWrapping := BackendCapability{
+		Key:    "command_wrapping",
+		Status: CapabilityUnavailable,
+		Detail: "shell commands are not wrapped by a native platform sandbox",
+	}
+	if backend.CommandWrapping {
+		commandWrapping.Status = CapabilityNative
+		commandWrapping.Detail = "shell commands can be launched through " + string(backend.Name)
+	}
+	return append(capabilities, nativeIsolation, commandWrapping)
+}
+
+func policyCapabilityStatus(mode PolicyMode, enabled bool) CapabilityStatus {
+	if mode == ModeDisabled || !enabled {
+		return CapabilityDisabled
+	}
+	return CapabilityPreflight
 }

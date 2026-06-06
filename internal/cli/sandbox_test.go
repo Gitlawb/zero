@@ -133,7 +133,10 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 					Policy  sandbox.Policy  `json:"policy"`
 					Backend sandbox.Backend `json:"backend"`
 					Plan    struct {
-						Restrictions []string `json:"restrictions"`
+						SupportLevel string                      `json:"supportLevel"`
+						Capabilities []sandbox.BackendCapability `json:"capabilities"`
+						Restrictions []string                    `json:"restrictions"`
+						Warnings     []string                    `json:"warnings"`
 					} `json:"plan"`
 					Grants string `json:"grantsPath"`
 				}
@@ -146,14 +149,24 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				if payload.Backend.Platform != "windows" || !payload.Backend.Fallback || payload.Backend.NativeIsolation || payload.Backend.CommandWrapping {
 					t.Fatalf("unexpected backend capability JSON: %#v", payload.Backend)
 				}
+				if payload.Plan.SupportLevel != string(sandbox.BackendSupportPolicyOnly) {
+					t.Fatalf("support level = %q, want policy-only", payload.Plan.SupportLevel)
+				}
+				if sandboxPolicyCapabilityStatus(payload.Plan.Capabilities, "native_process_isolation") != sandbox.CapabilityUnavailable {
+					t.Fatalf("expected native isolation unavailable, got %#v", payload.Plan.Capabilities)
+				}
 				if !sandboxPolicyRestrictionContains(payload.Plan.Restrictions, "native process isolation unavailable on windows") {
 					t.Fatalf("expected JSON plan to document Windows fallback, got %#v", payload.Plan.Restrictions)
+				}
+				if !sandboxPolicyRestrictionContains(payload.Plan.Warnings, "Windows native sandbox adapter is not implemented") {
+					t.Fatalf("expected JSON warnings to document Windows fallback, got %#v", payload.Plan.Warnings)
 				}
 			} else {
 				output := stdout.String()
 				for _, want := range []string{
 					"Zero sandbox policy",
 					"backend: policy-only",
+					"support_level: policy-only",
 					"backend_fallback: true",
 					"backend_command_wrapping: false",
 					"backend_native_isolation: false",
@@ -213,4 +226,13 @@ func sandboxPolicyRestrictionContains(restrictions []string, value string) bool 
 		}
 	}
 	return false
+}
+
+func sandboxPolicyCapabilityStatus(capabilities []sandbox.BackendCapability, key string) sandbox.CapabilityStatus {
+	for _, capability := range capabilities {
+		if capability.Key == key {
+			return capability.Status
+		}
+	}
+	return ""
 }

@@ -13,6 +13,8 @@ type RiskLevel string
 type ViolationCode string
 type GrantDecision string
 type BackendName string
+type BackendSupportLevel string
+type CapabilityStatus string
 
 const (
 	SideEffectRead           SideEffect = "read"
@@ -82,6 +84,18 @@ const (
 	BackendBubblewrap  BackendName = "bubblewrap"
 	BackendSandboxExec BackendName = "sandbox-exec"
 	BackendPolicyOnly  BackendName = "policy-only"
+)
+
+const (
+	BackendSupportNative     BackendSupportLevel = "native"
+	BackendSupportPolicyOnly BackendSupportLevel = "policy-only"
+)
+
+const (
+	CapabilityNative      CapabilityStatus = "native"
+	CapabilityPreflight   CapabilityStatus = "preflight"
+	CapabilityUnavailable CapabilityStatus = "unavailable"
+	CapabilityDisabled    CapabilityStatus = "disabled"
 )
 
 type Policy struct {
