@@ -1136,7 +1136,8 @@ func findTranscriptRow(rows []transcriptRow, kind rowKind) (transcriptRow, bool)
 func transcriptHasMarkedModelEntry(rows []transcriptRow) bool {
 	for _, row := range rows {
 		for _, line := range strings.Split(row.text, "\n") {
-			if strings.HasPrefix(line, "* ") && strings.Contains(line, " (") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "* ") && strings.Contains(trimmed, " (") {
 				return true
 			}
 		}

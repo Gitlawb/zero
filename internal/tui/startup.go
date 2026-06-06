@@ -151,7 +151,7 @@ func renderTwoToneLogo(line string) string {
 }
 
 func (m model) commandChips() string {
-	chips := []string{"/plan", "/debug", "/tools", "/model", "/provider"}
+	chips := startupCommandNames()
 	parts := make([]string, 0, len(chips))
 	for _, chip := range chips {
 		parts = append(parts, zeroTheme.border.Render("[ "+chip+" ]"))

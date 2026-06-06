@@ -48,18 +48,25 @@ func (m model) handleEffortCommand(args string) (model, string) {
 
 func (m model) effortText() string {
 	lines := []string{
-		"Effort",
 		"active effort: " + m.effortDisplay(),
 		"model: " + displayValue(m.modelName, "none"),
 	}
 	efforts := m.availableReasoningEfforts()
 	if len(efforts) == 0 {
 		lines = append(lines, "available: none for active model")
-		return strings.Join(lines, "\n")
+		return renderCommandOutput(commandOutput{
+			Title:    "Effort",
+			Status:   commandStatusWarning,
+			Sections: []commandSection{{Title: "State", Lines: lines}},
+		})
 	}
 	lines = append(lines, "available: "+joinReasoningEfforts(efforts))
-	lines = append(lines, "Use /effort <value> or /effort auto.")
-	return strings.Join(lines, "\n")
+	return renderCommandOutput(commandOutput{
+		Title:    "Effort",
+		Status:   commandStatusOK,
+		Sections: []commandSection{{Title: "State", Lines: lines}},
+		Hints:    []string{"use /effort <value> or /effort auto"},
+	})
 }
 
 func (m model) availableReasoningEfforts() []modelregistry.ReasoningEffort {
@@ -114,12 +121,18 @@ func (m model) handleStyleCommand(args string) (model, string) {
 }
 
 func (m model) styleText() string {
-	return strings.Join([]string{
-		"Style",
-		"active style: " + m.responseStyle,
-		"available: " + strings.Join(responseStyles, ", "),
-		"Use /style <value> to update this TUI session.",
-	}, "\n")
+	return renderCommandOutput(commandOutput{
+		Title:  "Style",
+		Status: commandStatusOK,
+		Sections: []commandSection{{
+			Title: "State",
+			Lines: []string{
+				"active style: " + m.responseStyle,
+				"available: " + strings.Join(responseStyles, ", "),
+			},
+		}},
+		Hints: []string{"use /style <value> to update this TUI session"},
+	})
 }
 
 func defaultedResponseStyle(value string) string {
@@ -152,17 +165,31 @@ func (m model) handleCompactCommand(args string) (model, string) {
 }
 
 func (m model) compactText(requested bool) string {
-	lines := []string{
-		"Compact",
-		"status: " + m.compactionStatus(),
-		fmt.Sprintf("visible transcript rows: %d", len(m.transcript)),
-	}
+	status := commandStatusInfo
 	if requested {
-		lines = append(lines, "request recorded for future compaction backend.")
+		status = commandStatusWarning
 	} else {
-		lines = append(lines, "backend: not wired yet")
+		status = commandStatusWarning
 	}
-	return strings.Join(lines, "\n")
+	return renderCommandOutput(commandOutput{
+		Title:  "Compact",
+		Status: status,
+		Sections: []commandSection{
+			{
+				Title: "State",
+				Lines: []string{
+					"summary: " + m.compactionStatus(),
+					"requested: " + boolText(m.compactRequests > 0),
+					fmt.Sprintf("visible transcript rows: %d", len(m.transcript)),
+				},
+			},
+			{
+				Title: "Backend",
+				Lines: []string{"state: pending integration"},
+			},
+		},
+		Hints: []string{"compaction request is tracked for this TUI session"},
+	})
 }
 
 func (m model) compactionStatus() string {

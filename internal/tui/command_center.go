@@ -40,33 +40,59 @@ func (m model) searchText(query string) string {
 func (m model) resumeText(args string) string {
 	args = strings.TrimSpace(args)
 	if args != "" {
-		return strings.Join([]string{
-			"Sessions",
-			"TUI resume hydration is not wired yet.",
-			"Use zero exec --resume " + args + " for headless resume.",
-		}, "\n")
+		return renderCommandOutput(commandOutput{
+			Title:  "Sessions",
+			Status: commandStatusInfo,
+			Sections: []commandSection{{
+				Title: "Resume",
+				Lines: []string{"requested session: " + args},
+			}},
+			Hints: []string{"use /resume " + args + " to hydrate this TUI session"},
+		})
 	}
 	sessions, err := m.sessionStore.List()
 	if err != nil {
-		return "Sessions\nerror: " + err.Error()
+		return renderCommandOutput(commandOutput{
+			Title:  "Sessions",
+			Status: commandStatusBlocked,
+			Sections: []commandSection{{
+				Title: "Store",
+				Lines: []string{"error: " + err.Error()},
+			}},
+		})
 	}
-	lines := []string{"Sessions"}
 	if len(sessions) == 0 {
-		return "Sessions\n  (none)"
+		return renderCommandOutput(commandOutput{
+			Title:  "Sessions",
+			Status: commandStatusInfo,
+			Sections: []commandSection{{
+				Title: "Recent",
+				Lines: []string{"none"},
+			}},
+		})
 	}
 	limit := len(sessions)
 	if limit > 8 {
 		limit = 8
 	}
+	lines := []string{fmt.Sprintf("recent sessions: %d", len(sessions))}
 	for index := 0; index < limit; index++ {
 		session := sessions[index]
 		title := displayValue(session.Title, "untitled")
-		lines = append(lines, fmt.Sprintf("  %s  %s  model=%s provider=%s events=%d updated=%s", session.SessionID, title, displayValue(session.ModelID, "none"), displayValue(session.Provider, "none"), session.EventCount, session.UpdatedAt))
+		lines = append(lines, commandBullet(fmt.Sprintf("%s  %s  model=%s provider=%s events=%d updated=%s", session.SessionID, title, displayValue(session.ModelID, "none"), displayValue(session.Provider, "none"), session.EventCount, session.UpdatedAt)))
 	}
 	if len(sessions) > limit {
-		lines = append(lines, fmt.Sprintf("  ... %d more", len(sessions)-limit))
+		lines = append(lines, fmt.Sprintf("... %d more", len(sessions)-limit))
 	}
-	return strings.Join(lines, "\n")
+	return renderCommandOutput(commandOutput{
+		Title:  "Sessions",
+		Status: commandStatusOK,
+		Sections: []commandSection{{
+			Title: "Recent",
+			Lines: lines,
+		}},
+		Hints: []string{"use /resume latest or /resume <id> to load a session"},
+	})
 }
 
 func (m model) handleModelCommand(args string) (model, string) {

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -23,11 +22,19 @@ func (m model) runState() string {
 }
 
 func shellOnlyCommandText(name string) string {
-	return fmt.Sprintf("%s is registered in the Go TUI shell but is not wired yet.", name)
+	return renderCommandOutput(commandOutput{
+		Title:  strings.TrimPrefix(name, "/"),
+		Status: commandStatusWarning,
+		Sections: []commandSection{{
+			Title: "State",
+			Lines: []string{"This control is available in the TUI but does not have a backend setting yet."},
+		}},
+		Hints: []string{"use /help to inspect active commands"},
+	})
 }
 
 func helpText() string {
-	return "Commands:\n" + strings.Join(formatCommandHelpLines(), "\n") + "\nSubmit text to ask the assistant."
+	return formatGroupedCommandHelp()
 }
 
 const defaultCommandFooterText = "/help  /model  /provider  /context  /compact  /effort  /style  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"

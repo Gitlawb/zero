@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 type commandKind int
 
@@ -40,12 +43,13 @@ const (
 )
 
 type commandDefinition struct {
-	name        string
-	aliases     []string
-	usage       string
-	group       commandGroup
-	description string
-	kind        commandKind
+	name         string
+	aliases      []string
+	usage        string
+	group        commandGroup
+	description  string
+	kind         commandKind
+	startupOrder int
 }
 
 type parsedCommand struct {
@@ -56,25 +60,28 @@ type parsedCommand struct {
 
 var commandDefinitions = []commandDefinition{
 	{
-		name:        "/provider",
-		usage:       "/provider",
-		group:       commandGroupModel,
-		description: "Show the active provider.",
-		kind:        commandProvider,
+		name:         "/provider",
+		usage:        "/provider",
+		group:        commandGroupModel,
+		description:  "Show the active provider.",
+		kind:         commandProvider,
+		startupOrder: 5,
 	},
 	{
-		name:        "/model",
-		usage:       "/model [list|id]",
-		group:       commandGroupModel,
-		description: "Show the active model and model-shell status.",
-		kind:        commandModel,
+		name:         "/model",
+		usage:        "/model [list|id]",
+		group:        commandGroupModel,
+		description:  "Show or switch the active model.",
+		kind:         commandModel,
+		startupOrder: 4,
 	},
 	{
-		name:        "/plan",
-		usage:       "/plan",
-		group:       commandGroupSession,
-		description: "Show planning mode status.",
-		kind:        commandPlan,
+		name:         "/plan",
+		usage:        "/plan",
+		group:        commandGroupSession,
+		description:  "Show planning mode status.",
+		kind:         commandPlan,
+		startupOrder: 1,
 	},
 	{
 		name:        "/permissions",
@@ -84,11 +91,12 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandPermissions,
 	},
 	{
-		name:        "/tools",
-		usage:       "/tools",
-		group:       commandGroupTools,
-		description: "List registered tools.",
-		kind:        commandTools,
+		name:         "/tools",
+		usage:        "/tools",
+		group:        commandGroupTools,
+		description:  "List registered tools.",
+		kind:         commandTools,
+		startupOrder: 3,
 	},
 	{
 		name:        "/context",
@@ -124,7 +132,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/compact",
 		usage:       "/compact [status]",
 		group:       commandGroupSession,
-		description: "Show or request transcript compaction shell status.",
+		description: "Show or request transcript compaction state.",
 		kind:        commandCompact,
 	},
 	{
@@ -145,7 +153,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/doctor",
 		usage:       "/doctor",
 		group:       commandGroupRuntime,
-		description: "Show local diagnostics shell status.",
+		description: "Show local diagnostics.",
 		kind:        commandDoctor,
 	},
 	{
@@ -156,25 +164,26 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandConfig,
 	},
 	{
-		name:        "/debug",
-		aliases:     []string{"/debug-mode"},
-		usage:       "/debug",
-		group:       commandGroupRuntime,
-		description: "Show debug mode status.",
-		kind:        commandDebug,
+		name:         "/debug",
+		aliases:      []string{"/debug-mode"},
+		usage:        "/debug",
+		group:        commandGroupRuntime,
+		description:  "Show debug mode status.",
+		kind:         commandDebug,
+		startupOrder: 2,
 	},
 	{
 		name:        "/theme",
 		usage:       "/theme",
 		group:       commandGroupSession,
-		description: "Show theme shell status.",
+		description: "Show theme state.",
 		kind:        commandTheme,
 	},
 	{
 		name:        "/input-style",
 		usage:       "/input-style",
 		group:       commandGroupSession,
-		description: "Show input style shell status.",
+		description: "Show input style state.",
 		kind:        commandInputStyle,
 	},
 	{
@@ -248,13 +257,99 @@ func listCommandNames() []string {
 }
 
 func formatCommandHelpLines() []string {
-	lines := make([]string, 0, len(commandDefinitions))
-	for _, command := range commandDefinitions {
-		label := command.usage
-		if len(command.aliases) > 0 {
-			label += " (" + strings.Join(command.aliases, ", ") + ")"
+	return formatGroupedCommandHelpLines()
+}
+
+func formatGroupedCommandHelpLines() []string {
+	lines := make([]string, 0, len(commandDefinitions)+len(commandGroupOrder()))
+	for _, group := range commandGroupOrder() {
+		groupLines := commandHelpLinesForGroup(group)
+		if len(groupLines) == 0 {
+			continue
 		}
-		lines = append(lines, label+" - "+command.description)
+		lines = append(lines, string(group)+":")
+		lines = append(lines, groupLines...)
 	}
 	return lines
+}
+
+func formatGroupedCommandHelp() string {
+	lines := []string{"Commands", "status: info"}
+	for _, group := range commandGroupOrder() {
+		groupLines := commandHelpLinesForGroup(group)
+		if len(groupLines) == 0 {
+			continue
+		}
+		lines = append(lines, commandGroupTitle(group))
+		lines = append(lines, groupLines...)
+	}
+	lines = append(lines, "hint: submit plain text to ask Zero")
+	return strings.Join(lines, "\n")
+}
+
+func commandHelpLinesForGroup(group commandGroup) []string {
+	lines := []string{}
+	for _, command := range commandDefinitions {
+		if command.group != group {
+			continue
+		}
+		lines = append(lines, "  "+formatCommandHelpLine(command))
+	}
+	return lines
+}
+
+func formatCommandHelpLine(command commandDefinition) string {
+	label := command.usage
+	if len(command.aliases) > 0 {
+		label += " (" + strings.Join(command.aliases, ", ") + ")"
+	}
+	return label + " - " + command.description
+}
+
+func startupCommandNames() []string {
+	chips := make([]commandDefinition, 0, len(commandDefinitions))
+	for _, command := range commandDefinitions {
+		if command.startupOrder > 0 {
+			chips = append(chips, command)
+		}
+	}
+	sort.SliceStable(chips, func(left int, right int) bool {
+		if chips[left].startupOrder == chips[right].startupOrder {
+			return chips[left].name < chips[right].name
+		}
+		return chips[left].startupOrder < chips[right].startupOrder
+	})
+
+	names := make([]string, 0, len(chips))
+	for _, command := range chips {
+		names = append(names, command.name)
+	}
+	return names
+}
+
+func commandGroupOrder() []commandGroup {
+	return []commandGroup{
+		commandGroupModel,
+		commandGroupSession,
+		commandGroupRuntime,
+		commandGroupTools,
+		commandGroupMeta,
+	}
+}
+
+func commandGroupTitle(group commandGroup) string {
+	switch group {
+	case commandGroupModel:
+		return "Model"
+	case commandGroupSession:
+		return "Session"
+	case commandGroupRuntime:
+		return "Runtime"
+	case commandGroupTools:
+		return "Tools"
+	case commandGroupMeta:
+		return "Meta"
+	default:
+		return string(group)
+	}
 }

@@ -148,14 +148,20 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 }
 
 func formatResumeSummary(session sessions.Metadata, eventCount int) string {
-	return strings.Join([]string{
-		"Resumed Zero session",
-		"id: " + session.SessionID,
-		"title: " + displayValue(session.Title, "untitled"),
-		"model: " + displayValue(session.ModelID, "none"),
-		"provider: " + displayValue(session.Provider, "none"),
-		fmt.Sprintf("events: %d", eventCount),
-	}, "\n")
+	return renderCommandOutput(commandOutput{
+		Title:  "Resumed Zero session",
+		Status: commandStatusOK,
+		Sections: []commandSection{{
+			Title: "Session",
+			Lines: []string{
+				"id: " + session.SessionID,
+				"title: " + displayValue(session.Title, "untitled"),
+				"model: " + displayValue(session.ModelID, "none"),
+				"provider: " + displayValue(session.Provider, "none"),
+				fmt.Sprintf("events: %d", eventCount),
+			},
+		}},
+	})
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {

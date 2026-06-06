@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/zerocommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -681,122 +679,4 @@ func toolResultRowText(result agent.ToolResult) string {
 		status = tools.StatusOK
 	}
 	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.Output, tuiToolOutputLimit))
-}
-
-func (m model) providerStatus() string {
-	provider := m.providerName
-	if provider == "" {
-		provider = "provider:none"
-	}
-
-	if m.modelName == "" {
-		return provider
-	}
-	return provider + "/" + m.modelName
-}
-
-func (m model) toolsText() string {
-	registered := m.registry.All()
-	if len(registered) == 0 {
-		return "No tools registered."
-	}
-
-	names := make([]string, 0, len(registered))
-	for _, tool := range registered {
-		names = append(names, tool.Name())
-	}
-	sort.Strings(names)
-	return "Tools: " + strings.Join(names, ", ")
-}
-
-func (m model) permissionsText() string {
-	lines := []string{"Permission mode: " + string(m.permissionMode)}
-	if m.sandboxStore == nil {
-		lines = append(lines, "Sandbox grants: unavailable")
-		return strings.Join(lines, "\n")
-	}
-
-	grants, err := m.sandboxStore.List()
-	if err != nil {
-		lines = append(lines, "Sandbox grants: error: "+err.Error())
-		return strings.Join(lines, "\n")
-	}
-	snapshots := zerocommands.SandboxGrantSnapshots(grants)
-	if len(snapshots) == 0 {
-		lines = append(lines, "Sandbox grants: none")
-		return strings.Join(lines, "\n")
-	}
-
-	lines = append(lines, "Sandbox grants:")
-	for _, grant := range snapshots {
-		line := fmt.Sprintf("- %s [%s/%s]", grant.ToolName, grant.Decision, grant.MaxAutonomy)
-		if grant.ApprovedAt != "" {
-			line += " approved " + grant.ApprovedAt
-		}
-		if grant.Reason != "" {
-			line += " - " + grant.Reason
-		}
-		lines = append(lines, line)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m model) providerText() string {
-	return strings.Join([]string{
-		"Provider",
-		"provider: " + displayValue(m.providerName, "none"),
-		"model: " + displayValue(m.modelName, "none"),
-	}, "\n")
-}
-
-func (m model) modelText(args string) string {
-	lines := []string{
-		"Model",
-		"Active model: " + displayValue(m.modelName, "none"),
-		"provider: " + displayValue(m.providerName, "none"),
-	}
-	lines = append(lines, "Use /model list to inspect models or /model <id> to switch this TUI session.")
-	return strings.Join(lines, "\n")
-}
-
-func (m model) contextText() string {
-	return strings.Join([]string{
-		"Context",
-		"cwd: " + displayValue(m.cwd, "unknown"),
-		"provider: " + displayValue(m.providerName, "none"),
-		"model: " + displayValue(m.modelName, "none"),
-		"permission mode: " + string(m.permissionMode),
-		"effort: " + m.effortDisplay(),
-		"style: " + m.responseStyle,
-		"usage: " + m.usageSummaryText(),
-		"compaction: " + m.compactionStatus(),
-		fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
-		"active session: " + displayValue(m.activeSession.SessionID, "none"),
-		"session root: " + displayValue(m.sessionStore.RootDir, "unknown"),
-		fmt.Sprintf("tools: %d", len(m.registry.All())),
-	}, "\n")
-}
-
-func (m model) configText() string {
-	return strings.Join([]string{
-		"Config",
-		"provider: " + displayValue(m.providerName, "none"),
-		"model: " + displayValue(m.modelName, "none"),
-		fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
-		"permission mode: " + string(m.permissionMode),
-		"api key: " + apiKeyState(strings.TrimSpace(m.providerProfile.APIKey) != ""),
-	}, "\n")
-}
-
-func (m model) debugText() string {
-	state := "idle"
-	if m.pending {
-		state = "running"
-	}
-	return strings.Join([]string{
-		"Debug",
-		"run state: " + state,
-		"active run: " + fmt.Sprint(m.activeRunID),
-		"Debug mode is not wired in Go TUI yet.",
-	}, "\n")
 }

@@ -15,12 +15,6 @@ func (m model) modelListText() string {
 	}
 
 	activeID := activeModelID(registry, m.modelName)
-	lines := []string{
-		"Models",
-		"Active model: " + displayValue(m.modelName, "none"),
-		"provider: " + displayValue(m.providerName, "none"),
-		"Available models:",
-	}
 	models := registry.List(modelregistry.ListOptions{})
 	sort.SliceStable(models, func(i, j int) bool {
 		if models[i].Provider == models[j].Provider {
@@ -28,14 +22,33 @@ func (m model) modelListText() string {
 		}
 		return models[i].Provider < models[j].Provider
 	})
+	modelLines := []string{}
 	for _, model := range models {
 		marker := " "
 		if activeID != "" && model.ID == activeID {
 			marker = "*"
 		}
-		lines = append(lines, fmt.Sprintf("%s %s (%s) - %s", marker, model.ID, model.Provider, model.DisplayName))
+		modelLines = append(modelLines, fmt.Sprintf("%s %s (%s) - %s", marker, model.ID, model.Provider, model.DisplayName))
 	}
-	return strings.Join(lines, "\n")
+	return renderCommandOutput(commandOutput{
+		Title:  "Models",
+		Status: commandStatusOK,
+		Sections: []commandSection{
+			{
+				Title: "Active",
+				Lines: []string{
+					"Active model: " + displayValue(m.modelName, "none"),
+					"provider: " + displayValue(m.providerName, "none"),
+					"effort: " + m.effortDisplay(),
+				},
+			},
+			{
+				Title: "Available models:",
+				Lines: modelLines,
+			},
+		},
+		Hints: []string{"use /model <id> to switch this TUI session"},
+	})
 }
 
 func activeModelID(registry modelregistry.Registry, modelName string) string {
