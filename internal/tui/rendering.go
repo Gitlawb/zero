@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -160,6 +161,34 @@ func renderPermissionRow(row transcriptRow) string {
 		line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
 	}
 	return line
+}
+
+func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) string {
+	name := strings.TrimSpace(request.ToolName)
+	if name == "" {
+		name = "tool"
+	}
+
+	header := zeroTheme.amber.Render("permission required") + "  " + zeroTheme.text.Render(name)
+	choices := zeroTheme.text.Render("[a] allow") + "  " +
+		zeroTheme.text.Render("[d] deny") + "  " +
+		zeroTheme.text.Render("[y] always")
+
+	details := []string{}
+	if request.Risk.Level != "" {
+		details = append(details, "risk:"+string(request.Risk.Level))
+	}
+	if request.Reason != "" {
+		details = append(details, request.Reason)
+	}
+	if request.SideEffect != "" {
+		details = append(details, "side_effect:"+request.SideEffect)
+	}
+	if len(details) > 0 {
+		choices += "\n" + zeroTheme.muted.Render(strings.Join(details, "  "))
+	}
+
+	return borderedBlock(width, []string{header, choices})
 }
 
 func renderToolResultRow(row transcriptRow, width int) string {

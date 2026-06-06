@@ -188,7 +188,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				tool:   name,
 				detail: argHint(payloadString(payload, "arguments")),
 			})
-		case sessions.EventPermission:
+		case sessions.EventPermission, sessions.EventPermissionRequest, sessions.EventPermissionDecision:
 			rows = append(rows, permissionTranscriptRow(permissionEventFromPayload(payload)))
 		case sessions.EventToolResult:
 			name := payloadString(payload, "name")
@@ -246,6 +246,7 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 		Autonomy:          payloadString(payload, "autonomy"),
 		SideEffect:        payloadString(payload, "sideEffect"),
 		Reason:            payloadString(payload, "reason"),
+		DecisionReason:    payloadString(payload, "decisionReason"),
 		GrantMatched:      payloadBool(payload, "grantMatched"),
 	}
 	if risk, ok := payloadMap(payload, "risk"); ok {

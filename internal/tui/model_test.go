@@ -804,6 +804,109 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 	}
 }
 
+func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
+	request := testPromptPermissionRequest()
+	m := newModel(context.Background(), Options{})
+	m.showSplash = false
+	m.pending = true
+	m.activeRunID = 7
+	m.width = 96
+
+	updated, cmd := m.Update(permissionRequestMsg{
+		runID:   7,
+		request: request,
+	})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected permission request to update TUI state synchronously")
+	}
+	if next.pendingPermission == nil {
+		t.Fatalf("expected permission prompt to be pending, got %#v", next)
+	}
+	if countTranscriptRows(next.transcript, rowPermission) != 1 {
+		t.Fatalf("expected permission request to append one permission row, got %#v", next.transcript)
+	}
+	view := next.View()
+	for _, want := range []string{"write_file", "[a] allow", "[d] deny", "[y] always", "risk:high", "Creates or overwrites files."} {
+		assertContains(t, view, want)
+	}
+}
+
+func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+		want permissionDecision
+	}{
+		{name: "allow", key: "a", want: permissionDecisionAllow},
+		{name: "deny", key: "d", want: permissionDecisionDeny},
+		{name: "always", key: "y", want: permissionDecisionAlwaysAllow},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			decisions := []permissionDecision{}
+			m := newModel(context.Background(), Options{})
+			m.pending = true
+			m.activeRunID = 7
+			updated, _ := m.Update(permissionRequestMsg{
+				runID:   7,
+				request: testPromptPermissionRequest(),
+				decide: func(decision agent.PermissionDecision) {
+					decisions = append(decisions, permissionDecision(decision.Action))
+				},
+			})
+			next := updated.(model)
+
+			updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+			next = updated.(model)
+
+			if cmd != nil {
+				t.Fatal("expected permission choice to resolve synchronously")
+			}
+			if len(decisions) != 1 || decisions[0] != tc.want {
+				t.Fatalf("expected decision %q, got %#v", tc.want, decisions)
+			}
+			if next.pendingPermission != nil {
+				t.Fatalf("expected permission prompt to clear after choice, got %#v", next.pendingPermission)
+			}
+		})
+	}
+}
+
+func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
+	decisions := []permissionDecision{}
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	updated, _ := m.Update(permissionRequestMsg{
+		runID:   7,
+		request: testPromptPermissionRequest(),
+		decide: func(decision agent.PermissionDecision) {
+			decisions = append(decisions, permissionDecision(decision.Action))
+		},
+	})
+	next := updated.(model)
+	next.input.SetValue("second prompt")
+
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected Enter to be ignored while permission prompt is active")
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("expected Enter not to choose a permission decision, got %#v", decisions)
+	}
+	if transcriptContains(next.transcript, "second prompt") {
+		t.Fatalf("permission prompt should block normal prompt submit, got %#v", next.transcript)
+	}
+	if next.pendingPermission == nil {
+		t.Fatal("expected permission prompt to remain pending after Enter")
+	}
+}
+
 func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 	violation := sandbox.Violation{
 		Code:        sandbox.ViolationOutsideWorkspace,
@@ -1048,6 +1151,35 @@ func stringSliceContains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func testPromptPermissionEvent() agent.PermissionEvent {
+	return agent.PermissionEvent{
+		ToolCallID:     "call_1",
+		ToolName:       "write_file",
+		Action:         agent.PermissionActionPrompt,
+		Permission:     "prompt",
+		PermissionMode: agent.PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		SideEffect:     "write",
+		Reason:         "Creates or overwrites files.",
+		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},
+	}
+}
+
+func testPromptPermissionRequest() agent.PermissionRequest {
+	event := testPromptPermissionEvent()
+	return agent.PermissionRequest{
+		ToolCallID:     event.ToolCallID,
+		ToolName:       event.ToolName,
+		Action:         event.Action,
+		Permission:     event.Permission,
+		PermissionMode: event.PermissionMode,
+		Autonomy:       event.Autonomy,
+		SideEffect:     event.SideEffect,
+		Reason:         event.Reason,
+		Risk:           event.Risk,
+	}
 }
 
 func testSessionStore(t *testing.T) *sessions.Store {

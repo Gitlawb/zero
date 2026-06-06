@@ -84,6 +84,29 @@ func TestFormatEventRedactsSensitiveObjectKeys(t *testing.T) {
 	}
 }
 
+func TestFormatEventIncludesPermissionDecisionReason(t *testing.T) {
+	line, err := FormatEvent(Event{
+		SchemaVersion:  SchemaVersion,
+		Type:           EventPermissionDecision,
+		RunID:          "run_test",
+		ID:             "call_1",
+		Name:           "write_file",
+		Action:         "allow",
+		DecisionReason: "approved by operator",
+	})
+
+	if err != nil {
+		t.Fatalf("FormatEvent returned error: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatalf("expected valid JSON, got %q: %v", line, err)
+	}
+	if decoded["type"] != "permission_decision" || decoded["decisionReason"] != "approved by operator" {
+		t.Fatalf("expected permission decision reason to be serialized, got %#v", decoded)
+	}
+}
+
 func TestParseInputPromptCombinesPromptAndUserMessages(t *testing.T) {
 	input := strings.Join([]string{
 		`{"schemaVersion":1,"type":"message","role":"user","content":"Inspect this repo."}`,

@@ -56,6 +56,7 @@ type model struct {
 	runCancel          context.CancelFunc
 	runID              int
 	activeRunID        int
+	pendingPermission  *pendingPermissionPrompt
 	width              int
 	height             int
 	now                func() time.Time
@@ -73,6 +74,25 @@ type agentResponseMsg struct {
 type agentRowMsg struct {
 	runID int
 	row   transcriptRow
+}
+
+type permissionDecision = agent.PermissionDecisionAction
+
+const (
+	permissionDecisionAllow       permissionDecision = agent.PermissionDecisionAllow
+	permissionDecisionDeny        permissionDecision = agent.PermissionDecisionDeny
+	permissionDecisionAlwaysAllow permissionDecision = agent.PermissionDecisionAlwaysAllow
+)
+
+type permissionRequestMsg struct {
+	runID   int
+	request agent.PermissionRequest
+	decide  func(agent.PermissionDecision)
+}
+
+type pendingPermissionPrompt struct {
+	request agent.PermissionRequest
+	decide  func(agent.PermissionDecision)
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -161,11 +181,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyEnter:
+			if m.pendingPermission != nil {
+				return m, nil
+			}
 			return m.handleSubmit()
+		}
+		if m.pendingPermission != nil {
+			return m.handlePermissionKey(msg)
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		return m, nil
+	case permissionRequestMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.showSplash = false
+		m.transcript = appendTranscriptRow(m.transcript, permissionTranscriptRow(permissionEventFromRequest(msg.request)))
+		if msg.request.Action == agent.PermissionActionPrompt {
+			m.pendingPermission = &pendingPermissionPrompt{
+				request: msg.request,
+				decide:  msg.decide,
+			}
+		}
 		return m, nil
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
@@ -174,6 +213,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending = false
 		m.runCancel = nil
 		m.activeRunID = 0
+		m.pendingPermission = nil
 		for _, event := range msg.usageEvents {
 			var usageRows []transcriptRow
 			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
@@ -233,7 +273,11 @@ func (m model) transcriptView() string {
 
 	if m.pending {
 		builder.WriteString("\n")
-		builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
+		if m.pendingPermission != nil {
+			builder.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
+		} else {
+			builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
+		}
 		builder.WriteString("\n")
 	}
 
@@ -253,6 +297,48 @@ func startsTurn(kind rowKind) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "a":
+		return m.resolvePermission(permissionDecisionAllow)
+	case "d":
+		return m.resolvePermission(permissionDecisionDeny)
+	case "y":
+		return m.resolvePermission(permissionDecisionAlwaysAllow)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cmd) {
+	pending := m.pendingPermission
+	if pending == nil {
+		return m, nil
+	}
+
+	if pending.decide != nil {
+		pending.decide(agent.PermissionDecision{
+			Action: decision,
+			Reason: permissionDecisionReason(decision),
+		})
+	}
+	m.pendingPermission = nil
+	return m, nil
+}
+
+func permissionDecisionReason(decision permissionDecision) string {
+	switch decision {
+	case permissionDecisionAllow:
+		return "approved in TUI"
+	case permissionDecisionAlwaysAllow:
+		return "persistently approved in TUI"
+	case permissionDecisionDeny:
+		return "denied in TUI"
+	default:
+		return "denied in TUI"
 	}
 }
 
@@ -422,6 +508,7 @@ func (m *model) cancelRun() {
 	m.pending = false
 	m.runCancel = nil
 	m.activeRunID = 0
+	m.pendingPermission = nil
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
@@ -433,6 +520,36 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		options := m.agentOptions
 		options.Registry = m.registry
 		options.PermissionMode = m.permissionMode
+
+		onPermissionRequest := options.OnPermissionRequest
+		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
+			if onPermissionRequest != nil {
+				return onPermissionRequest(ctx, request)
+			}
+			if m.runtimeMessageSink == nil {
+				return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission prompt unavailable"}, nil
+			}
+			decisionCh := make(chan agent.PermissionDecision, 1)
+			m.sendPermissionRequest(runID, request, func(decision agent.PermissionDecision) {
+				select {
+				case decisionCh <- decision:
+				default:
+				}
+			})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventPermissionRequest,
+				Payload: request,
+			})
+			select {
+			case decision := <-decisionCh:
+				if strings.TrimSpace(decision.Reason) == "" {
+					decision.Reason = permissionDecisionReason(permissionDecision(decision.Action))
+				}
+				return decision, nil
+			case <-ctx.Done():
+				return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: ctx.Err().Error()}, ctx.Err()
+			}
+		}
 
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
@@ -490,7 +607,7 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
-				Type:    sessions.EventPermission,
+				Type:    tuiPermissionEventType(event),
 				Payload: event,
 			})
 			if onPermission != nil {
@@ -532,6 +649,23 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		})
 		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents}
 	}
+}
+
+func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest, decide func(agent.PermissionDecision)) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(permissionRequestMsg{runID: runID, request: request, decide: decide})
+}
+
+func tuiPermissionEventType(event agent.PermissionEvent) sessions.EventType {
+	if event.Action == agent.PermissionActionPrompt {
+		return sessions.EventPermissionRequest
+	}
+	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny {
+		return sessions.EventPermissionDecision
+	}
+	return sessions.EventPermission
 }
 
 func (m model) sendAgentRow(runID int, row transcriptRow) {

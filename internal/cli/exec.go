@@ -220,7 +220,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		},
 		OnPermission: func(event agent.PermissionEvent) {
 			writer.permission(event)
-			sessionRecorder.append(sessions.EventPermission, event)
+			sessionRecorder.append(sessionPermissionEventType(event), event)
 		},
 		OnToolResult: func(result agent.ToolResult) {
 			writer.toolResult(result)
@@ -442,4 +442,14 @@ func writeExecStreamJSONFinal(stdout io.Writer, cwd string, metadata execRunMeta
 		return exitCrash
 	}
 	return exitCode
+}
+
+func sessionPermissionEventType(event agent.PermissionEvent) sessions.EventType {
+	if event.Action == agent.PermissionActionPrompt {
+		return sessions.EventPermissionRequest
+	}
+	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny {
+		return sessions.EventPermissionDecision
+	}
+	return sessions.EventPermission
 }

@@ -126,7 +126,7 @@ func transcriptRowKey(row transcriptRow) string {
 		}
 	case rowPermission:
 		if row.permission != nil && row.permission.ToolCallID != "" {
-			return fmt.Sprintf("%d:%s", row.kind, row.permission.ToolCallID)
+			return fmt.Sprintf("%d:%s:%s", row.kind, row.permission.ToolCallID, row.permission.Action)
 		}
 	}
 	return ""
@@ -140,6 +140,23 @@ func permissionTranscriptRow(event agent.PermissionEvent) transcriptRow {
 		tool:       event.ToolName,
 		detail:     permissionDetailText(event),
 		permission: &event,
+	}
+}
+
+func permissionEventFromRequest(request agent.PermissionRequest) agent.PermissionEvent {
+	return agent.PermissionEvent{
+		ToolCallID:     request.ToolCallID,
+		ToolName:       request.ToolName,
+		Action:         request.Action,
+		Permission:     request.Permission,
+		PermissionMode: request.PermissionMode,
+		Autonomy:       request.Autonomy,
+		SideEffect:     request.SideEffect,
+		Reason:         request.Reason,
+		Risk:           request.Risk,
+		Violation:      request.Violation,
+		GrantMatched:   request.GrantMatched,
+		Grant:          request.Grant,
 	}
 }
 

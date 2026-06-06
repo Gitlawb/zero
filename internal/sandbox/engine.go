@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -101,6 +102,13 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
+}
+
+func (engine *Engine) Grant(input GrantInput) (Grant, error) {
+	if engine == nil || engine.store == nil {
+		return Grant{}, errors.New("sandbox grant store is not configured")
+	}
+	return engine.store.Grant(input)
 }
 
 func deny(request Request, risk Risk, code ViolationCode, path string, reason string, recoverable bool) Decision {

@@ -374,10 +374,10 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 
 	events := decodeJSONLines(t, stdout.String())
 	eventTypes := jsonEventTypes(events)
-	if !slices.Contains(eventTypes, "permission") {
-		t.Fatalf("expected permission event in %v; output %q", eventTypes, stdout.String())
+	if !slices.Contains(eventTypes, "permission_request") {
+		t.Fatalf("expected permission_request event in %v; output %q", eventTypes, stdout.String())
 	}
-	permissionEvent := findJSONEvent(t, events, "permission")
+	permissionEvent := findJSONEvent(t, events, "permission_request")
 	if permissionEvent["id"] != "call_write" || permissionEvent["name"] != "write_file" || permissionEvent["action"] != "prompt" {
 		t.Fatalf("unexpected permission event: %#v", permissionEvent)
 	}
@@ -400,7 +400,7 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermission)
+	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermissionRequest)
 	var payload map[string]any
 	if err := json.Unmarshal(permissionRecord.Payload, &payload); err != nil {
 		t.Fatalf("decode permission payload: %v", err)
@@ -438,7 +438,7 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 		t.Fatalf("approved exec wrote stderr = %q", stderr.String())
 	}
 	approvedEvents := decodeJSONLines(t, stdout.String())
-	approvedPermissionEvent := findJSONEvent(t, approvedEvents, "permission")
+	approvedPermissionEvent := findJSONEvent(t, approvedEvents, "permission_decision")
 	if approvedPermissionEvent["id"] != "call_write_approved" || approvedPermissionEvent["action"] != "allow" {
 		t.Fatalf("unexpected approved permission event: %#v", approvedPermissionEvent)
 	}
@@ -453,7 +453,7 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents approved session returned error: %v", err)
 	}
-	approvedPermissionRecord := findSessionEvent(t, approvedRecorded, sessions.EventPermission)
+	approvedPermissionRecord := findSessionEvent(t, approvedRecorded, sessions.EventPermissionDecision)
 	payload = map[string]any{}
 	if err := json.Unmarshal(approvedPermissionRecord.Payload, &payload); err != nil {
 		t.Fatalf("decode approved permission payload: %v", err)
@@ -542,6 +542,43 @@ func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
 	output := events[0]["output"].(string)
 	if len(output) >= streamJSONToolResultOutputLimit+100 || !strings.Contains(output, "[truncated]") {
 		t.Fatalf("expected shortened output with marker, got len=%d", len(output))
+	}
+}
+
+func TestExecEventWriterEmitsPermissionDecisionReason(t *testing.T) {
+	var stdout bytes.Buffer
+	writer := execEventWriter{
+		stdout:       &stdout,
+		format:       execOutputStreamJSON,
+		runID:        "run_test",
+		sessionID:    "session_test",
+		streamedText: &strings.Builder{},
+	}
+
+	writer.permission(agent.PermissionEvent{
+		ToolCallID:        "call_1",
+		ToolName:          "write_file",
+		Action:            agent.PermissionActionAllow,
+		Permission:        string(tools.PermissionPrompt),
+		PermissionGranted: true,
+		PermissionMode:    agent.PermissionModeAuto,
+		SideEffect:        string(tools.SideEffectWrite),
+		Reason:            "write access required",
+		DecisionReason:    "approved by operator",
+	})
+
+	if writer.err != nil {
+		t.Fatalf("permission returned writer error: %v", writer.err)
+	}
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) != 1 {
+		t.Fatalf("expected one permission event, got %#v", events)
+	}
+	if events[0]["type"] != "permission_decision" {
+		t.Fatalf("expected permission_decision event, got %#v", events[0])
+	}
+	if events[0]["decisionReason"] != "approved by operator" {
+		t.Fatalf("expected decisionReason to be preserved, got %#v", events[0])
 	}
 }
 

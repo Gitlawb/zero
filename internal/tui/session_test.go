@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -212,6 +213,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
 	runtimeMessages := []tea.Msg{}
+	runtimeMessageCh := make(chan tea.Msg, 8)
 	m := newModel(context.Background(), Options{
 		Cwd:            root,
 		ProviderName:   "openai",
@@ -222,6 +224,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		PermissionMode: agent.PermissionModeAsk,
 		RuntimeMessageSink: func(msg tea.Msg) {
 			runtimeMessages = append(runtimeMessages, msg)
+			runtimeMessageCh <- msg
 		},
 		AgentOptions: agent.Options{
 			Autonomy: string(sandbox.AutonomyMedium),
@@ -238,22 +241,30 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
 	}
-	finalMsg := cmd()
-	if len(runtimeMessages) != 3 {
-		t.Fatalf("expected live tool call, permission, and result messages, got %#v", runtimeMessages)
-	}
-	for _, runtimeMsg := range runtimeMessages {
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- cmd()
+	}()
+
+	for received := 0; received < 4; received++ {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
+		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
+			updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+			next = updated.(model)
+		}
 	}
 	if !next.pending {
 		t.Fatal("expected live runtime rows to leave run pending until final response")
 	}
-	for _, want := range []string{"tool call: write_file", "permission: write_file prompt", "tool result: write_file error"} {
+	for _, want := range []string{"tool call: write_file", "permission: write_file prompt", "permission: write_file deny", "tool result: write_file error"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected live transcript to contain %q, got %#v", want, next.transcript)
 		}
 	}
+	finalMsg := receiveFinalMessage(t, finalCh)
 	updated, _ = next.Update(finalMsg)
 	next = updated.(model)
 
@@ -274,7 +285,8 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
 		sessions.EventToolCall,
-		sessions.EventPermission,
+		sessions.EventPermissionRequest,
+		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
 		sessions.EventMessage,
 	}) {
@@ -286,13 +298,260 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	assertPayloadField(t, events[2], "permission", "prompt")
 	assertPayloadField(t, events[2], "permissionMode", "ask")
 	assertPayloadField(t, events[2], "sideEffect", "write")
-	assertPayloadField(t, events[4], "content", "write blocked")
+	assertPayloadField(t, events[3], "action", "deny")
+	assertPayloadField(t, events[3], "decisionReason", "denied in TUI")
+	assertPayloadField(t, events[5], "content", "write blocked")
 	if !transcriptContains(next.transcript, "permission: write_file prompt") {
 		t.Fatalf("expected permission row in transcript, got %#v", next.transcript)
 	}
-	if countTranscriptRows(next.transcript, rowPermission) != 1 {
-		t.Fatalf("expected final response to avoid duplicate permission rows, got %#v", next.transcript)
+	if countTranscriptRows(next.transcript, rowPermission) != 2 {
+		t.Fatalf("expected request and decision permission rows, got %#v", next.transcript)
 	}
+}
+
+func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_write", "notes.txt", "hello"),
+		textScript("write allowed"),
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+
+	next := submitAndDrivePermissionRun(t, m, "write notes", "a", runtimeMessageCh, 4)
+
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("expected allow decision to write file, got %q", content)
+	}
+	events := readOnlySessionEvents(t, store)
+	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
+		sessions.EventMessage,
+		sessions.EventToolCall,
+		sessions.EventPermissionRequest,
+		sessions.EventPermissionDecision,
+		sessions.EventToolResult,
+		sessions.EventMessage,
+	}) {
+		t.Fatalf("unexpected event sequence: %#v", got)
+	}
+	assertPayloadField(t, events[3], "action", "allow")
+	assertPayloadField(t, events[3], "decisionReason", "approved in TUI")
+	assertPayloadField(t, events[4], "status", "ok")
+	assertPayloadField(t, events[5], "content", "write allowed")
+	if !transcriptContains(next.transcript, "permission: write_file allow") {
+		t.Fatalf("expected allow decision in transcript, got %#v", next.transcript)
+	}
+}
+
+func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	grantStore, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_first", "notes.txt", "first"),
+		textScript("first write"),
+		writeFileToolScript("call_second", "notes.txt", "second"),
+		textScript("second write"),
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, grantStore, runtimeMessageCh)
+
+	next := submitAndDrivePermissionRun(t, m, "write first", "y", runtimeMessageCh, 4)
+
+	lookup, err := grantStore.Lookup("write_file", sandbox.AutonomyMedium)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lookup.Matched || lookup.Grant.Decision != sandbox.GrantAllow {
+		t.Fatalf("expected always decision to persist allow grant, got %#v", lookup)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "first" {
+		t.Fatalf("expected first approved write, got %q", content)
+	}
+
+	runtimeMessageCh = make(chan tea.Msg, 8)
+	next.runtimeMessageSink = func(msg tea.Msg) {
+		runtimeMessageCh <- msg
+	}
+	next = submitAndDrivePermissionRun(t, next, "write second", "", runtimeMessageCh, 3)
+
+	content, err = os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second" {
+		t.Fatalf("expected grant-backed second write, got %q", content)
+	}
+	events := readOnlySessionEvents(t, store)
+	if countSessionEvents(events, sessions.EventPermissionRequest) != 1 {
+		t.Fatalf("expected only first run to request permission, got %#v", eventTypes(events))
+	}
+	if countSessionEvents(events, sessions.EventPermissionDecision) != 2 {
+		t.Fatalf("expected both runs to record decisions, got %#v", eventTypes(events))
+	}
+	secondDecision := nthSessionEvent(t, events, sessions.EventPermissionDecision, 2)
+	assertPayloadField(t, secondDecision, "action", "allow")
+	assertPayloadField(t, secondDecision, "grantMatched", true)
+	if !transcriptContains(next.transcript, "second write") {
+		t.Fatalf("expected second run answer in transcript, got %#v", next.transcript)
+	}
+}
+
+func receiveRuntimeMessage(t *testing.T, messages <-chan tea.Msg) tea.Msg {
+	t.Helper()
+	select {
+	case msg := <-messages:
+		return msg
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runtime message")
+		return nil
+	}
+}
+
+func receiveFinalMessage(t *testing.T, messages <-chan tea.Msg) tea.Msg {
+	t.Helper()
+	select {
+	case msg := <-messages:
+		return msg
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for final agent message")
+		return nil
+	}
+}
+
+func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key string, runtimeMessages <-chan tea.Msg, expectedRuntimeMessages int) model {
+	t.Helper()
+	m.input.SetValue(prompt)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- cmd()
+	}()
+
+	for received := 0; received < expectedRuntimeMessages; received++ {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessages)
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+		if _, ok := runtimeMsg.(permissionRequestMsg); ok && key != "" {
+			updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+			next = updated.(model)
+		}
+	}
+
+	finalMsg := receiveFinalMessage(t, finalCh)
+	updated, _ = next.Update(finalMsg)
+	return updated.(model)
+}
+
+func newPermissionTestModel(root string, provider zeroruntime.Provider, registry *tools.Registry, store *sessions.Store, grantStore *sandbox.GrantStore, runtimeMessages chan<- tea.Msg) model {
+	engineOptions := sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+	}
+	if grantStore != nil {
+		engineOptions.Store = grantStore
+	}
+	return newModel(context.Background(), Options{
+		Cwd:            root,
+		ProviderName:   "openai",
+		ModelName:      "gpt-4.1",
+		Provider:       provider,
+		Registry:       registry,
+		SessionStore:   store,
+		SandboxStore:   grantStore,
+		PermissionMode: agent.PermissionModeAsk,
+		RuntimeMessageSink: func(msg tea.Msg) {
+			runtimeMessages <- msg
+		},
+		AgentOptions: agent.Options{
+			Autonomy: string(sandbox.AutonomyMedium),
+			Sandbox:  sandbox.NewEngine(engineOptions),
+		},
+	})
+}
+
+func writeFileToolScript(callID string, path string, content string) []zeroruntime.StreamEvent {
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: callID, ToolName: "write_file"},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: callID, ArgumentsFragment: `{"path":` + jsonString(path) + `,"content":` + jsonString(content) + `,"overwrite":true}`},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: callID},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
+func textScript(text string) []zeroruntime.StreamEvent {
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: text},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
+func jsonString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func readOnlySessionEvents(t *testing.T, store *sessions.Store) []sessions.Event {
+	t.Helper()
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected one session, got %d", len(list))
+	}
+	events, err := store.ReadEvents(list[0].SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	return events
+}
+
+func countSessionEvents(events []sessions.Event, eventType sessions.EventType) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
+}
+
+func nthSessionEvent(t *testing.T, events []sessions.Event, eventType sessions.EventType, ordinal int) sessions.Event {
+	t.Helper()
+	seen := 0
+	for _, event := range events {
+		if event.Type != eventType {
+			continue
+		}
+		seen++
+		if seen == ordinal {
+			return event
+		}
+	}
+	t.Fatalf("missing %s event #%d in %#v", eventType, ordinal, eventTypes(events))
+	return sessions.Event{}
 }
 
 func TestResumeCommandHydratesSessionTranscript(t *testing.T) {

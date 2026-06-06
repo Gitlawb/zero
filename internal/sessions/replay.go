@@ -180,7 +180,7 @@ func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
 
 func shapedPayloadPreview(event Event) string {
 	switch event.Type {
-	case EventPermission:
+	case EventPermission, EventPermissionRequest, EventPermissionDecision:
 		return permissionPayloadPreview(event.Payload)
 	case EventToolCall:
 		return toolPayloadPreview(event.Payload, []string{"id", "name", "toolName"})

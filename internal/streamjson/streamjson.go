@@ -17,16 +17,18 @@ const SchemaVersion = 1
 type EventType string
 
 const (
-	EventRunStart   EventType = "run_start"
-	EventText       EventType = "text"
-	EventToolCall   EventType = "tool_call"
-	EventPermission EventType = "permission"
-	EventToolResult EventType = "tool_result"
-	EventUsage      EventType = "usage"
-	EventFinal      EventType = "final"
-	EventWarning    EventType = "warning"
-	EventError      EventType = "error"
-	EventRunEnd     EventType = "run_end"
+	EventRunStart           EventType = "run_start"
+	EventText               EventType = "text"
+	EventToolCall           EventType = "tool_call"
+	EventPermission         EventType = "permission"
+	EventPermissionRequest  EventType = "permission_request"
+	EventPermissionDecision EventType = "permission_decision"
+	EventToolResult         EventType = "tool_result"
+	EventUsage              EventType = "usage"
+	EventFinal              EventType = "final"
+	EventWarning            EventType = "warning"
+	EventError              EventType = "error"
+	EventRunEnd             EventType = "run_end"
 )
 
 type InputType string
@@ -56,6 +58,7 @@ type Event struct {
 	Autonomy          string             `json:"autonomy,omitempty"`
 	SideEffect        string             `json:"sideEffect,omitempty"`
 	Reason            string             `json:"reason,omitempty"`
+	DecisionReason    string             `json:"decisionReason,omitempty"`
 	Risk              *sandbox.Risk      `json:"risk,omitempty"`
 	Violation         *sandbox.Violation `json:"violation,omitempty"`
 	GrantMatched      bool               `json:"grantMatched,omitempty"`

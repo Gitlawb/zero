@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -123,6 +124,43 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		permissionGranted = true
 	}
 
+	var preflightDecision *sandbox.Decision
+	if toolFound && options.Sandbox != nil {
+		decision := options.Sandbox.Evaluate(ctx, sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
+		preflightDecision = &decision
+	}
+
+	decisionReason := ""
+	if toolFound && options.OnPermissionRequest != nil && shouldRequestPermission(tool, permissionGranted, preflightDecision) {
+		requestEvent, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, preflightDecision)
+		if !ok {
+			requestEvent = fallbackPermissionEvent(call, tool, args, permissionMode, options)
+		}
+		request := permissionRequestFromEvent(requestEvent, args)
+		decision, err := requestPermission(ctx, request, options)
+		if err != nil {
+			decision = PermissionDecision{Action: PermissionDecisionDeny, Reason: err.Error()}
+		}
+		decision.Action = normalizePermissionDecisionAction(decision.Action)
+		decisionReason = strings.TrimSpace(decision.Reason)
+		switch decision.Action {
+		case PermissionDecisionAllow:
+			permissionGranted = true
+		case PermissionDecisionAlwaysAllow:
+			permissionGranted = true
+			grant, err := persistPermissionGrant(call.Name, decisionReason, options)
+			if err != nil {
+				emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
+				return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent)
+			}
+			requestEvent.GrantMatched = true
+			requestEvent.Grant = &grant
+		default:
+			emitDeniedPermission(options, call, requestEvent, decisionReason)
+			return deniedPermissionResult(call, decisionReason, requestEvent)
+		}
+	}
+
 	result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
 		PermissionGranted: permissionGranted,
 		PermissionMode:    string(permissionMode),
@@ -135,6 +173,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	sandboxDecision := result.SandboxDecision
 	if toolFound && options.OnPermission != nil {
 		if event, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, sandboxDecision); ok {
+			event.DecisionReason = decisionReason
 			options.OnPermission(event)
 		}
 	}
@@ -144,6 +183,112 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Status:     result.Status,
 		Output:     result.Output,
 		Meta:       result.Meta,
+	}
+}
+
+func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options) sandbox.Request {
+	safety := tool.Safety()
+	return sandbox.Request{
+		WorkspaceRoot:     "",
+		ToolName:          toolName,
+		SideEffect:        sandbox.SideEffect(safety.SideEffect),
+		Permission:        sandbox.Permission(safety.Permission),
+		PermissionGranted: permissionGranted,
+		PermissionMode:    sandbox.PermissionMode(permissionMode),
+		Autonomy:          sandbox.Autonomy(options.Autonomy),
+		Args:              args,
+		Reason:            safety.Reason,
+	}
+}
+
+func shouldRequestPermission(tool tools.Tool, permissionGranted bool, decision *sandbox.Decision) bool {
+	if permissionGranted || tool.Safety().Permission != tools.PermissionPrompt {
+		return false
+	}
+	if decision != nil {
+		return decision.Action == sandbox.ActionPrompt
+	}
+	return true
+}
+
+func requestPermission(ctx context.Context, request PermissionRequest, options Options) (PermissionDecision, error) {
+	if options.OnPermissionRequest == nil {
+		return PermissionDecision{Action: PermissionDecisionDeny, Reason: request.Reason}, nil
+	}
+	return options.OnPermissionRequest(ctx, request)
+}
+
+func normalizePermissionDecisionAction(action PermissionDecisionAction) PermissionDecisionAction {
+	switch action {
+	case PermissionDecisionAllow, PermissionDecisionAlwaysAllow:
+		return action
+	default:
+		return PermissionDecisionDeny
+	}
+}
+
+func persistPermissionGrant(toolName string, reason string, options Options) (sandbox.Grant, error) {
+	if options.Sandbox == nil {
+		return sandbox.Grant{}, errors.New("sandbox engine is not configured")
+	}
+	maxAutonomy := sandbox.Autonomy(options.Autonomy)
+	if maxAutonomy == "" {
+		maxAutonomy = sandbox.AutonomyMedium
+	}
+	if normalized, err := sandbox.NormalizeAutonomy(maxAutonomy); err == nil {
+		maxAutonomy = normalized
+	}
+	return options.Sandbox.Grant(sandbox.GrantInput{
+		ToolName:    toolName,
+		Decision:    sandbox.GrantAllow,
+		MaxAutonomy: maxAutonomy,
+		Reason:      reason,
+	})
+}
+
+func emitDeniedPermission(options Options, call ToolCall, requestEvent PermissionEvent, reason string) {
+	if options.OnPermission == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = requestEvent.Reason
+	}
+	event := requestEvent
+	event.ToolCallID = call.ID
+	event.ToolName = call.Name
+	event.Action = PermissionActionDeny
+	event.PermissionGranted = false
+	event.DecisionReason = reason
+	options.OnPermission(event)
+}
+
+func deniedPermissionResult(call ToolCall, reason string, requestEvent PermissionEvent) ToolResult {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = requestEvent.Reason
+	}
+	if reason == "" {
+		reason = "tool requires approval before execution"
+	}
+	event := requestEvent
+	event.Action = PermissionActionDeny
+	event.PermissionGranted = false
+	event.DecisionReason = reason
+	if event.Risk.Level == "" {
+		event.Risk = sandbox.Risk{Level: sandbox.RiskMedium, Reason: reason}
+	}
+	if requestEvent.ToolName == "" {
+		event.ToolName = call.Name
+	}
+	return ToolResult{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Status:     tools.StatusError,
+		Output:     "Error: Permission denied for " + call.Name + ": " + reason,
+		Meta: map[string]string{
+			"permission_action": string(event.Action),
+		},
 	}
 }
 
@@ -214,6 +359,40 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		GrantMatched:      grantMatched,
 		Grant:             grant,
 	}, true
+}
+
+func fallbackPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionMode PermissionMode, options Options) PermissionEvent {
+	event, _ := buildPermissionEvent(call, tool, args, false, permissionMode, options, nil)
+	return event
+}
+
+func permissionRequestFromEvent(event PermissionEvent, args map[string]any) PermissionRequest {
+	return PermissionRequest{
+		ToolCallID:     event.ToolCallID,
+		ToolName:       event.ToolName,
+		Action:         event.Action,
+		Permission:     event.Permission,
+		PermissionMode: event.PermissionMode,
+		Autonomy:       event.Autonomy,
+		SideEffect:     event.SideEffect,
+		Reason:         event.Reason,
+		Risk:           event.Risk,
+		Args:           cloneArgs(args),
+		Violation:      event.Violation,
+		GrantMatched:   event.GrantMatched,
+		Grant:          event.Grant,
+	}
+}
+
+func cloneArgs(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	copied := make(map[string]any, len(args))
+	for key, value := range args {
+		copied[key] = value
+	}
+	return copied
 }
 
 func permissionActionFromSandbox(action sandbox.Action) PermissionAction {

@@ -354,6 +354,166 @@ func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 	}
 }
 
+func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write approved")
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approved for test"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write approved" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("expected approved write content, got %q", content)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	request := requests[0]
+	if request.ToolCallID != "call-1" || request.ToolName != "write_file" || request.Action != PermissionActionPrompt {
+		t.Fatalf("unexpected permission request: %#v", request)
+	}
+	if request.PermissionMode != PermissionModeAsk || request.SideEffect != string(tools.SideEffectWrite) || request.Autonomy != string(sandbox.AutonomyMedium) {
+		t.Fatalf("unexpected request metadata: %#v", request)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one final permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || !event.PermissionGranted {
+		t.Fatalf("expected final allow event after approval, got %#v", event)
+	}
+	if event.DecisionReason != "approved for test" {
+		t.Fatalf("expected decision reason in final event, got %#v", event)
+	}
+}
+
+func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write denied")
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "not this command"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write denied" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected denied write to leave file missing, stat error: %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(lastMessage.Content, "Permission denied for write_file") || !strings.Contains(lastMessage.Content, "not this command") {
+		t.Fatalf("expected denied permission tool result, got %q", lastMessage.Content)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one final permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionDeny || event.PermissionGranted {
+		t.Fatalf("expected final deny event, got %#v", event)
+	}
+	if event.DecisionReason != "not this command" {
+		t.Fatalf("expected denial reason in final event, got %#v", event)
+	}
+}
+
+func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write approved")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Store:         store,
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			if request.Risk.Level == "" {
+				t.Fatalf("expected request risk to be populated: %#v", request)
+			}
+			return PermissionDecision{Action: PermissionDecisionAlwaysAllow, Reason: "trust write_file for this workspace"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write approved" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	lookup, err := store.Lookup("write_file", sandbox.AutonomyMedium)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lookup.Matched || lookup.Grant.Decision != sandbox.GrantAllow {
+		t.Fatalf("expected persistent allow grant, got %#v", lookup)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one final permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || !event.PermissionGranted || event.Grant == nil {
+		t.Fatalf("expected allow event with persisted grant, got %#v", event)
+	}
+	if event.Grant.Decision != sandbox.GrantAllow || event.Grant.ToolName != "write_file" {
+		t.Fatalf("unexpected persisted grant in event: %#v", event)
+	}
+}
+
 func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

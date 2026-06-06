@@ -147,6 +147,7 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 			"autonomy":           event.Autonomy,
 			"side_effect":        event.SideEffect,
 			"reason":             event.Reason,
+			"decision_reason":    event.DecisionReason,
 			"risk":               event.Risk,
 		}
 		if event.Violation != nil {
@@ -165,7 +166,7 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 		risk := event.Risk
 		permissionGranted := event.PermissionGranted
 		writer.writeStreamJSON(streamjson.Event{
-			Type:              streamjson.EventPermission,
+			Type:              streamJSONPermissionEventType(event),
 			RunID:             writer.runID,
 			SessionID:         writer.sessionID,
 			ID:                event.ToolCallID,
@@ -177,6 +178,7 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 			Autonomy:          event.Autonomy,
 			SideEffect:        event.SideEffect,
 			Reason:            event.Reason,
+			DecisionReason:    event.DecisionReason,
 			Risk:              &risk,
 			Violation:         event.Violation,
 			GrantMatched:      event.GrantMatched,
@@ -187,6 +189,16 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 	if event.Action != agent.PermissionActionAllow {
 		writer.writeStderr("[permission] " + event.ToolName + " " + string(event.Action) + ": " + event.Reason + "\n")
 	}
+}
+
+func streamJSONPermissionEventType(event agent.PermissionEvent) streamjson.EventType {
+	if event.Action == agent.PermissionActionPrompt {
+		return streamjson.EventPermissionRequest
+	}
+	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny {
+		return streamjson.EventPermissionDecision
+	}
+	return streamjson.EventPermission
 }
 
 func (writer *execEventWriter) usage(usage agent.Usage) {
