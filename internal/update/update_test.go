@@ -187,6 +187,64 @@ func TestCheckFetchesDataEndpoint(t *testing.T) {
 	}
 }
 
+func TestCheckResolvesEndpointPrecedence(t *testing.T) {
+	tests := []struct {
+		name     string
+		options  Options
+		env      string
+		want     string
+		clearEnv bool
+	}{
+		{
+			name:    "endpoint option wins",
+			options: Options{Endpoint: "Gitlawb/option-zero", Repository: "Gitlawb/repo-zero"},
+			env:     "Gitlawb/env-zero",
+			want:    Endpoint("Gitlawb/option-zero"),
+		},
+		{
+			name:    "environment wins over repository",
+			options: Options{Repository: "Gitlawb/repo-zero"},
+			env:     "Gitlawb/env-zero",
+			want:    Endpoint("Gitlawb/env-zero"),
+		},
+		{
+			name:     "repository wins over default",
+			options:  Options{Repository: "Gitlawb/repo-zero"},
+			want:     Endpoint("Gitlawb/repo-zero"),
+			clearEnv: true,
+		},
+		{
+			name:     "default repository last",
+			want:     Endpoint(DefaultRepository),
+			clearEnv: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.clearEnv {
+				t.Setenv("ZERO_UPDATE_RELEASE_URL", "")
+			} else {
+				t.Setenv("ZERO_UPDATE_RELEASE_URL", tt.env)
+			}
+			options := tt.options
+			options.CurrentVersion = "0.1.0"
+			options.GOOS = "linux"
+			options.GOARCH = "amd64"
+			options.Fetch = func(_ context.Context, endpoint string) (Release, error) {
+				if endpoint != tt.want {
+					t.Fatalf("endpoint = %q, want %q", endpoint, tt.want)
+				}
+				return releaseForTarget(t, "v0.2.0", "linux", "amd64"), nil
+			}
+
+			if _, err := Check(context.Background(), options); err != nil {
+				t.Fatalf("Check returned error: %v", err)
+			}
+		})
+	}
+}
+
 func TestCheckRejectsMissingReleaseAssets(t *testing.T) {
 	_, err := Check(context.Background(), Options{
 		CurrentVersion: "0.1.0",

@@ -4,13 +4,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/update"
 )
 
 type updateOptions struct {
-	check bool
-	json  bool
+	check      bool
+	json       bool
+	repository string
+	endpoint   string
+	timeout    time.Duration
 }
 
 func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -27,7 +32,12 @@ func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if !options.check {
 		return writeUsageError(stderr, "Only `zero update --check` is available right now.")
 	}
-	result, err := deps.checkUpdate(context.Background(), update.Options{CurrentVersion: version})
+	result, err := deps.checkUpdate(context.Background(), update.Options{
+		CurrentVersion: version,
+		Repository:     options.repository,
+		Endpoint:       options.endpoint,
+		Timeout:        options.timeout,
+	})
 	if err != nil {
 		return writeAppError(stderr, "Could not check for updates: "+err.Error(), exitCrash)
 	}
@@ -45,14 +55,50 @@ func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 
 func parseUpdateArgs(args []string) (updateOptions, bool, error) {
 	options := updateOptions{}
-	for _, arg := range args {
-		switch arg {
-		case "-h", "--help", "help":
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
 			return options, true, nil
-		case "--check":
+		case arg == "--check":
 			options.check = true
-		case "--json":
+		case arg == "--json":
 			options.json = true
+		case arg == "--repo":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.repository = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--repo="):
+			options.repository = strings.TrimSpace(strings.TrimPrefix(arg, "--repo="))
+		case arg == "--endpoint":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.endpoint = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--endpoint="):
+			options.endpoint = strings.TrimSpace(strings.TrimPrefix(arg, "--endpoint="))
+		case arg == "--timeout":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			timeout, err := parseUpdateTimeout(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.timeout = timeout
+			index = next
+		case strings.HasPrefix(arg, "--timeout="):
+			timeout, err := parseUpdateTimeout(strings.TrimPrefix(arg, "--timeout="))
+			if err != nil {
+				return options, false, err
+			}
+			options.timeout = timeout
 		default:
 			return options, false, execUsageError{fmt.Sprintf("unknown update flag %q", arg)}
 		}
@@ -60,14 +106,25 @@ func parseUpdateArgs(args []string) (updateOptions, bool, error) {
 	return options, false, nil
 }
 
+func parseUpdateTimeout(value string) (time.Duration, error) {
+	timeout, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, execUsageError{fmt.Sprintf("invalid update timeout %q: use a duration like 5s or 750ms", value)}
+	}
+	return timeout, nil
+}
+
 func writeUpdateHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero update --check [flags]
 
 Flags:
-      --check    Check the latest GitHub release without installing
-      --json     Print the update check result as JSON
-  -h, --help     Show this help
+      --check                 Check the latest GitHub release without installing
+      --json                  Print the update check result as JSON
+      --repo <owner/repo>     Repository to check when no endpoint is provided
+      --endpoint <url|repo>   Release API URL or owner/repo slug to check
+      --timeout <duration>    Release check timeout (default 5s)
+  -h, --help                  Show this help
 `)
 	return err
 }

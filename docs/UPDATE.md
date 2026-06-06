@@ -2,21 +2,33 @@
 
 `zero update --check` checks the latest GitHub release for `Gitlawb/zero` and compares it with the local CLI version.
 
+```bash
+zero update --check
+zero update --check --json
+zero update --check --repo Gitlawb/zero
+zero update --check --endpoint https://api.github.com/repos/Gitlawb/zero/releases/latest
+zero update --check --timeout 3s
+```
+
 For M2 this command is intentionally check-only:
 
 - It does not replace the running binary.
 - It exits with code `0` when the check succeeds, even when an update is available.
 - It exits with code `1` when the release check cannot be completed.
 - `--json` prints the same result in a machine-readable format for scripts and CI.
+- `--repo <owner/repo>` checks a different GitHub repository when no endpoint is provided.
+- `--endpoint <url|owner/repo>` checks a specific release API URL or repository slug.
+- `--timeout <duration>` overrides the default release check timeout.
 - Release checks time out after 5 seconds by default.
 - It validates that the latest release includes the expected archive and matching `.sha256` asset for the current platform.
 
 The release endpoint resolves in this order:
 
-- `Options.Endpoint` when calling `update.Check` from code.
+- `--endpoint` from the CLI, or `Options.Endpoint` when calling `update.Check` from code.
 - `ZERO_UPDATE_RELEASE_URL` from the environment.
+- `--repo` from the CLI, or `Options.Repository` when calling `update.Check` from code.
 - `https://api.github.com/repos/Gitlawb/zero/releases/latest`.
 
-`options.endpoint` and `ZERO_UPDATE_RELEASE_URL` may be a full URL or an `owner/repo` slug.
+`--endpoint`, `Options.Endpoint`, and `ZERO_UPDATE_RELEASE_URL` may be a full URL or an `owner/repo` slug.
 
 Installer scripts download the matching release asset for the local platform and verify its `.sha256` file. If Zero is already installed, use this command before re-running the installer.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -324,6 +325,38 @@ func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 	}
 }
 
+func TestRunUpdatePassesCheckOptions(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	var got update.Options
+	exitCode := runWithDeps([]string{"update", "--check", "--repo=Gitlawb/fork", "--endpoint", "https://example.test/releases/latest", "--timeout", "750ms", "--json"}, &stdout, &stderr, appDeps{
+		checkUpdate: func(_ context.Context, options update.Options) (update.Result, error) {
+			got = options
+			return update.Result{
+				CurrentVersion:  options.CurrentVersion,
+				LatestVersion:   "0.2.0",
+				ReleaseURL:      "https://example.test/releases/tag/v0.2.0",
+				TagName:         "v0.2.0",
+				UpdateAvailable: true,
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if got.CurrentVersion != "dev" || got.Repository != "Gitlawb/fork" || got.Endpoint != "https://example.test/releases/latest" || got.Timeout != 750*time.Millisecond {
+		t.Fatalf("unexpected update options: %#v", got)
+	}
+	if stdout.Len() == 0 {
+		t.Fatalf("expected JSON output")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunUpdateRequiresCheckFlag(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -338,6 +371,28 @@ func TestRunUpdateRequiresCheckFlag(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "--check") {
 		t.Fatalf("expected --check usage error, got %q", got)
+	}
+}
+
+func TestRunUpdateRejectsInvalidTimeout(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"update", "--check", "--timeout", "fast"}, &stdout, &stderr, appDeps{
+		checkUpdate: func(context.Context, update.Options) (update.Result, error) {
+			t.Fatal("checkUpdate should not run for invalid timeout")
+			return update.Result{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit code, got %d", exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "invalid update timeout") {
+		t.Fatalf("expected timeout usage error, got %q", got)
 	}
 }
 
@@ -371,8 +426,10 @@ func TestRunUpdateHelpDocumentsCheckFlag(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "--check") {
-		t.Fatalf("expected update help to document --check, got %q", stdout.String())
+	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected update help to document %s, got %q", want, stdout.String())
+		}
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
