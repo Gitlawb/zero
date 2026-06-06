@@ -358,24 +358,36 @@ func TestRunUpdatePassesCheckOptions(t *testing.T) {
 }
 
 func TestRunUpdateRejectsInvalidTarget(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	exitCode := runWithDeps([]string{"update", "--check", "--target", "solaris-sparc"}, &stdout, &stderr, appDeps{
-		checkUpdate: func(context.Context, update.Options) (update.Result, error) {
-			t.Fatal("checkUpdate should not run for invalid target")
-			return update.Result{}, nil
-		},
-	})
-
-	if exitCode != exitUsage {
-		t.Fatalf("expected usage exit code, got %d", exitCode)
+	tests := []struct {
+		args      []string
+		errorText string
+	}{
+		{args: []string{"update", "--check", "--target", "solaris-sparc"}, errorText: "unsupported update target"},
+		{args: []string{"update", "--check", "--target="}, errorText: "--target requires a non-empty value"},
 	}
-	if stdout.Len() != 0 {
-		t.Fatalf("expected empty stdout, got %q", stdout.String())
-	}
-	if got := stderr.String(); !strings.Contains(got, "unsupported update target") {
-		t.Fatalf("expected target usage error, got %q", got)
+
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithDeps(tt.args, &stdout, &stderr, appDeps{
+				checkUpdate: func(context.Context, update.Options) (update.Result, error) {
+					t.Fatal("checkUpdate should not run for invalid target")
+					return update.Result{}, nil
+				},
+			})
+
+			if exitCode != exitUsage {
+				t.Fatalf("expected usage exit code, got %d", exitCode)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, tt.errorText) {
+				t.Fatalf("expected target usage error %q, got %q", tt.errorText, got)
+			}
+		})
 	}
 }
 

@@ -114,10 +114,18 @@ func parseUpdateArgs(args []string) (updateOptions, bool, error) {
 			if err != nil {
 				return options, false, err
 			}
-			options.target = strings.TrimSpace(value)
+			target, err := parseUpdateTarget(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.target = target
 			index = next
 		case strings.HasPrefix(arg, "--target="):
-			options.target = strings.TrimSpace(strings.TrimPrefix(arg, "--target="))
+			target, err := parseUpdateTarget(strings.TrimPrefix(arg, "--target="))
+			if err != nil {
+				return options, false, err
+			}
+			options.target = target
 		default:
 			return options, false, execUsageError{fmt.Sprintf("unknown update flag %q", arg)}
 		}
@@ -134,6 +142,14 @@ func parseUpdateTimeout(value string) (time.Duration, error) {
 		return 0, execUsageError{fmt.Sprintf("invalid update timeout %q: timeout must be a positive duration", value)}
 	}
 	return timeout, nil
+}
+
+func parseUpdateTarget(value string) (string, error) {
+	target := strings.TrimSpace(value)
+	if target == "" {
+		return "", execUsageError{"--target requires a non-empty value"}
+	}
+	return target, nil
 }
 
 func writeUpdateHelp(w io.Writer) error {
