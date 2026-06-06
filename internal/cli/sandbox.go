@@ -314,9 +314,17 @@ func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backen
 		"mode: " + string(policy.Mode),
 		"network: " + string(policy.Network),
 		"backend: " + string(backend.Name),
-		"backend_available: " + fmt.Sprintf("%t", backend.Available),
-		"grants: " + grantsPath,
 	}
+	if backend.Platform != "" {
+		lines = append(lines, "backend_platform: "+backend.Platform)
+	}
+	lines = append(lines,
+		"backend_available: "+fmt.Sprintf("%t", backend.Available),
+		"backend_fallback: "+fmt.Sprintf("%t", backend.Fallback),
+		"backend_command_wrapping: "+fmt.Sprintf("%t", backend.CommandWrapping),
+		"backend_native_isolation: "+fmt.Sprintf("%t", backend.NativeIsolation),
+		"grants: "+grantsPath,
+	)
 	if backend.Message != "" {
 		lines = append(lines, "backend_message: "+backend.Message)
 	}

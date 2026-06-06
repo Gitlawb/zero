@@ -105,7 +105,12 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 		getwd:           func() (string, error) { return t.TempDir(), nil },
 		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
-			return sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"}
+			return sandbox.Backend{
+				Name:     sandbox.BackendPolicyOnly,
+				Platform: "windows",
+				Fallback: true,
+				Message:  "policy-only fallback: Windows native sandbox adapter is not implemented",
+			}
 		},
 	}
 
@@ -127,7 +132,10 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				var payload struct {
 					Policy  sandbox.Policy  `json:"policy"`
 					Backend sandbox.Backend `json:"backend"`
-					Grants  string          `json:"grantsPath"`
+					Plan    struct {
+						Restrictions []string `json:"restrictions"`
+					} `json:"plan"`
+					Grants string `json:"grantsPath"`
 				}
 				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 					t.Fatalf("decode policy JSON: %v\n%s", err, stdout.String())
@@ -135,8 +143,27 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				if payload.Policy.Mode != sandbox.ModeEnforce || payload.Backend.Name != sandbox.BackendPolicyOnly || payload.Grants == "" {
 					t.Fatalf("unexpected policy JSON: %#v", payload)
 				}
-			} else if !strings.Contains(stdout.String(), "Zero sandbox policy") || !strings.Contains(stdout.String(), "policy-only") {
-				t.Fatalf("unexpected policy text: %q", stdout.String())
+				if payload.Backend.Platform != "windows" || !payload.Backend.Fallback || payload.Backend.NativeIsolation || payload.Backend.CommandWrapping {
+					t.Fatalf("unexpected backend capability JSON: %#v", payload.Backend)
+				}
+				if !sandboxPolicyRestrictionContains(payload.Plan.Restrictions, "native process isolation unavailable on windows") {
+					t.Fatalf("expected JSON plan to document Windows fallback, got %#v", payload.Plan.Restrictions)
+				}
+			} else {
+				output := stdout.String()
+				for _, want := range []string{
+					"Zero sandbox policy",
+					"backend: policy-only",
+					"backend_fallback: true",
+					"backend_command_wrapping: false",
+					"backend_native_isolation: false",
+					"backend_platform: windows",
+					"Windows native sandbox adapter is not implemented",
+				} {
+					if !strings.Contains(output, want) {
+						t.Fatalf("expected policy text to contain %q, got %q", want, output)
+					}
+				}
 			}
 		})
 	}
@@ -177,4 +204,13 @@ func newSandboxTestStore(t *testing.T) *sandbox.GrantStore {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
 	return store
+}
+
+func sandboxPolicyRestrictionContains(restrictions []string, value string) bool {
+	for _, restriction := range restrictions {
+		if strings.Contains(restriction, value) {
+			return true
+		}
+	}
+	return false
 }
