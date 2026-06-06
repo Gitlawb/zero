@@ -10,7 +10,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -21,17 +20,13 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-var (
-	headerStyle = lipgloss.NewStyle().Bold(true)
-	footerStyle = lipgloss.NewStyle().Faint(true)
-)
-
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
 
 type model struct {
 	ctx              context.Context
 	cwd              string
+	gitBranch        string
 	providerName     string
 	modelName        string
 	providerProfile  config.ProviderProfile
@@ -51,11 +46,14 @@ type model struct {
 	unpricedTokens   int
 	transcript       []transcriptRow
 	input            textinput.Model
+	showSplash       bool
 	pending          bool
 	exiting          bool
 	runCancel        context.CancelFunc
 	runID            int
 	activeRunID      int
+	width            int
+	height           int
 	now              func() time.Time
 }
 
@@ -106,12 +104,13 @@ func newModel(ctx context.Context, options Options) model {
 
 	input := textinput.New()
 	input.Prompt = "zero > "
-	input.Placeholder = "type a prompt or /help"
+	input.Placeholder = "Ask Zero to inspect, edit, explain, or run a command..."
 	input.Focus()
 
 	return model{
 		ctx:             ctx,
 		cwd:             cwd,
+		gitBranch:       gitBranch(cwd),
 		providerName:    options.ProviderName,
 		modelName:       options.ModelName,
 		providerProfile: options.ProviderProfile,
@@ -126,6 +125,7 @@ func newModel(ctx context.Context, options Options) model {
 		usageTracker:    usageTracker,
 		transcript:      initialTranscript(),
 		input:           input,
+		showSplash:      true,
 		now:             time.Now,
 	}
 }
@@ -151,6 +151,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			return m.handleSubmit()
 		}
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -188,26 +192,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	var builder strings.Builder
+	if m.showSplash {
+		return m.startupView()
+	}
+	return m.transcriptView()
+}
 
-	builder.WriteString(headerStyle.Render(fmt.Sprintf("ZERO  %s  %s  %s  %s", m.cwd, m.providerStatus(), m.permissionMode, m.runState())))
+func (m model) transcriptView() string {
+	width := normalizedStartupWidth(m.width)
+
+	var builder strings.Builder
+	builder.WriteString(m.headerBar(width))
 	builder.WriteString("\n\n")
 
-	for _, row := range m.transcript {
-		builder.WriteString(renderRow(row))
+	for index, row := range m.transcript {
+		if index > 0 && startsTurn(row.kind) {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(renderRow(row, width))
 		builder.WriteString("\n")
 	}
 
 	if m.pending {
-		builder.WriteString("assistant: working...\n")
+		builder.WriteString("\n")
+		builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
+		builder.WriteString("\n")
 	}
 
 	builder.WriteString("\n")
-	builder.WriteString(m.input.View())
-	builder.WriteString("\n\n")
-	builder.WriteString(footerStyle.Render(m.footerText()))
+	builder.WriteString(borderedBlock(width, []string{m.input.View()}))
+	builder.WriteString("\n")
+	builder.WriteString(m.statusLine(width))
 
 	return builder.String()
+}
+
+// startsTurn reports whether a row begins a new conversational turn and therefore
+// gets a blank line of separation above it (tool rows stay grouped together).
+func startsTurn(kind rowKind) bool {
+	switch kind {
+	case rowUser, rowAssistant, rowSystem, rowError:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
@@ -221,47 +249,60 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandEmpty:
 		return m, nil
 	case commandHelp:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: helpText()})
 		return m, nil
 	case commandClear:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
+		m.showSplash = true
 		return m, nil
 	case commandExit:
 		m.exiting = true
 		return m, tea.Quit
 	case commandTools:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
 	case commandPermissions:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
 	case commandProvider:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
+		m.showSplash = false
 		text := ""
 		m, text = m.handleModelCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandContext:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
 	case commandConfig:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.configText()})
 		return m, nil
 	case commandDebug:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
 		return m, nil
 	case commandDoctor:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.doctorText()})
 		return m, nil
 	case commandSearch:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil
 	case commandResume:
+		m.showSplash = false
 		if m.pending {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -276,33 +317,39 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case commandCompact:
+		m.showSplash = false
 		text := ""
 		m, text = m.handleCompactCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandEffort:
+		m.showSplash = false
 		text := ""
 		m, text = m.handleEffortCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandStyle:
+		m.showSplash = false
 		text := ""
 		m, text = m.handleStyleCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme, commandInputStyle:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
 			text: shellOnlyCommandText(command.name),
 		})
 		return m, nil
 	case commandUnknown:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,
 			text: "unknown command: " + command.text,
 		})
 		return m, nil
 	case commandPrompt:
+		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: command.text})
 		if m.provider == nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -371,7 +418,12 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
-			rows = append(rows, transcriptRow{kind: rowToolCall, text: "tool call: " + call.Name})
+			rows = append(rows, transcriptRow{
+				kind:   rowToolCall,
+				text:   "tool call: " + call.Name,
+				tool:   call.Name,
+				detail: argHint(call.Arguments),
+			})
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type: sessions.EventToolCall,
 				Payload: map[string]any{
@@ -388,8 +440,11 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		onToolResult := options.OnToolResult
 		options.OnToolResult = func(result agent.ToolResult) {
 			rows = append(rows, transcriptRow{
-				kind: rowToolResult,
-				text: toolResultRowText(result),
+				kind:   rowToolResult,
+				text:   toolResultRowText(result),
+				tool:   result.Name,
+				status: result.Status,
+				detail: result.Output,
 			})
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type: sessions.EventToolResult,

@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func displayValue(value string, fallback string) string {
@@ -85,21 +87,59 @@ func formatCommandFooterText(commands []commandDefinition, pending bool) string 
 	return strings.Join(parts, "  ")
 }
 
-func renderRow(row transcriptRow) string {
+func renderRow(row transcriptRow, width int) string {
 	switch row.kind {
 	case rowWelcome:
-		return row.text
+		return zeroTheme.muted.Render(row.text)
 	case rowUser:
-		return "user: " + row.text
+		return zeroTheme.you.Render("▍ you") + "\n" + indentText(zeroTheme.text.Render(row.text), 2)
 	case rowAssistant:
-		return "assistant: " + row.text
-	case rowToolCall:
-		return row.text
-	case rowToolResult:
-		return row.text
+		return zeroTheme.zero.Render("◇ zero") + "\n" + indentText(zeroTheme.text.Render(row.text), 2)
+	case rowSystem:
+		return indentText(zeroTheme.text.Render(row.text), 2)
 	case rowError:
-		return "error: " + row.text
+		return zeroTheme.red.Render("✗ ") + zeroTheme.text.Render(row.text)
+	case rowToolCall:
+		return renderToolCallRow(row)
+	case rowToolResult:
+		return renderToolResultRow(row, width)
 	default:
 		return row.text
 	}
+}
+
+func renderToolCallRow(row transcriptRow) string {
+	name := row.tool
+	if name == "" {
+		name = strings.TrimPrefix(row.text, "tool call: ")
+	}
+	line := zeroTheme.tool.Render("▸ ") + zeroTheme.text.Render(name)
+	if hint := strings.TrimSpace(row.detail); hint != "" {
+		line += "  " + zeroTheme.muted.Render(hint)
+	}
+	return line
+}
+
+func renderToolResultRow(row transcriptRow, width int) string {
+	name := row.tool
+	if name == "" {
+		name = strings.TrimPrefix(row.text, "tool result: ")
+	}
+
+	icon := zeroTheme.green.Render("✓")
+	if row.status == tools.StatusError {
+		icon = zeroTheme.red.Render("✗")
+	}
+
+	line := zeroTheme.tool.Render("▸ ") + zeroTheme.text.Render(name) + "  " + icon
+
+	// A diff card already shows the change in full, so skip the flattened
+	// one-line summary in that case to avoid duplicating the content.
+	if looksLikeDiff(row.detail) {
+		return line + "\n" + indentText(diffCard(name, row.detail, width-2), 2)
+	}
+	if summary := truncateTUIOutput(row.detail, 100); summary != "" {
+		line += "  " + zeroTheme.muted.Render(summary)
+	}
+	return line
 }

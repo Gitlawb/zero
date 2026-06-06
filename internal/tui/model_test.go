@@ -112,22 +112,68 @@ func TestTranscriptReducer(t *testing.T) {
 	}
 }
 
-func TestInitialRenderContainsHeaderInputAndFooter(t *testing.T) {
+func TestInitialRenderShowsPremiumStartupSplash(t *testing.T) {
 	model := newModel(context.Background(), Options{
 		Cwd:          `D:\codings\Opensource\Zero`,
-		ProviderName: "fake",
-		ModelName:    "m-test",
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
 	})
+	model.width = 120
+	model.height = 34
 
 	view := model.View()
 	assertContains(t, view, "ZERO")
 	assertContains(t, view, `D:\codings\Opensource\Zero`)
-	assertContains(t, view, "fake/m-test")
-	assertContains(t, view, "zero >")
-	assertContains(t, view, "/help")
-	assertContains(t, view, "/clear")
-	assertContains(t, view, "/exit")
-	assertContains(t, view, "Ctrl+C")
+	assertContains(t, view, "project: zero")
+	assertContains(t, view, "READY")
+	assertContains(t, view, "openai / gpt-4.1")
+	assertContains(t, view, "terminal coding agent")
+	assertContains(t, view, "/plan")
+	assertContains(t, view, "/debug")
+	assertContains(t, view, "/tools")
+	assertContains(t, view, "/model")
+	assertContains(t, view, "/provider")
+	assertContains(t, view, "zero > Ask Zero to inspect, edit, explain, or run a command...")
+	if strings.Contains(view, "Welcome to Zero") {
+		t.Fatalf("startup splash should not show welcome transcript clutter, got %q", view)
+	}
+	if strings.Contains(view, "/clear") || strings.Contains(view, "/exit") {
+		t.Fatalf("startup splash should keep footer minimal, got %q", view)
+	}
+}
+
+func TestStartupSplashCollapsesAfterFirstPrompt(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("inspect the repo")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected missing provider prompt not to start an agent run")
+	}
+	view := next.View()
+	assertContains(t, view, "▍ you")
+	assertContains(t, view, "inspect the repo")
+	assertContains(t, view, "◇ zero")
+	assertContains(t, view, "No provider configured.")
+	if strings.Contains(view, "terminal coding agent") {
+		t.Fatalf("startup splash should collapse after first prompt, got %q", view)
+	}
+	// Working view shows the professional status line and live header state
+	// instead of the verbose command-footer hints.
+	assertContains(t, view, "shift+tab to cycle")
+	assertContains(t, view, "● ready")
+}
+
+func TestStartupSplashStaysVisibleOnEmptySubmit(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("   ")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	assertContains(t, next.View(), "terminal coding agent")
 }
 
 func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {

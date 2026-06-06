@@ -20,8 +20,11 @@ const (
 )
 
 type transcriptRow struct {
-	kind rowKind
-	text string
+	kind   rowKind
+	text   string
+	tool   string       // tool name, for tool call/result rows
+	status tools.Status // result status, for tool result rows
+	detail string       // raw multi-line output (e.g. a diff to render as a card)
 }
 
 type transcriptActionKind int
