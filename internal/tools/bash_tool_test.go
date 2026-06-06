@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestMain(m *testing.M) {
@@ -174,6 +176,126 @@ func TestBashToolTimesOut(t *testing.T) {
 	}
 	if result.Meta["timeout_ms"] != "20" {
 		t.Fatalf("expected timeout_ms metadata 20, got %q", result.Meta["timeout_ms"])
+	}
+}
+
+func TestRegistryRunsBashThroughSandboxEngine(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry()
+	registry.Register(NewBashTool(root))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+	})
+
+	result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
+		"command": helperCommand("success"),
+	}, RunOptions{
+		PermissionGranted: true,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionUnsafe),
+		Autonomy:          string(sandbox.AutonomyMedium),
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "hello from bash") {
+		t.Fatalf("expected helper output, got %q", result.Output)
+	}
+	if result.Meta["sandbox_backend"] != string(sandbox.BackendPolicyOnly) || result.Meta["sandbox_wrapped"] != "false" {
+		t.Fatalf("sandbox metadata = %#v, want policy-only fallback", result.Meta)
+	}
+}
+
+func TestBashToolReportsDisabledPolicyOnlyRunner(t *testing.T) {
+	root := t.TempDir()
+	policy := sandbox.DefaultPolicy()
+	policy.AllowPolicyOnlyRunner = false
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        policy,
+		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+	})
+
+	result := NewBashTool(root).(interface {
+		RunWithSandbox(context.Context, map[string]any, *sandbox.Engine) Result
+	}).RunWithSandbox(context.Background(), map[string]any{
+		"command": helperCommand("success"),
+	}, engine)
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s", result.Status)
+	}
+	if !strings.Contains(result.Output, "policy-only sandbox runner is disabled") {
+		t.Fatalf("expected disabled fallback error, got %q", result.Output)
+	}
+	if result.Meta["exit_code"] != "-1" {
+		t.Fatalf("exit_code metadata = %q, want -1", result.Meta["exit_code"])
+	}
+}
+
+func TestBashToolBuildsWrappedSandboxExecCommand(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", root, err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend: sandbox.Backend{
+			Name:       sandbox.BackendSandboxExec,
+			Available:  true,
+			Executable: "/usr/bin/sandbox-exec",
+		},
+	})
+
+	command, plan, err := buildBashCommand(context.Background(), "pwd", root, engine)
+	if err != nil {
+		t.Fatalf("buildBashCommand: %v", err)
+	}
+	if command.Path != "/usr/bin/sandbox-exec" || !plan.Wrapped {
+		t.Fatalf("command path = %q plan = %#v, want wrapped sandbox-exec", command.Path, plan)
+	}
+	if len(command.Args) < 5 || command.Args[1] != "-p" || !strings.Contains(command.Args[2], "(deny network*)") {
+		t.Fatalf("sandbox-exec args = %#v, want inline profile", command.Args)
+	}
+	if command.Dir != resolvedRoot || plan.SandboxDir != resolvedRoot {
+		t.Fatalf("dirs = command %q plan %q, want root", command.Dir, plan.SandboxDir)
+	}
+}
+
+func TestBashToolRunsWithHostSandboxBackendWhenAvailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows sandbox adapter is owned by the Windows integration slice")
+	}
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available || backend.Name == sandbox.BackendPolicyOnly {
+		t.Skipf("host sandbox backend unavailable: %s", backend.Message)
+	}
+	root := t.TempDir()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       backend,
+	})
+
+	result := NewBashTool(root).(interface {
+		RunWithSandbox(context.Context, map[string]any, *sandbox.Engine) Result
+	}).RunWithSandbox(context.Background(), map[string]any{
+		"command": "printf sandbox-ok",
+	}, engine)
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected host sandbox command to run, got %s: %s; meta=%#v", result.Status, result.Output, result.Meta)
+	}
+	if !strings.Contains(result.Output, "sandbox-ok") {
+		t.Fatalf("expected sandbox command output, got %q", result.Output)
+	}
+	if result.Meta["sandbox_backend"] != string(backend.Name) || result.Meta["sandbox_wrapped"] != "true" {
+		t.Fatalf("sandbox metadata = %#v, want wrapped host backend %s", result.Meta, backend.Name)
 	}
 }
 

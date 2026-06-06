@@ -389,6 +389,10 @@ func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
 		Name:       "read_file",
 		Status:     tools.StatusOK,
 		Output:     strings.Repeat("x", streamJSONToolResultOutputLimit+100),
+		Meta: map[string]string{
+			"sandbox_backend": "bubblewrap",
+			"sandbox_wrapped": "true",
+		},
 	})
 	if writer.err != nil {
 		t.Fatalf("toolResult returned writer error: %v", writer.err)
@@ -403,6 +407,10 @@ func TestExecEventWriterTruncatesStreamJSONToolResults(t *testing.T) {
 	}
 	if events[0]["name"] != "read_file" {
 		t.Fatalf("expected tool_result name to be read_file, got %#v", events[0])
+	}
+	meta := events[0]["meta"].(map[string]any)
+	if meta["sandbox_backend"] != "bubblewrap" || meta["sandbox_wrapped"] != "true" {
+		t.Fatalf("expected sandbox metadata, got %#v", meta)
 	}
 	output := events[0]["output"].(string)
 	if len(output) >= streamJSONToolResultOutputLimit+100 || !strings.Contains(output, "[truncated]") {
