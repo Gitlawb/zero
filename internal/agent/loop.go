@@ -56,10 +56,17 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	messages := zeroruntime.SeedMessages(buildSystemPrompt(), prompt)
 
 	guards := newGuardState()
+	compactor := newCompactionState(options)
 
 	result := Result{Messages: copyMessages(messages)}
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
+
+		// PROACTIVE compaction: if the history is approaching the model's
+		// context window, summarize the oldest middle before building the
+		// request. A no-op when ContextWindow == 0 (compaction disabled).
+		messages = compactor.maybeCompact(ctx, provider, messages)
+
 		request := zeroruntime.CompletionRequest{
 			Messages: copyMessages(messages),
 			Tools:    toolDefinitions(registry, permissionMode, options),
@@ -67,14 +74,55 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 		stream, err := provider.StreamCompletion(ctx, request)
 		if err != nil {
-			result.Messages = copyMessages(messages)
-			return result, err
+			// REACTIVE compaction: a context-limit failure on the call itself
+			// can be recovered by compacting once and retrying the same turn.
+			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, err.Error()); retried {
+				messages = compacted
+				if retryErr != nil {
+					result.Messages = copyMessages(messages)
+					return result, retryErr
+				}
+				request = zeroruntime.CompletionRequest{
+					Messages: copyMessages(messages),
+					Tools:    toolDefinitions(registry, permissionMode, options),
+				}
+				stream, err = provider.StreamCompletion(ctx, request)
+			}
+			if err != nil {
+				result.Messages = copyMessages(messages)
+				return result, err
+			}
 		}
 
 		collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
 			OnText:  options.OnText,
 			OnUsage: options.OnUsage,
 		})
+		if collected.Error != "" {
+			// REACTIVE compaction: the streamed error may also be a context
+			// limit (some providers surface it mid-stream). Compact and retry
+			// the same turn once before giving up.
+			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, collected.Error); retried {
+				messages = compacted
+				if retryErr != nil {
+					result.Messages = copyMessages(messages)
+					return result, retryErr
+				}
+				retryRequest := zeroruntime.CompletionRequest{
+					Messages: copyMessages(messages),
+					Tools:    toolDefinitions(registry, permissionMode, options),
+				}
+				retryStream, retryStreamErr := provider.StreamCompletion(ctx, retryRequest)
+				if retryStreamErr != nil {
+					result.Messages = copyMessages(messages)
+					return result, retryStreamErr
+				}
+				collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, zeroruntime.CollectOptions{
+					OnText:  options.OnText,
+					OnUsage: options.OnUsage,
+				})
+			}
+		}
 		if collected.Error != "" {
 			result.Messages = copyMessages(messages)
 			return result, errors.New(collected.Error)

@@ -104,9 +104,17 @@ type AskUserResponse struct {
 }
 
 type Options struct {
-	MaxTurns            int
-	Registry            *tools.Registry
-	PermissionMode      PermissionMode
+	MaxTurns int
+	// ContextWindow is the model's maximum input token budget. When > 0 the
+	// agent loop compacts long conversations once the estimated size crosses a
+	// fraction of this window (see compactionThreshold). 0 DISABLES compaction
+	// entirely, which keeps every existing caller and test behaving identically.
+	ContextWindow int
+	// CompactionPreserveLast is how many trailing messages compaction keeps
+	// verbatim. <= 0 falls back to defaultCompactionPreserveLast.
+	CompactionPreserveLast int
+	Registry               *tools.Registry
+	PermissionMode         PermissionMode
 	Autonomy            string
 	Sandbox             *sandbox.Engine
 	EnabledTools        []string

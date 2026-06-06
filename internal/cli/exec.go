@@ -225,6 +225,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// input when a controlling client is attached.)
 	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
 		MaxTurns:       resolved.MaxTurns,
+		ContextWindow:  modelContextWindow(resolved.Provider.Model),
 		Registry:       registry,
 		PermissionMode: permissionMode,
 		Autonomy:       options.autonomy,
@@ -490,6 +491,26 @@ func resolveSelectedModel(input string) (string, string) {
 		return input, ""
 	}
 	return entry.ID, notice
+}
+
+// modelContextWindow returns the resolved model's context window (max input
+// tokens) from the model registry, used to enable agent-loop compaction. An
+// unknown model (e.g. a custom openai-compatible name) returns 0, which leaves
+// compaction DISABLED — a safe default that never compacts unexpectedly.
+func modelContextWindow(modelID string) int {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return 0
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return 0
+	}
+	entry, ok := registry.Resolve(trimmed)
+	if !ok {
+		return 0
+	}
+	return entry.ContextLimits.ContextWindow
 }
 
 // reasoningEffortNotice resolves the requested --reasoning-effort against the

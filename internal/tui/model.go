@@ -694,6 +694,9 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		options := m.agentOptions
 		options.Registry = m.registry
 		options.PermissionMode = m.permissionMode
+		// Enable agent-loop compaction sized to the active model's context
+		// window. An unknown/custom model resolves to 0, leaving compaction off.
+		options.ContextWindow = modelContextWindow(m.modelName)
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
