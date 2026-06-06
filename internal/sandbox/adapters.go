@@ -66,6 +66,8 @@ func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPla
 	}
 	if backend.Name == BackendPolicyOnly {
 		restrictions = append(restrictions, "platform sandbox unavailable; policy engine still evaluates tool requests")
+	} else if backend.Available {
+		restrictions = append(restrictions, "shell commands are wrapped through "+string(backend.Name)+" when launched by the sandbox engine")
 	}
 	return BackendPlan{
 		Backend:       backend,
