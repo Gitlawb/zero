@@ -183,9 +183,9 @@ func TestStartupSplashStaysVisibleOnEmptySubmit(t *testing.T) {
 
 	view := next.View()
 	assertContains(t, view, "terminal coding agent")
-	assertNotContains(t, view, "\u258d you")
-	assertNotContains(t, view, "\u25c7 zero")
-	assertNotContains(t, view, "\u25cf ready")
+	assertNotContains(t, view, "▍ you")
+	assertNotContains(t, view, "◇ zero")
+	assertNotContains(t, view, "● ready")
 }
 
 func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
@@ -720,6 +720,97 @@ func TestAgentResponsePreservesToolResultMetadata(t *testing.T) {
 		t.Fatalf("tool result metadata was not preserved: %#v", row)
 	}
 	assertContains(t, renderRow(row, 80), "@@ -1 +1 @@")
+}
+
+func TestAgentEventRenderingMappingCoversRuntimeContract(t *testing.T) {
+	surfaces := map[zeroruntime.AgentEventType]string{
+		zeroruntime.AgentEventText:       "assistant transcript row",
+		zeroruntime.AgentEventToolCall:   "tool call transcript row",
+		zeroruntime.AgentEventToolResult: "tool result transcript row",
+		zeroruntime.AgentEventThinking:   "deferred: no transcript row until runtime emits thinking deltas",
+		zeroruntime.AgentEventUsage:      "usage tracker footer segment",
+		zeroruntime.AgentEventPlanUpdate: "system transcript row from /plan",
+		zeroruntime.AgentEventError:      "error transcript row",
+		zeroruntime.AgentEventTurnEnd:    "control boundary, no transcript row",
+	}
+	for _, eventType := range []zeroruntime.AgentEventType{
+		zeroruntime.AgentEventText,
+		zeroruntime.AgentEventToolCall,
+		zeroruntime.AgentEventToolResult,
+		zeroruntime.AgentEventThinking,
+		zeroruntime.AgentEventUsage,
+		zeroruntime.AgentEventPlanUpdate,
+		zeroruntime.AgentEventError,
+		zeroruntime.AgentEventTurnEnd,
+	} {
+		if strings.TrimSpace(surfaces[eventType]) == "" {
+			t.Fatalf("missing TUI rendering surface note for %s", eventType)
+		}
+	}
+
+	renderedRows := map[zeroruntime.AgentEventType]struct {
+		row   transcriptRow
+		wants []string
+	}{
+		zeroruntime.AgentEventText: {
+			row:   transcriptRow{kind: rowAssistant, text: "assistant text"},
+			wants: []string{"assistant text"},
+		},
+		zeroruntime.AgentEventToolCall: {
+			row: transcriptRow{
+				kind:   rowToolCall,
+				text:   "tool call: read_file",
+				tool:   "read_file",
+				detail: "README.md",
+			},
+			wants: []string{"read_file", "README.md"},
+		},
+		zeroruntime.AgentEventToolResult: {
+			row: transcriptRow{
+				kind:   rowToolResult,
+				text:   "tool result: apply_patch error",
+				tool:   "apply_patch",
+				status: tools.StatusError,
+				detail: strings.Join([]string{
+					"--- a/file.txt",
+					"+++ b/file.txt",
+					"@@ -1 +1 @@",
+					"-old",
+					"+new",
+				}, "\n"),
+			},
+			wants: []string{"apply_patch", "@@ -1 +1 @@"},
+		},
+		zeroruntime.AgentEventPlanUpdate: {
+			row:   transcriptRow{kind: rowSystem, text: "Plan updated\n- inspect: completed"},
+			wants: []string{"Plan updated", "inspect"},
+		},
+		zeroruntime.AgentEventError: {
+			row:   transcriptRow{kind: rowError, text: "provider failed"},
+			wants: []string{"provider failed"},
+		},
+	}
+	for eventType, tc := range renderedRows {
+		t.Run(string(eventType), func(t *testing.T) {
+			rendered := renderRow(tc.row, 96)
+			for _, want := range tc.wants {
+				assertContains(t, rendered, want)
+			}
+		})
+	}
+
+	m := newModel(context.Background(), Options{
+		ModelName:      "gpt-4.1",
+		PermissionMode: agent.PermissionModeAsk,
+	})
+	m.width = 96
+	m, usageRows := m.recordUsageEvent("gpt-4.1", zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
+	if len(usageRows) != 0 {
+		t.Fatalf("valid usage should update footer without transcript rows, got %#v", usageRows)
+	}
+	assertContains(t, m.usageSegment(), "100↑")
+	assertContains(t, m.usageSegment(), "20↓")
+	assertContains(t, m.statusLine(96), "approve each action")
 }
 
 func TestToolResultRowDefaultsEmptyStatusToOK(t *testing.T) {
