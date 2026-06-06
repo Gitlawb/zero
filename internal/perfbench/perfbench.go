@@ -381,7 +381,7 @@ func resolveZeroVersionCommand(rootDir string) ([]string, error) {
 	binaryPath := filepath.Join(rootDir, binaryName)
 	if _, err := os.Stat(binaryPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("No %s binary found. Run `bun run build` before running the performance benchmark.", binaryName)
+			return nil, fmt.Errorf("no %s binary found; run `bun run build` before running the performance benchmark", binaryName)
 		}
 		return nil, err
 	}

@@ -10,8 +10,8 @@ The M2 performance harness tracks three release-facing signals:
 
 Cold start uses the built Go binary at `./zero` or `./zero.exe`. Run `bun run build` before the benchmark so it measures the production runtime rather than the old TypeScript entrypoint.
 On Linux the harness memory metric reads RSS from `/proc/self/statm`; on other
-hosts it falls back to Go runtime memory when process RSS is not available from
-the standard library.
+hosts `readHarnessMemoryMb()` falls back to `runtime.ReadMemStats()` and reports
+`MemStats.Sys` in MB when process RSS is not available from the standard library.
 
 This smoke benchmark does not measure provider TTFT or Go agent memory. A
 provider-aware Go benchmark should be added separately when the runtime exposes a

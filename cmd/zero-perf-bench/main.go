@@ -190,7 +190,7 @@ func parseArgs(args []string, getenv func(string) string) (cliOptions, error) {
 			}
 			options.Help = true
 		default:
-			return options, fmt.Errorf("Unknown option: %s", arg)
+			return options, fmt.Errorf("unknown option: %s", arg)
 		}
 	}
 	return options, nil
