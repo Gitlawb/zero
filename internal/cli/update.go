@@ -111,6 +111,9 @@ func parseUpdateTimeout(value string) (time.Duration, error) {
 	if err != nil {
 		return 0, execUsageError{fmt.Sprintf("invalid update timeout %q: use a duration like 5s or 750ms", value)}
 	}
+	if timeout <= 0 {
+		return 0, execUsageError{fmt.Sprintf("invalid update timeout %q: timeout must be a positive duration", value)}
+	}
 	return timeout, nil
 }
 

@@ -375,24 +375,32 @@ func TestRunUpdateRequiresCheckFlag(t *testing.T) {
 }
 
 func TestRunUpdateRejectsInvalidTimeout(t *testing.T) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	for _, args := range [][]string{
+		{"update", "--check", "--timeout", "fast"},
+		{"update", "--check", "--timeout", "0s"},
+		{"update", "--check", "--timeout=-1s"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
 
-	exitCode := runWithDeps([]string{"update", "--check", "--timeout", "fast"}, &stdout, &stderr, appDeps{
-		checkUpdate: func(context.Context, update.Options) (update.Result, error) {
-			t.Fatal("checkUpdate should not run for invalid timeout")
-			return update.Result{}, nil
-		},
-	})
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				checkUpdate: func(context.Context, update.Options) (update.Result, error) {
+					t.Fatal("checkUpdate should not run for invalid timeout")
+					return update.Result{}, nil
+				},
+			})
 
-	if exitCode != exitUsage {
-		t.Fatalf("expected usage exit code, got %d", exitCode)
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("expected empty stdout, got %q", stdout.String())
-	}
-	if got := stderr.String(); !strings.Contains(got, "invalid update timeout") {
-		t.Fatalf("expected timeout usage error, got %q", got)
+			if exitCode != exitUsage {
+				t.Fatalf("expected usage exit code, got %d", exitCode)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, "invalid update timeout") {
+				t.Fatalf("expected timeout usage error, got %q", got)
+			}
+		})
 	}
 }
 
