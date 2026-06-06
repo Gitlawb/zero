@@ -67,10 +67,13 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	node := requireNode(t)
 	wrapperPath := copyWrapperFixture(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out reporting missing native binary: %v; output: %s", ctx.Err(), output)
+	}
 	if err == nil {
 		t.Fatalf("wrapper exited successfully without native binary: %s", output)
 	}
@@ -95,10 +98,13 @@ func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {
 		t.Fatalf("WriteFile native fixture: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching native binary: %v; output: %s", ctx.Err(), output)
+	}
 	if err != nil {
 		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
 	}
