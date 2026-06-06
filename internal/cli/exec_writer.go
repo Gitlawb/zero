@@ -163,22 +163,24 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 	}
 	if writer.format == execOutputStreamJSON {
 		risk := event.Risk
+		permissionGranted := event.PermissionGranted
 		writer.writeStreamJSON(streamjson.Event{
-			Type:           streamjson.EventPermission,
-			RunID:          writer.runID,
-			SessionID:      writer.sessionID,
-			ID:             event.ToolCallID,
-			Name:           event.ToolName,
-			Action:         string(event.Action),
-			Permission:     event.Permission,
-			PermissionMode: string(event.PermissionMode),
-			Autonomy:       event.Autonomy,
-			SideEffect:     event.SideEffect,
-			Reason:         event.Reason,
-			Risk:           &risk,
-			Violation:      event.Violation,
-			GrantMatched:   event.GrantMatched,
-			Grant:          event.Grant,
+			Type:              streamjson.EventPermission,
+			RunID:             writer.runID,
+			SessionID:         writer.sessionID,
+			ID:                event.ToolCallID,
+			Name:              event.ToolName,
+			Action:            string(event.Action),
+			Permission:        event.Permission,
+			PermissionGranted: &permissionGranted,
+			PermissionMode:    string(event.PermissionMode),
+			Autonomy:          event.Autonomy,
+			SideEffect:        event.SideEffect,
+			Reason:            event.Reason,
+			Risk:              &risk,
+			Violation:         event.Violation,
+			GrantMatched:      event.GrantMatched,
+			Grant:             event.Grant,
 		})
 		return
 	}

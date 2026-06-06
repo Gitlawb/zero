@@ -90,7 +90,7 @@ func EventsFromSummary(summary ChangeSummary) []Event {
 
 func redactFiles(files []FileChange) []FileChange {
 	if len(files) == 0 {
-		return nil
+		return []FileChange{}
 	}
 	next := append([]FileChange{}, files...)
 	for index := range next {

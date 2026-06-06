@@ -51,6 +51,33 @@ func TestConfigSnapshotRedactsProviderURLsAndResolvesAPIModels(t *testing.T) {
 	}
 }
 
+func TestConfigSnapshotRedactsProviderWarnings(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	resolved := config.ResolvedConfig{
+		Providers: []config.ProviderProfile{
+			{
+				Name:    "provider-" + secret,
+				BaseURL: "https://user:" + secret + "@[invalid",
+				APIKey:  secret,
+			},
+		},
+	}
+
+	snapshot := ConfigSnapshotFromResolved(resolved)
+
+	if len(snapshot.Providers) != 1 {
+		t.Fatalf("expected one provider, got %#v", snapshot.Providers)
+	}
+	provider := snapshot.Providers[0]
+	if provider.Status != "warning" || provider.Message == "" {
+		t.Fatalf("expected warning provider snapshot, got %#v", provider)
+	}
+	combined := provider.BaseURL + provider.Message
+	if strings.Contains(combined, secret) || strings.Contains(combined, "user:") || strings.Contains(combined, "[invalid") {
+		t.Fatalf("provider warning leaked raw secret or URL: %#v", provider)
+	}
+}
+
 func TestModelSnapshotsFilterSortAndExposeCapabilities(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {

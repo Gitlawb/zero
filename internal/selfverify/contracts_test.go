@@ -68,3 +68,22 @@ func TestSnapshotFromReportPreservesAttemptsAndRedactsRemediation(t *testing.T) 
 		t.Fatalf("attempt event did not capture first attempt: %#v", snapshot.Events[1])
 	}
 }
+
+func TestEventsFromReportMarksAttemptErrorWhenSummaryHasErrors(t *testing.T) {
+	report := Report{
+		Root: "/repo",
+		Attempts: []Attempt{{
+			Number: 1,
+			Report: verify.Report{
+				OK:      false,
+				Summary: verify.Summary{Total: 1, Errors: 1},
+			},
+		}},
+	}
+
+	events := EventsFromReport(report)
+
+	if len(events) < 2 || events[1].Type != EventAttemptFinished || events[1].Status != verify.StatusError {
+		t.Fatalf("expected attempt status error, got %#v", events)
+	}
+}

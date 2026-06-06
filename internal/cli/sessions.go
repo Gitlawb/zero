@@ -111,11 +111,19 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 				if err != nil {
 					return command, remaining, options, false, err
 				}
-				options.eventID = value
+				eventID, err := parseNonEmptySessionsFlag("--event", value)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.eventID = eventID
 				index = next
 				continue
 			case strings.HasPrefix(arg, "--event="):
-				options.eventID = strings.TrimSpace(strings.TrimPrefix(arg, "--event="))
+				eventID, err := parseNonEmptySessionsFlag("--event", strings.TrimPrefix(arg, "--event="))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.eventID = eventID
 				continue
 			case arg == "--preserve-last":
 				value, next, err := nextFlagValue(args, index, arg)
@@ -171,6 +179,14 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 		}
 	}
 	return command, remaining, options, false, nil
+}
+
+func parseNonEmptySessionsFlag(flag string, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", execUsageError{flag + " requires a value"}
+	}
+	return trimmed, nil
 }
 
 func isSessionsCommand(command string) bool {
@@ -342,10 +358,6 @@ func formatCompactionPlan(plan sessions.CompactionPlan) string {
 	return strings.Join(lines, "\n")
 }
 
-func formatSessionsList(items []sessions.Metadata) string {
-	return formatSessionSnapshotsList(zerocommands.SessionSnapshots(items))
-}
-
 func formatSessionSnapshotsList(items []zerocommands.SessionSnapshot) string {
 	if len(items) == 0 {
 		return "No Zero sessions found."
@@ -357,18 +369,10 @@ func formatSessionSnapshotsList(items []zerocommands.SessionSnapshot) string {
 	return strings.Join(lines, "\n")
 }
 
-func formatSessionTree(node sessions.TreeNode) string {
-	return formatSessionSnapshotTree(zerocommands.SessionTreeSnapshotFromNode(node))
-}
-
 func formatSessionSnapshotTree(node zerocommands.SessionTreeSnapshot) string {
 	lines := []string{"Zero session tree:"}
 	appendSessionSnapshotTree(&lines, node, "")
 	return strings.Join(lines, "\n") + "\n"
-}
-
-func appendSessionTree(lines *[]string, node sessions.TreeNode, prefix string) {
-	appendSessionSnapshotTree(lines, zerocommands.SessionTreeSnapshotFromNode(node), prefix)
 }
 
 func appendSessionSnapshotTree(lines *[]string, node zerocommands.SessionTreeSnapshot, prefix string) {
@@ -376,10 +380,6 @@ func appendSessionSnapshotTree(lines *[]string, node zerocommands.SessionTreeSna
 	for _, child := range node.Children {
 		appendSessionSnapshotTree(lines, child, prefix+"  ")
 	}
-}
-
-func formatSessionLine(session sessions.Metadata) string {
-	return formatSessionSnapshotLine(zerocommands.SessionSnapshotFromMetadata(session))
 }
 
 func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {

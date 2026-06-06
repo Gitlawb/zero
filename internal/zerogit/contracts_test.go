@@ -44,8 +44,12 @@ func TestSnapshotFromSummaryRedactsDiffAndBuildsEvents(t *testing.T) {
 }
 
 func TestEventsFromSummaryHandlesCleanRepository(t *testing.T) {
-	events := EventsFromSummary(ChangeSummary{Root: "/repo", Branch: "main", Clean: true})
+	snapshot := SnapshotFromSummary(ChangeSummary{Root: "/repo", Branch: "main", Clean: true})
+	events := snapshot.Events
 
+	if snapshot.Files == nil {
+		t.Fatalf("expected empty files slice, got nil: %#v", snapshot)
+	}
 	if len(events) != 1 {
 		t.Fatalf("expected one clean summary event, got %#v", events)
 	}

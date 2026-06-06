@@ -408,6 +408,56 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if payload["toolCallId"] != "call_write" || payload["name"] != "write_file" || payload["action"] != "prompt" {
 		t.Fatalf("unexpected recorded permission payload: %#v", payload)
 	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"exec", "--skip-permissions-unsafe", "--output-format", "stream-json", "write approved"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return toolCallingExecProvider{
+				toolCallID: "call_write_approved",
+				toolName:   "write_file",
+				arguments:  `{"path":"approved.txt","content":"hello"}`,
+				answer:     "write approved",
+			}, nil
+		},
+		newSandboxStore: func() (*sandbox.GrantStore, error) {
+			return sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("approved exec exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	approvedEvents := decodeJSONLines(t, stdout.String())
+	approvedPermissionEvent := findJSONEvent(t, approvedEvents, "permission")
+	if approvedPermissionEvent["id"] != "call_write_approved" || approvedPermissionEvent["action"] != "allow" {
+		t.Fatalf("unexpected approved permission event: %#v", approvedPermissionEvent)
+	}
+	if approvedPermissionEvent["permissionGranted"] != true {
+		t.Fatalf("approved permission event did not preserve permissionGranted: %#v", approvedPermissionEvent)
+	}
+	approvedSessionID, ok := approvedEvents[0]["sessionId"].(string)
+	if !ok || approvedSessionID == "" {
+		t.Fatalf("expected approved run_start sessionId, got %#v", approvedEvents[0])
+	}
+	approvedRecorded, err := store.ReadEvents(approvedSessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents approved session returned error: %v", err)
+	}
+	approvedPermissionRecord := findSessionEvent(t, approvedRecorded, sessions.EventPermission)
+	payload = map[string]any{}
+	if err := json.Unmarshal(approvedPermissionRecord.Payload, &payload); err != nil {
+		t.Fatalf("decode approved permission payload: %v", err)
+	}
+	if payload["permissionGranted"] != true {
+		t.Fatalf("approved recorded permission payload did not preserve permissionGranted: %#v", payload)
+	}
 }
 
 func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {

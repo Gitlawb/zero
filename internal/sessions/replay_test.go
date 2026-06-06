@@ -79,6 +79,25 @@ func TestStorePlanRewindRejectsMissingTargets(t *testing.T) {
 	}
 }
 
+func TestStorePlanRewindRejectsConflictingTargets(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "conflicttarget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"one", "two"} {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = store.PlanRewind(session.SessionID, RewindOptions{TargetEventID: "conflicttarget:1", TargetSequence: 2})
+
+	if err == nil || !strings.Contains(err.Error(), "conflicting rewind target selectors") {
+		t.Fatalf("expected conflicting target error, got %v", err)
+	}
+}
+
 func TestStorePlansCompactionWindow(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	session, err := store.Create(CreateInput{SessionID: "compact"})
@@ -107,6 +126,41 @@ func TestStorePlansCompactionWindow(t *testing.T) {
 	}
 	if plan.Truncated {
 		t.Fatalf("did not expect summary prompt truncation: %#v", plan)
+	}
+}
+
+func TestStoreCompactionShapesSensitivePermissionEvents(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "compactsafe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventPermission, Payload: map[string]any{
+		"action":         "allow",
+		"name":           "write_file",
+		"permission":     "prompt",
+		"reason":         "contains " + secret,
+		"grant":          map[string]string{"reason": secret},
+		"permissionMode": "unsafe",
+		"risk":           map[string]any{"level": "high", "details": secret},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "preserved"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 1, MaxPromptChars: 500})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plan.SummaryPrompt, secret) || strings.Contains(plan.SummaryPrompt, "contains") {
+		t.Fatalf("compaction prompt leaked sensitive permission payload: %q", plan.SummaryPrompt)
+	}
+	if !strings.Contains(plan.SummaryPrompt, "write_file") || !strings.Contains(plan.SummaryPrompt, "allow") || !strings.Contains(plan.SummaryPrompt, "high") {
+		t.Fatalf("compaction prompt lost safe permission fields: %q", plan.SummaryPrompt)
 	}
 }
 

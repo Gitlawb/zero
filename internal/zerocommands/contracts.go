@@ -140,7 +140,7 @@ func ProviderSnapshotFromProfile(profile config.ProviderProfile, active bool) Pr
 	metadata, err := providers.ResolveRuntimeMetadata(profile, providers.Options{})
 	if err != nil {
 		snapshot.Status = "warning"
-		snapshot.Message = err.Error()
+		snapshot.Message = "provider metadata unavailable"
 		return snapshot
 	}
 	snapshot.ProviderKind = string(metadata.ProviderKind)
@@ -258,6 +258,9 @@ func redactProviderBaseURL(baseURL string, apiKey string) string {
 func stripURLCredentials(value string) string {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.User == nil {
+		if err != nil {
+			return ""
+		}
 		return value
 	}
 	parsed.User = nil

@@ -92,19 +92,31 @@ func (store *Store) PlanRewind(sessionID string, options RewindOptions) (RewindP
 }
 
 func findRewindTarget(events []Event, options RewindOptions) (int, error) {
-	if strings.TrimSpace(options.TargetEventID) == "" && options.TargetSequence <= 0 {
+	targetEventID := strings.TrimSpace(options.TargetEventID)
+	if targetEventID == "" && options.TargetSequence <= 0 {
 		return -1, fmt.Errorf("rewind target event id or sequence is required")
 	}
+	if targetEventID != "" && options.TargetSequence > 0 {
+		for index, event := range events {
+			if event.ID == targetEventID {
+				if event.Sequence != options.TargetSequence {
+					return -1, fmt.Errorf("conflicting rewind target selectors: event %s has sequence %d, not %d", targetEventID, event.Sequence, options.TargetSequence)
+				}
+				return index, nil
+			}
+		}
+		return -1, fmt.Errorf("rewind target event %s was not found", targetEventID)
+	}
 	for index, event := range events {
-		if strings.TrimSpace(options.TargetEventID) != "" && event.ID == strings.TrimSpace(options.TargetEventID) {
+		if targetEventID != "" && event.ID == targetEventID {
 			return index, nil
 		}
 		if options.TargetSequence > 0 && event.Sequence == options.TargetSequence {
 			return index, nil
 		}
 	}
-	if strings.TrimSpace(options.TargetEventID) != "" {
-		return -1, fmt.Errorf("rewind target event %s was not found", options.TargetEventID)
+	if targetEventID != "" {
+		return -1, fmt.Errorf("rewind target event %s was not found", targetEventID)
 	}
 	return -1, fmt.Errorf("rewind target sequence %d was not found", options.TargetSequence)
 }
@@ -154,7 +166,7 @@ func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
 		"Preserve user intent, tool outcomes, important files, blockers, and follow-up state.",
 	}
 	for _, event := range events {
-		lines = append(lines, fmt.Sprintf("%d %s %s", event.Sequence, event.Type, payloadPreview(event.Payload)))
+		lines = append(lines, fmt.Sprintf("%d %s %s", event.Sequence, event.Type, shapedPayloadPreview(event)))
 	}
 	prompt := strings.Join(lines, "\n")
 	if maxChars > 0 && len(prompt) > maxChars {
@@ -164,6 +176,55 @@ func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
 		return prompt[:maxChars-len("\n[truncated]")] + "\n[truncated]", true
 	}
 	return prompt, false
+}
+
+func shapedPayloadPreview(event Event) string {
+	switch event.Type {
+	case EventPermission:
+		return permissionPayloadPreview(event.Payload)
+	case EventToolCall:
+		return toolPayloadPreview(event.Payload, []string{"id", "name", "toolName"})
+	case EventToolResult:
+		return toolPayloadPreview(event.Payload, []string{"id", "name", "toolName", "status"})
+	default:
+		return payloadPreview(event.Payload)
+	}
+}
+
+func permissionPayloadPreview(payload json.RawMessage) string {
+	var value map[string]any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return payloadPreview(payload)
+	}
+	shaped := map[string]any{}
+	for _, key := range []string{"action", "name", "toolName", "permission", "permissionMode", "sideEffect", "grantMatched"} {
+		if field, ok := value[key]; ok {
+			shaped[key] = field
+		}
+	}
+	if risk, ok := value["risk"].(map[string]any); ok {
+		if level, ok := risk["level"]; ok {
+			shaped["riskLevel"] = level
+		}
+	}
+	return marshalPreview(shaped)
+}
+
+func toolPayloadPreview(payload json.RawMessage, allowedKeys []string) string {
+	var value map[string]any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return payloadPreview(payload)
+	}
+	shaped := map[string]any{}
+	for _, key := range allowedKeys {
+		if field, ok := value[key]; ok {
+			shaped[key] = field
+		}
+	}
+	if len(shaped) == 0 {
+		shaped["payload"] = "redacted"
+	}
+	return marshalPreview(shaped)
 }
 
 func payloadPreview(payload json.RawMessage) string {
@@ -176,6 +237,14 @@ func payloadPreview(payload json.RawMessage) string {
 		return value[:240] + "..."
 	}
 	return value
+}
+
+func marshalPreview(value map[string]any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return payloadPreview(data)
 }
 
 func eventRefs(events []Event) []EventRef {

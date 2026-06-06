@@ -181,7 +181,7 @@ func redactTestSummary(summary *testrunner.Summary) *testrunner.Summary {
 
 func redactCommand(command []string) []string {
 	if len(command) == 0 {
-		return nil
+		return []string{}
 	}
 	next := append([]string{}, command...)
 	for index := range next {

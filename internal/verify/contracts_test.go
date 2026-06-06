@@ -69,6 +69,9 @@ func TestSnapshotFromReportRedactsLogsAndBuildsEvents(t *testing.T) {
 	if snapshot.Events[1].CheckID != "go.test" || snapshot.Events[1].Status != StatusFail {
 		t.Fatalf("check event did not capture result: %#v", snapshot.Events[1])
 	}
+	if snapshot.Events[1].Kind != testrunner.KindTest || snapshot.Events[1].Framework != testrunner.FrameworkGo {
+		t.Fatalf("check event did not preserve kind/framework: %#v", snapshot.Events[1])
+	}
 }
 
 func TestEventsFromReportHandlesEmptyReport(t *testing.T) {
@@ -79,5 +82,20 @@ func TestEventsFromReportHandlesEmptyReport(t *testing.T) {
 	}
 	if events[0].Type != EventVerifyStarted || events[1].Type != EventVerifyFinished {
 		t.Fatalf("unexpected empty report events: %#v", events)
+	}
+}
+
+func TestSnapshotFromReportUsesEmptyCommandSlice(t *testing.T) {
+	snapshot := SnapshotFromReport(Report{
+		Root:    "/workspace",
+		OK:      true,
+		Results: []Result{{ID: "manual", Status: StatusPass}},
+	})
+
+	if snapshot.Results[0].Command == nil {
+		t.Fatalf("expected empty command slice, got nil: %#v", snapshot.Results[0])
+	}
+	if snapshot.Events[1].Command == nil {
+		t.Fatalf("expected empty event command slice, got nil: %#v", snapshot.Events[1])
 	}
 }

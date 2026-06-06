@@ -155,6 +155,7 @@ func TestRunSessionsValidatesArgs(t *testing.T) {
 		{name: "list extra arg", args: []string{"sessions", "list", "extra"}, wantStderr: "sessions list does not accept positional arguments"},
 		{name: "rewind flag on list", args: []string{"sessions", "list", "--sequence", "2"}, wantStderr: "only valid for sessions rewind-plan"},
 		{name: "compaction flag on tree", args: []string{"sessions", "tree", "root", "--preserve-last", "2"}, wantStderr: "only valid for sessions compact-plan"},
+		{name: "empty event flag", args: []string{"sessions", "list", "--event="}, wantStderr: "--event requires a value"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stdout.Reset()

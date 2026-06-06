@@ -150,7 +150,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 
 func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options, decision *sandbox.Decision) (PermissionEvent, bool) {
 	safety := tool.Safety()
-	action := PermissionActionAllow
+	var action PermissionAction
 	reason := safety.Reason
 	risk := sandbox.Classify(sandbox.Request{
 		WorkspaceRoot:     "",
