@@ -1,0 +1,265 @@
+package zerocommands
+
+import (
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/sessions"
+)
+
+const RuntimeGo = "go"
+
+type ErrorKind string
+
+const (
+	ErrorKindUsage    ErrorKind = "usage"
+	ErrorKindProvider ErrorKind = "provider"
+	ErrorKindRuntime  ErrorKind = "runtime"
+)
+
+type CommandError struct {
+	Kind        ErrorKind `json:"kind"`
+	Message     string    `json:"message"`
+	Recoverable bool      `json:"recoverable,omitempty"`
+}
+
+func (err CommandError) Error() string {
+	return err.Message
+}
+
+type ConfigSnapshot struct {
+	Runtime        string             `json:"runtime"`
+	ActiveProvider string             `json:"activeProvider,omitempty"`
+	MaxTurns       int                `json:"maxTurns"`
+	Providers      []ProviderSnapshot `json:"providers"`
+}
+
+type ProviderSnapshot struct {
+	Name         string `json:"name"`
+	ProviderKind string `json:"providerKind,omitempty"`
+	BaseURL      string `json:"baseUrl,omitempty"`
+	Model        string `json:"model,omitempty"`
+	APIModel     string `json:"apiModel,omitempty"`
+	Active       bool   `json:"active"`
+	APIKeySet    bool   `json:"apiKeySet"`
+	Status       string `json:"status,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+type ModelSnapshotOptions struct {
+	Provider          modelregistry.ProviderKind
+	IncludeDeprecated bool
+}
+
+type ModelSnapshot struct {
+	ID               string   `json:"id"`
+	DisplayName      string   `json:"displayName"`
+	Provider         string   `json:"provider"`
+	APIModel         string   `json:"apiModel"`
+	Status           string   `json:"status"`
+	ContextWindow    int      `json:"contextWindow"`
+	MaxOutputTokens  int      `json:"maxOutputTokens"`
+	Capabilities     []string `json:"capabilities"`
+	ReasoningEfforts []string `json:"reasoningEfforts,omitempty"`
+	Description      string   `json:"description,omitempty"`
+}
+
+type SessionSnapshot struct {
+	SessionID           string `json:"sessionId"`
+	Kind                string `json:"kind,omitempty"`
+	Title               string `json:"title,omitempty"`
+	Cwd                 string `json:"cwd,omitempty"`
+	ModelID             string `json:"modelId,omitempty"`
+	Provider            string `json:"provider,omitempty"`
+	ParentSessionID     string `json:"parentSessionId,omitempty"`
+	RootSessionID       string `json:"rootSessionId,omitempty"`
+	AgentName           string `json:"agentName,omitempty"`
+	TaskID              string `json:"taskId,omitempty"`
+	ForkedFromEventID   string `json:"forkedFromEventId,omitempty"`
+	ForkedFromSequence  int    `json:"forkedFromSequence,omitempty"`
+	SpawnedFromEventID  string `json:"spawnedFromEventId,omitempty"`
+	SpawnedFromSequence int    `json:"spawnedFromSequence,omitempty"`
+	CreatedAt           string `json:"createdAt,omitempty"`
+	UpdatedAt           string `json:"updatedAt,omitempty"`
+	EventCount          int    `json:"eventCount"`
+	LastEventType       string `json:"lastEventType,omitempty"`
+}
+
+type SessionTreeSnapshot struct {
+	Session  SessionSnapshot       `json:"session"`
+	Children []SessionTreeSnapshot `json:"children,omitempty"`
+}
+
+func UsageError(message string) CommandError {
+	return CommandError{Kind: ErrorKindUsage, Message: strings.TrimSpace(message)}
+}
+
+func RuntimeError(message string) CommandError {
+	return CommandError{Kind: ErrorKindRuntime, Message: strings.TrimSpace(message)}
+}
+
+func ProviderError(message string) CommandError {
+	return CommandError{Kind: ErrorKindProvider, Message: strings.TrimSpace(message), Recoverable: true}
+}
+
+func ConfigSnapshotFromResolved(resolved config.ResolvedConfig) ConfigSnapshot {
+	snapshot := ConfigSnapshot{
+		Runtime:        RuntimeGo,
+		ActiveProvider: resolved.ActiveProvider,
+		MaxTurns:       resolved.MaxTurns,
+		Providers:      make([]ProviderSnapshot, 0, len(resolved.Providers)),
+	}
+	for _, profile := range resolved.Providers {
+		snapshot.Providers = append(snapshot.Providers, ProviderSnapshotFromProfile(profile, profile.Name == resolved.ActiveProvider))
+	}
+	sort.SliceStable(snapshot.Providers, func(i int, j int) bool {
+		if snapshot.Providers[i].Active != snapshot.Providers[j].Active {
+			return snapshot.Providers[i].Active
+		}
+		return snapshot.Providers[i].Name < snapshot.Providers[j].Name
+	})
+	return snapshot
+}
+
+func ProviderSnapshotFromProfile(profile config.ProviderProfile, active bool) ProviderSnapshot {
+	snapshot := ProviderSnapshot{
+		Name:         profile.Name,
+		ProviderKind: string(profile.ProviderKind),
+		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey),
+		Model:        profile.Model,
+		Active:       active,
+		APIKeySet:    strings.TrimSpace(profile.APIKey) != "",
+		Status:       "ok",
+	}
+	metadata, err := providers.ResolveRuntimeMetadata(profile, providers.Options{})
+	if err != nil {
+		snapshot.Status = "warning"
+		snapshot.Message = err.Error()
+		return snapshot
+	}
+	snapshot.ProviderKind = string(metadata.ProviderKind)
+	snapshot.APIModel = metadata.APIModel
+	return snapshot
+}
+
+func ModelSnapshots(registry modelregistry.Registry, options ModelSnapshotOptions) ([]ModelSnapshot, error) {
+	providerFilter := modelregistry.ProviderKind(strings.TrimSpace(strings.ToLower(string(options.Provider))))
+	if providerFilter != "" && !modelregistry.ValidRuntimeProviderKind(providerFilter) {
+		return nil, UsageError(fmt.Sprintf("unknown model provider %q", options.Provider))
+	}
+
+	models := registry.List(modelregistry.ListOptions{IncludeDeprecated: options.IncludeDeprecated})
+	snapshots := make([]ModelSnapshot, 0, len(models))
+	for _, model := range models {
+		if !modelMatchesProvider(model, providerFilter) {
+			continue
+		}
+		snapshots = append(snapshots, ModelSnapshotFromEntry(model))
+	}
+	sort.SliceStable(snapshots, func(i int, j int) bool {
+		if snapshots[i].Provider == snapshots[j].Provider {
+			return snapshots[i].ID < snapshots[j].ID
+		}
+		return snapshots[i].Provider < snapshots[j].Provider
+	})
+	return snapshots, nil
+}
+
+func modelMatchesProvider(model modelregistry.ModelEntry, providerFilter modelregistry.ProviderKind) bool {
+	if providerFilter == "" {
+		return true
+	}
+	if providerFilter == modelregistry.ProviderOpenAICompatible {
+		return model.AllowsProvider(providerFilter)
+	}
+	return model.Provider == providerFilter
+}
+
+func ModelSnapshotFromEntry(model modelregistry.ModelEntry) ModelSnapshot {
+	capabilities := make([]string, 0, len(model.Capabilities))
+	for _, capability := range model.Capabilities {
+		capabilities = append(capabilities, string(capability))
+	}
+	efforts := make([]string, 0, len(model.ReasoningEfforts))
+	for _, effort := range model.ReasoningEfforts {
+		efforts = append(efforts, string(effort))
+	}
+	return ModelSnapshot{
+		ID:               model.ID,
+		DisplayName:      model.DisplayName,
+		Provider:         string(model.Provider),
+		APIModel:         model.APIModel,
+		Status:           string(model.Status),
+		ContextWindow:    model.ContextLimits.ContextWindow,
+		MaxOutputTokens:  model.ContextLimits.MaxOutputTokens,
+		Capabilities:     capabilities,
+		ReasoningEfforts: efforts,
+		Description:      model.Description,
+	}
+}
+
+func SessionSnapshots(items []sessions.Metadata) []SessionSnapshot {
+	snapshots := make([]SessionSnapshot, 0, len(items))
+	for _, item := range items {
+		snapshots = append(snapshots, SessionSnapshotFromMetadata(item))
+	}
+	return snapshots
+}
+
+func SessionSnapshotFromMetadata(item sessions.Metadata) SessionSnapshot {
+	return SessionSnapshot{
+		SessionID:           item.SessionID,
+		Kind:                string(item.SessionKind),
+		Title:               item.Title,
+		Cwd:                 item.Cwd,
+		ModelID:             item.ModelID,
+		Provider:            item.Provider,
+		ParentSessionID:     item.ParentSessionID,
+		RootSessionID:       item.RootSessionID,
+		AgentName:           item.AgentName,
+		TaskID:              item.TaskID,
+		ForkedFromEventID:   item.ForkedFromEventID,
+		ForkedFromSequence:  item.ForkedFromSequence,
+		SpawnedFromEventID:  item.SpawnedFromEventID,
+		SpawnedFromSequence: item.SpawnedFromSequence,
+		CreatedAt:           item.CreatedAt,
+		UpdatedAt:           item.UpdatedAt,
+		EventCount:          item.EventCount,
+		LastEventType:       string(item.LastEventType),
+	}
+}
+
+func SessionTreeSnapshotFromNode(node sessions.TreeNode) SessionTreeSnapshot {
+	children := make([]SessionTreeSnapshot, 0, len(node.Children))
+	for _, child := range node.Children {
+		children = append(children, SessionTreeSnapshotFromNode(child))
+	}
+	return SessionTreeSnapshot{
+		Session:  SessionSnapshotFromMetadata(node.Session),
+		Children: children,
+	}
+}
+
+func redactProviderBaseURL(baseURL string, apiKey string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return ""
+	}
+	safeURL := stripURLCredentials(baseURL)
+	return redaction.RedactString(safeURL, redaction.Options{ExtraSecretValues: []string{apiKey}})
+}
+
+func stripURLCredentials(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value
+	}
+	parsed.User = nil
+	return parsed.String()
+}

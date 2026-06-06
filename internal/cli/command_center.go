@@ -3,14 +3,12 @@ package cli
 import (
 	"fmt"
 	"io"
-	"net/url"
 	"sort"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/zerocommands"
 )
 
 type commandCenterOptions struct {
@@ -19,37 +17,9 @@ type commandCenterOptions struct {
 	includeDeprecated bool
 }
 
-type configSummary struct {
-	Runtime        string            `json:"runtime"`
-	ActiveProvider string            `json:"activeProvider,omitempty"`
-	MaxTurns       int               `json:"maxTurns"`
-	Providers      []providerSummary `json:"providers"`
-}
-
-type providerSummary struct {
-	Name         string `json:"name"`
-	ProviderKind string `json:"providerKind,omitempty"`
-	BaseURL      string `json:"baseUrl,omitempty"`
-	Model        string `json:"model,omitempty"`
-	APIModel     string `json:"apiModel,omitempty"`
-	Active       bool   `json:"active"`
-	APIKeySet    bool   `json:"apiKeySet"`
-	Status       string `json:"status,omitempty"`
-	Message      string `json:"message,omitempty"`
-}
-
-type modelSummary struct {
-	ID               string   `json:"id"`
-	DisplayName      string   `json:"displayName"`
-	Provider         string   `json:"provider"`
-	APIModel         string   `json:"apiModel"`
-	Status           string   `json:"status"`
-	ContextWindow    int      `json:"contextWindow"`
-	MaxOutputTokens  int      `json:"maxOutputTokens"`
-	Capabilities     []string `json:"capabilities"`
-	ReasoningEfforts []string `json:"reasoningEfforts,omitempty"`
-	Description      string   `json:"description,omitempty"`
-}
+type configSummary = zerocommands.ConfigSnapshot
+type providerSummary = zerocommands.ProviderSnapshot
+type modelSummary = zerocommands.ModelSnapshot
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseCommandCenterArgs(args, false)
@@ -220,16 +190,7 @@ func parseCommandCenterArgs(args []string, allowModelFilters bool) (commandCente
 }
 
 func summarizeConfig(resolved config.ResolvedConfig) configSummary {
-	summary := configSummary{
-		Runtime:        "go",
-		ActiveProvider: resolved.ActiveProvider,
-		MaxTurns:       resolved.MaxTurns,
-		Providers:      make([]providerSummary, 0, len(resolved.Providers)),
-	}
-	for _, profile := range resolved.Providers {
-		provider := summarizeProvider(profile, profile.Name == resolved.ActiveProvider)
-		summary.Providers = append(summary.Providers, provider)
-	}
+	summary := zerocommands.ConfigSnapshotFromResolved(resolved)
 	sort.SliceStable(summary.Providers, func(i int, j int) bool {
 		if summary.Providers[i].Active != summary.Providers[j].Active {
 			return summary.Providers[i].Active
@@ -239,64 +200,13 @@ func summarizeConfig(resolved config.ResolvedConfig) configSummary {
 	return summary
 }
 
-func summarizeProvider(profile config.ProviderProfile, active bool) providerSummary {
-	summary := providerSummary{
-		Name:         profile.Name,
-		ProviderKind: string(profile.ProviderKind),
-		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey),
-		Model:        profile.Model,
-		Active:       active,
-		APIKeySet:    strings.TrimSpace(profile.APIKey) != "",
-		Status:       "ok",
-	}
-	metadata, err := providers.ResolveRuntimeMetadata(profile, providers.Options{})
-	if err != nil {
-		summary.Status = "warning"
-		summary.Message = err.Error()
-		return summary
-	}
-	summary.ProviderKind = string(metadata.ProviderKind)
-	summary.APIModel = metadata.APIModel
-	return summary
-}
-
-func redactProviderBaseURL(baseURL string, apiKey string) string {
-	baseURL = strings.TrimSpace(baseURL)
-	if baseURL == "" {
-		return ""
-	}
-	safeURL := stripURLCredentials(baseURL)
-	return redaction.RedactString(safeURL, redaction.Options{ExtraSecretValues: []string{apiKey}})
-}
-
-func stripURLCredentials(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.User == nil {
-		return value
-	}
-	parsed.User = nil
-	return parsed.String()
-}
-
 func listModelSummaries(registry modelregistry.Registry, options commandCenterOptions) ([]modelSummary, error) {
-	providerFilter := modelregistry.ProviderKind(strings.TrimSpace(strings.ToLower(options.provider)))
-	if providerFilter != "" && !modelregistry.ValidRuntimeProviderKind(providerFilter) {
-		return nil, execUsageError{fmt.Sprintf("unknown model provider %q", options.provider)}
-	}
-
-	models := registry.List(modelregistry.ListOptions{IncludeDeprecated: options.includeDeprecated})
-	summaries := make([]modelSummary, 0, len(models))
-	for _, model := range models {
-		if providerFilter != "" {
-			if providerFilter == modelregistry.ProviderOpenAICompatible {
-				if !model.AllowsProvider(providerFilter) {
-					continue
-				}
-			} else if model.Provider != providerFilter {
-				continue
-			}
-		}
-		summaries = append(summaries, summarizeModel(model))
+	summaries, err := zerocommands.ModelSnapshots(registry, zerocommands.ModelSnapshotOptions{
+		Provider:          modelregistry.ProviderKind(strings.TrimSpace(strings.ToLower(options.provider))),
+		IncludeDeprecated: options.includeDeprecated,
+	})
+	if err != nil {
+		return nil, execUsageError{err.Error()}
 	}
 	sort.SliceStable(summaries, func(i int, j int) bool {
 		if summaries[i].Provider == summaries[j].Provider {
@@ -305,29 +215,6 @@ func listModelSummaries(registry modelregistry.Registry, options commandCenterOp
 		return summaries[i].Provider < summaries[j].Provider
 	})
 	return summaries, nil
-}
-
-func summarizeModel(model modelregistry.ModelEntry) modelSummary {
-	capabilities := make([]string, 0, len(model.Capabilities))
-	for _, capability := range model.Capabilities {
-		capabilities = append(capabilities, string(capability))
-	}
-	efforts := make([]string, 0, len(model.ReasoningEfforts))
-	for _, effort := range model.ReasoningEfforts {
-		efforts = append(efforts, string(effort))
-	}
-	return modelSummary{
-		ID:               model.ID,
-		DisplayName:      model.DisplayName,
-		Provider:         string(model.Provider),
-		APIModel:         model.APIModel,
-		Status:           string(model.Status),
-		ContextWindow:    model.ContextLimits.ContextWindow,
-		MaxOutputTokens:  model.ContextLimits.MaxOutputTokens,
-		Capabilities:     capabilities,
-		ReasoningEfforts: efforts,
-		Description:      model.Description,
-	}
 }
 
 func formatConfigSummary(summary configSummary) string {
