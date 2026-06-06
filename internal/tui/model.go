@@ -166,16 +166,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var usageRows []transcriptRow
 			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
 			for _, row := range usageRows {
-				m.transcript = appendRow(m.transcript, row.kind, row.text)
+				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
 		}
 		var sessionRows []transcriptRow
 		m, sessionRows = m.appendSessionEvents(msg.sessionEvents)
 		for _, row := range sessionRows {
-			m.transcript = appendRow(m.transcript, row.kind, row.text)
+			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		for _, row := range msg.rows {
-			m.transcript = appendRow(m.transcript, row.kind, row.text)
+			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if msg.err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{

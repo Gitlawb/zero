@@ -200,7 +200,7 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	}
 	appendTestEvent(t, store, session.SessionID, sessions.EventMessage, map[string]any{"role": "user", "content": "previous request"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventToolCall, map[string]any{"id": "call_1", "name": "grep", "arguments": `{"pattern":"Zero"}`})
-	appendTestEvent(t, store, session.SessionID, sessions.EventToolResult, map[string]any{"toolCallId": "call_1", "name": "grep", "status": "ok", "output": "matches"})
+	appendTestEvent(t, store, session.SessionID, sessions.EventToolResult, map[string]any{"toolCallId": "call_1", "name": "grep", "status": "error", "output": "matches"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventMessage, map[string]any{"role": "assistant", "content": "previous answer"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventError, map[string]any{"message": "old error"})
 
@@ -213,10 +213,18 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /resume to hydrate synchronously")
 	}
-	for _, want := range []string{"Resumed Zero session", session.SessionID, "previous request", "tool call: grep", "tool result: grep ok matches", "previous answer", "old error"} {
+	for _, want := range []string{"Resumed Zero session", session.SessionID, "previous request", "tool call: grep", "tool result: grep error matches", "previous answer", "old error"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected resumed transcript to contain %q, got %#v", want, next.transcript)
 		}
+	}
+	toolCall, ok := findTranscriptRow(next.transcript, rowToolCall)
+	if !ok || toolCall.tool != "grep" || toolCall.detail != "Zero" {
+		t.Fatalf("expected hydrated tool call metadata, got ok=%v row=%#v", ok, toolCall)
+	}
+	toolResult, ok := findTranscriptRow(next.transcript, rowToolResult)
+	if !ok || toolResult.tool != "grep" || toolResult.status != tools.StatusError || toolResult.detail != "matches" {
+		t.Fatalf("expected hydrated tool result metadata, got ok=%v row=%#v", ok, toolResult)
 	}
 	if transcriptContains(next.transcript, "zero exec --resume") {
 		t.Fatalf("resume should not show headless-only guidance after hydration, got %#v", next.transcript)

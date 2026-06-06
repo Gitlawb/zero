@@ -688,6 +688,40 @@ func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
 	}
 }
 
+func TestAgentResponsePreservesToolResultMetadata(t *testing.T) {
+	diff := strings.Join([]string{
+		"--- a/file.txt",
+		"+++ b/file.txt",
+		"@@ -1 +1 @@",
+		"-old",
+		"+new",
+	}, "\n")
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+
+	updated, _ := m.Update(agentResponseMsg{
+		runID: 7,
+		rows: []transcriptRow{{
+			kind:   rowToolResult,
+			text:   "tool result: apply_patch error",
+			tool:   "apply_patch",
+			status: tools.StatusError,
+			detail: diff,
+		}},
+	})
+	next := updated.(model)
+
+	row, ok := findTranscriptRow(next.transcript, rowToolResult)
+	if !ok {
+		t.Fatalf("expected tool result row, got %#v", next.transcript)
+	}
+	if row.tool != "apply_patch" || row.status != tools.StatusError || row.detail != diff {
+		t.Fatalf("tool result metadata was not preserved: %#v", row)
+	}
+	assertContains(t, renderRow(row, 80), "@@ -1 +1 @@")
+}
+
 func TestToolResultRowDefaultsEmptyStatusToOK(t *testing.T) {
 	text := toolResultRowText(agent.ToolResult{Name: "read_file", Output: "done"})
 
@@ -741,6 +775,15 @@ func transcriptContains(rows []transcriptRow, want string) bool {
 		}
 	}
 	return false
+}
+
+func findTranscriptRow(rows []transcriptRow, kind rowKind) (transcriptRow, bool) {
+	for _, row := range rows {
+		if row.kind == kind {
+			return row, true
+		}
+	}
+	return transcriptRow{}, false
 }
 
 func transcriptHasMarkedModelEntry(rows []transcriptRow) bool {

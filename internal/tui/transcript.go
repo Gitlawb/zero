@@ -62,13 +62,23 @@ func reduceTranscript(rows []transcriptRow, action transcriptAction) []transcrip
 	case actionAppendAssistant:
 		return appendRow(rows, rowAssistant, action.text)
 	case actionAppendToolCall:
-		return appendRow(rows, rowToolCall, fmt.Sprintf("tool call: %s", action.name))
+		return appendTranscriptRow(rows, transcriptRow{
+			kind: rowToolCall,
+			text: fmt.Sprintf("tool call: %s", action.name),
+			tool: action.name,
+		})
 	case actionAppendToolResult:
 		status := action.status
 		if status == "" {
 			status = tools.StatusOK
 		}
-		return appendRow(rows, rowToolResult, fmt.Sprintf("tool result: %s %s %s", action.name, status, action.text))
+		return appendTranscriptRow(rows, transcriptRow{
+			kind:   rowToolResult,
+			text:   fmt.Sprintf("tool result: %s %s %s", action.name, status, action.text),
+			tool:   action.name,
+			status: status,
+			detail: action.text,
+		})
 	case actionAppendSystem:
 		return appendRow(rows, rowSystem, action.text)
 	case actionAppendError:
@@ -79,8 +89,12 @@ func reduceTranscript(rows []transcriptRow, action transcriptAction) []transcrip
 }
 
 func appendRow(rows []transcriptRow, kind rowKind, text string) []transcriptRow {
+	return appendTranscriptRow(rows, transcriptRow{kind: kind, text: text})
+}
+
+func appendTranscriptRow(rows []transcriptRow, row transcriptRow) []transcriptRow {
 	next := append([]transcriptRow{}, rows...)
-	next = append(next, transcriptRow{kind: kind, text: text})
+	next = append(next, row)
 	return next
 }
 

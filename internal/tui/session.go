@@ -106,7 +106,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, formatResumeSummary(*session, len(events)))
 	for _, row := range transcriptRowsFromSessionEvents(events) {
-		rows = appendRow(rows, row.kind, row.text)
+		rows = appendTranscriptRow(rows, row)
 	}
 	m.transcript = rows
 	return m, ""
@@ -179,7 +179,12 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if name == "" {
 				name = "unknown"
 			}
-			rows = append(rows, transcriptRow{kind: rowToolCall, text: "tool call: " + name})
+			rows = append(rows, transcriptRow{
+				kind:   rowToolCall,
+				text:   "tool call: " + name,
+				tool:   name,
+				detail: argHint(payloadString(payload, "arguments")),
+			})
 		case sessions.EventToolResult:
 			name := payloadString(payload, "name")
 			if name == "" {
@@ -189,9 +194,13 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if status == "" {
 				status = tools.StatusOK
 			}
+			output := payloadString(payload, "output")
 			rows = append(rows, transcriptRow{
-				kind: rowToolResult,
-				text: fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(payloadString(payload, "output"), tuiToolOutputLimit)),
+				kind:   rowToolResult,
+				text:   fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
+				tool:   name,
+				status: status,
+				detail: output,
 			})
 		case sessions.EventError:
 			if message := payloadString(payload, "message"); message != "" {
