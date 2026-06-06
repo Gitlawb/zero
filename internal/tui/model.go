@@ -26,38 +26,39 @@ const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
 
 type model struct {
-	ctx              context.Context
-	cwd              string
-	gitBranch        string
-	providerName     string
-	modelName        string
-	providerProfile  config.ProviderProfile
-	provider         zeroruntime.Provider
-	newProvider      func(config.ProviderProfile) (zeroruntime.Provider, error)
-	registry         *tools.Registry
-	sessionStore     *sessions.Store
-	sandboxStore     *sandbox.GrantStore
-	activeSession    sessions.Metadata
-	sessionEvents    []sessions.Event
-	usageTracker     *usage.Tracker
-	agentOptions     agent.Options
-	permissionMode   agent.PermissionMode
-	reasoningEffort  modelregistry.ReasoningEffort
-	responseStyle    string
-	compactRequests  int
-	unpricedRequests int
-	unpricedTokens   int
-	transcript       []transcriptRow
-	input            textinput.Model
-	showSplash       bool
-	pending          bool
-	exiting          bool
-	runCancel        context.CancelFunc
-	runID            int
-	activeRunID      int
-	width            int
-	height           int
-	now              func() time.Time
+	ctx                context.Context
+	cwd                string
+	gitBranch          string
+	providerName       string
+	modelName          string
+	providerProfile    config.ProviderProfile
+	provider           zeroruntime.Provider
+	newProvider        func(config.ProviderProfile) (zeroruntime.Provider, error)
+	registry           *tools.Registry
+	sessionStore       *sessions.Store
+	sandboxStore       *sandbox.GrantStore
+	activeSession      sessions.Metadata
+	sessionEvents      []sessions.Event
+	usageTracker       *usage.Tracker
+	runtimeMessageSink func(tea.Msg)
+	agentOptions       agent.Options
+	permissionMode     agent.PermissionMode
+	reasoningEffort    modelregistry.ReasoningEffort
+	responseStyle      string
+	compactRequests    int
+	unpricedRequests   int
+	unpricedTokens     int
+	transcript         []transcriptRow
+	input              textinput.Model
+	showSplash         bool
+	pending            bool
+	exiting            bool
+	runCancel          context.CancelFunc
+	runID              int
+	activeRunID        int
+	width              int
+	height             int
+	now                func() time.Time
 }
 
 type agentResponseMsg struct {
@@ -67,6 +68,11 @@ type agentResponseMsg struct {
 	usageModelID  string
 	sessionEvents []pendingSessionEvent
 	err           error
+}
+
+type agentRowMsg struct {
+	runID int
+	row   transcriptRow
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -112,26 +118,27 @@ func newModel(ctx context.Context, options Options) model {
 	input.Focus()
 
 	return model{
-		ctx:             ctx,
-		cwd:             cwd,
-		gitBranch:       gitBranch(cwd),
-		providerName:    options.ProviderName,
-		modelName:       options.ModelName,
-		providerProfile: options.ProviderProfile,
-		provider:        options.Provider,
-		newProvider:     options.NewProvider,
-		registry:        registry,
-		sessionStore:    sessionStore,
-		sandboxStore:    sandboxStore,
-		agentOptions:    options.AgentOptions,
-		permissionMode:  permissionMode,
-		reasoningEffort: options.ReasoningEffort,
-		responseStyle:   defaultedResponseStyle(options.ResponseStyle),
-		usageTracker:    usageTracker,
-		transcript:      initialTranscript(),
-		input:           input,
-		showSplash:      true,
-		now:             time.Now,
+		ctx:                ctx,
+		cwd:                cwd,
+		gitBranch:          gitBranch(cwd),
+		providerName:       options.ProviderName,
+		modelName:          options.ModelName,
+		providerProfile:    options.ProviderProfile,
+		provider:           options.Provider,
+		newProvider:        options.NewProvider,
+		registry:           registry,
+		sessionStore:       sessionStore,
+		sandboxStore:       sandboxStore,
+		agentOptions:       options.AgentOptions,
+		runtimeMessageSink: options.RuntimeMessageSink,
+		permissionMode:     permissionMode,
+		reasoningEffort:    options.ReasoningEffort,
+		responseStyle:      defaultedResponseStyle(options.ResponseStyle),
+		usageTracker:       usageTracker,
+		transcript:         initialTranscript(),
+		input:              input,
+		showSplash:         true,
+		now:                time.Now,
 	}
 }
 
@@ -188,6 +195,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text: msg.err.Error(),
 			})
 		}
+		return m, nil
+	case agentRowMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		return m, nil
 	}
 
@@ -423,12 +436,15 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
-			rows = append(rows, transcriptRow{
+			row := transcriptRow{
 				kind:   rowToolCall,
+				id:     call.ID,
 				text:   "tool call: " + call.Name,
 				tool:   call.Name,
 				detail: argHint(call.Arguments),
-			})
+			}
+			rows = append(rows, row)
+			m.sendAgentRow(runID, row)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type: sessions.EventToolCall,
 				Payload: map[string]any{
@@ -444,13 +460,16 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 
 		onToolResult := options.OnToolResult
 		options.OnToolResult = func(result agent.ToolResult) {
-			rows = append(rows, transcriptRow{
+			row := transcriptRow{
 				kind:   rowToolResult,
+				id:     result.ToolCallID,
 				text:   toolResultRowText(result),
 				tool:   result.Name,
 				status: result.Status,
 				detail: result.Output,
-			})
+			}
+			rows = append(rows, row)
+			m.sendAgentRow(runID, row)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type: sessions.EventToolResult,
 				Payload: map[string]any{
@@ -467,7 +486,9 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 
 		onPermission := options.OnPermission
 		options.OnPermission = func(event agent.PermissionEvent) {
-			rows = append(rows, permissionTranscriptRow(event))
+			row := permissionTranscriptRow(event)
+			rows = append(rows, row)
+			m.sendAgentRow(runID, row)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventPermission,
 				Payload: event,
@@ -511,6 +532,13 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		})
 		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents}
 	}
+}
+
+func (m model) sendAgentRow(runID int, row transcriptRow) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(agentRowMsg{runID: runID, row: row})
 }
 
 func toolResultRowText(result agent.ToolResult) string {

@@ -9,7 +9,18 @@ import (
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
 func Run(ctx context.Context, options Options) int {
-	program := tea.NewProgram(
+	externalSink := options.RuntimeMessageSink
+	var program *tea.Program
+	options.RuntimeMessageSink = func(msg tea.Msg) {
+		if externalSink != nil {
+			externalSink(msg)
+		}
+		if program != nil {
+			program.Send(msg)
+		}
+	}
+
+	program = tea.NewProgram(
 		newModel(ctx, options),
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),

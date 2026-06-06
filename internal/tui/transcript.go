@@ -23,6 +23,7 @@ const (
 
 type transcriptRow struct {
 	kind       rowKind
+	id         string
 	text       string
 	tool       string       // tool name, for tool call/result rows
 	status     tools.Status // result status, for tool result rows
@@ -96,14 +97,45 @@ func appendRow(rows []transcriptRow, kind rowKind, text string) []transcriptRow 
 }
 
 func appendTranscriptRow(rows []transcriptRow, row transcriptRow) []transcriptRow {
+	if hasTranscriptRow(rows, row) {
+		return rows
+	}
 	next := append([]transcriptRow{}, rows...)
 	next = append(next, row)
 	return next
 }
 
+func hasTranscriptRow(rows []transcriptRow, row transcriptRow) bool {
+	key := transcriptRowKey(row)
+	if key == "" {
+		return false
+	}
+	for _, existing := range rows {
+		if transcriptRowKey(existing) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func transcriptRowKey(row transcriptRow) string {
+	switch row.kind {
+	case rowToolCall, rowToolResult:
+		if row.id != "" {
+			return fmt.Sprintf("%d:%s", row.kind, row.id)
+		}
+	case rowPermission:
+		if row.permission != nil && row.permission.ToolCallID != "" {
+			return fmt.Sprintf("%d:%s", row.kind, row.permission.ToolCallID)
+		}
+	}
+	return ""
+}
+
 func permissionTranscriptRow(event agent.PermissionEvent) transcriptRow {
 	return transcriptRow{
 		kind:       rowPermission,
+		id:         event.ToolCallID,
 		text:       permissionRowText(event),
 		tool:       event.ToolName,
 		detail:     permissionDetailText(event),
@@ -153,6 +185,9 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	}
 	if event.Violation != nil {
 		violation := "violation=" + string(event.Violation.Code)
+		if event.Violation.Risk.Level != "" {
+			violation += " risk=" + string(event.Violation.Risk.Level)
+		}
 		if event.Violation.Path != "" {
 			violation += " path=" + event.Violation.Path
 		}

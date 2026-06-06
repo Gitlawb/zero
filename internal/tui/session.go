@@ -183,6 +183,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			}
 			rows = append(rows, transcriptRow{
 				kind:   rowToolCall,
+				id:     payloadString(payload, "id"),
 				text:   "tool call: " + name,
 				tool:   name,
 				detail: argHint(payloadString(payload, "arguments")),
@@ -201,6 +202,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			output := payloadString(payload, "output")
 			rows = append(rows, transcriptRow{
 				kind:   rowToolResult,
+				id:     firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id")),
 				text:   fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
 				tool:   name,
 				status: status,

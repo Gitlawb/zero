@@ -823,14 +823,34 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 		Autonomy:       string(sandbox.AutonomyHigh),
 		SideEffect:     "write",
 		Reason:         "workspace boundary enforced",
-		Risk:           sandbox.Risk{Level: sandbox.RiskCritical},
+		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},
 		Violation:      &violation,
 	}
 
 	rendered := renderRow(permissionTranscriptRow(event), 96)
 
-	for _, want := range []string{"permission", "write_file", "denied", "risk:critical", "violation=outside_workspace", "../secret.txt"} {
+	for _, want := range []string{"permission", "write_file", "denied", "risk:high", "violation=outside_workspace risk=critical", "../secret.txt"} {
 		assertContains(t, rendered, want)
+	}
+}
+
+func TestAppendTranscriptRowDedupesRuntimeRowsByID(t *testing.T) {
+	event := agent.PermissionEvent{
+		ToolCallID: "call_1",
+		ToolName:   "write_file",
+		Action:     agent.PermissionActionPrompt,
+	}
+	rows := initialTranscript()
+	rows = appendTranscriptRow(rows, transcriptRow{kind: rowToolCall, id: "call_1", text: "tool call: write_file", tool: "write_file"})
+	rows = appendTranscriptRow(rows, permissionTranscriptRow(event))
+	rows = appendTranscriptRow(rows, transcriptRow{kind: rowToolResult, id: "call_1", text: "tool result: write_file error", tool: "write_file", status: tools.StatusError})
+
+	rows = appendTranscriptRow(rows, transcriptRow{kind: rowToolCall, id: "call_1", text: "tool call: write_file", tool: "write_file"})
+	rows = appendTranscriptRow(rows, permissionTranscriptRow(event))
+	rows = appendTranscriptRow(rows, transcriptRow{kind: rowToolResult, id: "call_1", text: "tool result: write_file error", tool: "write_file", status: tools.StatusError})
+
+	if len(rows) != 4 {
+		t.Fatalf("expected welcome plus three unique runtime rows, got %#v", rows)
 	}
 }
 
@@ -989,6 +1009,16 @@ func transcriptText(rows []transcriptRow) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func countTranscriptRows(rows []transcriptRow, kind rowKind) int {
+	count := 0
+	for _, row := range rows {
+		if row.kind == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func findTranscriptRow(rows []transcriptRow, kind rowKind) (transcriptRow, bool) {

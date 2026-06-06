@@ -211,6 +211,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}}
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
+	runtimeMessages := []tea.Msg{}
 	m := newModel(context.Background(), Options{
 		Cwd:            root,
 		ProviderName:   "openai",
@@ -219,6 +220,9 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		Registry:       registry,
 		SessionStore:   store,
 		PermissionMode: agent.PermissionModeAsk,
+		RuntimeMessageSink: func(msg tea.Msg) {
+			runtimeMessages = append(runtimeMessages, msg)
+		},
 		AgentOptions: agent.Options{
 			Autonomy: string(sandbox.AutonomyMedium),
 			Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
@@ -234,7 +238,23 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
 	}
-	updated, _ = next.Update(cmd())
+	finalMsg := cmd()
+	if len(runtimeMessages) != 3 {
+		t.Fatalf("expected live tool call, permission, and result messages, got %#v", runtimeMessages)
+	}
+	for _, runtimeMsg := range runtimeMessages {
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+	}
+	if !next.pending {
+		t.Fatal("expected live runtime rows to leave run pending until final response")
+	}
+	for _, want := range []string{"tool call: write_file", "permission: write_file prompt", "tool result: write_file error"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected live transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	updated, _ = next.Update(finalMsg)
 	next = updated.(model)
 
 	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
@@ -269,6 +289,9 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	assertPayloadField(t, events[4], "content", "write blocked")
 	if !transcriptContains(next.transcript, "permission: write_file prompt") {
 		t.Fatalf("expected permission row in transcript, got %#v", next.transcript)
+	}
+	if countTranscriptRows(next.transcript, rowPermission) != 1 {
+		t.Fatalf("expected final response to avoid duplicate permission rows, got %#v", next.transcript)
 	}
 }
 
