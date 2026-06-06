@@ -309,10 +309,10 @@ func MeasureFirstOutput(ctx context.Context, command []string) (firstOutputSampl
 	go readTimedPipe(stdout, markFirstOutput, stdoutChan)
 	go readTimedPipe(stderr, markFirstOutput, stderrChan)
 
-	waitErr := cmd.Wait()
-	finishedAt := time.Now()
 	stdoutResult := <-stdoutChan
 	stderrResult := <-stderrChan
+	waitErr := cmd.Wait()
+	finishedAt := time.Now()
 	if stdoutResult.Err != nil {
 		return firstOutputSample{}, stdoutResult.Err
 	}
