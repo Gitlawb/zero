@@ -54,8 +54,9 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	}
 
 	sandboxGrantAuthorized := false
+	var sandboxDecision *sandbox.Decision
 	if options.Sandbox != nil {
-		decision := options.Sandbox.Evaluate(ctx, sandbox.Request{
+		d := options.Sandbox.Evaluate(ctx, sandbox.Request{
 			ToolName:          name,
 			SideEffect:        sandbox.SideEffect(tool.Safety().SideEffect),
 			Permission:        sandbox.Permission(tool.Safety().Permission),
@@ -65,42 +66,55 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			Args:              args,
 			Reason:            tool.Safety().Reason,
 		})
+		sandboxDecision = &d
 		if options.OnSandboxDecision != nil {
-			go func(d sandbox.Decision) {
+			go func(dec sandbox.Decision) {
 				defer func() {
 					if r := recover(); r != nil {
 						// Fail-safe: never let a consumer callback panic the tool execution path.
 						// In real use the agent loop or CLI may log this; for now we swallow to keep tools reliable.
 					}
 				}()
-				options.OnSandboxDecision(d)
-			}(decision)
+				options.OnSandboxDecision(dec)
+			}(d)
 		}
-		if decision.Action == sandbox.ActionDeny {
-			return errorResult(decision.ErrorString())
+		if d.Action == sandbox.ActionDeny {
+			res := errorResult(d.ErrorString())
+			res.SandboxDecision = sandboxDecision
+			return res
 		}
-		if decision.Action == sandbox.ActionPrompt && !options.PermissionGranted {
-			return errorResult("Error: Sandbox approval required for " + name + ": " + decision.Reason)
+		if d.Action == sandbox.ActionPrompt && !options.PermissionGranted {
+			res := errorResult("Error: Sandbox approval required for " + name + ": " + d.Reason)
+			res.SandboxDecision = sandboxDecision
+			return res
 		}
-		sandboxGrantAuthorized = decision.Action == sandbox.ActionAllow && decision.GrantMatched
+		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && d.GrantMatched
 	}
 
 	switch tool.Safety().Permission {
 	case PermissionAllow:
 	case PermissionPrompt:
 		if !options.PermissionGranted && !sandboxGrantAuthorized {
-			return errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
+			res := errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
+			res.SandboxDecision = sandboxDecision
+			return res
 		}
 	default:
-		return errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
+		res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
+		res.SandboxDecision = sandboxDecision
+		return res
 	}
 
 	if options.Sandbox != nil {
 		if sandboxed, ok := tool.(sandboxAwareTool); ok {
-			return sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
+			res := sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
+			res.SandboxDecision = sandboxDecision
+			return res
 		}
 	}
-	return tool.Run(ctx, args)
+	res := tool.Run(ctx, args)
+	res.SandboxDecision = sandboxDecision
+	return res
 }
 
 func CoreReadOnlyTools(workspaceRoot string) []Tool {

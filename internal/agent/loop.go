@@ -123,17 +123,16 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		permissionGranted = true
 	}
 
-	var sandboxDecision *sandbox.Decision
 	result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
 		PermissionGranted: permissionGranted,
 		PermissionMode:    string(permissionMode),
 		Autonomy:          options.Autonomy,
 		Sandbox:           options.Sandbox,
-		OnSandboxDecision: func(decision sandbox.Decision) {
-			copied := decision
-			sandboxDecision = &copied
-		},
+		// Note: we no longer rely on OnSandboxDecision callback for capture here
+		// (it is still supported for other observers and is invoked asynchronously in the registry).
+		// The sandbox decision (if any) is now returned synchronously on the Result for permission event building.
 	})
+	sandboxDecision := result.SandboxDecision
 	if toolFound && options.OnPermission != nil {
 		if event, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, sandboxDecision); ok {
 			options.OnPermission(event)

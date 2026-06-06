@@ -1,6 +1,10 @@
 package tools
 
-import "context"
+import (
+	"context"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
+)
 
 type SideEffect string
 type Permission string
@@ -48,10 +52,11 @@ type PropertySchema struct {
 }
 
 type Result struct {
-	Status    Status
-	Output    string
-	Truncated bool
-	Meta      map[string]string
+	Status            Status
+	Output            string
+	Truncated         bool
+	Meta              map[string]string
+	SandboxDecision   *sandbox.Decision `json:"-"`
 }
 
 type Tool interface {
