@@ -115,6 +115,13 @@ func copyWrapperFixture(t *testing.T) string {
 		t.Fatalf("ReadFile wrapper: %v", err)
 	}
 	dir := t.TempDir()
+	// Create a package.json with "type": "module" so the isolated .js fixture
+	// is treated as ESM (matching how it runs when installed from the real package.json).
+	// Without this, Node treats .js as CJS on all platforms, causing top-level import
+	// to fail with SyntaxError before reaching the missing-binary logic.
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile package.json fixture: %v", err)
+	}
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll bin: %v", err)
