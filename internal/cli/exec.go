@@ -218,6 +218,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				"arguments": call.Arguments,
 			})
 		},
+		OnPermission: func(event agent.PermissionEvent) {
+			writer.permission(event)
+			sessionRecorder.append(sessions.EventPermission, event)
+		},
 		OnToolResult: func(result agent.ToolResult) {
 			writer.toolResult(result)
 			payload := map[string]any{

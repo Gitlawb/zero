@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -336,6 +338,78 @@ func TestRunExecStreamJSONOutputsRunEndAndRecordsSession(t *testing.T) {
 	}
 }
 
+func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "stream-json", "write notes"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return toolCallingExecProvider{
+				toolCallID: "call_write",
+				toolName:   "write_file",
+				arguments:  `{"path":"notes.txt","content":"hello"}`,
+				answer:     "write denied",
+			}, nil
+		},
+		newSandboxStore: func() (*sandbox.GrantStore, error) {
+			return sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+
+	events := decodeJSONLines(t, stdout.String())
+	eventTypes := jsonEventTypes(events)
+	if !slices.Contains(eventTypes, "permission") {
+		t.Fatalf("expected permission event in %v; output %q", eventTypes, stdout.String())
+	}
+	permissionEvent := findJSONEvent(t, events, "permission")
+	if permissionEvent["id"] != "call_write" || permissionEvent["name"] != "write_file" || permissionEvent["action"] != "prompt" {
+		t.Fatalf("unexpected permission event: %#v", permissionEvent)
+	}
+	if permissionEvent["permission"] != "prompt" || permissionEvent["permissionMode"] != "auto" || permissionEvent["sideEffect"] != "write" {
+		t.Fatalf("unexpected permission metadata: %#v", permissionEvent)
+	}
+	risk, ok := permissionEvent["risk"].(map[string]any)
+	if !ok || risk["level"] == "" {
+		t.Fatalf("expected permission risk payload, got %#v", permissionEvent)
+	}
+
+	sessionID, ok := events[0]["sessionId"].(string)
+	if !ok || sessionID == "" {
+		t.Fatalf("expected run_start sessionId, got %#v", events[0])
+	}
+	store := sessions.NewStore(sessions.StoreOptions{
+		RootDir: filepath.Join(dataHome, "zero", "sessions"),
+	})
+	recorded, err := store.ReadEvents(sessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermission)
+	var payload map[string]any
+	if err := json.Unmarshal(permissionRecord.Payload, &payload); err != nil {
+		t.Fatalf("decode permission payload: %v", err)
+	}
+	if payload["toolCallId"] != "call_write" || payload["name"] != "write_file" || payload["action"] != "prompt" {
+		t.Fatalf("unexpected recorded permission payload: %#v", payload)
+	}
+}
+
 func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
@@ -517,4 +591,57 @@ type closeFunc func() error
 
 func (fn closeFunc) Close() error {
 	return fn()
+}
+
+type toolCallingExecProvider struct {
+	toolCallID string
+	toolName   string
+	arguments  string
+	answer     string
+}
+
+func (provider toolCallingExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	for _, message := range request.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			ch := make(chan zeroruntime.StreamEvent, 2)
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: provider.answer}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+			close(ch)
+			return ch, nil
+		}
+	}
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	select {
+	case <-ctx.Done():
+		close(ch)
+		return ch, ctx.Err()
+	case ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: provider.toolCallID, ToolName: provider.toolName}:
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: provider.toolCallID, ArgumentsFragment: provider.arguments}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: provider.toolCallID}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+func findJSONEvent(t *testing.T, events []map[string]any, eventType string) map[string]any {
+	t.Helper()
+	for _, event := range events {
+		if event["type"] == eventType {
+			return event
+		}
+	}
+	t.Fatalf("event %q not found in %#v", eventType, events)
+	return nil
+}
+
+func findSessionEvent(t *testing.T, events []sessions.Event, eventType sessions.EventType) sessions.Event {
+	t.Helper()
+	for _, event := range events {
+		if event.Type == eventType {
+			return event
+		}
+	}
+	t.Fatalf("session event %q not found in %#v", eventType, events)
+	return sessions.Event{}
 }

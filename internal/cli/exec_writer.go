@@ -134,6 +134,59 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 	writer.writeStderr("[result] " + truncateForStatus(result.Output) + "\n")
 }
 
+func (writer *execEventWriter) permission(event agent.PermissionEvent) {
+	if writer.format == execOutputJSON {
+		payload := map[string]any{
+			"type":               "permission",
+			"tool_call_id":       event.ToolCallID,
+			"name":               event.ToolName,
+			"action":             string(event.Action),
+			"permission":         event.Permission,
+			"permission_granted": event.PermissionGranted,
+			"permission_mode":    string(event.PermissionMode),
+			"autonomy":           event.Autonomy,
+			"side_effect":        event.SideEffect,
+			"reason":             event.Reason,
+			"risk":               event.Risk,
+		}
+		if event.Violation != nil {
+			payload["violation"] = event.Violation
+		}
+		if event.GrantMatched {
+			payload["grant_matched"] = true
+		}
+		if event.Grant != nil {
+			payload["grant"] = event.Grant
+		}
+		writer.writeJSON(payload)
+		return
+	}
+	if writer.format == execOutputStreamJSON {
+		risk := event.Risk
+		writer.writeStreamJSON(streamjson.Event{
+			Type:           streamjson.EventPermission,
+			RunID:          writer.runID,
+			SessionID:      writer.sessionID,
+			ID:             event.ToolCallID,
+			Name:           event.ToolName,
+			Action:         string(event.Action),
+			Permission:     event.Permission,
+			PermissionMode: string(event.PermissionMode),
+			Autonomy:       event.Autonomy,
+			SideEffect:     event.SideEffect,
+			Reason:         event.Reason,
+			Risk:           &risk,
+			Violation:      event.Violation,
+			GrantMatched:   event.GrantMatched,
+			Grant:          event.Grant,
+		})
+		return
+	}
+	if event.Action != agent.PermissionActionAllow {
+		writer.writeStderr("[permission] " + event.ToolName + " " + string(event.Action) + ": " + event.Reason + "\n")
+	}
+}
+
 func (writer *execEventWriter) usage(usage agent.Usage) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{
