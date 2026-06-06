@@ -51,6 +51,15 @@ type AssetCheck struct {
 	Verified      bool   `json:"verified"`
 }
 
+// Target identifies a supported release archive target.
+type Target struct {
+	Name     string `json:"name"`
+	GOOS     string `json:"goos"`
+	GOARCH   string `json:"goarch"`
+	Platform string `json:"platform"`
+	Arch     string `json:"arch"`
+}
+
 // Options configures a release update check.
 type Options struct {
 	CurrentVersion string
@@ -98,6 +107,28 @@ func CompareSemver(left string, right string) (int, error) {
 		return 0, err
 	}
 	return compareSemverParts(leftParts, rightParts), nil
+}
+
+// ResolveTarget maps a release target name like windows-x64 to Go build
+// coordinates and release asset naming fields.
+func ResolveTarget(target string) (Target, error) {
+	value := strings.TrimSpace(strings.ToLower(target))
+	switch value {
+	case "linux-x64":
+		return Target{Name: value, GOOS: "linux", GOARCH: "amd64", Platform: "linux", Arch: "x64"}, nil
+	case "linux-arm64":
+		return Target{Name: value, GOOS: "linux", GOARCH: "arm64", Platform: "linux", Arch: "arm64"}, nil
+	case "macos-x64":
+		return Target{Name: value, GOOS: "darwin", GOARCH: "amd64", Platform: "macos", Arch: "x64"}, nil
+	case "macos-arm64":
+		return Target{Name: value, GOOS: "darwin", GOARCH: "arm64", Platform: "macos", Arch: "arm64"}, nil
+	case "windows-x64":
+		return Target{Name: value, GOOS: "windows", GOARCH: "amd64", Platform: "windows", Arch: "x64"}, nil
+	case "windows-arm64":
+		return Target{Name: value, GOOS: "windows", GOARCH: "arm64", Platform: "windows", Arch: "arm64"}, nil
+	default:
+		return Target{}, fmt.Errorf("unsupported update target %q: expected one of linux-x64, linux-arm64, macos-x64, macos-arm64, windows-x64, windows-arm64", target)
+	}
 }
 
 func Check(ctx context.Context, options Options) (Result, error) {

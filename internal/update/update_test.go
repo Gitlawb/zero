@@ -75,6 +75,39 @@ func TestCheckReportsAvailableUpdate(t *testing.T) {
 	}
 }
 
+func TestResolveTarget(t *testing.T) {
+	tests := []struct {
+		target   string
+		goos     string
+		goarch   string
+		platform string
+		arch     string
+	}{
+		{target: "linux-x64", goos: "linux", goarch: "amd64", platform: "linux", arch: "x64"},
+		{target: "linux-arm64", goos: "linux", goarch: "arm64", platform: "linux", arch: "arm64"},
+		{target: "macos-x64", goos: "darwin", goarch: "amd64", platform: "macos", arch: "x64"},
+		{target: "macos-arm64", goos: "darwin", goarch: "arm64", platform: "macos", arch: "arm64"},
+		{target: "windows-x64", goos: "windows", goarch: "amd64", platform: "windows", arch: "x64"},
+		{target: "windows-arm64", goos: "windows", goarch: "arm64", platform: "windows", arch: "arm64"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.target, func(t *testing.T) {
+			target, err := ResolveTarget(tt.target)
+			if err != nil {
+				t.Fatalf("ResolveTarget returned error: %v", err)
+			}
+			if target.GOOS != tt.goos || target.GOARCH != tt.goarch || target.Platform != tt.platform || target.Arch != tt.arch {
+				t.Fatalf("ResolveTarget(%q) = %#v", tt.target, target)
+			}
+		})
+	}
+
+	if _, err := ResolveTarget("solaris-sparc"); err == nil || !strings.Contains(err.Error(), "unsupported update target") {
+		t.Fatalf("ResolveTarget invalid error = %v, want unsupported target", err)
+	}
+}
+
 func TestCheckReturnsFetchError(t *testing.T) {
 	wantErr := errors.New("network failure")
 

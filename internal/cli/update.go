@@ -16,6 +16,7 @@ type updateOptions struct {
 	repository string
 	endpoint   string
 	timeout    time.Duration
+	target     string
 }
 
 func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -32,12 +33,21 @@ func runUpdate(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if !options.check {
 		return writeUsageError(stderr, "Only `zero update --check` is available right now.")
 	}
-	result, err := deps.checkUpdate(context.Background(), update.Options{
+	checkOptions := update.Options{
 		CurrentVersion: version,
 		Repository:     options.repository,
 		Endpoint:       options.endpoint,
 		Timeout:        options.timeout,
-	})
+	}
+	if options.target != "" {
+		target, err := update.ResolveTarget(options.target)
+		if err != nil {
+			return writeUsageError(stderr, err.Error())
+		}
+		checkOptions.GOOS = target.GOOS
+		checkOptions.GOARCH = target.GOARCH
+	}
+	result, err := deps.checkUpdate(context.Background(), checkOptions)
 	if err != nil {
 		return writeAppError(stderr, "Could not check for updates: "+err.Error(), exitCrash)
 	}
@@ -99,6 +109,15 @@ func parseUpdateArgs(args []string) (updateOptions, bool, error) {
 				return options, false, err
 			}
 			options.timeout = timeout
+		case arg == "--target":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.target = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--target="):
+			options.target = strings.TrimSpace(strings.TrimPrefix(arg, "--target="))
 		default:
 			return options, false, execUsageError{fmt.Sprintf("unknown update flag %q", arg)}
 		}
@@ -127,6 +146,7 @@ Flags:
       --repo <owner/repo>     Repository to check when no endpoint is provided
       --endpoint <url|repo>   Release API URL or owner/repo slug to check
       --timeout <duration>    Release check timeout (default 5s)
+      --target <platform>     Release target to verify (for example windows-x64)
   -h, --help                  Show this help
 `)
 	return err

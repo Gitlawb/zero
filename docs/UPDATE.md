@@ -8,6 +8,7 @@ zero update --check --json
 zero update --check --repo Gitlawb/zero
 zero update --check --endpoint https://api.github.com/repos/Gitlawb/zero/releases/latest
 zero update --check --timeout 3s
+zero update --check --target windows-x64
 ```
 
 For M2 this command is intentionally check-only:
@@ -19,8 +20,11 @@ For M2 this command is intentionally check-only:
 - `--repo <owner/repo>` checks a different GitHub repository when no endpoint is provided.
 - `--endpoint <url|owner/repo>` checks a specific release API URL or repository slug.
 - `--timeout <duration>` overrides the default release check timeout.
+- `--target <platform-arch>` validates release metadata for another supported target from the current machine.
 - Release checks time out after 5 seconds by default.
-- It validates that the latest release includes the expected archive and matching `.sha256` asset for the current platform.
+- It validates that the latest release includes the expected archive and matching `.sha256` asset for the selected platform target.
+
+Supported targets are `linux-x64`, `linux-arm64`, `macos-x64`, `macos-arm64`, `windows-x64`, and `windows-arm64`. Without `--target`, Zero checks the current platform.
 
 The release endpoint resolves in this order:
 

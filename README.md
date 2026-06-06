@@ -99,7 +99,7 @@ zero doctor [--connectivity] [--json]        # health checks
 zero config [--json]                          # inspect resolved configuration
 zero sandbox policy [--json]                 # inspect sandbox backend support
 zero serve --mcp [-C <path>]                  # expose Zero read-only tools over MCP stdio
-zero update --check [--json --repo owner/name] # check for a newer release
+zero update --check [--json --target windows-x64] # check for a newer release
 ```
 
 ## Providers & models
