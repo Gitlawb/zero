@@ -1,572 +1,286 @@
-# Zero WorkSplit PRD v2: Balanced And Conflict-Free Team Plan
+# Zero WorkSplit PRD v3: Go-Native Product Ownership Plan
 
-Status: Draft v2.0
-Date: 2026-06-02
-Timeline: 6 months to v1.0
-Team: Vasanth, Gnanam, Anandan
+Status: Draft v3.0
+Date: 2026-06-06
+Timeline: Active sprint plan toward v0.1, then v1.0 hardening
 
-This v2 replaces the conflict points in the original WorkSplit PRD:
+Team:
 
-- UI/TUI surfaces are separated from backend capabilities.
-- Headless `exec` is split into CLI surface, runtime protocol, and distribution responsibilities.
-- Search is scheduled after a minimal session event store exists.
-- Slash commands are split into command UI, backend APIs, and integration commands.
-- Anandan's workload is narrowed to infra/distribution/integrations, with clear dependencies on Gnanam runtime contracts.
-- Each milestone gives all 3 people similar effort and reviewable PR slices.
+- Vasanth
+- Gnanam
+- Anandan
 
-## Product Goal
+## 1. Product Goal
 
-Zero is a production coding agent CLI/TUI that can:
+Zero is a terminal-first AI coding agent built in Go.
 
-- Chat and stream responses in a polished terminal UI.
-- Read, write, edit, search, and run tools safely.
-- Use OpenAI-compatible, Anthropic, and Gemini providers.
-- Track context and cost.
-- Run headless for scripts, automation, CI, and VS Code.
-- Persist, resume, fork, search, and export sessions.
-- Connect to MCP servers and load local plugins.
-- Run tests, manage git, self-verify changes, and operate inside sandbox policies.
+The goal is not just to remove the old TypeScript runtime. The goal is to make Zero feel like a mature daily-driver CLI agent:
 
-## Ownership Rules
+- fast startup
+- strong command UX
+- safe autonomy
+- clear permission handling
+- useful local tools
+- reliable provider/runtime behavior
+- installable, updateable, and testable on real developer machines
 
-These rules prevent future conflicts:
+This document replaces the older migration-era work split. The Go runtime is now the main product baseline, so future work should focus on product depth rather than repeating the old M0 migration plan.
 
-1. Every feature has one Directly Responsible Owner.
-2. UI/TUI commands and backend modules are separate deliverables.
-3. Cross-owner features must land the backend contract before UI/integration work depends on it.
-4. Provider-specific logic stays inside provider modules.
-5. Session/event protocol is owned by Gnanam and consumed by TUI, VS Code, MCP, and automation.
-6. Distribution work packages stable behavior; it does not define runtime semantics.
-7. Permission prompts are Vasanth's UI, but grants/policy/sandbox enforcement are Gnanam's backend.
-8. Windows platform implementation is Anandan's, but it must use the shared sandbox policy interface.
-
-## Team Roles
+## 2. Current Baseline On Main
 
-| Person | Primary role | Owns | Does not own |
-|---|---|---|---|
-| Vasanth | Product lead, TUI, tools UX | Bubble Tea TUI, slash command UI, tool result rendering, local tool UX, permission prompts, themes, command palette, user-facing flows | Provider internals, session protocol, MCP transports, release pipeline |
-| Gnanam | Runtime backend, providers, protocols | Model registry, provider factory, Anthropic/Gemini, usage/cost, session store, stream-json, config validation, doctor/search backend, MCP/plugin backend, permissions/grants, sandbox policy | TUI rendering, binary packaging, VS Code extension UI |
-| Anandan | Infra, distribution, external integrations | CI, build, single binary, release packages, installers, self-update, performance benchmarks, VS Code extension, GitHub PR integration, Windows sandbox, release security | Provider internals, TUI command rendering, model registry |
-
-## Shared Contracts
-
-These contracts are required before dependent work starts:
-
-| Contract | Owner | Consumers | Needed by |
-|---|---|---|---|
-| Provider stream event schema | Gnanam | Vasanth, Anandan | TUI streaming, headless output, VS Code |
-| Model registry API | Gnanam | Vasanth | `/model`, `/effort`, cost, context budget |
-| Session event schema | Gnanam | Vasanth, Anandan | `/resume`, `/rewind`, search, VS Code, audit |
-| Command registry shape | Vasanth | Gnanam, Anandan | Slash command registration and help |
-| Build/test scripts | Anandan | Vasanth, Gnanam | CI, DoD, release |
-| Permission/grant policy | Gnanam | Vasanth, Anandan | prompts, MCP permissions, sandbox, Windows |
-| Stream-json protocol | Gnanam | Anandan | VS Code extension and automation |
-
-## Milestone M0: Foundation Baseline, Weeks 1-2
-
-Goal: Zero runs locally, has basic tools, one OpenAI-compatible provider, basic TUI, tests, and project scripts.
-
-Current status: the earlier TS/Bun M0 baseline is historical context only. The Go migration resets M0 around a new Go module, `cmd/zero` entrypoint, Bubble Tea TUI shell, core tools, tests, and validation commands. M1 work should start only after these Go foundation PRs are merged.
-
-### Vasanth
-
-- Tool interface with JSON Schema-compatible parameter validation.
-- Core file tools: read, write, edit, grep, list directory, bash, plan.
-- Basic Bubble Tea TUI and message/tool rendering.
-- Basic agent loop integration.
-- PR: `feat/go-m0-tools-tui`.
-
-### Gnanam
-
-- Define the first Go provider contract for the M0 OpenAI-compatible provider.
-- Define first draft of normalized `Usage` type.
-- Define first draft of model registry type.
-- Review config loader and list missing provider/config fields.
-- PR: `feat/go-m0-runtime-contracts`.
-
-### Anandan
-
-- Add stable project commands: `go test ./...`, `go build ./cmd/zero`, and the npm wrapper smoke checklist.
-- Add initial CI smoke job.
-- Verify Go toolchain version, module cache behavior, and npm wrapper lockfile behavior.
-- Add build artifact smoke check.
-- PR: `feat/m0-ci-scripts`.
-
-### M0 Done
-
-- `go test ./...` passes.
-- `go build ./cmd/zero` passes.
-- npm wrapper smoke checklist exists when npm packaging files are touched.
-- `zero` can run, read a file, edit a file, and stream a response.
-
-### npm Wrapper Smoke Checklist
-
-When npm distribution files are changed, the smoke check must verify:
-
-- `package.json` exists with the expected package name and version.
-- `npm ci` succeeds from the wrapper package directory.
-- The wrapper binary resolves through the package `bin` entry and `node_modules/.bin`.
-- `zero --version` or `zero --help` exits 0 and reports the expected version or command surface.
-- The designated npm smoke/build script exits 0.
-
-## Milestone M1: Multi-Provider And Headless Foundation, Weeks 3-4
-
-Goal: Zero can select models/providers, use Claude/Gemini/OpenAI-compatible providers, and run headless with stable output.
-
-### Vasanth: TUI And CLI Surface
-
-- Model selector UI and `/model` command shell.
-- Reasoning effort UI and `/effort` command shell.
-- Header/footer model display.
-- Streaming output polish in TUI.
-- Headless command surface: parse `zero exec`, flags, output mode selection.
-- Exit code mapping display and CLI user messages.
-- PRs:
-  - `feat/m1-model-selector-ui`
-  - `feat/m1-headless-cli-surface`
-
-### Gnanam: Provider Runtime
-
-- Model registry with 10+ models, cost, context limits, capabilities.
-- Provider factory that resolves model/profile/provider.
-- Anthropic provider with streaming text, tool calls, system prompt, usage.
-- Gemini provider with streaming text, tool calls, usage, vision-ready input shape.
-- Normalized provider event schema and usage type.
-- PRs:
-  - `feat/m1-model-registry`
-  - `feat/m1-provider-factory`
-  - `feat/m1-anthropic-provider`
-  - `feat/m1-gemini-provider`
-
-### Anandan: Build And CI
-
-- Single binary build spike with Go cross-compilation.
-- CI matrix for Linux/macOS/Windows test and build smoke.
-- Release packaging formats: tar.gz for Unix, zip for Windows.
-- Artifact upload on tags or manual workflow.
-- PRs:
-  - `feat/m1-ci-matrix`
-  - `feat/m1-binary-build`
-  - `feat/m1-release-packaging`
-
-### M1 Dependency Order
-
-1. Gnanam lands model registry.
-2. Gnanam lands provider factory.
-3. Vasanth connects model selector to registry.
-4. Gnanam lands Anthropic/Gemini.
-5. Vasanth finishes provider-aware TUI/headless surface.
-6. Anandan packages once scripts and entrypoints are stable.
-
-### M1 Done
-
-- `zero exec -m <model> "list files"` runs through provider factory.
-- OpenAI-compatible provider still works.
-- Anthropic and Gemini providers pass mocked stream tests.
-- Model selector reads registry data.
-- CI runs tests and build checks on PR.
-- Binary build has at least one working platform artifact or documented blocker.
-
-## Milestone M2: Core Commands, Cost, Observability, Install Flow, Weeks 5-8
-
-Goal: Core slash commands work, cost and diagnostics are visible, sessions have a minimal event store, and installation/update flows begin.
-
-### Vasanth: Core Command UX
-
-- Slash command framework and help registry.
-- Session commands UI: `/clear`, `/compact`, `/context`, `/resume`, `/exit`.
-- Model commands UI: `/model`, `/effort`, `/style`.
-- Meta commands UI: `/help`, `/config`, `/doctor`.
-- Tool result truncation and pagination UI.
-- Auto-compaction prompt UX.
-- PRs:
-  - `feat/m2-slash-framework`
-  - `feat/m2-session-model-commands`
-  - `feat/m2-tool-truncation`
-  - `feat/m2-compaction-ui`
-
-### Gnanam: Observability Backend
-
-- Minimal session event store to support cost/search/resume later.
-- Cost tracking from normalized usage and model registry.
-- `zero doctor` backend checks: binary, config, provider, connectivity, model validity.
-- `zero search` backend over local session events.
-- Config inspection and validation API for `/config`.
-- Secret redaction helper used by logs, provider errors, doctor, feedback.
-- PRs:
-  - `feat/m2-minimal-session-events`
-  - `feat/m2-cost-tracking`
-  - `feat/m2-doctor`
-  - `feat/m2-search`
-  - `feat/m2-secret-redaction`
-
-### Anandan: Install, Update, Performance
-
-- Self-update design and `zero update --check`.
-- Install scripts for Linux/macOS and PowerShell draft for Windows.
-- Performance benchmark harness: cold start, binary first-output latency, harness end memory.
-- CI performance smoke job with threshold warnings.
-- Release checksum generation.
-- PRs:
-  - `feat/m2-update-check`
-  - `feat/m2-install-scripts`
-  - `feat/m2-perf-bench`
-  - `feat/m2-release-checksums`
-
-### M2 Command Scope
-
-Fully working in M2:
-
-- `/clear`
-- `/compact`
-- `/context`
-- `/resume`
-- `/exit`
-- `/model`
-- `/effort`
-- `/style`
-- `/help`
-- `/config`
-- `/doctor`
-
-Registered but full backend lands later:
-
-- `/rewind`: full in M3 with session event replay.
-- `/permissions`: full in M4/M6 with permission/grant system.
-- `/init`, `/memory`, `/skills`: full in M4 with memory/skills.
-- `/mcp`, `/hooks`, `/agents`: full in M4 with MCP/hooks/subagents.
-- `/feedback`: full in M3/M5 with integration/redaction.
-
-### M2 Done
-
-- TUI command framework is stable.
-- Core 11 commands work.
-- Cost shows in footer/session summary.
-- `zero doctor` gives redacted pass/warn/fail checks.
-- `zero search` can search persisted local events.
-- Install scripts and update check have smoke tests.
-
-## Milestone M3: Sessions, Stream Protocol, VS Code MVP, Weeks 9-10
-
-Goal: Sessions are durable, stream-json is stable, and VS Code can drive Zero through the protocol.
-
-### Vasanth: TUI Session UX
-
-- Themes: light, dark, custom config.
-- Mouse support for selectors and command palette where feasible.
-- Collapsible tool rows with one-line summaries.
-- `/rewind` interactive UI using Gnanam's session event API.
-- Session picker polish for `/resume` and fork display.
-- PRs:
-  - `feat/m3-themes`
-  - `feat/m3-tool-rows`
-  - `feat/m3-rewind-ui`
-
-### Gnanam: Headless And Sessions
-
-- Full session persistence under `~/.local/share/zero/sessions/<id>/`.
-- Append-only `events.jsonl`.
-- `--resume` and `--fork` support.
-- Stream-json input/output protocol with schema tests.
-- Config validation errors with source paths.
-- Session search indexing improvements.
-- PRs:
-  - `feat/m3-sessions`
-  - `feat/m3-resume-fork`
-  - `feat/m3-stream-json`
-  - `feat/m3-config-validation`
-
-### Anandan: VS Code And Docs Distribution
-
-- VS Code extension MVP using stream-json.
-- Inline chat panel.
-- Diff view integration.
-- Homebrew tap or formula draft.
-- Documentation site skeleton with install and CLI docs.
-- PRs:
-  - `feat/m3-vscode-mvp`
-  - `feat/m3-homebrew`
-  - `feat/m3-docs-site`
-
-### M3 Dependency Order
-
-1. Gnanam freezes stream-json event schema.
-2. Anandan builds VS Code against that schema.
-3. Gnanam lands session resume/fork.
-4. Vasanth wires `/rewind` and session picker.
-5. Anandan documents protocol and install path.
-
-### M3 Done
-
-- Sessions survive process restart.
-- `zero exec --resume <id>` works.
-- `zero exec --fork <id>` creates a new session branch.
-- Stream-json is line-delimited and schema-tested.
-- VS Code MVP can send prompt and render streamed text/tool events.
-
-## Milestone M4: Extensibility, MCP, Skills, Subagents, Weeks 11-14
-
-Goal: Users can extend Zero with memory, skills, hooks, MCP servers, plugins, and subagents.
-
-### Vasanth: Extensibility UX
-
-- `/init` generates project memory scaffold.
-- `/memory` inspect/reload UI.
-- `/skills` manager UI.
-- `/hooks` manager UI.
-- `/mcp` manager UI shell.
-- `/agents` selector UI.
-- PRs:
-  - `feat/m4-memory-ui`
-  - `feat/m4-skills-ui`
-  - `feat/m4-extensibility-commands`
-
-### Gnanam: MCP And Plugin Backend
-
-- MCP client with stdio, HTTP, and SSE transports.
-- Surface MCP tools in Zero tool registry.
-- MCP permissions: per-server and per-tool grants, list/revoke/clear.
-- Local plugin loader from `~/.config/zero/plugins/` and `.zero/plugins/`.
-- Plugin manifest validation with `plugin.json`.
-- MCP server mode: `zero serve --mcp`.
-- Hook config storage and audit events.
-- PRs:
-  - `feat/m4-mcp-client`
-  - `feat/m4-mcp-permissions`
-  - `feat/m4-plugin-loader`
-  - `feat/m4-mcp-server`
-  - `feat/m4-hook-backend`
-
-### Anandan: Subagents And Integration Docs
-
-- Subagent framework using Gnanam's parent/child session linkage.
-- `task` tool implementation for scoped subagents.
-- Built-in agents: code-review, security-review, refactor, test-gen.
-- VS Code support for subagent session tree.
-- Extensibility docs for MCP/plugins/agents.
-- PRs:
-  - `feat/m4-subagent-framework`
-  - `feat/m4-builtin-agents`
-  - `feat/m4-vscode-agents`
-  - `feat/m4-extensibility-docs`
-
-### M4 Dependency Order
-
-1. Gnanam lands MCP tool registry integration.
-2. Vasanth wires `/mcp` UI to backend.
-3. Gnanam lands parent/child session APIs.
-4. Anandan lands subagent framework.
-5. Vasanth wires `/agents` UI.
-
-### M4 Done
-
-- User can add and call an MCP tool.
-- User can list/revoke/clear MCP permissions.
-- User can load a local plugin manifest.
-- User can run `zero serve --mcp`.
-- User can spawn a scoped subagent through `task`.
-- Extensibility commands are fully functional.
-
-## Milestone M5: Advanced Agent Operations, Weeks 15-20
-
-Goal: Zero can verify work, manage git/test flows, and assist code review.
-
-### Vasanth: Advanced Tool UX
-
-- `web_fetch` and `web_search` tools with safe display and truncation.
-- LSP diagnostics display in TUI.
-- Typecheck/lint result rendering.
-- Rich test failure rendering in TUI.
-- Review summary UI for agent findings.
-- PRs:
-  - `feat/m5-web-tools-ui`
-  - `feat/m5-diagnostics-ui`
-  - `feat/m5-verification-ui`
-
-### Gnanam: Git And Verification Backend
-
-- Git worktree isolation per task.
-- Auto-commit backend: detect changes and generate commit messages.
-- Test runner detection and execution.
-- Parse test results into structured summaries.
-- Self-verification loop: run checks after edits, retry within budget.
-- PRs:
-  - `feat/m5-worktrees`
-  - `feat/m5-autocommit`
-  - `feat/m5-test-runner`
-  - `feat/m5-self-verify`
-
-### Anandan: GitHub And Review Automation
-
-- GitHub API integration for PR metadata and comments.
-- Automated code-review workflow using built-in agent.
-- Security-review workflow.
-- Dependency update detection.
-- CI integration for agent-generated reports.
-- PRs:
-  - `feat/m5-github-integration`
-  - `feat/m5-code-review-agent`
-  - `feat/m5-security-review-agent`
-  - `feat/m5-dependency-updates`
-
-### M5 Dependency Order
-
-1. Gnanam lands git/test backend APIs.
-2. Vasanth renders verification output.
-3. Anandan builds GitHub PR review workflow on git/test/session APIs.
-4. Anandan publishes CI report integration.
-
-### M5 Done
-
-- Zero can create/use a git worktree for a task.
-- Zero can run project tests and parse failures.
-- Zero can self-verify after edits.
-- Zero can produce a code-review report.
-- GitHub PR comment posting works when configured.
-
-## Milestone M6: Sandbox And Security, Weeks 21-24
-
-Goal: Zero can safely run higher-autonomy workflows with OS-aware sandboxing and durable permission grants.
-
-### Vasanth: Security UX
-
-- Permission prompts: allow, deny, always allow, always deny.
-- Autonomy level UI: low, medium, high.
-- Permission audit log view.
-- Sandbox violation rendering.
-- Security warnings in TUI and headless text output.
-- PRs:
-  - `feat/m6-permission-prompts`
-  - `feat/m6-autonomy-ui`
-  - `feat/m6-audit-ui`
-
-### Gnanam: Sandbox Backend
-
-- Shared sandbox policy interface.
-- Linux sandbox using bubblewrap.
-- macOS sandbox using sandbox-exec or best available policy backend.
-- Persistent grants: allow/deny list/revoke/clear.
-- Network and filesystem policy enforcement.
-- Structured sandbox violation errors.
-- PRs:
-  - `feat/m6-sandbox-policy`
-  - `feat/m6-sandbox-linux`
-  - `feat/m6-sandbox-macos`
-  - `feat/m6-persistent-grants`
-
-### Anandan: Windows And Release Security
-
-- Windows sandbox using AppContainer or best supported Windows isolation.
-- Release signing/checksum verification.
-- Security CI hardening.
-- Dependency vulnerability scanning.
-- Security audit and penetration test coordination.
-- PRs:
-  - `feat/m6-sandbox-windows`
-  - `feat/m6-release-signing`
-  - `feat/m6-security-ci`
-  - `feat/m6-security-audit`
-
-### M6 Dependency Order
-
-1. Gnanam lands shared sandbox policy interface.
-2. Vasanth wires prompts to the shared policy.
-3. Gnanam implements Linux/macOS policy adapters.
-4. Anandan implements Windows adapter using same policy.
-5. Anandan finalizes release security.
-
-### M6 Done
-
-- `zero --auto high` uses permission policy and sandbox backend.
-- Persistent grants work across sessions.
-- Linux/macOS sandboxing works or has documented OS-specific fallback.
-- Windows sandbox adapter works or has documented fallback.
-- Security audit findings are triaged and fixed or accepted.
-
-## Slash Command Ownership Matrix
-
-| Command | UI owner | Backend owner | Fully done by | Notes |
-|---|---|---|---|---|
-| `/clear` | Vasanth | Gnanam | M2 | New session/reset event. |
-| `/compact` | Vasanth | Gnanam | M2 | Requires token/cost/context backend. |
-| `/context` | Vasanth | Gnanam | M2 | Registry + usage + tool/MCP context. |
-| `/rewind` | Vasanth | Gnanam | M3 | Requires durable event store. |
-| `/resume` | Vasanth | Gnanam | M3 | M2 can list minimal sessions; M3 full resume/fork. |
-| `/exit` | Vasanth | Gnanam | M2 | Must flush session-end event. |
-| `/model` | Vasanth | Gnanam | M1/M2 | Registry lands M1, UI polished M2. |
-| `/effort` | Vasanth | Gnanam | M1/M2 | Reasoning metadata from registry. |
-| `/style` | Vasanth | Vasanth | M2 | UI/config preference only unless style affects prompts. |
-| `/permissions` | Vasanth | Gnanam | M4/M6 | MCP permissions in M4, sandbox grants in M6. |
-| `/init` | Vasanth | Vasanth | M4 | Project memory scaffold. |
-| `/memory` | Vasanth | Vasanth | M4 | Memory inspect/reload. |
-| `/skills` | Vasanth | Gnanam | M4 | UI by Vasanth; plugin-provided skills backend by Gnanam. |
-| `/mcp` | Vasanth | Gnanam | M4 | MCP client/server/backend by Gnanam. |
-| `/hooks` | Vasanth | Gnanam | M4 | UI by Vasanth; hook config/audit backend by Gnanam. |
-| `/agents` | Vasanth | Anandan | M4 | Requires Gnanam parent/child session API. |
-| `/help` | Vasanth | Vasanth | M2 | Command metadata registry. |
-| `/config` | Vasanth | Gnanam | M2/M3 | Inspect in M2, validation source errors in M3. |
-| `/doctor` | Vasanth | Gnanam | M2 | Backend CLI and TUI share same checks. |
-| `/feedback` | Vasanth | Anandan | M3/M5 | Redaction by Gnanam; GitHub/product integration by Anandan. |
-
-## Headless Exec Ownership
-
-Headless `exec` is split to avoid conflict:
-
-| Area | Owner | Scope |
-|---|---|---|
-| CLI command and flags | Vasanth | `zero exec`, `--model`, `--output-format`, help text, exit message display. |
-| Runtime execution | Gnanam | Provider factory, stream events, usage, tool loop hooks, session recording, stream-json. |
-| Packaging and CI | Anandan | Binary command works across platforms, CI tests headless modes, release artifacts. |
-
-## Permission Ownership
-
-| Area | Owner | Scope |
-|---|---|---|
-| Prompt UI | Vasanth | Allow/deny/always controls and TUI display. |
-| Policy engine | Gnanam | Risk classification, grants, persistent decisions, MCP permissions, sandbox policy. |
-| Platform adapters | Gnanam + Anandan | Gnanam owns Linux/macOS; Anandan owns Windows using same policy. |
-
-## Definition Of Done Per PR
-
-Every PR must include:
-
-- Tests for changed behavior.
-- `go test ./...` must pass when the PR modifies any Go code; docs-only PRs are exempt and must say so in the PR description.
-- `go build ./cmd/zero` must pass when the PR modifies `cmd/zero` or runtime packages used by the entrypoint; docs-only and npm-wrapper-only PRs are exempt and must say so in the PR description.
-- The npm wrapper smoke checklist must pass when the PR modifies npm distribution files.
-- PR description explains what changed and why.
-- No unrelated refactors.
-- Redaction used for secrets in logs/errors/tests.
-- Cross-owner API changes include a small contract note or test.
-
-## Review Rotation
-
-| Author | Primary reviewer | Secondary reviewer when cross-owner |
-|---|---|---|
-| Vasanth | Gnanam | Anandan for distribution/VS Code impact |
-| Gnanam | Anandan | Vasanth for TUI/UX impact |
-| Anandan | Vasanth | Gnanam for runtime/protocol impact |
-
-## Balanced Workload Summary
-
-| Milestone | Vasanth load | Gnanam load | Anandan load |
-|---|---|---|---|
-| M0 | Core tools + TUI baseline | Runtime contracts | Scripts + CI baseline |
-| M1 | Model/headless UI | Registry + providers | CI + binary + packaging |
-| M2 | Core slash UX + compaction UI | Cost + doctor + search + events | Install + update + perf |
-| M3 | Session UI + themes | Sessions + stream-json | VS Code + docs + Homebrew |
-| M4 | Extensibility UI | MCP + plugins + permissions | Subagents + agent docs |
-| M5 | Verification/web UX | Git + tests + self-verify | GitHub review automation |
-| M6 | Security UX | Linux/macOS sandbox + grants | Windows sandbox + release security |
-
-This keeps workload balanced while preserving clean ownership boundaries.
-
-## Immediate Next Steps
-
-1. Reset M0 for the Go migration and treat old TS/Bun PR #6 as historical only.
-2. Anandan starts `feat/go-m0-module-entrypoint` with `go.mod`, `cmd/zero`, `go test ./...`, and `go build ./cmd/zero`.
-3. Gnanam starts `feat/go-m0-runtime-contracts` for the Go provider/tool/runtime contracts.
-4. Vasanth starts `feat/go-m0-tools-tui` for core tools, Bubble Tea startup shell, and basic agent loop integration.
-5. Anandan adds CI smoke coverage for the Go commands and the npm wrapper smoke checklist when wrapper files land.
-6. Start M1 model registry, provider factory, and model selector work only after the Go M0 foundation PRs are merged.
+The current main branch is Go-native for the runtime and CLI.
 
+Implemented baseline:
+
+- `cmd/zero` is the primary CLI entrypoint.
+- `cmd/zero-pr-review` exists for PR automation workflows.
+- Core runtime packages live under `internal/`.
+- Current CLI surface includes `exec`, `config`, `models`, `providers`, `doctor`, `search`, `sessions`, `plugins`, `hooks`, `mcp`, `sandbox`, `update`, `worktrees`, `verify`, `changes`, `serve`, `help`, and `version`.
+- Core areas exist for agent flow, provider/model registry, tools, TUI, sessions, search, sandbox, self-verification, stream-json, usage, redaction, hooks, MCP, plugins, update, worktrees, and git/change handling.
+- TypeScript is no longer the runtime. Remaining TypeScript should be treated as npm/package support, scripts, or legacy test support until each file is explicitly retired or rewritten.
+
+Still needed before Zero feels production-ready:
+
+- Permission and sandbox UX must become clearer and harder to misuse.
+- TUI command flows need polish beyond basic rendering.
+- Platform behavior, especially Windows sandbox/update/install paths, needs stronger product ownership.
+- Review automation should produce useful, repeatable output for maintainers.
+- Release trust needs checksums, install smoke tests, and update verification.
+
+## 3. Ownership Rules
+
+- Every feature has one DRI.
+- UI, runtime, and platform work should be split by contract, not by vague file ownership.
+- Every PR must expose user-runnable behavior or a concrete contract consumed by another owner.
+- Docs, CI, and website work can support a product PR, but they should not be the whole lane for any owner.
+- Anandan must own platform product work, not only docs/site/CI.
+- Shared contracts should be agreed before large UI or integration work lands.
+- Keep PRs large enough to move the product forward, but still reviewable.
+
+## 4. Team Roles
+
+| Owner | Primary Role | Owns | Should Not Own Alone |
+| --- | --- | --- | --- |
+| Vasanth | Product UX and TUI owner | Bubble Tea TUI, startup screen, command palette, slash command UX, tool rendering, permission prompts, sandbox violation rendering, verification/test/git output UX, themes, daily CLI feel | Provider internals, release pipeline, platform adapters |
+| Gnanam | Runtime core owner | Provider/model registry, provider factory, agent/runtime protocols, stream-json, sessions/search backends, config/doctor/usage/redaction, MCP/hooks/plugins backend, sandbox policy/grants, permission event contract | TUI composition, release packaging, platform-specific install trust |
+| Anandan | Platform product owner | Install/update/release trust, binary/package smoke tests, platform sandbox adapters, Windows behavior, PR/review automation CLI, CI as product verification, performance and release checks | TUI rendering, provider semantics, model registry ownership |
+
+## 5. Anandan Platform Product Rule
+
+Anandan should not be assigned only docs/site/CI forever. His lane must produce platform behavior that users and maintainers can run.
+
+Accepted Anandan work:
+
+- `zero sandbox policy` improvements and platform-specific sandbox behavior.
+- Windows sandbox adapter behavior and clear fallback reporting.
+- `zero update` verification, release metadata validation, and install smoke tests.
+- Package and binary checksums.
+- PR automation CLI workflows that reviewers can run locally or in CI.
+- CI jobs that prove real Zero commands work after installation.
+
+Not accepted as standalone Anandan work:
+
+- Docs-only updates.
+- Website-only updates.
+- Future VS Code notes with no current CLI behavior.
+- CI matrix changes that do not prove a user-facing command or release flow.
+- Release notes or checklists without executable validation.
+
+Docs and CI are still useful, but they must attach to real platform product behavior.
+
+## 6. Shared Contracts
+
+| Contract | DRI | Consumers | Purpose |
+| --- | --- | --- | --- |
+| Provider stream events | Gnanam | Vasanth, Anandan | Lets TUI and automation render model output, tool calls, and errors consistently. |
+| Permission and sandbox events | Gnanam | Vasanth, Anandan | Lets TUI ask for decisions and platform code enforce them without bypasses. |
+| Session event schema | Gnanam | Vasanth, Anandan | Lets TUI, resume, search, and automation share one session model. |
+| Command metadata registry | Vasanth | Gnanam, Anandan | Lets slash commands, help, shell completions, and docs use one command source. |
+| Platform/release contract | Anandan | Vasanth, Gnanam | Defines install, update, checksum, smoke, and platform capability results. |
+| Stream-json protocol | Gnanam | Anandan | Lets CI and PR automation consume Zero output without scraping text UI. |
+
+## 7. Active Workstreams
+
+### A. Safe Autonomy
+
+Top priority. Zero must be able to run tools confidently while showing users what is happening and asking when risk increases.
+
+Planned PRs:
+
+- Vasanth: `feat/tui-sandbox-permissions`
+  - permission prompt UX
+  - allow, deny, and always-allow flows
+  - sandbox violation rendering
+  - `/permissions` or equivalent permission state UI
+- Gnanam: `feat/runtime-permission-events`
+  - structured permission request events
+  - sandbox grant contract
+  - stream-json support
+  - tests for denial, approval, and violation cases
+- Anandan: `feat/windows-sandbox-platform`
+  - platform sandbox capability checks
+  - stronger Windows behavior or explicit safe fallback
+  - `zero sandbox policy --json` output useful enough for CI and support
+  - platform tests where possible
+
+Done when:
+
+- High-autonomy tool attempts produce a clear prompt, decision, and result in TUI and headless modes.
+- Denied commands do not run.
+- Sandbox violations are visible and actionable.
+- Platform fallback is explicit, tested, and not silently unsafe.
+
+### B. Command UX And Daily CLI
+
+The CLI should feel like a product, not a collection of backend commands.
+
+Planned PRs:
+
+- Vasanth: `feat/tui-command-polish`
+  - `/model`, `/provider`, `/context`, `/doctor`, `/verify`, `/resume`, and `/compact` become clear interactive flows
+  - command results render consistently
+  - startup screen stays minimal until the user asks for panels
+- Gnanam: `feat/runtime-command-contracts`
+  - stable command data APIs
+  - provider/model/session/config result structs
+  - error types suitable for TUI rendering
+- Anandan: `feat/install-update-user-flow`
+  - `zero update` and install flows are user-runnable
+  - package smoke command verifies installed binary behavior
+  - CI proves the packaged command starts and reports version/help
+
+Done when:
+
+- A new user can run Zero, inspect config/provider/model state, and understand the next action without reading source.
+
+### C. Verification And Review Automation
+
+Zero should help maintainers verify changes and review PRs with repeatable local commands.
+
+Planned PRs:
+
+- Vasanth: `feat/tui-verification-results`
+  - render verify/test/git/review results in TUI
+  - show pass/fail/blocked states clearly
+- Gnanam: `feat/runtime-self-verify-contract`
+  - structured verification results
+  - stable test/change event model
+  - redacted logs for model and automation use
+- Anandan: `feat/pr-review-cli-workflow`
+  - make `cmd/zero-pr-review` or `zero review` useful for changed files, validations, and summary output
+  - support local and CI invocation
+  - avoid brittle text scraping where stream-json can be used
+
+Done when:
+
+- A maintainer can run one local command before review and get useful changed-file, validation, and risk output.
+
+### D. Release Trust And Distribution
+
+This is Anandan's main product lane after platform sandbox work.
+
+Planned PRs:
+
+- Anandan: `feat/release-trust`
+  - release metadata validation
+  - checksums
+  - install smoke tests
+  - update verification
+  - clear error output when release artifacts are invalid
+- Vasanth:
+  - consume release/update results in CLI UX where needed
+- Gnanam:
+  - ensure config, errors, and logs are structured and redacted
+
+Done when:
+
+- Users can install, run, verify, and update Zero with confidence.
+- Maintainers can prove release artifacts work before publishing.
+
+### E. Extensibility UX
+
+This comes after safe autonomy and daily CLI polish.
+
+Planned PRs:
+
+- Vasanth:
+  - `/mcp`, `/hooks`, `/plugins`, and related UI flows
+- Gnanam:
+  - harden backend contracts and lifecycle behavior
+- Anandan:
+  - automation and docs only after executable behavior exists
+
+Done when:
+
+- Extensibility feels discoverable and safe from the terminal.
+
+## 8. Immediate Next PRs
+
+These are the next reviewable slices. Do not use the old migration-era next steps.
+
+1. Vasanth: `feat/tui-sandbox-permissions`
+2. Gnanam: `feat/runtime-permission-events`
+3. Anandan: `feat/windows-sandbox-platform`
+4. Anandan: `feat/update-release-verification`
+5. Vasanth: `feat/tui-command-polish`
+6. Gnanam: `feat/session-rewind-compaction-contract`
+
+Recommended first parallel set:
+
+- Vasanth starts the TUI permission prompt and violation display.
+- Gnanam defines the permission event/grant contract.
+- Anandan owns Windows/platform sandbox reporting and tests.
+
+## 9. Command Ownership Matrix
+
+| Command Area | Vasanth | Gnanam | Anandan |
+| --- | --- | --- | --- |
+| `exec` | TUI and interactive UX | Runtime execution contract | Package smoke and platform validation |
+| `sandbox` | Prompt and violation UX | Policy, grants, and events | Platform adapters and Windows behavior |
+| `update` | Display and user messaging | Config and redacted errors | Primary owner of update verification |
+| `verify` | Result rendering | Verification backend contract | CI and release integration |
+| `changes` | TUI rendering | Change detection backend | PR automation integration |
+| `mcp`, `hooks`, `plugins`, `serve` | Discoverability and UI | Backend lifecycle and contracts | Automation/docs after behavior exists |
+| `sessions`, `search` | Resume/search UX | Storage, query, and event model | Stream-json and automation consumers |
+
+## 10. Definition Of Done
+
+For every code PR:
+
+- Add or update tests for the changed behavior.
+- Run `go test ./...` when Go files changed.
+- Run the relevant build command when CLI entrypoints changed.
+- Run package smoke checks when install/update/npm wrapper files changed.
+- Include manual CLI output or screenshots only when they prove a user-facing flow.
+
+For docs-only PRs:
+
+- State clearly that no runtime behavior changed.
+- Do not use docs-only PRs as a substitute for platform product work.
+
+For Anandan's PRs specifically:
+
+- Must include one of:
+  - user-runnable command behavior
+  - install/update/release artifact verification
+  - platform adapter behavior
+  - CI that executes real installed Zero commands
+- Docs/CI can support the PR, but cannot be the entire value.
+
+## 11. Review Rotation
+
+- Vasanth PRs:
+  - Gnanam reviews runtime contracts.
+  - Anandan reviews platform/release impact when touched.
+- Gnanam PRs:
+  - Vasanth reviews user-facing contract impact.
+  - Anandan reviews platform/protocol impact when touched.
+- Anandan PRs:
+  - Vasanth reviews user-facing CLI behavior.
+  - Gnanam reviews runtime contract and safety impact.
+
+## 12. Retired Historical Plan
+
+The old M0-M6 TypeScript-to-Go migration schedule is now historical.
+
+Do not assign new work from the old migration next-steps section. The Go migration foundation has already landed on main. Future work should move Zero from "ported" to "mature terminal coding agent."
