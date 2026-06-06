@@ -163,8 +163,8 @@ internal/
   streamjson/            # headless stream-json protocol
   mcp/ plugins/ hooks/   # extension-facing runtime surfaces
 bin/                     # npm wrapper entrypoint
-scripts/                 # Bun install/perf scripts, installers, and npm helpers
-tests/                   # Bun tests for wrapper/build/release scripts
+scripts/                 # installers and npm helper scripts
+tests/                   # Bun tests for wrapper/install scripts
 docs/                    # PRD + protocol/install/perf docs
 ```
 

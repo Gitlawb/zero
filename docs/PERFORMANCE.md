@@ -5,10 +5,13 @@ The M2 performance harness tracks three release-facing signals:
 - Cold start: process startup time for `zero --version`.
 - Binary first output: time from spawning the built `zero --version` command to
   the first stdout or stderr chunk.
-- Harness end memory: RSS for the Bun benchmark harness after the spawned
+- Harness end memory: RSS for the Go benchmark harness after the spawned
   command exits, plus the delta from the pre-spawn RSS sample.
 
 Cold start uses the built Go binary at `./zero` or `./zero.exe`. Run `bun run build` before the benchmark so it measures the production runtime rather than the old TypeScript entrypoint.
+On Linux the harness memory metric reads RSS from `/proc/self/statm`; on other
+hosts it falls back to Go runtime memory when process RSS is not available from
+the standard library.
 
 This smoke benchmark does not measure provider TTFT or Go agent memory. A
 provider-aware Go benchmark should be added separately when the runtime exposes a
@@ -44,7 +47,7 @@ The default sample count is intentionally small for CI smoke coverage. `p95` use
 Override thresholds with CLI flags:
 
 ```bash
-bun run scripts/perf-bench.ts --cold-start-warn-ms=350 --first-output-warn-ms=600 --harness-end-rss-warn-mb=384
+bun run perf:bench --cold-start-warn-ms=350 --first-output-warn-ms=600 --harness-end-rss-warn-mb=384
 ```
 
 Or with environment variables:

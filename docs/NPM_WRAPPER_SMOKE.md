@@ -1,8 +1,8 @@
 # npm Wrapper Smoke Checklist
 
 Run this checklist when a PR changes npm distribution files such as
-`package.json`, `bun.lock`, `bin/zero.ts`, `scripts/npm-wrapper.ts`, build scripts,
-Go release tooling, or the npm `bin` wrapper.
+`package.json`, `bun.lock`, `bin/zero.ts`, `scripts/npm-wrapper.ts`, Go build or
+release tooling, or the npm `bin` wrapper.
 
 ## Required Checks
 

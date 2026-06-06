@@ -19,8 +19,8 @@
     "review:pr": "go run ./cmd/zero-pr-review",
     "package:release": "go run ./cmd/zero-release package",
     "verify:release": "go run ./cmd/zero-release verify",
-    "perf:bench": "bun run scripts/perf-bench.ts",
-    "perf:smoke": "bun run scripts/perf-bench.ts --output dist/perf/perf-bench.json"
+    "perf:bench": "go run ./cmd/zero-perf-bench",
+    "perf:smoke": "go run ./cmd/zero-perf-bench --output dist/perf/perf-bench.json"
   },
   "devDependencies": {
     "@types/bun": "latest",

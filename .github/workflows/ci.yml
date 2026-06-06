@@ -83,7 +83,7 @@ jobs:
         run: bun run build
 
       - name: Performance smoke
-        run: bun run scripts/perf-bench.ts --ci --output dist/perf/perf-bench.json
+        run: bun run perf:smoke --ci
 
       - name: Upload performance report
         if: always()
