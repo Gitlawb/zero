@@ -46,7 +46,6 @@ func (m model) toolsText() string {
 func (m model) permissionsText() string {
 	stateLines := []string{
 		"Permission mode: " + string(m.permissionMode),
-		"mode: " + string(m.permissionMode),
 	}
 	if m.sandboxStore == nil {
 		return renderCommandOutput(commandOutput{
@@ -98,7 +97,6 @@ func (m model) permissionsText() string {
 
 func (m model) providerText() string {
 	profileLines := []string{
-		"active: " + displayValue(m.providerName, "none"),
 		"provider: " + displayValue(m.providerName, "none"),
 		"model: " + displayValue(m.modelName, "none"),
 	}
@@ -131,7 +129,7 @@ func (m model) modelText(args string) string {
 		Sections: []commandSection{{
 			Title: "Active",
 			Lines: []string{
-				"Active model: " + displayValue(m.modelName, "none"),
+				"model: " + displayValue(m.modelName, "none"),
 				"provider: " + displayValue(m.providerName, "none"),
 				"effort: " + m.effortDisplay(),
 			},
@@ -170,7 +168,6 @@ func (m model) contextText() string {
 			{
 				Title: "Tools",
 				Lines: []string{
-					fmt.Sprintf("tools: %d", toolCount),
 					fmt.Sprintf("registered tools: %d", toolCount),
 				},
 			},

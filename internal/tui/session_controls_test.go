@@ -121,6 +121,9 @@ func TestCompactCommandRecordsShellRequest(t *testing.T) {
 	if next.compactRequests != 1 {
 		t.Fatalf("status should not add compact requests, got %d", next.compactRequests)
 	}
+	if got := next.transcript[len(next.transcript)-1].text; !strings.Contains(got, "status: info") {
+		t.Fatalf("expected /compact status to render info status, got %q", got)
+	}
 }
 
 func TestUsageEventsUpdateFooterAndContext(t *testing.T) {

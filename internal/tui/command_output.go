@@ -1,13 +1,10 @@
 package tui
 
 import (
-	"regexp"
 	"strings"
-)
 
-var commandOutputSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\bsk-[A-Za-z0-9._-]+\b`),
-}
+	"github.com/Gitlawb/zero/internal/redaction"
+)
 
 type commandStatus string
 
@@ -110,18 +107,11 @@ func normalizeCommandStatus(status commandStatus) commandStatus {
 
 func compactCommandOutputText(text string) string {
 	text = strings.Join(strings.Fields(text), " ")
-	for _, pattern := range commandOutputSecretPatterns {
-		text = pattern.ReplaceAllString(text, "[REDACTED]")
-	}
-	return text
+	return redaction.RedactString(text, redaction.Options{})
 }
 
 func renderCommandOutput(output commandOutput) string {
 	return formatCommandOutput(output)
-}
-
-func commandFieldLine(key string, value string) string {
-	return compactCommandOutputText(key) + ": " + displayValue(compactCommandOutputText(value), "none")
 }
 
 func commandBullet(value string) string {

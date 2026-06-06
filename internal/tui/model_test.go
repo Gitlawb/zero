@@ -384,7 +384,7 @@ func TestContextCommandShowsSessionState(t *testing.T) {
 		"permission mode: ask",
 		"max turns:",
 		"session root:",
-		"tools: 1",
+		"registered tools: 1",
 	} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected context transcript to contain %q, got %#v", want, next.transcript)

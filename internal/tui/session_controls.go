@@ -168,8 +168,6 @@ func (m model) compactText(requested bool) string {
 	status := commandStatusInfo
 	if requested {
 		status = commandStatusWarning
-	} else {
-		status = commandStatusWarning
 	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Compact",

@@ -109,15 +109,25 @@ func TestFormatCommandOutputRedactsTokenLikeText(t *testing.T) {
 		Status: commandStatusOK,
 		Sections: []commandSection{{
 			Title: "Sandbox grants",
-			Lines: []string{"bash [allow/high] - sk-sensitive approved shell"},
+			Lines: []string{
+				"bash [allow/high] - sk-proj-sensitive-token-value approved shell",
+				"anthropic: sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+				"google: AIza1234567890abcdef",
+			},
 		}},
 	})
 
-	if strings.Contains(got, "sk-sensitive") {
-		t.Fatalf("expected token-like text to be redacted, got:\n%s", got)
+	for _, secret := range []string{
+		"sk-proj-sensitive-token-value",
+		"sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+		"AIza1234567890abcdef",
+	} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("expected token-like text to be redacted, got:\n%s", got)
+		}
 	}
 	if !strings.Contains(got, "[REDACTED] approved shell") {
-		t.Fatalf("expected redaction marker in command output, got:\n%s", got)
+		t.Fatalf("expected token-like text to be redacted, got:\n%s", got)
 	}
 }
 

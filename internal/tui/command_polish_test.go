@@ -62,7 +62,7 @@ func TestProviderAndConfigCommandsUseStableStatusOutput(t *testing.T) {
 		t.Fatal("expected /provider to be handled without starting an agent run")
 	}
 	providerText := transcriptText(next.transcript)
-	for _, want := range []string{"Provider", "status: ok", "active: openai", "model: gpt-4.1", "api key: set"} {
+	for _, want := range []string{"Provider", "status: ok", "provider: openai", "model: gpt-4.1", "api key: set"} {
 		assertContains(t, providerText, want)
 	}
 	assertNotContains(t, providerText, "sk-sensitive")
@@ -151,7 +151,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		t.Fatal("expected /permissions to be handled without starting an agent run")
 	}
 	permissionText := transcriptText(next.transcript)
-	for _, want := range []string{"Permissions", "status: ok", "mode: ask", "persistent grants: 1", "bash [allow/high]", "[REDACTED]"} {
+	for _, want := range []string{"Permissions", "status: ok", "Permission mode: ask", "persistent grants: 1", "bash [allow/high]", "[REDACTED]"} {
 		assertContains(t, permissionText, want)
 	}
 	assertNotContains(t, permissionText, "sk-proj-sensitive")
