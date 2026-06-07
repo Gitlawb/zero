@@ -107,6 +107,12 @@ func gitBranchForPrompt(cwd string) string {
 		if dir == "" {
 			return ""
 		}
+		// In worktree mode the gitdir is often RELATIVE (e.g.
+		// "gitdir: ../.git/worktrees/<name>") — resolve it against cwd, not the
+		// process working directory, or HEAD lookup fails and we drop the branch.
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
 		headPath = filepath.Join(dir, "HEAD")
 	}
 	data, err := os.ReadFile(headPath)

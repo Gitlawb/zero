@@ -815,6 +815,29 @@ func TestSystemPromptEmbedsConfirmationPolicy(t *testing.T) {
 	}
 }
 
+func TestGitBranchForPromptResolvesRelativeWorktreeGitdir(t *testing.T) {
+	root := t.TempDir()
+	// The real gitdir for the worktree, where HEAD lives.
+	gitdir := filepath.Join(root, "realgit", "worktrees", "wt")
+	if err := os.MkdirAll(gitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitdir, "HEAD"), []byte("ref: refs/heads/feature-x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The worktree checkout: a .git FILE pointing at the gitdir via a RELATIVE path.
+	worktree := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: ../realgit/worktrees/wt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitBranchForPrompt(worktree); got != "feature-x" {
+		t.Fatalf("gitBranchForPrompt = %q, want feature-x (relative worktree gitdir resolved against cwd)", got)
+	}
+}
+
 func TestBuildSystemPromptInjectsWorkspaceContext(t *testing.T) {
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.md"), []byte("Always run `make lint` before committing."), 0o644); err != nil {
