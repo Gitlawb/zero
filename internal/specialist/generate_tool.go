@@ -31,7 +31,7 @@ func (tool *GenerateTool) Name() string {
 }
 
 func (tool *GenerateTool) Description() string {
-	return "Create a local Zero specialist profile from a designed name, description, and system prompt."
+	return "Create a project-local Zero specialist profile from a designed name, description, and system prompt."
 }
 
 func (tool *GenerateTool) Parameters() tools.Schema {
@@ -52,13 +52,14 @@ func (tool *GenerateTool) Parameters() tools.Schema {
 			},
 			"location": {
 				Type:        "string",
-				Description: "Where to save the specialist.",
-				Enum:        []string{"user", "project"},
-				Default:     "user",
+				Description: "Where to save the specialist. GenerateSpecialist is project-scoped.",
+				Enum:        []string{"project"},
+				Default:     "project",
 			},
 			"tools": {
 				Type:        "array",
 				Description: "Tool categories or tool ids for the specialist, such as read-only, edit, execute, or plan.",
+				Items:       &tools.PropertySchema{Type: "string"},
 			},
 			"overwrite": {
 				Type:        "boolean",
@@ -75,7 +76,7 @@ func (tool *GenerateTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect:      tools.SideEffectWrite,
 		Permission:      tools.PermissionPrompt,
-		Reason:          "Writes a specialist profile to disk.",
+		Reason:          "Writes a project specialist profile inside the workspace.",
 		AdvertiseInAuto: true,
 	}
 }
@@ -146,6 +147,8 @@ func parseGenerateParameters(args map[string]any) (generateParameters, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = slugFromDescription(description)
+	} else if !namePattern.MatchString(name) {
+		return generateParameters{}, fmt.Errorf("invalid specialist name %q: use lowercase letters, numbers, and dashes", name)
 	}
 	locationValue, err := parseWritableLocation(location)
 	if err != nil {
@@ -177,7 +180,7 @@ func optionalStringList(args map[string]any, key string) ([]string, error) {
 		for _, item := range typed {
 			text, ok := item.(string)
 			if !ok {
-				return nil, fmt.Errorf("task %s must be an array of strings", key)
+				return nil, fmt.Errorf("parameter %s must be an array of strings", key)
 			}
 			values = append(values, text)
 		}
@@ -185,18 +188,16 @@ func optionalStringList(args map[string]any, key string) ([]string, error) {
 	case string:
 		return SplitToolList(typed), nil
 	default:
-		return nil, fmt.Errorf("task %s must be an array of strings", key)
+		return nil, fmt.Errorf("parameter %s must be an array of strings", key)
 	}
 }
 
 func parseWritableLocation(value string) (Location, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "user":
-		return LocationUser, nil
-	case "project":
+	case "", "project":
 		return LocationProject, nil
 	default:
-		return "", fmt.Errorf("generate specialist location must be user or project")
+		return "", fmt.Errorf("generate specialist location must be project")
 	}
 }
 

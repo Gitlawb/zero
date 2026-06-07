@@ -252,6 +252,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.runTUI == nil {
 		deps.runTUI = defaults.runTUI
 	}
+	if deps.runEditor == nil {
+		deps.runEditor = defaults.runEditor
+	}
 	if deps.checkUpdate == nil {
 		deps.checkUpdate = defaults.checkUpdate
 	}

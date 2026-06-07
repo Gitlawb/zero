@@ -322,11 +322,15 @@ func runSpecialistEdit(paths specialist.Paths, name string, options specialistOp
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	if _, err := os.Stat(path); err != nil {
+	info, err := os.Lstat(path)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return writeExecUsageError(stderr, "specialist not found: "+name)
 		}
 		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return writeExecUsageError(stderr, "refusing to edit symlink specialist file: "+path)
 	}
 	runEditor := deps.runEditor
 	if runEditor == nil {

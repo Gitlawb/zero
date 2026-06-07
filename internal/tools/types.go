@@ -46,12 +46,13 @@ type Schema struct {
 }
 
 type PropertySchema struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
-	Default     any      `json:"default,omitempty"`
-	Minimum     *int     `json:"minimum,omitempty"`
-	Maximum     *int     `json:"maximum,omitempty"`
+	Type        string          `json:"type"`
+	Description string          `json:"description,omitempty"`
+	Enum        []string        `json:"enum,omitempty"`
+	Default     any             `json:"default,omitempty"`
+	Items       *PropertySchema `json:"items,omitempty"`
+	Minimum     *int            `json:"minimum,omitempty"`
+	Maximum     *int            `json:"maximum,omitempty"`
 }
 
 type Result struct {

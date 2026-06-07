@@ -491,6 +491,9 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 	if property.Default != nil {
 		schema["default"] = property.Default
 	}
+	if property.Items != nil {
+		schema["items"] = propertyToRuntimeMap(*property.Items)
+	}
 	if property.Minimum != nil {
 		schema["minimum"] = *property.Minimum
 	}

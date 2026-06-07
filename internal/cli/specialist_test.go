@@ -185,6 +185,44 @@ func TestRunSpecialistCreateDeleteAndEdit(t *testing.T) {
 	}
 }
 
+func TestRunSpecialistEditRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs extra privileges on Windows")
+	}
+	cwd := t.TempDir()
+	configRoot := setSpecialistConfigRoot(t)
+	userDir := filepath.Join(configRoot, "zero", "specialists")
+	if err := os.MkdirAll(userDir, 0o700); err != nil {
+		t.Fatalf("create specialist dir: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "target.md")
+	if err := os.WriteFile(target, []byte("do not edit"), 0o600); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	link := filepath.Join(userDir, "linked.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("create symlink: %v", err)
+	}
+	deps := appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		runEditor: func(path string) error {
+			t.Fatalf("editor should not be invoked for symlink path %s", path)
+			return nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"specialist", "edit", "linked"}, &stdout, &stderr, deps)
+
+	if exitCode != exitUsage {
+		t.Fatalf("exitCode = %d, want usage; stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing to edit symlink") {
+		t.Fatalf("expected symlink refusal, got %q", stderr.String())
+	}
+}
+
 func TestRunSpecialistCreateProjectAndRejectDuplicate(t *testing.T) {
 	cwd := t.TempDir()
 	setSpecialistConfigRoot(t)
