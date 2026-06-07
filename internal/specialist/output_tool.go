@@ -121,12 +121,20 @@ func (tool *OutputTool) blockOnOutput(ctx context.Context, manager *background.M
 		}
 		select {
 		case <-ctx.Done():
-			return tool.readOutput(task)
+			return tool.readLatestOutput(manager, taskID)
 		case <-timer.C:
-			return tool.readOutput(task)
+			return tool.readLatestOutput(manager, taskID)
 		case <-ticker.C:
 		}
 	}
+}
+
+func (tool *OutputTool) readLatestOutput(manager *background.Manager, taskID string) tools.Result {
+	task, ok := manager.Get(taskID)
+	if !ok {
+		return taskError(fmt.Errorf("background task not found: %s", taskID))
+	}
+	return tool.readOutput(task)
 }
 
 func (tool *OutputTool) readOutput(task background.Task) tools.Result {
@@ -270,13 +278,14 @@ func summarizeTaskData(data string, exitCode int) (StreamResult, []string) {
 	events := []streamjson.Event{}
 	rawLines := []string{}
 	for _, line := range strings.Split(data, "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if line == "" {
+		rawLine := strings.TrimSuffix(line, "\r")
+		trimmed := strings.TrimSpace(rawLine)
+		if trimmed == "" {
 			continue
 		}
 		var event streamjson.Event
-		if err := json.Unmarshal([]byte(line), &event); err != nil || event.Type == "" {
-			rawLines = append(rawLines, line)
+		if err := json.Unmarshal([]byte(trimmed), &event); err != nil || event.Type == "" {
+			rawLines = append(rawLines, rawLine)
 			continue
 		}
 		events = append(events, event)

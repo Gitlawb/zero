@@ -124,7 +124,7 @@ func parseTaskParameters(args map[string]any) (TaskParameters, error) {
 		Resume:          strings.TrimSpace(resume),
 	}
 	if params.Name == "" && params.Resume == "" {
-		return TaskParameters{}, fmt.Errorf("task requires name")
+		return TaskParameters{}, fmt.Errorf("task requires name or resume")
 	}
 	if params.Prompt == "" {
 		return TaskParameters{}, fmt.Errorf("task requires prompt")

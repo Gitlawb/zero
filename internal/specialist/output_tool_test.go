@@ -114,12 +114,12 @@ func TestSummarizeTaskDataCollectsErrors(t *testing.T) {
 	summary, raw := summarizeTaskData(strings.Join([]string{
 		`{"schemaVersion":1,"type":"error","runId":"run_1","message":"failed"}`,
 		`{"schemaVersion":1,"type":"run_end","runId":"run_1","status":"error","exitCode":3}`,
-		`stderr text`,
+		`  stderr text  `,
 	}, "\n"), 0)
 	if summary.ExitCode != exitCode || len(summary.Errors) != 1 || summary.Errors[0] != "failed" {
 		t.Fatalf("summary = %#v", summary)
 	}
-	if len(raw) != 1 || raw[0] != "stderr text" {
+	if len(raw) != 1 || raw[0] != "  stderr text  " {
 		t.Fatalf("raw = %#v", raw)
 	}
 }

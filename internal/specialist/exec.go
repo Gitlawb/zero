@@ -261,8 +261,20 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 }
 
 func (executor Executor) runBackground(ctx context.Context, built BuildArgsResult, manifest Manifest, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
+	if err := ctx.Err(); err != nil {
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
 	manager, err := executor.backgroundManager()
 	if err != nil {
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		if built.PromptFile != "" {
 			cleanupPromptFile(built.PromptFile)
 		}
@@ -283,6 +295,13 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 	}
 	binaryPath, err := executor.binaryPath()
 	if err != nil {
+		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 		if built.PromptFile != "" {
 			cleanupPromptFile(built.PromptFile)
