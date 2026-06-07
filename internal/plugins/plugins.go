@@ -81,6 +81,23 @@ type HookExtension struct {
 	Args        []string  `json:"args"`
 }
 
+// PluginAuthor is optional manifest authorship metadata. All fields are
+// best-effort; missing values stay empty.
+type PluginAuthor struct {
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
+	URL   string `json:"url,omitempty"`
+}
+
+// PluginInterface is optional presentation metadata describing how a plugin
+// surfaces in a UI. All fields are optional and default to empty.
+type PluginInterface struct {
+	DisplayName    string   `json:"displayName,omitempty"`
+	Category       string   `json:"category,omitempty"`
+	BrandColor     string   `json:"brandColor,omitempty"`
+	DefaultPrompts []string `json:"defaultPrompts,omitempty"`
+}
+
 type LoadedPlugin struct {
 	SchemaVersion int             `json:"schemaVersion"`
 	ID            string          `json:"id"`
@@ -96,6 +113,12 @@ type LoadedPlugin struct {
 	Prompts       []PathExtension `json:"prompts"`
 	Skills        []PathExtension `json:"skills"`
 	Hooks         []HookExtension `json:"hooks"`
+	// Optional, additive metadata (omitempty so existing plugins are unchanged).
+	Author    PluginAuthor    `json:"author,omitempty"`
+	License   string          `json:"license,omitempty"`
+	Keywords  []string        `json:"keywords,omitempty"`
+	Homepage  string          `json:"homepage,omitempty"`
+	Interface PluginInterface `json:"interface,omitempty"`
 }
 
 type LoadResult struct {
@@ -300,6 +323,11 @@ func ParseManifest(raw any, options ParseManifestOptions) (LoadedPlugin, error) 
 		return LoadedPlugin{}, err
 	}
 
+	// NOTE: the tools/prompts/skills/hooks extensions parsed below are validated
+	// for DISCOVERY only (the `zero plugins` listing + backend snapshots). They
+	// are not yet registered into the tool registry / hook dispatcher / skills
+	// loader at runtime — that wiring is tracked as a separate feature, so these
+	// parsed-but-unconsumed fields are intentional, not dead code.
 	tools, err := parseTools(obj["tools"], options.AllowManifestToolAutoApproval)
 	if err != nil {
 		return LoadedPlugin{}, err
@@ -332,7 +360,79 @@ func ParseManifest(raw any, options ParseManifestOptions) (LoadedPlugin, error) 
 		Prompts:       prompts,
 		Skills:        skills,
 		Hooks:         hooks,
+		Author:        parseAuthor(obj["author"]),
+		License:       optionalMetaString(obj["license"]),
+		Keywords:      coerceMetaStringSlice(obj["keywords"]),
+		Homepage:      optionalMetaString(obj["homepage"]),
+		Interface:     parseInterface(obj["interface"]),
 	}, nil
+}
+
+// parseAuthor reads optional authorship metadata. It is intentionally tolerant:
+// an absent, non-object, or partially-typed value yields zero/empty fields so it
+// never fails an otherwise-valid manifest.
+func parseAuthor(raw any) PluginAuthor {
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return PluginAuthor{}
+	}
+	return PluginAuthor{
+		Name:  optionalMetaString(obj["name"]),
+		Email: optionalMetaString(obj["email"]),
+		URL:   optionalMetaString(obj["url"]),
+	}
+}
+
+// parseInterface reads optional presentation metadata, tolerating missing keys.
+func parseInterface(raw any) PluginInterface {
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return PluginInterface{}
+	}
+	return PluginInterface{
+		DisplayName:    optionalMetaString(obj["displayName"]),
+		Category:       optionalMetaString(obj["category"]),
+		BrandColor:     optionalMetaString(obj["brandColor"]),
+		DefaultPrompts: coerceMetaStringSlice(firstNonNil(obj["defaultPrompts"], obj["defaultPrompt"])),
+	}
+}
+
+// optionalMetaString returns a trimmed string for additive metadata fields, or
+// "" for anything that is not a usable string. It never errors — optional
+// metadata must not fail validation of an otherwise-valid manifest.
+func optionalMetaString(raw any) string {
+	if text, ok := raw.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+// coerceMetaStringSlice extracts a []string from a JSON array of strings,
+// silently dropping non-string entries and returning nil for non-arrays.
+func coerceMetaStringSlice(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+			values = append(values, strings.TrimSpace(text))
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func FormatList(plugins []LoadedPlugin, diagnostics []Diagnostic) string {
@@ -348,6 +448,9 @@ func FormatList(plugins []LoadedPlugin, diagnostics []Diagnostic) string {
 				state = "disabled"
 			}
 			lines = append(lines, fmt.Sprintf("  %s@%s %s [%s] %s - %s", plugin.ID, plugin.Version, plugin.Name, plugin.Source, state, counts))
+			for _, meta := range formatPluginMetadata(plugin) {
+				lines = append(lines, "    "+meta)
+			}
 		}
 	}
 
@@ -362,6 +465,32 @@ func FormatList(plugins []LoadedPlugin, diagnostics []Diagnostic) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatPluginMetadata renders only the optional metadata fields that are
+// present, one entry per line, so listings stay clean for plugins that omit them.
+func formatPluginMetadata(plugin LoadedPlugin) []string {
+	meta := []string{}
+	if author := formatAuthor(plugin.Author); author != "" {
+		meta = append(meta, "author: "+author)
+	}
+	if plugin.License != "" {
+		meta = append(meta, "license: "+plugin.License)
+	}
+	if len(plugin.Keywords) > 0 {
+		meta = append(meta, "keywords: "+strings.Join(plugin.Keywords, ", "))
+	}
+	return meta
+}
+
+func formatAuthor(author PluginAuthor) string {
+	if author.Name == "" {
+		return ""
+	}
+	if author.Email != "" {
+		return fmt.Sprintf("%s <%s>", author.Name, author.Email)
+	}
+	return author.Name
 }
 
 func formatDiagnosticLocation(diagnostic Diagnostic) string {

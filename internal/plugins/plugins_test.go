@@ -63,6 +63,111 @@ func TestParseManifestNormalizesExtensionsAndPaths(t *testing.T) {
 	}
 }
 
+func TestParseManifestReadsOptionalMetadata(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plugins")
+	pluginDir := filepath.Join(root, "zero-demo")
+	manifestPath := filepath.Join(pluginDir, "plugin.json")
+
+	plugin, err := ParseManifest(map[string]any{
+		"schemaVersion": float64(1),
+		"id":            "zero.demo",
+		"name":          "Zero Demo",
+		"version":       "0.1.0",
+		"author": map[string]any{
+			"name":  "OpenAI",
+			"email": "support@openai.com",
+			"url":   "https://openai.com/",
+		},
+		"license":  "Proprietary",
+		"keywords": []any{"automation", "macos"},
+		"homepage": "https://openai.com/",
+		"interface": map[string]any{
+			"displayName":   "Computer Use",
+			"category":      "Productivity",
+			"brandColor":    "#0F172A",
+			"defaultPrompt": []any{"Play a playlist", "Build my project"},
+		},
+	}, ParseManifestOptions{
+		Source:       SourceProject,
+		Root:         root,
+		PluginDir:    pluginDir,
+		ManifestPath: manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("ParseManifest returned error: %v", err)
+	}
+	if plugin.Author.Name != "OpenAI" || plugin.Author.Email != "support@openai.com" || plugin.Author.URL != "https://openai.com/" {
+		t.Fatalf("author = %#v", plugin.Author)
+	}
+	if plugin.License != "Proprietary" {
+		t.Fatalf("license = %q", plugin.License)
+	}
+	if len(plugin.Keywords) != 2 || plugin.Keywords[0] != "automation" {
+		t.Fatalf("keywords = %#v", plugin.Keywords)
+	}
+	if plugin.Homepage != "https://openai.com/" {
+		t.Fatalf("homepage = %q", plugin.Homepage)
+	}
+	if plugin.Interface.DisplayName != "Computer Use" || plugin.Interface.Category != "Productivity" || plugin.Interface.BrandColor != "#0F172A" {
+		t.Fatalf("interface = %#v", plugin.Interface)
+	}
+	if len(plugin.Interface.DefaultPrompts) != 2 || plugin.Interface.DefaultPrompts[0] != "Play a playlist" {
+		t.Fatalf("default prompts = %#v", plugin.Interface.DefaultPrompts)
+	}
+}
+
+func TestParseManifestWithoutOptionalMetadataLeavesZeroValues(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plugins")
+	pluginDir := filepath.Join(root, "zero-bare")
+	manifestPath := filepath.Join(pluginDir, "plugin.json")
+
+	plugin, err := ParseManifest(map[string]any{
+		"schemaVersion": float64(1),
+		"id":            "zero.bare",
+		"name":          "Bare",
+		"version":       "0.1.0",
+	}, ParseManifestOptions{
+		Source:       SourceUser,
+		Root:         root,
+		PluginDir:    pluginDir,
+		ManifestPath: manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("ParseManifest returned error: %v", err)
+	}
+	if plugin.Author != (PluginAuthor{}) {
+		t.Fatalf("author should be zero value, got %#v", plugin.Author)
+	}
+	if plugin.License != "" || plugin.Homepage != "" {
+		t.Fatalf("license/homepage should be empty, got %q / %q", plugin.License, plugin.Homepage)
+	}
+	if len(plugin.Keywords) != 0 {
+		t.Fatalf("keywords should be empty, got %#v", plugin.Keywords)
+	}
+	if plugin.Interface.DisplayName != "" || plugin.Interface.Category != "" || plugin.Interface.BrandColor != "" || len(plugin.Interface.DefaultPrompts) != 0 {
+		t.Fatalf("interface should be zero value, got %#v", plugin.Interface)
+	}
+}
+
+func TestFormatListSurfacesOptionalMetadata(t *testing.T) {
+	output := FormatList([]LoadedPlugin{{
+		SchemaVersion: 1,
+		ID:            "zero.demo",
+		Name:          "Zero Demo",
+		Version:       "0.1.0",
+		Enabled:       true,
+		Source:        SourceUser,
+		Author:        PluginAuthor{Name: "OpenAI"},
+		License:       "MIT",
+		Keywords:      []string{"automation", "macos"},
+	}}, nil)
+	for _, want := range []string{"author: OpenAI", "license: MIT", "keywords: automation, macos"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("FormatList output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestParseManifestClampsAutoApprovalByDefault(t *testing.T) {
 	root := t.TempDir()
 	pluginDir := filepath.Join(root, "zero-demo")

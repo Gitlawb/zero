@@ -171,6 +171,9 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 		NewListDirectoryTool(workspaceRoot),
 		NewGlobTool(workspaceRoot),
 		NewGrepTool(workspaceRoot),
+		// skill reads reusable instruction files from the skills dir (it resolves
+		// skills.DefaultDir itself); read-only, so it is safe in the core/MCP set.
+		NewSkillTool(""),
 		// NOTE: ask_user (NewAskUserTool) is intentionally NOT registered in core
 		// yet. It needs the agent loop's interactive intercept (OnAskUser); without
 		// it the tool only returns the non-interactive fallback. The agent module
