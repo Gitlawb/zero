@@ -573,9 +573,16 @@ func bar(left, right string, w int, fill lipgloss.Color) string {
 func (s styles) cmdRegion(d ChatData, w int) string {
 	p := s.pal
 	if d.Perm != nil {
-		hint := s.mute.Render("click a choice · keys ") +
-			s.acc.Render("a") + s.mute.Render("/") + s.acc.Render("y") + s.mute.Render("/") + s.acc.Render("d") +
-			s.mute.Render(" · Esc cancel")
+		var hint string
+		if PermLayout(w, d.Height).Active {
+			hint = s.mute.Render("click a choice · keys ") +
+				s.acc.Render("a") + s.mute.Render("/") + s.acc.Render("y") + s.mute.Render("/") + s.acc.Render("d") +
+				s.mute.Render(" · Esc cancel")
+		} else {
+			hint = s.mute.Render("keys ") +
+				s.acc.Render("a") + s.mute.Render("/") + s.acc.Render("y") + s.mute.Render("/") + s.acc.Render("d") +
+				s.mute.Render(" · Esc cancel")
+		}
 		return padRight(hint, w, p.Bg)
 	}
 	line := s.acc.Bold(true).Render(":") + " " + d.Input

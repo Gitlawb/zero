@@ -303,16 +303,21 @@ func TestPermModalFitsFrameAtNarrowWidth(t *testing.T) {
 	// and the modal must render a compact keyboard hint — every composed line
 	// (chrome + modal) must stay within the frame width so nothing overflows.
 	const W = 40
-	if PermLayout(W, 24).Active {
-		t.Fatalf("PermLayout(%d,24) should be inactive (too narrow for buttons)", W)
+	const H = 24
+	if PermLayout(W, H).Active {
+		t.Fatalf("PermLayout(%d,%d) should be inactive (too narrow for buttons)", W, H)
 	}
 	out := stripANSI(RenderChat(ChatData{
-		Variant: 0, Dark: true, Width: W, Height: 24,
+		Variant: 0, Dark: true, Width: W, Height: H,
 		Perm: &Perm{Tool: "edit_file", Risk: "medium", Reason: "writes a file"},
 	}))
 	for i, ln := range strings.Split(out, "\n") {
 		if lipgloss.Width(ln) > W {
 			t.Fatalf("line %d exceeds frame width %d (%d cells): %q", i, W, lipgloss.Width(ln), ln)
 		}
+	}
+	// When the layout is inactive, the command hint must not show mouse/click prompts
+	if strings.Contains(out, "click") {
+		t.Error("command hint should not contain 'click' when PermLayout is inactive")
 	}
 }
