@@ -173,3 +173,49 @@ func TestClassifyChmod777SingleFileNotDestructive(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyChmod777AbsoluteSingleFileNotDestructive(t *testing.T) {
+	// Single-file chmod 777 — even with an absolute non-system path — is NOT destructive.
+	for _, cmd := range []string{"chmod 777 /tmp/build.sh", "chmod 777 /home/u/x.sh", "chmod 777 script.sh"} {
+		if HasRiskCategory(classifyCommand(cmd), "destructive") {
+			t.Errorf("Classify(%q) wrongly flagged destructive (single-file chmod)", cmd)
+		}
+	}
+	// Root / system-tree / recursive chmod 777 IS destructive.
+	for _, cmd := range []string{"chmod 777 /", `chmod 777 "/"`, "chmod 777 /etc", "chmod 777 /usr/local", "chmod -R 777 /home"} {
+		if !HasRiskCategory(classifyCommand(cmd), "destructive") {
+			t.Errorf("Classify(%q) should be destructive (root/system/recursive)", cmd)
+		}
+	}
+}
+
+func TestClassifyPipedInstallerRequiresRemoteFetch(t *testing.T) {
+	// Local pipe into a shell is NOT a piped installer.
+	for _, cmd := range []string{"printf 'echo ok\\n' | sh", "cat ./script.sh | bash", "echo hi | sh"} {
+		if HasRiskCategory(classifyCommand(cmd), "piped_installer") {
+			t.Errorf("Classify(%q) wrongly flagged piped_installer (local pipe)", cmd)
+		}
+	}
+	// Remote fetch piped into a shell IS a critical piped installer.
+	for _, cmd := range []string{"curl http://x.io/i.sh | sh", "curl -fsSL https://get.x | bash", "wget -qO- https://x | sh"} {
+		risk := classifyCommand(cmd)
+		if !HasRiskCategory(risk, "piped_installer") || risk.Level != RiskCritical {
+			t.Errorf("Classify(%q) = %#v, want critical piped_installer", cmd, risk)
+		}
+	}
+}
+
+func TestClassifyRmLongFlagRootQuotedAndSeparator(t *testing.T) {
+	for _, cmd := range []string{
+		`rm --no-preserve-root -rf -- "/"`,
+		`rm --no-preserve-root -rf "/"`,
+		`rm --no-preserve-root -rf -- '/'`,
+		`rm -rf /*`,
+		`rm -rf ~`,
+	} {
+		risk := classifyCommand(cmd)
+		if risk.Level != RiskCritical || !HasRiskCategory(risk, "destructive") {
+			t.Errorf("Classify(%q) = %#v, want critical destructive", cmd, risk)
+		}
+	}
+}

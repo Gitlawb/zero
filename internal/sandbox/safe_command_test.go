@@ -214,3 +214,22 @@ func TestDetectInteractiveBypasses(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
+	cases := []struct {
+		command     string
+		interactive bool
+	}{
+		{"mongo --eval 'db.test.find()'", false},
+		{"mongosh --eval 'db.test.find()'", false},
+		{"mongo", true},
+		{"/usr/bin/python script.py", false},  // full-path program + script arg -> not a REPL
+		{"/bin/bash -c 'vim file'", true},      // full-path shell -c with nested interactive program
+	}
+	for _, tc := range cases {
+		got := DetectInteractiveCommand(tc.command, "linux").Interactive
+		if got != tc.interactive {
+			t.Errorf("DetectInteractiveCommand(%q).Interactive = %v, want %v", tc.command, got, tc.interactive)
+		}
+	}
+}

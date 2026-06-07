@@ -16,15 +16,20 @@ var (
 	//     target. Each target alternative tolerates optional surrounding quotes
 	//     so `rm -rf "/"` / `rm -rf '/'` cannot slip past the gate.
 	//   - chmod with combined/reordered flags and an octal-or-777 mode applied
-	//     RECURSIVELY (a -R/-r flag) or to an ABSOLUTE path / sensitive tree
-	//     (e.g. chmod -Rf 777 /, chmod -R 0777 /, chmod 777 -R /etc, chmod 777 /etc).
-	//     A single-file chmod 777 (e.g. `chmod 777 script.sh`) is intentionally
-	//     NOT flagged — the intent is recursive/directory-tree chmod.
+	//     RECURSIVELY (a -R/-r flag) or to root / a sensitive SYSTEM tree
+	//     (/, /etc, /usr, /bin, /var, … — e.g. chmod -Rf 777 /, chmod -R 0777 /,
+	//     chmod 777 -R /etc, chmod 777 /etc). A single-file chmod 777 — including
+	//     an absolute non-system path like `chmod 777 /tmp/build.sh` or a relative
+	//     `chmod 777 script.sh` — is intentionally NOT flagged; the intent is
+	//     recursive/directory-tree or system-tree chmod.
 	//   - mkfs, dd if=, chown -R.
-	destructiveCommandPattern = regexp.MustCompile(`(?i)(\brm\s+(-[A-Za-z]*r[A-Za-z]*f|-rf|-fr)\s+(--\s+)?["']?(\$\{?HOME\}?|/|~|\*)["']?|\bmkfs\b|\bdd\s+if=|\bchmod\s+(-[A-Za-z]*[rR][A-Za-z]*\s+)+0?777\b|\bchmod\s+(-\S+\s+)*0?777\s+-[A-Za-z]*[rR][A-Za-z]*\b|\bchmod\s+(-\S+\s+)*0?777\s+["']?/|\bchown\s+-R\b)`)
-	// pipedInstallerPattern matches a pipe into a POSIX shell, with or without a
-	// space and across sh/bash/zsh/ksh/dash (so `curl x|sh`, `|bash`, `| zsh`).
-	pipedInstallerPattern = regexp.MustCompile(`(?i)\|\s*(ba|z|k|da)?sh\b`)
+	destructiveCommandPattern = regexp.MustCompile(`(?i)(\brm\s+(-[A-Za-z]*r[A-Za-z]*f|-rf|-fr)\s+(--\s+)?["']?(\$\{?HOME\}?|/|~|\*)["']?|\bmkfs\b|\bdd\s+if=|\bchmod\s+(-[A-Za-z]*[rR][A-Za-z]*\s+)+0?777\b|\bchmod\s+(-\S+\s+)*0?777\s+-[A-Za-z]*[rR][A-Za-z]*\b|\bchmod\s+(-\S+\s+)*0?777\s+["']?/(\s|$|["']|(etc|usr|bin|sbin|lib|lib64|var|boot|opt|root|sys|proc|dev)\b)|\bchown\s+-R\b)`)
+	// pipedInstallerPattern matches the fetch-and-execute idiom: a remote fetch
+	// (curl/wget/fetch/aria2c) piped into a POSIX shell, with or without a space
+	// and across sh/bash/zsh/ksh/dash (so `curl x|sh`, `wget url | bash`, `| zsh`).
+	// A purely local pipe into a shell (e.g. `printf … | sh`, `cat ./s | bash`)
+	// is NOT a piped installer and must not be flagged.
+	pipedInstallerPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c)\b[^|]*\|\s*(ba|z|k|da)?sh\b`)
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
@@ -34,8 +39,12 @@ var (
 		// Writing to a raw block device (dd of=, redirect to /dev/sdX, etc.).
 		regexp.MustCompile(`(?i)>\s*/dev/(sd[a-z]+\d*|nvme\d+n\d+(p\d+)?|hd[a-z]+\d*|xvd[a-z]+\d*|mmcblk\d+)`),
 		regexp.MustCompile(`(?i)\bof=/dev/(sd[a-z]+\d*|nvme\d+n\d+(p\d+)?|hd[a-z]+\d*|xvd[a-z]+\d*|mmcblk\d+)`),
-		// rm -rf targeting the root, including long flags and --no-preserve-root.
-		regexp.MustCompile(`(?i)\brm\s+(-[A-Za-z]*\s+|--[a-z-]+\s+)*(/|/\*)(\s|$)`),
+		// rm targeting a dangerous root (/, /*, ~, $HOME, *) with ANY mix of
+		// short/long flags (incl. --no-preserve-root) in any order, an optional
+		// `--` separator, and optional surrounding quotes — so e.g.
+		// `rm --no-preserve-root -rf -- "/"` and `rm --no-preserve-root -rf "/"`
+		// cannot slip past the gate.
+		regexp.MustCompile(`(?i)\brm\s+(-{1,2}\S+\s+)*(--\s+)?["']?(/\*?|~|\$\{?HOME\}?|\*)["']?(\s|$)`),
 		// mkfs.<fstype> form (e.g. mkfs.ext4) not caught by the bare \bmkfs\b above when followed by a dot.
 		regexp.MustCompile(`(?i)\bmkfs\.[a-z0-9]+\b`),
 	}

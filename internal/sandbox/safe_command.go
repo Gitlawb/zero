@@ -90,6 +90,8 @@ var nonInteractiveREPLFlags = map[string][]string{
 	"php":     {"-r", "-f"},
 	"psql":    {"-c", "--command", "-f", "--file", "-l", "--list"},
 	"mysql":   {"-e", "--execute"},
+	"mongo":   {"--eval", "-f", "--file"},
+	"mongosh": {"--eval", "-f", "--file"},
 }
 
 // interactiveSegments are multi-word interactive invocations. The detector
@@ -412,7 +414,12 @@ func hasTrailingCommand(program string, fields []string) bool {
 
 func programIndex(program string, fields []string) int {
 	for index, field := range fields {
-		if strings.ToLower(strings.TrimPrefix(field, "\\")) == program {
+		// Normalize each field the SAME way firstProgram does (basename + strip
+		// quotes/escapes + lowercase) so a full-path invocation like
+		// /usr/bin/python or /bin/bash matches the normalized program name —
+		// otherwise hasNonInteractiveFlag / shellDashCPayload can't locate the
+		// program and mis-classify (false positives and missed detections).
+		if normalizeProgramToken(field) == program {
 			return index
 		}
 	}
