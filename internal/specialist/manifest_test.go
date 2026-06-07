@@ -14,6 +14,7 @@ func TestParseMarkdownValidatesAndResolvesTools(t *testing.T) {
 	manifest, err := ParseMarkdown(`---
 name: code-review
 description: Reviews a change
+extends: worker
 tools: [read-only, apply_patch]
 unknown: kept
 ---
@@ -23,6 +24,9 @@ Review the diff.`)
 	}
 	if manifest.Metadata.Name != "code-review" || manifest.SystemPrompt != "Review the diff." {
 		t.Fatalf("unexpected manifest: %#v", manifest)
+	}
+	if manifest.Metadata.Extends != "worker" {
+		t.Fatalf("Extends = %q, want worker", manifest.Metadata.Extends)
 	}
 	for _, want := range []string{"apply_patch", "glob", "grep", "list_directory", "read_file"} {
 		if !contains(manifest.ResolvedTools, want) {
@@ -240,6 +244,94 @@ User conflict prompt.`)
 	}
 }
 
+func TestLoadResolvesExtendsChainsAndChildOverrides(t *testing.T) {
+	root := t.TempDir()
+	userDir := filepath.Join(root, "user")
+	writeManifest(t, filepath.Join(userDir, "base.md"), `---
+name: base
+description: Base specialist
+tools: [execute]
+---
+Base prompt.`)
+	writeManifest(t, filepath.Join(userDir, "reviewer.md"), `---
+name: reviewer
+description: Reviews code
+extends: base
+---
+Reviewer prompt.`)
+	writeManifest(t, filepath.Join(userDir, "strict-reviewer.md"), `---
+name: strict-reviewer
+description: Reviews strictly
+extends: reviewer
+tools: [read-only]
+---
+Strict prompt.`)
+
+	result, err := Load(LoadOptions{Paths: Paths{UserDir: userDir}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	reviewer, ok := Find(result, "reviewer")
+	if !ok {
+		t.Fatal("reviewer not found")
+	}
+	if reviewer.SystemPrompt != "Base prompt.\n\nReviewer prompt." {
+		t.Fatalf("reviewer prompt = %q", reviewer.SystemPrompt)
+	}
+	if reviewer.Metadata.Extends != "base" || !contains(reviewer.ResolvedTools, "bash") {
+		t.Fatalf("reviewer did not inherit base metadata/tools: %#v", reviewer)
+	}
+
+	strict, ok := Find(result, "strict-reviewer")
+	if !ok {
+		t.Fatal("strict-reviewer not found")
+	}
+	if strict.SystemPrompt != "Base prompt.\n\nReviewer prompt.\n\nStrict prompt." {
+		t.Fatalf("strict prompt = %q", strict.SystemPrompt)
+	}
+	if strict.Metadata.Extends != "reviewer" || contains(strict.ResolvedTools, "bash") || !contains(strict.ResolvedTools, "read_file") {
+		t.Fatalf("strict reviewer should override inherited tools with read-only: %#v", strict)
+	}
+}
+
+func TestLoadRejectsMissingExtendsBaseAndCycles(t *testing.T) {
+	t.Run("missing base", func(t *testing.T) {
+		userDir := filepath.Join(t.TempDir(), "user")
+		writeManifest(t, filepath.Join(userDir, "child.md"), `---
+name: child
+description: Child specialist
+extends: ghost
+---
+Child prompt.`)
+
+		_, err := Load(LoadOptions{Paths: Paths{UserDir: userDir}})
+		if err == nil || !strings.Contains(err.Error(), `base specialist "ghost" for "child" not found`) {
+			t.Fatalf("expected missing base error, got %v", err)
+		}
+	})
+
+	t.Run("cycle", func(t *testing.T) {
+		userDir := filepath.Join(t.TempDir(), "user")
+		writeManifest(t, filepath.Join(userDir, "a.md"), `---
+name: a
+description: A specialist
+extends: b
+---
+A prompt.`)
+		writeManifest(t, filepath.Join(userDir, "b.md"), `---
+name: b
+description: B specialist
+extends: a
+---
+B prompt.`)
+
+		_, err := Load(LoadOptions{Paths: Paths{UserDir: userDir}})
+		if err == nil || !strings.Contains(err.Error(), "cycle detected in specialist extends chain") {
+			t.Fatalf("expected cycle error, got %v", err)
+		}
+	})
+}
+
 func TestLoadSkipsBadFilesAndSymlinksWithWarnings(t *testing.T) {
 	root := t.TempDir()
 	userDir := filepath.Join(root, "user")
@@ -301,13 +393,17 @@ func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
 
 func TestFormatListUsesSpecialistTerminology(t *testing.T) {
 	result := LoadResult{Specialists: []Manifest{{
-		Metadata: Metadata{Name: "worker", Description: "Does work"},
+		Metadata: Metadata{Name: "worker", Description: "Does work", Extends: "base"},
 		Location: LocationBuiltin,
 		FilePath: "(builtin)",
 	}}}
 	output := FormatList(result)
 	if !strings.Contains(output, "Zero Specialists") || !strings.Contains(output, "worker [builtin]") {
 		t.Fatalf("unexpected list output: %s", output)
+	}
+	show := FormatShow(result.Specialists[0])
+	if !strings.Contains(show, "extends: base") {
+		t.Fatalf("show output missing extends: %s", show)
 	}
 }
 

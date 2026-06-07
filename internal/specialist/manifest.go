@@ -25,6 +25,7 @@ const (
 type Metadata struct {
 	Name            string   `json:"name"`
 	Description     string   `json:"description"`
+	Extends         string   `json:"extends,omitempty"`
 	Model           string   `json:"model,omitempty"`
 	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
 	Tools           []string `json:"tools,omitempty"`
@@ -43,6 +44,7 @@ type Manifest struct {
 type Summary struct {
 	Name            string   `json:"name"`
 	Description     string   `json:"description"`
+	Extends         string   `json:"extends,omitempty"`
 	Model           string   `json:"model,omitempty"`
 	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
 	Tools           []string `json:"tools,omitempty"`
@@ -72,6 +74,7 @@ var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 var knownMetadataKeys = map[string]bool{
 	"name":            true,
 	"description":     true,
+	"extends":         true,
 	"model":           true,
 	"reasoningEffort": true,
 	"tools":           true,
@@ -139,7 +142,12 @@ func Load(options LoadOptions) (LoadResult, error) {
 	warnings = append(warnings, userWarnings...)
 	manifests = append(manifests, userManifests...)
 
-	return LoadResult{Paths: paths, Specialists: mergeByName(manifests), Warnings: warnings}, nil
+	merged := mergeByName(manifests)
+	resolved, err := resolveExtends(merged)
+	if err != nil {
+		return LoadResult{}, err
+	}
+	return LoadResult{Paths: paths, Specialists: resolved, Warnings: warnings}, nil
 }
 
 func Find(result LoadResult, name string) (Manifest, bool) {
@@ -158,6 +166,7 @@ func Summaries(manifests []Manifest) []Summary {
 		summaries = append(summaries, Summary{
 			Name:            manifest.Metadata.Name,
 			Description:     manifest.Metadata.Description,
+			Extends:         manifest.Metadata.Extends,
 			Model:           manifest.Metadata.Model,
 			ReasoningEffort: manifest.Metadata.ReasoningEffort,
 			Tools:           append([]string(nil), manifest.Metadata.Tools...),
@@ -190,11 +199,12 @@ func ParseMarkdown(content string) (Manifest, error) {
 		}
 	}
 	if manifest.SystemPrompt == "" {
-		if manifest.Metadata.Description == "" {
+		if manifest.Metadata.Description != "" {
+			manifest.SystemPrompt = manifest.Metadata.Description
+			manifest.Warnings = append(manifest.Warnings, "using description as system prompt")
+		} else if manifest.Metadata.Extends == "" {
 			return Manifest{}, fmt.Errorf("system prompt cannot be empty")
 		}
-		manifest.SystemPrompt = manifest.Metadata.Description
-		manifest.Warnings = append(manifest.Warnings, "using description as system prompt")
 	}
 	if err := Validate(&manifest); err != nil {
 		return Manifest{}, err
@@ -205,6 +215,7 @@ func ParseMarkdown(content string) (Manifest, error) {
 func Validate(manifest *Manifest) error {
 	manifest.Metadata.Name = strings.TrimSpace(manifest.Metadata.Name)
 	manifest.Metadata.Description = strings.TrimSpace(manifest.Metadata.Description)
+	manifest.Metadata.Extends = strings.TrimSpace(manifest.Metadata.Extends)
 	manifest.Metadata.Model = strings.TrimSpace(manifest.Metadata.Model)
 	manifest.Metadata.ReasoningEffort = strings.TrimSpace(manifest.Metadata.ReasoningEffort)
 	if manifest.Metadata.Name == "" {
@@ -213,8 +224,11 @@ func Validate(manifest *Manifest) error {
 	if !namePattern.MatchString(manifest.Metadata.Name) {
 		return fmt.Errorf("invalid specialist name %q: use lowercase letters, numbers, and dashes", manifest.Metadata.Name)
 	}
-	if manifest.Metadata.Description == "" {
+	if manifest.Metadata.Description == "" && manifest.Metadata.Extends == "" {
 		return fmt.Errorf("specialist %q requires a description", manifest.Metadata.Name)
+	}
+	if manifest.Metadata.Extends != "" && !namePattern.MatchString(manifest.Metadata.Extends) {
+		return fmt.Errorf("invalid base specialist name %q: use lowercase letters, numbers, and dashes", manifest.Metadata.Extends)
 	}
 	if manifest.Metadata.Model != "" {
 		registry, err := modelregistry.DefaultRegistry()
@@ -341,6 +355,8 @@ func manifestFromRaw(raw map[string]any) (Manifest, error) {
 			metadata.Name = stringValue(value)
 		case "description":
 			metadata.Description = stringValue(value)
+		case "extends":
+			metadata.Extends = stringValue(value)
 		case "model":
 			metadata.Model = stringValue(value)
 		case "reasoningEffort":
@@ -482,5 +498,85 @@ func mergeByName(manifests []Manifest) []Manifest {
 	for _, name := range names {
 		merged = append(merged, byName[name])
 	}
+	return merged
+}
+
+func resolveExtends(manifests []Manifest) ([]Manifest, error) {
+	byName := map[string]Manifest{}
+	for _, manifest := range manifests {
+		byName[manifest.Metadata.Name] = manifest
+	}
+	cache := map[string]Manifest{}
+	resolved := make([]Manifest, 0, len(manifests))
+	for _, manifest := range manifests {
+		item, err := resolveManifestExtends(manifest.Metadata.Name, byName, cache, map[string]bool{})
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, item)
+	}
+	return resolved, nil
+}
+
+func resolveManifestExtends(name string, byName map[string]Manifest, cache map[string]Manifest, stack map[string]bool) (Manifest, error) {
+	if manifest, ok := cache[name]; ok {
+		return manifest, nil
+	}
+	manifest, ok := byName[name]
+	if !ok {
+		return Manifest{}, fmt.Errorf("specialist %q not found", name)
+	}
+	if stack[name] {
+		return Manifest{}, fmt.Errorf("cycle detected in specialist extends chain at %q", name)
+	}
+	stack[name] = true
+	defer delete(stack, name)
+
+	baseName := strings.TrimSpace(manifest.Metadata.Extends)
+	if baseName == "" {
+		cache[name] = manifest
+		return manifest, nil
+	}
+	base, ok := byName[baseName]
+	if !ok {
+		return Manifest{}, fmt.Errorf("base specialist %q for %q not found", baseName, manifest.Metadata.Name)
+	}
+	base, err := resolveManifestExtends(base.Metadata.Name, byName, cache, stack)
+	if err != nil {
+		return Manifest{}, err
+	}
+	merged := mergeExtends(base, manifest)
+	if err := Validate(&merged); err != nil {
+		return Manifest{}, err
+	}
+	cache[name] = merged
+	return merged, nil
+}
+
+func mergeExtends(base Manifest, child Manifest) Manifest {
+	merged := child
+	if merged.Metadata.Description == "" {
+		merged.Metadata.Description = base.Metadata.Description
+	}
+	if merged.Metadata.Model == "" {
+		merged.Metadata.Model = base.Metadata.Model
+	}
+	if merged.Metadata.ReasoningEffort == "" {
+		merged.Metadata.ReasoningEffort = base.Metadata.ReasoningEffort
+	}
+	if len(merged.Metadata.Tools) == 0 {
+		merged.Metadata.Tools = append([]string(nil), base.Metadata.Tools...)
+	} else {
+		merged.Metadata.Tools = append([]string(nil), merged.Metadata.Tools...)
+	}
+	switch {
+	case strings.TrimSpace(base.SystemPrompt) == "":
+		merged.SystemPrompt = strings.TrimSpace(merged.SystemPrompt)
+	case strings.TrimSpace(merged.SystemPrompt) == "":
+		merged.SystemPrompt = strings.TrimSpace(base.SystemPrompt)
+	default:
+		merged.SystemPrompt = strings.TrimSpace(base.SystemPrompt) + "\n\n" + strings.TrimSpace(merged.SystemPrompt)
+	}
+	merged.Warnings = append(append([]string(nil), base.Warnings...), child.Warnings...)
 	return merged
 }

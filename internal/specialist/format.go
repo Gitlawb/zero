@@ -37,6 +37,9 @@ func FormatShow(manifest Manifest) string {
 	if manifest.Metadata.Model != "" {
 		lines = append(lines, "model: "+manifest.Metadata.Model)
 	}
+	if manifest.Metadata.Extends != "" {
+		lines = append(lines, "extends: "+manifest.Metadata.Extends)
+	}
 	if manifest.Metadata.ReasoningEffort != "" {
 		lines = append(lines, "reasoning effort: "+manifest.Metadata.ReasoningEffort)
 	}
