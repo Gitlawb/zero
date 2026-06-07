@@ -154,6 +154,14 @@ func scrubResultSecrets(res Result) Result {
 		res.Display.Summary = scrubbed
 		res.Redacted = true
 	}
+	// Meta values carry model-controlled strings (e.g. glob pattern, bash cwd) and
+	// are forwarded into the transcript, so they are part of the boundary too.
+	for key, value := range res.Meta {
+		if scrubbed := redaction.RedactString(value, redaction.Options{}); scrubbed != value {
+			res.Meta[key] = scrubbed
+			res.Redacted = true
+		}
+	}
 	return res
 }
 

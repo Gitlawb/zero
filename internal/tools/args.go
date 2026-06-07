@@ -71,7 +71,11 @@ func boolArg(args map[string]any, key string, fallback bool) (bool, error) {
 // range; NaN/Inf/non-integer/out-of-range return ok=false so callers fail closed
 // before an implementation-defined cast.
 func floatToInt(f float64) (int, bool) {
-	if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f || f > float64(math.MaxInt) || f < float64(math.MinInt) {
+	// Use >= against float64(math.MaxInt): that constant rounds UP to 2^63, so a
+	// strict > would let exactly 2^63 through to an out-of-range int(f) cast. The
+	// largest representable in-range float (2^63-1024) is still < it, so nothing
+	// valid is excluded. MinInt (-2^63) is exactly representable, so > is correct there.
+	if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f || f >= float64(math.MaxInt) || f < float64(math.MinInt) {
 		return 0, false
 	}
 	return int(f), true

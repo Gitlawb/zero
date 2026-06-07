@@ -193,7 +193,12 @@ func firstArgString(args map[string]any, keys ...string) string {
 
 func requestPaths(request Request) []string {
 	paths := []string{}
-	for _, key := range []string{"path", "cwd", "file", "dir"} {
+	// Keep this aligned with the path-arg alias lists the tools accept (see
+	// aliasedStringArg in write_file/edit_file/read_file/grep/glob/list). The
+	// sandbox gates by arg-key name, so any alias a tool resolves but the sandbox
+	// does not inspect would let a model route a write/read around the
+	// workspace+symlink boundary.
+	for _, key := range []string{"path", "file", "file_path", "filepath", "filename", "cwd", "dir", "directory"} {
 		if value := argString(request.Args, key); value != "" {
 			paths = append(paths, value)
 		}

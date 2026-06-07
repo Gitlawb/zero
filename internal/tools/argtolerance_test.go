@@ -387,6 +387,14 @@ func TestIntArgCoercesStringNumbers(t *testing.T) {
 	if _, err := intArg(map[string]any{"n": 5.5}, "n", 0, 0, 0); err == nil {
 		t.Error("non-integral float should error")
 	}
+	// Exactly 2^63 is out of int64 range: float64(MaxInt) rounds up to it, so the
+	// guard must reject it (float and string forms) rather than cast.
+	if _, err := intArg(map[string]any{"n": 9223372036854775808.0}, "n", 0, 0, 0); err == nil {
+		t.Error("2^63 float should error (out of int64 range)")
+	}
+	if _, err := intArg(map[string]any{"n": "9223372036854775808"}, "n", 0, 0, 0); err == nil {
+		t.Error("2^63 string should error (out of int64 range)")
+	}
 }
 
 func TestWriteFileAcceptsStringOverwrite(t *testing.T) {

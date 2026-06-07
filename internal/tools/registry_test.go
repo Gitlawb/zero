@@ -102,6 +102,37 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	}
 }
 
+// Regression: write_file/edit_file accept path aliases (file_path, filename); the
+// sandbox must inspect those keys too, otherwise a model routes an out-of-workspace
+// write around the gate by choosing an alias the sandbox doesn't see.
+func TestRegistrySandboxGatesPathAliasKeys(t *testing.T) {
+	for _, key := range []string{"file_path", "filename", "filepath"} {
+		root := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "escape.txt")
+		registry := NewRegistry()
+		registry.Register(NewWriteFileTool(root))
+		engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Policy: sandbox.DefaultPolicy()})
+
+		result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+			key:         outside,
+			"content":   "escape",
+			"overwrite": true,
+		}, RunOptions{
+			PermissionGranted: true,
+			Sandbox:           engine,
+			PermissionMode:    string(sandbox.PermissionUnsafe),
+			Autonomy:          string(sandbox.AutonomyHigh),
+		})
+
+		if result.Status != StatusError || !strings.Contains(result.Output, "outside_workspace") {
+			t.Fatalf("alias %q bypassed the sandbox gate: %#v", key, result)
+		}
+		if _, err := os.Stat(outside); !os.IsNotExist(err) {
+			t.Fatalf("alias %q: file written outside workspace", key)
+		}
+	}
+}
+
 func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 	root := t.TempDir()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{
@@ -150,7 +181,10 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 	}
 }
 
-type secretTool struct{ out, display string }
+type secretTool struct {
+	out, display string
+	meta         map[string]string
+}
 
 func (t secretTool) Name() string        { return "secret_tool" }
 func (t secretTool) Description() string { return "emits text" }
@@ -159,7 +193,7 @@ func (t secretTool) Safety() Safety {
 	return Safety{SideEffect: SideEffectRead, Permission: PermissionAllow}
 }
 func (t secretTool) Run(context.Context, map[string]any) Result {
-	return Result{Status: StatusOK, Output: t.out, Display: Display{Summary: t.display}}
+	return Result{Status: StatusOK, Output: t.out, Display: Display{Summary: t.display}, Meta: t.meta}
 }
 
 // denyTool is permission-denied so RunWithOptions returns early via the denial
@@ -198,7 +232,11 @@ func TestRunWithOptionsScrubsSecretsOnDenialPaths(t *testing.T) {
 func TestRunWithOptionsScrubsSecretsForAllCallers(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	reg := NewRegistry()
-	reg.Register(secretTool{out: "token=" + secret, display: "ran token=" + secret})
+	reg.Register(secretTool{
+		out:     "token=" + secret,
+		display: "ran token=" + secret,
+		meta:    map[string]string{"pattern": "find " + secret},
+	})
 
 	res := reg.RunWithOptions(context.Background(), "secret_tool", map[string]any{}, RunOptions{PermissionGranted: true})
 	if res.Status != StatusOK {
@@ -207,10 +245,13 @@ func TestRunWithOptionsScrubsSecretsForAllCallers(t *testing.T) {
 	if strings.Contains(res.Output, secret) {
 		t.Fatalf("registry must scrub secrets, leaked: %q", res.Output)
 	}
-	// Display.Summary must be scrubbed too — a caller preferring Display must not
-	// bypass the boundary redaction.
+	// Display.Summary and Meta values must be scrubbed too — both are forwarded
+	// into the transcript, so a caller preferring either must not bypass redaction.
 	if strings.Contains(res.Display.Summary, secret) {
 		t.Fatalf("registry must scrub Display.Summary, leaked: %q", res.Display.Summary)
+	}
+	if strings.Contains(res.Meta["pattern"], secret) {
+		t.Fatalf("registry must scrub Meta values, leaked: %q", res.Meta["pattern"])
 	}
 	if !res.Redacted {
 		t.Error("expected Redacted=true")
