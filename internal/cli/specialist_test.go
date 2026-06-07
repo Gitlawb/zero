@@ -127,6 +127,90 @@ func TestRunSpecialistListJSON(t *testing.T) {
 	}
 }
 
+func TestRunSpecialistCreateDeleteAndEdit(t *testing.T) {
+	cwd := t.TempDir()
+	configRoot := setSpecialistConfigRoot(t)
+	userDir := filepath.Join(configRoot, "zero", "specialists")
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"specialist", "create", "triage",
+		"--description", "Triage failures",
+		"--prompt", "Find the most likely failure.",
+		"--tools", "read-only,plan",
+	}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("create exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	path := filepath.Join(userDir, "triage.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected specialist file: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{`name: "triage"`, `description: "Triage failures"`, `"read-only"`, `"plan"`, "Find the most likely failure."} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("created file missing %q:\n%s", want, content)
+		}
+	}
+
+	var editedPath string
+	deps.runEditor = func(path string) error {
+		editedPath = path
+		return nil
+	}
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"specialist", "edit", "triage"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("edit exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if editedPath != path {
+		t.Fatalf("edited path = %q, want %q", editedPath, path)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"specialist", "delete", "triage", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("delete exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected specialist file deleted, stat err=%v", err)
+	}
+	if !strings.Contains(stdout.String(), `"deleted": true`) {
+		t.Fatalf("delete JSON missing deleted=true: %s", stdout.String())
+	}
+}
+
+func TestRunSpecialistCreateProjectAndRejectDuplicate(t *testing.T) {
+	cwd := t.TempDir()
+	setSpecialistConfigRoot(t)
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+	args := []string{"specialist", "create", "project-helper", "--project", "--description=Project helper"}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps(args, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("create project exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".zero", "specialists", "project-helper.md")); err != nil {
+		t.Fatalf("expected project specialist file: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps(args, &stdout, &stderr, deps)
+	if exitCode != exitUsage {
+		t.Fatalf("duplicate exitCode = %d, want usage", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("duplicate error = %q", stderr.String())
+	}
+}
+
 func TestRunSpecialistShowMissingReturnsUsage(t *testing.T) {
 	setSpecialistConfigRoot(t)
 	deps := appDeps{getwd: func() (string, error) { return t.TempDir(), nil }}
@@ -173,6 +257,9 @@ func TestRunSpecialistArgCountErrors(t *testing.T) {
 	}{
 		{args: []string{"specialist", "list", "extra"}, want: "does not accept positional"},
 		{args: []string{"specialist", "show"}, want: "show requires a specialist name"},
+		{args: []string{"specialist", "create"}, want: "create requires a specialist name"},
+		{args: []string{"specialist", "delete"}, want: "delete requires a specialist name"},
+		{args: []string{"specialist", "edit"}, want: "edit requires a specialist name"},
 		{args: []string{"specialist", "path", "extra"}, want: "path does not accept positional"},
 	}
 	for _, tc := range tests {

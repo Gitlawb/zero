@@ -49,6 +49,7 @@ type appDeps struct {
 	inspectChanges       func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
 	commitChanges        func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
 	runTUI               func(context.Context, tui.Options) int
+	runEditor            func(string) error
 	checkUpdate          func(context.Context, update.Options) (update.Result, error)
 	now                  func() time.Time
 }
@@ -113,6 +114,7 @@ func defaultAppDeps() appDeps {
 		inspectChanges:   zerogit.Inspect,
 		commitChanges:    zerogit.Commit,
 		runTUI:           tui.Run,
+		runEditor:        openEditor,
 		checkUpdate:      update.Check,
 		now:              time.Now,
 	}
@@ -392,7 +394,7 @@ Commands:
   search     Search persisted local Zero session events
   find       Alias for search
   sessions   Inspect local Zero session lineage
-  specialist Inspect local Zero specialist profiles
+  specialist Manage local Zero specialist profiles
   plugins    Inspect local Zero plugin manifests
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings

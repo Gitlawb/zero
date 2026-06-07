@@ -87,6 +87,13 @@ var toolCategories = map[string][]string{
 	"plan":      {"update_plan"},
 }
 
+var forbiddenToolNames = map[string]bool{
+	"Task":               true,
+	"TaskOutput":         true,
+	"TaskStop":           true,
+	"GenerateSpecialist": true,
+}
+
 // defaultToolSelection keeps omitted tools conservative until runtime task
 // execution has its own permission policy.
 var defaultToolSelection = []string{"read-only"}
@@ -266,6 +273,9 @@ func ResolveTools(selection []string) ([]string, error) {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
+		}
+		if forbiddenToolNames[item] {
+			return nil, fmt.Errorf("forbidden specialist tool %q", item)
 		}
 		tools, ok := toolCategories[item]
 		if !ok {

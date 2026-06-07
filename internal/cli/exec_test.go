@@ -207,7 +207,7 @@ func TestRunExecRegistersTaskOnlyForUnsafeTopLevelRuns(t *testing.T) {
 			if exitCode != exitSuccess {
 				t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
 			}
-			for _, toolName := range []string{"Task", "TaskOutput", "TaskStop"} {
+			for _, toolName := range []string{"Task", "TaskOutput", "TaskStop", "GenerateSpecialist"} {
 				hasTool := strings.Contains(stdout.String(), "  "+toolName+" ")
 				if hasTool != tc.wantTask {
 					t.Fatalf("%s visibility = %v, want %v; output:\n%s", toolName, hasTool, tc.wantTask, stdout.String())

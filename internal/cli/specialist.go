@@ -3,13 +3,23 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	osexec "os/exec"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/specialist"
 )
 
 type specialistOptions struct {
-	json bool
+	json            bool
+	location        specialist.Location
+	description     string
+	prompt          string
+	extends         string
+	model           string
+	reasoningEffort string
+	tools           []string
+	force           bool
 }
 
 func runSpecialists(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -42,6 +52,12 @@ func runSpecialists(args []string, stdout io.Writer, stderr io.Writer, deps appD
 		return runSpecialistList(paths, options, stdout, stderr)
 	case "show":
 		return runSpecialistShow(paths, remaining[0], options, stdout, stderr)
+	case "create":
+		return runSpecialistCreate(paths, remaining[0], options, stdout, stderr)
+	case "delete", "rm":
+		return runSpecialistDelete(paths, remaining[0], options, stdout, stderr)
+	case "edit":
+		return runSpecialistEdit(paths, remaining[0], options, stdout, stderr, deps)
 	case "path":
 		return runSpecialistPath(paths, options, stdout)
 	default:
@@ -54,13 +70,84 @@ func parseSpecialistArgs(args []string) (string, []string, specialistOptions, bo
 	commandExplicit := false
 	remaining := []string{}
 	options := specialistOptions{}
-	for _, arg := range args {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
 		switch arg {
 		case "-h", "--help", "help":
 			return command, remaining, options, true, nil
 		case "--json":
 			options.json = true
+		case "--user":
+			options.location = specialist.LocationUser
+		case "--project":
+			options.location = specialist.LocationProject
+		case "--force":
+			options.force = true
+		case "--location", "--description", "--prompt", "--system-prompt", "--tools", "--extends", "--model", "--reasoning-effort":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			index = next
+			if err := applySpecialistOption(&options, arg, value); err != nil {
+				return command, remaining, options, false, err
+			}
 		default:
+			if strings.HasPrefix(arg, "--location=") {
+				value, err := requiredInlineFlagValue(arg, "--location")
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				if err := applySpecialistOption(&options, "--location", value); err != nil {
+					return command, remaining, options, false, err
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--description=") {
+				value, err := requiredInlineFlagValue(arg, "--description")
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				if err := applySpecialistOption(&options, "--description", value); err != nil {
+					return command, remaining, options, false, err
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--prompt=") || strings.HasPrefix(arg, "--system-prompt=") {
+				flag := "--prompt"
+				if strings.HasPrefix(arg, "--system-prompt=") {
+					flag = "--system-prompt"
+				}
+				value, err := requiredInlineFlagValue(arg, flag)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				if err := applySpecialistOption(&options, flag, value); err != nil {
+					return command, remaining, options, false, err
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--tools=") {
+				value, err := requiredInlineFlagValue(arg, "--tools")
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				if err := applySpecialistOption(&options, "--tools", value); err != nil {
+					return command, remaining, options, false, err
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "--extends=") || strings.HasPrefix(arg, "--model=") || strings.HasPrefix(arg, "--reasoning-effort=") {
+				flag, _, _ := strings.Cut(arg, "=")
+				value, err := requiredInlineFlagValue(arg, flag)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				if err := applySpecialistOption(&options, flag, value); err != nil {
+					return command, remaining, options, false, err
+				}
+				continue
+			}
 			if strings.HasPrefix(arg, "-") {
 				return command, remaining, options, false, fmt.Errorf("unknown specialist flag %q", arg)
 			}
@@ -75,6 +162,36 @@ func parseSpecialistArgs(args []string) (string, []string, specialistOptions, bo
 	return command, remaining, options, false, nil
 }
 
+func applySpecialistOption(options *specialistOptions, flag string, value string) error {
+	value = strings.TrimSpace(value)
+	switch flag {
+	case "--location":
+		switch strings.ToLower(value) {
+		case "user":
+			options.location = specialist.LocationUser
+		case "project":
+			options.location = specialist.LocationProject
+		default:
+			return fmt.Errorf("--location must be user or project")
+		}
+	case "--description":
+		options.description = value
+	case "--prompt", "--system-prompt":
+		options.prompt = value
+	case "--tools":
+		options.tools = specialist.SplitToolList(value)
+	case "--extends":
+		options.extends = value
+	case "--model":
+		options.model = value
+	case "--reasoning-effort":
+		options.reasoningEffort = value
+	default:
+		return fmt.Errorf("unknown specialist flag %q", flag)
+	}
+	return nil
+}
+
 func validateSpecialistCommand(command string, remaining []string) error {
 	switch command {
 	case "list":
@@ -84,6 +201,18 @@ func validateSpecialistCommand(command string, remaining []string) error {
 	case "show":
 		if len(remaining) != 1 {
 			return fmt.Errorf("specialist show requires a specialist name")
+		}
+	case "create":
+		if len(remaining) != 1 {
+			return fmt.Errorf("specialist create requires a specialist name")
+		}
+	case "delete", "rm":
+		if len(remaining) != 1 {
+			return fmt.Errorf("specialist delete requires a specialist name")
+		}
+	case "edit":
+		if len(remaining) != 1 {
+			return fmt.Errorf("specialist edit requires a specialist name")
 		}
 	case "path":
 		if len(remaining) != 0 {
@@ -141,6 +270,77 @@ func runSpecialistShow(paths specialist.Paths, name string, options specialistOp
 	return exitSuccess
 }
 
+func runSpecialistCreate(paths specialist.Paths, name string, options specialistOptions, stdout io.Writer, stderr io.Writer) int {
+	storage := specialist.NewStorage(paths)
+	manifest, err := storage.Create(specialist.CreateInput{
+		Name:            name,
+		Description:     options.description,
+		SystemPrompt:    options.prompt,
+		Extends:         options.extends,
+		Model:           options.model,
+		ReasoningEffort: options.reasoningEffort,
+		Tools:           options.tools,
+		Location:        options.location,
+		Overwrite:       options.force,
+	})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, manifest); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Created specialist %s at %s\n", manifest.Metadata.Name, manifest.FilePath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runSpecialistDelete(paths specialist.Paths, name string, options specialistOptions, stdout io.Writer, stderr io.Writer) int {
+	storage := specialist.NewStorage(paths)
+	path, err := storage.Delete(specialist.DeleteInput{Name: name, Location: options.location})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{"name": name, "path": path, "deleted": true}); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Deleted specialist %s at %s\n", name, path); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runSpecialistEdit(paths specialist.Paths, name string, options specialistOptions, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	storage := specialist.NewStorage(paths)
+	path, err := storage.Path(name, options.location)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return writeExecUsageError(stderr, "specialist not found: "+name)
+		}
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	runEditor := deps.runEditor
+	if runEditor == nil {
+		runEditor = openEditor
+	}
+	if err := runEditor(path); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if _, err := fmt.Fprintf(stdout, "Edited specialist %s at %s\n", name, path); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
 func runSpecialistPath(paths specialist.Paths, options specialistOptions, stdout io.Writer) int {
 	if options.json {
 		if err := writePrettyJSON(stdout, paths); err != nil {
@@ -161,11 +361,47 @@ func writeSpecialistHelp(w io.Writer) error {
 Commands:
   list       List built-in, user, and project specialists
   show NAME  Show one specialist profile
+  create NAME
+             Create a user specialist profile
+  delete NAME
+             Delete a user specialist profile
+  edit NAME  Open a user specialist profile in $VISUAL or $EDITOR
   path       Print specialist directories
   help       Show this help
 
 Flags:
-  --json     Print JSON output
+  --json                      Print JSON output
+  --user                      Use the user specialist directory (default)
+  --project                   Use the project .zero/specialists directory
+  --description <text>        Description for create
+  --prompt <text>             System prompt for create
+  --tools <list>              Tool ids/categories for create
+  --extends <name>            Base specialist for create
+  --model <model>             Model override for create
+  --reasoning-effort <value>  Reasoning effort override for create
+  --force                     Replace an existing specialist during create
 `)
 	return err
+}
+
+func openEditor(path string) error {
+	editor := strings.TrimSpace(os.Getenv("VISUAL"))
+	if editor == "" {
+		editor = strings.TrimSpace(os.Getenv("EDITOR"))
+	}
+	if editor == "" {
+		return fmt.Errorf("VISUAL or EDITOR must be set to edit specialists")
+	}
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return fmt.Errorf("VISUAL or EDITOR must be set to edit specialists")
+	}
+	command := osexec.Command(parts[0], append(parts[1:], path)...)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("editor failed: %w", err)
+	}
+	return nil
 }

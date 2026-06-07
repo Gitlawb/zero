@@ -139,6 +139,16 @@ Prompt.`,
 			want: "unknown tool or category",
 		},
 		{
+			name: "forbidden generation tool",
+			content: `---
+name: generator
+description: Generates specialists
+tools: [GenerateSpecialist]
+---
+Prompt.`,
+			want: "forbidden specialist tool",
+		},
+		{
 			name: "duplicate key",
 			content: `---
 name: explorer
