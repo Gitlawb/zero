@@ -185,6 +185,23 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Rewind\n" + err.Error()
 	}
+
+	// ApplyRewind truncated the persisted event log, restored files, and appended a
+	// rewind marker — so reload the in-memory session state. Otherwise the dropped
+	// events would still (a) be re-sent to the agent as ContextEvents on the next
+	// prompt (sessionPrompt sends m.sessionEvents) and (b) linger in the transcript.
+	if meta, getErr := m.sessionStore.Get(m.activeSession.SessionID); getErr == nil {
+		m.activeSession = *meta
+	}
+	if events, readErr := m.sessionStore.ReadEvents(m.activeSession.SessionID); readErr == nil {
+		m.sessionEvents = append([]sessions.Event{}, events...)
+		rows := initialTranscript()
+		for _, row := range transcriptRowsFromSessionEvents(events) {
+			rows = appendTranscriptRow(rows, row)
+		}
+		m.transcript = rows
+	}
+
 	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
 		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))
 	if len(report.Skipped) > 0 {
