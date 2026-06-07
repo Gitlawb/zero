@@ -60,8 +60,16 @@ func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
 	if safety.SideEffect != SideEffectNetwork || safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
 		t.Fatalf("unexpected web_fetch safety metadata: %#v", safety)
 	}
-	if tool.Parameters().Properties["url"].Type != "string" {
-		t.Fatalf("expected web_fetch url schema, got %#v", tool.Parameters())
+	schema := tool.Parameters()
+	if schema.Properties == nil {
+		t.Fatal("web_fetch schema properties are nil")
+	}
+	urlProperty, ok := schema.Properties["url"]
+	if !ok {
+		t.Fatal("web_fetch schema missing url property")
+	}
+	if urlProperty.Type != "string" {
+		t.Fatalf("web_fetch url type = %s, want string", urlProperty.Type)
 	}
 }
 

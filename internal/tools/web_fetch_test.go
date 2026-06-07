@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -20,6 +22,12 @@ type webFetchResolverFunc func(context.Context, string, string) ([]netip.Addr, e
 
 func (fn webFetchResolverFunc) LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error) {
 	return fn(ctx, network, host)
+}
+
+type webFetchDialFunc func(context.Context, string, string) (net.Conn, error)
+
+func (fn webFetchDialFunc) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	return fn(ctx, network, address)
 }
 
 func TestWebFetchToolSafetyAndSchema(t *testing.T) {
@@ -154,6 +162,76 @@ func TestWebFetchToolRejectsHostnamesResolvingToPrivateAddresses(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "private network hosts are blocked") {
 		t.Fatalf("expected private host message, got %q", result.Output)
+	}
+}
+
+func TestWebFetchToolConfiguresDialTimeSafetyForDefaultTransport(t *testing.T) {
+	tool, ok := NewWebFetchTool().(webFetchTool)
+	if !ok {
+		t.Fatalf("NewWebFetchTool returned %T, want webFetchTool", NewWebFetchTool())
+	}
+
+	client := tool.clientForRun()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.DialContext == nil {
+		t.Fatal("expected web_fetch transport to install a safe DialContext")
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected web_fetch transport to disable proxy resolution")
+	}
+}
+
+func TestWebFetchSafeDialRejectsPrivateRebindAddress(t *testing.T) {
+	dialCalled := false
+	dial := webFetchSafeDialContext(
+		webFetchResolverFunc(func(_ context.Context, network string, host string) ([]netip.Addr, error) {
+			if network != "ip" || host != "rebind.example" {
+				t.Fatalf("unexpected lookup network=%q host=%q", network, host)
+			}
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}),
+		webFetchDialFunc(func(context.Context, string, string) (net.Conn, error) {
+			dialCalled = true
+			return nil, errors.New("dial should not run")
+		}),
+	)
+
+	_, err := dial(context.Background(), "tcp", "rebind.example:443")
+
+	if err == nil || !strings.Contains(err.Error(), "loopback hosts are blocked") {
+		t.Fatalf("expected loopback rejection, got %v", err)
+	}
+	if dialCalled {
+		t.Fatal("dialer was called after unsafe DNS result")
+	}
+}
+
+func TestWebFetchSafeDialPinsResolvedPublicAddress(t *testing.T) {
+	var dialedAddress string
+	stop := errors.New("stop after address capture")
+	dial := webFetchSafeDialContext(
+		webFetchResolverFunc(func(_ context.Context, network string, host string) ([]netip.Addr, error) {
+			if network != "ip" || host != "public.example" {
+				t.Fatalf("unexpected lookup network=%q host=%q", network, host)
+			}
+			return []netip.Addr{netip.MustParseAddr("203.0.113.10")}, nil
+		}),
+		webFetchDialFunc(func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialedAddress = address
+			return nil, stop
+		}),
+	)
+
+	_, err := dial(context.Background(), "tcp", "public.example:443")
+
+	if !errors.Is(err, stop) {
+		t.Fatalf("expected captured dial error, got %v", err)
+	}
+	if dialedAddress != "203.0.113.10:443" {
+		t.Fatalf("dialed address = %q, want resolved IP address", dialedAddress)
 	}
 }
 

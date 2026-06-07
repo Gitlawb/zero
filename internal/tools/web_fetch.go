@@ -33,6 +33,10 @@ type webFetchResolver interface {
 	LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error)
 }
 
+type webFetchDialer interface {
+	DialContext(ctx context.Context, network string, address string) (net.Conn, error)
+}
+
 type defaultWebFetchResolver struct{}
 
 func (defaultWebFetchResolver) LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error) {
@@ -170,11 +174,59 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 
 func (tool webFetchTool) clientForRun() http.Client {
 	if tool.client == nil {
-		return http.Client{Timeout: webFetchTimeout, CheckRedirect: webFetchRedirectPolicy(nil, tool.resolver)}
+		return http.Client{
+			Timeout:       webFetchTimeout,
+			Transport:     webFetchSafeTransport(nil, tool.resolver),
+			CheckRedirect: webFetchRedirectPolicy(nil, tool.resolver),
+		}
 	}
 	client := *tool.client
+	client.Transport = webFetchSafeTransport(client.Transport, tool.resolver)
 	client.CheckRedirect = webFetchRedirectPolicy(tool.client.CheckRedirect, tool.resolver)
 	return client
+}
+
+func webFetchSafeTransport(roundTripper http.RoundTripper, resolver webFetchResolver) http.RoundTripper {
+	var transport *http.Transport
+	switch typed := roundTripper.(type) {
+	case nil:
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	case *http.Transport:
+		transport = typed.Clone()
+	default:
+		return roundTripper
+	}
+
+	dialer := &net.Dialer{Timeout: webFetchTimeout, KeepAlive: 30 * time.Second}
+	transport.Proxy = nil
+	transport.DialContext = webFetchSafeDialContext(resolver, dialer)
+	transport.DialTLSContext = nil
+	return transport
+}
+
+func webFetchSafeDialContext(resolver webFetchResolver, dialer webFetchDialer) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		pinnedAddress, err := webFetchSafeDialAddress(ctx, resolver, address)
+		if err != nil {
+			return nil, err
+		}
+		return dialer.DialContext(ctx, network, pinnedAddress)
+	}
+}
+
+func webFetchSafeDialAddress(ctx context.Context, resolver webFetchResolver, address string) (string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("validate dial target: %w", err)
+	}
+	addrs, err := resolveWebFetchHostAddrs(ctx, host, firstWebFetchResolver(resolver), true)
+	if err != nil {
+		return "", err
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("host did not resolve to an IP address")
+	}
+	return net.JoinHostPort(addrs[0].String(), port), nil
 }
 
 func webFetchRedirectPolicy(previous func(*http.Request, []*http.Request) error, resolver webFetchResolver) func(*http.Request, []*http.Request) error {
@@ -244,40 +296,51 @@ func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver we
 }
 
 func rejectUnsafeWebFetchHost(ctx context.Context, host string, resolver webFetchResolver) error {
+	_, err := resolveWebFetchHostAddrs(ctx, host, resolver, false)
+	return err
+}
+
+func resolveWebFetchHostAddrs(ctx context.Context, host string, resolver webFetchResolver, requireResolver bool) ([]netip.Addr, error) {
 	normalized := strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
 	if normalized == "" {
-		return fmt.Errorf("URL host is required")
+		return nil, fmt.Errorf("URL host is required")
 	}
 	switch {
 	case normalized == "localhost" || strings.HasSuffix(normalized, ".localhost"):
-		return fmt.Errorf("localhost hosts are blocked")
+		return nil, fmt.Errorf("localhost hosts are blocked")
 	case normalized == "metadata" || normalized == "metadata.google.internal":
-		return fmt.Errorf("metadata service hosts are blocked")
+		return nil, fmt.Errorf("metadata service hosts are blocked")
 	case strings.HasSuffix(normalized, ".local"):
-		return fmt.Errorf("local network hosts are blocked")
+		return nil, fmt.Errorf("local network hosts are blocked")
 	}
 
 	addr, err := netip.ParseAddr(normalized)
 	if err == nil {
-		return rejectUnsafeWebFetchAddr(addr)
+		if err := rejectUnsafeWebFetchAddr(addr); err != nil {
+			return nil, err
+		}
+		return []netip.Addr{addr.Unmap()}, nil
 	}
 	if resolver == nil {
-		return nil
+		if requireResolver {
+			return nil, fmt.Errorf("host resolver is required")
+		}
+		return nil, nil
 	}
 
 	addrs, err := resolver.LookupNetIP(ctx, "ip", normalized)
 	if err != nil {
-		return fmt.Errorf("resolve host: %w", err)
+		return nil, fmt.Errorf("resolve host: %w", err)
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("host did not resolve to an IP address")
+		return nil, fmt.Errorf("host did not resolve to an IP address")
 	}
 	for _, addr := range addrs {
 		if err := rejectUnsafeWebFetchAddr(addr); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return addrs, nil
 }
 
 func rejectUnsafeWebFetchAddr(addr netip.Addr) error {
@@ -328,4 +391,11 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstWebFetchResolver(resolver webFetchResolver) webFetchResolver {
+	if resolver != nil {
+		return resolver
+	}
+	return defaultWebFetchResolver{}
 }
