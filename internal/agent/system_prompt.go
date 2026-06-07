@@ -44,6 +44,9 @@ func buildSystemPrompt(options Options) string {
 		core = fallbackSystemPrompt
 	}
 	sections := []string{core}
+	if addendum := modelPromptAddendum(options.Model); addendum != "" {
+		sections = append(sections, addendum)
+	}
 	if ws := workspaceContext(options.Cwd); ws != "" {
 		sections = append(sections, ws)
 	}
