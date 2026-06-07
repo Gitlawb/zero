@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,9 @@ const (
 	exitCrash    = 1
 	exitUsage    = 2
 	exitProvider = 3
+	// exitInterrupted is the conventional shell exit code for a process stopped by
+	// SIGINT (128 + signal number 2).
+	exitInterrupted = 130
 )
 
 type execOutputFormat string
@@ -279,7 +283,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// user, so ask_user degrades to a "proceed with your best assumption" result
 	// rather than blocking. (Future enhancement: collect answers over stream-json
 	// input when a controlling client is attached.)
-	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
+	// Cancel the agent run on Ctrl+C / SIGTERM so a long headless run shuts down
+	// cleanly (the loop honors context cancellation) instead of being killed.
+	runCtx, stopSignals := signalContext()
+	defer stopSignals()
+	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
 		SessionID:        preparedSession.Session.SessionID,
@@ -346,6 +354,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return exitCrash
 	}
 	if err != nil {
+		// A Ctrl+C / SIGTERM cancellation is a clean shutdown, not a provider error.
+		if errors.Is(err, context.Canceled) || runCtx.Err() != nil {
+			sessionRecorder.append(sessions.EventError, map[string]any{"message": "interrupted"})
+			if options.outputFormat == execOutputStreamJSON {
+				writer.errorEvent("interrupted", "run cancelled by signal", false)
+				writer.runEnd("interrupted", exitInterrupted)
+				if writer.err != nil {
+					return exitCrash
+				}
+			} else {
+				fmt.Fprintln(stderr, "Interrupted.")
+			}
+			return exitInterrupted
+		}
 		sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
 		if options.outputFormat == execOutputStreamJSON {
 			writer.errorEvent("provider_error", err.Error(), false)
