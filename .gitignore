@@ -43,3 +43,4 @@ start-zenline.sh
 
 # user test artifact — never commit
 shop.html
+docs/audit-2026-06-07-deep-audit.md
