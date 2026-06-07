@@ -127,6 +127,14 @@ func TestWebFetchToolRejectsUnsafeURLsBeforeNetwork(t *testing.T) {
 		"http://127.0.0.1/admin",
 		"http://localhost/status",
 		"http://169.254.169.254/latest/meta-data",
+		"http://100.64.0.1/internal",
+		"http://0.1.2.3/internal",
+		"http://255.255.255.255/internal",
+		"http://[64:ff9b::7f00:1]/internal",
+		"http://[64:ff9b::a9fe:a9fe]/latest/meta-data",
+		"http://[64:ff9b:1:7f00:1::]/internal",
+		"http://[2002:7f00:1::]/internal",
+		"http://[::7f00:1]/internal",
 		"http://user:pass@example.com/private",
 	} {
 		t.Run(rawURL, func(t *testing.T) {
@@ -136,6 +144,29 @@ func TestWebFetchToolRejectsUnsafeURLsBeforeNetwork(t *testing.T) {
 			}
 			if !strings.Contains(result.Output, "Unsafe URL") {
 				t.Fatalf("expected unsafe URL message, got %q", result.Output)
+			}
+		})
+	}
+}
+
+func TestWebFetchToolRejectsNonDefaultPorts(t *testing.T) {
+	tool := newWebFetchToolWithClient(webFetchTestClient(func(*http.Request) (*http.Response, error) {
+		t.Fatal("non-default port should be rejected before network transport")
+		return nil, nil
+	}))
+
+	for _, rawURL := range []string{
+		"http://example.com:22/",
+		"https://example.com:80/",
+		"https://example.com:6379/",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			result := tool.Run(context.Background(), map[string]any{"url": rawURL})
+			if result.Status != StatusError {
+				t.Fatalf("expected unsafe URL error, got %s: %s", result.Status, result.Output)
+			}
+			if !strings.Contains(result.Output, "default port") {
+				t.Fatalf("expected default-port message, got %q", result.Output)
 			}
 		})
 	}
@@ -217,7 +248,7 @@ func TestWebFetchSafeDialPinsResolvedPublicAddress(t *testing.T) {
 			if network != "ip" || host != "public.example" {
 				t.Fatalf("unexpected lookup network=%q host=%q", network, host)
 			}
-			return []netip.Addr{netip.MustParseAddr("203.0.113.10")}, nil
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
 		}),
 		webFetchDialFunc(func(_ context.Context, _ string, address string) (net.Conn, error) {
 			dialedAddress = address
@@ -230,25 +261,50 @@ func TestWebFetchSafeDialPinsResolvedPublicAddress(t *testing.T) {
 	if !errors.Is(err, stop) {
 		t.Fatalf("expected captured dial error, got %v", err)
 	}
-	if dialedAddress != "203.0.113.10:443" {
+	if dialedAddress != "8.8.8.8:443" {
 		t.Fatalf("dialed address = %q, want resolved IP address", dialedAddress)
 	}
 }
 
 func TestWebFetchToolRejectsUnsafeRedirects(t *testing.T) {
+	for _, location := range []string{
+		"http://127.0.0.1/private",
+		"http://100.64.0.1/internal",
+	} {
+		t.Run(location, func(t *testing.T) {
+			tool := newWebFetchToolWithClient(webFetchTestClient(func(request *http.Request) (*http.Response, error) {
+				response := webFetchTestResponse(request, http.StatusFound, "text/plain", "redirect")
+				response.Header.Set("Location", location)
+				return response, nil
+			}))
+
+			result := tool.Run(context.Background(), map[string]any{"url": "https://example.com/start"})
+
+			if result.Status != StatusError {
+				t.Fatalf("expected redirect safety error, got %s: %s", result.Status, result.Output)
+			}
+			if !strings.Contains(result.Output, "Unsafe redirect URL") {
+				t.Fatalf("expected unsafe redirect message, got %q", result.Output)
+			}
+		})
+	}
+}
+
+func TestWebFetchToolRedactsContentType(t *testing.T) {
 	tool := newWebFetchToolWithClient(webFetchTestClient(func(request *http.Request) (*http.Response, error) {
-		response := webFetchTestResponse(request, http.StatusFound, "text/plain", "redirect")
-		response.Header.Set("Location", "http://127.0.0.1/private")
-		return response, nil
+		return webFetchTestResponse(request, http.StatusOK, "text/plain; token=secret-token", "hello"), nil
 	}))
 
-	result := tool.Run(context.Background(), map[string]any{"url": "https://example.com/start"})
+	result := tool.Run(context.Background(), map[string]any{"url": "https://example.com/redact"})
 
-	if result.Status != StatusError {
-		t.Fatalf("expected redirect safety error, got %s: %s", result.Status, result.Output)
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "Unsafe redirect URL") {
-		t.Fatalf("expected unsafe redirect message, got %q", result.Output)
+	if strings.Contains(result.Output, "secret-token") || strings.Contains(result.Meta["content_type"], "secret-token") {
+		t.Fatalf("expected content type to be redacted, output=%q meta=%#v", result.Output, result.Meta)
+	}
+	if !strings.Contains(result.Output, "token=[REDACTED]") || !strings.Contains(result.Meta["content_type"], "token=[REDACTED]") {
+		t.Fatalf("expected redacted token in content type, output=%q meta=%#v", result.Output, result.Meta)
 	}
 }
 

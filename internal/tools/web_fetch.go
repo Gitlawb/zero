@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -41,6 +42,50 @@ type defaultWebFetchResolver struct{}
 
 func (defaultWebFetchResolver) LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error) {
 	return net.DefaultResolver.LookupNetIP(ctx, network, host)
+}
+
+type webFetchBlockedPrefix struct {
+	prefix netip.Prefix
+	reason string
+}
+
+type webFetchEmbeddedIPv4Prefix struct {
+	prefix     netip.Prefix
+	byteOffset int
+}
+
+var webFetchBlockedAddrPrefixes = []webFetchBlockedPrefix{
+	{prefix: netip.MustParsePrefix("0.0.0.0/8"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("10.0.0.0/8"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("100.64.0.0/10"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("127.0.0.0/8"), reason: "loopback hosts are blocked"},
+	{prefix: netip.MustParsePrefix("169.254.0.0/16"), reason: "link-local hosts are blocked"},
+	{prefix: netip.MustParsePrefix("172.16.0.0/12"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.0.0.0/24"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.0.2.0/24"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.88.99.0/24"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.168.0.0/16"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("198.18.0.0/15"), reason: "benchmark network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("198.51.100.0/24"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("203.0.113.0/24"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("224.0.0.0/4"), reason: "multicast hosts are blocked"},
+	{prefix: netip.MustParsePrefix("240.0.0.0/4"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("::/128"), reason: "unspecified hosts are blocked"},
+	{prefix: netip.MustParsePrefix("::1/128"), reason: "loopback hosts are blocked"},
+	{prefix: netip.MustParsePrefix("100::/64"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("2001::/23"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("2001:2::/48"), reason: "benchmark network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("2001:db8::/32"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("fc00::/7"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("fe80::/10"), reason: "link-local hosts are blocked"},
+	{prefix: netip.MustParsePrefix("ff00::/8"), reason: "multicast hosts are blocked"},
+}
+
+var webFetchEmbeddedIPv4Prefixes = []webFetchEmbeddedIPv4Prefix{
+	{prefix: netip.MustParsePrefix("::/96"), byteOffset: 12},
+	{prefix: netip.MustParsePrefix("64:ff9b::/96"), byteOffset: 12},
+	{prefix: netip.MustParsePrefix("64:ff9b:1::/48"), byteOffset: 6},
+	{prefix: netip.MustParsePrefix("2002::/16"), byteOffset: 2},
 }
 
 func NewWebFetchTool() Tool {
@@ -125,7 +170,7 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	if response.Request != nil && response.Request.URL != nil {
 		finalURL = redactWebFetchURL(response.Request.URL)
 	}
-	contentType := response.Header.Get("Content-Type")
+	contentType := redactWebFetchText(response.Header.Get("Content-Type"))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _, _ := readWebFetchBody(response.Body, min(maxBytes, webFetchErrorBodyLimit))
 		message := fmt.Sprintf("Error fetching URL: HTTP %s", webFetchStatusLine(response))
@@ -289,10 +334,31 @@ func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver we
 	if strings.Contains(host, "%") {
 		return fmt.Errorf("URL host zones are not allowed")
 	}
+	if err := validateWebFetchPort(parsed); err != nil {
+		return err
+	}
 	if err := rejectUnsafeWebFetchHost(ctx, host, resolver); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateWebFetchPort(parsed *url.URL) error {
+	port := parsed.Port()
+	if port == "" {
+		return nil
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		if port == "80" {
+			return nil
+		}
+	case "https":
+		if port == "443" {
+			return nil
+		}
+	}
+	return fmt.Errorf("only default ports are allowed for %s URLs", parsed.Scheme)
 }
 
 func rejectUnsafeWebFetchHost(ctx context.Context, host string, resolver webFetchResolver) error {
@@ -348,19 +414,41 @@ func rejectUnsafeWebFetchAddr(addr netip.Addr) error {
 		return fmt.Errorf("invalid resolved host address")
 	}
 	addr = addr.Unmap()
-	switch {
-	case addr.IsLoopback():
-		return fmt.Errorf("loopback hosts are blocked")
-	case addr.IsPrivate():
-		return fmt.Errorf("private network hosts are blocked")
-	case addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast():
-		return fmt.Errorf("link-local hosts are blocked")
-	case addr.IsMulticast():
-		return fmt.Errorf("multicast hosts are blocked")
-	case addr.IsUnspecified():
-		return fmt.Errorf("unspecified hosts are blocked")
+	if embedded, ok := webFetchEmbeddedIPv4(addr); ok {
+		return rejectUnsafeWebFetchAddr(embedded)
+	}
+	for _, blocked := range webFetchBlockedAddrPrefixes {
+		if blocked.prefix.Contains(addr) {
+			return errors.New(blocked.reason)
+		}
+	}
+	if !addr.IsGlobalUnicast() {
+		return fmt.Errorf("non-global hosts are blocked")
 	}
 	return nil
+}
+
+func webFetchEmbeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
+	if addr.Is4() {
+		return netip.Addr{}, false
+	}
+	bytes := addr.As16()
+	for _, candidate := range webFetchEmbeddedIPv4Prefixes {
+		if !candidate.prefix.Contains(addr) {
+			continue
+		}
+		if candidate.byteOffset < 0 || candidate.byteOffset+4 > len(bytes) {
+			continue
+		}
+		embedded := [4]byte{
+			bytes[candidate.byteOffset],
+			bytes[candidate.byteOffset+1],
+			bytes[candidate.byteOffset+2],
+			bytes[candidate.byteOffset+3],
+		}
+		return netip.AddrFrom4(embedded), true
+	}
+	return netip.Addr{}, false
 }
 
 func redactWebFetchURL(value *url.URL) string {
