@@ -121,9 +121,10 @@ func TestAskUserPromptEscDeliversCollectedAnswers(t *testing.T) {
 	if len(answers) != 1 {
 		t.Fatalf("expected the answer callback to fire on Esc, got %#v", answers)
 	}
-	if next.pending {
-		// cancelRun is the normal Esc path; here we only cancel the prompt, the
-		// run continues with the degraded answers.
+	// Esc on an ask_user prompt cancels only the questionnaire, not the run, so the
+	// run stays pending and continues with the degraded (empty) answers.
+	if !next.pending {
+		t.Fatal("expected the run to keep running after Esc cancels only the ask_user prompt")
 	}
 }
 

@@ -99,6 +99,11 @@ func (store *Store) CaptureToolCheckpoint(sessionID, workspaceRoot, tool string,
 // Returns ok=false when there is nothing to record (disabled, no paths, or no
 // capturable files).
 func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string, paths []string) (CheckpointPayload, bool) {
+	// Validate the session id (as CaptureToolCheckpoint does) so an exported caller
+	// can't route blob writes through an unexpected/invalid session path.
+	if !ValidSessionID(sessionID) {
+		return CheckpointPayload{}, false
+	}
 	if !CheckpointsEnabled() || len(paths) == 0 {
 		return CheckpointPayload{}, false
 	}

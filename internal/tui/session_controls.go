@@ -190,17 +190,23 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	// rewind marker — so reload the in-memory session state. Otherwise the dropped
 	// events would still (a) be re-sent to the agent as ContextEvents on the next
 	// prompt (sessionPrompt sends m.sessionEvents) and (b) linger in the transcript.
+	// A reload FAILURE must be surfaced (and the stale in-memory context dropped),
+	// not ignored — silently keeping m.sessionEvents would re-send rewound-away
+	// events on the next prompt, defeating the rewind.
 	if meta, getErr := m.sessionStore.Get(m.activeSession.SessionID); getErr == nil {
 		m.activeSession = *meta
 	}
-	if events, readErr := m.sessionStore.ReadEvents(m.activeSession.SessionID); readErr == nil {
-		m.sessionEvents = append([]sessions.Event{}, events...)
-		rows := initialTranscript()
-		for _, row := range transcriptRowsFromSessionEvents(events) {
-			rows = appendTranscriptRow(rows, row)
-		}
-		m.transcript = rows
+	events, readErr := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if readErr != nil {
+		m.sessionEvents = nil // drop stale context so it can't reach the next prompt
+		return m, fmt.Sprintf("Rewind\nrewound to sequence %d, but reloading the session failed (in-memory context cleared): %s", target, readErr.Error())
 	}
+	m.sessionEvents = append([]sessions.Event{}, events...)
+	rows := initialTranscript()
+	for _, row := range transcriptRowsFromSessionEvents(events) {
+		rows = appendTranscriptRow(rows, row)
+	}
+	m.transcript = rows
 
 	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
 		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))

@@ -397,6 +397,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.showSplash = false
+		// A request with no questions has nothing to answer — resolve it
+		// immediately so the run isn't stalled waiting on manual input.
+		if len(msg.request.Questions) == 0 {
+			if msg.answer != nil {
+				msg.answer(nil)
+			}
+			return m, nil
+		}
 		m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
 		m.pendingAskUser = &pendingAskUserPrompt{
 			request: msg.request,
@@ -416,7 +424,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// state changes.
 			if _, flushing := m.flushRunIDs[msg.runID]; flushing {
 				delete(m.flushRunIDs, msg.runID)
-				m, _ = m.appendSessionEvents(flushableSessionEvents(msg.sessionEvents))
+				// appendSessionEvents only returns rows for persist FAILURES; surface
+				// them so a failed checkpoint/tool flush (which would silently degrade
+				// /rewind) is visible rather than swallowed.
+				var flushRows []transcriptRow
+				m, flushRows = m.appendSessionEvents(flushableSessionEvents(msg.sessionEvents))
+				for _, row := range flushRows {
+					m.transcript = appendTranscriptRow(m.transcript, row)
+				}
 				// A Ctrl+C during an in-flight run defers its quit until the run's
 				// checkpoint session events have been flushed (above). Now that the
 				// last pending flush is drained, fire the deferred quit.

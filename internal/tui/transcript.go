@@ -131,6 +131,11 @@ func transcriptRowKey(row transcriptRow) string {
 			return fmt.Sprintf("%d:%s:%s", row.kind, row.permission.ToolCallID, row.permission.Action)
 		}
 	case rowAskUser:
+		// Prefer row.id (set to the ToolCallID): it survives rehydration even when
+		// row.askUser is nil, so a reloaded ask_user row still dedupes correctly.
+		if row.id != "" {
+			return fmt.Sprintf("%d:%s", row.kind, row.id)
+		}
 		if row.askUser != nil && row.askUser.ToolCallID != "" {
 			return fmt.Sprintf("%d:%s", row.kind, row.askUser.ToolCallID)
 		}

@@ -1279,3 +1279,17 @@ func testSessionStore(t *testing.T) *sessions.Store {
 		},
 	})
 }
+
+func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
+	if got := nextPermissionMode(agent.PermissionModeAuto); got != agent.PermissionModeAsk {
+		t.Fatalf("Auto -> %s, want Ask", got)
+	}
+	if got := nextPermissionMode(agent.PermissionModeAsk); got != agent.PermissionModeAuto {
+		t.Fatalf("Ask -> %s, want Auto", got)
+	}
+	// Unsafe must fold to the STRICTER Ask, never Auto (toggling an Unsafe session
+	// must not make it less strict).
+	if got := nextPermissionMode(agent.PermissionModeUnsafe); got != agent.PermissionModeAsk {
+		t.Fatalf("Unsafe -> %s, want Ask", got)
+	}
+}

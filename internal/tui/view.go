@@ -82,9 +82,12 @@ func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 	switch mode {
 	case agent.PermissionModeAuto:
 		return agent.PermissionModeAsk
-	default:
-		// Ask (and anything else, incl. an externally-set Unsafe) → Auto.
+	case agent.PermissionModeAsk:
 		return agent.PermissionModeAuto
+	default:
+		// Anything else (incl. an externally-set Unsafe) folds to Ask — the stricter
+		// landing, so toggling never makes an Unsafe session less strict.
+		return agent.PermissionModeAsk
 	}
 }
 
