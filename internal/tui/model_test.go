@@ -1064,6 +1064,90 @@ func TestToolResultRowTruncatesLongOutput(t *testing.T) {
 	}
 }
 
+func TestShiftTabCyclesPermissionMode(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	m.width = 96
+
+	// shift+tab toggles Auto<->Ask only; Unsafe is intentionally NOT reachable by
+	// a casual keypress (it disables permission prompts).
+	for _, want := range []agent.PermissionMode{
+		agent.PermissionModeAsk,
+		agent.PermissionModeAuto,
+	} {
+		updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		m = updated.(model)
+		if cmd != nil {
+			t.Fatalf("expected shift+tab to cycle mode synchronously, got command")
+		}
+		if m.permissionMode != want {
+			t.Fatalf("expected permission mode %q after shift+tab, got %q", want, m.permissionMode)
+		}
+		if m.permissionMode == agent.PermissionModeUnsafe {
+			t.Fatalf("shift+tab must never land on Unsafe")
+		}
+	}
+
+	// The rendered status label tracks the cycled mode.
+	label, _ := m.modeLabel()
+	if label != "auto-approve edits" {
+		t.Fatalf("expected mode label to track cycled mode, got %q", label)
+	}
+}
+
+func TestShiftTabDoesNotCycleWhileModalsActive(t *testing.T) {
+	// Permission modal, ask_user prompt, and an open picker all take precedence:
+	// shift+tab must not change the mode while any is up.
+	t.Run("permission", func(t *testing.T) {
+		m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+		m.pending = true
+		m.activeRunID = 7
+		updated, _ := m.Update(permissionRequestMsg{runID: 7, request: testPromptPermissionRequest()})
+		next := updated.(model)
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		next = updated.(model)
+		if next.permissionMode != agent.PermissionModeAuto {
+			t.Fatalf("expected mode unchanged while permission modal is up, got %q", next.permissionMode)
+		}
+		if next.pendingPermission == nil {
+			t.Fatal("expected permission prompt to remain pending")
+		}
+	})
+	t.Run("ask_user", func(t *testing.T) {
+		m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+		m.pending = true
+		m.activeRunID = 7
+		updated, _ := m.Update(askUserRequestMsg{runID: 7, request: testAskUserRequest(), answer: func([]string) {}})
+		next := updated.(model)
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		next = updated.(model)
+		if next.permissionMode != agent.PermissionModeAuto {
+			t.Fatalf("expected mode unchanged while ask_user prompt is up, got %q", next.permissionMode)
+		}
+		if next.pendingAskUser == nil {
+			t.Fatal("expected ask_user prompt to remain pending")
+		}
+	})
+	t.Run("picker", func(t *testing.T) {
+		m := newModel(context.Background(), Options{
+			ProviderName:   "openai",
+			ModelName:      "gpt-4.1",
+			Provider:       &fakeProvider{},
+			PermissionMode: agent.PermissionModeAuto,
+		})
+		m.input.SetValue("/model")
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		next := updated.(model)
+		if next.picker == nil {
+			t.Skip("model picker unavailable in test environment")
+		}
+		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		next = updated.(model)
+		if next.permissionMode != agent.PermissionModeAuto {
+			t.Fatalf("expected mode unchanged while picker is open, got %q", next.permissionMode)
+		}
+	})
+}
+
 func TestCtrlCExits(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 

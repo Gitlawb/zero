@@ -76,23 +76,29 @@ func (store *Store) CaptureToolCheckpoint(sessionID, workspaceRoot, tool string,
 	}
 	defer unlock()
 
-	payload, ok := store.snapshotForCheckpoint(sessionID, workspaceRoot, tool, paths)
+	payload, ok := store.SnapshotForCheckpoint(sessionID, workspaceRoot, tool, paths)
 	if !ok {
 		return Event{}, nil
 	}
 	return store.appendEventLocked(sessionID, AppendEventInput{Type: EventSessionCheckpoint, Payload: payload})
 }
 
-// snapshotForCheckpoint reads and stores the before-mutation blobs for paths and
-// returns the checkpoint payload WITHOUT appending an event. It is intentionally
-// package-private: the blob writes and the referencing EventSessionCheckpoint
-// must be committed atomically under the same session lock, which only its sole
-// caller CaptureToolCheckpoint guarantees. A snapshot-only entry point exposed to
-// external callers would let blobs be written that a concurrent
-// pruneOrphanBlobs/ApplyRewind could delete before the event is recorded.
+// SnapshotForCheckpoint reads and stores the before-mutation blobs for paths and
+// returns the checkpoint payload WITHOUT appending an event.
+//
+// CONTRACT: the returned payload references blobs that are ORPHAN-VULNERABLE — a
+// concurrent pruneOrphanBlobs/ApplyRewind can delete them — until the caller
+// appends an EventSessionCheckpoint carrying this payload. The caller therefore
+// MUST record that event promptly, including on cancellation paths. Prefer
+// CaptureToolCheckpoint, which writes the blobs AND appends the event atomically
+// under one session lock; use SnapshotForCheckpoint only when the event must be
+// batched IN ORDER with other session events (the TUI captures before each
+// mutating tool, batches the checkpoint with the run's other events to preserve
+// recorded ordering, and flushes them at end-of-run and on cancel).
+//
 // Returns ok=false when there is nothing to record (disabled, no paths, or no
 // capturable files).
-func (store *Store) snapshotForCheckpoint(sessionID, workspaceRoot, tool string, paths []string) (CheckpointPayload, bool) {
+func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string, paths []string) (CheckpointPayload, bool) {
 	if !CheckpointsEnabled() || len(paths) == 0 {
 		return CheckpointPayload{}, false
 	}

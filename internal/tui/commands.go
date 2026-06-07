@@ -17,6 +17,7 @@ const (
 	commandPermissions
 	commandProvider
 	commandModel
+	commandMode
 	commandContext
 	commandConfig
 	commandDebug
@@ -25,6 +26,7 @@ const (
 	commandSearch
 	commandResume
 	commandCompact
+	commandRewind
 	commandEffort
 	commandStyle
 	commandTheme
@@ -74,6 +76,13 @@ var commandDefinitions = []commandDefinition{
 		description:  "Show or switch the active model.",
 		kind:         commandModel,
 		startupOrder: 4,
+	},
+	{
+		name:        "/mode",
+		usage:       "/mode [name]",
+		group:       commandGroupModel,
+		description: "List agent modes or switch model, effort, and turns at once.",
+		kind:        commandMode,
 	},
 	{
 		name:         "/plan",
@@ -134,6 +143,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show or request transcript compaction state.",
 		kind:        commandCompact,
+	},
+	{
+		name:        "/rewind",
+		usage:       "/rewind [latest|<sequence>]",
+		group:       commandGroupSession,
+		description: "Restore workspace files to a checkpoint and truncate the session.",
+		kind:        commandRewind,
 	},
 	{
 		name:        "/effort",

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -54,10 +55,46 @@ type model struct {
 	runCancel          context.CancelFunc
 	runID              int
 	activeRunID        int
-	pendingPermission  *pendingPermissionPrompt
-	width              int
-	height             int
-	now                func() time.Time
+	// flushRunIDs holds the ids of runs cancelled while still in flight. Each
+	// cancelled agent goroutine keeps running to completion and returns its
+	// accumulated sessionEvents (including EventSessionCheckpoint payloads captured
+	// before each mutating tool) in a final agentResponseMsg. activeRunID is
+	// already zeroed by then, so without this the message would be dropped and the
+	// checkpoint blobs already written to disk would be orphaned (breaking
+	// /rewind). It is a SET (not a single id) so a second cancel before the first
+	// goroutine returns doesn't overwrite/lose the first run's pending flush. The
+	// agentResponseMsg handler persists each such run's session events (only) so
+	// the checkpoints stay referenced, then removes the id.
+	flushRunIDs       map[int]struct{}
+	pendingPermission *pendingPermissionPrompt
+	pendingAskUser    *pendingAskUserPrompt
+	width             int
+	height            int
+	now               func() time.Time
+
+	skin             string // "" default shell, "zeroline" reskin
+	themeVariant     int    // zeroline color theme (0-4)
+	themeDark        bool   // zeroline light/dark
+	frame            int    // animation frame counter (zeroline spinner)
+	booted           bool   // zeroline boot splash finished
+	streamingText    string // live assistant text for the current segment
+	streamStartFrame int    // frame the current stream segment began (tok/s)
+
+	// Slash-command autocomplete (purely additive UI state). suggestions is the
+	// live match list for the current "/token"; suggestionIdx is the highlighted
+	// row. Active only when suggestionsActive() (no modal, non-empty matches).
+	suggestions   []commandSuggestion
+	suggestionIdx int
+
+	// picker, when non-nil, is an open interactive selector overlay (/model,
+	// /theme, /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and
+	// applies the chosen value through the existing command handlers.
+	picker *commandPicker
+}
+
+type agentTextMsg struct {
+	runID int
+	delta string
 }
 
 type agentResponseMsg struct {
@@ -91,6 +128,25 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+}
+
+// askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
+// agent goroutine sends it (via the runtime sink) and blocks until the model
+// hands answers back through the answer callback.
+type askUserRequestMsg struct {
+	runID   int
+	request agent.AskUserRequest
+	answer  func([]string)
+}
+
+// pendingAskUserPrompt tracks an in-progress questionnaire. Answers are collected
+// one question at a time; once every question has an answer (or the user cancels)
+// the answer callback is invoked exactly once.
+type pendingAskUserPrompt struct {
+	request agent.AskUserRequest
+	answer  func([]string)
+	index   int
+	answers []string
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -133,9 +189,16 @@ func newModel(ctx context.Context, options Options) model {
 	input := textinput.New()
 	input.Prompt = "zero > "
 	input.Placeholder = "Ask Zero to inspect, edit, explain, or run a command..."
+	if options.Skin == "zeroline" {
+		input.Prompt = "❯ "
+		input.Placeholder = "message zero — / commands · @ files · ! bash"
+	}
 	input.Focus()
 
 	return model{
+		skin:               options.Skin,
+		themeVariant:       options.ThemeVariant,
+		themeDark:          options.ThemeDark,
 		ctx:                ctx,
 		cwd:                cwd,
 		gitBranch:          gitBranch(cwd),
@@ -161,6 +224,9 @@ func newModel(ctx context.Context, options Options) model {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.skin == "zeroline" {
+		return tea.Batch(textinput.Blink, zerolineTick())
+	}
 	return textinput.Blink
 }
 
@@ -169,11 +235,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			// cancelRun records the in-flight run into flushRunIDs and writes the
+			// "Run cancelled." marker, exactly like the Esc path. If a run was still
+			// in flight we must NOT quit yet: the cancelled goroutine returns its
+			// accumulated session events (including the EventSessionCheckpoint blobs it
+			// already wrote to disk before each mutating tool) in a final
+			// agentResponseMsg, and quitting now would drop that message, orphaning the
+			// checkpoints and breaking /rewind for Ctrl+C'd runs. Defer the quit until
+			// that flush lands; the agentResponseMsg handler fires tea.Quit once
+			// flushRunIDs drains. With no run in flight there is nothing to flush, so
+			// quit immediately as before.
+			pendingFlush := false
+			if m.pending && m.activeRunID != 0 {
+				pendingFlush = true
+			}
 			m.cancelRun()
 			m.exiting = true
+			if pendingFlush && len(m.flushRunIDs) > 0 {
+				return m, nil
+			}
 			return m, tea.Quit
 		case tea.KeyEsc:
+			// An active questionnaire is cancelled (not the whole run): deliver
+			// whatever answers were collected so the agent loop unblocks and
+			// degrades to its best-assumption path.
+			if m.pendingAskUser != nil {
+				return m.resolveAskUser(true)
+			}
+			// An open picker cancels first; then an active suggestion overlay is
+			// dismissed. Neither cancels the run or clears the input.
+			if m.picker != nil {
+				m.picker = nil
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				return m.dismissSuggestions(), nil
+			}
 			m.input.SetValue("")
+			m.suggestions = nil
+			m.suggestionIdx = 0
 			if m.pending {
 				m.cancelRun()
 			}
@@ -182,11 +282,99 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingPermission != nil {
 				return m, nil
 			}
+			if m.pendingAskUser != nil {
+				return m.submitAskUserAnswer()
+			}
+			if m.picker != nil {
+				return m.choosePicker()
+			}
+			// Enter on a highlighted suggestion completes the input rather than
+			// submitting; Enter with no active suggestion submits as today.
+			if m.suggestionsActive() {
+				return m.completeSuggestion(), nil
+			}
 			return m.handleSubmit()
+		case tea.KeyShiftTab:
+			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
+			// is intentionally not reachable by a casual keypress — see
+			// nextPermissionMode), but only when nothing modal is up: a permission
+			// prompt, ask_user questionnaire, or open picker all take precedence
+			// and let the key fall through to their own handlers below.
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.picker == nil {
+				m.permissionMode = nextPermissionMode(m.permissionMode)
+				return m, nil
+			}
+		case tea.KeyTab:
+			if m.picker == nil && m.suggestionsActive() {
+				m.moveSuggestion(1)
+				return m, nil
+			}
+		case tea.KeyDown:
+			if m.picker != nil {
+				m.picker.move(1)
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				m.moveSuggestion(1)
+				return m, nil
+			}
+		case tea.KeyUp:
+			if m.picker != nil {
+				m.picker.move(-1)
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				m.moveSuggestion(-1)
+				return m, nil
+			}
+		}
+		if m.pendingAskUser != nil {
+			// While a questionnaire is active, all other keys feed the text input
+			// (the answer field); nothing else should react.
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
 		}
 		if m.pendingPermission != nil {
 			return m.handlePermissionKey(msg)
 		}
+		// An open picker is modal over the input: swallow remaining keys so they
+		// neither type into the field nor trigger zeroline theme shortcuts.
+		// ↑/↓/Enter/Esc were already handled above.
+		if m.picker != nil {
+			return m, nil
+		}
+		if m.skin == "zeroline" {
+			m.booted = true // any key dismisses the boot splash
+			if nm, handled := m.handleZerolineKeys(msg); handled {
+				return nm, nil
+			}
+		}
+		// The key fell through to the text input: let it update, then refresh the
+		// autocomplete match list from the new value.
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		m.recomputeSuggestions()
+		return m, cmd
+	case zerolineTickMsg:
+		if m.skin != "zeroline" {
+			return m, nil
+		}
+		m.frame++
+		if m.frame >= bootFrames {
+			m.booted = true
+		}
+		return m, zerolineTick()
+	case agentTextMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		if m.streamingText == "" {
+			m.streamStartFrame = m.frame
+		}
+		m.streamingText += msg.delta
+		m.showSplash = false
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -204,14 +392,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case askUserRequestMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.showSplash = false
+		m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
+		m.pendingAskUser = &pendingAskUserPrompt{
+			request: msg.request,
+			answer:  msg.answer,
+			answers: make([]string, 0, len(msg.request.Questions)),
+		}
+		m.input.SetValue("")
+		return m, nil
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
+			// A run cancelled while in flight still finishes in its goroutine and
+			// returns its accumulated session events here. Persist ONLY those events
+			// (notably the EventSessionCheckpoint payloads captured before each
+			// mutating tool) so the checkpoint blobs stay referenced and /rewind
+			// works; the cancel path already wrote the "Run cancelled." marker, so
+			// skip transcript rows, the trailing cancellation error, and any pending
+			// state changes.
+			if _, flushing := m.flushRunIDs[msg.runID]; flushing {
+				delete(m.flushRunIDs, msg.runID)
+				m, _ = m.appendSessionEvents(flushableSessionEvents(msg.sessionEvents))
+				// A Ctrl+C during an in-flight run defers its quit until the run's
+				// checkpoint session events have been flushed (above). Now that the
+				// last pending flush is drained, fire the deferred quit.
+				if m.exiting && len(m.flushRunIDs) == 0 {
+					return m, tea.Quit
+				}
+			}
 			return m, nil
 		}
 		m.pending = false
 		m.runCancel = nil
 		m.activeRunID = 0
 		m.pendingPermission = nil
+		m.pendingAskUser = nil
+		m.streamingText = ""
 		for _, event := range msg.usageEvents {
 			var usageRows []transcriptRow
 			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
@@ -238,6 +458,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		// a tool call ends the current streamed text segment
+		if msg.row.kind == rowToolCall {
+			m.streamingText = ""
+		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		return m, nil
 	}
@@ -248,6 +472,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.skin == "zeroline" {
+		return m.zerolineView()
+	}
 	if m.showSplash {
 		return m.startupView()
 	}
@@ -271,9 +498,12 @@ func (m model) transcriptView() string {
 
 	if m.pending {
 		builder.WriteString("\n")
-		if m.pendingPermission != nil {
+		switch {
+		case m.pendingPermission != nil:
 			builder.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
-		} else {
+		case m.pendingAskUser != nil:
+			builder.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
+		default:
 			builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
 		}
 		builder.WriteString("\n")
@@ -281,6 +511,14 @@ func (m model) transcriptView() string {
 
 	builder.WriteString("\n")
 	builder.WriteString(borderedBlock(width, []string{m.input.View()}))
+	if overlay := m.suggestionOverlay(width); overlay != "" {
+		builder.WriteString("\n")
+		builder.WriteString(overlay)
+	}
+	if picker := m.pickerOverlay(width); picker != "" {
+		builder.WriteString("\n")
+		builder.WriteString(picker)
+	}
 	builder.WriteString("\n")
 	builder.WriteString(m.statusLine(width))
 
@@ -327,6 +565,45 @@ func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cm
 	return m, nil
 }
 
+// submitAskUserAnswer records the answer to the current question and advances to
+// the next one; once every question is answered it delivers the full answer set.
+func (m model) submitAskUserAnswer() (tea.Model, tea.Cmd) {
+	pending := m.pendingAskUser
+	if pending == nil {
+		return m, nil
+	}
+	pending.answers = append(pending.answers, strings.TrimSpace(m.input.Value()))
+	pending.index++
+	m.input.SetValue("")
+	if pending.index >= len(pending.request.Questions) {
+		return m.resolveAskUser(false)
+	}
+	return m, nil
+}
+
+// resolveAskUser delivers the collected answers (padding to one-per-question when
+// cancelled early) and clears the prompt. cancelled answers stay empty so the
+// loop can degrade to its best-assumption path without deadlocking.
+func (m model) resolveAskUser(cancelled bool) (tea.Model, tea.Cmd) {
+	pending := m.pendingAskUser
+	if pending == nil {
+		return m, nil
+	}
+	answers := pending.answers
+	if cancelled {
+		// Record the question currently on screen as unanswered too.
+		m.input.SetValue("")
+	}
+	for len(answers) < len(pending.request.Questions) {
+		answers = append(answers, "")
+	}
+	if pending.answer != nil {
+		pending.answer(answers)
+	}
+	m.pendingAskUser = nil
+	return m, nil
+}
+
 func permissionDecisionReason(decision permissionDecision) string {
 	switch decision {
 	case permissionDecisionAllow:
@@ -340,12 +617,52 @@ func permissionDecisionReason(decision permissionDecision) string {
 	}
 }
 
+// choosePicker applies the highlighted picker item through the same handler the
+// typed command would have used, appends the resulting status text, and closes
+// the picker. Behavior is identical to running "/model <id>", "/effort <v>",
+// "/mode <name>", or selecting a zeroline theme by key.
+func (m model) choosePicker() (tea.Model, tea.Cmd) {
+	picker := m.picker
+	m.picker = nil
+	if picker == nil {
+		return m, nil
+	}
+	item, ok := picker.current()
+	if !ok {
+		return m, nil
+	}
+	switch picker.kind {
+	case pickerModel:
+		m.showSplash = false
+		text := ""
+		m, text = m.handleModelCommand(item.Value)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+	case pickerEffort:
+		m.showSplash = false
+		text := ""
+		m, text = m.handleEffortCommand(item.Value)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+	case pickerMode:
+		m.showSplash = false
+		text := ""
+		m, text = m.handleModeCommand(item.Value)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+	case pickerTheme:
+		// Theme selection mirrors the zeroline number-key shortcut: set the active
+		// variant by its catalog index.
+		m.themeVariant = picker.selected
+	}
+	return m, nil
+}
+
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	command := parseCommand(m.input.Value())
 	if command.kind == commandPrompt && m.pending {
 		return m, nil
 	}
 	m.input.SetValue("")
+	m.suggestions = nil
+	m.suggestionIdx = 0
 
 	switch command.kind {
 	case commandEmpty:
@@ -374,9 +691,37 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
+		if strings.TrimSpace(command.text) == "" {
+			if m.pending {
+				m.showSplash = false
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+				return m, nil
+			}
+			if picker := m.newModelPicker(); picker != nil {
+				m.picker = picker
+				return m, nil
+			}
+		}
 		m.showSplash = false
 		text := ""
 		m, text = m.handleModelCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandMode:
+		if strings.TrimSpace(command.text) == "" {
+			if m.pending {
+				m.showSplash = false
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+				return m, nil
+			}
+			if picker := m.newModePicker(); picker != nil {
+				m.picker = picker
+				return m, nil
+			}
+		}
+		m.showSplash = false
+		text := ""
+		m, text = m.handleModeCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandContext:
@@ -424,7 +769,24 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleCompactCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandRewind:
+		m.showSplash = false
+		text := ""
+		m, text = m.handleRewindCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
 	case commandEffort:
+		if strings.TrimSpace(command.text) == "" {
+			if m.pending {
+				m.showSplash = false
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+				return m, nil
+			}
+			if picker := m.newEffortPicker(); picker != nil {
+				m.picker = picker
+				return m, nil
+			}
+		}
 		m.showSplash = false
 		text := ""
 		m, text = m.handleEffortCommand(command.text)
@@ -436,7 +798,27 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleStyleCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
-	case commandTheme, commandInputStyle:
+	case commandTheme:
+		// Only the zeroline skin renders themes; there a no-argument /theme opens
+		// the picker. The default skin keeps its existing shell-only message.
+		if m.skin == "zeroline" && strings.TrimSpace(command.text) == "" {
+			if m.pending {
+				m.showSplash = false
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+				return m, nil
+			}
+			if picker := m.newThemePicker(); picker != nil {
+				m.picker = picker
+				return m, nil
+			}
+		}
+		m.showSplash = false
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: shellOnlyCommandText(command.name),
+		})
+		return m, nil
+	case commandInputStyle:
 		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
@@ -496,6 +878,16 @@ func (m *model) cancelRun() {
 	if m.runCancel != nil {
 		m.runCancel()
 	}
+	// Remember the in-flight run so its final agentResponseMsg is still drained
+	// for session-event persistence after activeRunID is cleared — otherwise the
+	// checkpoint blobs it captured before each mutating tool are orphaned on disk
+	// and /rewind can't reference them.
+	if m.pending && m.activeRunID != 0 {
+		if m.flushRunIDs == nil {
+			m.flushRunIDs = make(map[int]struct{})
+		}
+		m.flushRunIDs[m.activeRunID] = struct{}{}
+	}
 	if m.pending && m.activeSession.SessionID != "" {
 		if next, err := (*m).appendSessionEvent(sessions.EventError, map[string]any{
 			"message": "Run cancelled.",
@@ -507,6 +899,7 @@ func (m *model) cancelRun() {
 	m.runCancel = nil
 	m.activeRunID = 0
 	m.pendingPermission = nil
+	m.pendingAskUser = nil
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
@@ -522,6 +915,17 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.Cwd = m.cwd
+		// Enable agent-loop compaction sized to the active model's context
+		// window. An unknown/custom model resolves to 0, leaving compaction off.
+		options.ContextWindow = modelContextWindow(m.modelName)
+
+		onText := options.OnText
+		options.OnText = func(delta string) {
+			m.sendAgentText(runID, delta)
+			if onText != nil {
+				onText(delta)
+			}
+		}
 
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
@@ -553,6 +957,34 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 			}
 		}
 
+		onAskUser := options.OnAskUser
+		options.OnAskUser = func(ctx context.Context, request agent.AskUserRequest) (agent.AskUserResponse, error) {
+			if onAskUser != nil {
+				return onAskUser(ctx, request)
+			}
+			if m.runtimeMessageSink == nil {
+				// No interactive surface: let the loop degrade gracefully.
+				return agent.AskUserResponse{}, fmt.Errorf("ask_user prompt unavailable")
+			}
+			answerCh := make(chan []string, 1)
+			m.sendAskUserRequest(runID, request, func(answers []string) {
+				select {
+				case answerCh <- answers:
+				default:
+				}
+			})
+			sessionEvents = append(sessionEvents, pendingSessionEvent{
+				Type:    sessions.EventMessage,
+				Payload: askUserSessionPayload(request),
+			})
+			select {
+			case answers := <-answerCh:
+				return agent.AskUserResponse{Answers: answers}, nil
+			case <-ctx.Done():
+				return agent.AskUserResponse{}, ctx.Err()
+			}
+		}
+
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
 			row := transcriptRow{
@@ -572,6 +1004,27 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 					"arguments": call.Arguments,
 				},
 			})
+			// Snapshot before-state of files this call will mutate, NOW (before the
+			// mutation runs), then batch the checkpoint event IN ORDER with the other
+			// session events so the recorded sequence matches execution (recording it
+			// out-of-band would reorder it ahead of the batched tool_call/result).
+			// SnapshotForCheckpoint writes the blobs; the batched event referencing
+			// them is flushed at end-of-run AND on cancel (flushRunIDs), so the blobs
+			// never stay orphaned — see its contract in internal/sessions.
+			if m.sessionStore != nil && m.activeSession.SessionID != "" {
+				var args map[string]any
+				if call.Arguments != "" {
+					_ = json.Unmarshal([]byte(call.Arguments), &args)
+				}
+				if targets := tools.MutationTargets(m.cwd, call.Name, args); len(targets) > 0 {
+					if payload, ok := m.sessionStore.SnapshotForCheckpoint(m.activeSession.SessionID, m.cwd, call.Name, targets); ok {
+						sessionEvents = append(sessionEvents, pendingSessionEvent{
+							Type:    sessions.EventSessionCheckpoint,
+							Payload: payload,
+						})
+					}
+				}
+			}
 			if onToolCall != nil {
 				onToolCall(call)
 			}
@@ -589,14 +1042,21 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 			}
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)
+			toolPayload := map[string]any{
+				"toolCallId": result.ToolCallID,
+				"name":       result.Name,
+				"status":     string(result.Status),
+				"output":     result.Output,
+			}
+			if result.Redacted {
+				toolPayload["redacted"] = true
+			}
+			if len(result.ChangedFiles) > 0 {
+				toolPayload["changedFiles"] = result.ChangedFiles
+			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
-				Type: sessions.EventToolResult,
-				Payload: map[string]any{
-					"toolCallId": result.ToolCallID,
-					"name":       result.Name,
-					"status":     string(result.Status),
-					"output":     result.Output,
-				},
+				Type:    sessions.EventToolResult,
+				Payload: toolPayload,
 			})
 			if onToolResult != nil {
 				onToolResult(result)
@@ -660,6 +1120,13 @@ func (m model) sendPermissionRequest(runID int, request agent.PermissionRequest,
 	m.runtimeMessageSink(permissionRequestMsg{runID: runID, request: request, decide: decide})
 }
 
+func (m model) sendAskUserRequest(runID int, request agent.AskUserRequest, answer func([]string)) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(askUserRequestMsg{runID: runID, request: request, answer: answer})
+}
+
 func tuiPermissionEventType(event agent.PermissionEvent) sessions.EventType {
 	if event.Action == agent.PermissionActionPrompt {
 		return sessions.EventPermissionRequest
@@ -675,6 +1142,13 @@ func (m model) sendAgentRow(runID int, row transcriptRow) {
 		return
 	}
 	m.runtimeMessageSink(agentRowMsg{runID: runID, row: row})
+}
+
+func (m model) sendAgentText(runID int, delta string) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(agentTextMsg{runID: runID, delta: delta})
 }
 
 func toolResultRowText(result agent.ToolResult) string {

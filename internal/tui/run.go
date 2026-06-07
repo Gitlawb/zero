@@ -20,12 +20,17 @@ func Run(ctx context.Context, options Options) int {
 		}
 	}
 
-	program = tea.NewProgram(
-		newModel(ctx, options),
+	programOpts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
-	)
+	}
+	// NOTE: we intentionally do NOT enable mouse capture. Mouse cell-motion
+	// reporting routes clicks/drags to the program, which breaks the terminal's
+	// native text selection + copy and surprises users who expect normal
+	// click/select/copy/paste. The permission modal is fully keyboard-driven
+	// (a/y/d/Esc), so capturing the mouse buys little and costs core UX.
+	program = tea.NewProgram(newModel(ctx, options), programOpts...)
 
 	if _, err := program.Run(); err != nil {
 		return 1

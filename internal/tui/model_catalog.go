@@ -51,6 +51,25 @@ func (m model) modelListText() string {
 	})
 }
 
+// modelContextWindow resolves the active model's context window (max input
+// tokens) from the model registry to size agent-loop compaction. An unknown or
+// custom model resolves to 0, leaving compaction DISABLED as a safe default.
+func modelContextWindow(modelName string) int {
+	trimmed := strings.TrimSpace(modelName)
+	if trimmed == "" {
+		return 0
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return 0
+	}
+	entry, ok := registry.Resolve(trimmed)
+	if !ok {
+		return 0
+	}
+	return entry.ContextLimits.ContextWindow
+}
+
 func activeModelID(registry modelregistry.Registry, modelName string) string {
 	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {

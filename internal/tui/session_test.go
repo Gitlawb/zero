@@ -285,6 +285,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
 		sessions.EventToolCall,
+		sessions.EventSessionCheckpoint,
 		sessions.EventPermissionRequest,
 		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
@@ -292,15 +293,15 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[2], "toolCallId", "call_write")
-	assertPayloadField(t, events[2], "name", "write_file")
-	assertPayloadField(t, events[2], "action", "prompt")
-	assertPayloadField(t, events[2], "permission", "prompt")
-	assertPayloadField(t, events[2], "permissionMode", "ask")
-	assertPayloadField(t, events[2], "sideEffect", "write")
-	assertPayloadField(t, events[3], "action", "deny")
-	assertPayloadField(t, events[3], "decisionReason", "denied in TUI")
-	assertPayloadField(t, events[5], "content", "write blocked")
+	assertPayloadField(t, events[3], "toolCallId", "call_write")
+	assertPayloadField(t, events[3], "name", "write_file")
+	assertPayloadField(t, events[3], "action", "prompt")
+	assertPayloadField(t, events[3], "permission", "prompt")
+	assertPayloadField(t, events[3], "permissionMode", "ask")
+	assertPayloadField(t, events[3], "sideEffect", "write")
+	assertPayloadField(t, events[4], "action", "deny")
+	assertPayloadField(t, events[4], "decisionReason", "denied in TUI")
+	assertPayloadField(t, events[6], "content", "write blocked")
 	if !transcriptContains(next.transcript, "permission: write_file prompt") {
 		t.Fatalf("expected permission row in transcript, got %#v", next.transcript)
 	}
@@ -334,6 +335,7 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
 		sessions.EventMessage,
 		sessions.EventToolCall,
+		sessions.EventSessionCheckpoint,
 		sessions.EventPermissionRequest,
 		sessions.EventPermissionDecision,
 		sessions.EventToolResult,
@@ -341,10 +343,10 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 	}) {
 		t.Fatalf("unexpected event sequence: %#v", got)
 	}
-	assertPayloadField(t, events[3], "action", "allow")
-	assertPayloadField(t, events[3], "decisionReason", "approved in TUI")
-	assertPayloadField(t, events[4], "status", "ok")
-	assertPayloadField(t, events[5], "content", "write allowed")
+	assertPayloadField(t, events[4], "action", "allow")
+	assertPayloadField(t, events[4], "decisionReason", "approved in TUI")
+	assertPayloadField(t, events[5], "status", "ok")
+	assertPayloadField(t, events[6], "content", "write allowed")
 	if !transcriptContains(next.transcript, "permission: write_file allow") {
 		t.Fatalf("expected allow decision in transcript, got %#v", next.transcript)
 	}
@@ -704,6 +706,164 @@ func TestEscCancelRecordsSessionError(t *testing.T) {
 	assertPayloadField(t, events[1], "message", "Run cancelled.")
 	if next.pending {
 		t.Fatal("expected Esc to clear pending state")
+	}
+}
+
+func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	writeTestFile(t, root, "notes.txt", "before")
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_write", "notes.txt", "after"),
+		textScript("never reached"),
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+	m.input.SetValue("rewrite notes")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- cmd()
+	}()
+
+	// Drain live runtime messages until the permission prompt is up. The tool call
+	// (and its checkpoint snapshot) is captured into the goroutine's in-flight
+	// sessionEvents before the run blocks on the permission decision.
+	cancelled := false
+	for !cancelled {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
+			// Cancel mid-run via Esc while the permission prompt is pending: this
+			// unblocks the goroutine through ctx cancellation.
+			updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			next = updated.(model)
+			cancelled = true
+		}
+	}
+	if next.pending {
+		t.Fatal("expected Esc to clear pending state")
+	}
+	if len(next.flushRunIDs) == 0 {
+		t.Fatal("expected cancelled run to be flagged for session-event flush")
+	}
+
+	// The cancelled goroutine still returns its accumulated session events. Deliver
+	// that final message; the checkpoint must be persisted even though activeRunID
+	// is already zeroed.
+	finalMsg := receiveFinalMessage(t, finalCh)
+	updated, _ = next.Update(finalMsg)
+	next = updated.(model)
+	if len(next.flushRunIDs) != 0 {
+		t.Fatalf("expected flush set to clear after draining cancelled run, got %v", next.flushRunIDs)
+	}
+
+	events := readOnlySessionEvents(t, store)
+	if countSessionEvents(events, sessions.EventSessionCheckpoint) != 1 {
+		t.Fatalf("expected the in-flight checkpoint to be persisted on cancel, got %#v", eventTypes(events))
+	}
+	if countSessionEvents(events, sessions.EventToolCall) != 1 {
+		t.Fatalf("expected the in-flight tool call to be persisted on cancel, got %#v", eventTypes(events))
+	}
+	// The cancel path records exactly one "Run cancelled." error; the goroutine's
+	// trailing cancellation error must be dropped, not double-recorded.
+	if got := countSessionEvents(events, sessions.EventError); got != 1 {
+		t.Fatalf("expected exactly one cancellation error event, got %d in %#v", got, eventTypes(events))
+	}
+	cancelErr := nthSessionEvent(t, events, sessions.EventError, 1)
+	assertPayloadField(t, cancelErr, "message", "Run cancelled.")
+}
+
+func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	writeTestFile(t, root, "notes.txt", "before")
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		writeFileToolScript("call_write", "notes.txt", "after"),
+		textScript("never reached"),
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+	m.input.SetValue("rewrite notes")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	finalCh := make(chan tea.Msg, 1)
+	go func() {
+		finalCh <- cmd()
+	}()
+
+	// Drain live runtime messages until the permission prompt is up; the tool call
+	// and its checkpoint snapshot are captured into the goroutine's in-flight
+	// sessionEvents before the run blocks on the permission decision.
+	cancelled := false
+	for !cancelled {
+		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
+		updated, _ = next.Update(runtimeMsg)
+		next = updated.(model)
+		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
+			// Ctrl+C while the permission prompt is pending: this must cancel the
+			// in-flight run (unblocking the goroutine via ctx) AND mark the model
+			// exiting — but it must NOT quit before the in-flight run's final
+			// message has been drained, or the captured checkpoint is orphaned.
+			var exitCmd tea.Cmd
+			updated, exitCmd = next.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			next = updated.(model)
+			if !next.exiting {
+				t.Fatal("expected Ctrl+C to mark model exiting")
+			}
+			if exitCmd != nil {
+				t.Fatal("expected Ctrl+C to defer quit while an in-flight run still needs flushing")
+			}
+			cancelled = true
+		}
+	}
+	if next.pending {
+		t.Fatal("expected Ctrl+C to clear pending state")
+	}
+	if len(next.flushRunIDs) == 0 {
+		t.Fatal("expected cancelled run to be flagged for session-event flush")
+	}
+
+	// The cancelled goroutine still returns its accumulated session events. Deliver
+	// that final message; the checkpoint must be persisted even though activeRunID
+	// is already zeroed, and the deferred quit must fire now.
+	finalMsg := receiveFinalMessage(t, finalCh)
+	updated, quitCmd := next.Update(finalMsg)
+	next = updated.(model)
+	if len(next.flushRunIDs) != 0 {
+		t.Fatalf("expected flush set to clear after draining cancelled run, got %v", next.flushRunIDs)
+	}
+	if quitCmd == nil {
+		t.Fatal("expected deferred quit to fire once the in-flight run is flushed on Ctrl+C")
+	}
+
+	events := readOnlySessionEvents(t, store)
+	if countSessionEvents(events, sessions.EventSessionCheckpoint) != 1 {
+		t.Fatalf("expected the in-flight checkpoint to be persisted on Ctrl+C, got %#v", eventTypes(events))
+	}
+	if countSessionEvents(events, sessions.EventToolCall) != 1 {
+		t.Fatalf("expected the in-flight tool call to be persisted on Ctrl+C, got %#v", eventTypes(events))
+	}
+	// The cancel path records exactly one "Run cancelled." error; the goroutine's
+	// trailing cancellation error must be dropped, not double-recorded.
+	if got := countSessionEvents(events, sessions.EventError); got != 1 {
+		t.Fatalf("expected exactly one cancellation error event, got %d in %#v", got, eventTypes(events))
 	}
 }
 
