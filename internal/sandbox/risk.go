@@ -9,9 +9,49 @@ import (
 )
 
 var (
-	networkCommandPattern     = regexp.MustCompile(`(?i)\b(curl|wget|scp|ssh|rsync|nc|netcat|python3?\s+-m\s+http\.server|npm\s+(install|add|publish|login)|pnpm\s+(install|add|publish)|yarn\s+(add|publish)|bun\s+(add|install|publish)|pip3?\s+install|go\s+get|git\s+clone|gh\s+(release\s+download|repo\s+clone|api))\b`)
-	destructiveCommandPattern = regexp.MustCompile(`(?i)(\brm\s+(-[A-Za-z]*r[A-Za-z]*f|-rf|-fr)\s+(/|\$HOME|~|\*)|\bmkfs\b|\bdd\s+if=|\bchmod\s+-R\s+777\b|\bchown\s+-R\b)`)
+	networkCommandPattern = regexp.MustCompile(`(?i)\b(curl|wget|scp|ssh|rsync|nc|netcat|python3?\s+-m\s+http\.server|npm\s+(install|add|publish|login)|pnpm\s+(install|add|publish)|yarn\s+(add|publish)|bun\s+(add|install|publish)|pip3?\s+install|go\s+get|git\s+clone|gh\s+(release\s+download|repo\s+clone|api))\b`)
+	// destructiveCommandPattern matches the highest-risk shell forms:
+	//   - rm -rf (with combined/reordered r/f flags) targeting /, $HOME (bare,
+	//     quoted, or ${HOME} braced), ~, or *, with an optional `--` before the
+	//     target. Each target alternative tolerates optional surrounding quotes
+	//     so `rm -rf "/"` / `rm -rf '/'` cannot slip past the gate.
+	//   - chmod with combined/reordered flags and an octal-or-777 mode applied
+	//     RECURSIVELY (a -R/-r flag) or to an ABSOLUTE path / sensitive tree
+	//     (e.g. chmod -Rf 777 /, chmod -R 0777 /, chmod 777 -R /etc, chmod 777 /etc).
+	//     A single-file chmod 777 (e.g. `chmod 777 script.sh`) is intentionally
+	//     NOT flagged — the intent is recursive/directory-tree chmod.
+	//   - mkfs, dd if=, chown -R.
+	destructiveCommandPattern = regexp.MustCompile(`(?i)(\brm\s+(-[A-Za-z]*r[A-Za-z]*f|-rf|-fr)\s+(--\s+)?["']?(\$\{?HOME\}?|/|~|\*)["']?|\bmkfs\b|\bdd\s+if=|\bchmod\s+(-[A-Za-z]*[rR][A-Za-z]*\s+)+0?777\b|\bchmod\s+(-\S+\s+)*0?777\s+-[A-Za-z]*[rR][A-Za-z]*\b|\bchmod\s+(-\S+\s+)*0?777\s+["']?/|\bchown\s+-R\b)`)
+	// pipedInstallerPattern matches a pipe into a POSIX shell, with or without a
+	// space and across sh/bash/zsh/ksh/dash (so `curl x|sh`, `|bash`, `| zsh`).
+	pipedInstallerPattern = regexp.MustCompile(`(?i)\|\s*(ba|z|k|da)?sh\b`)
+	// destructiveExtraPatterns hold high-severity patterns that the legacy
+	// destructiveCommandPattern does not already cover. Folded in from the
+	// blueprint safe_bash.go without duplicating existing matches.
+	destructiveExtraPatterns = []*regexp.Regexp{
+		// Fork bomb (and minor spacing variants).
+		regexp.MustCompile(`:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`),
+		// Writing to a raw block device (dd of=, redirect to /dev/sdX, etc.).
+		regexp.MustCompile(`(?i)>\s*/dev/(sd[a-z]+\d*|nvme\d+n\d+(p\d+)?|hd[a-z]+\d*|xvd[a-z]+\d*|mmcblk\d+)`),
+		regexp.MustCompile(`(?i)\bof=/dev/(sd[a-z]+\d*|nvme\d+n\d+(p\d+)?|hd[a-z]+\d*|xvd[a-z]+\d*|mmcblk\d+)`),
+		// rm -rf targeting the root, including long flags and --no-preserve-root.
+		regexp.MustCompile(`(?i)\brm\s+(-[A-Za-z]*\s+|--[a-z-]+\s+)*(/|/\*)(\s|$)`),
+		// mkfs.<fstype> form (e.g. mkfs.ext4) not caught by the bare \bmkfs\b above when followed by a dot.
+		regexp.MustCompile(`(?i)\bmkfs\.[a-z0-9]+\b`),
+	}
 )
+
+func matchesDestructive(command string) bool {
+	if destructiveCommandPattern.MatchString(command) {
+		return true
+	}
+	for _, pattern := range destructiveExtraPatterns {
+		if pattern.MatchString(command) {
+			return true
+		}
+	}
+	return false
+}
 
 func Classify(request Request) Risk {
 	categories := map[string]bool{}
@@ -36,16 +76,18 @@ func Classify(request Request) Risk {
 		add("out_of_workspace", RiskCritical)
 	}
 
-	command := argString(request.Args, "command")
+	// The bash tool accepts the command under any of these aliases; resolve the
+	// first non-empty so destructive/network/piped-installer classification
+	// cannot be bypassed by choosing a different alias key.
+	command := firstArgString(request.Args, "command", "cmd", "script", "shell")
 	if command != "" {
 		if networkCommandPattern.MatchString(command) {
 			add("network", RiskCritical)
 		}
-		if destructiveCommandPattern.MatchString(command) {
+		if matchesDestructive(command) {
 			add("destructive", RiskCritical)
 		}
-		lowerCommand := strings.ToLower(command)
-		if strings.Contains(lowerCommand, "| sh") || strings.Contains(lowerCommand, "| bash") {
+		if pipedInstallerPattern.MatchString(command) {
 			add("piped_installer", RiskCritical)
 		}
 	}
@@ -128,6 +170,16 @@ func argString(args map[string]any, key string) string {
 	default:
 		return strings.TrimSpace(fmt.Sprint(typed))
 	}
+}
+
+// firstArgString returns the first non-empty argument value among keys.
+func firstArgString(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := argString(args, key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func requestPaths(request Request) []string {
