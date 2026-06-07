@@ -183,6 +183,21 @@ func TestBuildArgsRejectsInvalidSessionIDs(t *testing.T) {
 	}
 }
 
+func TestBuildArgsNormalizesGeneratedSessionID(t *testing.T) {
+	result, err := (Executor{
+		NewSessionID: func() (string, error) { return " child_session ", nil },
+	}).BuildArgs(BuildArgsInput{Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("BuildArgs returned error: %v", err)
+	}
+	if result.SessionID != "child_session" {
+		t.Fatalf("SessionID = %q, want child_session", result.SessionID)
+	}
+	if !containsSequence(result.Args, []string{"--init-session-id", "child_session"}) {
+		t.Fatalf("args missing normalized session id: %#v", result.Args)
+	}
+}
+
 func containsSequence(values []string, sequence []string) bool {
 	for index := 0; index+len(sequence) <= len(values); index++ {
 		if reflect.DeepEqual(values[index:index+len(sequence)], sequence) {

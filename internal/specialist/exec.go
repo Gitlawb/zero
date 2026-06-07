@@ -44,8 +44,9 @@ type BuildResumeArgsInput struct {
 }
 
 type BuildArgsResult struct {
-	Args       []string
-	SessionID  string
+	Args      []string
+	SessionID string
+	// PromptFile is created for large prompts; callers own cleanup after exec finishes.
 	PromptFile string
 }
 
@@ -60,6 +61,7 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	if err != nil {
 		return BuildArgsResult{}, err
 	}
+	sessionID = strings.TrimSpace(sessionID)
 	if !sessions.ValidSessionID(sessionID) {
 		return BuildArgsResult{}, fmt.Errorf("invalid specialist session id %q", sessionID)
 	}
