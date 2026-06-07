@@ -67,6 +67,16 @@ func boolArg(args map[string]any, key string, fallback bool) (bool, error) {
 	return false, fmt.Errorf("%s must be a boolean", key)
 }
 
+// floatToInt converts a float to int only when it is finite, integral, and in
+// range; NaN/Inf/non-integer/out-of-range return ok=false so callers fail closed
+// before an implementation-defined cast.
+func floatToInt(f float64) (int, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f || f > float64(math.MaxInt) || f < float64(math.MinInt) {
+		return 0, false
+	}
+	return int(f), true
+}
+
 func intArg(args map[string]any, key string, fallback int, min int, max int) (int, error) {
 	value, ok := args[key]
 	if !ok || value == nil {
@@ -82,17 +92,22 @@ func intArg(args map[string]any, key string, fallback int, min int, max int) (in
 	case int64:
 		number = int(typed)
 	case float64:
-		if math.Trunc(typed) != typed {
+		n, ok := floatToInt(typed)
+		if !ok {
 			return 0, fmt.Errorf("%s must be an integer", key)
 		}
-		number = int(typed)
+		number = n
 	case string:
 		// Some models send numbers as strings ("5"); accept whole numbers.
 		trimmed := strings.TrimSpace(typed)
 		if parsed, perr := strconv.Atoi(trimmed); perr == nil {
 			number = parsed
-		} else if f, ferr := strconv.ParseFloat(trimmed, 64); ferr == nil && math.Trunc(f) == f {
-			number = int(f)
+		} else if f, ferr := strconv.ParseFloat(trimmed, 64); ferr == nil {
+			n, ok := floatToInt(f)
+			if !ok {
+				return 0, fmt.Errorf("%s must be an integer", key)
+			}
+			number = n
 		} else {
 			return 0, fmt.Errorf("%s must be an integer", key)
 		}

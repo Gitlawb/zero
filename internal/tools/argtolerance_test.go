@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -371,6 +372,20 @@ func TestIntArgCoercesStringNumbers(t *testing.T) {
 	}
 	if _, err := intArg(map[string]any{"n": "abc"}, "n", 0, 1, 0); err == nil {
 		t.Error("non-numeric string should error")
+	}
+	// Fail closed on non-finite / non-integral floats (and their string forms)
+	// before an implementation-defined cast.
+	if _, err := intArg(map[string]any{"n": math.NaN()}, "n", 0, 0, 0); err == nil {
+		t.Error("NaN float should error")
+	}
+	if _, err := intArg(map[string]any{"n": math.Inf(1)}, "n", 0, 0, 0); err == nil {
+		t.Error("+Inf float should error")
+	}
+	if _, err := intArg(map[string]any{"n": "NaN"}, "n", 0, 0, 0); err == nil {
+		t.Error("NaN string should error")
+	}
+	if _, err := intArg(map[string]any{"n": 5.5}, "n", 0, 0, 0); err == nil {
+		t.Error("non-integral float should error")
 	}
 }
 

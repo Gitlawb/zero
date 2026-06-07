@@ -162,6 +162,37 @@ func (t secretTool) Run(context.Context, map[string]any) Result {
 	return Result{Status: StatusOK, Output: t.out, Display: Display{Summary: t.display}}
 }
 
+// denyTool is permission-denied so RunWithOptions returns early via the denial
+// path (before any tool execution); its Reason can carry secret-shaped text.
+type denyTool struct{ reason string }
+
+func (t denyTool) Name() string        { return "deny_tool" }
+func (t denyTool) Description() string { return "always denied" }
+func (t denyTool) Parameters() Schema  { return Schema{Type: "object", AdditionalProperties: false} }
+func (t denyTool) Safety() Safety {
+	return Safety{SideEffect: SideEffectShell, Permission: PermissionDeny, Reason: t.reason}
+}
+func (t denyTool) Run(context.Context, map[string]any) Result { return Result{Status: StatusOK} }
+
+// Regression (Vasanthdev2004): the EARLY denial/permission/unknown-tool returns
+// must be scrubbed too, not just the tool-execution paths.
+func TestRunWithOptionsScrubsSecretsOnDenialPaths(t *testing.T) {
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	reg := NewRegistry()
+	reg.Register(denyTool{reason: "blocked path=/tmp/" + secret})
+
+	res := reg.RunWithOptions(context.Background(), "deny_tool", map[string]any{}, RunOptions{PermissionGranted: true})
+	if res.Status != StatusError {
+		t.Fatalf("expected permission-denied error, got %s: %s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, secret) {
+		t.Fatalf("denial path must scrub secrets, leaked: %q", res.Output)
+	}
+	if !res.Redacted {
+		t.Error("expected Redacted=true on a scrubbed denial")
+	}
+}
+
 // Regression: secrets must be scrubbed at the registry boundary so EVERY caller
 // (agent loop AND MCP server) gets redacted output — not just the agent path.
 func TestRunWithOptionsScrubsSecretsForAllCallers(t *testing.T) {

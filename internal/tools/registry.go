@@ -58,7 +58,12 @@ func (registry *Registry) Run(ctx context.Context, name string, args map[string]
 	return registry.RunWithOptions(ctx, name, args, RunOptions{})
 }
 
-func (registry *Registry) RunWithOptions(ctx context.Context, name string, args map[string]any, options RunOptions) Result {
+func (registry *Registry) RunWithOptions(ctx context.Context, name string, args map[string]any, options RunOptions) (result Result) {
+	// Every return path passes through scrubResultSecrets exactly once, so denial,
+	// permission, and unknown-tool error messages (which can echo secret-bearing
+	// args/paths) are redacted at the boundary just like tool output.
+	defer func() { result = scrubResultSecrets(result) }()
+
 	tool, ok := registry.Get(name)
 	if !ok {
 		return errorResult(`Error: Unknown tool "` + name + `".`)
@@ -121,19 +126,19 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		if res.SandboxDecision == nil {
 			res.SandboxDecision = sandboxDecision
 		}
-		return scrubResultSecrets(res)
+		return res
 	}
 
 	if options.Sandbox != nil {
 		if sandboxed, ok := tool.(sandboxAwareTool); ok {
 			res := sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
 			res.SandboxDecision = sandboxDecision
-			return scrubResultSecrets(res)
+			return res
 		}
 	}
 	res := tool.Run(ctx, args)
 	res.SandboxDecision = sandboxDecision
-	return scrubResultSecrets(res)
+	return res
 }
 
 // scrubResultSecrets redacts known secret forms from a tool result's Output at
