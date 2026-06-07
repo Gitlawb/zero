@@ -124,10 +124,9 @@ func ParseAskUserQuestions(args map[string]any) ([]AskUserQuestion, error) {
 		if err != nil {
 			return nil, fmt.Errorf("question %d %s", index+1, err.Error())
 		}
-		multiSelect, err := boolArg(object, "multiSelect", false)
-		if err != nil {
-			return nil, fmt.Errorf("question %d %s", index+1, err.Error())
-		}
+		// multiSelect is a UI hint; treat an uncoercible value as the default rather
+		// than failing the whole call (mirrors the best-effort options path).
+		multiSelect, _ := boolArg(object, "multiSelect", false)
 		questions = append(questions, AskUserQuestion{
 			Question:    text,
 			Options:     coerceOptionStrings(object["options"]), // best-effort; never errors

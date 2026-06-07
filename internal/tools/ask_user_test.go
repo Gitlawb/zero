@@ -135,6 +135,18 @@ func TestParseAskUserQuestionsLenientOptions(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("missing options must be allowed: %v", err)
 	}
+
+	// multiSelect is a UI hint: an uncoercible value must NOT fail the call; it
+	// defaults to false (best-effort, like options).
+	qs, err = ParseAskUserQuestions(map[string]any{
+		"questions": []any{map[string]any{"question": "q", "multiSelect": "maybe"}},
+	})
+	if err != nil {
+		t.Fatalf("uncoercible multiSelect must not error: %v", err)
+	}
+	if qs[0].MultiSelect {
+		t.Fatalf("uncoercible multiSelect should default to false")
+	}
 }
 
 func TestParseAskUserQuestionsStringItem(t *testing.T) {

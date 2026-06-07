@@ -150,7 +150,7 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 	}
 }
 
-type secretTool struct{ out string }
+type secretTool struct{ out, display string }
 
 func (t secretTool) Name() string        { return "secret_tool" }
 func (t secretTool) Description() string { return "emits text" }
@@ -159,7 +159,7 @@ func (t secretTool) Safety() Safety {
 	return Safety{SideEffect: SideEffectRead, Permission: PermissionAllow}
 }
 func (t secretTool) Run(context.Context, map[string]any) Result {
-	return Result{Status: StatusOK, Output: t.out}
+	return Result{Status: StatusOK, Output: t.out, Display: Display{Summary: t.display}}
 }
 
 // Regression: secrets must be scrubbed at the registry boundary so EVERY caller
@@ -167,7 +167,7 @@ func (t secretTool) Run(context.Context, map[string]any) Result {
 func TestRunWithOptionsScrubsSecretsForAllCallers(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	reg := NewRegistry()
-	reg.Register(secretTool{out: "token=" + secret})
+	reg.Register(secretTool{out: "token=" + secret, display: "ran token=" + secret})
 
 	res := reg.RunWithOptions(context.Background(), "secret_tool", map[string]any{}, RunOptions{PermissionGranted: true})
 	if res.Status != StatusOK {
@@ -175,6 +175,11 @@ func TestRunWithOptionsScrubsSecretsForAllCallers(t *testing.T) {
 	}
 	if strings.Contains(res.Output, secret) {
 		t.Fatalf("registry must scrub secrets, leaked: %q", res.Output)
+	}
+	// Display.Summary must be scrubbed too — a caller preferring Display must not
+	// bypass the boundary redaction.
+	if strings.Contains(res.Display.Summary, secret) {
+		t.Fatalf("registry must scrub Display.Summary, leaked: %q", res.Display.Summary)
 	}
 	if !res.Redacted {
 		t.Error("expected Redacted=true")
