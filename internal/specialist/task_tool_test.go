@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -89,8 +90,18 @@ func TestTaskToolRunsForegroundSpecialist(t *testing.T) {
 
 func TestTaskToolRunsResumeSpecialist(t *testing.T) {
 	var gotArgs []string
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(sessions.CreateInput{
+		SessionID:   "child_task",
+		SessionKind: sessions.SessionKindChild,
+		Tag:         SessionTagSpecialist,
+		AgentName:   "worker",
+	}); err != nil {
+		t.Fatalf("Create resume session returned error: %v", err)
+	}
 	executor := Executor{
 		NewSessionID: func() (string, error) { return "unused", nil },
+		SessionStore: store,
 		Load: func(LoadOptions) (LoadResult, error) {
 			return LoadResult{Specialists: []Manifest{{
 				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
@@ -122,6 +133,28 @@ func TestTaskToolRunsResumeSpecialist(t *testing.T) {
 		if !containsSequence(gotArgs, want) {
 			t.Fatalf("resume args missing %v: %#v", want, gotArgs)
 		}
+	}
+}
+
+func TestTaskToolRejectsResumeSpecialistMismatch(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(sessions.CreateInput{
+		SessionID:   "child_task",
+		SessionKind: sessions.SessionKindChild,
+		Tag:         SessionTagSpecialist,
+		AgentName:   "worker",
+	}); err != nil {
+		t.Fatalf("Create resume session returned error: %v", err)
+	}
+
+	result := NewTaskTool(Executor{SessionStore: store}).Run(context.Background(), map[string]any{
+		"name":   "explorer",
+		"prompt": "follow up",
+		"resume": "child_task",
+	})
+
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, `belongs to specialist "worker"`) {
+		t.Fatalf("mismatch result = %#v", result)
 	}
 }
 

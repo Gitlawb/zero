@@ -114,10 +114,10 @@ func parseTaskParameters(args map[string]any) (TaskParameters, error) {
 		Resume:      strings.TrimSpace(resume),
 	}
 	if params.Name == "" {
-		return TaskParameters{}, fmt.Errorf("Task requires name")
+		return TaskParameters{}, fmt.Errorf("task requires name")
 	}
 	if params.Prompt == "" {
-		return TaskParameters{}, fmt.Errorf("Task requires prompt")
+		return TaskParameters{}, fmt.Errorf("task requires prompt")
 	}
 	return params, nil
 }
@@ -132,7 +132,7 @@ func optionalTaskString(args map[string]any, key string) (string, error) {
 	}
 	text, ok := value.(string)
 	if !ok {
-		return "", fmt.Errorf("Task %s must be a string", key)
+		return "", fmt.Errorf("task %s must be a string", key)
 	}
 	return text, nil
 }

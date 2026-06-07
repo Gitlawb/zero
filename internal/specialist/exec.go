@@ -38,6 +38,7 @@ type Executor struct {
 	RunChild          RunChildFunc
 	BinaryPath        string
 	Paths             Paths
+	SessionStore      *sessions.Store
 }
 
 type BuildArgsInput struct {
@@ -218,7 +219,18 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 }
 
 func (executor Executor) runResume(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
-	manifest, err := executor.loadManifest(params.Name)
+	session, err := executor.resumeSession(params.Resume)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	specialistName := strings.TrimSpace(session.AgentName)
+	if specialistName == "" {
+		return ExecResult{}, fmt.Errorf("resume session %q does not identify a specialist", session.SessionID)
+	}
+	if requestedName := strings.TrimSpace(params.Name); requestedName != "" && requestedName != specialistName {
+		return ExecResult{}, fmt.Errorf("resume session %q belongs to specialist %q, not %q", session.SessionID, specialistName, requestedName)
+	}
+	manifest, err := executor.loadManifest(specialistName)
 	if err != nil {
 		return ExecResult{}, err
 	}
@@ -233,6 +245,31 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		return ExecResult{}, err
 	}
 	return executor.runBuiltArgs(ctx, built)
+}
+
+func (executor Executor) resumeSession(sessionID string) (*sessions.Metadata, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("resume session id is required")
+	}
+	if !sessions.ValidSessionID(sessionID) {
+		return nil, fmt.Errorf("invalid resume session id %q", sessionID)
+	}
+	store := executor.SessionStore
+	if store == nil {
+		store = sessions.NewStore(sessions.StoreOptions{})
+	}
+	session, err := store.Get(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, fmt.Errorf("resume session not found: %s", sessionID)
+	}
+	if session.SessionKind != sessions.SessionKindChild || strings.TrimSpace(session.Tag) != sessionTagSpecialist {
+		return nil, fmt.Errorf("resume session %q is not a specialist child session", sessionID)
+	}
+	return session, nil
 }
 
 func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult) (ExecResult, error) {
