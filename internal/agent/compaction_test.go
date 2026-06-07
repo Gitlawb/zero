@@ -409,9 +409,9 @@ func TestRunReactiveRetryDoesNotDoubleEmitText(t *testing.T) {
 	if provider.summarizeCalls == 0 {
 		t.Fatal("expected reactive compaction to run")
 	}
-	// The retried turn's text must be streamed to OnText at most once. Before the
-	// fix it was emitted on both the original (mid-stream) collect AND the retry
-	// collect, double-emitting the retried response.
+	// The retried turn's text must NOT be re-streamed to OnText. Before the fix it
+	// was emitted on both the original (mid-stream) collect AND the retry collect,
+	// double-emitting the retried response.
 	joined := strings.Join(deltas, "")
 	if got := strings.Count(joined, "recovered"); got != 0 {
 		t.Fatalf("retried-turn text must NOT be re-streamed to OnText, saw %d occurrences in %q", got, joined)

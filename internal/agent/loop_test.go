@@ -34,6 +34,28 @@ func (provider *mockProvider) StreamCompletion(ctx context.Context, request zero
 	return ch, nil
 }
 
+func TestIsRetriableToolError(t *testing.T) {
+	cases := []struct {
+		name   string
+		result ToolResult
+		want   bool
+	}{
+		{"success", ToolResult{Status: tools.StatusOK}, false},
+		{"bad arguments", ToolResult{Status: tools.StatusError, Output: "Error: Failed to parse arguments for x: bad json"}, true},
+		{"execution failure", ToolResult{Status: tools.StatusError, Output: "Error: read foo.txt: no such file"}, true},
+		{"disabled tool", ToolResult{Status: tools.StatusError, Output: `Error: Tool "x" is not enabled for this run.`}, false},
+		{"permission denied (meta)", ToolResult{Status: tools.StatusError, Output: "Error: Permission denied for x: needs approval", Meta: map[string]string{"permission_action": "deny"}}, false},
+		{"permission required", ToolResult{Status: tools.StatusError, Output: "Error: Permission required for x: approve first"}, false},
+		{"sandbox violation", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox violation: outside_workspace"}, false},
+		{"sandbox approval", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox approval required for x: network"}, false},
+	}
+	for _, c := range cases {
+		if got := isRetriableToolError(c.result); got != c.want {
+			t.Errorf("%s: isRetriableToolError = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestRunReturnsProviderText(t *testing.T) {
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{

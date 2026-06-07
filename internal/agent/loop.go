@@ -202,7 +202,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
 			}
-			toolResult := executeToolCall(ctx, registry, call, permissionMode, options)
+			toolResult, abortErr := executeToolCall(ctx, registry, call, permissionMode, options)
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
 			}
@@ -212,9 +212,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				ToolCallID: toolResult.ToolCallID,
 			})
 
+			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
+			// returns context.Canceled rather than fabricating a headless answer. Stop
+			// promptly with that error (or run-context cancellation), keeping messages
+			// valid by closing out the still-advertised calls first.
+			if abortErr == nil && ctx.Err() != nil {
+				abortErr = ctx.Err()
+			}
+			if abortErr != nil {
+				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				result.Messages = copyMessages(messages)
+				return result, abortErr
+			}
+
 			// Repeated-failure guard: if a tool keeps failing the same way, hint
 			// once (with its schema) then halt — so no model loops on a bad call.
-			outcome := guards.observeToolResult(call.Name, toolResult.Status == tools.StatusError, toolResult.Output)
+			// Only RETRIABLE failures (bad arguments / execution errors) drive it:
+			// policy refusals (disabled tool, permission denial, sandbox violation)
+			// aren't fixed by reformatting the call, so a "match this schema" hint
+			// would misdirect the model toward JSON shape or blocked behavior.
+			retriableFailure := isRetriableToolError(toolResult)
+			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.Output)
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
 				// the guard halts mid-turn so the calls after this one never run.
@@ -279,7 +297,11 @@ func toolSchemaJSON(registry *tools.Registry, name string) string {
 	return string(data)
 }
 
-func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) ToolResult {
+// executeToolCall runs one tool call and returns its result. The second return
+// is a non-nil ABORT error only when the call demands the whole run stop (a
+// canceled/timed-out ask_user prompt) rather than continuing — every ordinary
+// success or tool error returns a nil abort error.
+func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) (ToolResult, error) {
 	args := map[string]any{}
 	if call.Arguments != "" {
 		if err := json.Unmarshal([]byte(call.Arguments), &args); err != nil {
@@ -288,7 +310,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				Name:       call.Name,
 				Status:     tools.StatusError,
 				Output:     "Error: Failed to parse arguments for " + call.Name + ": " + err.Error(),
-			}
+			}, nil
 		}
 	}
 	if !ToolAllowedByFilters(call.Name, options.EnabledTools, options.DisabledTools) {
@@ -297,14 +319,14 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			Name:       call.Name,
 			Status:     tools.StatusError,
 			Output:     `Error: Tool "` + call.Name + `" is not enabled for this run.`,
-		}
+		}, nil
 	}
 
 	// ask_user is intercepted in the loop (like permissions) so the question can
 	// be routed to an interactive front-end instead of blocking inside the tool.
 	// When no front-end is wired up it degrades to the tool's own graceful Run().
 	if call.Name == "ask_user" {
-		return executeAskUser(ctx, registry, call, args, options)
+		return executeAskUser(ctx, registry, call, args, permissionMode, options)
 	}
 
 	tool, toolFound := registry.Get(call.Name)
@@ -340,13 +362,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			grant, err := persistPermissionGrant(call.Name, decisionReason, options)
 			if err != nil {
 				emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
-				return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent)
+				return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent), nil
 			}
 			requestEvent.GrantMatched = true
 			requestEvent.Grant = &grant
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)
-			return deniedPermissionResult(call, decisionReason, requestEvent)
+			return deniedPermissionResult(call, decisionReason, requestEvent), nil
 		}
 	}
 
@@ -383,7 +405,30 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
+	}, nil
+}
+
+// isRetriableToolError reports whether a failed tool result is one the model can
+// plausibly fix by changing its next call (argument or execution failure), as
+// opposed to a policy refusal (disabled tool, permission denial, sandbox
+// violation) that no reformatting will satisfy. Only retriable failures should
+// drive the repeated-failure schema hint / stop.
+func isRetriableToolError(result ToolResult) bool {
+	if result.Status != tools.StatusError {
+		return false
 	}
+	if result.Meta["permission_action"] == string(PermissionActionDeny) {
+		return false
+	}
+	switch {
+	case strings.Contains(result.Output, "is not enabled for this run"),
+		strings.Contains(result.Output, "Permission denied for "),
+		strings.Contains(result.Output, "Permission required for "),
+		strings.Contains(result.Output, "Sandbox violation"),
+		strings.Contains(result.Output, "Sandbox approval required for "):
+		return false
+	}
+	return true
 }
 
 // scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for
@@ -402,7 +447,10 @@ func scrubInterceptedOutput(output string) (string, bool) {
 // options.OnAskUser, mirroring the async permission flow. If no handler is set,
 // or the handler errors, it falls back to the tool's own graceful result so the
 // loop never blocks forever waiting on a user who isn't there.
-func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any, options Options) ToolResult {
+// executeAskUser returns (result, abortErr). abortErr is non-nil ONLY when the
+// prompt was canceled/timed out and the run must stop with that error; every
+// other path (success, bad args, headless degradation) returns a nil abortErr.
+func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) (ToolResult, error) {
 	questions, err := tools.ParseAskUserQuestions(args)
 	if err != nil {
 		return ToolResult{
@@ -410,11 +458,11 @@ func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall
 			Name:       call.Name,
 			Status:     tools.StatusError,
 			Output:     "Error: Invalid arguments for ask_user: " + err.Error(),
-		}
+		}, nil
 	}
 
 	if options.OnAskUser == nil {
-		return askUserFallbackResult(ctx, registry, call, args)
+		return askUserFallbackResult(ctx, registry, call, args, permissionMode, options), nil
 	}
 
 	header, _ := args["header"].(string)
@@ -425,7 +473,21 @@ func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall
 	}
 	response, err := options.OnAskUser(ctx, request)
 	if err != nil {
-		return askUserFallbackResult(ctx, registry, call, args)
+		// A canceled / timed-out prompt must ABORT the run (return the error), not
+		// fabricate a headless answer that keeps mutating the transcript after the UI
+		// asked to stop. The error result carries the reason; the abort error stops
+		// the loop even when the run context itself was not canceled.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: ask_user canceled: " + err.Error(),
+			}, err
+		}
+		// Genuine handler unavailability (no interactive surface / non-cancel error):
+		// degrade to the same headless path as a missing handler.
+		return askUserFallbackResult(ctx, registry, call, args, permissionMode, options), nil
 	}
 
 	// Scrub the formatted answers through the same redaction boundary the
@@ -438,20 +500,38 @@ func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall
 		Status:     tools.StatusOK,
 		Output:     output,
 		Redacted:   redacted,
-	}
+	}, nil
 }
 
 // askUserFallbackResult runs the registered ask_user tool (or returns the shared
-// graceful message) so the no-interactive-user path matches the headless path.
-func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any) ToolResult {
+// graceful message) so the no-interactive-user path matches every OTHER tool: it
+// goes through registry.RunWithOptions with the same run context (ToolCallID,
+// session/model/depth/cwd, sandbox/permission) and copies the full result fields
+// (Meta/ChangedFiles/Display), instead of the bare registry.Run that dropped them.
+func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) ToolResult {
 	if _, ok := registry.Get(call.Name); ok {
-		result := registry.Run(ctx, call.Name, args)
+		result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
+			// ask_user is read-only (PermissionAllow); no prompt/grant is required.
+			PermissionGranted: true,
+			PermissionMode:    string(permissionMode),
+			Autonomy:          options.Autonomy,
+			Sandbox:           options.Sandbox,
+			ToolCallID:        call.ID,
+			SessionID:         options.SessionID,
+			Model:             options.Model,
+			ReasoningEffort:   options.ReasoningEffort,
+			Depth:             options.Depth,
+			Cwd:               options.Cwd,
+		})
 		return ToolResult{
-			ToolCallID: call.ID,
-			Name:       call.Name,
-			Status:     result.Status,
-			Output:     result.Output,
-			Redacted:   result.Redacted,
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       result.Status,
+			Output:       result.Output,
+			Meta:         result.Meta,
+			Redacted:     result.Redacted,
+			ChangedFiles: result.ChangedFiles,
+			Display:      result.Display,
 		}
 	}
 	return ToolResult{

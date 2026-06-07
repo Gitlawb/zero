@@ -137,6 +137,42 @@ func TestRunAskUserHandlerErrorDegradesGracefully(t *testing.T) {
 	}
 }
 
+func TestRunAskUserCancellationAbortsRun(t *testing.T) {
+	registry := registryWithAskUser()
+	args := `{"questions":[{"question":"Which framework?"}]}`
+	provider := providerCallingAskUserThenAnswer(args, "done")
+
+	result, err := Run(context.Background(), "clarify", provider, Options{
+		Registry: registry,
+		OnAskUser: func(_ context.Context, _ AskUserRequest) (AskUserResponse, error) {
+			return AskUserResponse{}, context.Canceled
+		},
+	})
+
+	// A canceled prompt must abort with that error — NOT fabricate a headless
+	// answer and run on to a final answer.
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected run to abort with context.Canceled, got err=%v answer=%q", err, result.FinalAnswer)
+	}
+	// The model must not be asked for a follow-up turn after cancellation.
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected the run to stop after the canceled ask_user (1 turn), got %d", len(provider.requests))
+	}
+	// The recorded tool result must reflect cancellation, not a synthetic answer.
+	var toolMsg string
+	for _, m := range result.Messages {
+		if m.Role == zeroruntime.MessageRoleTool {
+			toolMsg = m.Content
+		}
+	}
+	if !strings.Contains(strings.ToLower(toolMsg), "canceled") {
+		t.Fatalf("expected a canceled tool result, got %q", toolMsg)
+	}
+	if strings.Contains(strings.ToLower(toolMsg), "no interactive user") {
+		t.Fatalf("must not fabricate a headless answer on cancellation, got %q", toolMsg)
+	}
+}
+
 func TestRunAskUserRedactsSecretsInAnswers(t *testing.T) {
 	registry := registryWithAskUser()
 	secret := "sk-ant-api03-ABCDEFGHIJKLMNOP1234567890"
