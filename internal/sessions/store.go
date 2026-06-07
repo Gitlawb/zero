@@ -37,6 +37,8 @@ const (
 	EventCompaction         EventType = "session_compaction"
 	EventSessionFork        EventType = "session_fork"
 	EventSessionChild       EventType = "session_child"
+	EventSpecialistStart    EventType = "specialist_start"
+	EventSpecialistStop     EventType = "specialist_stop"
 )
 
 type SessionKind string

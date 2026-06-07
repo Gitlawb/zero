@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/background"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -22,6 +23,7 @@ const (
 type OutputTool struct {
 	manager        *background.Manager
 	managerFunc    BackgroundManagerFunc
+	SessionStore   *sessions.Store
 	PollInterval   time.Duration
 	DefaultTimeout time.Duration
 	MaxTimeout     time.Duration
@@ -37,8 +39,8 @@ func NewOutputTool(manager *background.Manager) *OutputTool {
 	return &OutputTool{manager: manager}
 }
 
-func newOutputToolWithManagerFunc(managerFunc BackgroundManagerFunc) *OutputTool {
-	return &OutputTool{managerFunc: managerFunc}
+func newOutputToolWithManagerFunc(managerFunc BackgroundManagerFunc, sessionStore *sessions.Store) *OutputTool {
+	return &OutputTool{managerFunc: managerFunc, SessionStore: sessionStore}
 }
 
 func (tool *OutputTool) Name() string {
@@ -142,9 +144,14 @@ func (tool *OutputTool) readOutput(task background.Task) tools.Result {
 	if err != nil {
 		return taskError(err)
 	}
+	dataString := string(data)
+	summary, rawLines := summarizeTaskData(dataString, task.ExitCode)
+	if task.Status != background.StatusRunning {
+		Executor{SessionStore: tool.SessionStore}.recordBackgroundTaskAccounting(task, summary)
+	}
 	return tools.Result{
 		Status: tools.StatusOK,
-		Output: formatTaskOutput(task, string(data)),
+		Output: formatTaskOutputSummary(task, summary, rawLines),
 		Meta: map[string]string{
 			"task_id": string(task.ID),
 			"status":  string(task.Status),
@@ -235,6 +242,11 @@ func optionalTaskInt(args map[string]any, key string) (int, error) {
 }
 
 func formatTaskOutput(task background.Task, data string) string {
+	summary, rawLines := summarizeTaskData(data, task.ExitCode)
+	return formatTaskOutputSummary(task, summary, rawLines)
+}
+
+func formatTaskOutputSummary(task background.Task, summary StreamResult, rawLines []string) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "task_id: %s\n", task.ID)
 	fmt.Fprintf(&builder, "status: %s\n", task.Status)
@@ -255,7 +267,6 @@ func formatTaskOutput(task background.Task, data string) string {
 		fmt.Fprintf(&builder, "exit_code: %d\n", task.ExitCode)
 	}
 
-	summary, rawLines := summarizeTaskData(data, task.ExitCode)
 	if summary.Text != "" {
 		fmt.Fprintf(&builder, "\noutput:\n%s\n", summary.Text)
 	}

@@ -229,7 +229,7 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 	if params.RunInBackground {
 		return executor.runBackground(ctx, built, manifest, params, options)
 	}
-	return executor.runBuiltArgs(ctx, built)
+	return executor.runBuiltArgs(ctx, built, manifest, params, options, "foreground")
 }
 
 func (executor Executor) runResume(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
@@ -258,7 +258,7 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 	if err != nil {
 		return ExecResult{}, err
 	}
-	return executor.runBuiltArgs(ctx, built)
+	return executor.runBuiltArgs(ctx, built, manifest, params, options, "resume")
 }
 
 func (executor Executor) runBackground(ctx context.Context, built BuildArgsResult, manifest Manifest, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
@@ -311,17 +311,35 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 	}
 	executor.trackBackgroundPromptFile(built.SessionID, built.PromptFile)
 
+	accounting := specialistAccountingInput{
+		ParentSessionID: options.ParentSessionID,
+		ChildSessionID:  built.SessionID,
+		SpecialistName:  manifest.Metadata.Name,
+		Description:     params.Description,
+		ToolCallID:      options.ToolCallID,
+		Mode:            "background",
+		Background:      true,
+	}
+	executor.recordSpecialistStart(accounting)
 	pid, err := executor.launchBackground(binaryPath, built.Args, outputFile, func(exitCode int) {
 		status := background.StatusCompleted
 		if exitCode != 0 {
 			status = background.StatusError
 		}
 		_ = manager.MarkExited(built.SessionID, status, exitCode)
+		if task, ok := manager.Get(built.SessionID); ok {
+			summary := StreamResult{ExitCode: task.ExitCode}
+			if data, err := os.ReadFile(task.OutputFile); err == nil {
+				summary, _ = summarizeTaskData(string(data), task.ExitCode)
+			}
+			executor.recordBackgroundTaskAccounting(task, summary)
+		}
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 	})
 	if err != nil {
 		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
+		executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
 		return ExecResult{}, err
 	}
 	if pid > 0 {
@@ -384,7 +402,7 @@ func (executor Executor) resumeSession(sessionID string) (*sessions.Metadata, er
 	return session, nil
 }
 
-func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult) (ExecResult, error) {
+func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult, manifest Manifest, params TaskParameters, options TaskRunOptions, mode string) (ExecResult, error) {
 	if built.PromptFile != "" {
 		defer cleanupPromptFile(built.PromptFile)
 	}
@@ -392,10 +410,24 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 	if err != nil {
 		return ExecResult{}, err
 	}
+	accounting := specialistAccountingInput{
+		ParentSessionID: options.ParentSessionID,
+		ChildSessionID:  built.SessionID,
+		SpecialistName:  manifest.Metadata.Name,
+		Description:     params.Description,
+		ToolCallID:      options.ToolCallID,
+		Mode:            mode,
+		Background:      false,
+	}
+	executor.recordSpecialistStart(accounting)
 	run, err := executor.runChild(ctx, binaryPath, built.Args)
 	if err != nil {
+		executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
 		return ExecResult{}, err
 	}
+	summary := SummarizeStream(run.Events, run.ExitCode)
+	rolledUp := executor.rollUpSpecialistUsage(accounting, summary)
+	executor.recordSpecialistStop(accounting, summary, summary.Status, summary.ExitCode, nil, rolledUp)
 	return ExecResult{
 		Result:    BuildFinalResult(run.Events, run.Stderr, run.ExitCode),
 		SessionID: built.SessionID,

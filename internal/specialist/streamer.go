@@ -13,12 +13,32 @@ import (
 
 type StreamResult struct {
 	Events    []streamjson.Event
+	RunID     string
 	SessionID string
 	Text      string
 	Tools     []string
 	Errors    []string
 	Status    string
 	ExitCode  int
+	Usage     StreamUsage
+}
+
+type StreamUsage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	Events           int
+}
+
+func (usage StreamUsage) HasUsage() bool {
+	return usage.Events > 0 || usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.TotalTokens != 0
+}
+
+func (usage StreamUsage) EffectiveTotalTokens() int {
+	if usage.TotalTokens != 0 {
+		return usage.TotalTokens
+	}
+	return usage.PromptTokens + usage.CompletionTokens
 }
 
 func ParseStream(reader io.Reader) ([]streamjson.Event, error) {
@@ -53,6 +73,9 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 	finalText := ""
 	seenTools := map[string]bool{}
 	for _, event := range events {
+		if result.RunID == "" && strings.TrimSpace(event.RunID) != "" {
+			result.RunID = strings.TrimSpace(event.RunID)
+		}
 		if result.SessionID == "" && strings.TrimSpace(event.SessionID) != "" {
 			result.SessionID = strings.TrimSpace(event.SessionID)
 		}
@@ -78,6 +101,17 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 			result.Status = strings.TrimSpace(event.Status)
 			if event.ExitCode != nil {
 				result.ExitCode = *event.ExitCode
+			}
+		case streamjson.EventUsage:
+			result.Usage.Events++
+			if event.PromptTokens != nil {
+				result.Usage.PromptTokens += *event.PromptTokens
+			}
+			if event.CompletionTokens != nil {
+				result.Usage.CompletionTokens += *event.CompletionTokens
+			}
+			if event.TotalTokens != nil {
+				result.Usage.TotalTokens += *event.TotalTokens
 			}
 		}
 	}
