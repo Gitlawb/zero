@@ -256,6 +256,33 @@ func TestRestoreRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestRestoreDedupesEquivalentRawPaths(t *testing.T) {
+	store, ws := newCkStore(t)
+	target := mustAppend(t, store, AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	path := filepath.Join(ws, "a.txt")
+
+	// Closest-to-target checkpoint captures "closest" via raw path "a.txt".
+	mustWriteFile(t, path, "closest")
+	mustCapture(t, store, ws, "write_file", "a.txt")
+	// A NEWER checkpoint references the SAME file via an equivalent raw path.
+	mustWriteFile(t, path, "newer")
+	mustCapture(t, store, ws, "edit_file", "./a.txt")
+	mustWriteFile(t, path, "current")
+
+	if _, err := store.RestoreToSequence("s", ws, target.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	// The closest-to-target snapshot must win; the newer entry under the
+	// equivalent raw path must not overwrite it.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
+	if string(got) != "closest" {
+		t.Fatalf("equivalent raw path bypassed dedupe: got %q, want \"closest\"", got)
+	}
+}
+
 func TestRestoreFailsOnCorruptCheckpointPayload(t *testing.T) {
 	store, ws := newCkStore(t)
 	target := mustAppend(t, store, AppendEventInput{Type: EventMessage, Payload: map[string]any{}})

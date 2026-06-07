@@ -62,22 +62,12 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 			return report, fmt.Errorf("decode checkpoint payload seq %d: %w", ev.Sequence, err)
 		}
 		for _, f := range payload.Files {
-			// Process only the CLOSEST-to-target entry per path. We iterate
-			// closest-to-target first, so the first time we see a path here is its
-			// closest-to-target snapshot; any newer (already-handled) entry for the
-			// same path must be ignored. This prevents a newer blob from
-			// overwriting an older Skipped entry and avoids double-counting
-			// FilesRestored/FilesDeleted.
-			if restored[f.Path] {
-				continue
-			}
-			restored[f.Path] = true
-
-			// Defense in depth: never write/delete outside the workspace, even if
-			// a checkpoint event was tampered with (path traversal via "../") or
-			// an in-workspace symlink points outside the root. The boundary is
-			// re-resolved here, immediately before the mutation, to keep the
-			// check-to-use window small.
+			// Resolve/confine the target FIRST so the dedupe key below is the
+			// canonical workspace path. Defense in depth: never write/delete outside
+			// the workspace, even if a checkpoint event was tampered with (path
+			// traversal via "../") or an in-workspace symlink points outside the
+			// root. The boundary is re-resolved here, immediately before the
+			// mutation, to keep the check-to-use window small.
 			//
 			// Residual: a symlink-swap TOCTOU remains — a concurrent process with
 			// workspace write access could replace a validated intermediate
@@ -88,6 +78,24 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 			// the CLI/TUI rewind-wiring work. The narrow window plus the
 			// workspace-write-access precondition make this low-risk here.
 			abs, ok := resolveWithinWorkspace(workspaceRoot, f.Path)
+
+			// Process only the CLOSEST-to-target entry per RESOLVED path. We iterate
+			// closest-to-target first, so the first time we see a resolved path is
+			// its closest-to-target snapshot; any newer (already-handled) entry for
+			// the SAME underlying file must be ignored — even when it was recorded
+			// under an equivalent-but-different raw path (./a.txt, dir/../a.txt, a
+			// symlink alias). Deduping on the raw path would let such an alias slip
+			// past and overwrite the closest snapshot. Unresolvable targets dedupe
+			// on their raw path (there is no canonical key for them).
+			key := f.Path
+			if ok {
+				key = abs
+			}
+			if restored[key] {
+				continue
+			}
+			restored[key] = true
+
 			if !ok {
 				report.Skipped = append(report.Skipped, f.Path)
 				continue
