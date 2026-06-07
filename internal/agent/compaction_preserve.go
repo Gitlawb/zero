@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -140,16 +141,27 @@ func skillNameFromArguments(arguments string) string {
 	return strings.TrimSpace(parsed.Name)
 }
 
-// capBody truncates an over-long skill body at a rune boundary with a note.
+// truncationNote is appended to a capped skill body. Its length is reserved
+// within the byte budget so the result never exceeds maxPreservedSkillBytes.
+const truncationNote = "\n… (truncated; re-load the skill for the full body)"
+
+// capBody truncates an over-long skill body to maxPreservedSkillBytes BYTES,
+// cutting on a UTF-8 rune boundary (never splitting a multibyte rune) and
+// reserving room for the note so the result stays within the byte budget. The
+// note is added only when the body is actually truncated.
 func capBody(body string) string {
 	if len(body) <= maxPreservedSkillBytes {
 		return body
 	}
-	runes := []rune(body)
-	if len(runes) > maxPreservedSkillBytes {
-		runes = runes[:maxPreservedSkillBytes]
+	limit := maxPreservedSkillBytes - len(truncationNote)
+	if limit < 0 {
+		limit = 0
 	}
-	return string(runes) + "\n… (truncated; re-load the skill for the full body)"
+	// Walk back to the start of a rune so a multibyte sequence is never split.
+	for limit > 0 && !utf8.RuneStart(body[limit]) {
+		limit--
+	}
+	return body[:limit] + truncationNote
 }
 
 // appendPreservedState appends the active plan and loaded-skill sections found

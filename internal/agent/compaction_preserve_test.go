@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -96,6 +97,47 @@ func TestExtractLatestPlanReturnsMostRecent(t *testing.T) {
 	got := extractLatestPlan(messages)
 	if !strings.Contains(got, "new step") || strings.Contains(got, "old step") {
 		t.Fatalf("extractLatestPlan should return the most recent plan, got %q", got)
+	}
+}
+
+func TestCapBodyShortBodyUnchanged(t *testing.T) {
+	body := "short skill body"
+	if got := capBody(body); got != body {
+		t.Fatalf("capBody changed a short body: %q", got)
+	}
+	if strings.Contains(capBody(body), "truncated") {
+		t.Fatalf("note added without truncation")
+	}
+}
+
+func TestCapBodyRespectsByteBudgetForMultibyte(t *testing.T) {
+	// Each '世' is 3 bytes; build a body well over the byte budget.
+	body := strings.Repeat("世", maxPreservedSkillBytes)
+	got := capBody(body)
+	if len(got) > maxPreservedSkillBytes {
+		t.Fatalf("capBody returned %d bytes, want <= %d (byte budget)", len(got), maxPreservedSkillBytes)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Fatalf("expected truncation note on an over-budget body")
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("capBody split a multibyte rune (invalid UTF-8)")
+	}
+}
+
+func TestCapBodyNoteOnlyWhenTruncated(t *testing.T) {
+	// A body whose RUNE count is under the cap but BYTE length is over it must
+	// still be byte-capped (the old rune-based check mishandled this case).
+	body := strings.Repeat("世", (maxPreservedSkillBytes/3)+100)
+	if len(body) <= maxPreservedSkillBytes {
+		t.Fatalf("test setup: body should exceed the byte budget, got %d", len(body))
+	}
+	got := capBody(body)
+	if len(got) > maxPreservedSkillBytes {
+		t.Fatalf("capBody returned %d bytes, want <= %d", len(got), maxPreservedSkillBytes)
+	}
+	if !strings.Contains(got, "truncated") || !utf8.ValidString(got) {
+		t.Fatalf("expected a valid, truncated body, got %q", got)
 	}
 }
 
