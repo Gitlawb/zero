@@ -131,6 +131,45 @@ func TestRunSessionsPlansRewindAndCompaction(t *testing.T) {
 	}
 }
 
+// Regression: `sessions rewind` must be reachable (the parser whitelist), and the
+// destructive path must honor --exclude-target (apply BEFORE the target event).
+func TestRunSessionsRewindIsReachableAndHonorsExcludeTarget(t *testing.T) {
+	makeStore := func() (*sessions.Store, string) {
+		store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T19:30:00Z")})
+		session, err := store.Create(sessions.CreateInput{SessionID: "rw", Title: "Rewind", Cwd: t.TempDir()})
+		if err != nil {
+			t.Fatalf("Create returned error: %v", err)
+		}
+		for _, content := range []string{"alpha", "beta", "gamma", "delta"} {
+			if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return store, session.SessionID
+	}
+	remainingAfterRewind := func(extra ...string) int {
+		store, id := makeStore()
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"sessions", "rewind", id, "--sequence", "2"}, extra...)
+		if ec := runWithDeps(args, &stdout, &stderr, appDeps{
+			newSessionStore: func() *sessions.Store { return store },
+		}); ec != exitSuccess {
+			t.Fatalf("sessions rewind %v exit = %d, stderr = %q", extra, ec, stderr.String())
+		}
+		events, err := store.ReadEvents(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(events)
+	}
+
+	keepTarget := remainingAfterRewind()                      // keep through seq 2
+	excludeTarget := remainingAfterRewind("--exclude-target") // keep through seq 1
+	if excludeTarget >= keepTarget {
+		t.Fatalf("--exclude-target should keep fewer events than keep-target: keep=%d exclude=%d", keepTarget, excludeTarget)
+	}
+}
+
 func TestRunSessionsValidatesArgs(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-04T19:30:00Z")})
 

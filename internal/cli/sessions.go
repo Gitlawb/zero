@@ -196,7 +196,7 @@ func parseNonEmptySessionsFlag(flag string, value string) (string, error) {
 
 func isSessionsCommand(command string) bool {
 	switch command {
-	case "list", "children", "lineage", "tree", "rewind-plan", "compact-plan":
+	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan":
 		return true
 	default:
 		return false
@@ -322,13 +322,20 @@ func runSessionsRewind(store *sessions.Store, sessionID string, options sessionC
 		return writeSessionCommandError(stderr, err)
 	}
 	if session == nil {
-		return writeExecUsageError(stderr, "Zero session not found: "+sessionID)
+		return writeExecUsageError(stderr, "Zero session not found: "+redact(sessionID))
 	}
 	workspaceRoot := strings.TrimSpace(session.Cwd)
 	if workspaceRoot == "" {
 		return writeExecUsageError(stderr, "session has no recorded workspace (cwd); cannot restore files")
 	}
-	report, err := store.ApplyRewind(sessionID, workspaceRoot, plan.TargetSequence)
+	// Honor --exclude-target: ApplyRewind keeps events THROUGH the given sequence,
+	// so when the target event itself must be dropped (KeepTarget=false), apply
+	// through the sequence BEFORE it — matching what rewind-plan reports.
+	keepThrough := plan.TargetSequence
+	if !plan.KeepTarget {
+		keepThrough = plan.TargetSequence - 1
+	}
+	report, err := store.ApplyRewind(sessionID, workspaceRoot, keepThrough)
 	if err != nil {
 		return writeSessionCommandError(stderr, err)
 	}
@@ -339,7 +346,7 @@ func runSessionsRewind(store *sessions.Store, sessionID string, options sessionC
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintf(stdout, "Rewound %s to sequence %d: %d file(s) restored, %d deleted, %d skipped.\n",
-		sessionID, plan.TargetSequence, report.FilesRestored, report.FilesDeleted, len(report.Skipped)); err != nil {
+		redact(sessionID), keepThrough, report.FilesRestored, report.FilesDeleted, len(report.Skipped)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess

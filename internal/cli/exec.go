@@ -178,7 +178,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		resolvedModel, notice := resolveSelectedModel(modelRegistry, options.model)
 		overrides.Provider.Model = resolvedModel
 		if notice != "" {
-			fmt.Fprintln(stderr, notice)
+			if _, err := fmt.Fprintln(stderr, notice); err != nil {
+				return exitCrash
+			}
 		}
 	}
 	if options.maxTurns > 0 {
@@ -197,7 +199,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// skip the advisory even though the run uses a concrete effective model.
 	if options.reasoningEffort != "" {
 		if notice := reasoningEffortNotice(modelRegistry, resolved.Provider.Model, options.reasoningEffort); notice != "" {
-			fmt.Fprintln(stderr, notice)
+			if _, err := fmt.Fprintln(stderr, notice); err != nil {
+				return exitCrash
+			}
 		}
 	}
 
