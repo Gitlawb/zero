@@ -297,3 +297,22 @@ func TestPermLayoutDisablesHitboxesWhenButtonsClipped(t *testing.T) {
 		t.Fatalf("expected active geometry at full height, got %+v", big)
 	}
 }
+
+func TestPermModalFitsFrameAtNarrowWidth(t *testing.T) {
+	// At a width too narrow for the button row, PermLayout disables the hitboxes
+	// and the modal must render a compact keyboard hint — every composed line
+	// (chrome + modal) must stay within the frame width so nothing overflows.
+	const W = 40
+	if PermLayout(W, 24).Active {
+		t.Fatalf("PermLayout(%d,24) should be inactive (too narrow for buttons)", W)
+	}
+	out := stripANSI(RenderChat(ChatData{
+		Variant: 0, Dark: true, Width: W, Height: 24,
+		Perm: &Perm{Tool: "edit_file", Risk: "medium", Reason: "writes a file"},
+	}))
+	for i, ln := range strings.Split(out, "\n") {
+		if lipgloss.Width(ln) > W {
+			t.Fatalf("line %d exceeds frame width %d (%d cells): %q", i, W, lipgloss.Width(ln), ln)
+		}
+	}
+}

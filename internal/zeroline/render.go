@@ -276,7 +276,23 @@ func RenderChat(d ChatData) string {
 	if overlay != "" {
 		frame += "\n" + overlay
 	}
-	return frame + "\n" + bottom
+	frame += "\n" + bottom
+	// Frame-safety: guarantee no rendered line exceeds the frame width, so chrome
+	// (top/bottom bars) and the modal/body stay inside the terminal even at narrow
+	// widths. clip is width-aware + ANSI-safe and a no-op when a line already fits.
+	return clampFrameWidth(frame, w)
+}
+
+// clampFrameWidth clips every line of the composed frame to w display cells so no
+// row can overflow the terminal (a backstop over the per-component clipping).
+func clampFrameWidth(frame string, w int) string {
+	lines := strings.Split(frame, "\n")
+	for i, ln := range lines {
+		if lipgloss.Width(ln) > w {
+			lines[i] = clip(ln, w)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // overlayRegion renders the slash-command autocomplete list or an open picker on
@@ -633,6 +649,13 @@ func (s styles) permModalLines(p *Perm, bw int) []string {
 	alwaysBtn := s.dim.Render("[ ") + s.acc.Render("y") + s.dim.Render(" · always ]")
 	denyBtn := s.dim.Render("[ ") + s.acc.Render("d") + s.dim.Render(" · deny ]")
 	buttons := allowBtn + "  " + alwaysBtn + "  " + denyBtn
+	if bw < permMinBoxWidth {
+		// Too narrow for the full button row (it would overflow the modal frame);
+		// render a compact keyboard-only hint clipped to the content width instead.
+		// PermLayout disables the mouse hitboxes at this width, so the rendered row
+		// and the (absent) hit-test stay aligned.
+		buttons = clip(s.acc.Render("a")+s.dim.Render(" allow  ")+s.acc.Render("y")+s.dim.Render(" always  ")+s.acc.Render("d")+s.dim.Render(" deny"), contentW)
+	}
 
 	lines := []string{
 		topLine,
