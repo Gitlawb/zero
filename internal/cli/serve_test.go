@@ -31,7 +31,7 @@ func TestRunServeMCPListsReadOnlyToolsByDefault(t *testing.T) {
 			t.Fatalf("expected MCP output to contain %q, got %q", want, output)
 		}
 	}
-	for _, unwanted := range []string{"write_file", "apply_patch", "bash"} {
+	for _, unwanted := range []string{"write_file", "apply_patch", "bash", "web_fetch"} {
 		if strings.Contains(output, unwanted) {
 			t.Fatalf("did not expect default MCP output to contain %q: %q", unwanted, output)
 		}
@@ -53,7 +53,7 @@ func TestRunServeMCPAllowsUnsafeToolsWithExplicitFlag(t *testing.T) {
 		t.Fatalf("expected exit code 0, got %d; stderr=%q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"read_file", "write_file", "apply_patch", "bash"} {
+	for _, want := range []string{"read_file", "write_file", "apply_patch", "bash", "web_fetch"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected unsafe MCP output to contain %q, got %q", want, output)
 		}

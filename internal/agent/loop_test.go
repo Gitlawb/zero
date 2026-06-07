@@ -162,6 +162,32 @@ func TestRunAdvertisesRuntimeToolDefinitions(t *testing.T) {
 	}
 }
 
+func TestRunAdvertisesWebFetchInAutoMode(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWebFetchTool())
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "what tools exist?", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "web_fetch" {
+		t.Fatalf("expected web_fetch to be advertised in auto mode, got %#v", provider.requests[0].Tools)
+	}
+}
+
 func TestRunFiltersAdvertisedTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

@@ -46,6 +46,45 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	}
 }
 
+func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
+	toolset := CoreNetworkTools()
+	if len(toolset) != 1 {
+		t.Fatalf("expected 1 core network tool, got %d", len(toolset))
+	}
+
+	tool := toolset[0]
+	if tool.Name() != "web_fetch" {
+		t.Fatalf("expected web_fetch network tool, got %q", tool.Name())
+	}
+	safety := tool.Safety()
+	if safety.SideEffect != SideEffectNetwork || safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
+		t.Fatalf("unexpected web_fetch safety metadata: %#v", safety)
+	}
+	if tool.Parameters().Properties["url"].Type != "string" {
+		t.Fatalf("expected web_fetch url schema, got %#v", tool.Parameters())
+	}
+}
+
+func TestCoreToolsIncludeWebFetchButReadOnlyToolsDoNot(t *testing.T) {
+	readOnly := CoreReadOnlyTools(t.TempDir())
+	for _, tool := range readOnly {
+		if tool.Name() == "web_fetch" {
+			t.Fatal("web_fetch should not be exposed by read-only core tools")
+		}
+	}
+
+	found := false
+	for _, tool := range CoreTools(t.TempDir()) {
+		if tool.Name() == "web_fetch" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected CoreTools to include web_fetch")
+	}
+}
+
 func TestRegistryRunsToolsThroughSafePath(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(NewReadFileTool(t.TempDir()))
@@ -59,6 +98,22 @@ func TestRegistryRunsToolsThroughSafePath(t *testing.T) {
 	}
 	if result.Output == "" {
 		t.Fatalf("expected an error output")
+	}
+}
+
+func TestRegistryRequiresPermissionForWebFetch(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(NewWebFetchTool())
+
+	result := registry.Run(context.Background(), "web_fetch", map[string]any{
+		"url": "https://example.com",
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected permission error status, got %s", result.Status)
+	}
+	if !strings.Contains(result.Output, "Permission required for web_fetch") {
+		t.Fatalf("unexpected permission output: %q", result.Output)
 	}
 }
 

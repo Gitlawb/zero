@@ -208,6 +208,29 @@ func TestEngineClassifiesNetworkAndDestructiveShellCommands(t *testing.T) {
 	}
 }
 
+func TestEngineDeniesNetworkSideEffectWhenPolicyBlocksNetwork(t *testing.T) {
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "web_fetch",
+		SideEffect:     SideEffectNetwork,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       AutonomyHigh,
+		Args:           map[string]any{"url": "https://example.com"},
+	})
+
+	if decision.Action != ActionDeny || decision.Violation == nil {
+		t.Fatalf("network tool decision = %#v, want deny violation", decision)
+	}
+	if decision.Violation.Code != ViolationNetwork {
+		t.Fatalf("violation code = %q, want %q", decision.Violation.Code, ViolationNetwork)
+	}
+	if decision.Risk.Level != RiskHigh {
+		t.Fatalf("risk level = %q, want %q", decision.Risk.Level, RiskHigh)
+	}
+}
+
 func TestEngineReportsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

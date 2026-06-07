@@ -108,6 +108,7 @@ var knownToolNames = map[string]bool{
 	"apply_patch":    true,
 	"update_plan":    true,
 	"bash":           true,
+	"web_fetch":      true,
 }
 
 func DefaultPaths(workspaceRoot string) (Paths, error) {

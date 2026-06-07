@@ -631,6 +631,7 @@ func assertCoreRegistry(t *testing.T, registry *tools.Registry) {
 		"apply_patch",
 		"update_plan",
 		"bash",
+		"web_fetch",
 	} {
 		if _, ok := registry.Get(name); !ok {
 			t.Fatalf("expected registry to include core tool %q", name)

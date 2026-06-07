@@ -159,9 +159,16 @@ func CoreShellTools(workspaceRoot string) []Tool {
 	}
 }
 
+func CoreNetworkTools() []Tool {
+	return []Tool{
+		NewWebFetchTool(),
+	}
+}
+
 func CoreTools(workspaceRoot string) []Tool {
 	tools := append([]Tool{}, CoreReadOnlyTools(workspaceRoot)...)
 	tools = append(tools, CoreWriteTools(workspaceRoot)...)
 	tools = append(tools, CoreShellTools(workspaceRoot)...)
+	tools = append(tools, CoreNetworkTools()...)
 	return tools
 }
