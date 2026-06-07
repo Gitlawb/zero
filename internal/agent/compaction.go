@@ -315,27 +315,60 @@ func (state *compactionState) recover(
 // OnUsage callbacks, so compaction stays invisible on the user-facing surface.
 func summarizeClosure(ctx context.Context, provider Provider) func([]zeroruntime.Message) (string, error) {
 	return func(toSummarize []zeroruntime.Message) (string, error) {
-		request := zeroruntime.CompletionRequest{
-			Messages: []zeroruntime.Message{
-				{Role: zeroruntime.MessageRoleSystem, Content: summaryInstructions},
-				{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(toSummarize)},
-			},
-			// No tools: this is a plain text summarization call.
-		}
-		stream, err := provider.StreamCompletion(ctx, request)
-		if err != nil {
-			return "", err
-		}
-		collected := zeroruntime.CollectStream(ctx, stream)
-		if collected.Error != "" {
-			return "", errors.New(collected.Error)
-		}
-		summary := strings.TrimSpace(collected.Text)
-		if summary == "" {
-			return "", errors.New("summarizer returned no text")
-		}
+		return summarizeWithFallback(ctx, provider, toSummarize)
+	}
+}
+
+// summarizeWithFallback summarizes messages in a single provider call. If that
+// call fails with a context-limit error — the slice to summarize is itself too
+// large for the model's input window — it splits the slice in half, summarizes
+// each half recursively, and joins the partial summaries. This keeps compaction
+// working when the elided middle is bigger than the summarizer's own context.
+// Non-context-limit errors (and a single message that still won't fit) surface
+// to the caller unchanged.
+func summarizeWithFallback(ctx context.Context, provider Provider, messages []zeroruntime.Message) (string, error) {
+	summary, err := summarizeMessagesOnce(ctx, provider, messages)
+	if err == nil {
 		return summary, nil
 	}
+	if len(messages) < 2 || !isContextLimitError(err.Error()) {
+		return "", err
+	}
+
+	mid := len(messages) / 2
+	left, leftErr := summarizeWithFallback(ctx, provider, messages[:mid])
+	if leftErr != nil {
+		return "", leftErr
+	}
+	right, rightErr := summarizeWithFallback(ctx, provider, messages[mid:])
+	if rightErr != nil {
+		return "", rightErr
+	}
+	return strings.TrimSpace(left + "\n\n" + right), nil
+}
+
+// summarizeMessagesOnce performs a single tool-less summarization call.
+func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message) (string, error) {
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleSystem, Content: summaryInstructions},
+			{Role: zeroruntime.MessageRoleUser, Content: "Summarize this conversation:\n\n" + renderTranscript(messages)},
+		},
+		// No tools: this is a plain text summarization call.
+	}
+	stream, err := provider.StreamCompletion(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	collected := zeroruntime.CollectStream(ctx, stream)
+	if collected.Error != "" {
+		return "", errors.New(collected.Error)
+	}
+	summary := strings.TrimSpace(collected.Text)
+	if summary == "" {
+		return "", errors.New("summarizer returned no text")
+	}
+	return summary, nil
 }
 
 // renderTranscript flattens messages into a plain-text transcript for the

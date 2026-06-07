@@ -1,0 +1,101 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
+)
+
+var markerPattern = regexp.MustCompile(`msg-\d+`)
+
+// sizeLimitedSummarizer returns a context-limit error when the rendered
+// transcript carries more than maxMarkers messages, and otherwise "summarizes"
+// by echoing the message markers it saw — so a successful summary records exactly
+// which messages it covered.
+type sizeLimitedSummarizer struct {
+	maxMarkers int
+	calls      int32
+}
+
+func (p *sizeLimitedSummarizer) StreamCompletion(_ context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	atomic.AddInt32(&p.calls, 1)
+	text := request.Messages[len(request.Messages)-1].Content
+	markers := markerPattern.FindAllString(text, -1)
+	ch := make(chan zeroruntime.StreamEvent, 2)
+	if len(markers) > p.maxMarkers {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: "context length exceeded"}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: strings.Join(markers, " ")}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+type errorSummarizer struct {
+	message string
+	calls   int32
+}
+
+func (p *errorSummarizer) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	atomic.AddInt32(&p.calls, 1)
+	ch := make(chan zeroruntime.StreamEvent, 1)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: p.message}
+	close(ch)
+	return ch, nil
+}
+
+func TestSummarizeWithFallbackChunksOnContextLimit(t *testing.T) {
+	const n = 8
+	messages := make([]zeroruntime.Message, n)
+	for i := range messages {
+		messages[i] = zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: fmt.Sprintf("msg-%d some content", i)}
+	}
+	// The summarizer can only handle 2 messages per call, so the 8-message slice
+	// must be split recursively until each chunk fits.
+	provider := &sizeLimitedSummarizer{maxMarkers: 2}
+
+	summary, err := summarizeWithFallback(context.Background(), provider, messages)
+	if err != nil {
+		t.Fatalf("summarizeWithFallback failed: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		if !strings.Contains(summary, fmt.Sprintf("msg-%d", i)) {
+			t.Fatalf("combined summary missing msg-%d: %q", i, summary)
+		}
+	}
+	if got := atomic.LoadInt32(&provider.calls); got < 2 {
+		t.Fatalf("expected multiple calls from splitting, got %d", got)
+	}
+}
+
+func TestSummarizeWithFallbackPropagatesNonContextErrors(t *testing.T) {
+	provider := &errorSummarizer{message: "auth error: invalid key"}
+	_, err := summarizeWithFallback(context.Background(), provider, []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: "msg-0"},
+		{Role: zeroruntime.MessageRoleUser, Content: "msg-1"},
+	})
+	if err == nil {
+		t.Fatal("expected a non-context-limit error to propagate")
+	}
+	if got := atomic.LoadInt32(&provider.calls); got != 1 {
+		t.Fatalf("a non-context error must not trigger splitting/retry, calls=%d", got)
+	}
+}
+
+func TestSummarizeWithFallbackSingleMessageContextLimitSurfaces(t *testing.T) {
+	// A single message that still won't fit can't be split further → error surfaces.
+	provider := &sizeLimitedSummarizer{maxMarkers: 0}
+	_, err := summarizeWithFallback(context.Background(), provider, []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: "msg-0 too big"},
+	})
+	if err == nil {
+		t.Fatal("expected the context-limit error to surface for an unsplittable single message")
+	}
+}
