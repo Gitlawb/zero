@@ -7,6 +7,9 @@ import (
 
 func FormatList(result LoadResult) string {
 	lines := []string{"Zero Specialists:"}
+	for _, warning := range result.Warnings {
+		lines = append(lines, "  warning: "+warning)
+	}
 	if len(result.Specialists) == 0 {
 		lines = append(lines, "  (none)")
 		return strings.Join(lines, "\n")
@@ -60,8 +63,8 @@ func FormatPaths(paths Paths) string {
 }
 
 func formatTools(manifest Manifest) string {
-	if len(manifest.Metadata.Tools) == 0 {
-		return "all"
+	if len(manifest.Metadata.Tools) == 0 && len(manifest.ResolvedTools) > 0 {
+		return strings.Join(manifest.ResolvedTools, ", ") + " (default)"
 	}
 	if len(manifest.ResolvedTools) == 0 {
 		return strings.Join(manifest.Metadata.Tools, ", ")

@@ -8,6 +8,7 @@ func Builtins() []Manifest {
 			Metadata: Metadata{
 				Name:        "worker",
 				Description: "Handles general delegated coding tasks and reports concrete outcomes.",
+				Tools:       []string{"read-only", "edit", "execute", "plan"},
 			},
 			SystemPrompt: workerPrompt,
 			Location:     LocationBuiltin,

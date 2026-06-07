@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"encoding/csv"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/modelregistry"
 )
 
 type Location string
@@ -61,6 +64,7 @@ type LoadOptions struct {
 type LoadResult struct {
 	Paths       Paths      `json:"paths"`
 	Specialists []Manifest `json:"specialists"`
+	Warnings    []string   `json:"warnings,omitempty"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
@@ -79,6 +83,10 @@ var toolCategories = map[string][]string{
 	"execute":   {"read_file", "list_directory", "grep", "glob", "bash"},
 	"plan":      {"update_plan"},
 }
+
+// defaultToolSelection keeps omitted tools conservative until runtime task
+// execution has its own permission policy.
+var defaultToolSelection = []string{"read-only"}
 
 var knownToolNames = map[string]bool{
 	"read_file":      true,
@@ -117,18 +125,21 @@ func Load(options LoadOptions) (LoadResult, error) {
 	}
 
 	manifests := Builtins()
-	projectManifests, err := loadDirectory(paths.ProjectDir, LocationProject)
+	warnings := []string{}
+	projectManifests, projectWarnings, err := loadDirectory(paths.ProjectDir, LocationProject)
 	if err != nil {
 		return LoadResult{}, err
 	}
+	warnings = append(warnings, projectWarnings...)
 	manifests = append(manifests, projectManifests...)
-	userManifests, err := loadDirectory(paths.UserDir, LocationUser)
+	userManifests, userWarnings, err := loadDirectory(paths.UserDir, LocationUser)
 	if err != nil {
 		return LoadResult{}, err
 	}
+	warnings = append(warnings, userWarnings...)
 	manifests = append(manifests, userManifests...)
 
-	return LoadResult{Paths: paths, Specialists: mergeByName(manifests)}, nil
+	return LoadResult{Paths: paths, Specialists: mergeByName(manifests), Warnings: warnings}, nil
 }
 
 func Find(result LoadResult, name string) (Manifest, bool) {
@@ -205,6 +216,24 @@ func Validate(manifest *Manifest) error {
 	if manifest.Metadata.Description == "" {
 		return fmt.Errorf("specialist %q requires a description", manifest.Metadata.Name)
 	}
+	if manifest.Metadata.Model != "" {
+		registry, err := modelregistry.DefaultRegistry()
+		if err != nil {
+			return fmt.Errorf("load model registry: %w", err)
+		}
+		modelID, ok := registry.ResolveID(manifest.Metadata.Model)
+		if !ok {
+			return fmt.Errorf("specialist %q references unknown model %q", manifest.Metadata.Name, manifest.Metadata.Model)
+		}
+		manifest.Metadata.Model = modelID
+	}
+	if manifest.Metadata.ReasoningEffort != "" {
+		effort := strings.ToLower(manifest.Metadata.ReasoningEffort)
+		if !modelregistry.ValidReasoningEffort(modelregistry.ReasoningEffort(effort)) {
+			return fmt.Errorf("specialist %q references unknown reasoning effort %q", manifest.Metadata.Name, manifest.Metadata.ReasoningEffort)
+		}
+		manifest.Metadata.ReasoningEffort = effort
+	}
 	resolved, err := ResolveTools(manifest.Metadata.Tools)
 	if err != nil {
 		return fmt.Errorf("specialist %q: %w", manifest.Metadata.Name, err)
@@ -215,7 +244,7 @@ func Validate(manifest *Manifest) error {
 
 func ResolveTools(selection []string) ([]string, error) {
 	if len(selection) == 0 {
-		return nil, nil
+		selection = defaultToolSelection
 	}
 	resolved := []string{}
 	seen := map[string]bool{}
@@ -263,6 +292,7 @@ func parseFrontmatter(frontmatter string) (map[string]any, error) {
 		return raw, nil
 	}
 	lines := strings.Split(frontmatter, "\n")
+	seen := map[string]int{}
 	for index := 0; index < len(lines); index++ {
 		line := strings.TrimSpace(lines[index])
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -277,6 +307,10 @@ func parseFrontmatter(frontmatter string) (map[string]any, error) {
 		if key == "" {
 			return nil, fmt.Errorf("invalid empty frontmatter key on line %d", index+1)
 		}
+		if previous, ok := seen[key]; ok {
+			return nil, fmt.Errorf("duplicate frontmatter key %q on line %d; first seen on line %d", key, index+1, previous)
+		}
+		seen[key] = index + 1
 		if value == "" && isListKey(key) {
 			values, next, err := parseBlockList(lines, index+1)
 			if err != nil {
@@ -356,7 +390,13 @@ func parseInlineList(value string) ([]string, error) {
 		return []string{}, nil
 	}
 	values := []string{}
-	for _, part := range strings.Split(inner, ",") {
+	reader := csv.NewReader(strings.NewReader(inner))
+	reader.TrimLeadingSpace = true
+	fields, err := reader.Read()
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range fields {
 		item := strings.TrimSpace(part)
 		if item == "" {
 			continue
@@ -386,30 +426,37 @@ func stringValue(value any) string {
 	return ""
 }
 
-func loadDirectory(dir string, location Location) ([]Manifest, error) {
+func loadDirectory(dir string, location Location) ([]Manifest, []string, error) {
 	if strings.TrimSpace(dir) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("read specialist directory %s: %w", dir, err)
+		return nil, nil, fmt.Errorf("read specialist directory %s: %w", dir, err)
 	}
 	manifests := []Manifest{}
+	warnings := []string{}
 	for _, entry := range entries {
 		if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			warnings = append(warnings, fmt.Sprintf("skipped symlink specialist manifest: %s", filepath.Join(dir, entry.Name())))
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read specialist manifest %s: %w", path, err)
+			warnings = append(warnings, fmt.Sprintf("skipped unreadable specialist manifest %s: %s", path, err))
+			continue
 		}
 		manifest, err := ParseMarkdown(string(data))
 		if err != nil {
-			return nil, fmt.Errorf("parse specialist manifest %s: %w", path, err)
+			warnings = append(warnings, fmt.Sprintf("skipped invalid specialist manifest %s: %s", path, err))
+			continue
 		}
 		manifest.Location = location
 		manifest.FilePath = path
@@ -418,7 +465,7 @@ func loadDirectory(dir string, location Location) ([]Manifest, error) {
 		}
 		manifests = append(manifests, manifest)
 	}
-	return manifests, nil
+	return manifests, warnings, nil
 }
 
 func mergeByName(manifests []Manifest) []Manifest {

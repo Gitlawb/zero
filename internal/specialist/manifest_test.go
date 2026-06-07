@@ -3,8 +3,11 @@ package specialist
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestParseMarkdownValidatesAndResolvesTools(t *testing.T) {
@@ -56,6 +59,128 @@ description: Greets the user
 	}
 	if len(manifest.Warnings) != 1 || !strings.Contains(manifest.Warnings[0], "description") {
 		t.Fatalf("expected description fallback warning, got %#v", manifest.Warnings)
+	}
+	for _, want := range []string{"glob", "grep", "list_directory", "read_file"} {
+		if !contains(manifest.ResolvedTools, want) {
+			t.Fatalf("default resolved tools missing %q: %#v", want, manifest.ResolvedTools)
+		}
+	}
+	if contains(manifest.ResolvedTools, "bash") || contains(manifest.ResolvedTools, "write_file") {
+		t.Fatalf("default tools should be read-only, got %#v", manifest.ResolvedTools)
+	}
+}
+
+func TestParseMarkdownValidatesModelAndReasoningEffort(t *testing.T) {
+	manifest, err := ParseMarkdown(`---
+name: reviewer
+description: Reviews code
+model: sonnet-4.5
+reasoningEffort: HIGH
+---
+Review.`)
+	if err != nil {
+		t.Fatalf("ParseMarkdown returned error: %v", err)
+	}
+	if manifest.Metadata.Model != "claude-sonnet-4.5" {
+		t.Fatalf("Model = %q, want canonical claude-sonnet-4.5", manifest.Metadata.Model)
+	}
+	if manifest.Metadata.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", manifest.Metadata.ReasoningEffort)
+	}
+
+	_, err = ParseMarkdown(`---
+name: reviewer
+description: Reviews code
+model: fake-9000
+---
+Review.`)
+	if err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Fatalf("expected unknown model error, got %v", err)
+	}
+
+	_, err = ParseMarkdown(`---
+name: reviewer
+description: Reviews code
+reasoningEffort: ULTRA
+---
+Review.`)
+	if err == nil || !strings.Contains(err.Error(), "unknown reasoning effort") {
+		t.Fatalf("expected unknown reasoning effort error, got %v", err)
+	}
+}
+
+func TestParseMarkdownRejectsInvalidNamesUnknownToolsAndDuplicateKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name: "invalid name",
+			content: `---
+name: ../escape
+description: Bad name
+---
+Prompt.`,
+			want: "invalid specialist name",
+		},
+		{
+			name: "unknown tool",
+			content: `---
+name: explorer
+description: Explores code
+tools: [web_search]
+---
+Prompt.`,
+			want: "unknown tool or category",
+		},
+		{
+			name: "duplicate key",
+			content: `---
+name: explorer
+name: explorer-two
+description: Explores code
+---
+Prompt.`,
+			want: "duplicate frontmatter key",
+		},
+		{
+			name: "malformed frontmatter",
+			content: `---
+name explorer
+description: Explores code
+---
+Prompt.`,
+			want: "invalid frontmatter line",
+		},
+		{
+			name: "empty prompt",
+			content: `---
+name: empty
+description:
+---`,
+			want: "system prompt cannot be empty",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseMarkdown(tc.content)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestParseMarkdownInlineListHonorsQuotedCommas(t *testing.T) {
+	_, err := ParseMarkdown(`---
+name: quoted
+description: Quoted list
+tools: ["read-only", "grep,glob"]
+---
+Prompt.`)
+	if err == nil || !strings.Contains(err.Error(), `unknown tool or category "grep,glob"`) {
+		t.Fatalf("expected quoted comma to stay in one token, got %v", err)
 	}
 }
 
@@ -112,6 +237,65 @@ User conflict prompt.`)
 	}
 	if conflict.Location != LocationUser || conflict.SystemPrompt != "User conflict prompt." || contains(conflict.ResolvedTools, "bash") {
 		t.Fatalf("user manifest should win same-name conflict, got %#v", conflict)
+	}
+}
+
+func TestLoadSkipsBadFilesAndSymlinksWithWarnings(t *testing.T) {
+	root := t.TempDir()
+	userDir := filepath.Join(root, "user")
+	writeManifest(t, filepath.Join(userDir, "valid.md"), `---
+name: valid
+description: Valid specialist
+---
+Prompt.`)
+	writeManifest(t, filepath.Join(userDir, "bad.md"), `---
+name: bad
+tools: [missing]
+---
+Prompt.`)
+	target := filepath.Join(userDir, "valid.md")
+	link := filepath.Join(userDir, "linked.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	result, err := Load(LoadOptions{Paths: Paths{UserDir: userDir}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if _, ok := Find(result, "valid"); !ok {
+		t.Fatalf("valid manifest should still load: %#v", result)
+	}
+	if _, ok := Find(result, "bad"); ok {
+		t.Fatalf("bad manifest should be skipped: %#v", result)
+	}
+	warnings := strings.Join(result.Warnings, "\n")
+	if !strings.Contains(warnings, "skipped invalid specialist manifest") || !strings.Contains(warnings, "skipped symlink specialist manifest") {
+		t.Fatalf("expected invalid-file and symlink warnings, got %#v", result.Warnings)
+	}
+}
+
+func TestKnownToolNamesMatchCoreRegistry(t *testing.T) {
+	core := tools.CoreTools(t.TempDir())
+	got := make([]string, 0, len(knownToolNames))
+	for name := range knownToolNames {
+		got = append(got, name)
+	}
+	want := make([]string, 0, len(core))
+	for _, tool := range core {
+		want = append(want, tool.Name())
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("knownToolNames drifted from core registry\ngot:  %#v\nwant: %#v", got, want)
+	}
+	for category, names := range toolCategories {
+		for _, name := range names {
+			if !knownToolNames[name] {
+				t.Fatalf("category %q references unknown tool %q", category, name)
+			}
+		}
 	}
 }
 

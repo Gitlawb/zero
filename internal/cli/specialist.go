@@ -104,9 +104,11 @@ func runSpecialistList(paths specialist.Paths, options specialistOptions, stdout
 		if err := writePrettyJSON(stdout, struct {
 			Paths       specialist.Paths     `json:"paths"`
 			Specialists []specialist.Summary `json:"specialists"`
+			Warnings    []string             `json:"warnings,omitempty"`
 		}{
 			Paths:       result.Paths,
 			Specialists: specialist.Summaries(result.Specialists),
+			Warnings:    result.Warnings,
 		}); err != nil {
 			return exitCrash
 		}
