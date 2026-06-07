@@ -9,6 +9,13 @@ import (
 
 type toolState struct {
 	calls map[int]*pendingToolCall
+	// finishReason holds the normalized terminal stop reason (zeroruntime
+	// FinishReason*) when the response ended abnormally (length/content_filter),
+	// so the provider can attach it to the done event. Empty for a normal finish.
+	finishReason string
+	// done is set once a terminal event (error) has been emitted so the post-scan
+	// path does not emit a second done after the stream already ended.
+	done bool
 }
 
 type pendingToolCall struct {

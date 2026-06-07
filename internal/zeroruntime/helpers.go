@@ -12,6 +12,17 @@ type CollectedStream struct {
 	Usage            Usage
 	Error            string
 	DroppedToolCalls int // malformed tool calls the provider could not dispatch
+	// FinishReason is the provider's normalized terminal stop reason when the
+	// response did not end normally (FinishReasonLength / FinishReasonContentFilter).
+	// It is empty for a normal completion. Truncated reports whether it is set.
+	FinishReason string
+}
+
+// Truncated reports whether the response ended for a non-normal reason (the
+// output was cut at the token cap or withheld by a content filter), so callers
+// can warn instead of treating a clipped answer as complete.
+func (collected CollectedStream) Truncated() bool {
+	return collected.FinishReason != ""
 }
 
 // CollectOptions provides callbacks for consumers that need live stream updates.
@@ -48,6 +59,14 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			if !ok {
 				collector.flush(&collected)
 				return collected
+			}
+
+			// A non-normal terminal stop reason can ride on any event (providers
+			// attach it to their done/terminal event). Record it regardless of
+			// type so a truncated/filtered response is never mistaken for a
+			// normal completion.
+			if event.FinishReason != "" {
+				collected.FinishReason = event.FinishReason
 			}
 
 			switch event.Type {
@@ -99,6 +118,10 @@ type toolCallCollector struct {
 	order       []string
 	openEmptyID []string // stack of synthetic keys for in-flight empty-id calls
 	synthetic   int
+	// pendingEmptyDelta is the synthetic key of an empty-id call that was opened
+	// by a delta arriving before any start (so its buffered arguments aren't
+	// orphaned). The next empty-id start adopts it instead of opening a new call.
+	pendingEmptyDelta string
 }
 
 func newToolCallCollector() *toolCallCollector {
@@ -111,9 +134,16 @@ func newToolCallCollector() *toolCallCollector {
 func (collector *toolCallCollector) start(id string, name string) {
 	key := id
 	if id == "" {
-		collector.synthetic++
-		key = fmt.Sprintf("\x00synthetic-%d", collector.synthetic)
-		collector.openEmptyID = append(collector.openEmptyID, key)
+		// Adopt an empty-id call that a delta opened before this start, so its
+		// already-buffered arguments and this start's name land on one call.
+		if collector.pendingEmptyDelta != "" {
+			key = collector.pendingEmptyDelta
+			collector.pendingEmptyDelta = ""
+		} else {
+			collector.synthetic++
+			key = fmt.Sprintf("\x00synthetic-%d", collector.synthetic)
+			collector.openEmptyID = append(collector.openEmptyID, key)
+		}
 	}
 	call := collector.ensure(key, id)
 	// Only set the name when non-empty and still unset, so a duplicate or
@@ -126,7 +156,17 @@ func (collector *toolCallCollector) start(id string, name string) {
 func (collector *toolCallCollector) delta(id string, fragment string) {
 	key, ok := collector.resolveKey(id)
 	if !ok {
-		key = id
+		if id == "" {
+			// An empty-id delta with no in-flight empty-id call: open one and
+			// remember it so a following empty-id start adopts it instead of
+			// orphaning these buffered arguments under a nameless call.
+			collector.synthetic++
+			key = fmt.Sprintf("\x00synthetic-%d", collector.synthetic)
+			collector.openEmptyID = append(collector.openEmptyID, key)
+			collector.pendingEmptyDelta = key
+		} else {
+			key = id
+		}
 		collector.ensure(key, id)
 	}
 	collector.calls[key].Arguments += fragment
@@ -138,7 +178,13 @@ func (collector *toolCallCollector) delta(id string, fragment string) {
 func (collector *toolCallCollector) end(id string) {
 	if id == "" {
 		if len(collector.openEmptyID) > 0 {
+			closed := collector.openEmptyID[len(collector.openEmptyID)-1]
 			collector.openEmptyID = collector.openEmptyID[:len(collector.openEmptyID)-1]
+			// If a delta-opened call is closed before any start adopts it, drop
+			// the pending pointer so a later start can't attach to a closed call.
+			if closed == collector.pendingEmptyDelta {
+				collector.pendingEmptyDelta = ""
+			}
 		}
 	}
 }
@@ -185,4 +231,5 @@ func (collector *toolCallCollector) flush(collected *CollectedStream) {
 	}
 	collector.order = collector.order[:0]
 	collector.openEmptyID = collector.openEmptyID[:0]
+	collector.pendingEmptyDelta = ""
 }

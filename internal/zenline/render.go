@@ -199,7 +199,11 @@ func RenderHome(d HomeData) string {
 		BorderBackground(p.Bg).Background(p.Bg).
 		Padding(0, 1).Width(mini(58, w-4)).Render(d.Input)
 	b.WriteString(box + "\n")
-	if overlay := s.overlayRegion(ChatData{Suggestions: d.Suggestions, SelectedIdx: d.SelectedIdx, Picker: d.Picker}, mini(58, w-4)); overlay != "" {
+	homeOverlayCap := len(d.Suggestions) + 1
+	if d.Picker != nil {
+		homeOverlayCap = len(d.Picker.Items) + 1
+	}
+	if overlay := s.overlayRegion(ChatData{Suggestions: d.Suggestions, SelectedIdx: d.SelectedIdx, Picker: d.Picker}, mini(58, w-4), homeOverlayCap); overlay != "" {
 		b.WriteString(overlay + "\n")
 	}
 	b.WriteString("\n")
@@ -245,8 +249,14 @@ func RenderChat(d ChatData) string {
 
 	// The autocomplete / picker overlay (when present) sits between the command
 	// line and the bottom bar; its lines are subtracted from the transcript body
-	// so the frame keeps its fixed height.
-	overlay := s.overlayRegion(d, w)
+	// so the frame keeps its fixed height. Cap the overlay so it can never push
+	// the body below one row (top + cmd + bottom = 3 fixed rows, plus >=1 body),
+	// which would otherwise overflow the frame's allotted height.
+	maxOverlay := h - 3 - 1
+	if maxOverlay < 0 {
+		maxOverlay = 0
+	}
+	overlay := s.overlayRegion(d, w, maxOverlay)
 	overlayH := 0
 	if overlay != "" {
 		overlayH = strings.Count(overlay, "\n") + 1
@@ -271,28 +281,41 @@ func RenderChat(d ChatData) string {
 
 // overlayRegion renders the slash-command autocomplete list or an open picker on
 // the theme background, just below the command line. Returns "" when neither is
-// present. A picker takes precedence over the suggestion list.
-func (s styles) overlayRegion(d ChatData, w int) string {
+// present. A picker takes precedence over the suggestion list. maxRows caps the
+// number of rendered rows so the overlay can never overflow the frame; a
+// non-positive maxRows suppresses the overlay entirely.
+//
+// While a permission prompt is up the overlay is suppressed: PermLayout (the
+// mouse hit-test) lays the modal out assuming no overlay rows, so showing one
+// here would drift the rendered buttons away from their hitboxes.
+func (s styles) overlayRegion(d ChatData, w, maxRows int) string {
+	if d.Perm != nil || maxRows <= 0 {
+		return ""
+	}
 	if d.Picker != nil {
-		return s.pickerLines(*d.Picker, w)
+		return s.pickerLines(*d.Picker, w, maxRows)
 	}
 	if len(d.Suggestions) > 0 {
-		return s.suggestionLines(d.Suggestions, d.SelectedIdx, w)
+		return s.suggestionLines(d.Suggestions, d.SelectedIdx, w, maxRows)
 	}
 	return ""
 }
 
 // suggestionLines renders one row per match (name + dim description) on the
 // theme background; the selected row is highlighted with a caret and accent.
-func (s styles) suggestionLines(items []Suggestion, selected, w int) string {
+// maxRows caps the rows (including a trailing "… N more" row when truncated) so
+// the overlay never overflows the frame.
+func (s styles) suggestionLines(items []Suggestion, selected, w, maxRows int) string {
 	nameW := 0
 	for _, it := range items {
 		if l := lipgloss.Width(it.Name); l > nameW {
 			nameW = l
 		}
 	}
-	lines := make([]string, 0, len(items))
-	for i, it := range items {
+	visible, hidden := capRows(len(items), maxRows)
+	lines := make([]string, 0, visible+1)
+	for i := 0; i < visible; i++ {
+		it := items[i]
 		pad := strings.Repeat(" ", maxi(0, nameW-lipgloss.Width(it.Name)))
 		marker := s.mute.Render("  ")
 		name := s.fg.Render(it.Name)
@@ -303,16 +326,23 @@ func (s styles) suggestionLines(items []Suggestion, selected, w int) string {
 		line := marker + name + pad + s.dim.Render("  "+it.Desc)
 		lines = append(lines, padRight(clip(line, w), w, s.pal.Bg))
 	}
+	if hidden > 0 {
+		lines = append(lines, padRight(clip(s.mute.Render(fmt.Sprintf("  … %d more", hidden)), w), w, s.pal.Bg))
+	}
 	return strings.Join(lines, "\n")
 }
 
 // pickerLines renders an open selector: a title line plus one row per item, the
-// selected row highlighted, all on the theme background.
-func (s styles) pickerLines(p Picker, w int) string {
+// selected row highlighted, all on the theme background. maxRows caps the total
+// rows (title + items + an optional "… N more") so the overlay fits the frame.
+func (s styles) pickerLines(p Picker, w, maxRows int) string {
 	lines := make([]string, 0, len(p.Items)+1)
 	head := s.acc.Bold(true).Render(p.Title) + s.mute.Render("  ↑/↓ move · ⏎ select · esc cancel")
 	lines = append(lines, padRight(clip(head, w), w, s.pal.Bg))
-	for i, item := range p.Items {
+	// The title consumes one row; the rest are available for items.
+	visible, hidden := capRows(len(p.Items), maxRows-1)
+	for i := 0; i < visible; i++ {
+		item := p.Items[i]
 		marker := s.mute.Render("  ")
 		label := s.fg.Render(item)
 		if i == p.Selected {
@@ -321,7 +351,28 @@ func (s styles) pickerLines(p Picker, w int) string {
 		}
 		lines = append(lines, padRight(clip(marker+label, w), w, s.pal.Bg))
 	}
+	if hidden > 0 {
+		lines = append(lines, padRight(clip(s.mute.Render(fmt.Sprintf("  … %d more", hidden)), w), w, s.pal.Bg))
+	}
 	return strings.Join(lines, "\n")
+}
+
+// capRows returns how many of total rows to render given a maxRows budget, and
+// how many are hidden. When everything fits, hidden is 0. When it doesn't, one
+// row is reserved for a "… N more" summary so the visible count leaves room for
+// it (visible + 1 summary <= maxRows). A non-positive budget shows nothing.
+func capRows(total, maxRows int) (visible, hidden int) {
+	if maxRows <= 0 {
+		return 0, total
+	}
+	if total <= maxRows {
+		return total, 0
+	}
+	visible = maxRows - 1 // reserve one row for the "… N more" summary
+	if visible < 0 {
+		visible = 0
+	}
+	return visible, total - visible
 }
 
 // Rect is a screen region in cell coordinates (0-based, y measured from the top
@@ -1014,19 +1065,6 @@ func firstLine(s string) string {
 	return s
 }
 
-func detailLines(s string, max int) []string {
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return nil
-	}
-	ls := strings.Split(s, "\n")
-	if len(ls) > max {
-		ls = ls[:max]
-		ls = append(ls, "…")
-	}
-	return ls
-}
-
 func wrap(text string, w int) []string {
 	if w < 8 {
 		w = 8
@@ -1054,15 +1092,18 @@ func wrap(text string, w int) []string {
 	return lines
 }
 
+// clip truncates s to a display width of w cells, appending an ellipsis when it
+// overflows. It measures by terminal display width (not rune count) so wide
+// runes (CJK, emoji) never exceed the budget, and it is ANSI-aware so styled
+// escape sequences in s are preserved rather than counted/split.
 func clip(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= w {
+	if lipgloss.Width(s) <= w {
 		return s
 	}
-	return string(r[:w-1]) + "…"
+	return ansi.Truncate(s, w, "…")
 }
 
 func padRight(s string, w int, fill lipgloss.Color) string {

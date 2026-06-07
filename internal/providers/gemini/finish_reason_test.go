@@ -1,0 +1,124 @@
+package gemini
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
+)
+
+// A candidate finishReason of MAX_TOKENS means the response was truncated at the
+// output cap. The provider must surface it on the done event.
+func TestStreamCompletionSurfacesMaxTokensFinishReason(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"cut"}]},"finishReason":"MAX_TOKENS"}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	var doneReason string
+	var sawDone bool
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventDone {
+			sawDone = true
+			doneReason = e.FinishReason
+		}
+	}
+	if !sawDone {
+		t.Fatalf("no done event; events: %+v", events)
+	}
+	if doneReason != zeroruntime.FinishReasonLength {
+		t.Fatalf("done FinishReason = %q, want %q", doneReason, zeroruntime.FinishReasonLength)
+	}
+}
+
+// A SAFETY finishReason maps to the runtime's content-filter reason.
+func TestStreamCompletionSurfacesSafetyFinishReason(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"SAFETY"}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != zeroruntime.FinishReasonContentFilter {
+			t.Fatalf("done FinishReason = %q, want %q", e.FinishReason, zeroruntime.FinishReasonContentFilter)
+		}
+	}
+}
+
+// A normal STOP finishReason must leave the done event's FinishReason empty.
+func TestStreamCompletionNormalFinishReasonHasNoReason(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != "" {
+			t.Fatalf("normal finish leaked FinishReason %q", e.FinishReason)
+		}
+	}
+}
+
+// A functionCall part with an empty Name can't be dispatched. The provider must
+// signal a dropped tool call (once) so the agent can ask the model to retry,
+// rather than silently skipping it.
+func TestStreamCompletionEmitsDroppedOnNamelessFunctionCallPart(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"","args":{"a":1}}}]}}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	var dropped, started int
+	for _, e := range events {
+		switch e.Type {
+		case zeroruntime.StreamEventToolCallDropped:
+			dropped++
+		case zeroruntime.StreamEventToolCallStart:
+			started++
+		}
+	}
+	if started != 0 {
+		t.Errorf("a nameless functionCall must not start a tool call, got %d starts", started)
+	}
+	if dropped != 1 {
+		t.Errorf("expected exactly one dropped-tool-call signal, got %d; events: %+v", dropped, events)
+	}
+}
+
+// A nameless top-level functionCall must also be signalled as dropped.
+func TestStreamCompletionEmitsDroppedOnNamelessTopLevelFunctionCall(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"functionCalls":[{"name":"","args":{"a":1}}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	var dropped, started int
+	for _, e := range events {
+		switch e.Type {
+		case zeroruntime.StreamEventToolCallDropped:
+			dropped++
+		case zeroruntime.StreamEventToolCallStart:
+			started++
+		}
+	}
+	if started != 0 {
+		t.Errorf("a nameless functionCall must not start a tool call, got %d starts", started)
+	}
+	if dropped != 1 {
+		t.Errorf("expected exactly one dropped-tool-call signal, got %d; events: %+v", dropped, events)
+	}
+}
+
+// A well-formed functionCall must NOT emit a dropped signal.
+func TestStreamCompletionDoesNotDropValidFunctionCall(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read_file","args":{"path":"x"}}}]}}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventToolCallDropped {
+			t.Errorf("valid functionCall must not be dropped; events: %+v", events)
+		}
+	}
+}

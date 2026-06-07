@@ -77,8 +77,12 @@ func TestStreamCompletionPostsChatCompletionRequest(t *testing.T) {
 	if gotBody["model"] != "gpt-test" || gotBody["stream"] != true {
 		t.Fatalf("unexpected model/stream: %#v", gotBody)
 	}
-	if _, ok := gotBody["stream_options"]; ok {
-		t.Fatalf("stream_options should be omitted in M0 request: %#v", gotBody["stream_options"])
+	streamOpts, ok := gotBody["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing or wrong type: %#v", gotBody["stream_options"])
+	}
+	if streamOpts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage = %#v, want true", streamOpts["include_usage"])
 	}
 	messages := gotBody["messages"].([]any)
 	assistant := messages[2].(map[string]any)
@@ -473,6 +477,170 @@ func TestStreamCompletionIdleTimeoutAbortsStalledStream(t *testing.T) {
 	if !gotIdleError {
 		t.Errorf("expected a surfaced idle-timeout error, got events: %+v", events)
 	}
+}
+
+func TestStreamCompletionSendsMaxCompletionTokens(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test", MaxTokens: 1234})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	got, ok := gotBody["max_completion_tokens"]
+	if !ok {
+		t.Fatalf("max_completion_tokens missing from request: %#v", gotBody)
+	}
+	if n, _ := got.(float64); int(n) != 1234 {
+		t.Fatalf("max_completion_tokens = %#v, want 1234", got)
+	}
+}
+
+func TestStreamCompletionOmitsMaxCompletionTokensWhenUnset(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if _, ok := gotBody["max_completion_tokens"]; ok {
+		t.Fatalf("max_completion_tokens should be omitted when unset: %#v", gotBody["max_completion_tokens"])
+	}
+}
+
+// A finish_reason of "length" means the response was truncated at the output cap.
+// The provider must surface it on the done event so a clipped answer is not
+// mistaken for a complete one.
+func TestStreamCompletionSurfacesLengthFinishReason(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"truncated"}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	var doneReason string
+	var sawDone bool
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventDone {
+			sawDone = true
+			doneReason = e.FinishReason
+		}
+	}
+	if !sawDone {
+		t.Fatalf("no done event; events: %+v", events)
+	}
+	if doneReason != zeroruntime.FinishReasonLength {
+		t.Fatalf("done FinishReason = %q, want %q", doneReason, zeroruntime.FinishReasonLength)
+	}
+
+	// And it round-trips through the runtime collector as Truncated.
+	collected := zeroruntime.CollectStream(context.Background(), replay(events))
+	if !collected.Truncated() || collected.FinishReason != zeroruntime.FinishReasonLength {
+		t.Fatalf("collected = %+v, want truncated length", collected)
+	}
+}
+
+// A content_filter finish_reason maps to the runtime's content-filter reason.
+func TestStreamCompletionSurfacesContentFilterFinishReason(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"content_filter"}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != zeroruntime.FinishReasonContentFilter {
+			t.Fatalf("done FinishReason = %q, want %q", e.FinishReason, zeroruntime.FinishReasonContentFilter)
+		}
+	}
+}
+
+// A normal "stop" finish must leave FinishReason empty on the done event.
+func TestStreamCompletionNormalFinishHasNoReason(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != "" {
+			t.Fatalf("normal finish leaked FinishReason %q", e.FinishReason)
+		}
+	}
+}
+
+// The shared SSE reader must join multi-line "data:" continuation fields into a
+// single payload (the OpenAI provider previously parsed one line at a time and
+// would drop the continuation, producing malformed JSON).
+func TestStreamCompletionJoinsMultiLineDataFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// One SSE event whose JSON payload is split across two data: lines.
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":\ndata: {\"content\":\"joined\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	events := collectProviderEvents(t, provider)
+	var text string
+	for _, e := range events {
+		if e.Type == zeroruntime.StreamEventText {
+			text += e.Content
+		}
+		if e.Type == zeroruntime.StreamEventError {
+			t.Fatalf("multi-line data field produced an error: %q", e.Error)
+		}
+	}
+	if text != "joined" {
+		t.Fatalf("text = %q, want %q (continuation data: line dropped?)", text, "joined")
+	}
+}
+
+func replay(events []zeroruntime.StreamEvent) <-chan zeroruntime.StreamEvent {
+	ch := make(chan zeroruntime.StreamEvent, len(events))
+	for _, e := range events {
+		ch <- e
+	}
+	close(ch)
+	return ch
 }
 
 func TestStreamCompletionEmitsDroppedOnNamelessToolCall(t *testing.T) {

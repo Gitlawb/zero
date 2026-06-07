@@ -44,6 +44,21 @@ const (
 	StreamEventError           StreamEventType = "error"
 )
 
+// Normalized terminal finish reasons for responses that did not end normally.
+// Providers map their native stop reasons onto these so consumers can detect a
+// truncated or filtered response regardless of which provider produced it. A
+// normal completion leaves the finish reason empty.
+const (
+	// FinishReasonLength means the response was truncated at the output token
+	// cap (OpenAI finish_reason=="length", Anthropic stop_reason=="max_tokens",
+	// Gemini finishReason=="MAX_TOKENS").
+	FinishReasonLength = "length"
+	// FinishReasonContentFilter means the response was withheld or cut off by a
+	// content/safety filter (OpenAI finish_reason=="content_filter",
+	// Gemini finishReason=="SAFETY").
+	FinishReasonContentFilter = "content_filter"
+)
+
 // ToolCall is a normalized assistant request to run a tool.
 type ToolCall struct {
 	ID        string
@@ -118,6 +133,11 @@ type StreamEvent struct {
 	ArgumentsFragment string
 	Usage             Usage
 	Error             string
+	// FinishReason carries the provider's normalized terminal stop reason when a
+	// response did not end normally (e.g. FinishReasonLength when the output hit
+	// the token cap, or FinishReasonContentFilter when it was filtered). It is
+	// empty for a normal completion. Providers set it on the terminal/done event.
+	FinishReason string
 }
 
 // CompletionRequest groups provider input messages and available tools.

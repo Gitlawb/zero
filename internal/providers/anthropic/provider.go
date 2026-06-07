@@ -227,6 +227,11 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 		if payload.Usage != nil {
 			state.recordUsage(*payload.Usage)
 		}
+		if payload.Delta != nil {
+			if reason := mapStopReason(payload.Delta.StopReason); reason != "" {
+				state.finishReason = reason
+			}
+		}
 	case "message_stop":
 		provider.emitDone(ctx, state, events)
 	case "error":
@@ -256,7 +261,7 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
 		}
 	}
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	state.done = true
 }
 
@@ -434,7 +439,18 @@ type streamState struct {
 	outputTokens   int
 	hasInputUsage  bool
 	hasOutputUsage bool
+	finishReason   string // normalized terminal stop reason (empty for normal stop)
 	done           bool
+}
+
+// mapStopReason maps Anthropic's message_delta stop_reason onto the runtime's
+// normalized terminal reasons. A normal stop ("end_turn"/"tool_use"/"stop_sequence"/"")
+// returns "".
+func mapStopReason(reason string) string {
+	if reason == "max_tokens" {
+		return zeroruntime.FinishReasonLength
+	}
+	return ""
 }
 
 func newStreamState() *streamState {

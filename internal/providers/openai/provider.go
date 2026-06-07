@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -31,6 +30,9 @@ type Options struct {
 	Model      string
 	HTTPClient *http.Client
 	UserAgent  string
+	// MaxTokens caps the model's output tokens. Zero omits the cap (the model's
+	// own default applies). Resolved from the model registry by the factory.
+	MaxTokens int
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
 	// Zero uses defaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
@@ -41,6 +43,7 @@ type Provider struct {
 	apiKey            string
 	baseURL           string
 	model             string
+	maxTokens         int
 	httpClient        *http.Client
 	userAgent         string
 	streamIdleTimeout time.Duration
@@ -72,10 +75,16 @@ func New(options Options) (*Provider, error) {
 		idleTimeout = defaultStreamIdleTimeout
 	}
 
+	maxTokens := options.MaxTokens
+	if maxTokens < 0 {
+		maxTokens = 0
+	}
+
 	return &Provider{
 		apiKey:            options.APIKey,
 		baseURL:           baseURL,
 		model:             model,
+		maxTokens:         maxTokens,
 		httpClient:        httpClient,
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: idleTimeout,
@@ -154,102 +163,61 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 
 	state := newToolState()
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 0, 4096), 16*1024*1024)
-
-	// Read SSE lines on a dedicated goroutine so the consumer below can enforce
-	// an idle deadline with a select. The reader exits when the body EOFs/errors
-	// or when streamCtx is cancelled (idle abort), then closes lines.
-	lines := make(chan string)
-	go func() {
-		defer close(lines)
-		for scanner.Scan() {
-			select {
-			case lines <- scanner.Text():
-			case <-streamCtx.Done():
-				return
-			}
-		}
-	}()
-
-	idle := time.NewTimer(provider.streamIdleTimeout)
-	defer idle.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			state.closeOpen(ctx, events)
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctx.Err().Error())})
-			return
-		case <-idle.C:
-			// Upstream went silent without closing. Abort the read and surface a
-			// timeout instead of blocking the agent forever.
-			cancelStream()
-			state.closeOpen(ctx, events)
-			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:  zeroruntime.StreamEventError,
-				Error: provider.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", provider.streamIdleTimeout)),
-			})
-			return
-		case raw, ok := <-lines:
-			if !ok {
-				// Reader finished: EOF, scanner error, or context cancel.
-				state.closeOpen(ctx, events)
-				if err := scanner.Err(); err != nil {
-					sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
-					return
-				}
-				if err := ctx.Err(); err != nil {
-					sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
-					return
-				}
-				sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
-				return
-			}
-
-			// Any line is activity: refresh the idle deadline.
-			if !idle.Stop() {
-				select {
-				case <-idle.C:
-				default:
-				}
-			}
-			idle.Reset(provider.streamIdleTimeout)
-
-			line := strings.TrimSpace(raw)
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if data == "" {
-				continue
-			}
-			if data == "[DONE]" {
-				state.closeOpen(ctx, events)
-				sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
-				return
-			}
-
-			var chunk streamChunk
-			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-				state.closeOpen(ctx, events)
-				sendEvent(ctx, events, zeroruntime.StreamEvent{
-					Type:  zeroruntime.StreamEventError,
-					Error: provider.redact("provider stream error: malformed JSON: " + err.Error()),
-				})
-				return
-			}
-			if chunk.Error != nil {
-				state.closeOpen(ctx, events)
-				sendEvent(ctx, events, zeroruntime.StreamEvent{
-					Type:  zeroruntime.StreamEventError,
-					Error: provider.classifiedError(http.StatusInternalServerError, chunk.Error.Message),
-				})
-				return
-			}
-			provider.emitChunk(ctx, chunk, state, events)
-		}
+	// Use the shared SSE reader (also used by the Anthropic/Gemini providers) so
+	// multi-line "data:" continuation fields are joined into one payload, and the
+	// idle watchdog / context cancellation are handled uniformly.
+	err := providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, provider.streamIdleTimeout, func(data string) bool {
+		return provider.emitPayload(ctx, data, state, events)
+	})
+	if errors.Is(err, providerio.ErrStreamIdle) {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", provider.streamIdleTimeout)),
+		})
+		return
 	}
+	if err != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
+		return
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctxErr.Error())})
+		return
+	}
+	if !state.done {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
+	}
+}
+
+// emitPayload handles one accumulated SSE data payload ([DONE]/blank lines are
+// already filtered by the shared reader). It returns false to abort the stream
+// after emitting a terminal error.
+func (provider *Provider) emitPayload(ctx context.Context, data string, state *toolState, events chan<- zeroruntime.StreamEvent) bool {
+	var chunk streamChunk
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.redact("provider stream error: malformed JSON: " + err.Error()),
+		})
+		state.done = true
+		return false
+	}
+	if chunk.Error != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.classifiedError(http.StatusInternalServerError, chunk.Error.Message),
+		})
+		state.done = true
+		return false
+	}
+	provider.emitChunk(ctx, chunk, state, events)
+	return true
 }
 
 func (provider *Provider) emitChunk(
@@ -271,6 +239,9 @@ func (provider *Provider) emitChunk(
 		if choice.FinishReason == "tool_calls" {
 			state.closeOpen(ctx, events)
 		}
+		if reason := mapFinishReason(choice.FinishReason); reason != "" {
+			state.finishReason = reason
+		}
 	}
 
 	if chunk.Usage != nil {
@@ -282,6 +253,19 @@ func (provider *Provider) emitChunk(
 				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
 			},
 		})
+	}
+}
+
+// mapFinishReason maps OpenAI's finish_reason onto the runtime's normalized
+// terminal reasons. A normal finish ("stop"/"tool_calls"/"") returns "".
+func mapFinishReason(reason string) string {
+	switch reason {
+	case "length":
+		return zeroruntime.FinishReasonLength
+	case "content_filter":
+		return zeroruntime.FinishReasonContentFilter
+	default:
+		return ""
 	}
 }
 
@@ -347,6 +331,12 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		Model:    provider.model,
 		Messages: messages,
 		Stream:   true,
+		// Request the terminal usage chunk; OpenAI omits it on streams otherwise,
+		// which silently zeroes token accounting.
+		StreamOptions: &streamOptions{IncludeUsage: true},
+	}
+	if provider.maxTokens > 0 {
+		mapped.MaxCompletionTokens = provider.maxTokens
 	}
 	if len(request.Tools) > 0 {
 		mapped.Tools = make([]toolDefinition, 0, len(request.Tools))

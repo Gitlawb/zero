@@ -33,6 +33,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			APIKey:     profile.APIKey,
 			BaseURL:    resolved.baseURL,
 			Model:      resolved.apiModel,
+			MaxTokens:  resolved.maxOutputTokens,
 			HTTPClient: options.HTTPClient,
 			UserAgent:  options.UserAgent,
 		})

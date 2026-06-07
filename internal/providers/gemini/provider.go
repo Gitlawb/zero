@@ -195,6 +195,9 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 		state.hasUsage = true
 	}
 	for _, candidate := range payload.Candidates {
+		if reason := mapFinishReason(candidate.FinishReason); reason != "" {
+			state.finishReason = reason
+		}
 		if candidate.Content == nil {
 			continue
 		}
@@ -202,7 +205,14 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 			if part.Text != "" {
 				providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: part.Text})
 			}
-			if part.FunctionCall != nil && part.FunctionCall.Name != "" {
+			if part.FunctionCall != nil {
+				if part.FunctionCall.Name == "" {
+					// A functionCall without a usable name can't be dispatched.
+					// Signal a drop once so the agent can ask the model to retry
+					// instead of silently ending the turn (mirrors OpenAI/Anthropic).
+					providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDropped})
+					continue
+				}
 				state.syntheticToolIndex++
 				if !provider.emitToolCall(ctx, *part.FunctionCall, state.syntheticToolIndex, events) {
 					state.done = true
@@ -213,6 +223,9 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 	}
 	for _, functionCall := range payload.FunctionCalls {
 		if functionCall.Name == "" {
+			// Nameless top-level functionCall: signal a drop once rather than
+			// silently skipping it.
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDropped})
 			continue
 		}
 		state.syntheticToolIndex++
@@ -235,7 +248,7 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
 		}
 	}
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	state.done = true
 }
 
@@ -451,5 +464,19 @@ type streamState struct {
 	reasoningTokens    int
 	hasUsage           bool
 	syntheticToolIndex int
+	finishReason       string // normalized terminal stop reason (empty for normal stop)
 	done               bool
+}
+
+// mapFinishReason maps a Gemini candidate finishReason onto the runtime's
+// normalized terminal reasons. A normal stop ("STOP"/"") returns "".
+func mapFinishReason(reason string) string {
+	switch reason {
+	case "MAX_TOKENS":
+		return zeroruntime.FinishReasonLength
+	case "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII":
+		return zeroruntime.FinishReasonContentFilter
+	default:
+		return ""
+	}
 }

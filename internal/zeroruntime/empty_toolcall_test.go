@@ -33,6 +33,35 @@ func TestCollectStreamDropsNamelessToolCalls(t *testing.T) {
 	}
 }
 
+// An empty-id DELTA that arrives BEFORE its start event must not orphan its
+// buffered arguments: a following empty-id start should adopt the in-flight
+// call so the name and the early-buffered arguments end up on the same call.
+func TestCollectStreamEmptyIDDeltaBeforeStartIsAdopted(t *testing.T) {
+	events := make(chan StreamEvent, 8)
+	// delta arrives first, with an empty id and no start yet
+	events <- StreamEvent{Type: StreamEventToolCallDelta, ArgumentsFragment: `{"path":`}
+	// start (empty id) arrives afterwards carrying the name
+	events <- StreamEvent{Type: StreamEventToolCallStart, ToolName: "read_file"}
+	events <- StreamEvent{Type: StreamEventToolCallDelta, ArgumentsFragment: `"x"}`}
+	events <- StreamEvent{Type: StreamEventToolCallEnd}
+	events <- StreamEvent{Type: StreamEventDone}
+	close(events)
+
+	got := CollectStream(context.Background(), events)
+	if len(got.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d: %+v", len(got.ToolCalls), got.ToolCalls)
+	}
+	if got.ToolCalls[0].Name != "read_file" {
+		t.Fatalf("call name = %q, want read_file", got.ToolCalls[0].Name)
+	}
+	if got.ToolCalls[0].Arguments != `{"path":"x"}` {
+		t.Fatalf("arguments = %q, want full buffered args (early delta orphaned?)", got.ToolCalls[0].Arguments)
+	}
+	if got.DroppedToolCalls != 0 {
+		t.Fatalf("DroppedToolCalls = %d, want 0 (early delta should not orphan into a nameless call)", got.DroppedToolCalls)
+	}
+}
+
 // A provider-signalled dropped (nameless) tool call must be counted so the agent
 // can tell the model to retry instead of silently treating it as a final answer.
 func TestCollectStreamCountsDroppedToolCalls(t *testing.T) {
