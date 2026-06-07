@@ -221,6 +221,19 @@ func (manager *Manager) Kill(taskID string) error {
 	return manager.markKilledIfStillRunning(taskID, pid)
 }
 
+func (manager *Manager) KillRunning() error {
+	var errs []error
+	for _, task := range manager.List() {
+		if task.Status != StatusRunning {
+			continue
+		}
+		if err := manager.Kill(task.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (manager *Manager) killTarget(taskID string) (int, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

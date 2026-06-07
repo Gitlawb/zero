@@ -276,9 +276,11 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
-	if err := registerSpecialistTools(registry, workspaceRoot); err != nil {
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot)
+	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
+	defer closeSpecialistRuntime(stderr, specialistRuntime)
 	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, mcp.AutonomyLow)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
@@ -331,10 +333,10 @@ func newCoreRegistry(workspaceRoot string) *tools.Registry {
 	return registry
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) error {
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) (*specialist.Runtime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return specialist.RegisterTools(registry, specialist.Executor{Paths: paths})
 }
@@ -352,6 +354,15 @@ func closeMCPRuntime(stderr io.Writer, runtime mcpToolRuntime) {
 	}
 	if err := runtime.Close(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "[zero] mcp_close_error: %s\n", err)
+	}
+}
+
+func closeSpecialistRuntime(stderr io.Writer, runtime *specialist.Runtime) {
+	if runtime == nil {
+		return
+	}
+	if err := runtime.Close(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "[zero] specialist_cleanup_error: %s\n", err)
 	}
 }
 

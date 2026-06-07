@@ -1,44 +1,19 @@
 package specialist
 
-import (
-	"sync"
+import "github.com/Gitlawb/zero/internal/tools"
 
-	"github.com/Gitlawb/zero/internal/background"
-	"github.com/Gitlawb/zero/internal/tools"
-)
-
-func RegisterTools(registry *tools.Registry, executor Executor) error {
-	managerFunc := executor.BackgroundManagerFunc
-	if executor.BackgroundManager != nil {
-		manager := executor.BackgroundManager
-		managerFunc = func() (*background.Manager, error) {
-			return manager, nil
-		}
+func RegisterTools(registry *tools.Registry, executor Executor) (*Runtime, error) {
+	runtime := executor.BackgroundRuntime
+	if runtime == nil {
+		runtime = NewRuntime(RuntimeOptions{
+			Manager:     executor.BackgroundManager,
+			ManagerFunc: executor.BackgroundManagerFunc,
+		})
 	}
-	if managerFunc == nil {
-		managerFunc = lazyBackgroundManager()
-	}
-	executor.BackgroundManagerFunc = managerFunc
+	executor.BackgroundRuntime = runtime
+	executor.BackgroundManagerFunc = runtime.Manager
 	registry.Register(NewTaskTool(executor))
-	registry.Register(newOutputToolWithManagerFunc(managerFunc))
-	registry.Register(newStopToolWithManagerFunc(managerFunc))
-	return nil
-}
-
-func lazyBackgroundManager() BackgroundManagerFunc {
-	var mu sync.Mutex
-	var manager *background.Manager
-	return func() (*background.Manager, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if manager != nil {
-			return manager, nil
-		}
-		created, err := background.NewManager("")
-		if err != nil {
-			return nil, err
-		}
-		manager = created
-		return manager, nil
-	}
+	registry.Register(newOutputToolWithManagerFunc(runtime.Manager))
+	registry.Register(newStopToolWithManagerFunc(runtime.Manager))
+	return runtime, nil
 }

@@ -177,6 +177,56 @@ func TestManagerKillDoesNotClobberCompletedTask(t *testing.T) {
 	}
 }
 
+func TestManagerKillRunningStopsOnlyRunningTasks(t *testing.T) {
+	now := sequenceClock(
+		time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 7, 9, 0, 1, 0, time.UTC),
+		time.Date(2026, 6, 7, 9, 0, 2, 0, time.UTC),
+	)
+	killed := []int{}
+	manager, err := NewManagerWithOptions(ManagerOptions{
+		RootDir: t.TempDir(),
+		Now:     now,
+		KillProcess: func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "running_1", Type: "specialist", PID: 11}); err != nil {
+		t.Fatalf("Register running_1 returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "done", Type: "specialist", PID: 22}); err != nil {
+		t.Fatalf("Register done returned error: %v", err)
+	}
+	if err := manager.UpdateStatus("done", StatusCompleted, 0); err != nil {
+		t.Fatalf("UpdateStatus returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "running_2", Type: "specialist", PID: 33}); err != nil {
+		t.Fatalf("Register running_2 returned error: %v", err)
+	}
+
+	if err := manager.KillRunning(); err != nil {
+		t.Fatalf("KillRunning returned error: %v", err)
+	}
+
+	if !reflect.DeepEqual(killed, []int{33, 11}) {
+		t.Fatalf("killed pids = %#v", killed)
+	}
+	for _, id := range []string{"running_1", "running_2"} {
+		task, ok := manager.Get(id)
+		if !ok || task.Status != StatusKilled {
+			t.Fatalf("%s status = %#v", id, task)
+		}
+	}
+	done, ok := manager.Get("done")
+	if !ok || done.Status != StatusCompleted {
+		t.Fatalf("completed task was changed: %#v", done)
+	}
+}
+
 func TestDefaultRootHonorsXDGDataHome(t *testing.T) {
 	got := DefaultRoot(map[string]string{
 		"XDG_DATA_HOME": "/tmp/zero-data",

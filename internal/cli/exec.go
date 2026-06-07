@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/worktrees"
 )
@@ -103,10 +104,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	var specialistRuntime *specialist.Runtime
 	if shouldRegisterExecSpecialistTools(options) {
-		if err := registerSpecialistTools(registry, workspaceRoot); err != nil {
+		var err error
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot)
+		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}
+		defer closeSpecialistRuntime(stderr, specialistRuntime)
 	}
 	permissionMode, err := resolveExecPermissionMode(options)
 	if err != nil {

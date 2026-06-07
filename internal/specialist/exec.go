@@ -45,6 +45,7 @@ type Executor struct {
 	SessionStore          *sessions.Store
 	BackgroundManager     *background.Manager
 	BackgroundManagerFunc BackgroundManagerFunc
+	BackgroundRuntime     *Runtime
 }
 
 type BuildArgsInput struct {
@@ -308,6 +309,7 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 		}
 		return ExecResult{}, err
 	}
+	executor.trackBackgroundPromptFile(built.SessionID, built.PromptFile)
 
 	pid, err := executor.launchBackground(binaryPath, built.Args, outputFile, func(exitCode int) {
 		status := background.StatusCompleted
@@ -315,22 +317,16 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 			status = background.StatusError
 		}
 		_ = manager.UpdateStatus(built.SessionID, status, exitCode)
-		if built.PromptFile != "" {
-			cleanupPromptFile(built.PromptFile)
-		}
+		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 	})
 	if err != nil {
 		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
-		if built.PromptFile != "" {
-			cleanupPromptFile(built.PromptFile)
-		}
+		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 		return ExecResult{}, err
 	}
 	if pid > 0 {
 		if err := manager.SetPID(built.SessionID, pid); err != nil {
-			if built.PromptFile != "" {
-				cleanupPromptFile(built.PromptFile)
-			}
+			executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 			return ExecResult{}, err
 		}
 	}
@@ -452,6 +448,9 @@ func (executor Executor) launchBackground(binaryPath string, args []string, outp
 }
 
 func (executor Executor) backgroundManager() (*background.Manager, error) {
+	if executor.BackgroundRuntime != nil {
+		return executor.BackgroundRuntime.Manager()
+	}
 	if executor.BackgroundManager != nil {
 		return executor.BackgroundManager, nil
 	}
@@ -459,6 +458,26 @@ func (executor Executor) backgroundManager() (*background.Manager, error) {
 		return executor.BackgroundManagerFunc()
 	}
 	return background.NewManager("")
+}
+
+func (executor Executor) trackBackgroundPromptFile(taskID string, promptFile string) {
+	if promptFile == "" {
+		return
+	}
+	if executor.BackgroundRuntime != nil {
+		executor.BackgroundRuntime.TrackPromptFile(taskID, promptFile)
+	}
+}
+
+func (executor Executor) cleanupBackgroundPromptFile(taskID string, promptFile string) {
+	if promptFile == "" {
+		return
+	}
+	if executor.BackgroundRuntime != nil {
+		executor.BackgroundRuntime.UntrackPromptFile(taskID)
+		return
+	}
+	cleanupPromptFile(promptFile)
 }
 
 func appendModelArgs(args []string, manifest Manifest, parentModel string, parentReasoningEffort string) []string {
