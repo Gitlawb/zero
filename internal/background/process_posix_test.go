@@ -4,21 +4,29 @@ package background
 
 import (
 	"bufio"
+	"errors"
 	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 )
 
-// withShortGrace shrinks the termination timings for fast tests and restores them.
-func withShortGrace(t *testing.T) {
-	t.Helper()
-	grace, poll := terminationGracePeriod, terminationPollInterval
-	terminationGracePeriod, terminationPollInterval = 300*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
+// terminatingSignal returns the signal that killed a process from its cmd.Wait()
+// error, or 0 if it exited normally / for another reason.
+func terminatingSignal(err error) syscall.Signal {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return status.Signal()
+		}
+	}
+	return 0
 }
 
 func TestTerminateProcessEscalatesToSIGKILL(t *testing.T) {
-	withShortGrace(t)
+	grace, poll := terminationGracePeriod, terminationPollInterval
+	terminationGracePeriod, terminationPollInterval = 300*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
 
 	// A process that traps and ignores SIGTERM — only SIGKILL can stop it. The
 	// while-loop keeps the trap-holding shell as the process (a trailing single
@@ -35,8 +43,8 @@ func TestTerminateProcessEscalatesToSIGKILL(t *testing.T) {
 	if _, err := bufio.NewReader(stdout).ReadString('\n'); err != nil {
 		t.Fatalf("waiting for trap to install: %v", err)
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 
 	start := time.Now()
 	if err := terminateProcess(cmd.Process.Pid); err != nil {
@@ -44,7 +52,10 @@ func TestTerminateProcessEscalatesToSIGKILL(t *testing.T) {
 	}
 
 	select {
-	case <-done:
+	case waitErr := <-done:
+		if sig := terminatingSignal(waitErr); sig != syscall.SIGKILL {
+			t.Fatalf("process terminated by %v, want SIGKILL (it ignores SIGTERM)", sig)
+		}
 	case <-time.After(2 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("process not killed — SIGKILL escalation failed")
@@ -65,15 +76,20 @@ func TestTerminateProcessGracefulSIGTERM(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	done := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(done) }()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 
 	start := time.Now()
 	if err := terminateProcess(cmd.Process.Pid); err != nil {
 		t.Fatalf("terminateProcess: %v", err)
 	}
 	select {
-	case <-done:
+	case waitErr := <-done:
+		// Must die from SIGTERM, not SIGKILL — proves we ask politely first and
+		// don't regress to an immediate force-kill.
+		if sig := terminatingSignal(waitErr); sig != syscall.SIGTERM {
+			t.Fatalf("process terminated by %v, want SIGTERM", sig)
+		}
 	case <-time.After(3 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("process not killed on SIGTERM")
