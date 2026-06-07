@@ -143,6 +143,12 @@ func scrubResultSecrets(res Result) Result {
 		res.Output = scrubbed
 		res.Redacted = true
 	}
+	// Display.Summary can echo command/output fragments, so scrub it too: a caller
+	// that prefers Display must not bypass the boundary redaction.
+	if scrubbed := redaction.RedactString(res.Display.Summary, redaction.Options{}); scrubbed != res.Display.Summary {
+		res.Display.Summary = scrubbed
+		res.Redacted = true
+	}
 	return res
 }
 

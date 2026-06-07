@@ -401,7 +401,10 @@ func TestApplyPatchReportsWorkspaceRelativeChangedFilesUnderCwd(t *testing.T) {
 
 	res := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch, "cwd": "sub/dir"})
 	if res.Status != StatusOK {
-		t.Skipf("git apply unavailable or failed: %s", res.Output)
+		if gitApplyUnavailable(res.Output) {
+			t.Skipf("git binary unavailable: %s", res.Output)
+		}
+		t.Fatalf("apply_patch with cwd failed (possible regression): %s", res.Output)
 	}
 	if len(res.ChangedFiles) != 1 || res.ChangedFiles[0] != "sub/dir/a.txt" {
 		t.Fatalf("ChangedFiles = %v, want [sub/dir/a.txt]", res.ChangedFiles)
@@ -450,7 +453,10 @@ func TestApplyPatchReportsChangedFiles(t *testing.T) {
 	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n"
 	res := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch})
 	if res.Status != StatusOK {
-		t.Skipf("git apply unavailable or failed: %s", res.Output) // environment guard
+		if gitApplyUnavailable(res.Output) {
+			t.Skipf("git binary unavailable: %s", res.Output)
+		}
+		t.Fatalf("apply_patch failed (possible regression): %s", res.Output)
 	}
 	found := false
 	for _, f := range res.ChangedFiles {
@@ -480,4 +486,12 @@ func TestWriteFileAcceptsContentAlias(t *testing.T) {
 	if string(got) != "<html>hi</html>" {
 		t.Fatalf("file content = %q", got)
 	}
+}
+
+// gitApplyUnavailable reports whether an apply_patch failure is due to the git
+// binary being absent (an environment condition worth skipping) rather than a
+// real regression (which must fail the test). apply_patch shells out to
+// `git apply`; a missing binary surfaces as exec's "executable file not found".
+func gitApplyUnavailable(output string) bool {
+	return strings.Contains(output, "executable file not found")
 }

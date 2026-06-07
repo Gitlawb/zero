@@ -32,8 +32,14 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		if err != nil {
 			return nil
 		}
-		_, relativeRoot, err := resolveWorkspacePath(workspaceRoot, cwd)
+		applyRoot, relativeRoot, err := resolveWorkspacePath(workspaceRoot, cwd)
 		if err != nil {
+			return nil
+		}
+		// Enforce the same workspace confinement apply_patch applies (against the
+		// resolved apply dir), so a patch with a traversal path (../x) never yields
+		// an out-of-workspace target.
+		if err := validatePatchPaths(applyRoot, patch); err != nil {
 			return nil
 		}
 		paths := changedFilesFromPatch(relativeRoot, patch)

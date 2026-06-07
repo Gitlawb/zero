@@ -56,6 +56,12 @@ func TestMutationTargetsRejectsEscapingPaths(t *testing.T) {
 	if got := MutationTargets(root, "write_file", map[string]any{"path": "../escape.txt", "content": "x"}); len(got) != 0 {
 		t.Errorf("expected no targets for escaping path, got %v", got)
 	}
+	// apply_patch must also reject a patch whose paths escape the workspace, so it
+	// never returns an out-of-workspace checkpoint target.
+	escapePatch := "--- a/../escape.txt\n+++ b/../escape.txt\n@@ -1 +1 @@\n-one\n+two\n"
+	if got := MutationTargets(root, "apply_patch", map[string]any{"patch": escapePatch}); len(got) != 0 {
+		t.Errorf("expected no targets for escaping apply_patch, got %v", got)
+	}
 }
 
 // Finding 3: with cwd != ".", apply_patch's MutationTargets must return

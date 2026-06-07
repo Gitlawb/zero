@@ -319,7 +319,10 @@ func TestApplyPatchToolAcceptsDiffAlias(t *testing.T) {
 	}, "\n")
 	res := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"diff": patch})
 	if res.Status != StatusOK {
-		t.Skipf("git apply unavailable or failed: %s", res.Output)
+		if gitApplyUnavailable(res.Output) {
+			t.Skipf("git binary unavailable: %s", res.Output)
+		}
+		t.Fatalf("apply_patch via diff alias failed (possible regression): %s", res.Output)
 	}
 	got, _ := os.ReadFile(filepath.Join(root, "hello.txt"))
 	if strings.ReplaceAll(string(got), "\r\n", "\n") != "hello\nnew\n" {
