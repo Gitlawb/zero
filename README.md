@@ -99,6 +99,7 @@ zero doctor [--connectivity] [--json]        # health checks
 zero config [--json]                          # inspect resolved configuration
 zero sandbox policy [--json]                 # inspect sandbox backend support
 zero serve --mcp [-C <path>]                  # expose Zero read-only tools over MCP stdio
+zero specialist list|show|create|edit|delete  # manage local specialist sub-agents
 zero update --check [--json --target windows-x64] # check for a newer release
 ```
 
@@ -124,6 +125,8 @@ runtimes (Ollama, gateways, etc.) plug in the same way.
 | `update_plan` | maintain a live task plan | plan |
 | `write_file` · `edit_file` · `apply_patch` | create & modify files | write (gated) |
 | `bash` | run shell commands | shell (gated) |
+| `Task` · `TaskOutput` · `TaskStop` | delegate to specialist sub-agents | shell/read (gated by tool) |
+| `GenerateSpecialist` | create project-local specialist manifests | write (gated) |
 
 Write/shell tools route through the permission policy before any side effect.
 
@@ -199,6 +202,7 @@ and [`docs/UPDATE.md`](docs/UPDATE.md) for the update flow.
 
 - [Product Requirements (PRD)](docs/PRD.md) — vision, goals, full feature spec, roadmap
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md) — headless I/O contract
+- [Specialists](docs/SPECIALISTS.md) — sub-agent manifests, Task tools, and background task state
 - [Headless exec PRD](docs/M1_HEADLESS_EXEC_PRD.md)
 - [npm wrapper smoke checklist](docs/NPM_WRAPPER_SMOKE.md)
 - [Performance](docs/PERFORMANCE.md) · [Install](docs/INSTALL.md) · [Update](docs/UPDATE.md)

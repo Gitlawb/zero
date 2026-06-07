@@ -89,6 +89,101 @@ func TestManagerRegistersListsAndKillsTask(t *testing.T) {
 	}
 }
 
+func TestManagerPersistsAndLoadsTasks(t *testing.T) {
+	root := t.TempDir()
+	now := sequenceClock(
+		time.Date(2026, 6, 7, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 7, 10, 0, 1, 0, time.UTC),
+	)
+	manager, err := NewManagerWithOptions(ManagerOptions{RootDir: root, Now: now})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions returned error: %v", err)
+	}
+	outputFile, err := manager.Register(RegisterInput{
+		TaskID:         "task_1",
+		Type:           "specialist",
+		SpecialistName: "worker",
+		Description:    "Persist metadata",
+		ParentID:       "parent",
+	})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := manager.SetPID("task_1", 4321); err != nil {
+		t.Fatalf("SetPID returned error: %v", err)
+	}
+	if err := manager.UpdateStatus("task_1", StatusCompleted, 0); err != nil {
+		t.Fatalf("UpdateStatus returned error: %v", err)
+	}
+
+	reloaded, err := NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager reload returned error: %v", err)
+	}
+	task, ok := reloaded.Get("task_1")
+	if !ok {
+		t.Fatal("reloaded manager did not find task")
+	}
+	if task.ID != "task_1" ||
+		task.Type != "specialist" ||
+		task.SpecialistName != "worker" ||
+		task.Description != "Persist metadata" ||
+		task.ParentID != "parent" ||
+		task.PID != 4321 ||
+		task.Status != StatusCompleted ||
+		task.ExitCode != 0 ||
+		task.OutputFile != outputFile ||
+		task.StartedAt.IsZero() ||
+		task.CompletedAt.IsZero() {
+		t.Fatalf("reloaded task = %#v", task)
+	}
+	parentTasks := reloaded.ListByParent("parent")
+	if len(parentTasks) != 1 || parentTasks[0].ID != "task_1" {
+		t.Fatalf("reloaded parent tasks = %#v", parentTasks)
+	}
+}
+
+func TestManagerPersistsKilledStatus(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManagerWithOptions(ManagerOptions{
+		RootDir: root,
+		KillProcess: func(pid int) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "task", Type: "specialist", PID: 42}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := manager.Kill("task"); err != nil {
+		t.Fatalf("Kill returned error: %v", err)
+	}
+
+	reloaded, err := NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager reload returned error: %v", err)
+	}
+	task, ok := reloaded.Get("task")
+	if !ok || task.Status != StatusKilled || task.ExitCode != -1 || task.CompletedAt.IsZero() {
+		t.Fatalf("reloaded killed task = %#v", task)
+	}
+}
+
+func TestManagerRejectsInvalidPersistedMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "task.json"), []byte(`{"id":"other","type":"specialist","status":"running","outputFile":"task.ndjson"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	_, err := NewManager(root)
+
+	if err == nil || !strings.Contains(err.Error(), "does not match file id") {
+		t.Fatalf("NewManager invalid metadata error = %v", err)
+	}
+}
+
 func TestManagerRejectsUnsafeTaskIDsAndOutputPaths(t *testing.T) {
 	manager, err := NewManager(t.TempDir())
 	if err != nil {

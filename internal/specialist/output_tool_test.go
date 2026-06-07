@@ -54,6 +54,39 @@ func TestOutputToolReadsCompletedTaskSummary(t *testing.T) {
 	}
 }
 
+func TestOutputToolReadsTaskAfterManagerReload(t *testing.T) {
+	root := t.TempDir()
+	manager, err := background.NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	outputFile, err := manager.Register(background.RegisterInput{
+		TaskID:         "child_task",
+		Type:           "specialist",
+		SpecialistName: "worker",
+		Description:    "Reloaded output",
+	})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := os.WriteFile(outputFile, []byte(`{"schemaVersion":1,"type":"final","runId":"run_1","text":"persisted output"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := manager.UpdateStatus("child_task", background.StatusCompleted, 0); err != nil {
+		t.Fatalf("UpdateStatus returned error: %v", err)
+	}
+	reloaded, err := background.NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager reload returned error: %v", err)
+	}
+
+	result := NewOutputTool(reloaded).Run(context.Background(), map[string]any{"task_id": "child_task"})
+
+	if result.Status != tools.StatusOK || !strings.Contains(result.Output, "output:\npersisted output") || result.Meta["status"] != string(background.StatusCompleted) {
+		t.Fatalf("TaskOutput reloaded result = %#v", result)
+	}
+}
+
 func TestOutputToolFallsBackToRawLines(t *testing.T) {
 	manager, err := background.NewManager(t.TempDir())
 	if err != nil {
