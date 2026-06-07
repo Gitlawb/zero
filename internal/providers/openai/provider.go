@@ -150,6 +150,14 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 			_ = resp.Body.Close()
 			continue
 		}
+		// If the 5xx retry backoff above returned false because ctx was canceled
+		// (rather than because retries were exhausted), report the cancellation
+		// instead of misclassifying the upstream 5xx as the failure cause.
+		if ctx.Err() != nil {
+			_ = resp.Body.Close()
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctx.Err().Error())})
+			return
+		}
 		response = resp
 		break
 	}

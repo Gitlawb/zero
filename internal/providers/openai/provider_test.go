@@ -578,10 +578,17 @@ func TestStreamCompletionSurfacesContentFilterFinishReason(t *testing.T) {
 	})
 
 	events := collectProviderEvents(t, provider)
+	var sawDone bool
 	for _, e := range events {
-		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != zeroruntime.FinishReasonContentFilter {
-			t.Fatalf("done FinishReason = %q, want %q", e.FinishReason, zeroruntime.FinishReasonContentFilter)
+		if e.Type == zeroruntime.StreamEventDone {
+			sawDone = true
+			if e.FinishReason != zeroruntime.FinishReasonContentFilter {
+				t.Fatalf("done FinishReason = %q, want %q", e.FinishReason, zeroruntime.FinishReasonContentFilter)
+			}
 		}
+	}
+	if !sawDone {
+		t.Fatalf("no done event; events: %+v", events)
 	}
 }
 
@@ -593,10 +600,17 @@ func TestStreamCompletionNormalFinishHasNoReason(t *testing.T) {
 	})
 
 	events := collectProviderEvents(t, provider)
+	var sawDone bool
 	for _, e := range events {
-		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != "" {
-			t.Fatalf("normal finish leaked FinishReason %q", e.FinishReason)
+		if e.Type == zeroruntime.StreamEventDone {
+			sawDone = true
+			if e.FinishReason != "" {
+				t.Fatalf("normal finish leaked FinishReason %q", e.FinishReason)
+			}
 		}
+	}
+	if !sawDone {
+		t.Fatalf("no done event; events: %+v", events)
 	}
 }
 

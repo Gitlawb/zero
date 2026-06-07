@@ -115,10 +115,6 @@ func ScanSSEDataWithContext(
 	idleTimeout time.Duration,
 	handle func(data string) bool,
 ) error {
-	if idleTimeout <= 0 {
-		return ScanSSEData(reader, handle)
-	}
-
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 4096), maxSSELineBytes)
 
@@ -140,16 +136,24 @@ func ScanSSEDataWithContext(
 		close(payloads)
 	}()
 
-	idle := time.NewTimer(idleTimeout)
-	defer idle.Stop()
-	resetIdle := func() {
-		if !idle.Stop() {
-			select {
-			case <-idle.C:
-			default:
+	// The idle watchdog is optional. When idleTimeout <= 0 it is disabled, but we
+	// STILL run the goroutine + select loop so ctx cancellation is always honored
+	// (a nil idleC channel simply never fires in the select).
+	var idleC <-chan time.Time
+	resetIdle := func() {}
+	if idleTimeout > 0 {
+		idle := time.NewTimer(idleTimeout)
+		defer idle.Stop()
+		idleC = idle.C
+		resetIdle = func() {
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
 			}
+			idle.Reset(idleTimeout)
 		}
-		idle.Reset(idleTimeout)
 	}
 
 	for {
@@ -160,7 +164,7 @@ func ScanSSEDataWithContext(
 			// that only the request-context cancel can interrupt).
 			cancel()
 			return ctx.Err()
-		case <-idle.C:
+		case <-idleC:
 			// Upstream went silent without closing. Abort the read and surface
 			// a timeout instead of blocking the agent forever.
 			cancel()

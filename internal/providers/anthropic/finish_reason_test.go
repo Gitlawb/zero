@@ -44,9 +44,16 @@ func TestStreamCompletionNormalStopReasonHasNoFinishReason(t *testing.T) {
 	})
 
 	events := collectProviderEvents(t, provider)
+	var sawDone bool
 	for _, e := range events {
-		if e.Type == zeroruntime.StreamEventDone && e.FinishReason != "" {
-			t.Fatalf("normal stop leaked FinishReason %q", e.FinishReason)
+		if e.Type == zeroruntime.StreamEventDone {
+			sawDone = true
+			if e.FinishReason != "" {
+				t.Fatalf("normal stop leaked FinishReason %q", e.FinishReason)
+			}
 		}
+	}
+	if !sawDone {
+		t.Fatalf("no done event; events: %+v", events)
 	}
 }

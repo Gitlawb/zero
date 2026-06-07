@@ -72,6 +72,37 @@ func TestScanSSEDataWithContextHonorsContextCancel(t *testing.T) {
 	}
 }
 
+// ctx cancellation must unblock a hung read EVEN WHEN the idle watchdog is
+// disabled (idleTimeout <= 0). Regression: the helper used to skip the
+// goroutine + select loop when idle was off, so a context cancel could not
+// interrupt a parked read and the call hung forever.
+func TestScanSSEDataWithContextHonorsCancelWhenIdleDisabled(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer func() { _ = pw.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		// idleTimeout == 0 disables the watchdog; only ctx cancel can return.
+		done <- ScanSSEDataWithContext(ctx, cancel, pr, 0, func(string) bool { return true })
+	}()
+
+	// Cancel shortly after the call has parked in a blocking read with no data.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ScanSSEDataWithContext hung with idle watchdog disabled; ctx cancel ignored")
+	}
+}
+
 // Normal completion (EOF) must return nil after delivering all data payloads,
 // matching ScanSSEData's multi-line accumulation semantics.
 func TestScanSSEDataWithContextDeliversThenEOF(t *testing.T) {
