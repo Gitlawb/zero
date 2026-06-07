@@ -110,6 +110,13 @@ func confineSkillPath(rootReal string, manifestPath string) (string, bool) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", false
 	}
+	// Only read regular files. A non-regular in-root target (directory, FIFO,
+	// device, socket) named SKILL.md would otherwise make os.ReadFile block
+	// indefinitely — skill is a permission-allow tool over a user-controlled dir.
+	info, err := os.Lstat(real)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
 	return real, true
 }
 

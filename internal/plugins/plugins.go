@@ -427,8 +427,10 @@ func coerceMetaStringSlice(raw any) []string {
 	}
 	values := make([]string, 0, len(items))
 	for _, item := range items {
-		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
-			values = append(values, strings.TrimSpace(text))
+		if text, ok := item.(string); ok {
+			if trimmed := strings.TrimSpace(text); trimmed != "" {
+				values = append(values, trimmed)
+			}
 		}
 	}
 	if len(values) == 0 {
