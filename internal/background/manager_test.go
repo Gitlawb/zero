@@ -149,6 +149,34 @@ func TestManagerDoesNotMarkKilledWhenKillFails(t *testing.T) {
 	}
 }
 
+func TestManagerKillDoesNotClobberCompletedTask(t *testing.T) {
+	now := sequenceClock(
+		time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 7, 9, 0, 1, 0, time.UTC),
+	)
+	var manager *Manager
+	manager, err := NewManagerWithOptions(ManagerOptions{
+		RootDir: t.TempDir(),
+		Now:     now,
+		KillProcess: func(pid int) error {
+			return manager.UpdateStatus("task", StatusCompleted, 0)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "task", Type: "specialist", PID: 42}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := manager.Kill("task"); err != nil {
+		t.Fatalf("Kill returned error: %v", err)
+	}
+	task, ok := manager.Get("task")
+	if !ok || task.Status != StatusCompleted || task.ExitCode != 0 {
+		t.Fatalf("Kill clobbered completed task: %#v", task)
+	}
+}
+
 func TestDefaultRootHonorsXDGDataHome(t *testing.T) {
 	got := DefaultRoot(map[string]string{
 		"XDG_DATA_HOME": "/tmp/zero-data",

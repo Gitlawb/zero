@@ -208,22 +208,62 @@ func (manager *Manager) Get(taskID string) (Task, bool) {
 func (manager *Manager) Kill(taskID string) error {
 	taskID = strings.TrimSpace(taskID)
 
+	pid, err := manager.killTarget(taskID)
+	if err != nil {
+		return err
+	}
+	if !manager.isRunningPID(taskID, pid) {
+		return nil
+	}
+	if err := manager.killProcess(pid); err != nil {
+		return fmt.Errorf("kill background task %s: %w", taskID, err)
+	}
+	return manager.markKilledIfStillRunning(taskID, pid)
+}
+
+func (manager *Manager) killTarget(taskID string) (int, error) {
 	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	task, ok := manager.tasks[taskID]
-	manager.mu.Unlock()
+	if !ok {
+		return 0, fmt.Errorf("background task not found: %s", taskID)
+	}
+	if task.Status != StatusRunning {
+		return 0, fmt.Errorf("background task %s is %s", taskID, task.Status)
+	}
+	if task.PID <= 0 {
+		return 0, fmt.Errorf("background task %s has no pid", taskID)
+	}
+	return task.PID, nil
+}
+
+func (manager *Manager) isRunningPID(taskID string, pid int) bool {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	task, ok := manager.tasks[taskID]
+	return ok && task.Status == StatusRunning && task.PID == pid
+}
+
+func (manager *Manager) markKilledIfStillRunning(taskID string, pid int) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	task, ok := manager.tasks[taskID]
 	if !ok {
 		return fmt.Errorf("background task not found: %s", taskID)
 	}
 	if task.Status != StatusRunning {
-		return fmt.Errorf("background task %s is %s", taskID, task.Status)
+		return nil
 	}
-	if task.PID <= 0 {
-		return fmt.Errorf("background task %s has no pid", taskID)
+	if task.PID != pid {
+		return fmt.Errorf("background task %s pid changed before kill completed", taskID)
 	}
-	if err := manager.killProcess(task.PID); err != nil {
-		return fmt.Errorf("kill background task %s: %w", taskID, err)
+	task.Status = StatusKilled
+	task.ExitCode = -1
+	if task.CompletedAt.IsZero() {
+		task.CompletedAt = manager.now()
 	}
-	return manager.UpdateStatus(taskID, StatusKilled, -1)
+	manager.tasks[taskID] = task
+	return nil
 }
 
 func (manager *Manager) OutputPath(taskID string) string {
