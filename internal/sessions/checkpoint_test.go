@@ -256,6 +256,17 @@ func TestRestoreRejectsPathTraversal(t *testing.T) {
 	}
 }
 
+func TestRestoreFailsOnCorruptCheckpointPayload(t *testing.T) {
+	store, ws := newCkStore(t)
+	target := mustAppend(t, store, AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	// A checkpoint event whose payload does not decode into CheckpointPayload must
+	// abort the rewind, not be silently skipped (which could restore a later state).
+	mustAppend(t, store, AppendEventInput{Type: EventSessionCheckpoint, Payload: "corrupt-not-a-checkpoint"})
+	if _, err := store.RestoreToSequence("s", ws, target.Sequence); err == nil {
+		t.Fatal("expected rewind to fail on undecodable checkpoint payload")
+	}
+}
+
 func TestTruncateToZeroProducesEmptyFile(t *testing.T) {
 	store, _ := newCkStore(t)
 	mustAppend(t, store, AppendEventInput{Type: EventMessage, Payload: map[string]any{}})

@@ -56,7 +56,10 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 		ev := checkpoints[i]
 		var payload CheckpointPayload
 		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
-			continue
+			// Fail the rewind rather than skipping: silently continuing would let a
+			// NEWER checkpoint win for that path and restore a later state than the
+			// caller asked for. Corruption is a hard error.
+			return report, fmt.Errorf("decode checkpoint payload seq %d: %w", ev.Sequence, err)
 		}
 		for _, f := range payload.Files {
 			// Process only the CLOSEST-to-target entry per path. We iterate
