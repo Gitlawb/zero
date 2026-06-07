@@ -114,11 +114,14 @@ type LoadedPlugin struct {
 	Skills        []PathExtension `json:"skills"`
 	Hooks         []HookExtension `json:"hooks"`
 	// Optional, additive metadata (omitempty so existing plugins are unchanged).
-	Author    PluginAuthor    `json:"author,omitempty"`
-	License   string          `json:"license,omitempty"`
-	Keywords  []string        `json:"keywords,omitempty"`
-	Homepage  string          `json:"homepage,omitempty"`
-	Interface PluginInterface `json:"interface,omitempty"`
+	// Author/Interface are pointers: a non-pointer struct is never "empty" to
+	// encoding/json, so omitempty would still emit `author:{}` / `interface:{}`
+	// and change the serialized form of plugins that don't set them.
+	Author    *PluginAuthor    `json:"author,omitempty"`
+	License   string           `json:"license,omitempty"`
+	Keywords  []string         `json:"keywords,omitempty"`
+	Homepage  string           `json:"homepage,omitempty"`
+	Interface *PluginInterface `json:"interface,omitempty"`
 }
 
 type LoadResult struct {
@@ -371,30 +374,38 @@ func ParseManifest(raw any, options ParseManifestOptions) (LoadedPlugin, error) 
 // parseAuthor reads optional authorship metadata. It is intentionally tolerant:
 // an absent, non-object, or partially-typed value yields zero/empty fields so it
 // never fails an otherwise-valid manifest.
-func parseAuthor(raw any) PluginAuthor {
+func parseAuthor(raw any) *PluginAuthor {
 	obj, ok := raw.(map[string]any)
 	if !ok {
-		return PluginAuthor{}
+		return nil
 	}
-	return PluginAuthor{
+	author := PluginAuthor{
 		Name:  optionalMetaString(obj["name"]),
 		Email: optionalMetaString(obj["email"]),
 		URL:   optionalMetaString(obj["url"]),
 	}
+	if author.Name == "" && author.Email == "" && author.URL == "" {
+		return nil
+	}
+	return &author
 }
 
 // parseInterface reads optional presentation metadata, tolerating missing keys.
-func parseInterface(raw any) PluginInterface {
+func parseInterface(raw any) *PluginInterface {
 	obj, ok := raw.(map[string]any)
 	if !ok {
-		return PluginInterface{}
+		return nil
 	}
-	return PluginInterface{
+	iface := PluginInterface{
 		DisplayName:    optionalMetaString(obj["displayName"]),
 		Category:       optionalMetaString(obj["category"]),
 		BrandColor:     optionalMetaString(obj["brandColor"]),
 		DefaultPrompts: coerceMetaStringSlice(firstNonNil(obj["defaultPrompts"], obj["defaultPrompt"])),
 	}
+	if iface.DisplayName == "" && iface.Category == "" && iface.BrandColor == "" && len(iface.DefaultPrompts) == 0 {
+		return nil
+	}
+	return &iface
 }
 
 // optionalMetaString returns a trimmed string for additive metadata fields, or
@@ -483,8 +494,8 @@ func formatPluginMetadata(plugin LoadedPlugin) []string {
 	return meta
 }
 
-func formatAuthor(author PluginAuthor) string {
-	if author.Name == "" {
+func formatAuthor(author *PluginAuthor) string {
+	if author == nil || author.Name == "" {
 		return ""
 	}
 	if author.Email != "" {

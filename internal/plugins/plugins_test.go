@@ -135,8 +135,8 @@ func TestParseManifestWithoutOptionalMetadataLeavesZeroValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseManifest returned error: %v", err)
 	}
-	if plugin.Author != (PluginAuthor{}) {
-		t.Fatalf("author should be zero value, got %#v", plugin.Author)
+	if plugin.Author != nil {
+		t.Fatalf("author should be nil when absent, got %#v", plugin.Author)
 	}
 	if plugin.License != "" || plugin.Homepage != "" {
 		t.Fatalf("license/homepage should be empty, got %q / %q", plugin.License, plugin.Homepage)
@@ -144,8 +144,8 @@ func TestParseManifestWithoutOptionalMetadataLeavesZeroValues(t *testing.T) {
 	if len(plugin.Keywords) != 0 {
 		t.Fatalf("keywords should be empty, got %#v", plugin.Keywords)
 	}
-	if plugin.Interface.DisplayName != "" || plugin.Interface.Category != "" || plugin.Interface.BrandColor != "" || len(plugin.Interface.DefaultPrompts) != 0 {
-		t.Fatalf("interface should be zero value, got %#v", plugin.Interface)
+	if plugin.Interface != nil {
+		t.Fatalf("interface should be nil when absent, got %#v", plugin.Interface)
 	}
 }
 
@@ -157,7 +157,7 @@ func TestFormatListSurfacesOptionalMetadata(t *testing.T) {
 		Version:       "0.1.0",
 		Enabled:       true,
 		Source:        SourceUser,
-		Author:        PluginAuthor{Name: "OpenAI"},
+		Author:        &PluginAuthor{Name: "OpenAI"},
 		License:       "MIT",
 		Keywords:      []string{"automation", "macos"},
 	}}, nil)

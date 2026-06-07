@@ -37,8 +37,15 @@ func NewSkillTool(dir string) *skillTool {
 						Type:        "string",
 						Description: "The name of the skill to load.",
 					},
+					"skill": {
+						Type:        "string",
+						Description: "Alias for name; supply either name or skill.",
+					},
 				},
-				Required:             []string{"name"},
+				// Intentionally no strict Required: the tool needs exactly one of
+				// name/skill, which Run enforces via aliasedStringArg. Declaring both
+				// here keeps the alias usable under schema validators that reject
+				// unknown keys (AdditionalProperties:false).
 				AdditionalProperties: false,
 			},
 			safety: readOnlySafety("Reads a local skill file; gathers reusable instructions only."),

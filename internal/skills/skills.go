@@ -45,6 +45,12 @@ func DefaultDir(env map[string]string) string {
 	}
 	base := dataHome
 	if base == "" {
+		if home == "" {
+			// No XDG_DATA_HOME and no resolvable home: returning a relative path
+			// here (".local/share/zero/skills") would bind skills to the process
+			// CWD, so signal "no skills dir" and let the caller handle it.
+			return ""
+		}
 		base = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(base, "zero", "skills")

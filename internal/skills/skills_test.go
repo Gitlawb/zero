@@ -227,6 +227,13 @@ func TestListReturnsNamesAndDescriptions(t *testing.T) {
 	if listed[0].Name != "a" || listed[0].Description != "ay" {
 		t.Fatalf("unexpected first skill: %+v", listed[0])
 	}
+	// List must strip Content so a listing never leaks full skill bodies (the
+	// skills above all have a non-empty "body"); only Get/Load return Content.
+	for _, skill := range listed {
+		if skill.Content != "" {
+			t.Fatalf("List must strip Content, got %q for %q", skill.Content, skill.Name)
+		}
+	}
 }
 
 func TestDefaultDirHonorsEnvOverride(t *testing.T) {
