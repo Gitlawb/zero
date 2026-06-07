@@ -45,6 +45,13 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		}
 	}
 
+	// Registration is atomic per call: validate and stage every server's tools
+	// first, then commit to the caller's registry only once they all succeed. If a
+	// LATER server fails mid-registration, nothing was committed, so the registry
+	// never ends up holding dead tools that point at a (now-closed) client for an
+	// earlier server.
+	staged := make([]registryTool, 0)
+	stagedNames := make(map[string]struct{})
 	for _, server := range servers {
 		client, err := factory(ctx, server)
 		if err != nil {
@@ -64,12 +71,24 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				return nil, fmt.Errorf("MCP server %s returned a tool without a name", server.Name)
 			}
 			tool := newRegistryTool(server, remote, client, options)
+			// Conflict detection spans both the existing registry and tools staged so
+			// far in this call (two MCP tools whose names collapse to the same
+			// sanitized name conflict even though neither is in the registry yet).
 			if existing, ok := registry.Get(tool.Name()); ok {
 				_ = runtime.Close()
 				return nil, fmt.Errorf("MCP tool %s from %s conflicts with existing tool %s", remote.Name, server.Name, existing.Name())
 			}
-			registry.Register(tool)
+			if _, ok := stagedNames[tool.Name()]; ok {
+				_ = runtime.Close()
+				return nil, fmt.Errorf("MCP tool %s from %s conflicts with another MCP tool named %s", remote.Name, server.Name, tool.Name())
+			}
+			stagedNames[tool.Name()] = struct{}{}
+			staged = append(staged, tool)
 		}
+	}
+	// Every server succeeded — commit the staged tools to the registry.
+	for _, tool := range staged {
+		registry.Register(tool)
 	}
 	return runtime, nil
 }

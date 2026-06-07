@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -114,6 +115,72 @@ func TestRegisterToolsMarksPersistentlyApprovedToolsAllow(t *testing.T) {
 	if tool.Safety().Permission != tools.PermissionAllow {
 		t.Fatalf("Safety.Permission = %q, want allow from persistent MCP grant", tool.Safety().Permission)
 	}
+}
+
+func TestRegisterToolsRollsBackEarlierServerToolsWhenLaterServerFails(t *testing.T) {
+	// NormalizeConfig sorts server names, so "alpha" registers before "zebra".
+	// "zebra" fails mid-registration; registration must be atomic, so "alpha"'s
+	// tools must NOT be left dangling in the caller's registry.
+	registry := tools.NewRegistry()
+	alphaClient := &fakeToolClient{listed: []RemoteTool{{Name: "lookup", Description: "Lookup documentation"}}}
+
+	_, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"alpha": {Type: "stdio", Command: "alpha-mcp"},
+		"zebra": {Type: "stdio", Command: "zebra-mcp"},
+	}}, RegisterOptions{
+		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
+			if server.Name == "zebra" {
+				return nil, errors.New("zebra connect failed")
+			}
+			return alphaClient, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected RegisterTools to fail when a later server fails")
+	}
+	if _, ok := registry.Get("mcp_alpha_lookup"); ok {
+		t.Fatal("expected earlier server's tools to be rolled back when a later server fails")
+	}
+}
+
+func TestRegisterToolsPreservesPriorRegistryStateOnFailure(t *testing.T) {
+	// A tool that predates the MCP registration must survive a failed RegisterTools
+	// call: rollback removes only what this call added.
+	registry := tools.NewRegistry()
+	registry.Register(&fakePreexistingTool{name: "preexisting"})
+
+	_, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"alpha": {Type: "stdio", Command: "alpha-mcp"},
+		"zebra": {Type: "stdio", Command: "zebra-mcp"},
+	}}, RegisterOptions{
+		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
+			if server.Name == "zebra" {
+				return nil, errors.New("zebra connect failed")
+			}
+			return &fakeToolClient{listed: []RemoteTool{{Name: "lookup"}}}, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected RegisterTools to fail when a later server fails")
+	}
+	if _, ok := registry.Get("preexisting"); !ok {
+		t.Fatal("expected pre-existing tool to survive a failed MCP registration")
+	}
+	if _, ok := registry.Get("mcp_alpha_lookup"); ok {
+		t.Fatal("expected the failed call to add no MCP tools")
+	}
+}
+
+type fakePreexistingTool struct {
+	name string
+}
+
+func (t *fakePreexistingTool) Name() string            { return t.name }
+func (t *fakePreexistingTool) Description() string      { return "preexisting tool" }
+func (t *fakePreexistingTool) Parameters() tools.Schema { return tools.Schema{} }
+func (t *fakePreexistingTool) Safety() tools.Safety     { return tools.Safety{} }
+func (t *fakePreexistingTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
 }
 
 type fakeToolClient struct {

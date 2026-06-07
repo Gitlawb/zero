@@ -38,19 +38,46 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, registry *too
 		writer:   writer,
 	}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+	// Run the blocking reads on a goroutine and select on ctx so a
+	// non-responsive peer cannot hang shutdown: a cancelled ctx returns
+	// immediately instead of blocking on the next read.
+	type readResult struct {
+		message rpcMessage
+		err     error
+	}
+	reads := make(chan readResult)
+	go func() {
+		defer close(reads)
+		for {
+			message, err := reader.read()
+			select {
+			case reads <- readResult{message: message, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
-		message, err := reader.read()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case result, ok := <-reads:
+			if !ok {
 				return nil
 			}
-			return err
-		}
-		if err := server.handle(ctx, message); err != nil {
-			return err
+			if result.err != nil {
+				if errors.Is(result.err, io.EOF) {
+					return nil
+				}
+				return result.err
+			}
+			if err := server.handle(ctx, result.message); err != nil {
+				return err
+			}
 		}
 	}
 }
