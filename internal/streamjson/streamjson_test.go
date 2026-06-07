@@ -154,3 +154,61 @@ func TestCreateRunIDUsesStablePrefix(t *testing.T) {
 func boolPtr(value bool) *bool {
 	return &value
 }
+
+func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {
+	redacted := true
+	truncated := false
+	ev := Event{
+		SchemaVersion: 1,
+		Type:          EventToolResult,
+		Output:        "Edited f.go",
+		Truncated:     &truncated,
+		Redacted:      &redacted,
+		ChangedFiles:  []string{"f.go"},
+		Display:       &Display{Summary: "Edited f.go", Kind: "diff"},
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Event
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Redacted == nil || !*back.Redacted {
+		t.Error("redacted lost in round-trip")
+	}
+	if len(back.ChangedFiles) != 1 || back.ChangedFiles[0] != "f.go" {
+		t.Errorf("changedFiles lost: %v", back.ChangedFiles)
+	}
+	if back.Display == nil || back.Display.Kind != "diff" {
+		t.Errorf("display lost: %+v", back.Display)
+	}
+	// omitempty: a bare event must not emit the new keys
+	bare, _ := json.Marshal(Event{SchemaVersion: 1, Type: EventText})
+	for _, k := range []string{"redacted", "changedFiles", "display"} {
+		if strings.Contains(string(bare), k) {
+			t.Errorf("expected %q omitted on bare event, got %s", k, bare)
+		}
+	}
+}
+
+func TestEventRoundTripsCheckpointInfo(t *testing.T) {
+	ev := Event{
+		SchemaVersion: 1,
+		Type:          EventCheckpoint,
+		Checkpoint:    &CheckpointInfo{Sequence: 5, Tool: "edit_file", Files: []string{"a.go"}},
+	}
+	data, _ := json.Marshal(ev)
+	var back Event
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Checkpoint == nil || back.Checkpoint.Tool != "edit_file" || back.Checkpoint.Sequence != 5 {
+		t.Errorf("checkpoint lost: %+v", back.Checkpoint)
+	}
+	bare, _ := json.Marshal(Event{SchemaVersion: 1, Type: EventText})
+	if strings.Contains(string(bare), "checkpoint") {
+		t.Errorf("checkpoint should be omitted on bare event: %s", bare)
+	}
+}

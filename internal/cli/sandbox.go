@@ -9,10 +9,11 @@ import (
 )
 
 type sandboxCommandOptions struct {
-	json     bool
-	confirm  bool
-	autonomy string
-	reason   string
+	json      bool
+	confirm   bool
+	effective bool
+	autonomy  string
+	reason    string
 }
 
 func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -35,7 +36,7 @@ func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 }
 
 func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	options, help, err := parseSandboxCommandOptions(args, false)
+	options, help, err := parseSandboxCommandOptions(args, sandboxCommandFlags{allowEffective: true})
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -56,6 +57,9 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	policy := zeroSandbox.DefaultPolicy()
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
 	plan := backend.BuildPlan(workspaceRoot, policy)
+	if options.effective {
+		return runSandboxPolicyEffective(options, workspaceRoot, policy, backend, plan, store.FilePath(), stdout)
+	}
 	if options.json {
 		payload := struct {
 			Policy     zeroSandbox.Policy      `json:"policy"`
@@ -79,6 +83,93 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	return exitSuccess
 }
 
+// sandboxGuards is the resolved set of pre-execution safety guards the engine
+// applies for the effective policy. There is no layered/merged config today, so
+// the "effective" view is the fully-resolved DefaultPolicy plus the platform
+// backend and the always-on static guards.
+type sandboxGuards struct {
+	InteractiveCommand bool `json:"interactiveCommand"`
+	DestructiveShell   bool `json:"destructiveShell"`
+	Network            bool `json:"network"`
+	Workspace          bool `json:"workspace"`
+}
+
+func resolveSandboxGuards(policy zeroSandbox.Policy) sandboxGuards {
+	return sandboxGuards{
+		// Interactive-command detection is a static pre-exec guard that always
+		// runs in the bash tool regardless of policy toggles.
+		InteractiveCommand: true,
+		DestructiveShell:   policy.DenyDestructiveShell,
+		Network:            policy.Network == zeroSandbox.NetworkDeny,
+		Workspace:          policy.EnforceWorkspace,
+	}
+}
+
+func runSandboxPolicyEffective(options sandboxCommandOptions, workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, grantsPath string, stdout io.Writer) int {
+	guards := resolveSandboxGuards(policy)
+	if options.json {
+		payload := struct {
+			WorkspaceRoot string                  `json:"workspaceRoot"`
+			Policy        zeroSandbox.Policy      `json:"policy"`
+			Backend       zeroSandbox.Backend     `json:"backend"`
+			Plan          zeroSandbox.BackendPlan `json:"plan"`
+			Guards        sandboxGuards           `json:"guards"`
+			GrantsPath    string                  `json:"grantsPath"`
+		}{
+			WorkspaceRoot: workspaceRoot,
+			Policy:        policy,
+			Backend:       backend,
+			Plan:          plan,
+			Guards:        guards,
+			GrantsPath:    grantsPath,
+		}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, formatEffectiveSandboxPolicy(workspaceRoot, policy, backend, plan, guards, grantsPath)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, guards sandboxGuards, grantsPath string) string {
+	lines := []string{
+		"Zero effective sandbox policy",
+		"root: " + workspaceRoot,
+		"mode: " + string(policy.Mode),
+		"network: " + string(policy.Network),
+		"enforce_workspace: " + fmt.Sprintf("%t", policy.EnforceWorkspace),
+		"deny_destructive_shell: " + fmt.Sprintf("%t", policy.DenyDestructiveShell),
+		"allow_policy_only_runner: " + fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
+		"backend: " + string(backend.Name),
+		"support_level: " + string(plan.SupportLevel),
+		"interactive_command_guard: " + enabledLabel(guards.InteractiveCommand),
+		"destructive_shell_guard: " + enabledLabel(guards.DestructiveShell),
+		"network_guard: " + enabledLabel(guards.Network),
+		"workspace_guard: " + enabledLabel(guards.Workspace),
+		"grants: " + grantsPath,
+	}
+	if backend.Platform != "" {
+		lines = append(lines, "backend_platform: "+backend.Platform)
+	}
+	for _, restriction := range plan.Restrictions {
+		lines = append(lines, "restriction: "+restriction)
+	}
+	for _, warning := range plan.Warnings {
+		lines = append(lines, "warning: "+warning)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func enabledLabel(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
 func runSandboxGrants(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "sandbox grants subcommand required. Use `zero sandbox grants list`.")
@@ -90,7 +181,7 @@ func runSandboxGrants(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		return exitSuccess
 	case "list":
-		options, help, err := parseSandboxCommandOptions(args[1:], false)
+		options, help, err := parseSandboxCommandOptions(args[1:], sandboxCommandFlags{})
 		if err != nil {
 			return writeExecUsageError(stderr, err.Error())
 		}
@@ -213,7 +304,7 @@ func runSandboxGrantRevoke(args []string, stdout io.Writer, stderr io.Writer, de
 }
 
 func runSandboxGrantClear(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	options, help, err := parseSandboxCommandOptions(args, true)
+	options, help, err := parseSandboxCommandOptions(args, sandboxCommandFlags{allowConfirm: true})
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -248,7 +339,12 @@ func runSandboxGrantClear(args []string, stdout io.Writer, stderr io.Writer, dep
 	return exitSuccess
 }
 
-func parseSandboxCommandOptions(args []string, allowConfirm bool) (sandboxCommandOptions, bool, error) {
+type sandboxCommandFlags struct {
+	allowConfirm   bool
+	allowEffective bool
+}
+
+func parseSandboxCommandOptions(args []string, flags sandboxCommandFlags) (sandboxCommandOptions, bool, error) {
 	options := sandboxCommandOptions{autonomy: string(zeroSandbox.AutonomyLow)}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -257,8 +353,10 @@ func parseSandboxCommandOptions(args []string, allowConfirm bool) (sandboxComman
 			return options, true, nil
 		case arg == "--json":
 			options.json = true
-		case allowConfirm && arg == "--confirm":
+		case flags.allowConfirm && arg == "--confirm":
 			options.confirm = true
+		case flags.allowEffective && arg == "--effective":
+			options.effective = true
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown sandbox flag %q", arg)}
 		default:
@@ -353,6 +451,7 @@ func writeSandboxPolicyHelp(w io.Writer) error {
   zero sandbox policy [flags]
 
 Flags:
+      --effective         Print the resolved effective policy (merged config + guards)
       --json              Print JSON output
   -h, --help              Show this help
 `)

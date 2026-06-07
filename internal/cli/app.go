@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
@@ -38,6 +39,7 @@ type appDeps struct {
 	newSessionStore      func() *sessions.Store
 	loadPlugins          func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir            func() string
 	newMCPStore          func() (*mcp.PermissionStore, error)
 	newSandboxStore      func() (*sandbox.GrantStore, error)
 	selectSandboxBackend func(sandbox.BackendOptions) sandbox.Backend
@@ -97,6 +99,9 @@ func defaultAppDeps() appDeps {
 		},
 		loadPlugins: plugins.Load,
 		loadHooks:   hooks.LoadConfig,
+		skillsDir: func() string {
+			return skills.DefaultDir(nil)
+		},
 		newMCPStore: func() (*mcp.PermissionStore, error) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{})
 		},
@@ -166,6 +171,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSpecialists(args[1:], stdout, stderr, deps)
 	case "plugins", "plugin":
 		return runPlugins(args[1:], stdout, stderr, deps)
+	case "skills", "skill":
+		return runSkills(args[1:], stdout, stderr, deps)
 	case "hooks":
 		return runHooks(args[1:], stdout, stderr, deps)
 	case "mcp":
@@ -182,6 +189,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runChanges(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
+	case "zeroline":
+		return runZeroline(args[1:], stdout, stderr, deps)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -218,6 +227,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.loadHooks == nil {
 		deps.loadHooks = defaults.loadHooks
+	}
+	if deps.skillsDir == nil {
+		deps.skillsDir = defaults.skillsDir
 	}
 	if deps.newMCPStore == nil {
 		deps.newMCPStore = defaults.newMCPStore
@@ -265,6 +277,10 @@ func fillAppDeps(deps appDeps) appDeps {
 }
 
 func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
+	return runInteractiveTUIWithSkin(stderr, deps, "")
+}
+
+func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string) int {
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
@@ -301,7 +317,12 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 		Store:         sandboxStore,
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 	})
-	permissionMode := agent.PermissionModeAuto
+	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
+	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
+	// apply_patch) would never be offered to the model — the TUI could neither edit
+	// files nor run shell. Ask advertises them and routes each through the existing
+	// OnPermissionRequest flow; shift+tab lets the user switch modes live.
+	permissionMode := agent.PermissionModeAsk
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
 		ProviderName:    resolved.Provider.Name,
@@ -320,6 +341,8 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 			Sandbox:        sandboxEngine,
 		},
 		PermissionMode: permissionMode,
+		Skin:           skin,
+		ThemeDark:      true,
 	})
 }
 
@@ -399,6 +422,7 @@ Commands:
   sessions   Inspect local Zero session lineage
   specialist Manage local Zero specialist profiles
   plugins    Inspect local Zero plugin manifests
+  skills     Inspect local Zero skills
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings
   sandbox    Inspect sandbox policy and persistent grants
@@ -407,6 +431,7 @@ Commands:
   verify     Detect and run local verification checks
   changes    Inspect and commit local git changes
   serve      Run Zero protocol servers
+  zeroline    Launch the interactive TUI with the Zeroline reskin
   help       Show this help
   version    Print version
 
@@ -433,6 +458,7 @@ Runs a one-shot prompt through the Go agent runtime.
 
 Flags:
   -f, --file <path>                  Read prompt text from a file
+      --mode <name>                  Apply a preset (smart, deep, fast, large, precise); explicit flags override it
   -m, --model <model>                Select the model for provider setup
       --max-turns <number>           Override the maximum agent loop turns
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools

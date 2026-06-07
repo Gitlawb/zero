@@ -24,6 +24,8 @@ const (
 	EventPermissionRequest  EventType = "permission_request"
 	EventPermissionDecision EventType = "permission_decision"
 	EventToolResult         EventType = "tool_result"
+	EventCheckpoint         EventType = "checkpoint"
+	EventRestore            EventType = "restore"
 	EventUsage              EventType = "usage"
 	EventFinal              EventType = "final"
 	EventWarning            EventType = "warning"
@@ -37,6 +39,22 @@ const (
 	InputPrompt  InputType = "prompt"
 	InputMessage InputType = "message"
 )
+
+// Display is a compact structured summary of a tool result.
+type Display struct {
+	Summary string `json:"summary,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+}
+
+// CheckpointInfo describes a captured file checkpoint or an applied restore.
+type CheckpointInfo struct {
+	Sequence      int      `json:"sequence,omitempty"`
+	Tool          string   `json:"tool,omitempty"`
+	Files         []string `json:"files,omitempty"`
+	FilesRestored int      `json:"filesRestored,omitempty"`
+	FilesDeleted  int      `json:"filesDeleted,omitempty"`
+	Skipped       []string `json:"skipped,omitempty"`
+}
 
 type Event struct {
 	SchemaVersion     int                `json:"schemaVersion"`
@@ -66,6 +84,10 @@ type Event struct {
 	Status            string             `json:"status,omitempty"`
 	Output            string             `json:"output,omitempty"`
 	Truncated         *bool              `json:"truncated,omitempty"`
+	Redacted          *bool              `json:"redacted,omitempty"`
+	ChangedFiles      []string           `json:"changedFiles,omitempty"`
+	Display           *Display           `json:"display,omitempty"`
+	Checkpoint        *CheckpointInfo    `json:"checkpoint,omitempty"`
 	Meta              map[string]string  `json:"meta,omitempty"`
 	PromptTokens      *int               `json:"promptTokens,omitempty"`
 	CompletionTokens  *int               `json:"completionTokens,omitempty"`

@@ -101,7 +101,7 @@ func TestRunNoArgsLaunchesTUIWithNilProviderWhenNoProviderConfigured(t *testing.
 		t.Fatalf("provider metadata = %q/%q, want empty", launchedOptions.ProviderName, launchedOptions.ModelName)
 	}
 	assertCoreRegistry(t, launchedOptions.Registry)
-	assertAgentOptions(t, launchedOptions, 12, agent.PermissionModeAuto)
+	assertAgentOptions(t, launchedOptions, 12, agent.PermissionModeAsk)
 }
 
 func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
@@ -164,7 +164,40 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
 	assertCoreRegistry(t, launchedOptions.Registry)
-	assertAgentOptions(t, launchedOptions, 5, agent.PermissionModeAuto)
+	assertAgentOptions(t, launchedOptions, 5, agent.PermissionModeAsk)
+}
+
+func TestRunNoArgsLaunchesTUIInAskPermissionMode(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	var launchedOptions tui.Options
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	// Auto only advertises PermissionAllow tools, so write_file/edit_file/bash/
+	// apply_patch (PermissionPrompt) would never be offered to the model. Ask
+	// advertises them and gates each through the permission flow.
+	if launchedOptions.PermissionMode != agent.PermissionModeAsk {
+		t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeAsk)
+	}
+	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeAsk {
+		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeAsk)
+	}
 }
 
 func TestRunNoArgsReportsConfigErrorsWithoutLaunchingTUI(t *testing.T) {
@@ -218,6 +251,8 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 		{"session"},
 		{"plugins"},
 		{"plugin"},
+		{"skills"},
+		{"skill"},
 		{"hooks"},
 		{"mcp"},
 		{"sandbox"},
@@ -536,6 +571,7 @@ func assertHelpOutput(t *testing.T, args []string) {
 		"worktrees",
 		"verify",
 		"serve",
+		"zeroline",
 		"--version",
 	} {
 		if !strings.Contains(output, want) {

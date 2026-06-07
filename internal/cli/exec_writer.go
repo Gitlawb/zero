@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -102,6 +103,33 @@ func (writer *execEventWriter) toolCall(call agent.ToolCall, registry *tools.Reg
 	writer.writeStderr("[tool] " + call.Name + "\n")
 }
 
+func (writer *execEventWriter) checkpoint(event sessions.Event) {
+	var payload sessions.CheckpointPayload
+	if len(event.Payload) > 0 {
+		_ = json.Unmarshal(event.Payload, &payload)
+	}
+	files := make([]string, 0, len(payload.Files))
+	for _, f := range payload.Files {
+		files = append(files, f.Path)
+	}
+	switch writer.format {
+	case execOutputStreamJSON:
+		writer.writeStreamJSON(streamjson.Event{
+			Type:       streamjson.EventCheckpoint,
+			RunID:      writer.runID,
+			Checkpoint: &streamjson.CheckpointInfo{Sequence: event.Sequence, Tool: payload.Tool, Files: files},
+		})
+	case execOutputJSON:
+		writer.writeJSON(map[string]any{
+			"type":     "checkpoint",
+			"sequence": event.Sequence,
+			"tool":     payload.Tool,
+			"files":    files,
+		})
+	}
+	// Plain text mode stays silent: checkpoints are background safety, not output.
+}
+
 func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 	if writer.format == execOutputJSON {
 		payload := map[string]any{
@@ -114,21 +142,39 @@ func (writer *execEventWriter) toolResult(result agent.ToolResult) {
 		if len(result.Meta) > 0 {
 			payload["meta"] = result.Meta
 		}
+		if result.Redacted {
+			payload["redacted"] = true
+		}
+		if len(result.ChangedFiles) > 0 {
+			payload["changed_files"] = result.ChangedFiles
+		}
+		if result.Display.Summary != "" || result.Display.Kind != "" {
+			payload["display"] = map[string]string{"summary": result.Display.Summary, "kind": result.Display.Kind}
+		}
 		writer.writeJSON(payload)
 		return
 	}
 	if writer.format == execOutputStreamJSON {
 		output, truncated := truncateForStreamJSONOutput(result.Output)
-		writer.writeStreamJSON(streamjson.Event{
-			Type:      streamjson.EventToolResult,
-			RunID:     writer.runID,
-			ID:        result.ToolCallID,
-			Name:      result.Name,
-			Status:    string(result.Status),
-			Output:    output,
-			Truncated: &truncated,
-			Meta:      result.Meta,
-		})
+		event := streamjson.Event{
+			Type:         streamjson.EventToolResult,
+			RunID:        writer.runID,
+			ID:           result.ToolCallID,
+			Name:         result.Name,
+			Status:       string(result.Status),
+			Output:       output,
+			Truncated:    &truncated,
+			ChangedFiles: result.ChangedFiles,
+			Meta:         result.Meta,
+		}
+		if result.Redacted {
+			redacted := true
+			event.Redacted = &redacted
+		}
+		if result.Display.Summary != "" || result.Display.Kind != "" {
+			event.Display = &streamjson.Display{Summary: result.Display.Summary, Kind: result.Display.Kind}
+		}
+		writer.writeStreamJSON(event)
 		return
 	}
 	writer.writeStderr("[result] " + truncateForStatus(result.Output) + "\n")

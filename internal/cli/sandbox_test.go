@@ -182,6 +182,99 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 	}
 }
 
+func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		getwd:           func() (string, error) { return t.TempDir(), nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{
+				Name:     sandbox.BackendPolicyOnly,
+				Platform: "darwin",
+				Fallback: true,
+				Message:  "policy-only fallback",
+			}
+		},
+	}
+
+	t.Run("text", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"sandbox", "policy", "--effective"}, &stdout, &stderr, deps)
+		if exitCode != exitSuccess {
+			t.Fatalf("effective exit = %d, stderr %q", exitCode, stderr.String())
+		}
+		output := stdout.String()
+		for _, want := range []string{
+			"Zero effective sandbox policy",
+			"mode: enforce",
+			"network: deny",
+			"enforce_workspace: true",
+			"deny_destructive_shell: true",
+			"interactive_command_guard: enabled",
+			"support_level: policy-only",
+		} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("effective text missing %q, got %q", want, output)
+			}
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		exitCode := runWithDeps([]string{"sandbox", "policy", "--effective", "--json"}, &stdout, &stderr, deps)
+		if exitCode != exitSuccess {
+			t.Fatalf("effective json exit = %d, stderr %q", exitCode, stderr.String())
+		}
+		var payload struct {
+			Policy struct {
+				Mode                 string `json:"mode"`
+				Network              string `json:"network"`
+				EnforceWorkspace     bool   `json:"enforceWorkspace"`
+				DenyDestructiveShell bool   `json:"denyDestructiveShell"`
+			} `json:"policy"`
+			Backend struct {
+				Name string `json:"name"`
+			} `json:"backend"`
+			Plan struct {
+				SupportLevel string `json:"supportLevel"`
+			} `json:"plan"`
+			Guards struct {
+				InteractiveCommand bool `json:"interactiveCommand"`
+				DestructiveShell   bool `json:"destructiveShell"`
+				Network            bool `json:"network"`
+				Workspace          bool `json:"workspace"`
+			} `json:"guards"`
+			GrantsPath string `json:"grantsPath"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("decode effective JSON: %v\n%s", err, stdout.String())
+		}
+		if payload.Policy.Mode != "enforce" || payload.Policy.Network != "deny" {
+			t.Fatalf("unexpected effective policy: %#v", payload.Policy)
+		}
+		if !payload.Policy.EnforceWorkspace || !payload.Policy.DenyDestructiveShell {
+			t.Fatalf("expected workspace + destructive guards enabled: %#v", payload.Policy)
+		}
+		if !payload.Guards.InteractiveCommand || !payload.Guards.DestructiveShell {
+			t.Fatalf("expected guards reported: %#v", payload.Guards)
+		}
+		if payload.Plan.SupportLevel != string(sandbox.BackendSupportPolicyOnly) || payload.GrantsPath == "" {
+			t.Fatalf("unexpected effective plan/grants: %#v %q", payload.Plan, payload.GrantsPath)
+		}
+	})
+}
+
+func TestRunSandboxPolicyEffectiveHelpListed(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "policy", "--help"}, &stdout, &stderr, appDeps{})
+	if exitCode != exitSuccess {
+		t.Fatalf("help exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "--effective") {
+		t.Fatalf("policy help should document --effective, got %q", stdout.String())
+	}
+}
+
 func TestRunSandboxHelpDoesNotOpenStore(t *testing.T) {
 	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) {
 		t.Fatal("newSandboxStore should not be called for help")

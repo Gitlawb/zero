@@ -1,14 +1,39 @@
 package cli
 
 import (
+	"encoding/json"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 type execSessionRecorder struct {
 	prepared sessions.PreparedExec
 	err      error
+}
+
+// captureCheckpoint snapshots the before-state of files a tool call will mutate.
+// Best-effort: failures never affect the run. Returns the checkpoint event and
+// true when one was recorded.
+func (recorder *execSessionRecorder) captureCheckpoint(workspaceRoot string, call agent.ToolCall) (sessions.Event, bool) {
+	if recorder.prepared.Store == nil || recorder.prepared.Session.SessionID == "" {
+		return sessions.Event{}, false
+	}
+	var args map[string]any
+	if call.Arguments != "" {
+		_ = json.Unmarshal([]byte(call.Arguments), &args)
+	}
+	targets := tools.MutationTargets(workspaceRoot, call.Name, args)
+	if len(targets) == 0 {
+		return sessions.Event{}, false
+	}
+	event, err := recorder.prepared.Store.CaptureToolCheckpoint(recorder.prepared.Session.SessionID, workspaceRoot, call.Name, targets)
+	if err != nil || event.Type == "" {
+		return sessions.Event{}, false
+	}
+	return event, true
 }
 
 func shouldUseExecSession(options execOptions) bool {

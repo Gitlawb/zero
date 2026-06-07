@@ -61,6 +61,11 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeExecUsageError(stderr, "sessions rewind-plan requires a session id")
 		}
 		return runSessionsRewindPlan(store, remaining[0], options, stdout, stderr)
+	case "rewind":
+		if len(remaining) != 1 {
+			return writeExecUsageError(stderr, "sessions rewind requires a session id")
+		}
+		return runSessionsRewind(store, remaining[0], options, stdout, stderr)
 	case "compact-plan":
 		if len(remaining) != 1 {
 			return writeExecUsageError(stderr, "sessions compact-plan requires a session id")
@@ -200,8 +205,8 @@ func isSessionsCommand(command string) bool {
 
 func validateSessionCommandFlags(command string, options sessionCommandOptions) error {
 	hasRewindFlag := options.sequence > 0 || strings.TrimSpace(options.eventID) != "" || options.excludeTarget
-	if hasRewindFlag && command != "rewind-plan" {
-		return execUsageError{"--sequence, --event, and --exclude-target are only valid for sessions rewind-plan"}
+	if hasRewindFlag && command != "rewind-plan" && command != "rewind" {
+		return execUsageError{"--sequence, --event, and --exclude-target are only valid for sessions rewind-plan and rewind"}
 	}
 	hasCompactionFlag := options.preserveLast > 0 || options.maxPromptChars > 0
 	if hasCompactionFlag && command != "compact-plan" {
@@ -298,6 +303,43 @@ func runSessionsRewindPlan(store *sessions.Store, sessionID string, options sess
 		return exitSuccess
 	}
 	if _, err := fmt.Fprintln(stdout, formatRewindPlan(plan)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runSessionsRewind(store *sessions.Store, sessionID string, options sessionCommandOptions, stdout io.Writer, stderr io.Writer) int {
+	plan, err := store.PlanRewind(sessionID, sessions.RewindOptions{
+		TargetSequence: options.sequence,
+		TargetEventID:  options.eventID,
+		KeepTarget:     !options.excludeTarget,
+	})
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	session, err := store.Get(sessionID)
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	if session == nil {
+		return writeExecUsageError(stderr, "Zero session not found: "+sessionID)
+	}
+	workspaceRoot := strings.TrimSpace(session.Cwd)
+	if workspaceRoot == "" {
+		return writeExecUsageError(stderr, "session has no recorded workspace (cwd); cannot restore files")
+	}
+	report, err := store.ApplyRewind(sessionID, workspaceRoot, plan.TargetSequence)
+	if err != nil {
+		return writeSessionCommandError(stderr, err)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, redaction.RedactValue(report, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Rewound %s to sequence %d: %d file(s) restored, %d deleted, %d skipped.\n",
+		sessionID, plan.TargetSequence, report.FilesRestored, report.FilesDeleted, len(report.Skipped)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -429,13 +471,14 @@ Commands:
   lineage <id>          Print the root-to-session lineage path
   tree <id>             Print a child-session tree
   rewind-plan <id>      Preview events kept and dropped by a rewind
+  rewind <id>           Restore workspace files and truncate the log to a checkpoint
   compact-plan <id>     Preview events compacted and preserved by compaction
 
 Flags:
       --json            Print JSON output
-      --sequence <n>    Rewind target sequence for rewind-plan
-      --event <id>      Rewind target event id for rewind-plan
-      --exclude-target  Drop the target event in rewind-plan
+      --sequence <n>    Rewind target sequence (rewind-plan, rewind)
+      --event <id>      Rewind target event id (rewind-plan, rewind)
+      --exclude-target  Drop the target event (rewind-plan, rewind)
       --preserve-last <n> Keep recent events in compact-plan
       --max-prompt-chars <n> Limit compact-plan summary prompt
   -h, --help            Show this help

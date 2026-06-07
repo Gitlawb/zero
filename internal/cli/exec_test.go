@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -35,6 +37,7 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 			}
 			for _, want := range []string{
 				"-f, --file",
+				"--mode <name>",
 				"-m, --model",
 				"--max-turns",
 				"--profile <profile>",
@@ -317,6 +320,190 @@ func TestRunExecPersistsCallingSessionChildMetadata(t *testing.T) {
 	}
 }
 
+func TestRunExecModeSeedsModelAndTurnOverrides(t *testing.T) {
+	cwd := t.TempDir()
+	var gotModel string
+	var gotMaxTurns int
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--mode", "deep", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			gotModel = overrides.Provider.Model
+			gotMaxTurns = overrides.MaxTurns
+			return config.ResolvedConfig{}, errors.New("stop before provider")
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider exit %d, got %d", exitProvider, exitCode)
+	}
+	if gotModel != "claude-opus-4.1" {
+		t.Fatalf("overrides.Provider.Model = %q, want claude-opus-4.1", gotModel)
+	}
+	if gotMaxTurns != 50 {
+		t.Fatalf("overrides.MaxTurns = %d, want 50", gotMaxTurns)
+	}
+}
+
+func TestRunExecExplicitModelOverridesMode(t *testing.T) {
+	cwd := t.TempDir()
+	var gotModel string
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--mode", "deep", "--model", "gpt-4.1", "hello"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			gotModel = overrides.Provider.Model
+			return config.ResolvedConfig{}, errors.New("stop before provider")
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider exit %d, got %d", exitProvider, exitCode)
+	}
+	if gotModel != "gpt-4.1" {
+		t.Fatalf("explicit --model should override mode: got %q, want gpt-4.1", gotModel)
+	}
+}
+
+func TestRunExecModeRoutesModelThroughRegistry(t *testing.T) {
+	cwd := t.TempDir()
+	var gotModel string
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	// "smart" maps to claude-sonnet-4.5; the mode's model must be routed through
+	// the registry (Resolve) so the canonical id reaches the overrides.
+	exitCode := runWithDeps([]string{"exec", "--mode", "smart", "hi"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			gotModel = overrides.Provider.Model
+			return config.ResolvedConfig{}, errors.New("stop before provider")
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider exit %d, got %d", exitProvider, exitCode)
+	}
+	if gotModel != "claude-sonnet-4.5" {
+		t.Fatalf("expected mode smart to select claude-sonnet-4.5, got %q", gotModel)
+	}
+}
+
+func TestRunExecUnknownModeErrors(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec", "--mode", "turbo", "hello"}, &stdout, &stderr)
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unknown mode") {
+		t.Fatalf("expected unknown mode error, got %q", stderr.String())
+	}
+	for _, want := range []string{"smart", "deep", "fast", "large", "precise"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("expected error to list valid mode %q, got %q", want, stderr.String())
+		}
+	}
+}
+
+func TestApplyExecModeLeavesRawModelForSharedResolution(t *testing.T) {
+	// applyExecMode must NOT pre-resolve the mode's model: leaving the raw id/alias
+	// lets the shared --model resolution path resolve it AND surface any deprecation
+	// notice on stderr (the bug was that applyExecMode resolved it and discarded the
+	// notice). The raw alias must be the preset's exact Model value.
+	mode, ok := modelregistry.LookupMode("deep")
+	if !ok {
+		t.Fatal("expected built-in mode deep")
+	}
+	options := execOptions{mode: "deep"}
+	if err := applyExecMode(&options); err != nil {
+		t.Fatalf("applyExecMode returned error: %v", err)
+	}
+	if options.model != mode.Model {
+		t.Fatalf("options.model = %q, want raw mode model %q (resolution must be delegated)", options.model, mode.Model)
+	}
+}
+
+func TestRunExecModeModelSurfacesDeprecationNoticeViaSharedPath(t *testing.T) {
+	// A mode-supplied model must flow through the same resolution path as an
+	// explicit --model, so a deprecated id redirects AND prints a notice. No
+	// built-in mode references a deprecated model, so emulate one by setting the
+	// raw mode model directly through applyExecMode and threading it through the
+	// shared resolver, exactly as runExec does after the reorder.
+	options := execOptions{mode: "smart"}
+	if err := applyExecMode(&options); err != nil {
+		t.Fatalf("applyExecMode returned error: %v", err)
+	}
+	// Sanity: the shared resolver surfaces a notice + redirect for a deprecated id,
+	// which is the path the mode model now feeds into.
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	resolved, notice := resolveSelectedModel(registry, "gpt-4-turbo")
+	if resolved != "gpt-4.1" {
+		t.Fatalf("expected deprecated model to redirect to gpt-4.1, got %q", resolved)
+	}
+	if !strings.Contains(notice, "deprecated") {
+		t.Fatalf("expected shared resolver to surface a deprecation notice, got %q", notice)
+	}
+}
+
+func TestRunExecListToolsAppliesModeBeforeListing(t *testing.T) {
+	// applyExecMode now runs before tool-filter validation and the --list-tools
+	// branch, so a --mode preset is expanded for --list-tools. Combining a mode
+	// with --list-tools must still succeed and never resolve a provider.
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--list-tools", "--mode", "deep"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Tools visible to model") {
+		t.Fatalf("expected --list-tools --mode to list tools, got %q", stdout.String())
+	}
+}
+
+func TestRunExecModeToolFilterReflectedInListTools(t *testing.T) {
+	// The reorder also means a mode-injected tool filter would be reflected in
+	// --list-tools. No built-in mode ships a tool filter, so drive the equivalent
+	// surface through applyExecMode + formatExecToolList: a filter seeded onto the
+	// options before the listing must narrow the tools the model can see.
+	options := execOptions{enabledTools: []string{"read_file", "grep"}}
+	registry := newCoreRegistry(t.TempDir())
+	list := formatExecToolList(registry, options, agent.PermissionModeAuto)
+	for _, want := range []string{"read_file", "grep"} {
+		if !strings.Contains(list, want) {
+			t.Fatalf("expected tool list to contain %q, got %q", want, list)
+		}
+	}
+	if strings.Contains(list, "bash") {
+		t.Fatalf("expected mode-style tool filter to hide bash, got %q", list)
+	}
+}
+
 func TestRunExecAcceptsLegacyModelProfileFlags(t *testing.T) {
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{
 		"exec",
@@ -588,6 +775,77 @@ func TestRunExecJSONOutputsNDJSONEvents(t *testing.T) {
 	}
 }
 
+func TestRunExecResolvesCanonicalModelAlias(t *testing.T) {
+	root := t.TempDir()
+
+	// "openai:gpt-4.1" is a registry alias for the canonical gpt-4.1 id; the
+	// selection boundary should normalize it before the provider sees it.
+	exitCode, stdout, stderr := runExecWithEcho(t, []string{"exec", "--cwd", root, "-m", "openai:gpt-4.1", "-o", "json", "hi"})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr for active model, got %q", stderr)
+	}
+	events := decodeJSONLines(t, stdout)
+	if got := events[0]["model"]; got != "gpt-4.1" {
+		t.Fatalf("expected alias to resolve to gpt-4.1, got %v", got)
+	}
+}
+
+func TestRunExecRedirectsDeprecatedModelWithNotice(t *testing.T) {
+	root := t.TempDir()
+
+	exitCode, stdout, stderr := runExecWithEcho(t, []string{"exec", "--cwd", root, "-m", "gpt-4-turbo", "-o", "json", "hi"})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "deprecated") || !strings.Contains(stderr, "gpt-4.1") {
+		t.Fatalf("expected deprecation notice on stderr, got %q", stderr)
+	}
+	events := decodeJSONLines(t, stdout)
+	if got := events[0]["model"]; got != "gpt-4.1" {
+		t.Fatalf("expected deprecated model to redirect to gpt-4.1, got %v", got)
+	}
+}
+
+func TestRunExecReasoningEffortNoticeForNonReasoningModel(t *testing.T) {
+	root := t.TempDir()
+
+	exitCode, stdout, stderr := runExecWithEcho(t, []string{"exec", "--cwd", root, "-m", "gpt-4.1", "-r", "high", "-o", "json", "hi"})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "does not support reasoning effort") {
+		t.Fatalf("expected non-reasoning effort notice on stderr, got %q", stderr)
+	}
+	if stdout == "" {
+		t.Fatal("expected run output on stdout")
+	}
+}
+
+func TestReasoningEffortNoticeCoercesUnsupportedEffort(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	// claude-sonnet-4.5 supports low/medium/high with a medium default; xhigh is
+	// unsupported and should be coerced to the model default.
+	notice := reasoningEffortNotice(registry, "claude-sonnet-4.5", "xhigh")
+	if !strings.Contains(notice, "not supported") || !strings.Contains(notice, "medium") {
+		t.Fatalf("expected coercion notice to default medium, got %q", notice)
+	}
+	if got := reasoningEffortNotice(registry, "claude-sonnet-4.5", "high"); got != "" {
+		t.Fatalf("expected no notice for a supported effort, got %q", got)
+	}
+	if got := reasoningEffortNotice(registry, "gpt-4.1", "high"); !strings.Contains(got, "does not support") {
+		t.Fatalf("expected unsupported-model notice, got %q", got)
+	}
+}
+
 func TestRunExecJSONUnsafeOutputsWarningEvent(t *testing.T) {
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{"exec", "--skip-permissions-unsafe", "-o", "json", "hello"})
 
@@ -779,4 +1037,100 @@ func jsonEventTypes(events []map[string]any) []string {
 		types = append(types, eventType)
 	}
 	return types
+}
+
+// runExecWithEffectiveModel runs exec with the echo provider but forces the
+// resolved (effective) model regardless of any --model flag, so tests can
+// exercise behavior that depends on the effective model rather than the
+// override-supplied one.
+func runExecWithEffectiveModel(t *testing.T, effectiveModel string, args []string) (int, string, string) {
+	t.Helper()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				ActiveProvider: "echo",
+				Provider: config.ProviderProfile{
+					Name:         "echo",
+					ProviderKind: config.ProviderKindOpenAICompatible,
+					BaseURL:      "http://127.0.0.1/v1",
+					Model:        effectiveModel,
+				},
+				MaxTurns: 3,
+			}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+	return exitCode, stdout.String(), stderr.String()
+}
+
+// TestRunExecReasoningEffortNoticeUsesEffectiveModel asserts that
+// --reasoning-effort is validated against the EFFECTIVE (resolved) model even
+// when --model is omitted, so the advisory notice still surfaces.
+func TestRunExecReasoningEffortNoticeUsesEffectiveModel(t *testing.T) {
+	// gpt-4.1 is a registry-known non-reasoning model. With no --model the
+	// override model is empty, so the notice must be evaluated against the
+	// effective model resolved by resolveConfig.
+	exitCode, stdout, stderr := runExecWithEffectiveModel(t, "gpt-4.1", []string{
+		"exec", "-r", "high", "hi",
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "does not support reasoning effort") {
+		t.Fatalf("expected effort notice for effective model on stderr, got %q", stderr)
+	}
+	if stdout == "" {
+		t.Fatal("expected run output on stdout")
+	}
+}
+
+// TestRunExecAutoHighEmitsUnsafeWarning asserts that --auto high (which resolves
+// to PermissionModeUnsafe) surfaces the same unsafe warning as
+// --skip-permissions-unsafe.
+func TestRunExecAutoHighEmitsUnsafeWarning(t *testing.T) {
+	exitCode, stdout, stderr := runExecWithEcho(t, []string{
+		"exec", "--auto", "high", "-o", "json", "hello",
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+
+	events := decodeJSONLines(t, stdout)
+	if !slices.Contains(jsonEventTypes(events), "warning") {
+		t.Fatalf("expected JSON warning event for --auto high, got %v; output %q", jsonEventTypes(events), stdout)
+	}
+	if got := events[0]["permission_mode"]; got != "unsafe" {
+		t.Fatalf("expected run_start permission_mode unsafe, got %v", got)
+	}
+}
+
+// TestRunExecInvalidAutoValidatedWithSkipPermissions asserts that an invalid
+// --auto value is still rejected even when --skip-permissions-unsafe is also
+// passed (the unsafe path must not short-circuit --auto validation).
+func TestRunExecInvalidAutoValidatedWithSkipPermissions(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec", "--auto", "bogus", "--skip-permissions-unsafe", "hello"}, &stdout, &stderr)
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if got := stderr.String(); !strings.Contains(got, "Invalid autonomy level") {
+		t.Fatalf("expected autonomy validation error, got %q", got)
+	}
 }

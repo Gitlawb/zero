@@ -51,17 +51,23 @@ func validateExecToolFilters(options execOptions, registry *tools.Registry) erro
 }
 
 func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error) {
-	if options.skipPermissionsUnsafe {
-		return agent.PermissionModeUnsafe, nil
-	}
+	// Validate --auto first, regardless of --skip-permissions-unsafe, so an
+	// invalid autonomy value is always rejected. (Previously the unsafe path
+	// short-circuited before validation, letting "--auto bogus" slip through
+	// whenever --skip-permissions-unsafe was also set.)
+	var mode agent.PermissionMode
 	switch strings.ToLower(strings.TrimSpace(options.autonomy)) {
 	case "", "low", "medium":
-		return agent.PermissionModeAuto, nil
+		mode = agent.PermissionModeAuto
 	case "high":
-		return agent.PermissionModeUnsafe, nil
+		mode = agent.PermissionModeUnsafe
 	default:
 		return "", execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", options.autonomy)}
 	}
+	if options.skipPermissionsUnsafe {
+		return agent.PermissionModeUnsafe, nil
+	}
+	return mode, nil
 }
 
 func writeExecToolList(w io.Writer, registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) error {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -38,9 +39,15 @@ const (
 )
 
 type execOptions struct {
-	promptParts           []string
-	file                  string
-	model                 string
+	promptParts []string
+	file        string
+	mode        string
+	model       string
+	// modelProfile captures the legacy --profile flag. It is accepted for
+	// backward compatibility (so old invocations do not error) but is
+	// intentionally inert: nothing consumes it. Model selection is driven by
+	// --model / --mode instead. See writeExecHelp ("Accept legacy model profile
+	// selection") and TestRunExecAcceptsLegacyModelProfileFlags.
 	modelProfile          string
 	reasoningEffort       string
 	maxTurns              int
@@ -84,6 +91,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return exitCrash
 		}
 		return exitSuccess
+	}
+
+	// A mode seeds model/effort/max-turns/tool filters as a preset. Expand it up
+	// front — before tool-filter validation and the --list-tools branch — so a
+	// mode-injected tool filter is validated and reflected in --list-tools, and a
+	// mode-supplied model flows through the same resolution (and deprecation
+	// notice) path as an explicit --model. Explicit flags still win: applyExecMode
+	// only fills fields the caller left unset.
+	if err := applyExecMode(&options); err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
 	workspaceRoot, err := resolveWorkspaceRoot(options.cwd, deps)
@@ -148,9 +165,21 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	sessionTitle := execSessionTitle(options, prompt)
 
+	// Build the model registry once and reuse it across every model-aware
+	// lookup in this exec run (model resolution, reasoning-effort advisory, and
+	// context-window sizing). DefaultRegistry builds the full catalog and
+	// compiles its match patterns, so rebuilding it per lookup is wasteful.
+	// modelRegistry is the zero Registry when the catalog fails to build; the
+	// helpers below degrade to safe no-op behavior in that case.
+	modelRegistry, _ := modelregistry.DefaultRegistry()
+
 	overrides := config.Overrides{}
 	if options.model != "" {
-		overrides.Provider.Model = options.model
+		resolvedModel, notice := resolveSelectedModel(modelRegistry, options.model)
+		overrides.Provider.Model = resolvedModel
+		if notice != "" {
+			fmt.Fprintln(stderr, notice)
+		}
 	}
 	if options.maxTurns > 0 {
 		overrides.MaxTurns = options.maxTurns
@@ -161,6 +190,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	if resolved.Provider == (config.ProviderProfile{}) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
+	}
+	// Evaluate the --reasoning-effort advisory against the EFFECTIVE resolved
+	// model (resolved.Provider.Model), not the override. Without an explicit
+	// --model the override model is empty, so checking it here would silently
+	// skip the advisory even though the run uses a concrete effective model.
+	if options.reasoningEffort != "" {
+		if notice := reasoningEffortNotice(modelRegistry, resolved.Provider.Model, options.reasoningEffort); notice != "" {
+			fmt.Fprintln(stderr, notice)
+		}
 	}
 
 	provider, err := buildProvider(resolved, deps)
@@ -212,8 +250,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if writer.err != nil {
 		return exitCrash
 	}
-	if options.skipPermissionsUnsafe {
-		writer.warning("Unsafe permissions are active for this run because --skip-permissions-unsafe was passed.")
+	// Surface the unsafe-permissions warning whenever the run resolves to unsafe
+	// mode, covering BOTH --skip-permissions-unsafe and --auto high (which also
+	// resolves to PermissionModeUnsafe). Previously only the explicit flag path
+	// warned, so --auto high silently ran without notice.
+	if permissionMode == agent.PermissionModeUnsafe {
+		reason := "--auto high"
+		if options.skipPermissionsUnsafe {
+			reason = "--skip-permissions-unsafe"
+		}
+		writer.warning(fmt.Sprintf("Unsafe permissions are active for this run because %s was passed.", reason))
 		if writer.err != nil {
 			return exitCrash
 		}
@@ -225,8 +271,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		"content": prompt,
 	})
 
+	// OnAskUser is intentionally left unset: headless runs have no interactive
+	// user, so ask_user degrades to a "proceed with your best assumption" result
+	// rather than blocking. (Future enhancement: collect answers over stream-json
+	// input when a controlling client is attached.)
 	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
+		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
 		SessionID:        preparedSession.Session.SessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,
@@ -250,6 +301,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				"name":      call.Name,
 				"arguments": call.Arguments,
 			})
+			// Snapshot before-state of files this call will mutate (safe rewind).
+			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, call); ok {
+				writer.checkpoint(checkpoint)
+			}
 		},
 		OnPermission: func(event agent.PermissionEvent) {
 			writer.permission(event)
@@ -265,6 +320,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 			if len(result.Meta) > 0 {
 				payload["meta"] = result.Meta
+			}
+			if result.Redacted {
+				payload["redacted"] = true
+			}
+			if len(result.ChangedFiles) > 0 {
+				payload["changedFiles"] = result.ChangedFiles
 			}
 			sessionRecorder.append(sessions.EventToolResult, payload)
 		},
@@ -435,6 +496,102 @@ func writeExecProviderError(stdout io.Writer, stderr io.Writer, format execOutpu
 		return exitCrash
 	}
 	return exitProvider
+}
+
+// applyExecMode expands a --mode preset onto the exec options. The preset only
+// fills fields the caller left unset, so an explicit --model / --reasoning-effort
+// / --max-turns / tool filter always wins over the mode. The mode's model is left
+// as the preset's raw id/alias so the shared --model resolution path resolves it
+// through the registry (canonical ids/deprecation fallbacks) AND surfaces any
+// deprecation notice on stderr, exactly like an explicit --model. An unknown mode
+// is a usage error listing the valid presets.
+func applyExecMode(options *execOptions) error {
+	name := strings.TrimSpace(options.mode)
+	if name == "" {
+		return nil
+	}
+	mode, ok := modelregistry.LookupMode(name)
+	if !ok {
+		return execUsageError{fmt.Sprintf("unknown mode %q. Valid modes: %s.", options.mode, strings.Join(modelregistry.ModeNames(), ", "))}
+	}
+	if options.model == "" && mode.Model != "" {
+		options.model = mode.Model
+	}
+	if options.reasoningEffort == "" && mode.Effort != "" {
+		options.reasoningEffort = string(mode.Effort)
+	}
+	if options.maxTurns == 0 && mode.MaxTurns > 0 {
+		options.maxTurns = mode.MaxTurns
+	}
+	if len(options.enabledTools) == 0 && len(mode.EnabledTools) > 0 {
+		options.enabledTools = append([]string{}, mode.EnabledTools...)
+	}
+	if len(options.disabledTools) == 0 && len(mode.DisabledTools) > 0 {
+		options.disabledTools = append([]string{}, mode.DisabledTools...)
+	}
+	return nil
+}
+
+// resolveSelectedModel routes a user-supplied --model value through the model
+// registry so that fuzzy aliases (e.g. "sonnet 4.5") resolve to canonical ids
+// and deprecated models auto-redirect to their fallback. It returns the model id
+// to use plus a non-empty notice when a deprecation redirect or warning applies.
+// Inputs that the registry does not recognize (e.g. custom openai-compatible
+// model names) are returned unchanged so provider passthrough still works.
+func resolveSelectedModel(registry modelregistry.Registry, input string) (string, string) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return input, ""
+	}
+	entry, notice, ok := registry.ResolveWithFallback(trimmed)
+	if !ok {
+		return input, ""
+	}
+	return entry.ID, notice
+}
+
+// modelContextWindow returns the resolved model's context window (max input
+// tokens) from the model registry, used to enable agent-loop compaction. An
+// unknown model (e.g. a custom openai-compatible name) returns 0, which leaves
+// compaction DISABLED — a safe default that never compacts unexpectedly.
+func modelContextWindow(registry modelregistry.Registry, modelID string) int {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return 0
+	}
+	entry, ok := registry.Resolve(trimmed)
+	if !ok {
+		return 0
+	}
+	return entry.ContextLimits.ContextWindow
+}
+
+// reasoningEffortNotice resolves the requested --reasoning-effort against the
+// selected model's supported efforts via EffectiveReasoningEffort and returns a
+// short advisory when the requested value is unsupported (and was coerced to the
+// model default).
+//
+// NOTE: the effective effort is not yet forwarded to the provider request — the
+// zeroruntime.CompletionRequest / provider wire schemas carry no effort field.
+// Full provider-request propagation is deferred (see slice-3 report).
+func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return ""
+	}
+	entry, ok := registry.Get(trimmed)
+	if !ok {
+		return ""
+	}
+	want := modelregistry.ReasoningEffort(strings.TrimSpace(strings.ToLower(requested)))
+	effective := modelregistry.EffectiveReasoningEffort(entry, want)
+	if effective == modelregistry.ReasoningEffortNone {
+		return fmt.Sprintf("%s does not support reasoning effort; ignoring --reasoning-effort %s", entry.ID, requested)
+	}
+	if want != "" && effective != want {
+		return fmt.Sprintf("reasoning effort %q is not supported by %s; using %s instead", requested, entry.ID, effective)
+	}
+	return ""
 }
 
 func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, error) {
