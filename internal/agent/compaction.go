@@ -35,7 +35,9 @@ const summaryLabel = "[Summary of earlier conversation]"
 const summaryInstructions = "You are compacting a coding-assistant conversation to save context. " +
 	"Write a dense, factual summary of the conversation so far. Preserve: the user's goals and explicit constraints; " +
 	"decisions made and why; files created or modified (with paths) and key code changes; commands run and their important " +
-	"results; and anything still in progress or unresolved. Omit pleasantries. Use terse bullet points. Do not invent details."
+	"results; and anything still in progress or unresolved. Omit pleasantries. Use terse bullet points. Do not invent details. " +
+	"If the conversation already begins with an earlier summary block, treat its facts as established context and carry them " +
+	"forward into the new summary — never drop earlier information."
 
 // CompactionOptions configure a single Compact call.
 type CompactionOptions struct {
@@ -128,11 +130,15 @@ func Compact(messages []zeroruntime.Message, opts CompactionOptions) ([]zerorunt
 	}
 	summary = strings.TrimSpace(summary)
 
+	// Preserve structured state (active plan + loaded skills) from the elided
+	// middle verbatim, so it is not lost or paraphrased away by the prose summary.
+	content := appendPreservedState(summaryLabel+"\n"+summary, middle)
+
 	compacted := make([]zeroruntime.Message, 0, systemEnd+1+(len(messages)-boundary))
 	compacted = append(compacted, messages[:systemEnd]...)
 	compacted = append(compacted, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
-		Content: summaryLabel + "\n" + summary,
+		Content: content,
 	})
 	compacted = append(compacted, messages[boundary:]...)
 	return compacted, nil
