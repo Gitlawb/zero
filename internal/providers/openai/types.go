@@ -1,10 +1,19 @@
 package openai
 
 type chatCompletionRequest struct {
-	Model    string           `json:"model"`
-	Messages []chatMessage    `json:"messages"`
-	Tools    []toolDefinition `json:"tools,omitempty"`
-	Stream   bool             `json:"stream"`
+	Model               string           `json:"model"`
+	Messages            []chatMessage    `json:"messages"`
+	Tools               []toolDefinition `json:"tools,omitempty"`
+	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	Stream              bool             `json:"stream"`
+	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
+}
+
+// streamOptions requests the final usage chunk on a streaming response. Without
+// include_usage the OpenAI streaming API never sends the usage object, so token
+// accounting is silently zero for real OpenAI streams.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatMessage struct {

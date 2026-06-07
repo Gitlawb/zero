@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -17,6 +18,11 @@ import (
 const defaultBaseURL = "https://api.anthropic.com"
 const defaultVersion = "2023-06-01"
 const defaultMaxTokens = 4096
+
+// defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
+// without closing the connection, so a stalled-but-open upstream cannot hang the
+// agent forever.
+const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures an Anthropic Messages API provider.
 type Options struct {
@@ -28,18 +34,22 @@ type Options struct {
 	Beta       string
 	HTTPClient *http.Client
 	UserAgent  string
+	// StreamIdleTimeout aborts the stream if no data arrives for this long.
+	// Zero uses defaultStreamIdleTimeout.
+	StreamIdleTimeout time.Duration
 }
 
 // Provider streams completions from Anthropic's Messages API.
 type Provider struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	maxTokens  int
-	version    string
-	beta       string
-	httpClient *http.Client
-	userAgent  string
+	apiKey            string
+	baseURL           string
+	model             string
+	maxTokens         int
+	version           string
+	beta              string
+	httpClient        *http.Client
+	userAgent         string
+	streamIdleTimeout time.Duration
 }
 
 // New creates an Anthropic provider.
@@ -60,15 +70,20 @@ func New(options Options) (*Provider, error) {
 	if version == "" {
 		version = defaultVersion
 	}
+	idleTimeout := options.StreamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultStreamIdleTimeout
+	}
 	return &Provider{
-		apiKey:     options.APIKey,
-		baseURL:    baseURL,
-		model:      model,
-		maxTokens:  maxTokens,
-		version:    version,
-		beta:       strings.TrimSpace(options.Beta),
-		httpClient: providerio.HTTPClient(options.HTTPClient),
-		userAgent:  options.UserAgent,
+		apiKey:            options.APIKey,
+		baseURL:           baseURL,
+		model:             model,
+		maxTokens:         maxTokens,
+		version:           version,
+		beta:              strings.TrimSpace(options.Beta),
+		httpClient:        providerio.HTTPClient(options.HTTPClient),
+		userAgent:         options.UserAgent,
+		streamIdleTimeout: idleTimeout,
 	}, nil
 }
 
@@ -95,7 +110,12 @@ func (provider *Provider) StreamCompletion(
 }
 
 func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.baseURL+"/v1/messages", bytes.NewReader(body))
+	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
+	// the request, which unblocks the SSE reader goroutine.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	httpRequest, err := http.NewRequestWithContext(streamCtx, http.MethodPost, provider.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider request error: " + err.Error())})
 		return
@@ -127,9 +147,17 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 
 	state := newStreamState()
-	err = providerio.ScanSSEData(response.Body, func(data string) bool {
+	err = providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, provider.streamIdleTimeout, func(data string) bool {
 		return provider.emitPayload(ctx, data, state, events)
 	})
+	if errors.Is(err, providerio.ErrStreamIdle) {
+		state.closeOpen(ctx, events)
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", provider.streamIdleTimeout)),
+		})
+		return
+	}
 	if err != nil {
 		state.closeOpen(ctx, events)
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
@@ -163,7 +191,14 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 			state.recordUsage(payload.Message.Usage)
 		}
 	case "content_block_start":
-		if payload.ContentBlock != nil && payload.ContentBlock.Type == "tool_use" && payload.ContentBlock.ID != "" && payload.ContentBlock.Name != "" {
+		if payload.ContentBlock != nil && payload.ContentBlock.Type == "tool_use" {
+			if payload.ContentBlock.ID == "" || payload.ContentBlock.Name == "" {
+				// A tool_use block without a usable id/name can't be dispatched.
+				// Signal a drop once so the agent can ask the model to retry
+				// instead of silently ending the turn (mirrors OpenAI).
+				providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDropped})
+				return true
+			}
 			state.startTool(ctx, payload.Index, payload.ContentBlock.ID, payload.ContentBlock.Name, events)
 			if len(payload.ContentBlock.Input) > 0 {
 				encoded, err := json.Marshal(payload.ContentBlock.Input)
@@ -191,6 +226,11 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 	case "message_delta":
 		if payload.Usage != nil {
 			state.recordUsage(*payload.Usage)
+		}
+		if payload.Delta != nil {
+			if reason := mapStopReason(payload.Delta.StopReason); reason != "" {
+				state.finishReason = reason
+			}
 		}
 	case "message_stop":
 		provider.emitDone(ctx, state, events)
@@ -221,7 +261,7 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
 		}
 	}
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	state.done = true
 }
 
@@ -399,7 +439,18 @@ type streamState struct {
 	outputTokens   int
 	hasInputUsage  bool
 	hasOutputUsage bool
+	finishReason   string // normalized terminal stop reason (empty for normal stop)
 	done           bool
+}
+
+// mapStopReason maps Anthropic's message_delta stop_reason onto the runtime's
+// normalized terminal reasons. A normal stop ("end_turn"/"tool_use"/"stop_sequence"/"")
+// returns "".
+func mapStopReason(reason string) string {
+	if reason == "max_tokens" {
+		return zeroruntime.FinishReasonLength
+	}
+	return ""
 }
 
 func newStreamState() *streamState {

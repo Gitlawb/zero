@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,11 +10,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"
+
+// defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
+// without closing the connection. Hosted gateways (e.g. Ollama Cloud) sometimes
+// stall mid-stream after a tool-call delta; without this the agent blocks forever.
+const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures an OpenAI-compatible chat completions provider.
 type Options struct {
@@ -24,15 +30,23 @@ type Options struct {
 	Model      string
 	HTTPClient *http.Client
 	UserAgent  string
+	// MaxTokens caps the model's output tokens. Zero omits the cap (the model's
+	// own default applies). Resolved from the model registry by the factory.
+	MaxTokens int
+	// StreamIdleTimeout aborts the stream if no data arrives for this long.
+	// Zero uses defaultStreamIdleTimeout.
+	StreamIdleTimeout time.Duration
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
 type Provider struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	httpClient *http.Client
-	userAgent  string
+	apiKey            string
+	baseURL           string
+	model             string
+	maxTokens         int
+	httpClient        *http.Client
+	userAgent         string
+	streamIdleTimeout time.Duration
 }
 
 // New creates an OpenAI-compatible provider.
@@ -56,12 +70,24 @@ func New(options Options) (*Provider, error) {
 		httpClient = http.DefaultClient
 	}
 
+	idleTimeout := options.StreamIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultStreamIdleTimeout
+	}
+
+	maxTokens := options.MaxTokens
+	if maxTokens < 0 {
+		maxTokens = 0
+	}
+
 	return &Provider{
-		apiKey:     options.APIKey,
-		baseURL:    baseURL,
-		model:      model,
-		httpClient: httpClient,
-		userAgent:  options.UserAgent,
+		apiKey:            options.APIKey,
+		baseURL:           baseURL,
+		model:             model,
+		maxTokens:         maxTokens,
+		httpClient:        httpClient,
+		userAgent:         options.UserAgent,
+		streamIdleTimeout: idleTimeout,
 	}, nil
 }
 
@@ -86,23 +112,46 @@ func (provider *Provider) StreamCompletion(
 
 func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
 	endpoint := provider.baseURL + "/chat/completions"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider request error: " + err.Error())})
-		return
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if provider.userAgent != "" {
-		request.Header.Set("User-Agent", provider.userAgent)
-	}
-	if provider.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+provider.apiKey)
-	}
 
-	response, err := provider.httpClient.Do(request)
-	if err != nil {
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
-		return
+	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
+	// the request, rather than closing response.Body directly (which would race
+	// with the deferred Close below). Cancelling unblocks the reader goroutine.
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	// Retry transient failures (network errors and 5xx) before surfacing them.
+	// Hosted OpenAI-compatible gateways (e.g. Ollama Cloud) return intermittent
+	// 500s that succeed on a quick retry.
+	const maxAttempts = 3
+	var response *http.Response
+	for attempt := 1; ; attempt++ {
+		request, err := http.NewRequestWithContext(streamCtx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider request error: " + err.Error())})
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if provider.userAgent != "" {
+			request.Header.Set("User-Agent", provider.userAgent)
+		}
+		if provider.apiKey != "" {
+			request.Header.Set("Authorization", "Bearer "+provider.apiKey)
+		}
+
+		resp, err := provider.httpClient.Do(request)
+		if err != nil {
+			if attempt < maxAttempts && ctx.Err() == nil && backoff(ctx, attempt) {
+				continue
+			}
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
+			return
+		}
+		if resp.StatusCode >= http.StatusInternalServerError && attempt < maxAttempts && backoff(ctx, attempt) {
+			_ = resp.Body.Close()
+			continue
+		}
+		response = resp
+		break
 	}
 	defer func() {
 		_ = response.Body.Close()
@@ -114,53 +163,61 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	}
 
 	state := newToolState()
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 0, 4096), 16*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "" {
-			continue
-		}
-		if data == "[DONE]" {
-			state.closeOpen(ctx, events)
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
-			return
-		}
-
-		var chunk streamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			state.closeOpen(ctx, events)
-			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:  zeroruntime.StreamEventError,
-				Error: provider.redact("provider stream error: malformed JSON: " + err.Error()),
-			})
-			return
-		}
-		if chunk.Error != nil {
-			state.closeOpen(ctx, events)
-			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:  zeroruntime.StreamEventError,
-				Error: provider.classifiedError(http.StatusInternalServerError, chunk.Error.Message),
-			})
-			return
-		}
-		provider.emitChunk(ctx, chunk, state, events)
+	// Use the shared SSE reader (also used by the Anthropic/Gemini providers) so
+	// multi-line "data:" continuation fields are joined into one payload, and the
+	// idle watchdog / context cancellation are handled uniformly.
+	err := providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, provider.streamIdleTimeout, func(data string) bool {
+		return provider.emitPayload(ctx, data, state, events)
+	})
+	if errors.Is(err, providerio.ErrStreamIdle) {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", provider.streamIdleTimeout)),
+		})
+		return
 	}
-
-	state.closeOpen(ctx, events)
-	if err := scanner.Err(); err != nil {
+	if err != nil {
+		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
 	}
-	if err := ctx.Err(); err != nil {
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctxErr.Error())})
 		return
 	}
-	sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	if !state.done {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
+	}
+}
+
+// emitPayload handles one accumulated SSE data payload ([DONE]/blank lines are
+// already filtered by the shared reader). It returns false to abort the stream
+// after emitting a terminal error.
+func (provider *Provider) emitPayload(ctx context.Context, data string, state *toolState, events chan<- zeroruntime.StreamEvent) bool {
+	var chunk streamChunk
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.redact("provider stream error: malformed JSON: " + err.Error()),
+		})
+		state.done = true
+		return false
+	}
+	if chunk.Error != nil {
+		state.closeOpen(ctx, events)
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: provider.classifiedError(http.StatusInternalServerError, chunk.Error.Message),
+		})
+		state.done = true
+		return false
+	}
+	provider.emitChunk(ctx, chunk, state, events)
+	return true
 }
 
 func (provider *Provider) emitChunk(
@@ -182,6 +239,9 @@ func (provider *Provider) emitChunk(
 		if choice.FinishReason == "tool_calls" {
 			state.closeOpen(ctx, events)
 		}
+		if reason := mapFinishReason(choice.FinishReason); reason != "" {
+			state.finishReason = reason
+		}
 	}
 
 	if chunk.Usage != nil {
@@ -193,6 +253,19 @@ func (provider *Provider) emitChunk(
 				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
 			},
 		})
+	}
+}
+
+// mapFinishReason maps OpenAI's finish_reason onto the runtime's normalized
+// terminal reasons. A normal finish ("stop"/"tool_calls"/"") returns "".
+func mapFinishReason(reason string) string {
+	switch reason {
+	case "length":
+		return zeroruntime.FinishReasonLength
+	case "content_filter":
+		return zeroruntime.FinishReasonContentFilter
+	default:
+		return ""
 	}
 }
 
@@ -215,32 +288,24 @@ func (provider *Provider) emitHTTPError(ctx context.Context, response *http.Resp
 }
 
 func (provider *Provider) classifiedError(statusCode int, message string) string {
-	prefix := "provider error: "
-	switch statusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		prefix = "auth error: "
-	case http.StatusTooManyRequests:
-		prefix = "rate limit error: "
-	default:
-		if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
-			prefix = "provider request error: "
-		}
-	}
-	return provider.redact(prefix + message)
+	return providerio.ClassifiedError(statusCode, message, provider.apiKey)
 }
 
 func (provider *Provider) redact(message string) string {
-	if provider.apiKey != "" {
-		message = strings.ReplaceAll(message, provider.apiKey, "[REDACTED]")
+	return providerio.Redact(message, provider.apiKey)
+}
+
+// backoff waits before a retry attempt, returning false if the context is
+// cancelled while waiting.
+func backoff(ctx context.Context, attempt int) bool {
+	timer := time.NewTimer(time.Duration(attempt) * 400 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
-	words := strings.Fields(message)
-	for index := 0; index < len(words)-1; index++ {
-		if strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") {
-			words[index] = "authorization"
-			words[index+1] = "[REDACTED]"
-		}
-	}
-	return strings.Join(words, " ")
 }
 
 func sendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event zeroruntime.StreamEvent) {
@@ -266,6 +331,12 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		Model:    provider.model,
 		Messages: messages,
 		Stream:   true,
+		// Request the terminal usage chunk; OpenAI omits it on streams otherwise,
+		// which silently zeroes token accounting.
+		StreamOptions: &streamOptions{IncludeUsage: true},
+	}
+	if provider.maxTokens > 0 {
+		mapped.MaxCompletionTokens = provider.maxTokens
 	}
 	if len(request.Tools) > 0 {
 		mapped.Tools = make([]toolDefinition, 0, len(request.Tools))

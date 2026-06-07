@@ -35,9 +35,28 @@ const (
 	StreamEventToolCallStart StreamEventType = "tool-call-start"
 	StreamEventToolCallDelta StreamEventType = "tool-call-delta"
 	StreamEventToolCallEnd   StreamEventType = "tool-call-end"
-	StreamEventUsage         StreamEventType = "usage"
-	StreamEventDone          StreamEventType = "done"
-	StreamEventError         StreamEventType = "error"
+	// StreamEventToolCallDropped signals the model attempted a tool call that
+	// was malformed (no usable name/id) and could not be dispatched. The agent
+	// uses this to ask the model to retry instead of silently ending the turn.
+	StreamEventToolCallDropped StreamEventType = "tool-call-dropped"
+	StreamEventUsage           StreamEventType = "usage"
+	StreamEventDone            StreamEventType = "done"
+	StreamEventError           StreamEventType = "error"
+)
+
+// Normalized terminal finish reasons for responses that did not end normally.
+// Providers map their native stop reasons onto these so consumers can detect a
+// truncated or filtered response regardless of which provider produced it. A
+// normal completion leaves the finish reason empty.
+const (
+	// FinishReasonLength means the response was truncated at the output token
+	// cap (OpenAI finish_reason=="length", Anthropic stop_reason=="max_tokens",
+	// Gemini finishReason=="MAX_TOKENS").
+	FinishReasonLength = "length"
+	// FinishReasonContentFilter means the response was withheld or cut off by a
+	// content/safety filter (OpenAI finish_reason=="content_filter",
+	// Gemini finishReason=="SAFETY").
+	FinishReasonContentFilter = "content_filter"
 )
 
 // ToolCall is a normalized assistant request to run a tool.
@@ -114,6 +133,11 @@ type StreamEvent struct {
 	ArgumentsFragment string
 	Usage             Usage
 	Error             string
+	// FinishReason carries the provider's normalized terminal stop reason when a
+	// response did not end normally (e.g. FinishReasonLength when the output hit
+	// the token cap, or FinishReasonContentFilter when it was filtered). It is
+	// empty for a normal completion. Providers set it on the terminal/done event.
+	FinishReason string
 }
 
 // CompletionRequest groups provider input messages and available tools.
