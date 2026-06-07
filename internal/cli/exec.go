@@ -53,6 +53,12 @@ type execOptions struct {
 	resume                string
 	resumeLatest          bool
 	fork                  string
+	callingSessionID      string
+	callingToolUseID      string
+	tag                   string
+	depth                 int
+	sessionTitle          string
+	initSessionID         string
 	worktree              bool
 	worktreeName          string
 	worktreeDir           string
@@ -159,7 +165,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	agentPrompt := prompt
 	if shouldUseExecSession(options) {
 		preparedSession, err = sessions.PrepareExec(sessions.PrepareExecOptions{
-			Title:        createSessionTitle(prompt),
+			SessionID:    options.initSessionID,
+			Title:        execSessionTitle(options, prompt),
 			Cwd:          workspaceRoot,
 			ModelID:      resolved.Provider.Model,
 			Provider:     runMetadata.Provider,
@@ -202,14 +209,19 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	})
 
 	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
-		MaxTurns:       resolved.MaxTurns,
-		Registry:       registry,
-		PermissionMode: permissionMode,
-		Autonomy:       options.autonomy,
-		Sandbox:        sandboxEngine,
-		EnabledTools:   options.enabledTools,
-		DisabledTools:  options.disabledTools,
-		OnText:         writer.text,
+		MaxTurns:         resolved.MaxTurns,
+		CallingSessionID: options.callingSessionID,
+		CallingToolUseID: options.callingToolUseID,
+		Tag:              options.tag,
+		Depth:            options.depth,
+		SessionTitle:     options.sessionTitle,
+		Registry:         registry,
+		PermissionMode:   permissionMode,
+		Autonomy:         options.autonomy,
+		Sandbox:          sandboxEngine,
+		EnabledTools:     options.enabledTools,
+		DisabledTools:    options.disabledTools,
+		OnText:           writer.text,
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
 			sessionRecorder.append(sessions.EventToolCall, map[string]any{

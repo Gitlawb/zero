@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -41,6 +42,12 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 				"-C, --cwd",
 				"-o, --output-format text|json",
 				"--prompt",
+				"--calling-session-id",
+				"--calling-tool-use-id",
+				"--tag <tag>",
+				"--depth <number>",
+				"--session-title",
+				"--init-session-id",
 				"--skip-permissions-unsafe",
 			} {
 				if !strings.Contains(stdout.String(), want) {
@@ -120,6 +127,104 @@ func TestRunExecMaxTurnsReachesConfigOverrides(t *testing.T) {
 	}
 	if gotMaxTurns != 7 {
 		t.Fatalf("overrides.MaxTurns = %d, want 7", gotMaxTurns)
+	}
+}
+
+func TestParseExecSpecialistMetadataFlags(t *testing.T) {
+	options, help, err := parseExecArgs([]string{
+		"--calling-session-id", "parent_session",
+		"--calling-tool-use-id=toolu_123",
+		"--tag", "specialist",
+		"--depth=2",
+		"--session-title", "Explorer child",
+		"--init-session-id", "child_session",
+		"--output-format", "debug",
+		"inspect the parser",
+	})
+	if err != nil {
+		t.Fatalf("parseExecArgs returned error: %v", err)
+	}
+	if help {
+		t.Fatal("help = true, want false")
+	}
+	if options.callingSessionID != "parent_session" ||
+		options.callingToolUseID != "toolu_123" ||
+		options.tag != "specialist" ||
+		options.depth != 2 ||
+		options.sessionTitle != "Explorer child" ||
+		options.initSessionID != "child_session" {
+		t.Fatalf("metadata flags did not parse correctly: %#v", options)
+	}
+	if options.outputFormat != execOutputStreamJSON {
+		t.Fatalf("outputFormat = %q, want stream-json debug alias", options.outputFormat)
+	}
+	if strings.Join(options.promptParts, " ") != "inspect the parser" {
+		t.Fatalf("promptParts = %#v", options.promptParts)
+	}
+}
+
+func TestParseExecSpecialistMetadataRejectsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "negative depth", args: []string{"--depth=-1", "hello"}, want: "invalid --depth"},
+		{name: "non numeric depth", args: []string{"--depth", "many", "hello"}, want: "invalid --depth"},
+		{name: "empty tag", args: []string{"--tag=", "hello"}, want: "--tag requires a value"},
+		{name: "bad init session", args: []string{"--init-session-id", "../escape", "hello"}, want: "invalid --init-session-id"},
+		{name: "init with resume", args: []string{"--init-session-id", "child", "--resume", "parent", "hello"}, want: "Use --init-session-id only"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseExecArgs(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestRunExecUsesInitSessionIDAndSessionTitle(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--init-session-id", "specialist_child",
+		"--session-title", "Explorer child",
+		"hello",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	session, err := store.Get("specialist_child")
+	if err != nil {
+		t.Fatalf("Get session returned error: %v", err)
+	}
+	if session == nil {
+		t.Fatal("expected initialized session specialist_child")
+	}
+	if session.Title != "Explorer child" {
+		t.Fatalf("session title = %q, want Explorer child", session.Title)
+	}
+	if session.Cwd != cwd {
+		t.Fatalf("session cwd = %q, want %q", session.Cwd, cwd)
 	}
 }
 

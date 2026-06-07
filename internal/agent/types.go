@@ -82,7 +82,14 @@ type PermissionEvent struct {
 }
 
 type Options struct {
-	MaxTurns            int
+	MaxTurns int
+	// Specialist/sub-agent metadata is carried through exec now and consumed by
+	// the specialist runtime in later slices.
+	CallingSessionID    string
+	CallingToolUseID    string
+	Tag                 string
+	Depth               int
+	SessionTitle        string
 	Registry            *tools.Registry
 	PermissionMode      PermissionMode
 	Autonomy            string

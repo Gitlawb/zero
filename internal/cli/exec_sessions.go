@@ -15,7 +15,8 @@ func shouldUseExecSession(options execOptions) bool {
 	return options.outputFormat == execOutputStreamJSON ||
 		options.resume != "" ||
 		options.resumeLatest ||
-		options.fork != ""
+		options.fork != "" ||
+		options.initSessionID != ""
 }
 
 func preflightExecSession(options execOptions) error {
@@ -65,6 +66,13 @@ func createSessionTitle(prompt string) string {
 		return "Zero exec session"
 	}
 	return title
+}
+
+func execSessionTitle(options execOptions, prompt string) string {
+	if title := strings.TrimSpace(options.sessionTitle); title != "" {
+		return title
+	}
+	return createSessionTitle(prompt)
 }
 
 func (recorder *execSessionRecorder) append(eventType sessions.EventType, payload any) {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sessions"
 )
 
 func parseExecArgs(args []string) (execOptions, bool, error) {
@@ -176,6 +178,88 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--fork="):
 			options.fork = strings.TrimSpace(strings.TrimPrefix(arg, "--fork="))
+		case arg == "--calling-session-id":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.callingSessionID = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--calling-session-id="):
+			value, err := requiredInlineFlagValue(arg, "--calling-session-id")
+			if err != nil {
+				return options, false, err
+			}
+			options.callingSessionID = value
+		case arg == "--calling-tool-use-id":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.callingToolUseID = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--calling-tool-use-id="):
+			value, err := requiredInlineFlagValue(arg, "--calling-tool-use-id")
+			if err != nil {
+				return options, false, err
+			}
+			options.callingToolUseID = value
+		case arg == "--tag":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.tag = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--tag="):
+			value, err := requiredInlineFlagValue(arg, "--tag")
+			if err != nil {
+				return options, false, err
+			}
+			options.tag = value
+		case arg == "--depth":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			depth, err := parseExecDepth(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.depth = depth
+			index = next
+		case strings.HasPrefix(arg, "--depth="):
+			depth, err := parseExecDepth(strings.TrimSpace(strings.TrimPrefix(arg, "--depth=")))
+			if err != nil {
+				return options, false, err
+			}
+			options.depth = depth
+		case arg == "--session-title":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.sessionTitle = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--session-title="):
+			value, err := requiredInlineFlagValue(arg, "--session-title")
+			if err != nil {
+				return options, false, err
+			}
+			options.sessionTitle = value
+		case arg == "--init-session-id":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.initSessionID = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--init-session-id="):
+			value, err := requiredInlineFlagValue(arg, "--init-session-id")
+			if err != nil {
+				return options, false, err
+			}
+			options.initSessionID = value
 		case arg == "-w" || arg == "--worktree":
 			options.worktree = true
 			if index+1 < len(args) && !flagValueLooksLikeOption(strings.TrimSpace(args[index+1])) && strings.TrimSpace(args[index+1]) != "" {
@@ -207,11 +291,17 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if (options.resume != "" || options.resumeLatest) && options.fork != "" {
 		return options, false, execUsageError{"Use either --resume or --fork, not both."}
 	}
+	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
+		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}
+	}
 	if options.worktree && options.fork != "" {
 		return options, false, execUsageError{"--fork cannot be used with --worktree. Forked sessions must continue in the source session workspace."}
 	}
 	if options.worktreeDir != "" && !options.worktree {
 		return options, false, execUsageError{"--worktree-dir requires --worktree."}
+	}
+	if options.initSessionID != "" && !sessions.ValidSessionID(options.initSessionID) {
+		return options, false, execUsageError{fmt.Sprintf("invalid --init-session-id %q", options.initSessionID)}
 	}
 	if options.inputFormat == execInputStreamJSON && strings.TrimSpace(strings.Join(options.promptParts, " ")) != "" {
 		return options, false, execUsageError{"Stream-json input does not accept positional prompt text. Pipe JSONL or use --file."}
@@ -220,6 +310,18 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		return options, false, execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
 	}
 	return options, false, nil
+}
+
+func parseExecDepth(value string) (int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, execUsageError{"--depth requires a value"}
+	}
+	depth, err := strconv.Atoi(trimmed)
+	if err != nil || depth < 0 {
+		return 0, execUsageError{fmt.Sprintf("invalid --depth %q. Expected a non-negative integer.", value)}
+	}
+	return depth, nil
 }
 
 func parseExecMaxTurns(value string) (int, error) {
@@ -245,6 +347,14 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 	return next, index + 1, nil
 }
 
+func requiredInlineFlagValue(arg string, flag string) (string, error) {
+	value := strings.TrimSpace(strings.TrimPrefix(arg, flag+"="))
+	if value == "" {
+		return "", execUsageError{fmt.Sprintf("%s requires a value", flag)}
+	}
+	return value, nil
+}
+
 func flagValueLooksLikeOption(value string) bool {
 	if !strings.HasPrefix(value, "-") {
 		return false
@@ -261,7 +371,7 @@ func parseExecOutputFormat(value string) (execOutputFormat, error) {
 		return execOutputText, nil
 	case string(execOutputJSON):
 		return execOutputJSON, nil
-	case string(execOutputStreamJSON):
+	case string(execOutputStreamJSON), "debug":
 		return execOutputStreamJSON, nil
 	default:
 		return "", execUsageError{fmt.Sprintf("invalid output format %q. Expected text, json, or stream-json.", value)}

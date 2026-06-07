@@ -412,9 +412,16 @@ Flags:
                                     Select prompt input format
   -o, --output-format text|json|stream-json
                                     Select text, JSON, or schema-versioned JSONL output
+                                    ("debug" is accepted as a stream-json alias)
       --prompt <prompt>              Provide prompt text as a flag
       --resume [id]                  Resume a session; omit id to use the latest
       --fork <id>                    Fork an existing session into a new session
+      --calling-session-id <id>      Parent session id for specialist child runs
+      --calling-tool-use-id <id>     Parent tool-call id for specialist child runs
+      --tag <tag>                    Attach runtime tag metadata to the exec run
+      --depth <number>               Set specialist nesting depth metadata
+      --session-title <text>         Set the created session title
+      --init-session-id <id>         Create a new exec session with this id
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
 `)
 	return err
