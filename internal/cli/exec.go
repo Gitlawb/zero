@@ -103,6 +103,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	if shouldRegisterExecSpecialistTools(options) {
+		if err := registerSpecialistTools(registry, workspaceRoot); err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
+		}
+	}
 	permissionMode, err := resolveExecPermissionMode(options)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -166,16 +171,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	agentPrompt := prompt
 	if shouldUseExecSession(options) {
 		preparedSession, err = sessions.PrepareExec(sessions.PrepareExecOptions{
-			SessionID:    options.initSessionID,
-			Title:        sessionTitle,
-			Cwd:          workspaceRoot,
-			ModelID:      resolved.Provider.Model,
-			Provider:     runMetadata.Provider,
-			Tag:          options.tag,
-			Depth:        options.depth,
-			Resume:       options.resume,
-			ResumeLatest: options.resumeLatest,
-			Fork:         options.fork,
+			SessionID:        options.initSessionID,
+			Title:            sessionTitle,
+			Cwd:              workspaceRoot,
+			ModelID:          resolved.Provider.Model,
+			Provider:         runMetadata.Provider,
+			Tag:              options.tag,
+			Depth:            options.depth,
+			CallingSessionID: options.callingSessionID,
+			CallingToolUseID: options.callingToolUseID,
+			AgentName:        specialistAgentName(options.sessionTitle),
+			TaskID:           options.initSessionID,
+			Resume:           options.resume,
+			ResumeLatest:     options.resumeLatest,
+			Fork:             options.fork,
 		})
 		if err != nil {
 			return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -213,11 +222,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 
 	result, err := agent.Run(context.Background(), agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
+		SessionID:        preparedSession.Session.SessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,
 		Tag:              options.tag,
 		Depth:            options.depth,
 		SessionTitle:     sessionTitle,
+		Model:            resolved.Provider.Model,
+		ReasoningEffort:  options.reasoningEffort,
+		Cwd:              workspaceRoot,
 		Registry:         registry,
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,

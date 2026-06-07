@@ -1,15 +1,21 @@
 package specialist
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 const (
@@ -17,13 +23,21 @@ const (
 	promptFileThresholdBytes = 4 * 1024
 )
 
+const SessionTagSpecialist = sessionTagSpecialist
+
 type NewSessionIDFunc func() (string, error)
 type WritePromptFileFunc func(prompt string) (string, error)
+type LoadFunc func(LoadOptions) (LoadResult, error)
+type RunChildFunc func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error)
 
 type Executor struct {
 	NewSessionID      NewSessionIDFunc
 	WritePromptFile   WritePromptFileFunc
 	PromptFileMaxSize int
+	Load              LoadFunc
+	RunChild          RunChildFunc
+	BinaryPath        string
+	Paths             Paths
 }
 
 type BuildArgsInput struct {
@@ -35,12 +49,15 @@ type BuildArgsInput struct {
 	ParentReasoningEffort string
 	CurrentDepth          int
 	Description           string
+	Cwd                   string
 }
 
 type BuildResumeArgsInput struct {
 	SessionID    string
 	Prompt       string
 	CurrentDepth int
+	Manifest     Manifest
+	Cwd          string
 }
 
 type BuildArgsResult struct {
@@ -48,6 +65,49 @@ type BuildArgsResult struct {
 	SessionID string
 	// PromptFile is created for large prompts; callers own cleanup after exec finishes.
 	PromptFile string
+}
+
+type TaskParameters struct {
+	Name        string
+	Prompt      string
+	Description string
+	Resume      string
+}
+
+type TaskRunOptions struct {
+	ToolCallID            string
+	ParentSessionID       string
+	ParentModel           string
+	ParentReasoningEffort string
+	CurrentDepth          int
+	Cwd                   string
+}
+
+type ExecResult struct {
+	Result    tools.Result
+	SessionID string
+}
+
+type ChildRunResult struct {
+	Events   []streamjson.Event
+	Stderr   string
+	ExitCode int
+}
+
+func (executor Executor) Run(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if options.CurrentDepth < 0 {
+		return ExecResult{}, fmt.Errorf("current depth cannot be negative")
+	}
+	if strings.TrimSpace(params.Prompt) == "" {
+		return ExecResult{}, fmt.Errorf("specialist prompt is required")
+	}
+	if strings.TrimSpace(params.Resume) != "" {
+		return executor.runResume(ctx, params, options)
+	}
+	return executor.runFresh(ctx, params, options)
 }
 
 func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error) {
@@ -75,9 +135,14 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	args = append(args, promptArgs...)
 	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
 	args = append(args, "--auto", "high", "--output-format", "stream-json")
-	if len(input.Manifest.ResolvedTools) > 0 {
-		args = append(args, "--enabled-tools", strings.Join(input.Manifest.ResolvedTools, ","))
+	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
+	if err != nil {
+		return BuildArgsResult{}, err
 	}
+	if len(toolAllowlist) == 0 {
+		return BuildArgsResult{}, fmt.Errorf("specialist %q resolved no enabled tools", input.Manifest.Metadata.Name)
+	}
+	args = append(args, "--enabled-tools", strings.Join(toolAllowlist, ","))
 	args = append(args, "--depth", strconv.Itoa(input.CurrentDepth+1), "--tag", sessionTagSpecialist)
 	if parentSessionID := strings.TrimSpace(input.ParentSessionID); parentSessionID != "" {
 		args = append(args, "--calling-session-id", parentSessionID)
@@ -87,6 +152,9 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	}
 	if description := strings.TrimSpace(input.Description); description != "" {
 		args = append(args, "--session-title", strings.TrimSpace(input.Manifest.Metadata.Name)+": "+description)
+	}
+	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
+		args = append(args, "--cwd", cwd)
 	}
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
@@ -112,8 +180,115 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	args := []string{"exec", "--resume", sessionID}
 	args = append(args, promptArgs...)
 	args = append(args, "--auto", "high", "--output-format", "stream-json")
+	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
+	if err != nil {
+		return BuildArgsResult{}, err
+	}
+	if len(toolAllowlist) == 0 {
+		return BuildArgsResult{}, fmt.Errorf("specialist %q resolved no enabled tools", input.Manifest.Metadata.Name)
+	}
+	args = append(args, "--enabled-tools", strings.Join(toolAllowlist, ","))
 	args = append(args, "--depth", strconv.Itoa(input.CurrentDepth+1), "--tag", sessionTagSpecialist)
+	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
+		args = append(args, "--cwd", cwd)
+	}
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
+}
+
+func (executor Executor) runFresh(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
+	manifest, err := executor.loadManifest(params.Name)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	built, err := executor.BuildArgs(BuildArgsInput{
+		Manifest:              manifest,
+		Prompt:                params.Prompt,
+		ParentSessionID:       options.ParentSessionID,
+		ParentToolUseID:       options.ToolCallID,
+		ParentModel:           options.ParentModel,
+		ParentReasoningEffort: options.ParentReasoningEffort,
+		CurrentDepth:          options.CurrentDepth,
+		Description:           params.Description,
+		Cwd:                   options.Cwd,
+	})
+	if err != nil {
+		return ExecResult{}, err
+	}
+	return executor.runBuiltArgs(ctx, built)
+}
+
+func (executor Executor) runResume(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
+	manifest, err := executor.loadManifest(params.Name)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	built, err := executor.BuildResumeArgs(BuildResumeArgsInput{
+		SessionID:    params.Resume,
+		Prompt:       params.Prompt,
+		CurrentDepth: options.CurrentDepth,
+		Manifest:     manifest,
+		Cwd:          options.Cwd,
+	})
+	if err != nil {
+		return ExecResult{}, err
+	}
+	return executor.runBuiltArgs(ctx, built)
+}
+
+func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult) (ExecResult, error) {
+	if built.PromptFile != "" {
+		defer cleanupPromptFile(built.PromptFile)
+	}
+	binaryPath, err := executor.binaryPath()
+	if err != nil {
+		return ExecResult{}, err
+	}
+	run, err := executor.runChild(ctx, binaryPath, built.Args)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	return ExecResult{
+		Result:    BuildFinalResult(run.Events, run.Stderr, run.ExitCode),
+		SessionID: built.SessionID,
+	}, nil
+}
+
+func (executor Executor) loadManifest(name string) (Manifest, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Manifest{}, fmt.Errorf("specialist name is required")
+	}
+	load := executor.Load
+	if load == nil {
+		load = Load
+	}
+	result, err := load(LoadOptions{Paths: executor.Paths})
+	if err != nil {
+		return Manifest{}, err
+	}
+	manifest, ok := Find(result, name)
+	if !ok {
+		return Manifest{}, fmt.Errorf("specialist %q not found", name)
+	}
+	return manifest, nil
+}
+
+func (executor Executor) binaryPath() (string, error) {
+	if path := strings.TrimSpace(executor.BinaryPath); path != "" {
+		return path, nil
+	}
+	path, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve zero executable: %w", err)
+	}
+	return path, nil
+}
+
+func (executor Executor) runChild(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+	if executor.RunChild != nil {
+		return executor.RunChild(ctx, binaryPath, append([]string(nil), args...))
+	}
+	return runChildProcess(ctx, binaryPath, args)
 }
 
 func appendModelArgs(args []string, manifest Manifest, parentModel string, parentReasoningEffort string) []string {
@@ -133,6 +308,13 @@ func appendModelArgs(args []string, manifest Manifest, parentModel string, paren
 		args = append(args, "--reasoning-effort", reasoningEffort)
 	}
 	return args
+}
+
+func resolvedToolAllowlist(manifest Manifest) ([]string, error) {
+	if len(manifest.ResolvedTools) > 0 {
+		return append([]string(nil), manifest.ResolvedTools...), nil
+	}
+	return ResolveTools(manifest.Metadata.Tools)
 }
 
 func (executor Executor) buildPromptArgs(prompt string) ([]string, string, error) {
@@ -181,4 +363,39 @@ func writePromptFile(prompt string) (string, error) {
 		return "", fmt.Errorf("write specialist prompt file: %w", err)
 	}
 	return promptPath, nil
+}
+
+func cleanupPromptFile(promptFile string) {
+	if promptFile == "" {
+		return
+	}
+	dir := filepath.Dir(promptFile)
+	if strings.HasPrefix(filepath.Base(dir), "zero-specialist-") {
+		_ = os.RemoveAll(dir)
+		return
+	}
+	_ = os.Remove(promptFile)
+}
+
+func runChildProcess(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	command := osexec.CommandContext(ctx, binaryPath, args...)
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+
+	exitCode := 0
+	if err := command.Run(); err != nil {
+		var exitErr *osexec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode}, fmt.Errorf("run specialist child: %w", err)
+		}
+	}
+	events, err := ParseStream(bytes.NewReader(stdout.Bytes()))
+	if err != nil {
+		return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode}, err
+	}
+	return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: exitCode}, nil
 }

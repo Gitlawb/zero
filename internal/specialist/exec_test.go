@@ -89,6 +89,24 @@ func TestBuildArgsInheritsParentModelAndReasoning(t *testing.T) {
 	}
 }
 
+func TestBuildArgsDefaultsToReadOnlyToolAllowlist(t *testing.T) {
+	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
+
+	result, err := executor.BuildArgs(BuildArgsInput{
+		Manifest: Manifest{
+			Metadata:     Metadata{Name: "worker", Description: "Works"},
+			SystemPrompt: "Do work.",
+		},
+		Prompt: "Do the thing",
+	})
+	if err != nil {
+		t.Fatalf("BuildArgs returned error: %v", err)
+	}
+	if !containsSequence(result.Args, []string{"--enabled-tools", "glob,grep,list_directory,read_file"}) {
+		t.Fatalf("args missing default read-only allowlist: %#v", result.Args)
+	}
+}
+
 func TestBuildArgsWritesLargePromptFile(t *testing.T) {
 	root := t.TempDir()
 	var writtenPrompt string

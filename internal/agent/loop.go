@@ -166,6 +166,12 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		PermissionMode:    string(permissionMode),
 		Autonomy:          options.Autonomy,
 		Sandbox:           options.Sandbox,
+		ToolCallID:        call.ID,
+		SessionID:         options.SessionID,
+		Model:             options.Model,
+		ReasoningEffort:   options.ReasoningEffort,
+		Depth:             options.Depth,
+		Cwd:               options.Cwd,
 		// Note: we no longer rely on OnSandboxDecision callback for capture here
 		// (it is still supported for other observers and is invoked asynchronously in the registry).
 		// The sandbox decision (if any) is now returned synchronously on the Result for permission event building.
@@ -499,7 +505,7 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 		return false
 	}
 	if permissionMode == PermissionModeAuto {
-		return tool.Safety().Permission == tools.PermissionAllow
+		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
 	return true
 }

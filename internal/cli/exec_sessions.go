@@ -75,6 +75,17 @@ func execSessionTitle(options execOptions, prompt string) string {
 	return createSessionTitle(prompt)
 }
 
+func specialistAgentName(sessionTitle string) string {
+	title := strings.TrimSpace(sessionTitle)
+	if title == "" {
+		return ""
+	}
+	if name, _, ok := strings.Cut(title, ":"); ok {
+		return strings.TrimSpace(name)
+	}
+	return title
+}
+
 func (recorder *execSessionRecorder) append(eventType sessions.EventType, payload any) {
 	if recorder.err != nil || recorder.prepared.Store == nil || recorder.prepared.Session.SessionID == "" {
 		return

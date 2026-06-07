@@ -621,6 +621,7 @@ func assertCoreRegistry(t *testing.T, registry *tools.Registry) {
 	}
 
 	for _, name := range []string{
+		"Task",
 		"read_file",
 		"list_directory",
 		"glob",

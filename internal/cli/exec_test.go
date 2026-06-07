@@ -185,6 +185,36 @@ func TestParseExecSpecialistMetadataRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestRunExecRegistersTaskOnlyForUnsafeTopLevelRuns(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantTask bool
+	}{
+		{name: "default headless", args: []string{"exec", "--list-tools"}, wantTask: false},
+		{name: "unsafe headless", args: []string{"exec", "--auto", "high", "--list-tools"}, wantTask: true},
+		{name: "specialist child", args: []string{"exec", "--auto", "high", "--tag", "specialist", "--list-tools"}, wantTask: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) {
+					return t.TempDir(), nil
+				},
+			})
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+			}
+			hasTask := strings.Contains(stdout.String(), "  Task ")
+			if hasTask != tc.wantTask {
+				t.Fatalf("Task visibility = %v, want %v; output:\n%s", hasTask, tc.wantTask, stdout.String())
+			}
+		})
+	}
+}
+
 func TestRunExecUsesInitSessionIDAndSessionTitle(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
@@ -227,6 +257,61 @@ func TestRunExecUsesInitSessionIDAndSessionTitle(t *testing.T) {
 	}
 	if session.Cwd != cwd {
 		t.Fatalf("session cwd = %q, want %q", session.Cwd, cwd)
+	}
+}
+
+func TestRunExecPersistsCallingSessionChildMetadata(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session", Title: "Parent", Cwd: "/repo", ModelID: "gpt-parent", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--output-format", "stream-json",
+		"--init-session-id", "child_session",
+		"--session-title", "worker: Auth check",
+		"--tag", "specialist",
+		"--depth", "1",
+		"--calling-session-id", parent.SessionID,
+		"--calling-tool-use-id", "toolu_123",
+		"hello",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return t.TempDir(), nil
+		},
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return echoExecProvider{}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	child, err := store.Get("child_session")
+	if err != nil {
+		t.Fatalf("Get child returned error: %v", err)
+	}
+	if child == nil {
+		t.Fatal("expected child session metadata")
+	}
+	if child.SessionKind != sessions.SessionKindChild ||
+		child.ParentSessionID != parent.SessionID ||
+		child.RootSessionID != parent.SessionID ||
+		child.AgentName != "worker" ||
+		child.TaskID != "child_session" ||
+		child.SpawnedFromEventID != "toolu_123" ||
+		child.Tag != "specialist" ||
+		child.Depth != 1 {
+		t.Fatalf("unexpected child metadata: %#v", child)
 	}
 }
 

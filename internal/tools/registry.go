@@ -16,10 +16,20 @@ type RunOptions struct {
 	Autonomy          string
 	Sandbox           *sandbox.Engine
 	OnSandboxDecision func(sandbox.Decision)
+	ToolCallID        string
+	SessionID         string
+	Model             string
+	ReasoningEffort   string
+	Depth             int
+	Cwd               string
 }
 
 type sandboxAwareTool interface {
 	RunWithSandbox(ctx context.Context, args map[string]any, engine *sandbox.Engine) Result
+}
+
+type optionsAwareTool interface {
+	RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result
 }
 
 func NewRegistry() *Registry {
@@ -102,6 +112,14 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	default:
 		res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
 		res.SandboxDecision = sandboxDecision
+		return res
+	}
+
+	if optioned, ok := tool.(optionsAwareTool); ok {
+		res := optioned.RunWithOptions(ctx, args, options)
+		if res.SandboxDecision == nil {
+			res.SandboxDecision = sandboxDecision
+		}
 		return res
 	}
 

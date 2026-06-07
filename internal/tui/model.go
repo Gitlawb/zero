@@ -518,6 +518,10 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		options := m.agentOptions
 		options.Registry = m.registry
 		options.PermissionMode = m.permissionMode
+		options.SessionID = m.activeSession.SessionID
+		options.Model = m.modelName
+		options.ReasoningEffort = string(m.reasoningEffort)
+		options.Cwd = m.cwd
 
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {

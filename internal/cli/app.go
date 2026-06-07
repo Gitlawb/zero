@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -16,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -274,6 +276,9 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	if err := registerSpecialistTools(registry, workspaceRoot); err != nil {
+		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
+	}
 	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, mcp.AutonomyLow)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
@@ -324,6 +329,22 @@ func newCoreRegistry(workspaceRoot string) *tools.Registry {
 		registry.Register(tool)
 	}
 	return registry
+}
+
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) error {
+	paths, err := specialist.DefaultPaths(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	specialist.RegisterTools(registry, specialist.Executor{Paths: paths})
+	return nil
+}
+
+func shouldRegisterExecSpecialistTools(options execOptions) bool {
+	if strings.EqualFold(strings.TrimSpace(options.tag), specialist.SessionTagSpecialist) {
+		return false
+	}
+	return options.skipPermissionsUnsafe || strings.EqualFold(strings.TrimSpace(options.autonomy), "high")
 }
 
 func closeMCPRuntime(stderr io.Writer, runtime mcpToolRuntime) {

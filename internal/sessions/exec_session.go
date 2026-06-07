@@ -23,17 +23,21 @@ func (err ExecError) Error() string {
 }
 
 type PrepareExecOptions struct {
-	Store        *Store
-	SessionID    string
-	Title        string
-	Cwd          string
-	ModelID      string
-	Provider     string
-	Tag          string
-	Depth        int
-	Resume       string
-	ResumeLatest bool
-	Fork         string
+	Store            *Store
+	SessionID        string
+	Title            string
+	Cwd              string
+	ModelID          string
+	Provider         string
+	Tag              string
+	Depth            int
+	CallingSessionID string
+	CallingToolUseID string
+	AgentName        string
+	TaskID           string
+	Resume           string
+	ResumeLatest     bool
+	Fork             string
 }
 
 type PreparedExec struct {
@@ -106,7 +110,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		return PreparedExec{Mode: ModeResume, Session: *session, ContextEvents: contextEvents, Store: store}, nil
 	}
 
-	session, err := store.Create(CreateInput{
+	createInput := CreateInput{
 		SessionID: options.SessionID,
 		Title:     options.Title,
 		Cwd:       options.Cwd,
@@ -114,7 +118,24 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		Provider:  options.Provider,
 		Tag:       options.Tag,
 		Depth:     options.Depth,
-	})
+	}
+	if strings.TrimSpace(options.CallingSessionID) != "" {
+		parentSessionID := strings.TrimSpace(options.CallingSessionID)
+		parent, err := store.Get(parentSessionID)
+		if err != nil {
+			return PreparedExec{}, err
+		}
+		if parent == nil {
+			return PreparedExec{}, ExecError{"Zero parent session not found: " + parentSessionID}
+		}
+		createInput.SessionKind = SessionKindChild
+		createInput.ParentSessionID = parent.SessionID
+		createInput.RootSessionID = firstNonEmpty(parent.RootSessionID, parent.SessionID)
+		createInput.AgentName = strings.TrimSpace(options.AgentName)
+		createInput.TaskID = strings.TrimSpace(firstNonEmpty(options.TaskID, options.SessionID))
+		createInput.SpawnedFromEventID = strings.TrimSpace(options.CallingToolUseID)
+	}
+	session, err := store.Create(createInput)
 	if err != nil {
 		return PreparedExec{}, err
 	}

@@ -85,11 +85,15 @@ type Options struct {
 	MaxTurns int
 	// Specialist/sub-agent metadata is carried through exec now and consumed by
 	// the specialist runtime in later slices.
+	SessionID           string
 	CallingSessionID    string
 	CallingToolUseID    string
 	Tag                 string
 	Depth               int
 	SessionTitle        string
+	Model               string
+	ReasoningEffort     string
+	Cwd                 string
 	Registry            *tools.Registry
 	PermissionMode      PermissionMode
 	Autonomy            string

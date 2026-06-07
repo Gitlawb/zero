@@ -33,6 +33,9 @@ type Safety struct {
 	SideEffect SideEffect
 	Permission Permission
 	Reason     string
+	// AdvertiseInAuto allows selected prompt-gated tools to be visible while
+	// still requiring the normal permission flow before execution.
+	AdvertiseInAuto bool
 }
 
 type Schema struct {
@@ -52,11 +55,11 @@ type PropertySchema struct {
 }
 
 type Result struct {
-	Status            Status
-	Output            string
-	Truncated         bool
-	Meta              map[string]string
-	SandboxDecision   *sandbox.Decision `json:"-"`
+	Status          Status
+	Output          string
+	Truncated       bool
+	Meta            map[string]string
+	SandboxDecision *sandbox.Decision `json:"-"`
 }
 
 type Tool interface {
