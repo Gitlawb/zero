@@ -444,7 +444,7 @@ func TestRunExecRejectsInvalidOutputFormatBeforeRuntime(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("expected empty stdout before runtime, got %q", stdout.String())
 	}
-	if got := stderr.String(); !strings.Contains(got, `invalid output format "yaml"`) {
+	if got := stderr.String(); !strings.Contains(got, `invalid output format "yaml"`) || !strings.Contains(got, "debug") {
 		t.Fatalf("expected output format validation error, got %q", got)
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "Go agent runtime ready") {

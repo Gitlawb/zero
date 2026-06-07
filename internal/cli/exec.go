@@ -136,6 +136,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
+	sessionTitle := execSessionTitle(options, prompt)
 
 	overrides := config.Overrides{}
 	if options.model != "" {
@@ -166,7 +167,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if shouldUseExecSession(options) {
 		preparedSession, err = sessions.PrepareExec(sessions.PrepareExecOptions{
 			SessionID:    options.initSessionID,
-			Title:        execSessionTitle(options, prompt),
+			Title:        sessionTitle,
 			Cwd:          workspaceRoot,
 			ModelID:      resolved.Provider.Model,
 			Provider:     runMetadata.Provider,
@@ -214,7 +215,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		CallingToolUseID: options.callingToolUseID,
 		Tag:              options.tag,
 		Depth:            options.depth,
-		SessionTitle:     options.sessionTitle,
+		SessionTitle:     sessionTitle,
 		Registry:         registry,
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,

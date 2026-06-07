@@ -374,7 +374,7 @@ func parseExecOutputFormat(value string) (execOutputFormat, error) {
 	case string(execOutputStreamJSON), "debug":
 		return execOutputStreamJSON, nil
 	default:
-		return "", execUsageError{fmt.Sprintf("invalid output format %q. Expected text, json, or stream-json.", value)}
+		return "", execUsageError{fmt.Sprintf("invalid output format %q. Expected text, json, stream-json, or debug.", value)}
 	}
 }
 
