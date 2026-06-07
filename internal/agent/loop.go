@@ -86,6 +86,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			Tools:    toolDefinitions(registry, permissionMode, options),
 		}
 
+		// Report the per-category context budget for this turn so a surface can
+		// show utilization. Opt-in: a no-op when OnContext is unset.
+		if options.OnContext != nil {
+			options.OnContext(MeasureContext(messages, request.Tools, options.ContextWindow))
+		}
+
 		stream, err := provider.StreamCompletion(ctx, request)
 		if err != nil {
 			// REACTIVE compaction: a context-limit failure on the call itself

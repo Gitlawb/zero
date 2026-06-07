@@ -137,6 +137,10 @@ type Options struct {
 	OnAskUser              func(context.Context, AskUserRequest) (AskUserResponse, error)
 	OnToolResult           func(ToolResult)
 	OnUsage                func(Usage)
+	// OnContext, when set, is called once per turn with the per-category context
+	// budget of the request about to be sent, so a surface (TUI/CLI) can show
+	// context utilization. Opt-in like the other callbacks; nil is a no-op.
+	OnContext func(ContextBreakdown)
 }
 
 type Result struct {
