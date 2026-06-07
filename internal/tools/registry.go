@@ -163,7 +163,10 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 		NewListDirectoryTool(workspaceRoot),
 		NewGlobTool(workspaceRoot),
 		NewGrepTool(workspaceRoot),
-		NewAskUserTool(),
+		// NOTE: ask_user (NewAskUserTool) is intentionally NOT registered in core
+		// yet. It needs the agent loop's interactive intercept (OnAskUser); without
+		// it the tool only returns the non-interactive fallback. The agent module
+		// registers it in core when that intercept path lands.
 	}
 }
 

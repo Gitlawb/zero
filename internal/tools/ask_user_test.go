@@ -88,17 +88,9 @@ func TestAskUserToolRunRejectsMissingQuestions(t *testing.T) {
 	}
 }
 
-func TestAskUserToolIsRegisteredInReadOnlyCore(t *testing.T) {
-	found := false
-	for _, tool := range CoreReadOnlyTools(t.TempDir()) {
-		if tool.Name() == "ask_user" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("expected ask_user to be part of the core read-only tool set")
-	}
-}
+// NOTE: ask_user is intentionally NOT in CoreReadOnlyTools yet — it needs the
+// agent loop's interactive intercept (OnAskUser) to function. The agent module
+// registers it in core and wires the intercept together, with its own test.
 
 func TestParseAskUserQuestionsLenientOptions(t *testing.T) {
 	// minimax-style: options as array of objects with a label field.

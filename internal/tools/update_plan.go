@@ -33,24 +33,14 @@ func NewUpdatePlanTool() *updatePlanTool {
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
+					// The item structure (content/status/id) is described textually
+					// above. A structured nested-object Items schema is deferred until
+					// the agent's PropertySchema serializer (propertyToRuntimeMap)
+					// passes nested Properties/Required through to providers; until then
+					// a nested schema here would be silently dropped, so keep it flat.
 					"plan": {
 						Type:        "array",
-						Description: "Ordered list of plan items, replacing any previous plan.",
-						Items: &PropertySchema{
-							Type: "object",
-							Properties: map[string]PropertySchema{
-								"content": {Type: "string", Description: "What this step does."},
-								"status": {
-									Type:        "string",
-									Description: "Step status (defaults to pending).",
-									Enum:        []string{"pending", "in_progress", "completed", "failed"},
-									Default:     "pending",
-								},
-								"notes": {Type: "string", Description: "Optional notes for this step."},
-								"id":    {Type: "string", Description: "Optional stable id; auto-numbered from position when omitted."},
-							},
-							Required: []string{"content"},
-						},
+						Description: "Ordered list of plan items, replacing any previous plan. Each item is an object with a required `content` string, an optional `status` (pending|in_progress|completed|failed, defaults to pending), optional `notes`, and an optional `id` (auto-numbered from position when omitted).",
 					},
 				},
 				Required:             []string{"plan"},

@@ -170,19 +170,22 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 // mirroring resolveWorkspaceTargetPath / read_file confinement. resolvedRoot must
 // already be EvalSymlinks-resolved so the Rel result is "../"-free for in-root
 // files even when the root lives under a symlink.
-func confineGrepFile(resolvedRoot string, path string) (string, bool) {
+func confineGrepFile(resolvedRoot string, path string) (string, string, bool) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	relative, err := filepath.Rel(resolvedRoot, resolved)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", false
+		return "", "", false
 	}
-	return filepath.ToSlash(relative), true
+	// Return the symlink-resolved absolute path too: callers must read THAT (not
+	// the unresolved input) so a symlink swap between this check and the read
+	// cannot escape the workspace boundary.
+	return filepath.ToSlash(relative), resolved, true
 }
 
 func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) ([]string, error) {
@@ -192,7 +195,7 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 	}
 
 	if !info.IsDir() {
-		relative, ok := confineGrepFile(resolvedRoot, target)
+		relative, _, ok := confineGrepFile(resolvedRoot, target)
 		if !ok {
 			return []string{}, nil
 		}
@@ -218,7 +221,7 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 		}
 		// Confine each candidate through symlinks: a symlink inside the workspace
 		// pointing to a file OUTSIDE the root must be skipped, not searched.
-		relative, ok := confineGrepFile(resolvedRoot, path)
+		relative, _, ok := confineGrepFile(resolvedRoot, path)
 		if !ok {
 			return nil
 		}
@@ -239,11 +242,13 @@ func collectGrepMatches(resolvedRoot string, files []string, compiled *regexp.Re
 	for _, file := range files {
 		// Re-confine at read time (defense-in-depth) AND to compute the clean
 		// workspace-relative path used in output.
-		relative, ok := confineGrepFile(resolvedRoot, file)
+		relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
 		if !ok {
 			continue
 		}
-		content, err := os.ReadFile(file)
+		// Read the symlink-RESOLVED path that confineGrepFile validated, not the
+		// raw candidate, so a symlink swapped in after the check can't escape.
+		content, err := os.ReadFile(resolvedPath)
 		if err != nil {
 			continue
 		}
