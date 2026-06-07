@@ -397,6 +397,12 @@ func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {
 	if session.TaskID != "" {
 		details = append(details, "task="+redact(session.TaskID))
 	}
+	if session.Tag != "" {
+		details = append(details, "tag="+redact(session.Tag))
+	}
+	if session.Depth > 0 {
+		details = append(details, fmt.Sprintf("depth=%d", session.Depth))
+	}
 	if session.ParentSessionID != "" {
 		details = append(details, "parent="+redact(session.ParentSessionID))
 	}

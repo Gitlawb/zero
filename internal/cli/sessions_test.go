@@ -25,6 +25,8 @@ func TestRunSessionsListsLineageAndTree(t *testing.T) {
 	child, err := store.CreateChild(root.SessionID, sessions.ChildInput{
 		SessionID: "child",
 		Title:     "Review child",
+		Tag:       "specialist",
+		Depth:     1,
 		AgentName: "code-review",
 		TaskID:    "task-7",
 	})
@@ -43,7 +45,7 @@ func TestRunSessionsListsLineageAndTree(t *testing.T) {
 		t.Fatalf("sessions list exit = %d, stderr = %q", exitCode, stderr.String())
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "Zero sessions") || !strings.Contains(output, root.SessionID) || !strings.Contains(output, child.SessionID) || !strings.Contains(output, "code-review") {
+	if !strings.Contains(output, "Zero sessions") || !strings.Contains(output, root.SessionID) || !strings.Contains(output, child.SessionID) || !strings.Contains(output, "code-review") || !strings.Contains(output, "tag=specialist") || !strings.Contains(output, "depth=1") {
 		t.Fatalf("sessions list output = %q, want root, child, and agent", output)
 	}
 

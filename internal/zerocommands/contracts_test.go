@@ -163,6 +163,8 @@ func TestSessionSnapshotsPreserveLineageFields(t *testing.T) {
 			Title:           "Child task",
 			ParentSessionID: "session_a",
 			ModelID:         "gpt-4.1",
+			Tag:             "specialist",
+			Depth:           1,
 			EventCount:      3,
 			LastEventType:   sessions.EventPermission,
 			AgentName:       "review",
@@ -187,6 +189,9 @@ func TestSessionSnapshotsPreserveLineageFields(t *testing.T) {
 	}
 	if child.LastEventType != string(sessions.EventPermission) || child.AgentName != "review" || child.TaskID != "task-1" {
 		t.Fatalf("session contract fields were not preserved: %#v", child)
+	}
+	if child.Tag != "specialist" || child.Depth != 1 {
+		t.Fatalf("session specialist metadata was not preserved: %#v", child)
 	}
 }
 

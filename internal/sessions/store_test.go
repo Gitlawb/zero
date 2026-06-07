@@ -22,12 +22,17 @@ func TestStoreCreatesAppendsListsAndReadsEvents(t *testing.T) {
 		Cwd:       "/repo",
 		ModelID:   "gpt-4.1",
 		Provider:  "openai",
+		Tag:       "specialist",
+		Depth:     1,
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
 	if session.EventCount != 0 || session.CreatedAt != "2026-06-04T10:00:00Z" {
 		t.Fatalf("unexpected session metadata: %#v", session)
+	}
+	if session.Tag != "specialist" || session.Depth != 1 {
+		t.Fatalf("session specialist metadata = %#v", session)
 	}
 
 	event, err := store.AppendEvent(session.SessionID, AppendEventInput{
@@ -50,6 +55,9 @@ func TestStoreCreatesAppendsListsAndReadsEvents(t *testing.T) {
 	}
 	if loaded == nil || loaded.EventCount != 1 || loaded.LastEventType != EventMessage {
 		t.Fatalf("metadata was not updated after append: %#v", loaded)
+	}
+	if loaded.Tag != "specialist" || loaded.Depth != 1 {
+		t.Fatalf("loaded specialist metadata = %#v", loaded)
 	}
 
 	events, err := store.ReadEvents(session.SessionID)
@@ -131,6 +139,8 @@ func TestStoreCreatesChildSessionsAndRecordsLineageEvents(t *testing.T) {
 	child, err := store.CreateChild(parent.SessionID, ChildInput{
 		SessionID: "child",
 		Title:     "Review agent",
+		Tag:       "specialist",
+		Depth:     1,
 		AgentName: "code-review",
 		TaskID:    "task-1",
 		Prompt:    "Review the diff",
@@ -146,6 +156,9 @@ func TestStoreCreatesChildSessionsAndRecordsLineageEvents(t *testing.T) {
 	}
 	if child.AgentName != "code-review" || child.TaskID != "task-1" || child.SpawnedFromEventID != "parent:1" || child.SpawnedFromSequence != 1 {
 		t.Fatalf("child agent metadata = %#v", child)
+	}
+	if child.Tag != "specialist" || child.Depth != 1 {
+		t.Fatalf("child specialist metadata = %#v", child)
 	}
 
 	childEvents, err := store.ReadEvents(child.SessionID)
@@ -174,8 +187,18 @@ func TestStoreCreatesChildSessionsAndRecordsLineageEvents(t *testing.T) {
 	if err := json.Unmarshal(parentEvents[1].Payload, &parentPayload); err != nil {
 		t.Fatalf("decode parent payload: %v", err)
 	}
-	if parentPayload["childSessionId"] != child.SessionID || parentPayload["agentName"] != "code-review" {
+	if parentPayload["childSessionId"] != child.SessionID || parentPayload["agentName"] != "code-review" || parentPayload["tag"] != "specialist" || parentPayload["depth"] != float64(1) {
 		t.Fatalf("parent payload = %#v, want child linkage", parentPayload)
+	}
+}
+
+func TestStoreRejectsNegativeSessionDepth(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+
+	_, err := store.Create(CreateInput{SessionID: "bad_depth", Depth: -1})
+
+	if err == nil || !strings.Contains(err.Error(), "invalid zero session depth") {
+		t.Fatalf("expected invalid depth error, got %v", err)
 	}
 }
 
@@ -379,6 +402,31 @@ func TestPrepareExecSessionResolvesResumeAndFork(t *testing.T) {
 	}
 	if forked.Mode != ModeFork || forked.Session.ParentSessionID != "latest" {
 		t.Fatalf("prepared fork = %#v", forked)
+	}
+}
+
+func TestPrepareExecPersistsSpecialistMetadataForNewSession(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T14:30:00Z")})
+
+	prepared, err := PrepareExec(PrepareExecOptions{
+		Store:     store,
+		SessionID: "child_session",
+		Title:     "Explorer child",
+		Tag:       "specialist",
+		Depth:     2,
+	})
+	if err != nil {
+		t.Fatalf("PrepareExec returned error: %v", err)
+	}
+	if prepared.Mode != ModeNew || prepared.Session.Tag != "specialist" || prepared.Session.Depth != 2 {
+		t.Fatalf("prepared specialist metadata = %#v", prepared)
+	}
+	loaded, err := store.Get("child_session")
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if loaded == nil || loaded.Tag != "specialist" || loaded.Depth != 2 {
+		t.Fatalf("loaded specialist metadata = %#v", loaded)
 	}
 }
 

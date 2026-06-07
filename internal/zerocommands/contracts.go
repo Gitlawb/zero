@@ -77,6 +77,8 @@ type SessionSnapshot struct {
 	Cwd                 string `json:"cwd,omitempty"`
 	ModelID             string `json:"modelId,omitempty"`
 	Provider            string `json:"provider,omitempty"`
+	Tag                 string `json:"tag,omitempty"`
+	Depth               int    `json:"depth,omitempty"`
 	ParentSessionID     string `json:"parentSessionId,omitempty"`
 	RootSessionID       string `json:"rootSessionId,omitempty"`
 	AgentName           string `json:"agentName,omitempty"`
@@ -220,6 +222,8 @@ func SessionSnapshotFromMetadata(item sessions.Metadata) SessionSnapshot {
 		Cwd:                 item.Cwd,
 		ModelID:             item.ModelID,
 		Provider:            item.Provider,
+		Tag:                 item.Tag,
+		Depth:               item.Depth,
 		ParentSessionID:     item.ParentSessionID,
 		RootSessionID:       item.RootSessionID,
 		AgentName:           item.AgentName,

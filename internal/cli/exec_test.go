@@ -196,6 +196,8 @@ func TestRunExecUsesInitSessionIDAndSessionTitle(t *testing.T) {
 		"exec",
 		"--init-session-id", "specialist_child",
 		"--session-title", "Explorer child",
+		"--tag", "specialist",
+		"--depth", "1",
 		"hello",
 	}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
@@ -220,8 +222,8 @@ func TestRunExecUsesInitSessionIDAndSessionTitle(t *testing.T) {
 	if session == nil {
 		t.Fatal("expected initialized session specialist_child")
 	}
-	if session.Title != "Explorer child" {
-		t.Fatalf("session title = %q, want Explorer child", session.Title)
+	if session.Title != "Explorer child" || session.Tag != "specialist" || session.Depth != 1 {
+		t.Fatalf("session metadata = %#v, want title/tag/depth", session)
 	}
 	if session.Cwd != cwd {
 		t.Fatalf("session cwd = %q, want %q", session.Cwd, cwd)

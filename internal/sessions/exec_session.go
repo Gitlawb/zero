@@ -29,6 +29,8 @@ type PrepareExecOptions struct {
 	Cwd          string
 	ModelID      string
 	Provider     string
+	Tag          string
+	Depth        int
 	Resume       string
 	ResumeLatest bool
 	Fork         string
@@ -110,6 +112,8 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		Cwd:       options.Cwd,
 		ModelID:   options.ModelID,
 		Provider:  options.Provider,
+		Tag:       options.Tag,
+		Depth:     options.Depth,
 	})
 	if err != nil {
 		return PreparedExec{}, err

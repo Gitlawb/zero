@@ -52,6 +52,8 @@ type Metadata struct {
 	Cwd                 string      `json:"cwd,omitempty"`
 	ModelID             string      `json:"modelId,omitempty"`
 	Provider            string      `json:"provider,omitempty"`
+	Tag                 string      `json:"tag,omitempty"`
+	Depth               int         `json:"depth,omitempty"`
 	ParentSessionID     string      `json:"parentSessionId,omitempty"`
 	RootSessionID       string      `json:"rootSessionId,omitempty"`
 	AgentName           string      `json:"agentName,omitempty"`
@@ -73,6 +75,8 @@ type CreateInput struct {
 	Cwd                 string
 	ModelID             string
 	Provider            string
+	Tag                 string
+	Depth               int
 	ParentSessionID     string
 	RootSessionID       string
 	AgentName           string
@@ -97,6 +101,8 @@ type ChildInput struct {
 	Cwd       string
 	ModelID   string
 	Provider  string
+	Tag       string
+	Depth     int
 	AgentName string
 	TaskID    string
 	Prompt    string
@@ -176,6 +182,9 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	if !ValidSessionID(sessionID) {
 		return Metadata{}, fmt.Errorf("invalid zero session id %q", input.SessionID)
 	}
+	if input.Depth < 0 {
+		return Metadata{}, fmt.Errorf("invalid zero session depth %d", input.Depth)
+	}
 
 	timestamp := store.timestamp()
 	session := Metadata{
@@ -185,6 +194,8 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		Cwd:                 strings.TrimSpace(input.Cwd),
 		ModelID:             strings.TrimSpace(input.ModelID),
 		Provider:            strings.TrimSpace(input.Provider),
+		Tag:                 strings.TrimSpace(input.Tag),
+		Depth:               input.Depth,
 		ParentSessionID:     strings.TrimSpace(input.ParentSessionID),
 		RootSessionID:       strings.TrimSpace(input.RootSessionID),
 		AgentName:           strings.TrimSpace(input.AgentName),

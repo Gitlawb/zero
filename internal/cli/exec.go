@@ -171,6 +171,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			Cwd:          workspaceRoot,
 			ModelID:      resolved.Provider.Model,
 			Provider:     runMetadata.Provider,
+			Tag:          options.tag,
+			Depth:        options.depth,
 			Resume:       options.resume,
 			ResumeLatest: options.resumeLatest,
 			Fork:         options.fork,

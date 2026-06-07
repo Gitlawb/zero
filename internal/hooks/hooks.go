@@ -19,10 +19,12 @@ type ConfigSource string
 type AuditStatus string
 
 const (
-	EventBeforeTool   Event = "beforeTool"
-	EventAfterTool    Event = "afterTool"
-	EventSessionStart Event = "sessionStart"
-	EventSessionEnd   Event = "sessionEnd"
+	EventBeforeTool      Event = "beforeTool"
+	EventAfterTool       Event = "afterTool"
+	EventSessionStart    Event = "sessionStart"
+	EventSessionEnd      Event = "sessionEnd"
+	EventSpecialistStart Event = "specialistStart"
+	EventSpecialistStop  Event = "specialistStop"
 )
 
 const (
@@ -689,7 +691,7 @@ func normalizeDefinition(raw any, field string) (Definition, error) {
 	if err != nil {
 		return Definition{}, err
 	}
-	if matcher != "" && (event == EventSessionStart || event == EventSessionEnd) {
+	if matcher != "" && !eventSupportsMatcher(event) {
 		return Definition{}, manifestError{fieldPath: field + ".matcher", message: "matcher is only supported for beforeTool and afterTool hooks."}
 	}
 	command, err := requiredString(obj, field+".command")
@@ -753,6 +755,10 @@ func matchesHookMatcher(matcher string, toolName string) bool {
 	return cursor <= searchEnd
 }
 
+func eventSupportsMatcher(event Event) bool {
+	return event == EventBeforeTool || event == EventAfterTool
+}
+
 func toDiagnostic(err error, source ConfigSource, path string) Diagnostic {
 	var manifestErr manifestError
 	if errors.As(err, &manifestErr) {
@@ -803,10 +809,10 @@ func parseEvent(raw any, field string) (Event, error) {
 	}
 	event := Event(strings.TrimSpace(text))
 	switch event {
-	case EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd:
+	case EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd, EventSpecialistStart, EventSpecialistStop:
 		return event, nil
 	default:
-		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, or sessionEnd."}
+		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, or specialistStop."}
 	}
 }
 

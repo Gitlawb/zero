@@ -127,30 +127,34 @@ func TestLoadConfigPreservesUserDisabledStateWhenProjectOmitsEnabled(t *testing.
 	}
 }
 
-func TestLoadConfigRejectsMatchersOnSessionHooks(t *testing.T) {
-	dir := t.TempDir()
-	projectConfigPath := filepath.Join(dir, "hooks.json")
-	writeHookJSON(t, projectConfigPath, map[string]any{
-		"hooks": []any{map[string]any{
-			"id":      "zero.session",
-			"event":   "sessionStart",
-			"matcher": "bash",
-			"command": "node",
-		}},
-	})
+func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
+	for _, event := range []string{"sessionStart", "specialistStart"} {
+		t.Run(event, func(t *testing.T) {
+			dir := t.TempDir()
+			projectConfigPath := filepath.Join(dir, "hooks.json")
+			writeHookJSON(t, projectConfigPath, map[string]any{
+				"hooks": []any{map[string]any{
+					"id":      "zero.lifecycle",
+					"event":   event,
+					"matcher": "bash",
+					"command": "node",
+				}},
+			})
 
-	result, err := LoadConfig(LoadOptions{
-		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
-		ProjectConfigPath: projectConfigPath,
-	})
-	if err != nil {
-		t.Fatalf("LoadConfig returned error: %v", err)
-	}
-	if len(result.Config.Hooks) != 0 {
-		t.Fatalf("expected invalid hooks to be skipped: %#v", result.Config.Hooks)
-	}
-	if !hasHookDiagnostic(result.Diagnostics, DiagnosticSchema, "", "hooks.0.matcher") {
-		t.Fatalf("missing matcher diagnostic: %#v", result.Diagnostics)
+			result, err := LoadConfig(LoadOptions{
+				UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+				ProjectConfigPath: projectConfigPath,
+			})
+			if err != nil {
+				t.Fatalf("LoadConfig returned error: %v", err)
+			}
+			if len(result.Config.Hooks) != 0 {
+				t.Fatalf("expected invalid hooks to be skipped: %#v", result.Config.Hooks)
+			}
+			if !hasHookDiagnostic(result.Diagnostics, DiagnosticSchema, "", "hooks.0.matcher") {
+				t.Fatalf("missing matcher diagnostic: %#v", result.Diagnostics)
+			}
+		})
 	}
 }
 
@@ -264,6 +268,42 @@ func TestSelectMatchesEnabledHooksByEventAndWildcard(t *testing.T) {
 	}
 	if got := Select(config, SelectInput{Event: EventBeforeTool, ToolName: "shell_safe_view"}); len(got) != 0 {
 		t.Fatalf("unexpected selection: %#v", got)
+	}
+}
+
+func TestSpecialistHookEventsLoadAndSelect(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{
+			map[string]any{
+				"id":      "zero.specialist-start",
+				"event":   "specialistStart",
+				"command": "node",
+			},
+			map[string]any{
+				"id":      "zero.specialist-stop",
+				"event":   "specialistStop",
+				"command": "node",
+			},
+		},
+	})
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if got := hookIDs(result.Config.Hooks); !reflect.DeepEqual(got, []string{"zero.specialist-start", "zero.specialist-stop"}) {
+		t.Fatalf("hook ids = %#v", got)
+	}
+	if got := hookIDs(Select(result.Config, SelectInput{Event: EventSpecialistStart})); !reflect.DeepEqual(got, []string{"zero.specialist-start"}) {
+		t.Fatalf("specialistStart selection = %#v", got)
+	}
+	if got := hookIDs(Select(result.Config, SelectInput{Event: EventSpecialistStop})); !reflect.DeepEqual(got, []string{"zero.specialist-stop"}) {
+		t.Fatalf("specialistStop selection = %#v", got)
 	}
 }
 
