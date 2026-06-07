@@ -254,8 +254,13 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 	state.closeOpen(ctx, events)
 	if state.hasInputUsage || state.hasOutputUsage {
 		usage, err := zeroruntime.NormalizeUsage(zeroruntime.TokenUsage{
-			InputTokens:  state.inputTokens,
-			OutputTokens: state.outputTokens,
+			// Anthropic reports input_tokens (uncached), cache_read, and
+			// cache_creation SEPARATELY. The runtime models the cached count as a
+			// SUBSET of total input (it clamps cached <= input), so report the full
+			// prompt size as InputTokens and the cache hits as CachedInputTokens.
+			InputTokens:       state.inputTokens + state.cacheReadTokens + state.cacheCreationTokens,
+			CachedInputTokens: state.cacheReadTokens,
+			OutputTokens:      state.outputTokens,
 		})
 		if err == nil {
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
@@ -292,8 +297,20 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		Model:     provider.model,
 		MaxTokens: provider.maxTokens,
 		Messages:  messages,
-		System:    system,
 		Stream:    true,
+	}
+	// Prompt caching: send the (stable, per-run) system prompt as a cacheable text
+	// block so the system instructions + tool definitions are not re-billed on
+	// every turn. The cache_control breakpoint on the last system block covers the
+	// whole system prompt; the breakpoint on the last tool covers all tool defs.
+	// Cache hits show up as cache_read_input_tokens in the usage. Non-caching
+	// providers ignore the field, and Anthropic accepts an empty/omitted system.
+	if strings.TrimSpace(system) != "" {
+		mapped.System = []systemBlock{{
+			Type:         "text",
+			Text:         system,
+			CacheControl: &cacheControl{Type: cacheEphemeral},
+		}}
 	}
 	if len(request.Tools) > 0 {
 		mapped.Tools = make([]anthropicTool, 0, len(request.Tools))
@@ -304,6 +321,7 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 				InputSchema: tool.Parameters,
 			})
 		}
+		mapped.Tools[len(mapped.Tools)-1].CacheControl = &cacheControl{Type: cacheEphemeral}
 	}
 	return mapped, nil
 }
@@ -434,13 +452,15 @@ type toolBlock struct {
 }
 
 type streamState struct {
-	tools          map[int]toolBlock
-	inputTokens    int
-	outputTokens   int
-	hasInputUsage  bool
-	hasOutputUsage bool
-	finishReason   string // normalized terminal stop reason (empty for normal stop)
-	done           bool
+	tools               map[int]toolBlock
+	inputTokens         int
+	outputTokens        int
+	cacheReadTokens     int // prompt-cache hits (cheap, re-billed reads)
+	cacheCreationTokens int // tokens written to the cache this turn
+	hasInputUsage       bool
+	hasOutputUsage      bool
+	finishReason        string // normalized terminal stop reason (empty for normal stop)
+	done                bool
 }
 
 // mapStopReason maps Anthropic's message_delta stop_reason onto the runtime's
@@ -460,6 +480,14 @@ func newStreamState() *streamState {
 func (state *streamState) recordUsage(usage usage) {
 	if usage.InputTokens != 0 {
 		state.inputTokens = usage.InputTokens
+		state.hasInputUsage = true
+	}
+	if usage.CacheReadInputTokens != 0 {
+		state.cacheReadTokens = usage.CacheReadInputTokens
+		state.hasInputUsage = true
+	}
+	if usage.CacheCreationInputTokens != 0 {
+		state.cacheCreationTokens = usage.CacheCreationInputTokens
 		state.hasInputUsage = true
 	}
 	if usage.OutputTokens != 0 {

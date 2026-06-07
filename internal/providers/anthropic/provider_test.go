@@ -83,8 +83,14 @@ func TestStreamCompletionPostsMessagesRequest(t *testing.T) {
 	if gotBody["model"] != "claude-test" || gotBody["stream"] != true || gotBody["max_tokens"] != float64(64_000) {
 		t.Fatalf("unexpected model/stream/max_tokens: %#v", gotBody)
 	}
-	if gotBody["system"] != "You are Zero." {
-		t.Fatalf("system = %#v, want system prompt", gotBody["system"])
+	// Prompt caching: system is sent as a cacheable text block, not a bare string.
+	system := gotBody["system"].([]any)
+	sysBlock := system[0].(map[string]any)
+	if sysBlock["type"] != "text" || sysBlock["text"] != "You are Zero." {
+		t.Fatalf("unexpected system block: %#v", gotBody["system"])
+	}
+	if cc, _ := sysBlock["cache_control"].(map[string]any); cc["type"] != "ephemeral" {
+		t.Fatalf("system block must carry ephemeral cache_control, got %#v", sysBlock["cache_control"])
 	}
 	messages := gotBody["messages"].([]any)
 	if len(messages) != 3 {
@@ -106,8 +112,13 @@ func TestStreamCompletionPostsMessagesRequest(t *testing.T) {
 		t.Fatalf("unexpected tool result: %#v", toolResultBlocks[0])
 	}
 	tools := gotBody["tools"].([]any)
-	if tools[0].(map[string]any)["input_schema"].(map[string]any)["type"] != "object" {
+	lastTool := tools[len(tools)-1].(map[string]any)
+	if lastTool["input_schema"].(map[string]any)["type"] != "object" {
 		t.Fatalf("unexpected tool schema: %#v", tools)
+	}
+	// The last tool carries the cache breakpoint so the whole tool block is cached.
+	if cc, _ := lastTool["cache_control"].(map[string]any); cc["type"] != "ephemeral" {
+		t.Fatalf("last tool must carry ephemeral cache_control, got %#v", lastTool["cache_control"])
 	}
 }
 
@@ -129,6 +140,37 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func TestStreamCompletionReportsCacheTokens(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSEEvent(w, "message_start", `{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":200,"cache_creation_input_tokens":40}}}`)
+		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`)
+		writeSSEEvent(w, "message_delta", `{"type":"message_delta","usage":{"output_tokens":5}}`)
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	})
+
+	var usage *zeroruntime.Usage
+	for _, event := range collectProviderEvents(t, provider) {
+		if event.Type == zeroruntime.StreamEventUsage {
+			u := event.Usage
+			usage = &u
+		}
+	}
+	if usage == nil {
+		t.Fatal("expected a usage event")
+	}
+	// InputTokens is the full prompt (uncached + cache_read + cache_creation);
+	// CachedInputTokens is the cache-hit subset.
+	if usage.CachedInputTokens != 200 {
+		t.Fatalf("CachedInputTokens = %d, want 200", usage.CachedInputTokens)
+	}
+	if usage.InputTokens != 250 {
+		t.Fatalf("InputTokens = %d, want 250 (10 input + 200 cache_read + 40 cache_creation)", usage.InputTokens)
+	}
+	if usage.OutputTokens != 5 {
+		t.Fatalf("OutputTokens = %d, want 5", usage.OutputTokens)
 	}
 }
 

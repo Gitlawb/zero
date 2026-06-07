@@ -4,9 +4,12 @@ type messagesRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
 	Messages  []anthropicMessage `json:"messages"`
-	System    string             `json:"system,omitempty"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
-	Stream    bool               `json:"stream"`
+	// System is either a plain string or a []systemBlock when prompt caching is
+	// enabled (Anthropic accepts both). The block form lets us attach a
+	// cache_control breakpoint to the stable system prompt.
+	System any             `json:"system,omitempty"`
+	Tools  []anthropicTool `json:"tools,omitempty"`
+	Stream bool            `json:"stream"`
 }
 
 type anthropicMessage struct {
@@ -14,10 +17,28 @@ type anthropicMessage struct {
 	Content any    `json:"content"`
 }
 
+// systemBlock is a single text block of the system prompt. A cache_control
+// breakpoint on a block caches everything up to and including it.
+type systemBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+// cacheControl marks a prompt-cache breakpoint. Only "ephemeral" is supported.
+type cacheControl struct {
+	Type string `json:"type"`
+}
+
+const cacheEphemeral = "ephemeral"
+
 type anthropicTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	InputSchema map[string]any `json:"input_schema,omitempty"`
+	// CacheControl on the LAST tool caches the whole (stable) tool-definition
+	// block so it is not re-billed every turn.
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
 
 type streamPayload struct {
@@ -49,8 +70,10 @@ type streamDelta struct {
 }
 
 type usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
 type apiError struct {
