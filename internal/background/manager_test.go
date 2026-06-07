@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestManagerRegistersListsAndKillsTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected output file to exist: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("output file permissions = %v, want 0600", info.Mode().Perm())
 	}
 	if err := manager.SetPID("task_1", 1234); err != nil {
