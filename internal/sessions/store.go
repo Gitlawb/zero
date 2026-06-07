@@ -32,6 +32,7 @@ const (
 	EventProviderUsage      EventType = "provider_usage"
 	EventUsage              EventType = EventProviderUsage
 	EventError              EventType = "error"
+	EventSessionCheckpoint  EventType = "session_checkpoint"
 	EventSessionRewind      EventType = "session_rewind"
 	EventCompaction         EventType = "session_compaction"
 	EventSessionFork        EventType = "session_fork"
@@ -134,9 +135,18 @@ type StoreOptions struct {
 }
 
 type Store struct {
-	RootDir      string
-	now          func() time.Time
-	locksMu      sync.Mutex
+	RootDir string
+	now     func() time.Time
+	locksMu sync.Mutex
+	// sessionLocks holds one in-process mutex per session id. Entries are never
+	// removed: doing so safely would require reference counting (a goroutine
+	// blocked on a mutex must not have it deleted and recreated out from under
+	// it, which would break mutual exclusion). The cost of leaving them is a
+	// single *sync.Mutex per distinct session id touched by this Store's
+	// lifetime, which is small and bounded in practice — the CLI process is
+	// short-lived and the TUI works with a bounded set of sessions. There is no
+	// session-close/delete lifecycle hook to prune against, so unbounded growth
+	// is accepted deliberately rather than risk an unsafe eviction.
 	sessionLocks map[string]*sync.Mutex
 	idCounter    atomic.Uint64
 }
@@ -325,6 +335,13 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 			return Metadata{}, err
 		}
 	}
+	// Copy the parent's content-addressed checkpoint blobs into the fork so the
+	// copied EventSessionCheckpoint events resolve to real blobs and a rewind on
+	// the fork can restore file content (otherwise rewind reads missing blobs
+	// and silently skips the files).
+	if err := store.copyBlobs(parent.SessionID, fork.SessionID); err != nil {
+		return Metadata{}, err
+	}
 	if _, err := store.AppendEvent(fork.SessionID, AppendEventInput{
 		Type: EventSessionFork,
 		Payload: map[string]any{
@@ -351,10 +368,21 @@ func (store *Store) AppendEvent(sessionID string, input AppendEventInput) (Event
 	if strings.TrimSpace(string(input.Type)) == "" {
 		return Event{}, fmt.Errorf("zero session event type is required")
 	}
-	lock := store.sessionLock(sessionID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Event{}, err
+	}
+	defer unlock()
 
+	return store.appendEventLocked(sessionID, input)
+}
+
+// appendEventLocked appends an event WITHOUT acquiring the session lock. The
+// caller MUST already hold store.lockSession(sessionID). It exists so multi-step
+// operations (e.g. ApplyRewind) can append the trailing marker atomically under
+// the single lock they already hold, instead of re-locking (which would deadlock
+// on the non-reentrant in-process mutex).
+func (store *Store) appendEventLocked(sessionID string, input AppendEventInput) (Event, error) {
 	session, err := store.readMetadata(sessionID)
 	if err != nil {
 		return Event{}, err
@@ -446,6 +474,30 @@ func (store *Store) sessionLock(sessionID string) *sync.Mutex {
 	return lock
 }
 
+// lockSession serializes mutations to a session both in-process (the existing
+// per-Store mutex) and across processes (an OS file lock on a per-session
+// .lock file), so a CLI rewind and a TUI sharing the same RootDir cannot
+// interleave writes. It returns an unlock function that releases both locks in
+// reverse order. The OS lock is best-effort: if it cannot be acquired (e.g. an
+// unsupported platform) the in-memory mutex still applies.
+func (store *Store) lockSession(sessionID string) (func(), error) {
+	mu := store.sessionLock(sessionID)
+	mu.Lock()
+	release, err := store.acquireFileLock(sessionID)
+	if err != nil {
+		mu.Unlock()
+		return nil, err
+	}
+	return func() {
+		release()
+		mu.Unlock()
+	}, nil
+}
+
+func (store *Store) lockPath(sessionID string) string {
+	return filepath.Join(store.sessionPath(sessionID), "session.lock")
+}
+
 func (store *Store) sessionPath(sessionID string) string {
 	return filepath.Join(store.RootDir, sessionID)
 }
@@ -476,11 +528,12 @@ func (store *Store) writeMetadata(session Metadata) error {
 		return fmt.Errorf("encode zero session metadata: %w", err)
 	}
 	path := store.metadataPath(session.SessionID)
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp-%d", path, store.idCounter.Add(1))
 	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write zero session metadata: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
 	return nil

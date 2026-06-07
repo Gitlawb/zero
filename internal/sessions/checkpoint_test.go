@@ -1,0 +1,247 @@
+package sessions
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func newCkStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(CreateInput{SessionID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	return store, t.TempDir() // store, workspaceRoot
+}
+
+func decodeCk(t *testing.T, ev Event) CheckpointPayload {
+	t.Helper()
+	var p CheckpointPayload
+	if err := json.Unmarshal(ev.Payload, &p); err != nil {
+		t.Fatalf("decode checkpoint payload: %v", err)
+	}
+	return p
+}
+
+func TestCaptureToolCheckpointWritesBlobAndEvent(t *testing.T) {
+	store, ws := newCkStore(t)
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := store.CaptureToolCheckpoint("s", ws, "edit_file", []string{"a.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Type != EventSessionCheckpoint {
+		t.Fatalf("event type = %s", ev.Type)
+	}
+	p := decodeCk(t, ev)
+	if len(p.Files) != 1 || p.Files[0].Path != "a.txt" || p.Files[0].Blob == "" || p.Files[0].Bytes != 2 {
+		t.Fatalf("unexpected payload: %+v", p)
+	}
+	if _, err := store.readBlob("s", p.Files[0].Blob); err != nil {
+		t.Fatalf("blob not stored: %v", err)
+	}
+}
+
+func TestCaptureDedupsIdenticalContent(t *testing.T) {
+	store, ws := newCkStore(t)
+	_ = os.WriteFile(filepath.Join(ws, "a.txt"), []byte("same"), 0o644)
+	_ = os.WriteFile(filepath.Join(ws, "b.txt"), []byte("same"), 0o644)
+	if _, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"a.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"b.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(store.blobsDir("s"))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 deduped blob, got %d", len(entries))
+	}
+}
+
+func TestCaptureRecordsAbsentForNewFile(t *testing.T) {
+	store, ws := newCkStore(t)
+	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := decodeCk(t, ev)
+	if !p.Files[0].Absent || p.Files[0].Blob != "" {
+		t.Fatalf("expected absent marker, got %+v", p.Files[0])
+	}
+}
+
+func TestCaptureSkipsOversizeFiles(t *testing.T) {
+	t.Setenv("ZERO_CHECKPOINT_MAX_BYTES", "4")
+	store, ws := newCkStore(t)
+	_ = os.WriteFile(filepath.Join(ws, "big.txt"), []byte("123456"), 0o644)
+	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"big.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := decodeCk(t, ev)
+	if !p.Files[0].Skipped || p.Files[0].Blob != "" {
+		t.Fatalf("expected skipped, got %+v", p.Files[0])
+	}
+}
+
+func TestCaptureDisabled(t *testing.T) {
+	t.Setenv("ZERO_CHECKPOINTS", "off")
+	store, ws := newCkStore(t)
+	_ = os.WriteFile(filepath.Join(ws, "a.txt"), []byte("v1"), 0o644)
+	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"a.txt"})
+	if err != nil || ev.Type != "" {
+		t.Fatalf("expected no-op when disabled, got ev=%+v err=%v", ev, err)
+	}
+}
+
+func TestTruncateEvents(t *testing.T) {
+	store, _ := newCkStore(t)
+	var seqs []int
+	for i := 0; i < 3; i++ {
+		ev, err := store.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{"i": i}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqs = append(seqs, ev.Sequence)
+	}
+	if err := store.TruncateEvents("s", seqs[1]); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := store.ReadEvents("s")
+	if len(events) != 2 || events[len(events)-1].Sequence != seqs[1] {
+		t.Fatalf("expected 2 events through seq %d, got %d", seqs[1], len(events))
+	}
+}
+
+func TestRestoreToSequenceRevertsFileContent(t *testing.T) {
+	store, ws := newCkStore(t)
+	target, _ := store.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	path := filepath.Join(ws, "a.txt")
+	mustWriteFile(t, path, "original")
+	mustCapture(t, store, ws, "write_file", "a.txt") // captures "original"
+	mustWriteFile(t, path, "edited1")
+	mustCapture(t, store, ws, "edit_file", "a.txt") // captures "edited1"
+	_ = os.WriteFile(path, []byte("edited2"), 0o644)
+
+	report, err := store.RestoreToSequence("s", ws, target.Sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != "original" {
+		t.Fatalf("restore should yield 'original', got %q", got)
+	}
+	if report.FilesRestored < 1 {
+		t.Fatalf("expected FilesRestored>=1, got %+v", report)
+	}
+}
+
+func TestRestoreDeletesFileThatWasAbsent(t *testing.T) {
+	store, ws := newCkStore(t)
+	target, _ := store.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	path := filepath.Join(ws, "new.txt")
+	mustCapture(t, store, ws, "write_file", "new.txt") // absent before
+	mustWriteFile(t, path, "created")
+
+	report, err := store.RestoreToSequence("s", ws, target.Sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected file deleted on restore, stat err=%v", err)
+	}
+	if report.FilesDeleted < 1 {
+		t.Fatalf("expected FilesDeleted>=1, got %+v", report)
+	}
+}
+
+func TestApplyRewindRestoresAndTruncates(t *testing.T) {
+	store, ws := newCkStore(t)
+	target, _ := store.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	path := filepath.Join(ws, "a.txt")
+	mustWriteFile(t, path, "original")
+	mustCapture(t, store, ws, "write_file", "a.txt")
+	mustWriteFile(t, path, "changed")
+
+	report, err := store.ApplyRewind("s", ws, target.Sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "original" {
+		t.Fatalf("file not restored: %q", got)
+	}
+	events, _ := store.ReadEvents("s")
+	last := events[len(events)-1]
+	if last.Type != EventSessionRewind {
+		t.Fatalf("expected trailing rewind marker, got %s", last.Type)
+	}
+	// kept events through target + the appended rewind marker
+	if events[len(events)-2].Sequence != target.Sequence {
+		t.Fatalf("expected truncation to target seq %d", target.Sequence)
+	}
+	_ = report
+}
+
+func TestRestoreRejectsPathTraversal(t *testing.T) {
+	store, ws := newCkStore(t)
+	target, _ := store.AppendEvent("s", AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	// Hand-craft a tampered checkpoint event with a traversal path.
+	outside := filepath.Join(filepath.Dir(ws), "evil.txt")
+	mustWriteFile(t, outside, "keep me")
+	mustAppend(t, store, AppendEventInput{Type: EventSessionCheckpoint, Payload: CheckpointPayload{
+		Tool:  "write_file",
+		Files: []CheckpointFile{{Path: "../evil.txt", Absent: true}},
+	}})
+	report, err := store.RestoreToSequence("s", ws, target.Sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("restore must NOT delete files outside the workspace: %v", err)
+	}
+	if len(report.Skipped) == 0 {
+		t.Errorf("expected traversal path reported as skipped, got %+v", report)
+	}
+}
+
+func TestTruncateToZeroProducesEmptyFile(t *testing.T) {
+	store, _ := newCkStore(t)
+	mustAppend(t, store, AppendEventInput{Type: EventMessage, Payload: map[string]any{}})
+	if err := store.TruncateEvents("s", 0); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := store.ReadEvents("s")
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events after truncate-to-0, got %d", len(events))
+	}
+}
+
+// mustWriteFile / mustCapture / mustAppend are setup helpers that fail the test
+// immediately on error, so a setup failure is diagnosed at its source instead of
+// surfacing as a confusing downstream assertion.
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func mustCapture(t *testing.T, store *Store, ws, tool, path string) {
+	t.Helper()
+	if _, err := store.CaptureToolCheckpoint("s", ws, tool, []string{path}); err != nil {
+		t.Fatalf("CaptureToolCheckpoint(%s, %s): %v", tool, path, err)
+	}
+}
+
+func mustAppend(t *testing.T, store *Store, input AppendEventInput) Event {
+	t.Helper()
+	ev, err := store.AppendEvent("s", input)
+	if err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	return ev
+}
