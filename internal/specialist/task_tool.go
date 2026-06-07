@@ -42,12 +42,17 @@ func (tool *TaskTool) Parameters() tools.Schema {
 				Type:        "string",
 				Description: "Short label for the child session.",
 			},
+			"run_in_background": {
+				Type:        "boolean",
+				Description: "Run the specialist in the background and return a task_id immediately.",
+				Default:     false,
+			},
 			"resume": {
 				Type:        "string",
 				Description: "Existing specialist session id to resume.",
 			},
 		},
-		Required:             []string{"name", "prompt"},
+		Required:             []string{"prompt"},
 		AdditionalProperties: false,
 	}
 }
@@ -107,13 +112,18 @@ func parseTaskParameters(args map[string]any) (TaskParameters, error) {
 	if err != nil {
 		return TaskParameters{}, err
 	}
-	params := TaskParameters{
-		Name:        strings.TrimSpace(name),
-		Prompt:      strings.TrimSpace(prompt),
-		Description: strings.TrimSpace(description),
-		Resume:      strings.TrimSpace(resume),
+	runInBackground, err := optionalTaskBool(args, "run_in_background")
+	if err != nil {
+		return TaskParameters{}, err
 	}
-	if params.Name == "" {
+	params := TaskParameters{
+		Name:            strings.TrimSpace(name),
+		Prompt:          strings.TrimSpace(prompt),
+		Description:     strings.TrimSpace(description),
+		RunInBackground: runInBackground,
+		Resume:          strings.TrimSpace(resume),
+	}
+	if params.Name == "" && params.Resume == "" {
 		return TaskParameters{}, fmt.Errorf("task requires name")
 	}
 	if params.Prompt == "" {
@@ -135,6 +145,21 @@ func optionalTaskString(args map[string]any, key string) (string, error) {
 		return "", fmt.Errorf("task %s must be a string", key)
 	}
 	return text, nil
+}
+
+func optionalTaskBool(args map[string]any, key string) (bool, error) {
+	if args == nil {
+		return false, nil
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return false, nil
+	}
+	flag, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("task %s must be a boolean", key)
+	}
+	return flag, nil
 }
 
 func taskError(err error) tools.Result {

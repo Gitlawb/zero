@@ -336,8 +336,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) err
 	if err != nil {
 		return err
 	}
-	specialist.RegisterTools(registry, specialist.Executor{Paths: paths})
-	return nil
+	return specialist.RegisterTools(registry, specialist.Executor{Paths: paths})
 }
 
 func shouldRegisterExecSpecialistTools(options execOptions) bool {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/background"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -29,16 +30,21 @@ type NewSessionIDFunc func() (string, error)
 type WritePromptFileFunc func(prompt string) (string, error)
 type LoadFunc func(LoadOptions) (LoadResult, error)
 type RunChildFunc func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error)
+type LaunchBackgroundFunc func(binaryPath string, args []string, outputFile string, onExit func(exitCode int)) (int, error)
+type BackgroundManagerFunc func() (*background.Manager, error)
 
 type Executor struct {
-	NewSessionID      NewSessionIDFunc
-	WritePromptFile   WritePromptFileFunc
-	PromptFileMaxSize int
-	Load              LoadFunc
-	RunChild          RunChildFunc
-	BinaryPath        string
-	Paths             Paths
-	SessionStore      *sessions.Store
+	NewSessionID          NewSessionIDFunc
+	WritePromptFile       WritePromptFileFunc
+	PromptFileMaxSize     int
+	Load                  LoadFunc
+	RunChild              RunChildFunc
+	LaunchBackground      LaunchBackgroundFunc
+	BinaryPath            string
+	Paths                 Paths
+	SessionStore          *sessions.Store
+	BackgroundManager     *background.Manager
+	BackgroundManagerFunc BackgroundManagerFunc
 }
 
 type BuildArgsInput struct {
@@ -69,10 +75,11 @@ type BuildArgsResult struct {
 }
 
 type TaskParameters struct {
-	Name        string
-	Prompt      string
-	Description string
-	Resume      string
+	Name            string
+	Prompt          string
+	Description     string
+	RunInBackground bool
+	Resume          string
 }
 
 type TaskRunOptions struct {
@@ -106,6 +113,9 @@ func (executor Executor) Run(ctx context.Context, params TaskParameters, options
 		return ExecResult{}, fmt.Errorf("specialist prompt is required")
 	}
 	if strings.TrimSpace(params.Resume) != "" {
+		if params.RunInBackground {
+			return ExecResult{}, fmt.Errorf("specialist resume cannot run in background")
+		}
 		return executor.runResume(ctx, params, options)
 	}
 	return executor.runFresh(ctx, params, options)
@@ -215,6 +225,9 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 	if err != nil {
 		return ExecResult{}, err
 	}
+	if params.RunInBackground {
+		return executor.runBackground(ctx, built, manifest, params, options)
+	}
 	return executor.runBuiltArgs(ctx, built)
 }
 
@@ -245,6 +258,90 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		return ExecResult{}, err
 	}
 	return executor.runBuiltArgs(ctx, built)
+}
+
+func (executor Executor) runBackground(ctx context.Context, built BuildArgsResult, manifest Manifest, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
+	manager, err := executor.backgroundManager()
+	if err != nil {
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
+	outputFile, err := manager.Register(background.RegisterInput{
+		TaskID:         built.SessionID,
+		Type:           "specialist",
+		SpecialistName: manifest.Metadata.Name,
+		Description:    params.Description,
+		ParentID:       options.ParentSessionID,
+	})
+	if err != nil {
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
+	binaryPath, err := executor.binaryPath()
+	if err != nil {
+		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
+
+	pid, err := executor.launchBackground(binaryPath, built.Args, outputFile, func(exitCode int) {
+		status := background.StatusCompleted
+		if exitCode != 0 {
+			status = background.StatusError
+		}
+		_ = manager.UpdateStatus(built.SessionID, status, exitCode)
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+	})
+	if err != nil {
+		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
+		if built.PromptFile != "" {
+			cleanupPromptFile(built.PromptFile)
+		}
+		return ExecResult{}, err
+	}
+	if pid > 0 {
+		if err := manager.SetPID(built.SessionID, pid); err != nil {
+			if built.PromptFile != "" {
+				cleanupPromptFile(built.PromptFile)
+			}
+			return ExecResult{}, err
+		}
+	}
+
+	output := fmt.Sprintf(`Task launched in background.
+task_id: %s
+pid: %d
+specialist: %s
+description: %s
+
+Use TaskOutput with task_id "%s" to check progress.
+Use TaskStop with task_id "%s" to stop it.`,
+		built.SessionID,
+		pid,
+		manifest.Metadata.Name,
+		strings.TrimSpace(params.Description),
+		built.SessionID,
+		built.SessionID,
+	)
+	return ExecResult{
+		Result: tools.Result{
+			Status: tools.StatusOK,
+			Output: strings.TrimSpace(output),
+			Meta: map[string]string{
+				"task_id":    built.SessionID,
+				"session_id": built.SessionID,
+			},
+		},
+		SessionID: built.SessionID,
+	}, nil
 }
 
 func (executor Executor) resumeSession(sessionID string) (*sessions.Metadata, error) {
@@ -326,6 +423,23 @@ func (executor Executor) runChild(ctx context.Context, binaryPath string, args [
 		return executor.RunChild(ctx, binaryPath, append([]string(nil), args...))
 	}
 	return runChildProcess(ctx, binaryPath, args)
+}
+
+func (executor Executor) launchBackground(binaryPath string, args []string, outputFile string, onExit func(exitCode int)) (int, error) {
+	if executor.LaunchBackground != nil {
+		return executor.LaunchBackground(binaryPath, append([]string(nil), args...), outputFile, onExit)
+	}
+	return launchBackgroundProcess(binaryPath, args, outputFile, onExit)
+}
+
+func (executor Executor) backgroundManager() (*background.Manager, error) {
+	if executor.BackgroundManager != nil {
+		return executor.BackgroundManager, nil
+	}
+	if executor.BackgroundManagerFunc != nil {
+		return executor.BackgroundManagerFunc()
+	}
+	return background.NewManager("")
 }
 
 func appendModelArgs(args []string, manifest Manifest, parentModel string, parentReasoningEffort string) []string {
@@ -435,4 +549,36 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string) (Chi
 		return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode}, err
 	}
 	return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: exitCode}, nil
+}
+
+func launchBackgroundProcess(binaryPath string, args []string, outputFile string, onExit func(exitCode int)) (int, error) {
+	file, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("open specialist background output: %w", err)
+	}
+	command := osexec.Command(binaryPath, args...)
+	command.Stdout = file
+	command.Stderr = file
+	command.Stdin = nil
+	if err := command.Start(); err != nil {
+		_ = file.Close()
+		return 0, fmt.Errorf("launch specialist background child: %w", err)
+	}
+	pid := command.Process.Pid
+	go func() {
+		exitCode := 0
+		if err := command.Wait(); err != nil {
+			var exitErr *osexec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
+		}
+		_ = file.Close()
+		if onExit != nil {
+			onExit(exitCode)
+		}
+	}()
+	return pid, nil
 }
