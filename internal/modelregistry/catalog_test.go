@@ -146,6 +146,76 @@ func TestDefaultRegistryReasoningAndProviderAssertions(t *testing.T) {
 	}
 }
 
+func TestDefaultRegistryResolvesFuzzyMatchPatterns(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	cases := map[string]string{
+		"sonnet 4.5": "claude-sonnet-4.5",
+		"Sonnet 4.5": "claude-sonnet-4.5",
+		"opus 4.1":   "claude-opus-4.1",
+		"gemini pro": "gemini-2.5-pro",
+	}
+	for input, want := range cases {
+		model, ok := registry.Resolve(input)
+		if !ok || model.ID != want {
+			t.Fatalf("Resolve(%q) = %q/%v, want %q", input, model.ID, ok, want)
+		}
+	}
+}
+
+func TestDefaultRegistryDeprecatedModelsRedirect(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	cases := map[string]string{
+		"gpt-4-turbo":      "gpt-4.1",
+		"claude-haiku-3.5": "claude-haiku-4.5",
+	}
+	for input, want := range cases {
+		model, notice, ok := registry.ResolveWithFallback(input)
+		if !ok {
+			t.Fatalf("ResolveWithFallback(%q) failed", input)
+		}
+		if model.ID != want {
+			t.Fatalf("ResolveWithFallback(%q) = %q, want fallback %q", input, model.ID, want)
+		}
+		if notice == "" {
+			t.Fatalf("ResolveWithFallback(%q) should return a deprecation notice", input)
+		}
+	}
+}
+
+func TestDefaultRegistryReasoningModelsHaveDefaultEffort(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+	for _, id := range []string{"claude-sonnet-4.5", "claude-opus-4.1", "gemini-2.5-pro"} {
+		model, err := registry.Require(id)
+		if err != nil {
+			t.Fatalf("Require(%q) returned error: %v", id, err)
+		}
+		if model.DefaultReasoningEffort == "" {
+			t.Fatalf("reasoning model %q should declare a default reasoning effort", id)
+		}
+		if !reasoningEffortAllowedIn(model.ReasoningEfforts, model.DefaultReasoningEffort) {
+			t.Fatalf("model %q default effort %q is not among supported efforts %v", id, model.DefaultReasoningEffort, model.ReasoningEfforts)
+		}
+	}
+}
+
+func reasoningEffortAllowedIn(efforts []ReasoningEffort, want ReasoningEffort) bool {
+	for _, effort := range efforts {
+		if effort == want {
+			return true
+		}
+	}
+	return false
+}
+
 func containsModelID(models []ModelEntry, id string) bool {
 	for _, model := range models {
 		if model.ID == id {

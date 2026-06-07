@@ -38,7 +38,69 @@ func DefaultModelEntries() []ModelEntry {
 		googleModel("gemini-2.5-flash", "Gemini 2.5 Flash", "gemini-2.5-flash", ModelStatusActive, []string{"google:gemini-2.5-flash", "gemini-flash"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.3, CachedInputPerMillion: 0.03, OutputPerMillion: 2.5}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google Flash model for low-latency coding interactions."),
 		googleModel("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite", "gemini-2.5-flash-lite", ModelStatusActive, []string{"google:gemini-2.5-flash-lite", "gemini-flash-lite"}, ContextLimits{ContextWindow: 1_048_576, MaxOutputTokens: 65_536}, ModelCost{InputPerMillion: 0.1, CachedInputPerMillion: 0.01, OutputPerMillion: 0.4}, []ModelCapability{ModelCapabilityVision, ModelCapabilityJSONMode, ModelCapabilityReasoning, ModelCapabilityLongContext}, standardReasoningEfforts(), "Google low-cost Flash model for background routing and summaries."),
 	}
+	decorateModelDepth(entries)
 	return cloneModelEntries(entries)
+}
+
+// decorateModelDepth layers slice-3 registry-depth metadata (fuzzy match
+// patterns, default reasoning efforts, and deprecation fallbacks) onto the base
+// catalog entries. Kept separate from the constructor helpers so the core
+// catalog stays terse and the depth wiring is easy to audit.
+func decorateModelDepth(entries []ModelEntry) {
+	depth := map[string]struct {
+		defaultEffort ReasoningEffort
+		patterns      []string
+		deprecation   *DeprecationRule
+	}{
+		"claude-sonnet-4.5": {
+			defaultEffort: ReasoningEffortMedium,
+			patterns:      []string{`(?i)^sonnet[^a-z0-9]*4[.\s]?5$`},
+		},
+		"claude-opus-4.1": {
+			defaultEffort: ReasoningEffortHigh,
+			patterns:      []string{`(?i)^opus[^a-z0-9]*4[.\s]?1$`},
+		},
+		"claude-haiku-4.5": {
+			defaultEffort: ReasoningEffortLow,
+			patterns:      []string{`(?i)^haiku[^a-z0-9]*4[.\s]?5$`},
+		},
+		"gemini-2.5-pro": {
+			defaultEffort: ReasoningEffortMedium,
+			patterns:      []string{`(?i)^gemini[^a-z0-9]*pro$`},
+		},
+		"gemini-2.5-flash": {
+			defaultEffort: ReasoningEffortLow,
+		},
+		"gpt-4-turbo": {
+			deprecation: &DeprecationRule{
+				FallbackID: "gpt-4.1",
+				SoftDate:   "2025-04-14",
+				WarningMsg: "gpt-4-turbo is deprecated; using gpt-4.1 instead",
+			},
+		},
+		"claude-haiku-3.5": {
+			deprecation: &DeprecationRule{
+				FallbackID: "claude-haiku-4.5",
+				SoftDate:   "2025-10-01",
+				WarningMsg: "claude-haiku-3.5 is deprecated; using claude-haiku-4.5 instead",
+			},
+		},
+	}
+	for index := range entries {
+		extra, ok := depth[entries[index].ID]
+		if !ok {
+			continue
+		}
+		if extra.defaultEffort != "" {
+			entries[index].DefaultReasoningEffort = extra.defaultEffort
+		}
+		if len(extra.patterns) > 0 {
+			entries[index].MatchPatterns = append(entries[index].MatchPatterns, extra.patterns...)
+		}
+		if extra.deprecation != nil {
+			entries[index].Deprecation = extra.deprecation.Clone()
+		}
+	}
 }
 
 func (registry Registry) List(options ListOptions) []ModelEntry {
@@ -198,6 +260,8 @@ func cloneModelEntry(entry ModelEntry) ModelEntry {
 	entry.ReasoningEfforts = append([]ReasoningEffort{}, entry.ReasoningEfforts...)
 	entry.Capabilities = append([]ModelCapability{}, entry.Capabilities...)
 	entry.Aliases = append([]string{}, entry.Aliases...)
+	entry.MatchPatterns = append([]string{}, entry.MatchPatterns...)
+	entry.Deprecation = entry.Deprecation.Clone()
 	entry.Cost.Tiers = append([]ModelCostTier{}, entry.Cost.Tiers...)
 	entry.Cost.Notes = append([]string{}, entry.Cost.Notes...)
 	return entry
