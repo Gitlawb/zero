@@ -398,10 +398,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.showSplash = false
 		// A request with no questions has nothing to answer — resolve it
-		// immediately so the run isn't stalled waiting on manual input.
+		// immediately so the run isn't stalled waiting on manual input. Mirror the
+		// normal flow: record the (empty) request in the transcript and answer with
+		// an empty slice (not nil) so downstream sees the same Answers shape.
 		if len(msg.request.Questions) == 0 {
+			m.transcript = appendTranscriptRow(m.transcript, askUserTranscriptRow(msg.request))
 			if msg.answer != nil {
-				msg.answer(nil)
+				msg.answer([]string{})
 			}
 			return m, nil
 		}
