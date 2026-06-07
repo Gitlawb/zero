@@ -744,6 +744,48 @@ func quoteJSONString(value string) string {
 	return string(encoded)
 }
 
+func TestRunAppendsConfirmationPolicyToSystemPrompt(t *testing.T) {
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "ok"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	if _, err := Run(context.Background(), "do work", provider, Options{
+		Registry: tools.NewRegistry(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(provider.requests) == 0 {
+		t.Fatal("expected at least one provider request")
+	}
+	system := provider.requests[0].Messages[0]
+	if system.Role != zeroruntime.MessageRoleSystem {
+		t.Fatalf("expected first message to be system, got %s", system.Role)
+	}
+	if !strings.Contains(system.Content, defaultSystemPrompt) {
+		t.Fatalf("system prompt lost base instruction: %q", system.Content)
+	}
+	// Key markers from CONFIRMATION_POLICY.md must be present so the model self-polices.
+	for _, marker := range []string{"Confirmation Modes", "BLOCKED", "ALWAYS CONFIRM"} {
+		if !strings.Contains(system.Content, marker) {
+			t.Fatalf("system prompt missing confirmation policy marker %q", marker)
+		}
+	}
+}
+
+func TestSystemPromptEmbedsConfirmationPolicy(t *testing.T) {
+	prompt := buildSystemPrompt()
+	if !strings.HasPrefix(prompt, defaultSystemPrompt) {
+		t.Fatalf("system prompt should start with the base instruction, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Confirmation Modes") {
+		t.Fatalf("embedded confirmation policy missing from system prompt")
+	}
+}
+
 func assertMessage(t *testing.T, message zeroruntime.Message, role zeroruntime.MessageRole, contentContains string) {
 	t.Helper()
 
@@ -763,5 +805,246 @@ func writeAgentTestFile(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunRetriesOnDroppedToolCall(t *testing.T) {
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventText, Content: "Let me write the files."},
+				{Type: zeroruntime.StreamEventToolCallDropped},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "All done."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "build it", provider, Options{Registry: tools.NewRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected the loop to retry (2 turns), got %d", len(provider.requests))
+	}
+	if result.FinalAnswer != "All done." {
+		t.Fatalf("expected final answer from retry turn, got %q", result.FinalAnswer)
+	}
+	// The retry turn must carry synthetic feedback to the model.
+	var fedback bool
+	for _, m := range provider.requests[1].Messages {
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(strings.ToLower(m.Content), "tool name") {
+			fedback = true
+		}
+	}
+	if !fedback {
+		t.Fatalf("expected a synthetic tool-error message on the retry turn, messages: %+v", provider.requests[1].Messages)
+	}
+}
+
+func TestRunSurfacesDroppedToolCallAlongsideValidCall(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				// One valid tool call AND a dropped (nameless) call in the same turn.
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventToolCallDropped},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "All done."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "do it", provider, Options{Registry: registry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "All done." {
+		t.Fatalf("expected final answer from retry turn, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected the loop to continue (2 turns), got %d", len(provider.requests))
+	}
+	// The valid tool call must still have executed (a tool result for call-1).
+	var sawToolResult bool
+	for _, m := range provider.requests[1].Messages {
+		if m.Role == zeroruntime.MessageRoleTool && m.ToolCallID == "call-1" {
+			sawToolResult = true
+		}
+	}
+	if !sawToolResult {
+		t.Fatalf("expected the valid tool call to execute, messages: %+v", provider.requests[1].Messages)
+	}
+	// The dropped call must ALSO be surfaced via the malformed-call notice.
+	var sawDroppedNotice bool
+	for _, m := range provider.requests[1].Messages {
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(strings.ToLower(m.Content), "malformed") {
+			sawDroppedNotice = true
+		}
+	}
+	if !sawDroppedNotice {
+		t.Fatalf("expected a malformed-call notice for the dropped call, messages: %+v", provider.requests[1].Messages)
+	}
+}
+
+// TestRunAppendsAbortedPlaceholderForUnexecutedToolCallsOnGuardStop verifies
+// that when a turn carries multiple tool calls and the repeated-failure guard
+// halts the run on a call that is NOT the last, every advertised tool_use still
+// gets a matching tool_result: the executed call gets its real result and the
+// remaining (unexecuted) calls get aborted-placeholder results, so the recorded
+// messages stay structurally valid for a strict provider replay.
+func TestRunAppendsAbortedPlaceholderForUnexecutedToolCallsOnGuardStop(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(alwaysFailingTool{})
+
+	// Three prior single-call failures prime the streak to one below the stop
+	// cap, so the FIRST call of the next multi-call turn is the 4th failure and
+	// trips outcome.Stop.
+	primingTurns := repeatedFlakyTurns(toolFailureStopAt - 1)
+
+	// The halting turn carries TWO tool calls: the first (flaky-stop) trips the
+	// guard before the second (flaky-2) is executed.
+	haltingTurn := []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "flaky-stop", ToolName: "flaky"},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "flaky-stop"},
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "flaky-2", ToolName: "flaky"},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "flaky-2"},
+		{Type: zeroruntime.StreamEventDone},
+	}
+
+	provider := &mockProvider{turns: append(primingTurns, haltingTurn)}
+
+	result, err := Run(context.Background(), "go", provider, Options{Registry: registry, MaxTurns: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalAnswer, "flaky") || !strings.Contains(result.FinalAnswer, "failed") {
+		t.Fatalf("expected repeated-failure stop answer, got %q", result.FinalAnswer)
+	}
+
+	// Both tool calls must have a matching tool_result message.
+	toolResultIDs := map[string]string{}
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			toolResultIDs[message.ToolCallID] = message.Content
+		}
+	}
+	if _, ok := toolResultIDs["flaky-stop"]; !ok {
+		t.Fatalf("expected a tool result for the executed call flaky-stop, messages: %+v", result.Messages)
+	}
+	placeholder, ok := toolResultIDs["flaky-2"]
+	if !ok {
+		t.Fatalf("expected an aborted-placeholder tool result for the unexecuted call flaky-2, messages: %+v", result.Messages)
+	}
+	if !strings.Contains(strings.ToLower(placeholder), "aborted") {
+		t.Fatalf("expected the placeholder result to mark the call as aborted, got %q", placeholder)
+	}
+
+	// Every tool_use in the final assistant message must have a matching result.
+	for _, message := range result.Messages {
+		if message.Role != zeroruntime.MessageRoleAssistant {
+			continue
+		}
+		for _, call := range message.ToolCalls {
+			if _, ok := toolResultIDs[call.ID]; !ok {
+				t.Fatalf("tool_use %q (%s) has no matching tool_result", call.ID, call.Name)
+			}
+		}
+	}
+}
+
+type secretEmittingTool struct{ output string }
+
+func (t secretEmittingTool) Name() string        { return "leak" }
+func (t secretEmittingTool) Description() string { return "emits text for testing" }
+func (t secretEmittingTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (t secretEmittingTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow}
+}
+func (t secretEmittingTool) Run(_ context.Context, _ map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: t.output}
+}
+
+func TestRunScrubsSecretsFromToolOutput(t *testing.T) {
+	secret := "sk-proj-ABCDEFGHIJKLMNOP1234567890"
+	registry := tools.NewRegistry()
+	registry.Register(secretEmittingTool{output: "the token is " + secret + " ok"})
+
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: "leak"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	var captured ToolResult
+	_, err := Run(context.Background(), "go", provider, Options{
+		Registry:     registry,
+		OnToolResult: func(r ToolResult) { captured = r },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(captured.Output, secret) {
+		t.Fatalf("secret leaked into tool result output: %q", captured.Output)
+	}
+	if !captured.Redacted {
+		t.Error("expected Redacted=true when a secret was scrubbed")
+	}
+	if !strings.Contains(strings.ToLower(captured.Output), "redacted") {
+		t.Errorf("expected a redaction reminder, got %q", captured.Output)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("expected a second turn carrying the tool result")
+	}
+	for _, m := range provider.requests[1].Messages {
+		if strings.Contains(m.Content, secret) {
+			t.Fatalf("secret leaked into model message: %q", m.Content)
+		}
+	}
+}
+
+func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(secretEmittingTool{output: "perfectly ordinary output"})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: "leak"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}},
+	}}
+	var captured ToolResult
+	if _, err := Run(context.Background(), "go", provider, Options{Registry: registry, OnToolResult: func(r ToolResult) { captured = r }}); err != nil {
+		t.Fatal(err)
+	}
+	if captured.Redacted {
+		t.Error("clean output should not be flagged Redacted")
+	}
+	if strings.Contains(strings.ToLower(captured.Output), "redacted") {
+		t.Errorf("clean output should not get a reminder, got %q", captured.Output)
 	}
 }

@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -14,6 +16,36 @@ import (
 
 const defaultSystemPrompt = "You are Zero, a terminal coding agent. Help with the current workspace and use tools when needed."
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
+
+// abortedToolResultNotice is the placeholder tool result recorded for a tool
+// call that was advertised by the assistant turn but never executed because the
+// repeated-failure guard halted the run first. It keeps every tool_use paired
+// with a tool_result so the transcript stays valid for a strict provider replay.
+const abortedToolResultNotice = "aborted: run halted by the repeated-failure guard"
+
+// droppedToolCallNotice tells the model a tool call it attempted was malformed
+// (missing a tool name) and dropped before execution, so it re-issues a valid
+// call instead of assuming the call ran. It is surfaced both when a turn yields
+// ONLY a dropped call and when a turn mixes valid calls with a dropped one.
+const droppedToolCallNotice = "Your previous tool call was malformed (it was missing a tool name) and was not executed. " +
+	"Re-issue the tool call with a valid tool name and JSON arguments, or reply with your final answer."
+
+// confirmationPolicy is the de-branded safety policy appended to the system
+// prompt so the model self-polices before risky actions. It mirrors the
+// sandbox's enforced rules but applies model-side judgement first.
+//
+//go:embed confirmation_policy.md
+var confirmationPolicy string
+
+// buildSystemPrompt returns the base instruction with the confirmation policy
+// appended. It is built once per run so every turn shares the same system turn.
+func buildSystemPrompt() string {
+	policy := strings.TrimSpace(confirmationPolicy)
+	if policy == "" {
+		return defaultSystemPrompt
+	}
+	return defaultSystemPrompt + "\n\n" + policy
+}
 
 func Run(ctx context.Context, prompt string, provider Provider, options Options) (Result, error) {
 	if provider == nil {
@@ -35,11 +67,20 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		permissionMode = PermissionModeAuto
 	}
 
-	messages := zeroruntime.SeedMessages(defaultSystemPrompt, prompt)
+	messages := zeroruntime.SeedMessages(buildSystemPrompt(), prompt)
+
+	guards := newGuardState()
+	compactor := newCompactionState(options)
 
 	result := Result{Messages: copyMessages(messages)}
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
+
+		// PROACTIVE compaction: if the history is approaching the model's
+		// context window, summarize the oldest middle before building the
+		// request. A no-op when ContextWindow == 0 (compaction disabled).
+		messages = compactor.maybeCompact(ctx, provider, messages)
+
 		request := zeroruntime.CompletionRequest{
 			Messages: copyMessages(messages),
 			Tools:    toolDefinitions(registry, permissionMode, options),
@@ -47,14 +88,60 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 		stream, err := provider.StreamCompletion(ctx, request)
 		if err != nil {
-			result.Messages = copyMessages(messages)
-			return result, err
+			// REACTIVE compaction: a context-limit failure on the call itself
+			// can be recovered by compacting once and retrying the same turn.
+			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, err.Error()); retried {
+				messages = compacted
+				if retryErr != nil {
+					result.Messages = copyMessages(messages)
+					return result, retryErr
+				}
+				request = zeroruntime.CompletionRequest{
+					Messages: copyMessages(messages),
+					Tools:    toolDefinitions(registry, permissionMode, options),
+				}
+				stream, err = provider.StreamCompletion(ctx, request)
+			}
+			if err != nil {
+				result.Messages = copyMessages(messages)
+				return result, err
+			}
 		}
 
 		collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
 			OnText:  options.OnText,
 			OnUsage: options.OnUsage,
 		})
+		if collected.Error != "" {
+			// REACTIVE compaction: the streamed error may also be a context
+			// limit (some providers surface it mid-stream). Compact and retry
+			// the same turn once before giving up.
+			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, collected.Error); retried {
+				messages = compacted
+				if retryErr != nil {
+					result.Messages = copyMessages(messages)
+					return result, retryErr
+				}
+				retryRequest := zeroruntime.CompletionRequest{
+					Messages: copyMessages(messages),
+					Tools:    toolDefinitions(registry, permissionMode, options),
+				}
+				retryStream, retryStreamErr := provider.StreamCompletion(ctx, retryRequest)
+				if retryStreamErr != nil {
+					result.Messages = copyMessages(messages)
+					return result, retryStreamErr
+				}
+				// Omit OnText on the reactive retry: when the original error
+				// surfaced MID-stream, partial text was already forwarded to the
+				// user. Re-streaming the retried response on top of it would
+				// duplicate output. OnUsage IS kept so token telemetry/budgeting
+				// still counts the successful retry. The retried text is captured
+				// in collected.Text and becomes the turn's assistant message.
+				collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, zeroruntime.CollectOptions{
+					OnUsage: options.OnUsage,
+				})
+			}
+		}
 		if collected.Error != "" {
 			result.Messages = copyMessages(messages)
 			return result, errors.New(collected.Error)
@@ -71,12 +158,47 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		})
 
 		if len(collected.ToolCalls) == 0 {
+			// The model intended a tool call but it was malformed and dropped.
+			// Tell it to retry rather than silently treating text as the answer.
+			// This path is handled before the no-output guard so a dropped-call
+			// turn is never counted as a runaway empty turn.
+			if collected.DroppedToolCalls > 0 {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: droppedToolCallNotice,
+				})
+				continue
+			}
+			// No-output guard: a turn with visible text is a real final answer.
+			// A truly-empty turn (no text, no tool calls, no dropped calls) is
+			// counted toward the runaway cap so we stop before burning maxTurns.
+			if guards.observeTurn(collected) {
+				result.FinalAnswer = noOutputStopAnswer(result.Turns)
+				result.Messages = copyMessages(messages)
+				return result, nil
+			}
+			if strings.TrimSpace(collected.Text) == "" {
+				// Empty-but-under-cap turn: nudge the model to make progress
+				// rather than treating the empty response as a final answer.
+				messages = append(messages, zeroruntime.Message{
+					Role: zeroruntime.MessageRoleUser,
+					Content: "Your previous response had no visible output and no tool calls. " +
+						"Continue the task by using a tool or reply with your final answer.",
+				})
+				continue
+			}
 			result.FinalAnswer = collected.Text
 			result.Messages = copyMessages(messages)
 			return result, nil
 		}
 
-		for _, call := range collected.ToolCalls {
+		// A turn with tool calls is progress: update guard counters before
+		// executing so the empty-turn counter resets and plan-tracking signals
+		// stay current.
+		guards.observeTurn(collected)
+
+		failureHint := ""
+		for index, call := range collected.ToolCalls {
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
 			}
@@ -89,12 +211,72 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Content:    toolResult.Output,
 				ToolCallID: toolResult.ToolCallID,
 			})
+
+			// Repeated-failure guard: if a tool keeps failing the same way, hint
+			// once (with its schema) then halt — so no model loops on a bad call.
+			outcome := guards.observeToolResult(call.Name, toolResult.Status == tools.StatusError, toolResult.Output)
+			if outcome.Stop {
+				// The assistant message advertised EVERY collected tool call, but
+				// the guard halts mid-turn so the calls after this one never run.
+				// Append an aborted placeholder result for each remaining call so
+				// every tool_use has a matching tool_result and the recorded
+				// messages stay valid for a strict provider replay (Anthropic
+				// rejects a tool_use with no answering tool_result).
+				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
+				result.Messages = copyMessages(messages)
+				return result, nil
+			}
+			if outcome.InjectHint && failureHint == "" {
+				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
+			}
+		}
+
+		// A turn can mix valid tool calls with a dropped (nameless) one. The valid
+		// calls executed above; surface the dropped call too so it is never
+		// silently ignored just because the turn also did real work. This is
+		// independent of (and additive to) the failure-hint / plan-reminder nudges.
+		if collected.DroppedToolCalls > 0 {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: droppedToolCallNotice,
+			})
+		}
+
+		// A repeated-failure hint (schema + exact error) takes priority over the
+		// planning reminders — fixing the failing call matters more than plan
+		// hygiene. Both are light, one-shot, user-role nudges.
+		if failureHint != "" {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: failureHint,
+			})
+		} else if reminder := guards.planReminder(result.Turns); reminder != "" {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: reminder,
+			})
 		}
 	}
 
 	result.FinalAnswer = maxTurnsAnswer
 	result.Messages = copyMessages(messages)
 	return result, nil
+}
+
+// toolSchemaJSON renders a tool's parameter schema as readable JSON for the
+// repeated-failure corrective hint, so the model can see exactly what arguments
+// the tool expects. Returns "{}" if the tool or schema is unavailable.
+func toolSchemaJSON(registry *tools.Registry, name string) string {
+	tool, ok := registry.Get(name)
+	if !ok {
+		return "{}"
+	}
+	data, err := json.MarshalIndent(schemaToRuntimeMap(tool.Parameters()), "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCall, permissionMode PermissionMode, options Options) ToolResult {
@@ -116,6 +298,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			Status:     tools.StatusError,
 			Output:     `Error: Tool "` + call.Name + `" is not enabled for this run.`,
 		}
+	}
+
+	// ask_user is intercepted in the loop (like permissions) so the question can
+	// be routed to an interactive front-end instead of blocking inside the tool.
+	// When no front-end is wired up it degrades to the tool's own graceful Run().
+	if call.Name == "ask_user" {
+		return executeAskUser(ctx, registry, call, args, options)
 	}
 
 	tool, toolFound := registry.Get(call.Name)
@@ -172,9 +361,8 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ReasoningEffort:   options.ReasoningEffort,
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
-		// Note: we no longer rely on OnSandboxDecision callback for capture here
-		// (it is still supported for other observers and is invoked asynchronously in the registry).
-		// The sandbox decision (if any) is now returned synchronously on the Result for permission event building.
+		// The sandbox decision (if any) is returned synchronously on the Result and
+		// used here for permission event building.
 	})
 	sandboxDecision := result.SandboxDecision
 	if toolFound && options.OnPermission != nil {
@@ -183,13 +371,107 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			options.OnPermission(event)
 		}
 	}
+	// Secret scrubbing happens at the registry boundary (the single point both
+	// the agent loop and the MCP server pass through), so result.Output is
+	// already redacted here and result.Redacted reflects whether it changed.
+	return ToolResult{
+		ToolCallID:   call.ID,
+		Name:         call.Name,
+		Status:       result.Status,
+		Output:       result.Output,
+		Meta:         result.Meta,
+		Redacted:     result.Redacted,
+		ChangedFiles: result.ChangedFiles,
+		Display:      result.Display,
+	}
+}
+
+// scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for
+// the loop-intercepted paths (ask_user answers, task child final answers) that
+// build a ToolResult.Output directly instead of going through
+// registry.RunWithOptions. RedactString substitutes "[REDACTED]" inline; the
+// returned bool reports whether anything was scrubbed so the caller can set
+// ToolResult.Redacted, keeping these paths consistent with every other tool
+// result the model and transcript see.
+func scrubInterceptedOutput(output string) (string, bool) {
+	scrubbed := redaction.RedactString(output, redaction.Options{})
+	return scrubbed, scrubbed != output
+}
+
+// executeAskUser routes an ask_user call to the interactive front-end via
+// options.OnAskUser, mirroring the async permission flow. If no handler is set,
+// or the handler errors, it falls back to the tool's own graceful result so the
+// loop never blocks forever waiting on a user who isn't there.
+func executeAskUser(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any, options Options) ToolResult {
+	questions, err := tools.ParseAskUserQuestions(args)
+	if err != nil {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: Invalid arguments for ask_user: " + err.Error(),
+		}
+	}
+
+	if options.OnAskUser == nil {
+		return askUserFallbackResult(ctx, registry, call, args)
+	}
+
+	header, _ := args["header"].(string)
+	request := AskUserRequest{
+		ToolCallID: call.ID,
+		Header:     strings.TrimSpace(header),
+		Questions:  toAgentAskUserQuestions(questions),
+	}
+	response, err := options.OnAskUser(ctx, request)
+	if err != nil {
+		return askUserFallbackResult(ctx, registry, call, args)
+	}
+
+	// Scrub the formatted answers through the same redaction boundary the
+	// registry applies to tool output, so a secret in a user's answer never lands
+	// in the transcript unredacted.
+	output, redacted := scrubInterceptedOutput(tools.FormatAskUserAnswers(questions, response.Answers))
 	return ToolResult{
 		ToolCallID: call.ID,
 		Name:       call.Name,
-		Status:     result.Status,
-		Output:     result.Output,
-		Meta:       result.Meta,
+		Status:     tools.StatusOK,
+		Output:     output,
+		Redacted:   redacted,
 	}
+}
+
+// askUserFallbackResult runs the registered ask_user tool (or returns the shared
+// graceful message) so the no-interactive-user path matches the headless path.
+func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call ToolCall, args map[string]any) ToolResult {
+	if _, ok := registry.Get(call.Name); ok {
+		result := registry.Run(ctx, call.Name, args)
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     result.Status,
+			Output:     result.Output,
+			Redacted:   result.Redacted,
+		}
+	}
+	return ToolResult{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Status:     tools.StatusOK,
+		Output:     tools.AskUserNonInteractiveMessage(),
+	}
+}
+
+func toAgentAskUserQuestions(questions []tools.AskUserQuestion) []AskUserQuestion {
+	converted := make([]AskUserQuestion, len(questions))
+	for index, question := range questions {
+		converted[index] = AskUserQuestion{
+			Question:    question.Question,
+			Options:     append([]string{}, question.Options...),
+			MultiSelect: question.MultiSelect,
+		}
+	}
+	return converted
 }
 
 func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options) sandbox.Request {
@@ -500,6 +782,19 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 	if property.Maximum != nil {
 		schema["maximum"] = *property.Maximum
 	}
+	if property.Items != nil {
+		schema["items"] = propertyToRuntimeMap(*property.Items)
+	}
+	if len(property.Properties) > 0 {
+		properties := make(map[string]any, len(property.Properties))
+		for name, nested := range property.Properties {
+			properties[name] = propertyToRuntimeMap(nested)
+		}
+		schema["properties"] = properties
+	}
+	if len(property.Required) > 0 {
+		schema["required"] = append([]string{}, property.Required...)
+	}
 	return schema
 }
 
@@ -511,6 +806,20 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
 	return true
+}
+
+// appendAbortedToolResults adds a placeholder tool-result message for each of
+// the given (unexecuted) tool calls, so every advertised tool_use keeps a
+// matching tool_result when the loop halts a turn before all calls have run.
+func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Message {
+	for _, call := range remaining {
+		messages = append(messages, zeroruntime.Message{
+			Role:       zeroruntime.MessageRoleTool,
+			Content:    abortedToolResultNotice,
+			ToolCallID: call.ID,
+		})
+	}
+	return messages
 }
 
 func copyMessages(messages []Message) []Message {
