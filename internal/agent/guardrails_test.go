@@ -212,7 +212,7 @@ func TestRunDoesNotInjectPlanReminderForTrivialTask(t *testing.T) {
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			toolTurn("call-1", "read_file", `{"path":"notes.txt"}`), // single tool call
-			textTurn("done"),                                        // immediately answers
+			textTurn("done"), // immediately answers
 		},
 	}
 
@@ -332,9 +332,11 @@ func TestRunStalePlanReminderIsOneShotPerInterval(t *testing.T) {
 
 type alwaysFailingTool struct{}
 
-func (alwaysFailingTool) Name() string             { return "flaky" }
-func (alwaysFailingTool) Description() string       { return "always fails for testing" }
-func (alwaysFailingTool) Parameters() tools.Schema  { return tools.Schema{Type: "object", AdditionalProperties: false} }
+func (alwaysFailingTool) Name() string        { return "flaky" }
+func (alwaysFailingTool) Description() string { return "always fails for testing" }
+func (alwaysFailingTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
 func (alwaysFailingTool) Safety() tools.Safety {
 	return tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow}
 }
