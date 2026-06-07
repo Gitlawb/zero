@@ -2,12 +2,33 @@ package providerio
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestSendWithRetryDoesNotReplayTransportErrors(t *testing.T) {
+	var calls int32
+	client := &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, errors.New("connection reset by peer")
+	})}
+
+	_, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
+	if err == nil {
+		t.Fatal("expected a transport error to surface")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("transport error replayed %d times — a non-idempotent POST must not be retried, want 1", got)
+	}
+}
 
 func TestShouldRetryStatus(t *testing.T) {
 	cases := map[int]bool{

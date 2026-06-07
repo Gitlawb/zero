@@ -11,14 +11,16 @@ import (
 
 // Transient-failure retry, shared by every provider.
 //
-// A streaming request can fail before any data arrives — a dropped connection, a
-// hosted gateway returning an intermittent 5xx, or a 429 rate limit. Those are
-// safe to retry because nothing has been streamed yet. SendWithRetry centralizes
-// that policy so all providers behave consistently (previously only the OpenAI
-// provider retried; Anthropic and Gemini surfaced the first failure).
+// SendWithRetry centralizes one retry policy so all providers behave consistently
+// (previously only the OpenAI provider retried; Anthropic and Gemini surfaced the
+// first failure).
 //
-// Only the INITIAL request is retried. Once the response body starts streaming
-// it is never re-issued (a partially consumed stream can't be safely replayed).
+// What is retried: ONLY server responses that say "rejected, try again" — 429
+// (rate limit) and 5xx — because the server explicitly declined the request with
+// no side effect. A transport/network error is NOT retried: a completion POST is
+// non-idempotent and may have reached the server, so replaying it could duplicate
+// (billable) work. Only the INITIAL request is ever in scope; once the response
+// body starts streaming it is never re-issued.
 
 const defaultMaxRetryAttempts = 3
 
@@ -26,11 +28,12 @@ const defaultMaxRetryAttempts = 3
 // stall the agent for minutes.
 const maxBackoff = 30 * time.Second
 
-// SendWithRetry issues an HTTP request with transient-failure retries: network
-// errors and retryable statuses (429 and 5xx) are retried up to maxAttempts,
-// backing off between tries and honoring a server Retry-After header and context
-// cancellation. The request is rebuilt from body each attempt so it is
-// replay-safe; setHeader (if non-nil) sets headers on every attempt.
+// SendWithRetry issues an HTTP request, retrying ONLY retryable server responses
+// (429 and 5xx) up to maxAttempts — backing off between tries and honoring a
+// server Retry-After header and context cancellation. Transport/network errors
+// are returned immediately, never replayed (see the package note). The request
+// is rebuilt from body each attempt; setHeader (if non-nil) sets headers on every
+// attempt.
 //
 // It returns the final *http.Response (which the caller inspects for a non-2xx
 // status, exactly as before) or an error for a network failure / context
@@ -59,9 +62,12 @@ func SendWithRetry(
 
 		response, err := client.Do(request)
 		if err != nil {
-			if attempt < maxAttempts && ctx.Err() == nil && Backoff(ctx, attempt, 0) {
-				continue
-			}
+			// A transport failure on a POST does NOT mean the server didn't receive
+			// it — the request may have arrived and be generating a (billable,
+			// non-idempotent) completion while only the response/connection failed.
+			// Replaying it could duplicate that work, so surface the error instead
+			// of retrying. Only server responses (429/5xx below), where we KNOW the
+			// request was rejected without effect, are safe to retry.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
