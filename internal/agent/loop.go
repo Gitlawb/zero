@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -14,7 +13,6 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-const defaultSystemPrompt = "You are Zero, a terminal coding agent. Help with the current workspace and use tools when needed."
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
 
 // abortedToolResultNotice is the placeholder tool result recorded for a tool
@@ -30,22 +28,8 @@ const abortedToolResultNotice = "aborted: run halted by the repeated-failure gua
 const droppedToolCallNotice = "Your previous tool call was malformed (it was missing a tool name) and was not executed. " +
 	"Re-issue the tool call with a valid tool name and JSON arguments, or reply with your final answer."
 
-// confirmationPolicy is the de-branded safety policy appended to the system
-// prompt so the model self-polices before risky actions. It mirrors the
-// sandbox's enforced rules but applies model-side judgement first.
-//
-//go:embed confirmation_policy.md
-var confirmationPolicy string
-
-// buildSystemPrompt returns the base instruction with the confirmation policy
-// appended. It is built once per run so every turn shares the same system turn.
-func buildSystemPrompt() string {
-	policy := strings.TrimSpace(confirmationPolicy)
-	if policy == "" {
-		return defaultSystemPrompt
-	}
-	return defaultSystemPrompt + "\n\n" + policy
-}
+// The system prompt (core coding-craft instructions + workspace context + safety
+// confirmation policy) is assembled in system_prompt.go via buildSystemPrompt.
 
 func Run(ctx context.Context, prompt string, provider Provider, options Options) (Result, error) {
 	if provider == nil {
@@ -67,7 +51,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		permissionMode = PermissionModeAuto
 	}
 
-	messages := zeroruntime.SeedMessages(buildSystemPrompt(), prompt)
+	messages := zeroruntime.SeedMessages(buildSystemPrompt(options), prompt)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
