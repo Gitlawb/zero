@@ -67,9 +67,9 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	node := requireNode(t)
 	wrapperPath := copyWrapperFixture(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
 	defer cancel()
-	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("wrapper timed out reporting missing native binary: %v; output: %s", ctx.Err(), output)
@@ -98,9 +98,9 @@ func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {
 		t.Fatalf("WriteFile native fixture: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
 	defer cancel()
-	command := exec.CommandContext(ctx, node, wrapperPath, "--version")
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("wrapper timed out launching native binary: %v; output: %s", ctx.Err(), output)
@@ -149,6 +149,22 @@ func requireNode(t *testing.T) string {
 		t.Skip("node is not available")
 	}
 	return node
+}
+
+func nodeWrapperCommand(ctx context.Context, node string, wrapperPath string, args ...string) *exec.Cmd {
+	commandArgs := append([]string{wrapperPath}, args...)
+	command := exec.CommandContext(ctx, node, commandArgs...)
+	// Keep wrapper behavior independent from developer or runner Node settings
+	// such as --inspect-brk, which would block this smoke test.
+	command.Env = append(os.Environ(), "NODE_OPTIONS=")
+	return command
+}
+
+func nodeWrapperTimeout() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 30 * time.Second
+	}
+	return 10 * time.Second
 }
 
 func repoRoot(t *testing.T) string {
