@@ -72,7 +72,18 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 
 			// Defense in depth: never write/delete outside the workspace, even if
 			// a checkpoint event was tampered with (path traversal via "../") or
-			// an in-workspace symlink points outside the root.
+			// an in-workspace symlink points outside the root. The boundary is
+			// re-resolved here, immediately before the mutation, to keep the
+			// check-to-use window small.
+			//
+			// Residual: a symlink-swap TOCTOU remains — a concurrent process with
+			// workspace write access could replace a validated intermediate
+			// directory with a symlink between this check and the
+			// os.Remove/writeFileAtomic below. Fully closing it needs
+			// descriptor-based traversal (openat2 RESOLVE_BENEATH on Linux /
+			// per-component O_NOFOLLOW), which is platform-specific; tracked for
+			// the CLI/TUI rewind-wiring work. The narrow window plus the
+			// workspace-write-access precondition make this low-risk here.
 			abs, ok := resolveWithinWorkspace(workspaceRoot, f.Path)
 			if !ok {
 				report.Skipped = append(report.Skipped, f.Path)

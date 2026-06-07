@@ -76,19 +76,23 @@ func (store *Store) CaptureToolCheckpoint(sessionID, workspaceRoot, tool string,
 	}
 	defer unlock()
 
-	payload, ok := store.SnapshotForCheckpoint(sessionID, workspaceRoot, tool, paths)
+	payload, ok := store.snapshotForCheckpoint(sessionID, workspaceRoot, tool, paths)
 	if !ok {
 		return Event{}, nil
 	}
 	return store.appendEventLocked(sessionID, AppendEventInput{Type: EventSessionCheckpoint, Payload: payload})
 }
 
-// SnapshotForCheckpoint reads and stores the before-mutation blobs for paths and
-// returns the checkpoint payload WITHOUT appending an event. Callers that batch
-// session events (e.g. the TUI) snapshot here — before the mutation runs — then
-// append the EventSessionCheckpoint themselves. Returns ok=false when there is
-// nothing to record (disabled, no paths, or no capturable files).
-func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string, paths []string) (CheckpointPayload, bool) {
+// snapshotForCheckpoint reads and stores the before-mutation blobs for paths and
+// returns the checkpoint payload WITHOUT appending an event. It is intentionally
+// package-private: the blob writes and the referencing EventSessionCheckpoint
+// must be committed atomically under the same session lock, which only its sole
+// caller CaptureToolCheckpoint guarantees. A snapshot-only entry point exposed to
+// external callers would let blobs be written that a concurrent
+// pruneOrphanBlobs/ApplyRewind could delete before the event is recorded.
+// Returns ok=false when there is nothing to record (disabled, no paths, or no
+// capturable files).
+func (store *Store) snapshotForCheckpoint(sessionID, workspaceRoot, tool string, paths []string) (CheckpointPayload, bool) {
 	if !CheckpointsEnabled() || len(paths) == 0 {
 		return CheckpointPayload{}, false
 	}
@@ -96,11 +100,26 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 	files := make([]CheckpointFile, 0, len(paths))
 	for _, rel := range paths {
 		entry := CheckpointFile{Path: rel}
-		abs := filepath.Join(workspaceRoot, rel)
+		// Confine every capture target to the workspace using the SAME guard the
+		// restore path uses (EvalSymlinks-resolved, no "../" escape). A target that
+		// does not resolve inside the workspace is Skipped — never read into a blob,
+		// and never recorded as Absent (which would delete it on rewind).
+		abs, ok := resolveWithinWorkspace(workspaceRoot, rel)
+		if !ok {
+			entry.Skipped = true
+			files = append(files, entry)
+			continue
+		}
 		info, statErr := os.Stat(abs)
 		if statErr != nil {
-			// Treat anything we cannot stat as absent (new file) — restore deletes it.
-			entry.Absent = true
+			if os.IsNotExist(statErr) {
+				// Genuinely new file — restore deletes it.
+				entry.Absent = true
+			} else {
+				// Permission / IO / symlink-loop errors must NOT be rewound as a
+				// delete; record them as skipped so restore leaves the file alone.
+				entry.Skipped = true
+			}
 			files = append(files, entry)
 			continue
 		}

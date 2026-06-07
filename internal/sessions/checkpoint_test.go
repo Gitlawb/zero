@@ -48,15 +48,18 @@ func TestCaptureToolCheckpointWritesBlobAndEvent(t *testing.T) {
 
 func TestCaptureDedupsIdenticalContent(t *testing.T) {
 	store, ws := newCkStore(t)
-	_ = os.WriteFile(filepath.Join(ws, "a.txt"), []byte("same"), 0o644)
-	_ = os.WriteFile(filepath.Join(ws, "b.txt"), []byte("same"), 0o644)
+	mustWriteFile(t, filepath.Join(ws, "a.txt"), "same")
+	mustWriteFile(t, filepath.Join(ws, "b.txt"), "same")
 	if _, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"a.txt"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"b.txt"}); err != nil {
 		t.Fatal(err)
 	}
-	entries, _ := os.ReadDir(store.blobsDir("s"))
+	entries, err := os.ReadDir(store.blobsDir("s"))
+	if err != nil {
+		t.Fatalf("read blobs dir: %v", err)
+	}
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 deduped blob, got %d", len(entries))
 	}
@@ -69,20 +72,49 @@ func TestCaptureRecordsAbsentForNewFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := decodeCk(t, ev)
+	if len(p.Files) != 1 {
+		t.Fatalf("expected 1 file entry, got %+v", p.Files)
+	}
 	if !p.Files[0].Absent || p.Files[0].Blob != "" {
 		t.Fatalf("expected absent marker, got %+v", p.Files[0])
+	}
+}
+
+func TestCaptureRejectsTraversalTargets(t *testing.T) {
+	store, ws := newCkStore(t)
+	// A file outside the workspace must never be read into a blob or marked
+	// Absent (which would delete it on rewind). Regression for capture-side
+	// path-traversal confinement.
+	outside := filepath.Join(filepath.Dir(ws), "secret.txt")
+	mustWriteFile(t, outside, "top secret")
+	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"../secret.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := decodeCk(t, ev)
+	if len(p.Files) != 1 {
+		t.Fatalf("expected 1 file entry, got %+v", p.Files)
+	}
+	if f := p.Files[0]; !f.Skipped || f.Absent || f.Blob != "" {
+		t.Fatalf("traversal target must be skipped (not captured/absent), got %+v", f)
+	}
+	if got, rerr := os.ReadFile(outside); rerr != nil || string(got) != "top secret" {
+		t.Fatalf("outside file must remain untouched: got %q err %v", got, rerr)
 	}
 }
 
 func TestCaptureSkipsOversizeFiles(t *testing.T) {
 	t.Setenv("ZERO_CHECKPOINT_MAX_BYTES", "4")
 	store, ws := newCkStore(t)
-	_ = os.WriteFile(filepath.Join(ws, "big.txt"), []byte("123456"), 0o644)
+	mustWriteFile(t, filepath.Join(ws, "big.txt"), "123456")
 	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"big.txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := decodeCk(t, ev)
+	if len(p.Files) != 1 {
+		t.Fatalf("expected 1 file entry, got %+v", p.Files)
+	}
 	if !p.Files[0].Skipped || p.Files[0].Blob != "" {
 		t.Fatalf("expected skipped, got %+v", p.Files[0])
 	}
@@ -91,7 +123,7 @@ func TestCaptureSkipsOversizeFiles(t *testing.T) {
 func TestCaptureDisabled(t *testing.T) {
 	t.Setenv("ZERO_CHECKPOINTS", "off")
 	store, ws := newCkStore(t)
-	_ = os.WriteFile(filepath.Join(ws, "a.txt"), []byte("v1"), 0o644)
+	mustWriteFile(t, filepath.Join(ws, "a.txt"), "v1")
 	ev, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"a.txt"})
 	if err != nil || ev.Type != "" {
 		t.Fatalf("expected no-op when disabled, got ev=%+v err=%v", ev, err)
@@ -111,7 +143,10 @@ func TestTruncateEvents(t *testing.T) {
 	if err := store.TruncateEvents("s", seqs[1]); err != nil {
 		t.Fatal(err)
 	}
-	events, _ := store.ReadEvents("s")
+	events, err := store.ReadEvents("s")
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
 	if len(events) != 2 || events[len(events)-1].Sequence != seqs[1] {
 		t.Fatalf("expected 2 events through seq %d, got %d", seqs[1], len(events))
 	}
@@ -125,13 +160,16 @@ func TestRestoreToSequenceRevertsFileContent(t *testing.T) {
 	mustCapture(t, store, ws, "write_file", "a.txt") // captures "original"
 	mustWriteFile(t, path, "edited1")
 	mustCapture(t, store, ws, "edit_file", "a.txt") // captures "edited1"
-	_ = os.WriteFile(path, []byte("edited2"), 0o644)
+	mustWriteFile(t, path, "edited2")
 
 	report, err := store.RestoreToSequence("s", ws, target.Sequence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := os.ReadFile(path)
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored file: %v", err)
+	}
 	if string(got) != "original" {
 		t.Fatalf("restore should yield 'original', got %q", got)
 	}
@@ -171,10 +209,20 @@ func TestApplyRewindRestoresAndTruncates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(path); string(got) != "original" {
+	got, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("read restored file: %v", rerr)
+	}
+	if string(got) != "original" {
 		t.Fatalf("file not restored: %q", got)
 	}
-	events, _ := store.ReadEvents("s")
+	events, err := store.ReadEvents("s")
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected >=2 events, got %d", len(events))
+	}
 	last := events[len(events)-1]
 	if last.Type != EventSessionRewind {
 		t.Fatalf("expected trailing rewind marker, got %s", last.Type)
@@ -214,7 +262,10 @@ func TestTruncateToZeroProducesEmptyFile(t *testing.T) {
 	if err := store.TruncateEvents("s", 0); err != nil {
 		t.Fatal(err)
 	}
-	events, _ := store.ReadEvents("s")
+	events, err := store.ReadEvents("s")
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
 	if len(events) != 0 {
 		t.Fatalf("expected 0 events after truncate-to-0, got %d", len(events))
 	}
