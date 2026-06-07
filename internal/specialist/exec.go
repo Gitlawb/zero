@@ -316,7 +316,7 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 		if exitCode != 0 {
 			status = background.StatusError
 		}
-		_ = manager.UpdateStatus(built.SessionID, status, exitCode)
+		_ = manager.MarkExited(built.SessionID, status, exitCode)
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 	})
 	if err != nil {

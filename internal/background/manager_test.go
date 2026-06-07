@@ -177,6 +177,31 @@ func TestManagerKillDoesNotClobberCompletedTask(t *testing.T) {
 	}
 }
 
+func TestManagerMarkExitedDoesNotClobberKilledTask(t *testing.T) {
+	manager, err := NewManagerWithOptions(ManagerOptions{
+		RootDir: t.TempDir(),
+		KillProcess: func(pid int) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "task", Type: "specialist", PID: 42}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := manager.Kill("task"); err != nil {
+		t.Fatalf("Kill returned error: %v", err)
+	}
+	if err := manager.MarkExited("task", StatusError, 1); err != nil {
+		t.Fatalf("MarkExited returned error: %v", err)
+	}
+	task, ok := manager.Get("task")
+	if !ok || task.Status != StatusKilled || task.ExitCode != -1 {
+		t.Fatalf("MarkExited clobbered killed task: %#v", task)
+	}
+}
+
 func TestManagerKillRunningStopsOnlyRunningTasks(t *testing.T) {
 	now := sequenceClock(
 		time.Date(2026, 6, 7, 9, 0, 0, 0, time.UTC),

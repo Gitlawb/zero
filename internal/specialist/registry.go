@@ -10,9 +10,10 @@ func RegisterTools(registry *tools.Registry, executor Executor) (*Runtime, error
 			ManagerFunc: executor.BackgroundManagerFunc,
 		})
 	}
-	executor.BackgroundRuntime = runtime
-	executor.BackgroundManagerFunc = runtime.Manager
-	registry.Register(NewTaskTool(executor))
+	toolExecutor := executor
+	toolExecutor.BackgroundRuntime = runtime
+	toolExecutor.BackgroundManagerFunc = runtime.Manager
+	registry.Register(NewTaskTool(toolExecutor))
 	registry.Register(newOutputToolWithManagerFunc(runtime.Manager))
 	registry.Register(newStopToolWithManagerFunc(runtime.Manager))
 	return runtime, nil
