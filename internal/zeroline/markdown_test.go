@@ -180,8 +180,10 @@ func TestStreamingAssistantStaysPlain(t *testing.T) {
 		Stream: "partial **incomplete",
 	}
 	out := stripANSI(RenderChat(d))
-	// streaming text is shown verbatim (not run through glamour)
-	if !strings.Contains(out, "partial") {
-		t.Errorf("streaming text missing: %q", out)
+	// Streaming text is shown verbatim (not run through glamour): the raw markdown
+	// markers must survive. Glamour would strip/render "**" into a bold span, so
+	// asserting the literal "**incomplete" is preserved proves the verbatim path.
+	if !strings.Contains(out, "partial **incomplete") {
+		t.Errorf("streaming text not verbatim (markdown markers stripped?): %q", out)
 	}
 }

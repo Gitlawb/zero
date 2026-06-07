@@ -285,11 +285,14 @@ func RenderChat(d ChatData) string {
 // number of rendered rows so the overlay can never overflow the frame; a
 // non-positive maxRows suppresses the overlay entirely.
 //
-// While a permission prompt is up the overlay is suppressed: PermLayout (the
-// mouse hit-test) lays the modal out assuming no overlay rows, so showing one
-// here would drift the rendered buttons away from their hitboxes.
+// While a blocking surface is up the overlay is suppressed. For a permission
+// prompt, PermLayout (the mouse hit-test) lays the modal out assuming no overlay
+// rows, so showing one would drift the rendered buttons away from their
+// hitboxes. For an ask_user questionnaire, RenderChat treats it as the focused
+// blocking surface, so overlay rows would consume bodyH and push the question
+// offscreen.
 func (s styles) overlayRegion(d ChatData, w, maxRows int) string {
-	if d.Perm != nil || maxRows <= 0 {
+	if d.Perm != nil || d.AskUser != nil || maxRows <= 0 {
 		return ""
 	}
 	if d.Picker != nil {
@@ -408,6 +411,12 @@ func (g PermGeometry) Hit(x, y int) string {
 const (
 	permModalRows = 8
 	permBtnRow    = 5
+	// permMinBoxWidth is the smallest box width that fits the three buttons on one
+	// row inside the modal frame: 43 button-row cells ("[ a · allow ]" 13 + 2 gap
+	// + "[ y · always ]" 14 + 2 gap + "[ d · deny ]" 12) plus a 1-cell border and
+	// 1-cell padding on each side. Below this the button row overflows the frame
+	// (and can clip at the terminal edge), so PermLayout disables the hitboxes.
+	permMinBoxWidth = 47
 )
 
 func permBoxWidth(w int) int {
@@ -430,6 +439,14 @@ func PermLayout(width, height int) PermGeometry {
 	width = maxi(width, 40)
 	height = maxi(height, 8)
 	bw := permBoxWidth(width)
+	// Too narrow to render the three buttons inside the modal frame: the button
+	// row would overflow the box border and can clip at the terminal edge, so the
+	// rendered buttons no longer reliably match these hitboxes. Disable them (the
+	// keyboard shortcuts still work) — mirrors the vertical-clip guard below.
+	// (A vertically-stacked narrow layout is a future enhancement.)
+	if bw < permMinBoxWidth {
+		return PermGeometry{Active: false}
+	}
 	bodyH := height - 3
 	if bodyH < 1 {
 		bodyH = 1
@@ -818,7 +835,10 @@ func (s styles) renderAssistantPlain(text string, tw int) []string {
 			continue
 		}
 		for _, wl := range wrap(t, tw-9) {
-			out = append(out, "        "+s.fg.Render(wl))
+			// clip the wrapped line too: wrap splits on spaces and does not break a
+			// single word longer than the budget, so a long URL-like token or an
+			// unbroken CJK run would otherwise overflow the frame.
+			out = append(out, "        "+s.fg.Render(clip(wl, tw-9)))
 		}
 	}
 	if len(out) == 0 {
@@ -1079,7 +1099,7 @@ func wrap(text string, w int) []string {
 		switch {
 		case cur == "":
 			cur = word
-		case len(cur)+1+len(word) <= w:
+		case lipgloss.Width(cur)+1+lipgloss.Width(word) <= w:
 			cur += " " + word
 		default:
 			lines = append(lines, cur)

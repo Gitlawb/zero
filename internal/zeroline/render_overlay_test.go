@@ -113,3 +113,50 @@ func TestClipLeavesShortStringsAndZeroWidth(t *testing.T) {
 		t.Errorf("clip(_, 0) = %q, want empty", got)
 	}
 }
+
+func TestWrapBudgetsByDisplayWidth(t *testing.T) {
+	// "你好"=4 display cells/6 bytes, "世界"=4 cells/6 bytes. At width 10 they fit
+	// on one line by display width (4+1+4=9 <= 10) but byte-counting (6+1+6=13)
+	// would wrap. wrap must use display width like clip does.
+	got := wrap("你好 世界", 10)
+	if len(got) != 1 || got[0] != "你好 世界" {
+		t.Fatalf("wrap should keep wide-rune words on one line by display width, got %#v", got)
+	}
+}
+
+func TestOverlaySuppressedDuringAskUser(t *testing.T) {
+	// A pending ask_user questionnaire is the focused blocking surface; a
+	// slash-command suggestion overlay must be suppressed so its rows don't consume
+	// bodyH and push the question offscreen.
+	d := ChatData{
+		Variant: 0, Dark: true, Width: 80, Height: 24,
+		AskUser:     &AskUser{Question: "Pick one?", Options: []string{"a", "b"}, Total: 1},
+		Suggestions: []Suggestion{{Name: "/zzsuggest", Desc: "should be hidden"}},
+	}
+	out := stripANSI(RenderChat(d))
+	if strings.Contains(out, "/zzsuggest") {
+		t.Errorf("suggestion overlay must be suppressed while AskUser is active:\n%s", out)
+	}
+}
+
+func TestPlainAssistantClipsLongUnbrokenToken(t *testing.T) {
+	// A single unbroken token (long URL / CJK run with no spaces) longer than the
+	// frame must NOT overflow: wrap won't break it, so the plain path must clip
+	// every rendered prose line to the budget. Scoped to the prose line carrying
+	// the token (the statusline footer width is a separate concern).
+	const W = 120
+	long := strings.Repeat("x", 400)
+	out := stripANSI(RenderChat(ChatData{Variant: 0, Dark: true, Width: W, Height: 24, Stream: long}))
+	sawToken := false
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.Contains(ln, "xxx") {
+			sawToken = true
+			if lipgloss.Width(ln) > W {
+				t.Fatalf("plain prose line with a long token exceeds frame width %d (%d cells)", W, lipgloss.Width(ln))
+			}
+		}
+	}
+	if !sawToken {
+		t.Fatal("expected the streamed long token to render")
+	}
+}

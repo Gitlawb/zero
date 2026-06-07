@@ -134,15 +134,26 @@ func TestPermLayoutMatchesRender(t *testing.T) {
 }
 
 func TestPermLayoutMatchesRenderClamped(t *testing.T) {
-	// PermLayout is the mouse hit-test and must stay in lockstep with the rendered
-	// modal even at small/clamped sizes: RenderChat floors width to 40 and height
-	// to 8, then centers the modal in a bodyH = height-3 region. If PermLayout
-	// applies different clamps the button row/column drift and clicks miss. These
-	// sizes are below the width floor and at the smallest heights that still fit
-	// the buttons, so they exercise both clamps.
-	for _, sz := range [][2]int{{10, 11}, {20, 12}, {30, 14}, {38, 24}} {
+	// Too narrow for the 43-cell button row (bw < permMinBoxWidth): the buttons
+	// would overflow the modal frame / clip at the terminal edge, so hitboxes are
+	// disabled (keyboard still works) — a click must not land on a misrendered
+	// button. (width 40/48 -> bw 38/46 < 47.)
+	for _, sz := range [][2]int{{10, 24}, {40, 24}, {48, 24}} {
+		if g := PermLayout(sz[0], sz[1]); g.Active {
+			t.Errorf("size %dx%d: expected inactive geometry (too narrow for buttons), got %+v", sz[0], sz[1], g)
+		}
+	}
+
+	// Wide enough for the buttons, but height clamped: PermLayout is the mouse
+	// hit-test and must stay in lockstep with the rendered modal. RenderChat floors
+	// height to 8 and centers the modal in a bodyH = height-3 region; if PermLayout
+	// applies different clamps the button row/column drift and clicks miss.
+	for _, sz := range [][2]int{{50, 11}, {60, 12}, {70, 14}, {52, 24}} {
 		w, h := sz[0], sz[1]
 		g := PermLayout(w, h)
+		if !g.Active {
+			t.Fatalf("size %dx%d: expected active geometry, got inactive", w, h)
+		}
 		out := RenderChat(ChatData{
 			Variant: 0, Dark: true, Width: w, Height: h,
 			Perm: &Perm{Tool: "edit_file", Risk: "medium", Reason: "writes a file"},
@@ -156,18 +167,12 @@ func TestPermLayoutMatchesRenderClamped(t *testing.T) {
 			t.Errorf("size %dx%d: button row %d does not contain the buttons: %q", w, h, g.Allow.Y, row)
 		}
 		// The allow button's rendered column must line up exactly with its hitbox.
-		// PermLayout places Allow.X at the modal's content-start (left+2) and the
-		// "[ a · allow ]" bracket renders two columns further in, so the bracket
-		// must sit at exactly Allow.X+2. This only holds if PermLayout centers using
-		// the SAME clamped width RenderChat does (floored to 40); raw width shifts
-		// the box by a column at sub-40 widths and the click would miss.
 		if col := strings.Index(row, "[ a"); col != g.Allow.X+2 {
 			t.Errorf("size %dx%d: allow button rendered at col %d, want Allow.X+2 = %d",
 				w, h, col, g.Allow.X+2)
 		}
 		// The rendered button row must be exactly where PermLayout points (no other
-		// row carries both labels), and a click in each button's center must resolve
-		// to that button.
+		// row carries both labels), and a click in each button's center must resolve.
 		for i, ln := range lines {
 			pl := stripANSI(ln)
 			if i != g.Allow.Y && strings.Contains(pl, "allow") && strings.Contains(pl, "deny") {
