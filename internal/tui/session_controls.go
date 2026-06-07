@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -162,6 +164,75 @@ func (m model) handleCompactCommand(args string) (model, string) {
 	}
 	m.compactRequests++
 	return m, m.compactText(true)
+}
+
+// handleRewindCommand restores workspace files to a checkpoint and truncates the
+// session log. "/rewind" or "/rewind latest" undoes the most recent checkpoint;
+// "/rewind <n>" rewinds to a specific event sequence.
+func (m model) handleRewindCommand(args string) (model, string) {
+	if m.sessionStore == nil || m.activeSession.SessionID == "" {
+		return m, "Rewind\nno active session to rewind."
+	}
+	if m.pending {
+		return m, "Rewind\ncannot rewind while a run is in progress."
+	}
+	arg := strings.TrimSpace(strings.ToLower(args))
+	target, err := m.resolveRewindTarget(arg)
+	if err != nil {
+		return m, "Rewind\n" + err.Error()
+	}
+	report, err := m.sessionStore.ApplyRewind(m.activeSession.SessionID, m.cwd, target)
+	if err != nil {
+		return m, "Rewind\n" + err.Error()
+	}
+
+	// ApplyRewind truncated the persisted event log, restored files, and appended a
+	// rewind marker — so reload the in-memory session state. Otherwise the dropped
+	// events would still (a) be re-sent to the agent as ContextEvents on the next
+	// prompt (sessionPrompt sends m.sessionEvents) and (b) linger in the transcript.
+	if meta, getErr := m.sessionStore.Get(m.activeSession.SessionID); getErr == nil {
+		m.activeSession = *meta
+	}
+	if events, readErr := m.sessionStore.ReadEvents(m.activeSession.SessionID); readErr == nil {
+		m.sessionEvents = append([]sessions.Event{}, events...)
+		rows := initialTranscript()
+		for _, row := range transcriptRowsFromSessionEvents(events) {
+			rows = appendTranscriptRow(rows, row)
+		}
+		m.transcript = rows
+	}
+
+	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
+		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))
+	if len(report.Skipped) > 0 {
+		summary += "\nskipped (not recoverable): " + strings.Join(report.Skipped, ", ")
+	}
+	return m, summary
+}
+
+// resolveRewindTarget maps a /rewind argument to a keep-through event sequence.
+func (m model) resolveRewindTarget(arg string) (int, error) {
+	events, err := m.sessionStore.ReadEvents(m.activeSession.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	if arg == "" || arg == "latest" {
+		lastCheckpoint := 0
+		for _, ev := range events {
+			if ev.Type == sessions.EventSessionCheckpoint && ev.Sequence > lastCheckpoint {
+				lastCheckpoint = ev.Sequence
+			}
+		}
+		if lastCheckpoint == 0 {
+			return 0, fmt.Errorf("no checkpoints to rewind")
+		}
+		return lastCheckpoint - 1, nil // undo the most recent checkpoint
+	}
+	seq, err := strconv.Atoi(arg)
+	if err != nil || seq < 0 {
+		return 0, fmt.Errorf("usage: /rewind [latest|<sequence>]")
+	}
+	return seq, nil
 }
 
 func (m model) compactText(requested bool) string {

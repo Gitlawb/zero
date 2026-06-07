@@ -310,8 +310,65 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	if next.reasoningEffort != "" {
 		t.Fatalf("expected unsupported effort preference to reset, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "unsupported preference reset") {
+	if !transcriptContains(next.transcript, "effort: auto (unsupported preference reset)") {
 		t.Fatalf("expected model switch transcript to mention effort reset, got %#v", next.transcript)
+	}
+}
+
+func TestModelSwitchRedirectsDeprecatedModelWithNotice(t *testing.T) {
+	nextProvider := &fakeProvider{}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "openai",
+		ModelName:       "gpt-4.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: openAITestProfile("gpt-4.1"),
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			if profile.Model != "gpt-4.1" {
+				t.Fatalf("expected deprecated model to redirect to gpt-4.1, got %#v", profile)
+			}
+			return nextProvider, nil
+		},
+	})
+	m.input.SetValue("/model gpt-4-turbo")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-4.1" {
+		t.Fatalf("expected active model to be gpt-4.1 after redirect, got %q", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "deprecated") {
+		t.Fatalf("expected deprecation notice in transcript, got %#v", next.transcript)
+	}
+	if !transcriptContains(next.transcript, "model: gpt-4.1") {
+		t.Fatalf("expected switch to canonical fallback id, got %#v", next.transcript)
+	}
+}
+
+func TestModelSwitchUnknownModelReportsError(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName:    "openai",
+		ModelName:       "gpt-4.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: openAITestProfile("gpt-4.1"),
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatal("provider should not be rebuilt for an unknown model")
+			return nil, nil
+		},
+	})
+	m.input.SetValue("/model totally-unknown-model")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if next.modelName != "gpt-4.1" {
+		t.Fatalf("expected active model to stay gpt-4.1, got %q", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "unknown Zero model") {
+		t.Fatalf("expected unknown model error, got %#v", next.transcript)
 	}
 }
 
@@ -322,5 +379,118 @@ func openAITestProfile(modelID string) config.ProviderProfile {
 		BaseURL:      config.OpenAIBaseURL,
 		APIKey:       "sk-test",
 		Model:        modelID,
+	}
+}
+
+func anthropicTestProfile(modelID string) config.ProviderProfile {
+	return config.ProviderProfile{
+		Name:         "anthropic",
+		ProviderKind: config.ProviderKindAnthropic,
+		BaseURL:      config.AnthropicBaseURL,
+		APIKey:       "sk-test",
+		Model:        modelID,
+	}
+}
+
+func TestModeCommandListsPresets(t *testing.T) {
+	// "/mode list" prints the preset list (no picker for an explicit subcommand).
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	m.input.SetValue("/mode list")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /mode list to be handled without starting an agent run")
+	}
+	for _, want := range []string{"Mode", "smart", "deep", "fast", "large", "precise", "model=claude-opus-4.1", "turns=50"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected mode list transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+func TestModeCommandNoArgOpensPicker(t *testing.T) {
+	// A bare "/mode" opens the interactive picker instead of printing status.
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	m.input.SetValue("/mode")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /mode picker open without starting an agent run")
+	}
+	if next.picker == nil || next.picker.kind != pickerMode {
+		t.Fatalf("expected an open mode picker, got %#v", next.picker)
+	}
+	if len(next.picker.items) == 0 {
+		t.Fatal("expected mode picker to list presets")
+	}
+}
+
+func TestModeCommandSwitchesModelEffortAndTurns(t *testing.T) {
+	nextProvider := &fakeProvider{}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "anthropic",
+		ModelName:       "claude-sonnet-4.5",
+		Provider:        &fakeProvider{},
+		ProviderProfile: anthropicTestProfile("claude-sonnet-4.5"),
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			if profile.Model != "claude-opus-4.1" {
+				t.Fatalf("expected provider rebuild for claude-opus-4.1, got %#v", profile)
+			}
+			return nextProvider, nil
+		},
+		AgentOptions: agent.Options{MaxTurns: 12},
+	})
+	m.input.SetValue("/mode deep")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /mode deep to be handled without starting an agent run")
+	}
+	if next.modelName != "claude-opus-4.1" {
+		t.Fatalf("expected model claude-opus-4.1, got %q", next.modelName)
+	}
+	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
+		t.Fatalf("expected effort high, got %q", next.reasoningEffort)
+	}
+	if next.agentOptions.MaxTurns != 50 {
+		t.Fatalf("expected max turns 50, got %d", next.agentOptions.MaxTurns)
+	}
+	if next.provider != nextProvider {
+		t.Fatal("expected provider to be rebuilt for the mode model")
+	}
+	for _, want := range []string{"mode deep", "model: claude-opus-4.1", "effort: high", "max turns: 50"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected mode switch transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+func TestModeCommandUnknownReportsError(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName:    "anthropic",
+		ModelName:       "claude-sonnet-4.5",
+		Provider:        &fakeProvider{},
+		ProviderProfile: anthropicTestProfile("claude-sonnet-4.5"),
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatal("provider should not be rebuilt for an unknown mode")
+			return nil, nil
+		},
+	})
+	m.input.SetValue("/mode turbo")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if next.modelName != "claude-sonnet-4.5" {
+		t.Fatalf("expected active model to stay claude-sonnet-4.5, got %q", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "unknown mode") {
+		t.Fatalf("expected unknown mode error, got %#v", next.transcript)
 	}
 }

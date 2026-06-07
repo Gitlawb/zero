@@ -70,6 +70,23 @@ func (m model) appendSessionEvents(events []pendingSessionEvent) (model, []trans
 	return m, rows
 }
 
+// flushableSessionEvents selects the events worth persisting from a run that was
+// cancelled mid-flight. The cancel path already records a single "Run cancelled."
+// error, so the goroutine's trailing EventError (the ctx-cancellation error) is
+// dropped to avoid a duplicate; everything else it accumulated before the cancel
+// — tool calls/results, permission events, usage, and the EventSessionCheckpoint
+// blobs that /rewind depends on — is kept.
+func flushableSessionEvents(events []pendingSessionEvent) []pendingSessionEvent {
+	flushable := make([]pendingSessionEvent, 0, len(events))
+	for _, event := range events {
+		if event.Type == sessions.EventError {
+			continue
+		}
+		flushable = append(flushable, event)
+	}
+	return flushable
+}
+
 func tuiSessionTitle(prompt string) string {
 	title := strings.Join(strings.Fields(prompt), " ")
 	if len(title) > tuiSessionTitleLimit {

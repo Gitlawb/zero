@@ -72,6 +72,22 @@ func (m model) modeSegment() string {
 	return style.Render("⏵⏵ "+label) + zeroTheme.muted.Render(" · shift+tab to cycle")
 }
 
+// nextPermissionMode toggles between the two prompt-respecting modes:
+// Auto ⇄ Ask. Unsafe (which disables permission prompts entirely) is
+// deliberately NOT reachable by a casual keypress — a single shift+tab landing
+// on it would let prompt-required tools run with no decision. Unsafe stays an
+// explicit opt-in (the launch/--skip-permissions-unsafe path), not a UI toggle.
+// Unsafe is folded back to Ask so the toggle always lands somewhere safe.
+func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
+	switch mode {
+	case agent.PermissionModeAuto:
+		return agent.PermissionModeAsk
+	default:
+		// Ask (and anything else, incl. an externally-set Unsafe) → Auto.
+		return agent.PermissionModeAuto
+	}
+}
+
 func (m model) modeLabel() (string, lipgloss.Style) {
 	switch m.permissionMode {
 	case agent.PermissionModeAuto:
@@ -199,6 +215,55 @@ func gitBranch(cwd string) string {
 		return ref[:7]
 	}
 	return ref
+}
+
+// suggestionOverlay renders the slash-command autocomplete list below the input
+// in the default skin: one row per match (name + dim description), the selected
+// row highlighted with a caret and the accent color. Returns "" when no overlay
+// should show.
+func (m model) suggestionOverlay(width int) string {
+	if !m.suggestionsActive() {
+		return ""
+	}
+	nameWidth := 0
+	for _, s := range m.suggestions {
+		if w := lipgloss.Width(s.Name); w > nameWidth {
+			nameWidth = w
+		}
+	}
+	lines := make([]string, 0, len(m.suggestions))
+	for index, s := range m.suggestions {
+		pad := strings.Repeat(" ", maxInt(0, nameWidth-lipgloss.Width(s.Name)))
+		marker := "  "
+		name := zeroTheme.text.Render(s.Name)
+		if index == m.suggestionIdx {
+			marker = zeroTheme.accent.Render("› ")
+			name = zeroTheme.accent.Render(s.Name)
+		}
+		line := marker + name + pad + "  " + zeroTheme.muted.Render(s.Desc)
+		lines = append(lines, fitStyledLine(line, width-2))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// pickerOverlay renders an open interactive selector below the input in the
+// default skin: a titled bordered list with the selected row highlighted.
+func (m model) pickerOverlay(width int) string {
+	if m.picker == nil {
+		return ""
+	}
+	lines := make([]string, 0, len(m.picker.items)+1)
+	lines = append(lines, zeroTheme.accent.Render(m.picker.title)+zeroTheme.muted.Render("  ↑/↓ move · ⏎ select · esc cancel"))
+	for index, item := range m.picker.items {
+		marker := "  "
+		label := zeroTheme.text.Render(item.Label)
+		if index == m.picker.selected {
+			marker = zeroTheme.accent.Render("› ")
+			label = zeroTheme.accent.Render(item.Label)
+		}
+		lines = append(lines, fitStyledLine(marker+label, width-4))
+	}
+	return borderedBlock(width, lines)
 }
 
 // argHint extracts the most representative argument from a tool call's raw JSON

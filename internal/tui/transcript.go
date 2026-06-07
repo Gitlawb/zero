@@ -17,6 +17,7 @@ const (
 	rowToolCall
 	rowToolResult
 	rowPermission
+	rowAskUser
 	rowSystem
 	rowError
 )
@@ -29,6 +30,7 @@ type transcriptRow struct {
 	status     tools.Status // result status, for tool result rows
 	detail     string       // raw multi-line output (e.g. a diff to render as a card)
 	permission *agent.PermissionEvent
+	askUser    *agent.AskUserRequest
 }
 
 type transcriptActionKind int
@@ -128,8 +130,67 @@ func transcriptRowKey(row transcriptRow) string {
 		if row.permission != nil && row.permission.ToolCallID != "" {
 			return fmt.Sprintf("%d:%s:%s", row.kind, row.permission.ToolCallID, row.permission.Action)
 		}
+	case rowAskUser:
+		if row.askUser != nil && row.askUser.ToolCallID != "" {
+			return fmt.Sprintf("%d:%s", row.kind, row.askUser.ToolCallID)
+		}
 	}
 	return ""
+}
+
+func askUserTranscriptRow(request agent.AskUserRequest) transcriptRow {
+	return transcriptRow{
+		kind:    rowAskUser,
+		id:      request.ToolCallID,
+		text:    askUserRowText(request),
+		detail:  askUserDetailText(request),
+		askUser: &request,
+	}
+}
+
+func askUserRowText(request agent.AskUserRequest) string {
+	parts := []string{"ask_user:"}
+	if header := strings.TrimSpace(request.Header); header != "" {
+		parts = append(parts, header)
+	} else {
+		parts = append(parts, fmt.Sprintf("%d question(s)", len(request.Questions)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func askUserDetailText(request agent.AskUserRequest) string {
+	lines := make([]string, 0, len(request.Questions))
+	for index, question := range request.Questions {
+		line := fmt.Sprintf("%d. %s", index+1, question.Question)
+		if len(question.Options) > 0 {
+			line += "  (" + strings.Join(question.Options, ", ") + ")"
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func askUserSessionPayload(request agent.AskUserRequest) map[string]any {
+	questions := make([]map[string]any, 0, len(request.Questions))
+	for _, question := range request.Questions {
+		entry := map[string]any{"question": question.Question}
+		if len(question.Options) > 0 {
+			entry["options"] = question.Options
+		}
+		if question.MultiSelect {
+			entry["multiSelect"] = true
+		}
+		questions = append(questions, entry)
+	}
+	payload := map[string]any{
+		"role":       "ask_user",
+		"toolCallId": request.ToolCallID,
+		"questions":  questions,
+	}
+	if header := strings.TrimSpace(request.Header); header != "" {
+		payload["header"] = header
+	}
+	return payload
 }
 
 func permissionTranscriptRow(event agent.PermissionEvent) transcriptRow {
