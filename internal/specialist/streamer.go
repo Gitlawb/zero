@@ -35,10 +35,7 @@ func (usage StreamUsage) HasUsage() bool {
 }
 
 func (usage StreamUsage) EffectiveTotalTokens() int {
-	if usage.TotalTokens != 0 {
-		return usage.TotalTokens
-	}
-	return usage.PromptTokens + usage.CompletionTokens
+	return usage.TotalTokens
 }
 
 func ParseStream(reader io.Reader) ([]streamjson.Event, error) {
@@ -104,14 +101,20 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 			}
 		case streamjson.EventUsage:
 			result.Usage.Events++
+			eventPromptTokens := 0
+			eventCompletionTokens := 0
 			if event.PromptTokens != nil {
-				result.Usage.PromptTokens += *event.PromptTokens
+				eventPromptTokens = *event.PromptTokens
+				result.Usage.PromptTokens += eventPromptTokens
 			}
 			if event.CompletionTokens != nil {
-				result.Usage.CompletionTokens += *event.CompletionTokens
+				eventCompletionTokens = *event.CompletionTokens
+				result.Usage.CompletionTokens += eventCompletionTokens
 			}
 			if event.TotalTokens != nil {
 				result.Usage.TotalTokens += *event.TotalTokens
+			} else {
+				result.Usage.TotalTokens += eventPromptTokens + eventCompletionTokens
 			}
 		}
 	}

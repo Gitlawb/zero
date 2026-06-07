@@ -47,6 +47,30 @@ func TestBuildFinalResultUsesTextDeltasWhenFinalMissing(t *testing.T) {
 	}
 }
 
+func TestSummarizeStreamAccumulatesMixedUsageFormats(t *testing.T) {
+	events, err := ParseStream(strings.NewReader(strings.Join([]string{
+		`{"schemaVersion":1,"type":"usage","runId":"run_1","promptTokens":10,"completionTokens":4,"totalTokens":14}`,
+		`{"schemaVersion":1,"type":"usage","runId":"run_1","promptTokens":8,"completionTokens":3}`,
+		"",
+	}, "\n")))
+	if err != nil {
+		t.Fatalf("ParseStream returned error: %v", err)
+	}
+	summary := SummarizeStream(events, 0)
+	if summary.Usage.Events != 2 {
+		t.Fatalf("usage events = %d, want 2", summary.Usage.Events)
+	}
+	if summary.Usage.PromptTokens != 18 {
+		t.Fatalf("prompt tokens = %d, want 18", summary.Usage.PromptTokens)
+	}
+	if summary.Usage.CompletionTokens != 7 {
+		t.Fatalf("completion tokens = %d, want 7", summary.Usage.CompletionTokens)
+	}
+	if summary.Usage.EffectiveTotalTokens() != 25 {
+		t.Fatalf("effective total tokens = %d, want 25", summary.Usage.EffectiveTotalTokens())
+	}
+}
+
 func TestBuildFinalResultErrorIncludesDiagnostics(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
 		`{"schemaVersion":1,"type":"run_start","runId":"run_1","sessionId":"child"}`,

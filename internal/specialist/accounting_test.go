@@ -67,30 +67,69 @@ func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
 		t.Fatalf("event types = %#v, want %#v", got, want)
 	}
 	startPayload := eventPayload(t, events[0])
-	if payloadString(startPayload, "source") != "specialist" ||
-		payloadString(startPayload, "childSessionId") != "child_task" ||
-		payloadString(startPayload, "specialist") != "worker" ||
-		payloadString(startPayload, "toolCallId") != "call_1" ||
-		payloadString(startPayload, "mode") != "foreground" ||
-		payloadBool(startPayload, "background") {
-		t.Fatalf("start payload = %#v", startPayload)
-	}
+	requirePayloadString(t, startPayload, "source", "specialist")
+	requirePayloadString(t, startPayload, "childSessionId", "child_task")
+	requirePayloadString(t, startPayload, "specialist", "worker")
+	requirePayloadString(t, startPayload, "toolCallId", "call_1")
+	requirePayloadString(t, startPayload, "mode", "foreground")
+	requirePayloadBool(t, startPayload, "background", false)
+
 	usagePayload := eventPayload(t, events[1])
-	if payloadString(usagePayload, "source") != "specialist" ||
-		payloadString(usagePayload, "childSessionId") != "child_task" ||
-		payloadString(usagePayload, "runId") != "run_1" ||
-		payloadInt(usagePayload, "promptTokens") != 12 ||
-		payloadInt(usagePayload, "completionTokens") != 5 ||
-		payloadInt(usagePayload, "totalTokens") != 17 ||
-		payloadInt(usagePayload, "usageEvents") != 1 {
-		t.Fatalf("usage payload = %#v", usagePayload)
-	}
+	requirePayloadString(t, usagePayload, "source", "specialist")
+	requirePayloadString(t, usagePayload, "childSessionId", "child_task")
+	requirePayloadString(t, usagePayload, "runId", "run_1")
+	requirePayloadInt(t, usagePayload, "promptTokens", 12)
+	requirePayloadInt(t, usagePayload, "completionTokens", 5)
+	requirePayloadInt(t, usagePayload, "totalTokens", 17)
+	requirePayloadInt(t, usagePayload, "usageEvents", 1)
+
 	stopPayload := eventPayload(t, events[2])
-	if payloadString(stopPayload, "status") != "success" ||
-		payloadInt(stopPayload, "exitCode") != 0 ||
-		!payloadBool(stopPayload, "usageRolledUp") {
-		t.Fatalf("stop payload = %#v", stopPayload)
+	requirePayloadString(t, stopPayload, "status", "success")
+	requirePayloadInt(t, stopPayload, "exitCode", 0)
+	requirePayloadBool(t, stopPayload, "usageRolledUp", true)
+}
+
+func TestExecutorRecordsStartedChildErrorExitCode(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
 	}
+	executor := Executor{
+		BinaryPath:   "/usr/local/bin/zero",
+		SessionStore: store,
+		NewSessionID: func() (string, error) { return "child_task", nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+				SystemPrompt:  "Work carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		RunChild: func(context.Context, string, []string) (ChildRunResult, error) {
+			return ChildRunResult{ExitCode: 7, Started: true}, os.ErrPermission
+		},
+	}
+
+	_, err = executor.Run(context.Background(), TaskParameters{
+		Name:   "worker",
+		Prompt: "inspect auth",
+	}, TaskRunOptions{ParentSessionID: parent.SessionID})
+	if err == nil {
+		t.Fatal("Run returned nil error")
+	}
+
+	events, err := store.ReadEvents(parent.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	stopEvents := eventsOfType(events, sessions.EventSpecialistStop)
+	if len(stopEvents) != 1 {
+		t.Fatalf("stop events = %#v", events)
+	}
+	stopPayload := eventPayload(t, stopEvents[0])
+	requirePayloadString(t, stopPayload, "status", "error")
+	requirePayloadInt(t, stopPayload, "exitCode", 7)
 }
 
 func TestOutputToolRollsUpCompletedBackgroundUsageOnce(t *testing.T) {
@@ -145,12 +184,10 @@ func TestOutputToolRollsUpCompletedBackgroundUsageOnce(t *testing.T) {
 		t.Fatalf("stop events = %#v", events)
 	}
 	usagePayload := eventPayload(t, eventsOfType(events, sessions.EventUsage)[0])
-	if payloadString(usagePayload, "mode") != "background" ||
-		payloadInt(usagePayload, "promptTokens") != 20 ||
-		payloadInt(usagePayload, "completionTokens") != 8 ||
-		payloadInt(usagePayload, "totalTokens") != 28 {
-		t.Fatalf("background usage payload = %#v", usagePayload)
-	}
+	requirePayloadString(t, usagePayload, "mode", "background")
+	requirePayloadInt(t, usagePayload, "promptTokens", 20)
+	requirePayloadInt(t, usagePayload, "completionTokens", 8)
+	requirePayloadInt(t, usagePayload, "totalTokens", 28)
 }
 
 func ptrInt(value int) *int {
@@ -192,23 +229,52 @@ func eventPayload(t *testing.T, event sessions.Event) map[string]any {
 	return payload
 }
 
-func payloadString(payload map[string]any, key string) string {
-	value, _ := payload[key].(string)
-	return value
+func requirePayloadString(t *testing.T, payload map[string]any, key string, want string) {
+	t.Helper()
+	value, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q: %#v", key, payload)
+	}
+	got, ok := value.(string)
+	if !ok {
+		t.Fatalf("payload %q = %#v, want string %q", key, value, want)
+	}
+	if got != want {
+		t.Fatalf("payload %q = %q, want %q", key, got, want)
+	}
 }
 
-func payloadBool(payload map[string]any, key string) bool {
-	value, _ := payload[key].(bool)
-	return value
+func requirePayloadBool(t *testing.T, payload map[string]any, key string, want bool) {
+	t.Helper()
+	value, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q: %#v", key, payload)
+	}
+	got, ok := value.(bool)
+	if !ok {
+		t.Fatalf("payload %q = %#v, want bool %v", key, value, want)
+	}
+	if got != want {
+		t.Fatalf("payload %q = %v, want %v", key, got, want)
+	}
 }
 
-func payloadInt(payload map[string]any, key string) int {
-	switch value := payload[key].(type) {
+func requirePayloadInt(t *testing.T, payload map[string]any, key string, want int) {
+	t.Helper()
+	value, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q: %#v", key, payload)
+	}
+	got := 0
+	switch typed := value.(type) {
 	case int:
-		return value
+		got = typed
 	case float64:
-		return int(value)
+		got = int(typed)
 	default:
-		return 0
+		t.Fatalf("payload %q = %#v, want int %d", key, value, want)
+	}
+	if got != want {
+		t.Fatalf("payload %q = %d, want %d", key, got, want)
 	}
 }

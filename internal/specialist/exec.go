@@ -101,6 +101,7 @@ type ChildRunResult struct {
 	Events   []streamjson.Event
 	Stderr   string
 	ExitCode int
+	Started  bool
 }
 
 func (executor Executor) Run(ctx context.Context, params TaskParameters, options TaskRunOptions) (ExecResult, error) {
@@ -422,7 +423,9 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 	executor.recordSpecialistStart(accounting)
 	run, err := executor.runChild(ctx, binaryPath, built.Args)
 	if err != nil {
-		executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
+		exitCode := run.exitCodeOr(-1)
+		summary := SummarizeStream(run.Events, exitCode)
+		executor.recordSpecialistStop(accounting, summary, "error", summary.ExitCode, err, false)
 		return ExecResult{}, err
 	}
 	summary := SummarizeStream(run.Events, run.ExitCode)
@@ -606,19 +609,30 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string) (Chi
 	command.Stderr = &stderr
 
 	exitCode := 0
+	started := false
 	if err := command.Run(); err != nil {
 		var exitErr *osexec.ExitError
 		if errors.As(err, &exitErr) {
+			started = true
 			exitCode = exitErr.ExitCode()
 		} else {
-			return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode}, fmt.Errorf("run specialist child: %w", err)
+			return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode, Started: started}, fmt.Errorf("run specialist child: %w", err)
 		}
+	} else {
+		started = true
 	}
 	events, err := ParseStream(bytes.NewReader(stdout.Bytes()))
 	if err != nil {
-		return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode}, err
+		return ChildRunResult{Stderr: stderr.String(), ExitCode: exitCode, Started: started}, err
 	}
-	return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: exitCode}, nil
+	return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: exitCode, Started: started}, nil
+}
+
+func (run ChildRunResult) exitCodeOr(defaultExitCode int) int {
+	if run.Started || run.ExitCode != 0 {
+		return run.ExitCode
+	}
+	return defaultExitCode
 }
 
 func launchBackgroundProcess(binaryPath string, args []string, outputFile string, onExit func(exitCode int)) (int, error) {
