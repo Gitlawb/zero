@@ -18,6 +18,40 @@ func writeSkill(t *testing.T, dir string, name string, content string) {
 	}
 }
 
+// Regression: skill is a permission-allow read-only tool, so a SKILL.md that is a
+// symlink pointing OUTSIDE the skills root must be skipped — never read — so the
+// tool can't be turned into an arbitrary-file reader.
+func TestLoadSkipsSymlinkedSkillFileEscapingRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "good", "---\nname: good\ndescription: ok\n---\nbody")
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.md")
+	if err := os.WriteFile(secret, []byte("---\nname: evil\ndescription: leaked\n---\nTOP SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evilDir := filepath.Join(dir, "evil")
+	if err := os.MkdirAll(evilDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(evilDir, "SKILL.md")); err != nil {
+		t.Skipf("symlink unavailable on this platform: %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	for _, s := range loaded {
+		if s.Name == "evil" || strings.Contains(s.Content, "TOP SECRET") {
+			t.Fatalf("symlinked SKILL.md escaping the root must be skipped, got %+v", s)
+		}
+	}
+	if len(loaded) != 1 || loaded[0].Name != "good" {
+		t.Fatalf("expected only the in-root skill, got %+v", loaded)
+	}
+}
+
 func TestLoadParsesFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	writeSkill(t, dir, "confirmation-policy", "---\nname: confirmation-policy\ndescription: When to ask the user before risky actions.\n---\n\n# Confirmation Policy\n\nAsk first.\n")

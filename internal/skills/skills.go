@@ -93,6 +93,26 @@ func Duplicates(dir string) ([]DuplicateName, error) {
 	return dups, err
 }
 
+// confineSkillPath resolves manifestPath through symlinks and returns the real
+// path only if it stays within rootReal (the already-symlink-resolved skills
+// root). This stops a symlinked SKILL.md — or a symlinked skill directory — from
+// making the permission-allow skill tool read files outside the skills root.
+// ok=false also covers a missing path or one that is a directory.
+func confineSkillPath(rootReal string, manifestPath string) (string, bool) {
+	real, err := filepath.EvalSymlinks(manifestPath)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(rootReal, real)
+	if err != nil {
+		return "", false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return real, true
+}
+
 // load is the shared scanner behind Load and Duplicates: it parses every
 // SKILL.md, deduplicates by frontmatter name (first directory wins) and reports
 // the dropped collisions.
@@ -109,6 +129,20 @@ func load(dir string) ([]Skill, []DuplicateName, error) {
 		return nil, nil, err
 	}
 
+	// Resolve the skills root through symlinks so each SKILL.md can be confined to
+	// it. skill is a permission-allow read-only core/MCP tool, so the loader must
+	// never follow a symlinked SKILL.md (or skill dir) out of the root and become
+	// an arbitrary-file reader. Fall back to an absolute dir if EvalSymlinks fails
+	// so confinement still has a stable root.
+	rootReal, rootErr := filepath.EvalSymlinks(dir)
+	if rootErr != nil {
+		if abs, absErr := filepath.Abs(dir); absErr == nil {
+			rootReal = abs
+		} else {
+			rootReal = dir
+		}
+	}
+
 	skills := make([]Skill, 0, len(entries))
 	// byName maps a frontmatter name to the index of the winning skill in skills,
 	// so a later same-name duplicate can be recognized and dropped deterministically.
@@ -119,10 +153,15 @@ func load(dir string) ([]Skill, []DuplicateName, error) {
 			continue
 		}
 		manifestPath := filepath.Join(dir, entry.Name(), skillFileName)
-		data, err := os.ReadFile(manifestPath)
+		realPath, ok := confineSkillPath(rootReal, manifestPath)
+		if !ok {
+			// Missing/unreadable SKILL.md, a directory, or a symlink escaping the
+			// skills root: skip it rather than read a file outside the root. One bad
+			// or hostile skill must not hide the rest or leak external files.
+			continue
+		}
+		data, err := os.ReadFile(realPath)
 		if err != nil {
-			// Missing or unreadable SKILL.md (including the case where it is a
-			// directory) is skipped, not fatal — one bad skill must not hide the rest.
 			continue
 		}
 		absPath := manifestPath
