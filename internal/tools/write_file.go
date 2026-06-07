@@ -34,11 +34,11 @@ func NewWriteFileTool(workspaceRoot string) Tool {
 }
 
 func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
-	requestedPath, err := stringArg(args, "path", "", true)
+	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
 	}
-	content, err := stringArgWithEmpty(args, "content", "", true, true)
+	content, err := fileContentArg(args)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
 	}
@@ -72,8 +72,23 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 
+	verb := "Created"
 	if existed {
-		return okResult(fmt.Sprintf("Overwrote %s (%d bytes).", relativePath, len([]byte(content))))
+		verb = "Overwrote"
 	}
-	return okResult(fmt.Sprintf("Created %s (%d bytes).", relativePath, len([]byte(content))))
+	summary := fmt.Sprintf("%s %s (%d bytes).", verb, relativePath, len([]byte(content)))
+	result := okResult(summary)
+	result.ChangedFiles = []string{relativePath}
+	result.Display = Display{Summary: summary, Kind: "file"}
+	return result
+}
+
+// fileContentArg reads the file body from "content" or a common alias that weaker
+// models sometimes use instead (contents/text/body/data/file_content). It
+// delegates to the shared aliasedStringArg so the present-but-non-string type
+// error ("content must be a string") and the required-but-missing error
+// ("content is required") stay consistent with every other tool. An empty string
+// is allowed (writing an empty file), so allowEmpty is true.
+func fileContentArg(args map[string]any) (string, error) {
+	return aliasedStringArg(args, []string{"content", "contents", "text", "body", "data", "file_content"}, "", true, true)
 }

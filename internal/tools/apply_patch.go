@@ -35,7 +35,7 @@ func NewApplyPatchTool(workspaceRoot string) Tool {
 }
 
 func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result {
-	patch, err := stringArg(args, "patch", "", true)
+	patch, err := aliasedStringArg(args, []string{"patch", "diff"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for apply_patch: " + err.Error())
 	}
@@ -83,10 +83,41 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 		return errorResult("Error applying patch: " + message)
 	}
 
-	if relativeRoot == "." {
-		return okResult("Patch applied successfully.")
+	summary := "Patch applied successfully."
+	if relativeRoot != "." {
+		summary = "Patch applied successfully in " + relativeRoot + "."
 	}
-	return okResult("Patch applied successfully in " + relativeRoot + ".")
+	result := okResult(summary)
+	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
+	result.Display = Display{Summary: summary, Kind: "diff"}
+	return result
+}
+
+// changedFilesFromPatch extracts the unique, WORKSPACE-relative paths a patch
+// touches, reusing the same per-line parser used for validation. Patch paths are
+// relative to the apply cwd, so relativeRoot (the workspace-relative cwd, e.g.
+// "sub/dir", or "." for the workspace root) is prefixed so callers get true
+// workspace-relative paths regardless of cwd.
+func changedFilesFromPatch(relativeRoot string, patch string) []string {
+	seen := map[string]bool{}
+	var paths []string
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		for _, path := range patchPathsFromLine(line) {
+			if path == "" || path == "/dev/null" {
+				continue
+			}
+			workspacePath := path
+			if relativeRoot != "" && relativeRoot != "." {
+				workspacePath = filepath.ToSlash(filepath.Join(relativeRoot, path))
+			}
+			if seen[workspacePath] {
+				continue
+			}
+			seen[workspacePath] = true
+			paths = append(paths, workspacePath)
+		}
+	}
+	return paths
 }
 
 func validatePatchPaths(root string, patch string) error {
@@ -138,7 +169,10 @@ func patchPathsFromLine(line string) []string {
 
 func stripPatchPrefix(path string) string {
 	path = strings.TrimSpace(path)
-	path = strings.TrimPrefix(path, "a/")
-	path = strings.TrimPrefix(path, "b/")
+	// A unified-diff path carries exactly one of the a/ or b/ prefixes; strip a
+	// single one so a real directory literally named "a" or "b" is preserved.
+	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
+		path = path[2:]
+	}
 	return filepath.ToSlash(path)
 }

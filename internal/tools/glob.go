@@ -38,13 +38,18 @@ func NewGlobTool(workspaceRoot string) Tool {
 }
 
 func (tool globTool) Run(_ context.Context, args map[string]any) Result {
-	pattern, err := stringArg(args, "pattern", "", true)
+	pattern, err := aliasedStringArg(args, []string{"pattern", "glob", "match", "query", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
 	}
-	cwd, err := stringArg(args, "cwd", ".", false)
+	// Optional with a "." default: treat an explicit empty cwd (a common
+	// weak-model quirk) the same as the key being absent rather than erroring.
+	cwd, err := aliasedStringArg(args, []string{"cwd", "dir", "directory", "path"}, ".", false, true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
+	}
+	if cwd == "" {
+		cwd = "."
 	}
 	limit, err := intArg(args, "limit", 100, 1, 1000)
 	if err != nil {

@@ -35,15 +35,15 @@ func NewEditFileTool(workspaceRoot string) Tool {
 }
 
 func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
-	requestedPath, err := stringArg(args, "path", "", true)
+	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
-	oldString, err := stringArg(args, "old_string", "", true)
+	oldString, err := aliasedStringArg(args, []string{"old_string", "old", "search", "find", "old_str"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
-	newString, err := stringArgWithEmpty(args, "new_string", "", true, true)
+	newString, err := aliasedStringArg(args, []string{"new_string", "new", "replace", "replacement", "new_str"}, "", true, true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
@@ -90,5 +90,9 @@ func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
 	if replacedCount != 1 {
 		suffix = "s"
 	}
-	return okResult(fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix))
+	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
+	result := okResult(summary)
+	result.ChangedFiles = []string{relativePath}
+	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff"}
+	return result
 }

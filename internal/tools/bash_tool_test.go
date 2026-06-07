@@ -299,6 +299,71 @@ func TestBashToolRunsWithHostSandboxBackendWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestBashToolBlocksInteractiveCommandBeforeExecution(t *testing.T) {
+	root := t.TempDir()
+
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": "vim main.go",
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status for interactive command, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "interactive") {
+		t.Fatalf("expected interactive guard message, got %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "edit_file") && !strings.Contains(result.Output, "sed") {
+		t.Fatalf("expected actionable suggestion, got %q", result.Output)
+	}
+	// The command must NOT have run: exit_code metadata should mark a pre-exec block.
+	if result.Meta["exit_code"] != "-1" {
+		t.Fatalf("expected exit_code -1 (not executed), got %q", result.Meta["exit_code"])
+	}
+	if result.Meta["safety_block"] != "interactive_command" {
+		t.Fatalf("expected safety_block metadata, got %#v", result.Meta)
+	}
+	if result.Display.Kind != "shell" || !strings.Contains(result.Display.Summary, "Blocked") {
+		t.Fatalf("expected blocked display annotation, got %#v", result.Display)
+	}
+}
+
+func TestBashToolBlocksInteractiveCommandThroughSandbox(t *testing.T) {
+	root := t.TempDir()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+	})
+
+	result := NewBashTool(root).(interface {
+		RunWithSandbox(context.Context, map[string]any, *sandbox.Engine) Result
+	}).RunWithSandbox(context.Background(), map[string]any{
+		"command": "less /etc/hosts",
+	}, engine)
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "interactive") || !strings.Contains(result.Output, "cat") {
+		t.Fatalf("expected pager guard message with cat suggestion, got %q", result.Output)
+	}
+}
+
+func TestBashToolAllowsNonInteractiveCommand(t *testing.T) {
+	root := t.TempDir()
+
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command": helperCommand("success"),
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status for non-interactive command, got %s: %s", result.Status, result.Output)
+	}
+	if result.Meta["safety_block"] != "" {
+		t.Fatalf("did not expect a safety block, got %#v", result.Meta)
+	}
+}
+
 func helperCommand(name string) string {
 	executable := shellQuote(os.Args[0])
 	return executable + " --zero-bash-helper " + name

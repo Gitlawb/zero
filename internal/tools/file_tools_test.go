@@ -172,6 +172,73 @@ func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 	}
 }
 
+// Finding 1: grep must not follow an in-workspace symlink that points to a file
+// OUTSIDE the workspace (confinement bypass). The symlinked secret must not be
+// searched or returned, mirroring read_file's EvalSymlinks confinement.
+func TestGrepDoesNotFollowSymlinkOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	secret := filepath.Join(outsideDir, "secret.txt")
+	writeTestFile(t, secret, "needle leaked from outside\n")
+	writeTestFile(t, filepath.Join(root, "keep.txt"), "needle inside\n")
+
+	link := filepath.Join(root, "escape.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"output_mode": "content",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, "leaked from outside") || strings.Contains(res.Output, "escape.txt") {
+		t.Fatalf("grep followed symlink outside workspace, leaked:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "keep.txt") {
+		t.Fatalf("expected in-workspace match, got:\n%s", res.Output)
+	}
+}
+
+// Finding 2: when the workspace root itself lives under a symlink (e.g. macOS
+// /tmp -> /private/tmp), match paths must be clean workspace-relative paths with
+// NO leading "../" — because the walked paths are EvalSymlinks-resolved while the
+// root was previously only Abs-normalized.
+func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
+	realDir := t.TempDir()
+	writeTestFile(t, filepath.Join(realDir, "pkg", "main.go"), "func main() {}\n")
+
+	linkRoot := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(realDir, linkRoot); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	res := NewGrepTool(linkRoot).Run(context.Background(), map[string]any{
+		"pattern":     "func main",
+		"output_mode": "content",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, "../") || strings.HasPrefix(strings.TrimSpace(res.Output), "/") {
+		t.Fatalf("expected clean workspace-relative path, got:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "pkg/main.go:1: func main") {
+		t.Fatalf("expected pkg/main.go match, got:\n%s", res.Output)
+	}
+
+	// files_with_matches mode must likewise be clean-relative.
+	res = NewGrepTool(linkRoot).Run(context.Background(), map[string]any{
+		"pattern":     "func main",
+		"output_mode": "files_with_matches",
+	})
+	if strings.TrimSpace(res.Output) != "pkg/main.go" {
+		t.Fatalf("expected pkg/main.go, got %q", res.Output)
+	}
+}
+
 func writeTestFile(t *testing.T, path string, content string) {
 	t.Helper()
 
@@ -180,5 +247,35 @@ func writeTestFile(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("keep.txt", "needle here")
+	mustWrite(".git/config", "needle here")
+	mustWrite("node_modules/pkg/index.js", "needle here")
+
+	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"output_mode": "files_with_matches",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, ".git") || strings.Contains(res.Output, "node_modules") {
+		t.Fatalf("grep must not descend into excluded dirs, got:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "keep.txt") {
+		t.Fatalf("expected keep.txt in results, got:\n%s", res.Output)
 	}
 }

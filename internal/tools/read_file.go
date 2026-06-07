@@ -36,7 +36,7 @@ func NewReadFileTool(workspaceRoot string) Tool {
 }
 
 func (tool readFileTool) Run(_ context.Context, args map[string]any) Result {
-	requestedPath, err := stringArg(args, "path", "", true)
+	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filepath", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}

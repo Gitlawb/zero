@@ -53,6 +53,10 @@ type PropertySchema struct {
 	Items       *PropertySchema `json:"items,omitempty"`
 	Minimum     *int            `json:"minimum,omitempty"`
 	Maximum     *int            `json:"maximum,omitempty"`
+	// Properties/Required describe nested object fields (for Type "object" or an
+	// object-typed Items).
+	Properties map[string]PropertySchema `json:"properties,omitempty"`
+	Required   []string                  `json:"required,omitempty"`
 }
 
 type Result struct {
@@ -61,6 +65,19 @@ type Result struct {
 	Truncated       bool
 	Meta            map[string]string
 	SandboxDecision *sandbox.Decision `json:"-"`
+	// Redacted is set when secret scrubbing altered Output before it left the
+	// tool-execution boundary.
+	Redacted bool
+	// ChangedFiles lists workspace-relative paths a mutating tool wrote.
+	ChangedFiles []string
+	// Display carries a short, structured summary for the TUI / stream.
+	Display Display
+}
+
+// Display carries a short, structured summary of a tool result for the TUI/stream.
+type Display struct {
+	Summary string
+	Kind    string // e.g. file, diff, search, shell
 }
 
 type Tool interface {

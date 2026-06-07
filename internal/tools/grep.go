@@ -48,13 +48,18 @@ func NewGrepTool(workspaceRoot string) Tool {
 }
 
 func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
-	pattern, err := stringArg(args, "pattern", "", true)
+	pattern, err := aliasedStringArg(args, []string{"pattern", "query", "regex", "search", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for grep: " + err.Error())
 	}
-	targetPath, err := stringArg(args, "path", ".", false)
+	// Optional with a "." default: treat an explicit empty path (a common
+	// weak-model quirk) the same as the key being absent rather than erroring.
+	targetPath, err := aliasedStringArg(args, []string{"path", "dir", "directory"}, ".", false, true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for grep: " + err.Error())
+	}
+	if targetPath == "" {
+		targetPath = "."
 	}
 	globPattern, err := stringArg(args, "glob", "", false)
 	if err != nil {
@@ -93,6 +98,16 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running grep: " + err.Error())
 	}
 
+	// Resolve the workspace root through symlinks ONCE so (a) confinement checks
+	// and (b) Rel computations both use the canonical root. tool.workspaceRoot is
+	// only Abs-normalized (no EvalSymlinks); using it directly would produce
+	// "../"-laden relative paths when the root itself lives under a symlink (e.g.
+	// macOS /tmp -> /private/tmp) and would not catch files that resolve outside.
+	resolvedRoot, err := filepath.EvalSymlinks(tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error running grep: " + err.Error())
+	}
+
 	var globMatcher *regexp.Regexp
 	if globPattern != "" {
 		globMatcher, err = compileGlob(globPattern)
@@ -101,12 +116,12 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 		}
 	}
 
-	files, err := grepFiles(tool.workspaceRoot, target, globMatcher)
+	files, err := grepFiles(resolvedRoot, target, globMatcher)
 	if err != nil {
 		return errorResult("Error running grep: " + err.Error())
 	}
 
-	matches := collectGrepMatches(tool.workspaceRoot, files, compiled)
+	matches := collectGrepMatches(resolvedRoot, files, compiled)
 	if len(matches) == 0 {
 		if outputMode == "count" {
 			return okResult("0 matches found")
@@ -148,18 +163,40 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 	}
 }
 
-func grepFiles(workspaceRoot string, target string, globMatcher *regexp.Regexp) ([]string, error) {
+// confineGrepFile resolves a candidate file through symlinks and returns its
+// clean, slash-separated path RELATIVE to the (already symlink-resolved) root.
+// It returns ok=false when the resolved file escapes the workspace root, so a
+// symlink inside the workspace that points outside is never searched/returned —
+// mirroring resolveWorkspaceTargetPath / read_file confinement. resolvedRoot must
+// already be EvalSymlinks-resolved so the Rel result is "../"-free for in-root
+// files even when the root lives under a symlink.
+func confineGrepFile(resolvedRoot string, path string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolved)
+	if err != nil {
+		return "", false
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", false
+	}
+	return filepath.ToSlash(relative), true
+}
+
+func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) ([]string, error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		return nil, err
 	}
 
 	if !info.IsDir() {
-		relative, err := filepath.Rel(workspaceRoot, target)
-		if err != nil {
-			return nil, err
+		relative, ok := confineGrepFile(resolvedRoot, target)
+		if !ok {
+			return []string{}, nil
 		}
-		if globMatcher == nil || globMatcher.MatchString(filepath.ToSlash(relative)) {
+		if globMatcher == nil || globMatcher.MatchString(relative) {
 			return []string{target}, nil
 		}
 		return []string{}, nil
@@ -179,11 +216,13 @@ func grepFiles(workspaceRoot string, target string, globMatcher *regexp.Regexp) 
 		if entry.IsDir() {
 			return nil
 		}
-		relative, err := filepath.Rel(workspaceRoot, path)
-		if err != nil {
-			return err
+		// Confine each candidate through symlinks: a symlink inside the workspace
+		// pointing to a file OUTSIDE the root must be skipped, not searched.
+		relative, ok := confineGrepFile(resolvedRoot, path)
+		if !ok {
+			return nil
 		}
-		if globMatcher == nil || globMatcher.MatchString(filepath.ToSlash(relative)) {
+		if globMatcher == nil || globMatcher.MatchString(relative) {
 			files = append(files, path)
 		}
 		return nil
@@ -195,14 +234,16 @@ func grepFiles(workspaceRoot string, target string, globMatcher *regexp.Regexp) 
 	return files, nil
 }
 
-func collectGrepMatches(workspaceRoot string, files []string, compiled *regexp.Regexp) []grepMatch {
+func collectGrepMatches(resolvedRoot string, files []string, compiled *regexp.Regexp) []grepMatch {
 	matches := []grepMatch{}
 	for _, file := range files {
-		content, err := os.ReadFile(file)
-		if err != nil {
+		// Re-confine at read time (defense-in-depth) AND to compute the clean
+		// workspace-relative path used in output.
+		relative, ok := confineGrepFile(resolvedRoot, file)
+		if !ok {
 			continue
 		}
-		relative, err := filepath.Rel(workspaceRoot, file)
+		content, err := os.ReadFile(file)
 		if err != nil {
 			continue
 		}
@@ -212,7 +253,7 @@ func collectGrepMatches(workspaceRoot string, files []string, compiled *regexp.R
 				continue
 			}
 			matches = append(matches, grepMatch{
-				file: filepath.ToSlash(relative),
+				file: relative,
 				line: index + 1,
 				text: strings.TrimRight(line, "\r"),
 				hits: len(lineMatches),

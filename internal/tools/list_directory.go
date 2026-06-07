@@ -35,9 +35,14 @@ func NewListDirectoryTool(workspaceRoot string) Tool {
 }
 
 func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result {
-	requestedPath, err := stringArg(args, "path", ".", false)
+	// Optional with a "." default: treat an explicit empty path (a common
+	// weak-model quirk) the same as the key being absent rather than erroring.
+	requestedPath, err := aliasedStringArg(args, []string{"path", "directory", "dir"}, ".", false, true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for list_directory: " + err.Error())
+	}
+	if requestedPath == "" {
+		requestedPath = "."
 	}
 	recursive, err := boolArg(args, "recursive", false)
 	if err != nil {

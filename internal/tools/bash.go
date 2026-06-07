@@ -52,7 +52,7 @@ func (tool bashTool) RunWithSandbox(ctx context.Context, args map[string]any, en
 }
 
 func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	commandText, err := stringArg(args, "command", "", true)
+	commandText, err := aliasedStringArg(args, []string{"command", "cmd", "script", "shell"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
 	}
@@ -63,6 +63,13 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	timeoutMS, err := intArg(args, "timeout_ms", defaultBashTimeoutMS, 1, maxBashTimeoutMS)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
+	}
+
+	// Pre-execution safety: refuse interactive commands (editors, pagers, REPLs,
+	// remote shells, etc.) that would hang the non-interactive agent until the
+	// timeout fires. This runs before the command is built or launched.
+	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtime.GOOS); interactive.Interactive {
+		return interactiveBlockResult(interactive)
 	}
 
 	absoluteCwd, relativeCwd, err := resolveWorkspacePath(tool.workspaceRoot, cwd)
@@ -161,6 +168,30 @@ func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
 	}
 	if plan.SandboxDir != "" {
 		meta["sandbox_cwd"] = plan.SandboxDir
+	}
+}
+
+// interactiveBlockResult builds the structured tool Result returned when a
+// command is refused before execution because it would hang the agent. The
+// violation is surfaced both in Output (clearly delimited) and in Meta/Display
+// so downstream consumers and the TUI can render it consistently.
+func interactiveBlockResult(detection zeroSandbox.InteractiveCommandResult) Result {
+	message := fmt.Sprintf(
+		"Error: Blocked interactive command %q before execution: %s. This would hang the non-interactive agent.\nSuggestion: %s",
+		detection.Command, detection.Reason, detection.Suggestion,
+	)
+	return Result{
+		Status: StatusError,
+		Output: message,
+		Meta: map[string]string{
+			"exit_code":    "-1",
+			"safety_block": "interactive_command",
+			"safety_cmd":   detection.Command,
+		},
+		Display: Display{
+			Summary: "Blocked interactive command: " + detection.Command,
+			Kind:    "shell",
+		},
 	}
 }
 

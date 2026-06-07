@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -120,18 +121,28 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		if res.SandboxDecision == nil {
 			res.SandboxDecision = sandboxDecision
 		}
-		return res
+		return scrubResultSecrets(res)
 	}
 
 	if options.Sandbox != nil {
 		if sandboxed, ok := tool.(sandboxAwareTool); ok {
 			res := sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
 			res.SandboxDecision = sandboxDecision
-			return res
+			return scrubResultSecrets(res)
 		}
 	}
 	res := tool.Run(ctx, args)
 	res.SandboxDecision = sandboxDecision
+	return scrubResultSecrets(res)
+}
+
+// scrubResultSecrets redacts known secret forms from a tool result's Output at
+// the registry boundary, so a tool can never leak a secret into the transcript.
+func scrubResultSecrets(res Result) Result {
+	if scrubbed := redaction.RedactString(res.Output, redaction.Options{}); scrubbed != res.Output {
+		res.Output = scrubbed
+		res.Redacted = true
+	}
 	return res
 }
 
@@ -141,6 +152,7 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 		NewListDirectoryTool(workspaceRoot),
 		NewGlobTool(workspaceRoot),
 		NewGrepTool(workspaceRoot),
+		NewAskUserTool(),
 	}
 }
 

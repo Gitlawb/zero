@@ -12,8 +12,8 @@ import (
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	toolset := CoreReadOnlyTools(t.TempDir())
-	if len(toolset) != 4 {
-		t.Fatalf("expected 4 core read-only tools, got %d", len(toolset))
+	if len(toolset) != 5 {
+		t.Fatalf("expected 5 core read-only tools, got %d", len(toolset))
 	}
 
 	for _, tool := range toolset {
@@ -147,5 +147,45 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 	}
 	if string(content) != "granted" {
 		t.Fatalf("written content = %q, want granted", string(content))
+	}
+}
+
+type secretTool struct{ out string }
+
+func (t secretTool) Name() string        { return "secret_tool" }
+func (t secretTool) Description() string { return "emits text" }
+func (t secretTool) Parameters() Schema  { return Schema{Type: "object", AdditionalProperties: false} }
+func (t secretTool) Safety() Safety {
+	return Safety{SideEffect: SideEffectRead, Permission: PermissionAllow}
+}
+func (t secretTool) Run(context.Context, map[string]any) Result {
+	return Result{Status: StatusOK, Output: t.out}
+}
+
+// Regression: secrets must be scrubbed at the registry boundary so EVERY caller
+// (agent loop AND MCP server) gets redacted output — not just the agent path.
+func TestRunWithOptionsScrubsSecretsForAllCallers(t *testing.T) {
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	reg := NewRegistry()
+	reg.Register(secretTool{out: "token=" + secret})
+
+	res := reg.RunWithOptions(context.Background(), "secret_tool", map[string]any{}, RunOptions{PermissionGranted: true})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, secret) {
+		t.Fatalf("registry must scrub secrets, leaked: %q", res.Output)
+	}
+	if !res.Redacted {
+		t.Error("expected Redacted=true")
+	}
+}
+
+func TestRunWithOptionsLeavesCleanOutputUnchanged(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(secretTool{out: "nothing secret here"})
+	res := reg.RunWithOptions(context.Background(), "secret_tool", map[string]any{}, RunOptions{PermissionGranted: true})
+	if res.Redacted || res.Output != "nothing secret here" {
+		t.Fatalf("clean output altered: redacted=%v output=%q", res.Redacted, res.Output)
 	}
 }
