@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -119,17 +118,10 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
-	// Retry transient failures (network errors and 5xx) before surfacing them.
-	// Hosted OpenAI-compatible gateways (e.g. Ollama Cloud) return intermittent
-	// 500s that succeed on a quick retry.
-	const maxAttempts = 3
-	var response *http.Response
-	for attempt := 1; ; attempt++ {
-		request, err := http.NewRequestWithContext(streamCtx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err != nil {
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider request error: " + err.Error())})
-			return
-		}
+	// Retry transient failures (network errors, 429, and 5xx) before surfacing
+	// them — hosted gateways return intermittent 500s and rate limits that
+	// succeed on a quick retry. Shared with the Anthropic/Gemini providers.
+	response, err := providerio.SendWithRetry(streamCtx, provider.httpClient, http.MethodPost, endpoint, body, func(request *http.Request) {
 		request.Header.Set("Content-Type", "application/json")
 		if provider.userAgent != "" {
 			request.Header.Set("User-Agent", provider.userAgent)
@@ -137,29 +129,10 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		if provider.apiKey != "" {
 			request.Header.Set("Authorization", "Bearer "+provider.apiKey)
 		}
-
-		resp, err := provider.httpClient.Do(request)
-		if err != nil {
-			if attempt < maxAttempts && ctx.Err() == nil && backoff(ctx, attempt) {
-				continue
-			}
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
-			return
-		}
-		if resp.StatusCode >= http.StatusInternalServerError && attempt < maxAttempts && backoff(ctx, attempt) {
-			_ = resp.Body.Close()
-			continue
-		}
-		// If the 5xx retry backoff above returned false because ctx was canceled
-		// (rather than because retries were exhausted), report the cancellation
-		// instead of misclassifying the upstream 5xx as the failure cause.
-		if ctx.Err() != nil {
-			_ = resp.Body.Close()
-			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctx.Err().Error())})
-			return
-		}
-		response = resp
-		break
+	}, 0)
+	if err != nil {
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
+		return
 	}
 	defer func() {
 		_ = response.Body.Close()
@@ -174,7 +147,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	// Use the shared SSE reader (also used by the Anthropic/Gemini providers) so
 	// multi-line "data:" continuation fields are joined into one payload, and the
 	// idle watchdog / context cancellation are handled uniformly.
-	err := providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, provider.streamIdleTimeout, func(data string) bool {
+	err = providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, provider.streamIdleTimeout, func(data string) bool {
 		return provider.emitPayload(ctx, data, state, events)
 	})
 	if errors.Is(err, providerio.ErrStreamIdle) {
@@ -301,19 +274,6 @@ func (provider *Provider) classifiedError(statusCode int, message string) string
 
 func (provider *Provider) redact(message string) string {
 	return providerio.Redact(message, provider.apiKey)
-}
-
-// backoff waits before a retry attempt, returning false if the context is
-// cancelled while waiting.
-func backoff(ctx context.Context, attempt int) bool {
-	timer := time.NewTimer(time.Duration(attempt) * 400 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }
 
 func sendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event zeroruntime.StreamEvent) {

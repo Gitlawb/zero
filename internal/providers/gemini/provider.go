@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -105,20 +104,15 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	streamCtx, cancelStream := context.WithCancel(ctx)
 	defer cancelStream()
 
-	httpRequest, err := http.NewRequestWithContext(streamCtx, http.MethodPost, provider.streamURL(), bytes.NewReader(body))
-	if err != nil {
-		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider request error: " + err.Error())})
-		return
-	}
-	httpRequest.Header.Set("Content-Type", "application/json")
-	if provider.apiKey != "" {
-		httpRequest.Header.Set("x-goog-api-key", provider.apiKey)
-	}
-	if provider.userAgent != "" {
-		httpRequest.Header.Set("User-Agent", provider.userAgent)
-	}
-
-	response, err := provider.httpClient.Do(httpRequest)
+	response, err := providerio.SendWithRetry(streamCtx, provider.httpClient, http.MethodPost, provider.streamURL(), body, func(request *http.Request) {
+		request.Header.Set("Content-Type", "application/json")
+		if provider.apiKey != "" {
+			request.Header.Set("x-goog-api-key", provider.apiKey)
+		}
+		if provider.userAgent != "" {
+			request.Header.Set("User-Agent", provider.userAgent)
+		}
+	}, 0)
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
