@@ -171,16 +171,67 @@ func TestManagerPersistsKilledStatus(t *testing.T) {
 	}
 }
 
-func TestManagerRejectsInvalidPersistedMetadata(t *testing.T) {
+func TestManagerSkipsInvalidPersistedMetadata(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "task.json"), []byte(`{"id":"other","type":"specialist","status":"running","outputFile":"task.ndjson"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
 
-	_, err := NewManager(root)
+	manager, err := NewManager(root)
 
-	if err == nil || !strings.Contains(err.Error(), "does not match file id") {
-		t.Fatalf("NewManager invalid metadata error = %v", err)
+	if err != nil {
+		t.Fatalf("NewManager returned error for invalid metadata: %v", err)
+	}
+	if _, ok := manager.Get("task"); ok {
+		t.Fatal("manager loaded invalid task metadata")
+	}
+	warnings := strings.Join(manager.LoadWarnings(), "\n")
+	if !strings.Contains(warnings, "does not match file id") {
+		t.Fatalf("load warnings = %q, want id mismatch warning", warnings)
+	}
+}
+
+func TestManagerMarksReloadedRunningTaskNonKillable(t *testing.T) {
+	root := t.TempDir()
+	manager, err := NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "task", Type: "specialist", PID: 42}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	killed := []int{}
+	reloaded, err := NewManagerWithOptions(ManagerOptions{
+		RootDir: root,
+		KillProcess: func(pid int) error {
+			killed = append(killed, pid)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager reload returned error: %v", err)
+	}
+	task, ok := reloaded.Get("task")
+	if !ok {
+		t.Fatal("reloaded manager did not find task")
+	}
+	if task.Status != StatusError || task.PID != 0 || task.ExitCode != -1 || task.CompletedAt.IsZero() {
+		t.Fatalf("reloaded running task was not orphaned: %#v", task)
+	}
+	if err := reloaded.Kill("task"); err == nil || !strings.Contains(err.Error(), "is error") {
+		t.Fatalf("Kill reloaded running task error = %v", err)
+	}
+	if len(killed) != 0 {
+		t.Fatalf("Kill signaled stale pids: %#v", killed)
+	}
+
+	reloadedAgain, err := NewManager(root)
+	if err != nil {
+		t.Fatalf("second reload returned error: %v", err)
+	}
+	task, ok = reloadedAgain.Get("task")
+	if !ok || task.Status != StatusError || task.PID != 0 {
+		t.Fatalf("repaired task metadata did not persist: %#v", task)
 	}
 }
 

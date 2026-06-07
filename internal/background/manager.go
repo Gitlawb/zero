@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,6 +57,7 @@ type ManagerOptions struct {
 type Manager struct {
 	mu          sync.Mutex
 	tasks       map[string]Task
+	warnings    []string
 	rootDir     string
 	now         func() time.Time
 	killProcess func(pid int) error
@@ -111,6 +113,12 @@ func (manager *Manager) RootDir() string {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	return manager.rootDir
+}
+
+func (manager *Manager) LoadWarnings() []string {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return append([]string(nil), manager.warnings...)
 }
 
 func (manager *Manager) Register(input RegisterInput) (string, error) {
@@ -336,57 +344,85 @@ func (manager *Manager) loadTasks() error {
 			continue
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing symlink background task metadata: %s", filepath.Join(manager.rootDir, entry.Name()))
+			manager.warnf("skipped symlink background task metadata: %s", filepath.Join(manager.rootDir, entry.Name()))
+			continue
 		}
 		taskID := strings.TrimSuffix(entry.Name(), ".json")
 		if !validTaskID(taskID) {
-			return fmt.Errorf("invalid background task metadata file %q", entry.Name())
+			manager.warnf("skipped invalid background task metadata file %q", entry.Name())
+			continue
 		}
 		path := manager.metadataFile(taskID)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read background task metadata %s: %w", path, err)
+			manager.warnf("skipped unreadable background task metadata %s: %s", path, err)
+			continue
 		}
 		var task Task
 		if err := json.Unmarshal(data, &task); err != nil {
-			return fmt.Errorf("decode background task metadata %s: %w", path, err)
+			manager.warnf("skipped invalid background task metadata %s: %s", path, err)
+			continue
 		}
-		task, err = manager.normalizeLoadedTask(taskID, task)
+		task, changed, err := manager.normalizeLoadedTask(taskID, task)
 		if err != nil {
-			return fmt.Errorf("invalid background task metadata %s: %w", path, err)
+			manager.warnf("skipped invalid background task metadata %s: %s", path, err)
+			continue
+		}
+		if changed {
+			if err := manager.persistTaskLocked(task); err != nil {
+				manager.warnf("failed to repair background task metadata %s: %s", path, err)
+			}
 		}
 		manager.tasks[task.ID] = task
 	}
 	return nil
 }
 
-func (manager *Manager) normalizeLoadedTask(fileTaskID string, task Task) (Task, error) {
+func (manager *Manager) normalizeLoadedTask(fileTaskID string, task Task) (Task, bool, error) {
+	changed := false
 	task.ID = strings.TrimSpace(task.ID)
 	if task.ID == "" {
 		task.ID = fileTaskID
+		changed = true
 	}
 	if task.ID != fileTaskID {
-		return Task{}, fmt.Errorf("metadata id %q does not match file id %q", task.ID, fileTaskID)
+		return Task{}, false, fmt.Errorf("metadata id %q does not match file id %q", task.ID, fileTaskID)
 	}
 	if !validTaskID(task.ID) {
-		return Task{}, fmt.Errorf("invalid task id %q", task.ID)
+		return Task{}, false, fmt.Errorf("invalid task id %q", task.ID)
 	}
-	task.Type = strings.TrimSpace(task.Type)
+	if trimmed := strings.TrimSpace(task.Type); trimmed != task.Type {
+		task.Type = trimmed
+		changed = true
+	}
 	if task.Type == "" {
-		return Task{}, fmt.Errorf("background task %s requires a type", task.ID)
+		return Task{}, false, fmt.Errorf("background task %s requires a type", task.ID)
 	}
 	if !validStatus(task.Status) {
-		return Task{}, fmt.Errorf("invalid background task status %q", task.Status)
+		return Task{}, false, fmt.Errorf("invalid background task status %q", task.Status)
 	}
 	if task.PID < 0 {
-		return Task{}, fmt.Errorf("invalid background task pid %d", task.PID)
+		return Task{}, false, fmt.Errorf("invalid background task pid %d", task.PID)
 	}
 	outputFile, err := manager.outputFile(task.ID, task.OutputFile)
 	if err != nil {
-		return Task{}, err
+		return Task{}, false, err
+	}
+	if outputFile != task.OutputFile {
+		changed = true
 	}
 	task.OutputFile = outputFile
-	return task, nil
+	if task.Status == StatusRunning {
+		task.Status = StatusError
+		task.PID = 0
+		task.ExitCode = -1
+		if task.CompletedAt.IsZero() {
+			task.CompletedAt = manager.now()
+		}
+		changed = true
+		manager.warnf("marked reloaded running background task %s as error; original process ownership was lost", task.ID)
+	}
+	return task, changed, nil
 }
 
 func (manager *Manager) persistTaskLocked(task Task) error {
@@ -395,9 +431,19 @@ func (manager *Manager) persistTaskLocked(task Task) error {
 		return fmt.Errorf("encode background task metadata: %w", err)
 	}
 	path := manager.metadataFile(task.ID)
-	tmp := fmt.Sprintf("%s.tmp-%d", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create background task metadata temp file: %w", err)
+	}
+	tmp := file.Name()
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write background task metadata: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close background task metadata: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
@@ -408,6 +454,12 @@ func (manager *Manager) persistTaskLocked(task Task) error {
 
 func (manager *Manager) metadataFile(taskID string) string {
 	return filepath.Join(manager.rootDir, taskID+".json")
+}
+
+func (manager *Manager) warnf(format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+	manager.warnings = append(manager.warnings, message)
+	log.Printf("zero background: %s", message)
 }
 
 func (manager *Manager) OutputPath(taskID string) string {

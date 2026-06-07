@@ -134,3 +134,7 @@ Each task has:
 
 Persisted metadata lets a new background manager instance read completed task
 output or stop a still-running task by id.
+
+If Zero is restarted while a background task is still marked `running`, the new
+manager marks that task `error` and clears its PID. This avoids sending
+`TaskStop` to a stale PID that may now belong to an unrelated process.
