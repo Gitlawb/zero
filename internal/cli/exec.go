@@ -166,7 +166,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
 
-	prompt, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
+	prompt, streamImages, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -204,6 +204,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
+	// Merge stream-json message images with --image attachments so BOTH input
+	// sources flow through the same vision gate (drop+warn) and the same
+	// agent.Options.Images wiring below. Without this merge, images sent over
+	// stream-json are parsed and validated but never reach the agent.
+	images = append(images, streamImages...)
 	// Gate against the EFFECTIVE resolved model (not the --model override). An
 	// unknown/custom id can't be confirmed vision-capable, so drop+warn rather
 	// than error: image input is best-effort, never fatal to the run.
@@ -445,7 +450,12 @@ func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {
 	return workspaceRoot, nil
 }
 
-func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reader) (string, error) {
+// resolveExecPrompt resolves the run's prompt text and, for stream-json input,
+// the images carried on its message events. The returned image slice is nil for
+// text input and for stream-json input that carries no images; it is merged with
+// any --image attachments by the caller before the shared vision gate, so both
+// sources flow through the same drop+warn and agent.Options.Images wiring.
+func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reader) (string, []zeroruntime.ImageBlock, error) {
 	if options.inputFormat == execInputStreamJSON {
 		input := ""
 		if options.file != "" {
@@ -455,21 +465,29 @@ func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reade
 			}
 			data, err := os.ReadFile(promptPath)
 			if err != nil {
-				return "", execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
+				return "", nil, execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
 			}
 			input = string(data)
 		} else {
 			data, err := io.ReadAll(stdin)
 			if err != nil {
-				return "", execUsageError{fmt.Sprintf("failed to read stream-json input: %v", err)}
+				return "", nil, execUsageError{fmt.Sprintf("failed to read stream-json input: %v", err)}
 			}
 			input = string(data)
 		}
-		prompt, err := streamjson.ParsePrompt(input)
+		events, err := streamjson.ParseInput(input)
 		if err != nil {
-			return "", execUsageError{err.Error()}
+			return "", nil, execUsageError{err.Error()}
 		}
-		return prompt, nil
+		prompt, err := streamjson.ResolvePrompt(events)
+		if err != nil {
+			return "", nil, execUsageError{err.Error()}
+		}
+		streamImages, err := streamjson.ResolveImages(events)
+		if err != nil {
+			return "", nil, execUsageError{err.Error()}
+		}
+		return prompt, streamImages, nil
 	}
 
 	parts := []string{}
@@ -485,20 +503,20 @@ func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reade
 		}
 		data, err := os.ReadFile(promptPath)
 		if err != nil {
-			return "", execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
+			return "", nil, execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
 		}
 		filePrompt := strings.TrimSpace(string(data))
 		if filePrompt == "" {
-			return "", execUsageError{fmt.Sprintf("prompt file is empty: %s", promptPath)}
+			return "", nil, execUsageError{fmt.Sprintf("prompt file is empty: %s", promptPath)}
 		}
 		parts = append(parts, filePrompt)
 	}
 
 	prompt := strings.TrimSpace(strings.Join(parts, "\n\n"))
 	if prompt == "" {
-		return "", execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
+		return "", nil, execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
 	}
-	return prompt, nil
+	return prompt, nil, nil
 }
 
 // resolveExecImages loads each --image attachment through the shared
