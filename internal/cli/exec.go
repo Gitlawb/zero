@@ -409,8 +409,13 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 
 // applyConfiguredAutonomyCeiling overlays a config-sourced autonomy ceiling onto
 // a policy. An empty ceiling is a no-op so the default High ceiling is preserved
-// (backward compatible). An unrecognised value is ignored so a malformed config
-// never silently lowers or raises the ceiling.
+// (backward compatible).
+//
+// A non-empty but unrecognised value FAILS CLOSED: it clamps to the most
+// restrictive ceiling (AutonomyLow) rather than leaving the policy unchanged.
+// config.Resolve already rejects invalid values, so this branch is defense in
+// depth — it guarantees that even a direct/programmatic caller passing a typo
+// can never WIDEN the ceiling back to the High default.
 func applyConfiguredAutonomyCeiling(policy sandbox.Policy, maxAutonomy string) sandbox.Policy {
 	trimmed := strings.TrimSpace(maxAutonomy)
 	if trimmed == "" {
@@ -418,6 +423,7 @@ func applyConfiguredAutonomyCeiling(policy sandbox.Policy, maxAutonomy string) s
 	}
 	normalized, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(trimmed))
 	if err != nil {
+		policy.MaxAutonomy = sandbox.AutonomyLow
 		return policy
 	}
 	policy.MaxAutonomy = normalized

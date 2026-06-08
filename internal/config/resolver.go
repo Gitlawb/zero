@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 const defaultMaxTurns = 12
@@ -38,6 +39,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	applyOverrides(&cfg, options.Overrides)
+
+	if maxAutonomy := strings.TrimSpace(cfg.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		// Fail loud on an invalid ceiling. An unvalidated typo (e.g. "moderate")
+		// would otherwise survive Resolve untouched, reach the sandbox bridge,
+		// fail to normalize there, and silently leave the default High ceiling in
+		// place — fail-open on a security boundary. Reject it here instead.
+		if _, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(maxAutonomy)); err != nil {
+			return ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q: expected low, medium, or high", maxAutonomy)
+		}
+	}
 
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider)
 	if err != nil {

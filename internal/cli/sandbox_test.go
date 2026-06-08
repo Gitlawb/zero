@@ -353,6 +353,38 @@ func TestRunSandboxPolicyTextShowsMaxAutonomy(t *testing.T) {
 	}
 }
 
+func TestApplyConfiguredAutonomyCeiling(t *testing.T) {
+	cases := []struct {
+		name        string
+		maxAutonomy string
+		want        sandbox.Autonomy
+	}{
+		// Empty is a no-op: the default High ceiling is preserved.
+		{name: "empty keeps default high", maxAutonomy: "", want: sandbox.AutonomyHigh},
+		{name: "whitespace keeps default high", maxAutonomy: "   ", want: sandbox.AutonomyHigh},
+		{name: "valid low", maxAutonomy: "low", want: sandbox.AutonomyLow},
+		{name: "valid medium", maxAutonomy: "medium", want: sandbox.AutonomyMedium},
+		{name: "valid high", maxAutonomy: "high", want: sandbox.AutonomyHigh},
+		{name: "case-insensitive medium", maxAutonomy: "MEDIUM", want: sandbox.AutonomyMedium},
+		// Fail-closed: an invalid non-empty value clamps to the most restrictive
+		// ceiling instead of leaving the High default in place.
+		{name: "invalid banana clamps to low", maxAutonomy: "banana", want: sandbox.AutonomyLow},
+		{name: "invalid moderate clamps to low", maxAutonomy: "moderate", want: sandbox.AutonomyLow},
+		{name: "invalid med clamps to low", maxAutonomy: "med", want: sandbox.AutonomyLow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if base := sandbox.DefaultPolicy(); base.MaxAutonomy != sandbox.AutonomyHigh {
+				t.Fatalf("precondition: DefaultPolicy().MaxAutonomy = %q, want high", base.MaxAutonomy)
+			}
+			policy := applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), tc.maxAutonomy)
+			if policy.MaxAutonomy != tc.want {
+				t.Fatalf("applyConfiguredAutonomyCeiling(_, %q).MaxAutonomy = %q, want %q", tc.maxAutonomy, policy.MaxAutonomy, tc.want)
+			}
+		})
+	}
+}
+
 func newSandboxTestStore(t *testing.T) *sandbox.GrantStore {
 	t.Helper()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{
