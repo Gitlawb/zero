@@ -644,6 +644,7 @@ func assertHelpOutput(t *testing.T, args []string) {
 		"worktrees",
 		"verify",
 		"serve",
+		"usage",
 		"zeroline",
 		"--version",
 	} {
