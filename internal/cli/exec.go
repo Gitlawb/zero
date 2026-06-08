@@ -78,6 +78,11 @@ type execOptions struct {
 	worktreeName          string
 	worktreeDir           string
 	skipPermissionsUnsafe bool
+	// allowEscalation opts the run into mid-run model escalation: it registers
+	// the escalate_model tool and wires agent.Options.ModelSwitcher. Off by
+	// default — a run without the flag is byte-identical to before (no tool, nil
+	// switcher).
+	allowEscalation bool
 }
 
 type execUsageError struct {

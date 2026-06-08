@@ -1135,3 +1135,31 @@ func TestRunExecInvalidAutoValidatedWithSkipPermissions(t *testing.T) {
 		t.Fatalf("expected autonomy validation error, got %q", got)
 	}
 }
+
+func TestParseExecAllowEscalationFlag(t *testing.T) {
+	t.Run("absent defaults to false", func(t *testing.T) {
+		options, help, err := parseExecArgs([]string{"hello"})
+		if err != nil {
+			t.Fatalf("parseExecArgs returned error: %v", err)
+		}
+		if help {
+			t.Fatal("help = true, want false")
+		}
+		if options.allowEscalation {
+			t.Fatal("allowEscalation = true, want false by default")
+		}
+	})
+
+	t.Run("flag sets true", func(t *testing.T) {
+		options, _, err := parseExecArgs([]string{"--allow-escalation", "hello"})
+		if err != nil {
+			t.Fatalf("parseExecArgs returned error: %v", err)
+		}
+		if !options.allowEscalation {
+			t.Fatal("allowEscalation = false, want true")
+		}
+		if strings.Join(options.promptParts, " ") != "hello" {
+			t.Fatalf("promptParts = %#v, want [hello]", options.promptParts)
+		}
+	})
+}

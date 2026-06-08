@@ -23,6 +23,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.skipPermissionsUnsafe = true
 		case arg == "--list-tools":
 			options.listTools = true
+		case arg == "--allow-escalation":
+			options.allowEscalation = true
 		case arg == "--auto":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
