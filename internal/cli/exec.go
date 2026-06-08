@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -19,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/worktrees"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const (
@@ -483,6 +485,29 @@ func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reade
 		return "", execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
 	}
 	return prompt, nil
+}
+
+// resolveExecImages loads each --image attachment through the shared
+// imageinput.LoadFile loader (read, sniff, normalize, 10-MiB cap), resolving
+// relative paths against workspaceRoot. It is a thin per-path loop: the actual
+// read/sniff/cap logic lives in internal/imageinput so the CLI and TUI surfaces
+// never duplicate it. Any loader error (missing file, unsupported type,
+// oversized) is wrapped into an execUsageError so the run reports it as a usage
+// problem rather than reaching a provider with an invalid image. Returns nil for
+// an empty path list (text-only behavior unchanged).
+func resolveExecImages(paths []string, workspaceRoot string) ([]zeroruntime.ImageBlock, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	images := make([]zeroruntime.ImageBlock, 0, len(paths))
+	for _, path := range paths {
+		image, err := imageinput.LoadFile(path, workspaceRoot)
+		if err != nil {
+			return nil, execUsageError{err.Error()}
+		}
+		images = append(images, image)
+	}
+	return images, nil
 }
 
 func writeExecUsageError(stderr io.Writer, message string) int {
