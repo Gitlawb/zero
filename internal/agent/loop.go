@@ -408,6 +408,12 @@ func isRetriableToolError(result ToolResult) bool {
 	if result.Status != tools.StatusError {
 		return false
 	}
+	// A categorized denial (filtered / permission / sandbox) is a policy decision,
+	// not a transient failure — never retry it. This is robust to message wording
+	// (the text checks below remain as a fallback for results lacking the field).
+	if result.DenialReason != DenialNone {
+		return false
+	}
 	if result.Meta["permission_action"] == string(PermissionActionDeny) {
 		return false
 	}

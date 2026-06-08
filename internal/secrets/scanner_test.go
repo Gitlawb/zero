@@ -11,7 +11,7 @@ func TestScanDetectsHighConfidenceSecrets(t *testing.T) {
 		"github_token":      "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 		"slack_token":       "xoxb-1234567890-abcdefghijklmno",
 		"google_api_key":    "AIzaSyA1234567890abcdefghijklmnopqrstuv",
-		"private_key_block": "-----BEGIN OPENSSH PRIVATE KEY-----",
+		"private_key_block": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAB\n-----END OPENSSH PRIVATE KEY-----",
 	}
 	for wantType, secret := range cases {
 		text := "log line before " + secret + " and after"
@@ -23,6 +23,25 @@ func TestScanDetectsHighConfidenceSecrets(t *testing.T) {
 		if findings[0].Type != wantType {
 			t.Errorf("%s: got type %q for %q", wantType, findings[0].Type, secret)
 		}
+	}
+}
+
+func TestRedactPrivateKeyBlockRemovesBody(t *testing.T) {
+	key := "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA_secret_body_line_1\n_secret_body_line_2\n-----END RSA PRIVATE KEY-----"
+	text := "here is a key:\n" + key + "\nbye"
+
+	redacted, findings := Redact(text)
+	if len(findings) != 1 || findings[0].Type != "private_key_block" {
+		t.Fatalf("findings = %#v, want one private_key_block", findings)
+	}
+	// The KEY BODY (not just the header) must be gone.
+	for _, leaked := range []string{"MIIEowIBAAKCAQEA", "_secret_body_line_1", "_secret_body_line_2", "PRIVATE KEY"} {
+		if strings.Contains(redacted, leaked) {
+			t.Fatalf("redaction leaked key material %q: %q", leaked, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "[REDACTED:private_key_block]") {
+		t.Fatalf("missing placeholder: %q", redacted)
 	}
 }
 
