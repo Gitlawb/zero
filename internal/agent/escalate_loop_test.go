@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/tools"
@@ -105,5 +107,174 @@ func TestExecuteToolCallNoEscalationMetaLeavesRequestedModelEmpty(t *testing.T) 
 	}
 	if result.RequestedModel != "" {
 		t.Fatalf("expected empty RequestedModel without escalation meta, got %q", result.RequestedModel)
+	}
+}
+
+// escalateThenAnswerTurns builds a two-turn provider script: turn 1 calls the
+// escalate tool, turn 2 returns a final answer. Reused by the switch tests.
+func escalateThenAnswerTurns(answer string) [][]zeroruntime.StreamEvent {
+	return [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: "escalate"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: answer},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}
+}
+
+// TestRunSwitchesProviderOnEscalationRequest verifies that when a tool requests
+// a model and a ModelSwitcher is wired, the loop swaps the active provider (the
+// NEXT turn streams from the new provider) and updates options.Model.
+func TestRunSwitchesProviderOnEscalationRequest(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	firstProvider := &mockProvider{turns: escalateThenAnswerTurns("done")}
+	secondProvider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventText, Content: "answered on the upgraded model"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	var switchedTo string
+	switchCount := 0
+	result, err := Run(context.Background(), "go", firstProvider, Options{
+		Registry: registry,
+		Model:    "claude-sonnet-4.5",
+		MaxTurns: 4,
+		ModelSwitcher: func(_ context.Context, modelID string) (Provider, error) {
+			switchCount++
+			switchedTo = modelID
+			return secondProvider, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if switchCount != 1 {
+		t.Fatalf("expected exactly one switch, got %d", switchCount)
+	}
+	if switchedTo != "claude-opus-4.1" {
+		t.Fatalf("expected switch to claude-opus-4.1, got %q", switchedTo)
+	}
+	// The first provider only handled the escalation turn (1 request); the second
+	// provider handled the answer turn (1 request) — proving the swap took effect.
+	if len(firstProvider.requests) != 1 {
+		t.Fatalf("expected first provider to handle exactly the escalation turn, got %d requests", len(firstProvider.requests))
+	}
+	if len(secondProvider.requests) != 1 {
+		t.Fatalf("expected second provider to handle the post-switch turn, got %d requests", len(secondProvider.requests))
+	}
+	if result.FinalAnswer != "answered on the upgraded model" {
+		t.Fatalf("expected final answer from the swapped provider, got %q", result.FinalAnswer)
+	}
+}
+
+// TestRunIgnoresEscalationWhenSwitcherNil verifies that without a ModelSwitcher
+// the escalation request is ignored: the original provider serves every turn.
+func TestRunIgnoresEscalationWhenSwitcherNil(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	provider := &mockProvider{turns: escalateThenAnswerTurns("done on original")}
+
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry: registry,
+		Model:    "claude-sonnet-4.5",
+		MaxTurns: 4,
+		// ModelSwitcher intentionally nil.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both turns (escalate + answer) must run on the single original provider.
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected the original provider to serve both turns, got %d requests", len(provider.requests))
+	}
+	if result.FinalAnswer != "done on original" {
+		t.Fatalf("expected final answer from the original provider, got %q", result.FinalAnswer)
+	}
+}
+
+// TestRunEscalationSwitcherErrorIsNonFatal verifies a ModelSwitcher error does
+// not abort the run: the loop continues on the current provider and a note is
+// recorded in the transcript.
+func TestRunEscalationSwitcherErrorIsNonFatal(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	provider := &mockProvider{turns: escalateThenAnswerTurns("recovered")}
+
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry: registry,
+		Model:    "claude-sonnet-4.5",
+		MaxTurns: 4,
+		ModelSwitcher: func(_ context.Context, _ string) (Provider, error) {
+			return nil, errors.New("provider build blew up")
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected escalation error to be non-fatal, got %v", err)
+	}
+	// The run continues on the same provider through the answer turn.
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected the run to continue on the original provider, got %d requests", len(provider.requests))
+	}
+	if result.FinalAnswer != "recovered" {
+		t.Fatalf("expected final answer after non-fatal switch error, got %q", result.FinalAnswer)
+	}
+	// A brief note about the failed switch must reach the model on the next turn.
+	var sawNote bool
+	for _, m := range provider.requests[1].Messages {
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(strings.ToLower(m.Content), "could not switch") {
+			sawNote = true
+		}
+	}
+	if !sawNote {
+		t.Fatalf("expected a non-fatal switch-failure note on the next turn, messages: %+v", provider.requests[1].Messages)
+	}
+}
+
+// TestRunSwitchesAtMostOncePerTurn verifies that when a single turn carries two
+// escalation requests, only the first triggers a switch.
+func TestRunSwitchesAtMostOncePerTurn(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	firstProvider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c1", ToolName: "escalate"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c1"},
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "c2", ToolName: "escalate"},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "c2"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+	secondProvider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	switchCount := 0
+	if _, err := Run(context.Background(), "go", firstProvider, Options{
+		Registry: registry,
+		Model:    "claude-sonnet-4.5",
+		MaxTurns: 4,
+		ModelSwitcher: func(_ context.Context, _ string) (Provider, error) {
+			switchCount++
+			return secondProvider, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if switchCount != 1 {
+		t.Fatalf("expected at most one switch per turn, got %d", switchCount)
 	}
 }
