@@ -300,6 +300,47 @@ func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
 	}
 }
 
+func TestParseInputThenResolveImagesRoundTrip(t *testing.T) {
+	raw := []byte("\x89PNG round trip bytes")
+	line := `{"schemaVersion":1,"type":"message","role":"user","content":"describe","images":[{"mediaType":"png","data":"` +
+		base64.StdEncoding.EncodeToString(raw) + `"}]}`
+
+	events, err := ParseInput(line)
+	if err != nil {
+		t.Fatalf("ParseInput: %v", err)
+	}
+
+	// prompt resolution is unaffected by images
+	prompt, err := ResolvePrompt(events)
+	if err != nil {
+		t.Fatalf("ResolvePrompt: %v", err)
+	}
+	if prompt != "describe" {
+		t.Fatalf("prompt = %q", prompt)
+	}
+
+	images, err := ResolveImages(events)
+	if err != nil {
+		t.Fatalf("ResolveImages: %v", err)
+	}
+	if len(images) != 1 || images[0].MediaType != "image/png" || string(images[0].Data) != string(raw) {
+		t.Fatalf("round-trip image mismatch: %+v", images)
+	}
+
+	// text-only input still resolves to nil images, non-empty prompt
+	textOnly, err := ParseInput(`{"schemaVersion":1,"type":"prompt","content":"hello"}`)
+	if err != nil {
+		t.Fatalf("ParseInput text-only: %v", err)
+	}
+	imgs, err := ResolveImages(textOnly)
+	if err != nil {
+		t.Fatalf("ResolveImages text-only: %v", err)
+	}
+	if imgs != nil {
+		t.Fatalf("expected nil images for text-only input, got %+v", imgs)
+	}
+}
+
 func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {
 	redacted := true
 	truncated := false
