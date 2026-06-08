@@ -117,7 +117,7 @@ func configFilesCheck(userPath string, projectPath string) Check {
 }
 
 func providerConfigCheck(profile config.ProviderProfile) Check {
-	if profile == (config.ProviderProfile{}) {
+	if emptyProviderProfile(profile) {
 		return check("provider.config", "Provider config", StatusFail, "No LLM provider is configured.", map[string]any{"help": "Set a provider in config or environment."})
 	}
 	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), map[string]any{
@@ -130,7 +130,7 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 }
 
 func providerModelCheck(profile config.ProviderProfile) Check {
-	if profile == (config.ProviderProfile{}) {
+	if emptyProviderProfile(profile) {
 		return check("provider.model", "Provider model", StatusWarn, "Model validity was skipped because provider config is unavailable.", nil)
 	}
 	registry, err := modelregistry.DefaultRegistry()
@@ -139,8 +139,8 @@ func providerModelCheck(profile config.ProviderProfile) Check {
 	}
 	model, err := registry.Require(profile.Model)
 	if err != nil {
-		if profile.ProviderKind == config.ProviderKindOpenAICompatible {
-			return check("provider.model", "Provider model", StatusWarn, "Custom OpenAI-compatible model was not found in the Zero registry; runtime will pass it through to the configured provider.", map[string]any{"model": profile.Model, "provider": providerName(profile)})
+		if profile.ProviderKind == config.ProviderKindOpenAICompatible || profile.ProviderKind == config.ProviderKindAnthropicCompat {
+			return check("provider.model", "Provider model", StatusWarn, fmt.Sprintf("Custom %s model was not found in the Zero registry; runtime will pass it through to the configured provider.", profile.ProviderKind), map[string]any{"model": profile.Model, "provider": providerName(profile)})
 		}
 		return check("provider.model", "Provider model", StatusFail, "Provider model is invalid: "+err.Error(), map[string]any{"model": profile.Model})
 	}
@@ -156,13 +156,17 @@ func providerModelCheck(profile config.ProviderProfile) Check {
 }
 
 func connectivityCheck(profile config.ProviderProfile, enabled bool, modelStatus Status) Check {
-	if profile == (config.ProviderProfile{}) || modelStatus == StatusFail {
+	if emptyProviderProfile(profile) || modelStatus == StatusFail {
 		return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity check was skipped because provider runtime did not resolve.", nil)
 	}
 	if !enabled {
 		return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity probe skipped. Run `zero doctor --connectivity` to probe the provider endpoint.", map[string]any{"baseURL": profile.BaseURL})
 	}
 	return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity probing is not wired in the Go doctor backend yet.", map[string]any{"baseURL": profile.BaseURL})
+}
+
+func emptyProviderProfile(profile config.ProviderProfile) bool {
+	return !config.HasProviderProfile(profile)
 }
 
 func check(id string, label string, status Status, message string, details map[string]any) Check {
@@ -197,7 +201,7 @@ func providerName(profile config.ProviderProfile) string {
 
 func toModelProvider(profile config.ProviderProfile) modelregistry.ProviderKind {
 	switch profile.ProviderKind {
-	case config.ProviderKindAnthropic:
+	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return modelregistry.ProviderAnthropic
 	case config.ProviderKindGoogle:
 		return modelregistry.ProviderGoogle

@@ -15,18 +15,43 @@ type ProviderKind string
 const (
 	ProviderKindOpenAI           ProviderKind = "openai"
 	ProviderKindAnthropic        ProviderKind = "anthropic"
+	ProviderKindAnthropicCompat  ProviderKind = "anthropic-compatible"
 	ProviderKindGoogle           ProviderKind = "google"
 	ProviderKindOpenAICompatible ProviderKind = "openai-compatible"
 )
 
 type ProviderProfile struct {
-	Name         string       `json:"name"`
-	Provider     string       `json:"provider,omitempty"`
-	ProviderKind ProviderKind `json:"provider_kind,omitempty"`
-	BaseURL      string       `json:"baseURL,omitempty"`
-	APIKey       string       `json:"apiKey,omitempty"`
-	Model        string       `json:"model,omitempty"`
-	Description  string       `json:"description,omitempty"`
+	Name            string            `json:"name"`
+	Provider        string            `json:"provider,omitempty"`
+	ProviderKind    ProviderKind      `json:"provider_kind,omitempty"`
+	CatalogID       string            `json:"catalogID,omitempty"`
+	BaseURL         string            `json:"baseURL,omitempty"`
+	APIKey          string            `json:"apiKey,omitempty"`
+	APIKeyEnv       string            `json:"apiKeyEnv,omitempty"`
+	APIFormat       string            `json:"apiFormat,omitempty"`
+	AuthHeader      string            `json:"authHeader,omitempty"`
+	AuthScheme      string            `json:"authScheme,omitempty"`
+	AuthHeaderValue string            `json:"authHeaderValue,omitempty"`
+	CustomHeaders   map[string]string `json:"customHeaders,omitempty"`
+	Model           string            `json:"model,omitempty"`
+	Description     string            `json:"description,omitempty"`
+}
+
+func HasProviderProfile(profile ProviderProfile) bool {
+	return strings.TrimSpace(profile.Name) != "" ||
+		strings.TrimSpace(profile.Provider) != "" ||
+		strings.TrimSpace(string(profile.ProviderKind)) != "" ||
+		strings.TrimSpace(profile.CatalogID) != "" ||
+		strings.TrimSpace(profile.BaseURL) != "" ||
+		strings.TrimSpace(profile.APIKey) != "" ||
+		strings.TrimSpace(profile.APIKeyEnv) != "" ||
+		strings.TrimSpace(profile.APIFormat) != "" ||
+		strings.TrimSpace(profile.AuthHeader) != "" ||
+		strings.TrimSpace(profile.AuthScheme) != "" ||
+		strings.TrimSpace(profile.AuthHeaderValue) != "" ||
+		profile.CustomHeaders != nil ||
+		strings.TrimSpace(profile.Model) != "" ||
+		strings.TrimSpace(profile.Description) != ""
 }
 
 type FileConfig struct {
@@ -140,16 +165,31 @@ func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 
 func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 	type rawProfile struct {
-		Name         string `json:"name"`
-		Provider     string `json:"provider"`
-		ProviderKind string `json:"provider_kind"`
-		BaseURL      string `json:"baseURL"`
-		BaseURLSnake string `json:"base_url"`
-		APIKey       string `json:"apiKey"`
-		APIKeySnake  string `json:"api_key"`
-		Model        string `json:"model"`
-		ModelID      string `json:"model_id"`
-		Description  string `json:"description"`
+		Name                 string            `json:"name"`
+		Provider             string            `json:"provider"`
+		ProviderKind         string            `json:"provider_kind"`
+		ProviderKindCamel    string            `json:"providerKind"`
+		CatalogID            string            `json:"catalogID"`
+		CatalogIDSnake       string            `json:"catalog_id"`
+		BaseURL              string            `json:"baseURL"`
+		BaseURLSnake         string            `json:"base_url"`
+		APIKey               string            `json:"apiKey"`
+		APIKeySnake          string            `json:"api_key"`
+		APIKeyEnv            string            `json:"apiKeyEnv"`
+		APIKeyEnvSnake       string            `json:"api_key_env"`
+		APIFormat            string            `json:"apiFormat"`
+		APIFormatSnake       string            `json:"api_format"`
+		AuthHeader           string            `json:"authHeader"`
+		AuthHeaderSnake      string            `json:"auth_header"`
+		AuthScheme           string            `json:"authScheme"`
+		AuthSchemeSnake      string            `json:"auth_scheme"`
+		AuthHeaderValue      string            `json:"authHeaderValue"`
+		AuthHeaderValueSnake string            `json:"auth_header_value"`
+		CustomHeaders        map[string]string `json:"customHeaders"`
+		CustomHeadersSnake   map[string]string `json:"custom_headers"`
+		Model                string            `json:"model"`
+		ModelID              string            `json:"model_id"`
+		Description          string            `json:"description"`
 	}
 
 	var raw rawProfile
@@ -159,9 +199,16 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 
 	profile.Name = strings.TrimSpace(raw.Name)
 	profile.Provider = strings.TrimSpace(raw.Provider)
-	profile.ProviderKind = ProviderKind(firstNonEmpty(raw.ProviderKind, raw.Provider))
+	profile.ProviderKind = ProviderKind(firstNonEmpty(raw.ProviderKind, raw.ProviderKindCamel, raw.Provider))
+	profile.CatalogID = strings.TrimSpace(firstNonEmpty(raw.CatalogID, raw.CatalogIDSnake))
 	profile.BaseURL = strings.TrimSpace(firstNonEmpty(raw.BaseURL, raw.BaseURLSnake))
 	profile.APIKey = firstNonEmpty(raw.APIKey, raw.APIKeySnake)
+	profile.APIKeyEnv = strings.TrimSpace(firstNonEmpty(raw.APIKeyEnv, raw.APIKeyEnvSnake))
+	profile.APIFormat = strings.TrimSpace(firstNonEmpty(raw.APIFormat, raw.APIFormatSnake))
+	profile.AuthHeader = strings.TrimSpace(firstNonEmpty(raw.AuthHeader, raw.AuthHeaderSnake))
+	profile.AuthScheme = strings.TrimSpace(firstNonEmpty(raw.AuthScheme, raw.AuthSchemeSnake))
+	profile.AuthHeaderValue = firstNonEmpty(raw.AuthHeaderValue, raw.AuthHeaderValueSnake)
+	profile.CustomHeaders = firstNonNilMap(raw.CustomHeaders, raw.CustomHeadersSnake)
 	profile.Model = strings.TrimSpace(firstNonEmpty(raw.Model, raw.ModelID))
 	profile.Description = strings.TrimSpace(raw.Description)
 	return nil
@@ -175,4 +222,24 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonNilMap(values ...map[string]string) map[string]string {
+	for _, value := range values {
+		if value != nil {
+			return copyStringMap(value)
+		}
+	}
+	return nil
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	copied := make(map[string]string, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
 }

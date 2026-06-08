@@ -351,7 +351,7 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string) int 
 }
 
 func buildProvider(resolved config.ResolvedConfig, deps appDeps) (zeroruntime.Provider, error) {
-	if resolved.Provider == (config.ProviderProfile{}) {
+	if !config.HasProviderProfile(resolved.Provider) {
 		return nil, nil
 	}
 	return deps.newProvider(resolved.Provider)

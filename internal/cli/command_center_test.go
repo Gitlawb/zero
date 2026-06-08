@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/zerocommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -184,6 +186,120 @@ func TestRunProvidersCurrentJSONIncludesRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestRunProvidersCatalogListsDescriptors(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "catalog"}, &stdout, &stderr, providerCatalogDeps(t))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Provider Catalog",
+		"id=openai",
+		"name=OpenAI",
+		"transport=openai",
+		"defaultModel=gpt-4.1",
+		"defaultBaseURL=https://api.openai.com/v1",
+		"authEnvVars=OPENAI_API_KEY",
+		"requiresAuth=true",
+		"local=false",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected providers catalog output to contain %q, got %q", want, output)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunProvidersCatalogJSONIncludesDescriptors(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "catalog", "--json"}, &stdout, &stderr, providerCatalogDeps(t))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var payload struct {
+		Providers []zerocommands.ProviderCatalogSnapshot `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode providers catalog JSON: %v\n%s", err, stdout.String())
+	}
+	openai := findProviderCatalogSnapshot(t, payload.Providers, "openai")
+	if openai.Name != "OpenAI" ||
+		openai.Transport != "openai" ||
+		openai.DefaultBaseURL != "https://api.openai.com/v1" ||
+		openai.DefaultModel != "gpt-4.1" ||
+		!openai.RequiresAuth ||
+		openai.Local {
+		t.Fatalf("unexpected OpenAI catalog descriptor: %#v", openai)
+	}
+	if len(openai.AuthEnvVars) != 1 || openai.AuthEnvVars[0] != "OPENAI_API_KEY" {
+		t.Fatalf("unexpected OpenAI auth env vars: %#v", openai.AuthEnvVars)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunProvidersCatalogFiltersByTransport(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "catalog", "--transport", "openai"}, &stdout, &stderr, providerCatalogDeps(t))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "id=openai") || !strings.Contains(output, "transport=openai") {
+		t.Fatalf("expected OpenAI transport providers in filtered catalog output, got %q", output)
+	}
+	if strings.Contains(output, "(none)") {
+		t.Fatalf("expected non-empty HTTP catalog output, got %q", output)
+	}
+}
+
+func TestRunProvidersCatalogRejectsUnknownTransport(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "catalog", "--transport", "space-link"}, &stdout, &stderr, providerCatalogDeps(t))
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown provider transport "space-link"`) {
+		t.Fatalf("expected unknown transport error, got %q", stderr.String())
+	}
+}
+
+func TestRunProvidersCatalogRejectsUnknownFlags(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "catalog", "--include-deprecated"}, &stdout, &stderr, providerCatalogDeps(t))
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown flag "--include-deprecated"`) {
+		t.Fatalf("expected unknown flag error, got %q", stderr.String())
+	}
+}
+
 func TestRunProvidersPositionalHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -194,7 +310,7 @@ func TestRunProvidersPositionalHelp(t *testing.T) {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"Usage:", "zero providers", "list", "current"} {
+	for _, want := range []string{"Usage:", "zero providers", "list", "current", "catalog"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected providers help to contain %q, got %q", want, output)
 		}
@@ -280,6 +396,33 @@ func commandCenterSecretBaseURLDeps(t *testing.T) appDeps {
 		}, nil
 	}
 	return deps
+}
+
+func providerCatalogDeps(t *testing.T) appDeps {
+	t.Helper()
+
+	return appDeps{
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			t.Fatalf("providers catalog should not resolve runtime config")
+			return config.ResolvedConfig{}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			t.Fatalf("providers catalog should not construct runtime providers")
+			return nil, nil
+		},
+	}
+}
+
+func findProviderCatalogSnapshot(t *testing.T, snapshots []zerocommands.ProviderCatalogSnapshot, id string) zerocommands.ProviderCatalogSnapshot {
+	t.Helper()
+
+	for _, snapshot := range snapshots {
+		if snapshot.ID == id {
+			return snapshot
+		}
+	}
+	t.Fatalf("catalog descriptor %q not found in %#v", id, snapshots)
+	return zerocommands.ProviderCatalogSnapshot{}
 }
 
 type commandCenterProvider struct{}

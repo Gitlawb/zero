@@ -116,7 +116,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if !ok {
 		return m, "Model\nunknown Zero model " + strconv.Quote(args)
 	}
-	if m.providerProfile == (config.ProviderProfile{}) {
+	if !config.HasProviderProfile(m.providerProfile) {
 		return m, "Model\nNo provider profile is available for TUI model switching."
 	}
 	if m.newProvider == nil {
@@ -199,7 +199,7 @@ func (m model) handleModeCommand(args string) (model, string) {
 	if !ok {
 		return m, "Mode\nmode " + strconv.Quote(mode.Name) + " references unknown model " + strconv.Quote(mode.Model)
 	}
-	if m.providerProfile == (config.ProviderProfile{}) {
+	if !config.HasProviderProfile(m.providerProfile) {
 		return m, "Mode\nNo provider profile is available for TUI mode switching."
 	}
 	if m.newProvider == nil {

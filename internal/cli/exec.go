@@ -194,7 +194,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
-	if resolved.Provider == (config.ProviderProfile{}) {
+	if !config.HasProviderProfile(resolved.Provider) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
 	}
 	// Evaluate the --reasoning-effort advisory against the EFFECTIVE resolved

@@ -37,7 +37,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			HTTPClient: options.HTTPClient,
 			UserAgent:  options.UserAgent,
 		})
-	case config.ProviderKindAnthropic:
+	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
 			APIKey:     profile.APIKey,
 			BaseURL:    resolved.baseURL,
@@ -106,6 +106,10 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 		if providerKind == config.ProviderKindOpenAICompatible {
 			if !entry.AllowsProvider(modelregistry.ProviderOpenAICompatible) {
 				return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, modelregistry.ProviderOpenAICompatible)
+			}
+		} else if providerKind == config.ProviderKindAnthropicCompat {
+			if !entry.AllowsProvider(modelregistry.ProviderAnthropic) {
+				return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
 			}
 		} else if providerKind != modelProvider {
 			return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
