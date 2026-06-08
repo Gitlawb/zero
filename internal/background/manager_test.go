@@ -450,6 +450,30 @@ func TestManagerKillStaysKilledWhenExitWaiterReapsDuringTerminate(t *testing.T) 
 	}
 }
 
+func TestMarkKilledIfStillRunningReportsWhetherItMarked(t *testing.T) {
+	manager, err := NewManagerWithOptions(ManagerOptions{
+		RootDir: t.TempDir(),
+		Now:     sequenceClock(time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC)),
+	})
+	if err != nil {
+		t.Fatalf("NewManagerWithOptions returned error: %v", err)
+	}
+	if _, err := manager.Register(RegisterInput{TaskID: "t", Type: "specialist", PID: 7}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	marked, err := manager.markKilledIfStillRunning("t", 7)
+	if err != nil || !marked {
+		t.Fatalf("first call: marked=%v err=%v, want true/nil", marked, err)
+	}
+	// Already killed (not running) → must report not-marked so Kill skips signaling
+	// a possibly-stale pid.
+	marked, err = manager.markKilledIfStillRunning("t", 7)
+	if err != nil || marked {
+		t.Fatalf("second call: marked=%v err=%v, want false/nil", marked, err)
+	}
+}
+
 func sequenceClock(times ...time.Time) func() time.Time {
 	index := 0
 	return func() time.Time {

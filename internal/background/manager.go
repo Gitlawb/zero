@@ -272,14 +272,23 @@ func (manager *Manager) Kill(taskID string) error {
 	// call MarkExited; marking killed first makes that MarkExited a no-op (it only
 	// acts on a running task), so a user-initiated stop stays "killed" instead of
 	// being clobbered to "error".
-	if err := manager.markKilledIfStillRunning(taskID, pid); err != nil {
+	marked, err := manager.markKilledIfStillRunning(taskID, pid)
+	if err != nil {
 		return err
+	}
+	if !marked {
+		// The task exited (or was reused) between the running check and now — the
+		// pid may be stale, so do NOT signal it.
+		return nil
 	}
 	if err := manager.killProcess(pid); err != nil {
 		// Couldn't terminate — undo the optimistic kill mark so the still-running
 		// task is not falsely reported as killed.
-		manager.restoreRunningAfterFailedKill(taskID, pid)
-		return fmt.Errorf("kill background task %s: %w", taskID, err)
+		killErr := fmt.Errorf("kill background task %s: %w", taskID, err)
+		if restoreErr := manager.restoreRunningAfterFailedKill(taskID, pid); restoreErr != nil {
+			return errors.Join(killErr, fmt.Errorf("restore running state for %s: %w", taskID, restoreErr))
+		}
+		return killErr
 	}
 	return nil
 }
@@ -320,18 +329,22 @@ func (manager *Manager) isRunningPID(taskID string, pid int) bool {
 	return ok && task.Status == StatusRunning && task.PID == pid
 }
 
-func (manager *Manager) markKilledIfStillRunning(taskID string, pid int) error {
+// markKilledIfStillRunning marks the task killed if it is still running. The
+// bool reports whether it actually marked: false means the task already exited
+// (or was reused), in which case the caller must NOT signal the pid — it may be
+// stale.
+func (manager *Manager) markKilledIfStillRunning(taskID string, pid int) (bool, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	task, ok := manager.tasks[taskID]
 	if !ok {
-		return fmt.Errorf("background task not found: %s", taskID)
+		return false, fmt.Errorf("background task not found: %s", taskID)
 	}
 	if task.Status != StatusRunning {
-		return nil
+		return false, nil
 	}
 	if task.PID != pid {
-		return fmt.Errorf("background task %s pid changed before kill completed", taskID)
+		return false, fmt.Errorf("background task %s pid changed before kill completed", taskID)
 	}
 	task.Status = StatusKilled
 	task.ExitCode = -1
@@ -339,30 +352,33 @@ func (manager *Manager) markKilledIfStillRunning(taskID string, pid int) error {
 		task.CompletedAt = manager.now()
 	}
 	if err := manager.persistTaskLocked(task); err != nil {
-		return err
+		return false, err
 	}
 	manager.tasks[taskID] = task
-	return nil
+	return true, nil
 }
 
 // restoreRunningAfterFailedKill reverts a task that was optimistically marked
 // killed back to running when the terminate failed (the process is presumed
 // still alive). It only touches a task still killed with the same pid, so a real
-// exit recorded meanwhile is left untouched.
-func (manager *Manager) restoreRunningAfterFailedKill(taskID string, pid int) {
+// exit recorded meanwhile is left untouched. It returns the persistence error so
+// the caller can surface a failed rollback rather than leaving the task wrongly
+// marked killed.
+func (manager *Manager) restoreRunningAfterFailedKill(taskID string, pid int) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	task, ok := manager.tasks[taskID]
 	if !ok || task.Status != StatusKilled || task.PID != pid {
-		return
+		return nil
 	}
 	task.Status = StatusRunning
 	task.ExitCode = 0
 	task.CompletedAt = time.Time{}
 	if err := manager.persistTaskLocked(task); err != nil {
-		return
+		return err
 	}
 	manager.tasks[taskID] = task
+	return nil
 }
 
 func (manager *Manager) loadTasks() error {
