@@ -1335,3 +1335,101 @@ func TestRunExecNoSwitcherWithoutFlag(t *testing.T) {
 		t.Fatalf("provider model = %q, want claude-haiku-4.5", providerModels[0])
 	}
 }
+
+func TestRunExecAttributesUsageToEscalatedModel(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	target, ok := mustUpgradeTarget(t, "claude-haiku-4.5")
+	if !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+
+	calls := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--allow-escalation",
+		"--model", "claude-haiku-4.5",
+		"--init-session-id", "escalation_run",
+		"escalate please",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			// The escalation chain (haiku -> sonnet) is anthropic; declare the
+			// provider kind to match so provider-metadata resolution accepts it.
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return usageEmittingEscalatingProvider{calls: &calls}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	events, err := store.ReadEvents("escalation_run")
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	var lastUsageModel string
+	var sawUsage bool
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal usage payload: %v", err)
+		}
+		if model, ok := payload["model"].(string); ok {
+			lastUsageModel = model
+			sawUsage = true
+		}
+	}
+	if !sawUsage {
+		t.Fatal("no usage event carried a model attribution")
+	}
+	if lastUsageModel != target {
+		t.Fatalf("last usage model = %q, want escalated target %q", lastUsageModel, target)
+	}
+}
+
+// usageEmittingEscalatingProvider escalates on turn 0 and emits a usage event on
+// turn 1 (after the switch) so the recorded usage must be attributed to the
+// escalated model.
+type usageEmittingEscalatingProvider struct {
+	calls *int
+}
+
+func (provider usageEmittingEscalatingProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	turn := *provider.calls
+	*provider.calls++
+	ch := make(chan zeroruntime.StreamEvent, 5)
+	if turn == 0 {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 7}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
