@@ -82,6 +82,40 @@ func TestEscalateModelRunSignalsTarget(t *testing.T) {
 	}
 }
 
+// An explicitly empty reason (and an absent reason) is accepted: reason is
+// informational only, so it must never fail the escalation. Both forms still
+// return the escalation result with the target signalled via Meta.
+func TestEscalateModelRunAcceptsEmptyReason(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	target, ok := registry.UpgradeTarget("claude-haiku-4.5")
+	if !ok {
+		t.Skip("catalog has no upgrade target seeded for claude-haiku-4.5")
+	}
+	tool := newEscalateModelTool(registry)
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "explicit empty reason", args: map[string]any{"reason": ""}},
+		{name: "absent reason", args: map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := tool.RunWithOptions(context.Background(), tc.args, RunOptions{Model: "claude-haiku-4.5"})
+			if res.Status != StatusOK {
+				t.Fatalf("status = %q output = %q, want ok (empty reason must not error)", res.Status, res.Output)
+			}
+			if got := res.Meta["escalate_to_model"]; got != target.ID {
+				t.Fatalf("meta escalate_to_model = %q, want %q", got, target.ID)
+			}
+		})
+	}
+}
+
 // A top-tier model (no upgrade target), an unknown model, and an empty model all
 // produce an informational, no-meta, OK result — the loop must not switch.
 func TestEscalateModelRunNoTarget(t *testing.T) {

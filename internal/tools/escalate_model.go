@@ -74,8 +74,9 @@ func (tool escalateModelTool) Run(ctx context.Context, args map[string]any) Resu
 // result. Status is OK either way (a "no escalation" outcome is not an error).
 func (tool escalateModelTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
 	// reason is optional and used only for transcript context; reject a non-string
-	// value but never require it.
-	if _, err := stringArg(args, "reason", "", false); err != nil {
+	// value but accept an absent OR explicitly empty string (allowEmpty) — reason
+	// is informational, so an empty reason must never fail the escalation.
+	if _, err := stringArgWithEmpty(args, "reason", "", false, true); err != nil {
 		return errorResult("Error: Invalid arguments for escalate_model: " + err.Error())
 	}
 
