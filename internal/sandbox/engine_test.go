@@ -256,6 +256,80 @@ func TestDefaultPolicyMaxAutonomyIsHigh(t *testing.T) {
 	}
 }
 
+func TestEnginePolicyCeilingOverridesGrant(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.Grant(GrantInput{
+		ToolName:    "write_file",
+		Decision:    GrantAllow,
+		MaxAutonomy: AutonomyHigh,
+		Reason:      "broad grant",
+	}); err != nil {
+		t.Fatalf("Grant allow returned error: %v", err)
+	}
+
+	policy := DefaultPolicy()
+	policy.MaxAutonomy = AutonomyMedium
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Store: store})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       AutonomyHigh,
+		Args:           map[string]any{"path": "notes.txt"},
+	})
+	if decision.Action != ActionPrompt {
+		t.Fatalf("decision.Action = %q, want %q (clamped above ceiling, not allow)", decision.Action, ActionPrompt)
+	}
+	if decision.Reason != "above policy ceiling" {
+		t.Fatalf("decision.Reason = %q, want \"above policy ceiling\"", decision.Reason)
+	}
+}
+
+func TestEnginePolicyCeilingBlocksUnsafeEscalation(t *testing.T) {
+	root := t.TempDir()
+	policy := DefaultPolicy()
+	policy.MaxAutonomy = AutonomyMedium
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       AutonomyHigh,
+		Args:           map[string]any{"path": "notes.txt"},
+	})
+	if decision.Action != ActionPrompt || decision.Reason != "above policy ceiling" {
+		t.Fatalf("unsafe high-autonomy decision = %#v, want prompt above policy ceiling", decision)
+	}
+}
+
+func TestEngineDefaultCeilingIsNoOp(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       AutonomyHigh,
+		Args:           map[string]any{"path": "notes.txt"},
+	})
+	if decision.Action != ActionAllow {
+		t.Fatalf("default-High ceiling decision = %#v, want allow (backward compatible)", decision)
+	}
+}
+
 func fixedSandboxTime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

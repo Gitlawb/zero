@@ -86,6 +86,15 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 				decision.Grant = &grant
 				return decision
 			}
+			if !autonomyAllowed(request.Autonomy, policy.MaxAutonomy) {
+				return Decision{
+					Action:       ActionPrompt,
+					Reason:       "above policy ceiling",
+					Risk:         risk,
+					GrantMatched: true,
+					Grant:        &grant,
+				}
+			}
 			return Decision{
 				Action:       ActionAllow,
 				Reason:       "persistent sandbox allow grant matched",
@@ -99,6 +108,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
+		if !autonomyAllowed(request.Autonomy, policy.MaxAutonomy) {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: "above policy ceiling"}
+		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
