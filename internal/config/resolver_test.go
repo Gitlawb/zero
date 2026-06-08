@@ -652,7 +652,7 @@ func TestResolveSandboxMaxAutonomyFromFile(t *testing.T) {
 		}]
 	}`)
 
-	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path})
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -692,6 +692,7 @@ func TestResolveSandboxMaxAutonomyOverride(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
 		Overrides:         Overrides{Sandbox: SandboxConfig{MaxAutonomy: "high"}},
+		Env:               map[string]string{},
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -709,7 +710,7 @@ func TestResolveSandboxMaxAutonomyInvalidFailsLoud(t *testing.T) {
 			"sandbox": {"maxAutonomy": "`+value+`"},
 			"providers": [{"name": "openai", "provider": "openai", "api_key": "sk", "model": "gpt"}]
 		}`)
-		_, err := Resolve(ResolveOptions{ProjectConfigPath: path})
+		_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
 		if err == nil {
 			t.Fatalf("Resolve() error = nil for invalid maxAutonomy %q, want failure", value)
 		}
@@ -725,7 +726,7 @@ func TestResolveSandboxMaxAutonomyValidResolves(t *testing.T) {
 			"sandbox": {"maxAutonomy": "`+value+`"},
 			"providers": [{"name": "openai", "provider": "openai", "api_key": "sk", "model": "gpt"}]
 		}`)
-		resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path})
+		resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
 		if err != nil {
 			t.Fatalf("Resolve() error = %v for valid maxAutonomy %q", err, value)
 		}
