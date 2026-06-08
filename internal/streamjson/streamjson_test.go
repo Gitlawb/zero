@@ -155,6 +155,30 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+func TestParseInputImagesAcceptedOnlyOnMessageEvents(t *testing.T) {
+	// images allowed on a message event
+	msg := `{"schemaVersion":1,"type":"message","role":"user","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	events, err := ParseInput(msg)
+	if err != nil {
+		t.Fatalf("message+images should parse, got %v", err)
+	}
+	if len(events) != 1 || len(events[0].Images) != 1 || events[0].Images[0].Data != "aGVsbG8=" {
+		t.Fatalf("images not parsed: %+v", events)
+	}
+
+	// images rejected on a prompt event (not whitelisted there)
+	prompt := `{"schemaVersion":1,"type":"prompt","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	if _, err := ParseInput(prompt); err == nil || !strings.Contains(err.Error(), "unknown field images") {
+		t.Fatalf("expected images rejected on prompt event, got %v", err)
+	}
+
+	// truly unknown field still rejected on a message event
+	bad := `{"schemaVersion":1,"type":"message","role":"user","content":"look","extra":true}`
+	if _, err := ParseInput(bad); err == nil || !strings.Contains(err.Error(), "unknown field extra") {
+		t.Fatalf("expected unknown field still rejected, got %v", err)
+	}
+}
+
 func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
 	ev := InputEvent{
 		SchemaVersion: 1,

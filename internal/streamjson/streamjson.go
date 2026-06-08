@@ -252,6 +252,7 @@ func validateInputFields(raw map[string]json.RawMessage) error {
 	}
 	if inputType == string(InputMessage) {
 		allowed["role"] = true
+		allowed["images"] = true
 	}
 	for key := range raw {
 		if !allowed[key] {
