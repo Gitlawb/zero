@@ -62,6 +62,9 @@ func SaveDraft(options SaveOptions) (SavedSpec, error) {
 		}
 		relativePath := filepath.ToSlash(filepath.Join(SpecDirName, id+".md"))
 		path := filepath.Join(absoluteRoot, filepath.FromSlash(relativePath))
+		if err := ensureSpecPathContained(specDir, path); err != nil {
+			return SavedSpec{}, err
+		}
 		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
 			if os.IsExist(err) {
@@ -86,4 +89,15 @@ func SaveDraft(options SaveOptions) (SavedSpec, error) {
 		}, nil
 	}
 	return SavedSpec{}, fmt.Errorf("create spec file: too many name collisions for %q", title)
+}
+
+func ensureSpecPathContained(specDir string, path string) error {
+	relative, err := filepath.Rel(filepath.Clean(specDir), filepath.Clean(path))
+	if err != nil {
+		return fmt.Errorf("resolve spec file path: %w", err)
+	}
+	if relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("create spec file: resolved path escapes %s", specDir)
+	}
+	return nil
 }

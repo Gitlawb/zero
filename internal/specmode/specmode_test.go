@@ -49,25 +49,63 @@ func TestSaveDraftWritesPlainMarkdownWithCollisionSuffix(t *testing.T) {
 	}
 }
 
-func TestExitToolSavesSpecAndReturnsReviewControl(t *testing.T) {
+func TestSaveDraftContainsAdversarialTitles(t *testing.T) {
+	now := fixedSpecTime("2026-06-08T10:00:00Z")
+	for _, title := range []string{
+		"../../etc/passwd",
+		"..",
+		"...",
+		"/abs",
+		"a/../../b",
+	} {
+		t.Run(title, func(t *testing.T) {
+			root := t.TempDir()
+			saved, err := SaveDraft(SaveOptions{
+				WorkspaceRoot: root,
+				Title:         title,
+				Plan:          "# Goal\n\nStay contained.",
+				Now:           now,
+			})
+			if err != nil {
+				t.Fatalf("SaveDraft returned error: %v", err)
+			}
+			relative, err := filepath.Rel(root, saved.Path)
+			if err != nil {
+				t.Fatalf("Rel(%q, %q): %v", root, saved.Path, err)
+			}
+			relative = filepath.ToSlash(relative)
+			if filepath.IsAbs(saved.RelativePath) || !strings.HasPrefix(saved.RelativePath, ".zero/specs/") {
+				t.Fatalf("RelativePath escaped spec dir: %q", saved.RelativePath)
+			}
+			if relative != saved.RelativePath {
+				t.Fatalf("saved.Path relative to root = %q, want %q", relative, saved.RelativePath)
+			}
+			if strings.HasPrefix(relative, "../") || relative == ".." || strings.Contains(relative, "/../") {
+				t.Fatalf("saved path contains traversal: %q", relative)
+			}
+		})
+	}
+}
+
+func TestSubmitToolSavesSpecAndReturnsReviewControl(t *testing.T) {
 	root := t.TempDir()
-	tool := NewExitTool(root, fixedSpecTime("2026-06-08T11:00:00Z"))
+	tool := NewSubmitTool(root, fixedSpecTime("2026-06-08T11:00:00Z"))
 
 	result := tool.Run(context.Background(), map[string]any{
-		"title": "Spec Mode",
-		"plan":  "# Goal\n\nAdd spec mode.",
+		"title": "Implementation Plan",
+		"plan":  "# Goal\n\nAdd implementation plan.",
 	})
 
 	if result.Status != tools.StatusOK {
-		t.Fatalf("ExitSpecMode status = %s output=%s", result.Status, result.Output)
+		t.Fatalf("submit_spec status = %s output=%s", result.Status, result.Output)
 	}
 	if result.Meta["control"] != ControlSpecReviewRequired {
 		t.Fatalf("control meta = %#v", result.Meta)
 	}
-	if result.Meta["specId"] != "2026-06-08-spec-mode" {
+	if result.Meta["specId"] != "2026-06-08-implementation-plan" {
 		t.Fatalf("specId meta = %#v", result.Meta)
 	}
-	if len(result.ChangedFiles) != 1 || result.ChangedFiles[0] != ".zero/specs/2026-06-08-spec-mode.md" {
+	if len(result.ChangedFiles) != 1 || result.ChangedFiles[0] != ".zero/specs/2026-06-08-implementation-plan.md" {
 		t.Fatalf("changed files = %#v", result.ChangedFiles)
 	}
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(result.ChangedFiles[0]))); err != nil {
@@ -78,8 +116,8 @@ func TestExitToolSavesSpecAndReturnsReviewControl(t *testing.T) {
 	}
 }
 
-func TestExitToolRejectsInvalidArgs(t *testing.T) {
-	result := NewExitTool(t.TempDir(), nil).Run(context.Background(), map[string]any{
+func TestSubmitToolRejectsInvalidArgs(t *testing.T) {
+	result := NewSubmitTool(t.TempDir(), nil).Run(context.Background(), map[string]any{
 		"title": "Missing plan",
 	})
 	if result.Status != tools.StatusError || !strings.Contains(result.Output, "plan is required") {

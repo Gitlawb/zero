@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -375,8 +376,18 @@ func mapMessages(messages []zeroruntime.Message) (*geminiContent, []geminiConten
 				contents = append(contents, geminiContent{Role: "model", Parts: parts})
 			}
 		default:
+			parts := []geminiPart{}
 			if hasContent {
-				appendUserParts(&contents, []geminiPart{{Text: content}})
+				parts = append(parts, geminiPart{Text: content})
+			}
+			for _, image := range message.Images {
+				parts = append(parts, geminiPart{InlineData: &geminiInlineData{
+					MimeType: image.MediaType,
+					Data:     base64.StdEncoding.EncodeToString(image.Data),
+				}})
+			}
+			if len(parts) > 0 {
+				appendUserParts(&contents, parts)
 			}
 		}
 	}

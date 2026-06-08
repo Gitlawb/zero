@@ -31,12 +31,42 @@ type CollectOptions struct {
 	OnUsage func(Usage)
 }
 
-// SeedMessages creates the initial system and user turns for a request.
+// SeedMessages creates the initial system and user turns for a request. It is a
+// text-only convenience that delegates to SeedMessagesWithImages with no images
+// (the user turn's Images stays nil, byte-identical to the prior behavior).
 func SeedMessages(systemPrompt string, userPrompt string) []Message {
+	return SeedMessagesWithImages(systemPrompt, userPrompt, nil)
+}
+
+// SeedMessagesWithImages creates the initial system and user turns and attaches
+// any image attachments to the user turn. images may be nil (text-only). The
+// images are deep-copied so the seeded message never aliases the caller's slice
+// or the underlying Data bytes (a later mutation of the caller's bytes can never
+// reach into the conversation history).
+func SeedMessagesWithImages(systemPrompt string, userPrompt string, images []ImageBlock) []Message {
 	return []Message{
 		{Role: MessageRoleSystem, Content: systemPrompt},
-		{Role: MessageRoleUser, Content: userPrompt},
+		{Role: MessageRoleUser, Content: userPrompt, Images: CloneImageBlocks(images)},
 	}
+}
+
+// CloneImageBlocks deep-copies a slice of ImageBlock, including each Data byte
+// slice, so the returned blocks share no backing array with the input. It
+// returns nil for a nil or empty input (preserving the text-only "no images"
+// representation). Use it wherever image-carrying messages are seeded or copied
+// so raw image bytes are never aliased across history/request/result copies.
+func CloneImageBlocks(in []ImageBlock) []ImageBlock {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ImageBlock, len(in))
+	for index, block := range in {
+		out[index] = ImageBlock{
+			MediaType: block.MediaType,
+			Data:      append([]byte(nil), block.Data...),
+		}
+	}
+	return out
 }
 
 // CollectStream drains provider events into text, tool calls, usage, and error state.

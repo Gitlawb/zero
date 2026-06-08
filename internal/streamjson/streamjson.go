@@ -2,6 +2,7 @@ package streamjson
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const SchemaVersion = 1
@@ -101,10 +103,19 @@ type Event struct {
 }
 
 type InputEvent struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	Type          InputType `json:"type"`
-	Role          string    `json:"role,omitempty"`
-	Content       string    `json:"content"`
+	SchemaVersion int          `json:"schemaVersion"`
+	Type          InputType    `json:"type"`
+	Role          string       `json:"role,omitempty"`
+	Content       string       `json:"content"`
+	Images        []InputImage `json:"images,omitempty"`
+}
+
+// InputImage carries a base64-encoded image attached to a stream-json
+// message event. MediaType is a MIME type (e.g. "image/png"); Data is the
+// standard base64 encoding of the raw image bytes (no data: URI prefix).
+type InputImage struct {
+	MediaType string `json:"mediaType"`
+	Data      string `json:"data"`
 }
 
 type ProtocolError struct {
@@ -190,6 +201,42 @@ func ResolvePrompt(events []InputEvent) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
+// maxStreamImageBytes caps a single decoded image at 10 MiB to bound request bodies.
+const maxStreamImageBytes = 10 << 20
+
+// ResolveImages decodes every base64 image attached to the input events into
+// raw-byte ImageBlocks. Each image's media type is normalized and validated
+// against the supported allow-list, and its decoded size is capped. Returns nil
+// when no events carry images.
+func ResolveImages(events []InputEvent) ([]zeroruntime.ImageBlock, error) {
+	var images []zeroruntime.ImageBlock
+	for _, event := range events {
+		for _, image := range event.Images {
+			// Reject an oversized payload from the ENCODED length BEFORE decoding,
+			// so a multi-gigabyte base64 blob is never allocated just to be capped
+			// after the fact. DecodedLen is the upper bound on the decoded size.
+			if base64.StdEncoding.DecodedLen(len(image.Data)) > maxStreamImageBytes {
+				return nil, ProtocolError{fmt.Sprintf("Stream-json image exceeds the %d byte limit.", maxStreamImageBytes)}
+			}
+			data, err := base64.StdEncoding.DecodeString(image.Data)
+			if err != nil {
+				return nil, ProtocolError{fmt.Sprintf("Stream-json image data is not valid base64: %s", err.Error())}
+			}
+			// Backstop: the exact decoded length (padding makes DecodedLen an upper
+			// bound) must also stay within the cap.
+			if len(data) > maxStreamImageBytes {
+				return nil, ProtocolError{fmt.Sprintf("Stream-json image exceeds the %d byte limit.", maxStreamImageBytes)}
+			}
+			mediaType := zeroruntime.NormalizeImageMediaType(image.MediaType)
+			if mediaType == "" {
+				return nil, ProtocolError{fmt.Sprintf("Stream-json image has an unsupported image media type %q.", image.MediaType)}
+			}
+			images = append(images, zeroruntime.ImageBlock{MediaType: mediaType, Data: data})
+		}
+	}
+	return images, nil
+}
+
 func ParsePrompt(input string) (string, error) {
 	events, err := ParseInput(input)
 	if err != nil {
@@ -215,7 +262,7 @@ func validateInputEvent(event InputEvent) error {
 	if event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schemaVersion must be %d", SchemaVersion)
 	}
-	if strings.TrimSpace(event.Content) == "" {
+	if strings.TrimSpace(event.Content) == "" && len(event.Images) == 0 {
 		return fmt.Errorf("content is required")
 	}
 	switch event.Type {
@@ -243,6 +290,7 @@ func validateInputFields(raw map[string]json.RawMessage) error {
 	}
 	if inputType == string(InputMessage) {
 		allowed["role"] = true
+		allowed["images"] = true
 	}
 	for key := range raw {
 		if !allowed[key] {

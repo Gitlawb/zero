@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -383,8 +384,22 @@ func mapMessages(messages []zeroruntime.Message) (string, []anthropicMessage, er
 			}
 			mapped = append(mapped, anthropicMessage{Role: "assistant", Content: messageContent})
 		default:
+			blocks := []map[string]any{}
 			if hasContent {
-				appendUserBlocks(&mapped, []map[string]any{{"type": "text", "text": content}})
+				blocks = append(blocks, map[string]any{"type": "text", "text": content})
+			}
+			for _, image := range message.Images {
+				blocks = append(blocks, map[string]any{
+					"type": "image",
+					"source": map[string]any{
+						"type":       "base64",
+						"media_type": image.MediaType,
+						"data":       base64.StdEncoding.EncodeToString(image.Data),
+					},
+				})
+			}
+			if len(blocks) > 0 {
+				appendUserBlocks(&mapped, blocks)
 			}
 		}
 	}

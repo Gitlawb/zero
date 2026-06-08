@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -19,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/worktrees"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 const (
@@ -45,6 +47,7 @@ const (
 type execOptions struct {
 	promptParts []string
 	file        string
+	imagePaths  []string
 	mode        string
 	model       string
 	// modelProfile captures the legacy --profile flag. It is accepted for
@@ -159,7 +162,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
 
-	prompt, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
+	prompt, streamImages, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -192,6 +195,24 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	if !config.HasProviderProfile(resolved.Provider) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
+	}
+	images, err := resolveExecImages(options.imagePaths, workspaceRoot)
+	if err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	// Merge stream-json message images with --image attachments so BOTH input
+	// sources flow through the same vision gate (drop+warn) and the same
+	// agent.Options.Images wiring below. Without this merge, images sent over
+	// stream-json are parsed and validated but never reach the agent.
+	images = append(images, streamImages...)
+	// Gate against the EFFECTIVE resolved model (not the --model override). An
+	// unknown/custom id can't be confirmed vision-capable, so drop+warn rather
+	// than error: image input is best-effort, never fatal to the run.
+	if len(images) > 0 && !modelregistry.SupportsVision(modelRegistry, resolved.Provider.Model) {
+		if _, err := fmt.Fprintf(stderr, "Model %s does not support image input; ignoring %d image(s).\n", resolved.Provider.Model, len(images)); err != nil {
+			return exitCrash
+		}
+		images = nil
 	}
 	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps)
 	if err != nil {
@@ -299,6 +320,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Model:            resolved.Provider.Model,
 		ReasoningEffort:  options.reasoningEffort,
 		Cwd:              workspaceRoot,
+		Images:           images,
 		Registry:         registry,
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,
@@ -451,7 +473,12 @@ func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {
 	return workspaceRoot, nil
 }
 
-func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reader) (string, error) {
+// resolveExecPrompt resolves the run's prompt text and, for stream-json input,
+// the images carried on its message events. The returned image slice is nil for
+// text input and for stream-json input that carries no images; it is merged with
+// any --image attachments by the caller before the shared vision gate, so both
+// sources flow through the same drop+warn and agent.Options.Images wiring.
+func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reader) (string, []zeroruntime.ImageBlock, error) {
 	if options.inputFormat == execInputStreamJSON {
 		input := ""
 		if options.file != "" {
@@ -461,21 +488,36 @@ func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reade
 			}
 			data, err := os.ReadFile(promptPath)
 			if err != nil {
-				return "", execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
+				return "", nil, execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
 			}
 			input = string(data)
 		} else {
 			data, err := io.ReadAll(stdin)
 			if err != nil {
-				return "", execUsageError{fmt.Sprintf("failed to read stream-json input: %v", err)}
+				return "", nil, execUsageError{fmt.Sprintf("failed to read stream-json input: %v", err)}
 			}
 			input = string(data)
 		}
-		prompt, err := streamjson.ParsePrompt(input)
+		events, err := streamjson.ParseInput(input)
 		if err != nil {
-			return "", execUsageError{err.Error()}
+			return "", nil, execUsageError{err.Error()}
 		}
-		return prompt, nil
+		streamImages, err := streamjson.ResolveImages(events)
+		if err != nil {
+			return "", nil, execUsageError{err.Error()}
+		}
+		prompt, perr := streamjson.ResolvePrompt(events)
+		if perr != nil {
+			// An image-only turn (a message event with empty content but at least
+			// one image) is valid: ResolvePrompt rejects empty content, but with
+			// images present the run proceeds with an empty prompt. Only a turn
+			// with neither text nor images is a real error.
+			if len(streamImages) == 0 {
+				return "", nil, execUsageError{perr.Error()}
+			}
+			prompt = ""
+		}
+		return prompt, streamImages, nil
 	}
 
 	parts := []string{}
@@ -491,20 +533,43 @@ func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reade
 		}
 		data, err := os.ReadFile(promptPath)
 		if err != nil {
-			return "", execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
+			return "", nil, execUsageError{fmt.Sprintf("prompt file not found: %s", promptPath)}
 		}
 		filePrompt := strings.TrimSpace(string(data))
 		if filePrompt == "" {
-			return "", execUsageError{fmt.Sprintf("prompt file is empty: %s", promptPath)}
+			return "", nil, execUsageError{fmt.Sprintf("prompt file is empty: %s", promptPath)}
 		}
 		parts = append(parts, filePrompt)
 	}
 
 	prompt := strings.TrimSpace(strings.Join(parts, "\n\n"))
 	if prompt == "" {
-		return "", execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
+		return "", nil, execUsageError{"Prompt required. Use `zero exec \"prompt\"` or `zero exec --file prompt.txt`."}
 	}
-	return prompt, nil
+	return prompt, nil, nil
+}
+
+// resolveExecImages loads each --image attachment through the shared
+// imageinput.LoadFile loader (read, sniff, normalize, 10-MiB cap), resolving
+// relative paths against workspaceRoot. It is a thin per-path loop: the actual
+// read/sniff/cap logic lives in internal/imageinput so the CLI and TUI surfaces
+// never duplicate it. Any loader error (missing file, unsupported type,
+// oversized) is wrapped into an execUsageError so the run reports it as a usage
+// problem rather than reaching a provider with an invalid image. Returns nil for
+// an empty path list (text-only behavior unchanged).
+func resolveExecImages(paths []string, workspaceRoot string) ([]zeroruntime.ImageBlock, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	images := make([]zeroruntime.ImageBlock, 0, len(paths))
+	for _, path := range paths {
+		image, err := imageinput.LoadFile(path, workspaceRoot)
+		if err != nil {
+			return nil, execUsageError{err.Error()}
+		}
+		images = append(images, image)
+	}
+	return images, nil
 }
 
 func writeExecUsageError(stderr io.Writer, message string) int {

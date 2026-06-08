@@ -94,6 +94,18 @@ type model struct {
 	// /theme, /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and
 	// applies the chosen value through the existing command handlers.
 	picker *commandPicker
+
+	// pendingImages holds image attachments staged by /image for the next user
+	// turn; pendingImageLabels are their display names (base(path)) for the chip
+	// row. Both are cleared after a prompt is submitted (or /image clear). nil =
+	// no attachments = today's text-only behavior exactly.
+	pendingImages      []zeroruntime.ImageBlock
+	pendingImageLabels []string
+
+	// captureRunImages, when set, is invoked with the images a run is launched
+	// with. Nil in production; used by tests to assert image threading without a
+	// real provider round-trip.
+	captureRunImages func([]zeroruntime.ImageBlock)
 }
 
 type agentTextMsg struct {
@@ -535,6 +547,10 @@ func (m model) transcriptView() string {
 	}
 
 	builder.WriteString("\n")
+	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
+		builder.WriteString(zeroTheme.muted.Render(chips))
+		builder.WriteString("\n")
+	}
 	builder.WriteString(borderedBlock(width, []string{m.input.View()}))
 	if overlay := m.suggestionOverlay(width); overlay != "" {
 		builder.WriteString("\n")
@@ -850,6 +866,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			text: shellOnlyCommandText(command.name),
 		})
 		return m, nil
+	case commandImage:
+		m.showSplash = false
+		m = m.handleImageCommand(command.text)
+		return m, nil
 	case commandUnknown:
 		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -908,12 +928,32 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 			command.text = agentPrompt
 		}
+		// Re-check vision support against the CURRENT effective model at submit
+		// time, not just at /image attach time: the user may have attached on a
+		// vision model and then /model-switched to a non-vision one. If the active
+		// model can't accept images, drop them (with an inline notice mirroring
+		// exec's drop+warn wording) rather than sending them to a model that
+		// rejects them. Pending state is cleared either way below.
+		turnImages := m.pendingImages
+		if len(turnImages) > 0 && !modelSupportsVisionTUI(m.modelName) {
+			name := m.modelName
+			if name == "" {
+				name = "the active model"
+			}
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendSystem,
+				text: fmt.Sprintf("Model %s does not support image input; ignoring %d image(s).", name, len(turnImages)),
+			})
+			turnImages = nil
+		}
+		m.pendingImages = nil
+		m.pendingImageLabels = nil
 		runCtx, cancel := context.WithCancel(m.ctx)
 		m.runID++
 		m.activeRunID = m.runID
 		m.runCancel = cancel
 		m.pending = true
-		return m, m.runAgent(m.activeRunID, runCtx, command.text)
+		return m, m.runAgent(m.activeRunID, runCtx, command.text, turnImages)
 	default:
 		return m, nil
 	}
@@ -947,7 +987,7 @@ func (m *model) cancelRun() {
 	m.pendingAskUser = nil
 }
 
-func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
+func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {
 	return func() tea.Msg {
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -960,6 +1000,10 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.Cwd = m.cwd
+		options.Images = images
+		if m.captureRunImages != nil {
+			m.captureRunImages(images)
+		}
 		// Enable agent-loop compaction sized to the active model's context
 		// window. An unknown/custom model resolves to 0, leaving compaction off.
 		options.ContextWindow = modelContextWindow(m.modelName)

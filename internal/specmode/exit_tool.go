@@ -10,28 +10,28 @@ import (
 )
 
 const (
-	ExitToolName              = "ExitSpecMode"
+	SubmitToolName            = "submit_spec"
 	ControlSpecReviewRequired = "spec_review_required"
 )
 
-type ExitTool struct {
+type SubmitTool struct {
 	workspaceRoot string
 	now           func() time.Time
 }
 
-func NewExitTool(workspaceRoot string, now func() time.Time) ExitTool {
-	return ExitTool{workspaceRoot: workspaceRoot, now: now}
+func NewSubmitTool(workspaceRoot string, now func() time.Time) SubmitTool {
+	return SubmitTool{workspaceRoot: workspaceRoot, now: now}
 }
 
-func (tool ExitTool) Name() string {
-	return ExitToolName
+func (tool SubmitTool) Name() string {
+	return SubmitToolName
 }
 
-func (tool ExitTool) Description() string {
-	return "Save the completed spec-mode markdown plan and stop for user review before implementation."
+func (tool SubmitTool) Description() string {
+	return "Save the completed implementation spec and stop for user review before implementation."
 }
 
-func (tool ExitTool) Parameters() tools.Schema {
+func (tool SubmitTool) Parameters() tools.Schema {
 	return tools.Schema{
 		Type: "object",
 		Properties: map[string]tools.PropertySchema{
@@ -49,7 +49,7 @@ func (tool ExitTool) Parameters() tools.Schema {
 	}
 }
 
-func (tool ExitTool) Safety() tools.Safety {
+func (tool SubmitTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect: tools.SideEffectWrite,
 		Permission: tools.PermissionAllow,
@@ -57,14 +57,14 @@ func (tool ExitTool) Safety() tools.Safety {
 	}
 }
 
-func (tool ExitTool) Run(_ context.Context, args map[string]any) tools.Result {
+func (tool SubmitTool) Run(_ context.Context, args map[string]any) tools.Result {
 	title, err := requiredString(args, "title")
 	if err != nil {
-		return tools.Result{Status: tools.StatusError, Output: "Error: Invalid arguments for ExitSpecMode: " + err.Error()}
+		return tools.Result{Status: tools.StatusError, Output: "Error: Invalid arguments for submit_spec: " + err.Error()}
 	}
 	plan, err := requiredString(args, "plan")
 	if err != nil {
-		return tools.Result{Status: tools.StatusError, Output: "Error: Invalid arguments for ExitSpecMode: " + err.Error()}
+		return tools.Result{Status: tools.StatusError, Output: "Error: Invalid arguments for submit_spec: " + err.Error()}
 	}
 	saved, err := SaveDraft(SaveOptions{
 		WorkspaceRoot: tool.workspaceRoot,

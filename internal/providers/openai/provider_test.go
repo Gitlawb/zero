@@ -730,3 +730,250 @@ func TestStreamCompletionEmitsDroppedOnNamelessToolCall(t *testing.T) {
 		t.Errorf("expected a dropped-tool-call signal, got events: %+v", events)
 	}
 }
+
+func TestOpenAIRequestTextOnlyOmitsEmptyContent(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	got, err := json.Marshal(provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+			{Role: zeroruntime.MessageRoleUser, Content: "hello"},
+			{
+				Role:    zeroruntime.MessageRoleAssistant,
+				Content: "", // assistant turn that is *only* a tool call -> empty content must drop
+				ToolCalls: []zeroruntime.ToolCall{{
+					ID:        "call_1",
+					Name:      "read_file",
+					Arguments: `{"path":"README.md"}`,
+				}},
+			},
+			{Role: zeroruntime.MessageRoleTool, Content: "contents", ToolCallID: "call_1"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	// String content round-trips as a JSON string, and empty content is omitted.
+	if !strings.Contains(string(got), `"content":"hello"`) {
+		t.Fatalf("user content not serialized as string: %s", got)
+	}
+	if strings.Contains(string(got), `"content":""`) {
+		t.Fatalf("empty assistant content must be omitted, got: %s", got)
+	}
+
+	// Decode the assistant message and assert no content key at all.
+	var decoded chatCompletionRequest
+	var raw struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(got, &raw); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	_ = decoded
+	if _, present := raw.Messages[2]["content"]; present {
+		t.Fatalf("assistant (tool-only) message must omit content key, got: %#v", raw.Messages[2])
+	}
+	if raw.Messages[1]["content"] != "hello" {
+		t.Fatalf("user content = %#v, want \"hello\"", raw.Messages[1]["content"])
+	}
+}
+
+func TestContentPartImageURLMarshalsDataURI(t *testing.T) {
+	parts := []contentPart{
+		{Type: "text", Text: "look"},
+		{Type: "image_url", ImageURL: &imageURLPart{URL: "data:image/png;base64,QUJD"}},
+	}
+	got, err := json.Marshal(parts)
+	if err != nil {
+		t.Fatalf("marshal content parts: %v", err)
+	}
+	want := `[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}]`
+	if string(got) != want {
+		t.Fatalf("content parts JSON =\n  %s\nwant\n  %s", got, want)
+	}
+
+	// The text field is omitted on an image-only part; image_url is omitted on a text part.
+	imgOnly, _ := json.Marshal(contentPart{Type: "image_url", ImageURL: &imageURLPart{URL: "data:image/png;base64,QQ=="}})
+	if strings.Contains(string(imgOnly), `"text"`) {
+		t.Fatalf("image-only part must omit empty text, got: %s", imgOnly)
+	}
+	textOnly, _ := json.Marshal(contentPart{Type: "text", Text: "hi"})
+	if strings.Contains(string(textOnly), `"image_url"`) {
+		t.Fatalf("text part must omit nil image_url, got: %s", textOnly)
+	}
+}
+
+func TestOpenAIRequestEmptyContentStaysOmittedAfterAnyRefactor(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	got, err := json.Marshal(provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{
+				Role:    zeroruntime.MessageRoleAssistant,
+				Content: "",
+				ToolCalls: []zeroruntime.ToolCall{{
+					ID:        "call_1",
+					Name:      "read_file",
+					Arguments: `{}`,
+				}},
+			},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(got, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := raw.Messages[0]["content"]; present {
+		t.Fatalf("empty content boxed in any must stay omitted, got: %#v", raw.Messages[0])
+	}
+}
+
+func TestMapMessageBuildsImageURLContentParts(t *testing.T) {
+	msg := mapMessage(zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "describe these",
+		Images: []zeroruntime.ImageBlock{
+			{MediaType: "image/png", Data: []byte("ABC")},
+			{MediaType: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}},
+		},
+	})
+
+	parts, ok := msg.Content.([]contentPart)
+	if !ok {
+		t.Fatalf("Content type = %T, want []contentPart", msg.Content)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("len(parts) = %d, want 3 (1 text + 2 images)", len(parts))
+	}
+	if parts[0].Type != "text" || parts[0].Text != "describe these" {
+		t.Fatalf("part[0] = %#v, want text part", parts[0])
+	}
+	// Data "ABC" base64-encodes to "QUJD".
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil ||
+		parts[1].ImageURL.URL != "data:image/png;base64,QUJD" {
+		t.Fatalf("part[1] = %#v, want png data URI", parts[1])
+	}
+	// {0xff,0xd8,0xff} base64-encodes to "/9j/".
+	if parts[2].ImageURL == nil || parts[2].ImageURL.URL != "data:image/jpeg;base64,/9j/" {
+		t.Fatalf("part[2] = %#v, want jpeg data URI", parts[2])
+	}
+}
+
+func TestMapMessageImageOnlyOmitsTextPart(t *testing.T) {
+	msg := mapMessage(zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "",
+		Images:  []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("A")}},
+	})
+	parts, ok := msg.Content.([]contentPart)
+	if !ok {
+		t.Fatalf("Content type = %T, want []contentPart", msg.Content)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("len(parts) = %d, want 1 (image only, no text part)", len(parts))
+	}
+	// Data "A" base64-encodes to "QQ==".
+	if parts[0].Type != "image_url" || parts[0].ImageURL == nil ||
+		parts[0].ImageURL.URL != "data:image/png;base64,QQ==" {
+		t.Fatalf("part[0] = %#v, want image-only png part", parts[0])
+	}
+}
+
+func TestMapMessageTextOnlyKeepsStringContent(t *testing.T) {
+	msg := mapMessage(zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "hi"})
+	if got, ok := msg.Content.(string); !ok || got != "hi" {
+		t.Fatalf("Content = %#v, want string \"hi\"", msg.Content)
+	}
+	empty := mapMessage(zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: ""})
+	if empty.Content != nil {
+		t.Fatalf("empty text content = %#v, want nil so omitempty drops it", empty.Content)
+	}
+}
+
+// TestMapMessageNonUserRolesNeverCarryImages locks the invariant that only the
+// user role emits image content-parts. Anthropic/Gemini only attach images on
+// their user branches; OpenAI funnels every role through mapMessage, so an
+// assistant/tool/system message that happens to carry Images must still
+// serialize plain string content (never a content-parts array).
+func TestMapMessageNonUserRolesNeverCarryImages(t *testing.T) {
+	images := []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("ABC")}}
+	for _, role := range []zeroruntime.MessageRole{
+		zeroruntime.MessageRoleAssistant,
+		zeroruntime.MessageRoleTool,
+		zeroruntime.MessageRoleSystem,
+	} {
+		msg := mapMessage(zeroruntime.Message{Role: role, Content: "plain", Images: images})
+		if got, ok := msg.Content.(string); !ok || got != "plain" {
+			t.Fatalf("role %q content = %#v, want plain string (no content-parts)", role, msg.Content)
+		}
+		if _, isParts := msg.Content.([]contentPart); isParts {
+			t.Fatalf("role %q must not emit image content-parts", role)
+		}
+	}
+}
+
+func TestStreamCompletionSerializesImageContentParts(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"choices":[]}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:  "sk-secret",
+		BaseURL: server.URL + "/",
+		Model:   "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: "what is this",
+			Images:  []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("ABC")}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	messages := gotBody["messages"].([]any)
+	user := messages[0].(map[string]any)
+	content, ok := user["content"].([]any)
+	if !ok {
+		t.Fatalf("user content not an array: %#v", user["content"])
+	}
+	if len(content) != 2 {
+		t.Fatalf("content parts = %d, want 2", len(content))
+	}
+	textPart := content[0].(map[string]any)
+	if textPart["type"] != "text" || textPart["text"] != "what is this" {
+		t.Fatalf("text part = %#v", textPart)
+	}
+	imagePart := content[1].(map[string]any)
+	if imagePart["type"] != "image_url" {
+		t.Fatalf("image part type = %#v, want image_url", imagePart["type"])
+	}
+	imageURL := imagePart["image_url"].(map[string]any)
+	if imageURL["url"] != "data:image/png;base64,QUJD" {
+		t.Fatalf("image url = %#v, want data:image/png;base64,QUJD", imageURL["url"])
+	}
+}

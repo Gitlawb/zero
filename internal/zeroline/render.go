@@ -95,6 +95,9 @@ type ChatData struct {
 	// skin instead of showing a misleading "working…".
 	AskUser *AskUser
 	Input   string
+	// ImageChips, when non-empty, is the pending-attachment chip row shown above
+	// the command input ("[img: a.png] [img: b.png]"); "" when nothing is staged.
+	ImageChips string
 	// Suggestions / SelectedIdx drive the slash-command autocomplete overlay; an
 	// empty slice means no overlay. Picker, when non-nil, is an open selector.
 	Suggestions []Suggestion
@@ -248,12 +251,23 @@ func RenderChat(d ChatData) string {
 	bottom := s.botBar(run, d.Header, d.Variant, d.TokS, w)
 	cmd := s.cmdRegion(d, w)
 
+	// The command region is one row by default, but grows to TWO rows when a
+	// pending-attachment chip line is shown above the input (cmdRegion emits the
+	// chips on their own row). Account for that extra row so the composed frame
+	// (top + cmd + bottom = cmdRows+2 fixed rows, plus the body/overlay) stays
+	// exactly `h` rows instead of overflowing.
+	cmdRows := 1
+	if d.ImageChips != "" {
+		cmdRows = 2
+	}
+	fixedRows := cmdRows + 2 // top + cmd(cmdRows) + bottom
+
 	// The autocomplete / picker overlay (when present) sits between the command
 	// line and the bottom bar; its lines are subtracted from the transcript body
 	// so the frame keeps its fixed height. Cap the overlay so it can never push
-	// the body below one row (top + cmd + bottom = 3 fixed rows, plus >=1 body),
-	// which would otherwise overflow the frame's allotted height.
-	maxOverlay := h - 3 - 1
+	// the body below one row (fixed rows, plus >=1 body), which would otherwise
+	// overflow the frame's allotted height.
+	maxOverlay := h - fixedRows - 1
 	if maxOverlay < 0 {
 		maxOverlay = 0
 	}
@@ -263,7 +277,7 @@ func RenderChat(d ChatData) string {
 		overlayH = strings.Count(overlay, "\n") + 1
 	}
 
-	bodyH := h - 3 - overlayH
+	bodyH := h - fixedRows - overlayH
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -588,6 +602,10 @@ func (s styles) cmdRegion(d ChatData, w int) string {
 		return padRight(hint, w, p.Bg)
 	}
 	line := s.acc.Bold(true).Render(":") + " " + d.Input
+	if d.ImageChips != "" {
+		chips := s.mute.Render(d.ImageChips)
+		return padRight(chips, w, p.Bg) + "\n" + padRight(line, w, p.Bg)
+	}
 	return padRight(line, w, p.Bg)
 }
 

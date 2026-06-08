@@ -1,6 +1,7 @@
 package streamjson
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -153,6 +154,214 @@ func TestCreateRunIDUsesStablePrefix(t *testing.T) {
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func TestResolveImagesDecodesNormalizesAndCaps(t *testing.T) {
+	// happy path: two images across two events, jpg media type normalized to image/jpeg
+	rawPNG := []byte("\x89PNG fake bytes")
+	rawJPG := []byte("\xff\xd8\xff fake jpeg")
+	events := []InputEvent{
+		{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a", Images: []InputImage{
+			{MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(rawPNG)},
+		}},
+		{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "b", Images: []InputImage{
+			{MediaType: "jpg", Data: base64.StdEncoding.EncodeToString(rawJPG)},
+		}},
+	}
+	images, err := ResolveImages(events)
+	if err != nil {
+		t.Fatalf("ResolveImages returned error: %v", err)
+	}
+	if len(images) != 2 {
+		t.Fatalf("expected 2 images, got %d", len(images))
+	}
+	if images[0].MediaType != "image/png" || string(images[0].Data) != string(rawPNG) {
+		t.Fatalf("png image not resolved: %+v", images[0])
+	}
+	if images[1].MediaType != "image/jpeg" || string(images[1].Data) != string(rawJPG) {
+		t.Fatalf("jpg image not normalized/decoded: %+v", images[1])
+	}
+
+	// no images -> nil, no error
+	none, err := ResolveImages([]InputEvent{{SchemaVersion: 1, Type: InputPrompt, Content: "x"}})
+	if err != nil {
+		t.Fatalf("ResolveImages with no images errored: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("expected nil for no images, got %+v", none)
+	}
+}
+
+func TestResolveImagesRejectsBadInputs(t *testing.T) {
+	// invalid base64
+	badB64 := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/png", Data: "not base64!!"}}}}
+	if _, err := ResolveImages(badB64); err == nil || !strings.Contains(err.Error(), "base64") {
+		t.Fatalf("expected base64 decode error, got %v", err)
+	}
+
+	// unsupported media type
+	badType := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/svg+xml", Data: base64.StdEncoding.EncodeToString([]byte("x"))}}}}
+	if _, err := ResolveImages(badType); err == nil || !strings.Contains(err.Error(), "unsupported image media type") {
+		t.Fatalf("expected unsupported media type error, got %v", err)
+	}
+
+	// oversized image (> 10 MiB decoded)
+	oversize := make([]byte, (10<<20)+1)
+	bigEvent := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(oversize)}}}}
+	if _, err := ResolveImages(bigEvent); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected oversize rejection, got %v", err)
+	}
+}
+
+// TestResolveImagesRejectsOversizedEncodedLengthBeforeDecode asserts that an
+// over-encoded-length payload is rejected from its ENCODED length BEFORE the
+// expensive base64 decode runs — so a huge blob never allocates a decode buffer
+// just to be capped after the fact. The Data here is NOT valid base64 ('@' is
+// outside the alphabet); reaching DecodeString would surface a "base64" error,
+// so an "exceeds" error proves the size gate fired first, before any decode.
+func TestResolveImagesRejectsOversizedEncodedLengthBeforeDecode(t *testing.T) {
+	// Encoded length whose DecodedLen exceeds the cap, made of non-base64 bytes
+	// so a decode attempt would fail loudly rather than silently allocate.
+	encodedLen := base64.StdEncoding.EncodedLen(maxStreamImageBytes) + 8
+	huge := strings.Repeat("@", encodedLen)
+	event := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/png", Data: huge}}}}
+
+	_, err := ResolveImages(event)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected pre-decode oversize rejection, got %v", err)
+	}
+	if strings.Contains(err.Error(), "base64") {
+		t.Fatalf("decode ran before the size gate: %v", err)
+	}
+}
+
+func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
+	// image-only message (empty content) is valid
+	imageOnly := `{"schemaVersion":1,"type":"message","role":"user","content":"","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	events, err := ParseInput(imageOnly)
+	if err != nil {
+		t.Fatalf("image-only message should be valid, got %v", err)
+	}
+	if len(events) != 1 || len(events[0].Images) != 1 {
+		t.Fatalf("image-only event not parsed: %+v", events)
+	}
+
+	// empty content AND no images is still rejected
+	empty := `{"schemaVersion":1,"type":"message","role":"user","content":""}`
+	if _, err := ParseInput(empty); err == nil || !strings.Contains(err.Error(), "content is required") {
+		t.Fatalf("expected empty-content rejection, got %v", err)
+	}
+
+	// prompt event with empty content is still rejected (no images allowed there)
+	emptyPrompt := `{"schemaVersion":1,"type":"prompt","content":""}`
+	if _, err := ParseInput(emptyPrompt); err == nil || !strings.Contains(err.Error(), "content is required") {
+		t.Fatalf("expected empty prompt rejection, got %v", err)
+	}
+}
+
+func TestParseInputImagesAcceptedOnlyOnMessageEvents(t *testing.T) {
+	// images allowed on a message event
+	msg := `{"schemaVersion":1,"type":"message","role":"user","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	events, err := ParseInput(msg)
+	if err != nil {
+		t.Fatalf("message+images should parse, got %v", err)
+	}
+	if len(events) != 1 || len(events[0].Images) != 1 || events[0].Images[0].Data != "aGVsbG8=" {
+		t.Fatalf("images not parsed: %+v", events)
+	}
+
+	// images rejected on a prompt event (not whitelisted there)
+	prompt := `{"schemaVersion":1,"type":"prompt","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	if _, err := ParseInput(prompt); err == nil || !strings.Contains(err.Error(), "unknown field images") {
+		t.Fatalf("expected images rejected on prompt event, got %v", err)
+	}
+
+	// truly unknown field still rejected on a message event
+	bad := `{"schemaVersion":1,"type":"message","role":"user","content":"look","extra":true}`
+	if _, err := ParseInput(bad); err == nil || !strings.Contains(err.Error(), "unknown field extra") {
+		t.Fatalf("expected unknown field still rejected, got %v", err)
+	}
+}
+
+func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
+	ev := InputEvent{
+		SchemaVersion: 1,
+		Type:          InputMessage,
+		Role:          "user",
+		Content:       "look at this",
+		Images: []InputImage{
+			{MediaType: "image/png", Data: "aGVsbG8="},
+		},
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"mediaType":"image/png"`) {
+		t.Fatalf("expected mediaType key, got %s", data)
+	}
+	if !strings.Contains(string(data), `"data":"aGVsbG8="`) {
+		t.Fatalf("expected data key, got %s", data)
+	}
+
+	var back InputEvent
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.Images) != 1 || back.Images[0].MediaType != "image/png" || back.Images[0].Data != "aGVsbG8=" {
+		t.Fatalf("images lost in round-trip: %+v", back.Images)
+	}
+
+	// omitempty: a text-only event must not emit the new key.
+	bare, _ := json.Marshal(InputEvent{SchemaVersion: 1, Type: InputPrompt, Content: "hi"})
+	if strings.Contains(string(bare), "images") {
+		t.Fatalf("expected images omitted on text-only event, got %s", bare)
+	}
+}
+
+func TestParseInputThenResolveImagesRoundTrip(t *testing.T) {
+	raw := []byte("\x89PNG round trip bytes")
+	line := `{"schemaVersion":1,"type":"message","role":"user","content":"describe","images":[{"mediaType":"png","data":"` +
+		base64.StdEncoding.EncodeToString(raw) + `"}]}`
+
+	events, err := ParseInput(line)
+	if err != nil {
+		t.Fatalf("ParseInput: %v", err)
+	}
+
+	// prompt resolution is unaffected by images
+	prompt, err := ResolvePrompt(events)
+	if err != nil {
+		t.Fatalf("ResolvePrompt: %v", err)
+	}
+	if prompt != "describe" {
+		t.Fatalf("prompt = %q", prompt)
+	}
+
+	images, err := ResolveImages(events)
+	if err != nil {
+		t.Fatalf("ResolveImages: %v", err)
+	}
+	if len(images) != 1 || images[0].MediaType != "image/png" || string(images[0].Data) != string(raw) {
+		t.Fatalf("round-trip image mismatch: %+v", images)
+	}
+
+	// text-only input still resolves to nil images, non-empty prompt
+	textOnly, err := ParseInput(`{"schemaVersion":1,"type":"prompt","content":"hello"}`)
+	if err != nil {
+		t.Fatalf("ParseInput text-only: %v", err)
+	}
+	imgs, err := ResolveImages(textOnly)
+	if err != nil {
+		t.Fatalf("ResolveImages text-only: %v", err)
+	}
+	if imgs != nil {
+		t.Fatalf("expected nil images for text-only input, got %+v", imgs)
+	}
 }
 
 func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {

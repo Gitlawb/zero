@@ -10,5 +10,5 @@ func RegisterDraftTools(registry *tools.Registry, workspaceRoot string, now func
 	if registry == nil {
 		return
 	}
-	registry.Register(NewExitTool(workspaceRoot, now))
+	registry.Register(NewSubmitTool(workspaceRoot, now))
 }

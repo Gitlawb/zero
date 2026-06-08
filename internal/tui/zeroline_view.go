@@ -122,6 +122,7 @@ func (m model) zerolineView() string {
 		Perm:        m.zerolinePerm(),
 		AskUser:     askUser,
 		Input:       m.input.View(),
+		ImageChips:  renderImageChips(m.pendingImageLabels),
 		Suggestions: m.zerolineSuggestions(),
 		SelectedIdx: m.suggestionIdx,
 		Picker:      m.zerolinePicker(),

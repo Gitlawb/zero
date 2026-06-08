@@ -859,7 +859,7 @@ func TestBuildSystemPromptInjectsWorkspaceContext(t *testing.T) {
 
 func TestBuildSystemPromptAllowsSpecModeOverride(t *testing.T) {
 	prompt := buildSystemPrompt(Options{SystemPrompt: specmode.DraftSystemPrompt})
-	if !strings.HasPrefix(prompt, "Spec mode is active.") {
+	if !strings.HasPrefix(prompt, "Specification drafting is active.") {
 		t.Fatalf("expected spec prompt override, got %q", prompt)
 	}
 	if !strings.Contains(prompt, "Confirmation Modes") {
@@ -892,7 +892,7 @@ func TestSpecDraftAdvertisesOnlySafeDraftTools(t *testing.T) {
 	for _, definition := range provider.requests[0].Tools {
 		names[definition.Name] = true
 	}
-	for _, want := range []string{"read_file", "list_directory", "glob", "grep", "skill", "ask_user", specmode.ExitToolName} {
+	for _, want := range []string{"read_file", "list_directory", "glob", "grep", "skill", "ask_user", specmode.SubmitToolName} {
 		if !names[want] {
 			t.Fatalf("spec draft tools missing %q from %#v", want, names)
 		}
@@ -937,14 +937,60 @@ func TestSpecDraftDeniesHiddenToolCalls(t *testing.T) {
 	}
 }
 
-func TestRunStopsWhenExitSpecModeReturnsReviewControl(t *testing.T) {
+func TestSpecDraftDeniesBashToolCalls(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"printf ran > ran.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "draft", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeSpecDraft,
+		MaxTurns:       2,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer after denial, got %q", result.FinalAnswer)
+	}
+	var denied string
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			denied = message.Content
+			break
+		}
+	}
+	if !strings.Contains(denied, "not available in spec-draft mode") {
+		t.Fatalf("expected spec-draft bash denial, got %q", denied)
+	}
+	if _, err := os.Stat(filepath.Join(root, "ran.txt")); !os.IsNotExist(err) {
+		t.Fatalf("bash should not have written ran.txt, stat err=%v", err)
+	}
+}
+
+func TestRunStopsWhenSubmitSpecReturnsReviewControl(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
 	specmode.RegisterDraftTools(registry, root, nil)
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
-			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "exit-1", ToolName: specmode.ExitToolName},
-			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "exit-1", ArgumentsFragment: `{"title":"Spec Mode","plan":"# Goal\n\nAdd spec mode."}`},
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "exit-1", ToolName: specmode.SubmitToolName},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "exit-1", ArgumentsFragment: `{"title":"Implementation Plan","plan":"# Goal\n\nAdd implementation plan."}`},
 			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "exit-1"},
 			{Type: zeroruntime.StreamEventDone},
 		}},
@@ -963,7 +1009,7 @@ func TestRunStopsWhenExitSpecModeReturnsReviewControl(t *testing.T) {
 		t.Fatalf("StopReason = %q, want %q", result.StopReason, StopReasonSpecReviewRequired)
 	}
 	if len(provider.requests) != 1 {
-		t.Fatalf("expected run to stop after ExitSpecMode, got %d requests", len(provider.requests))
+		t.Fatalf("expected run to stop after submit_spec, got %d requests", len(provider.requests))
 	}
 	if !strings.Contains(result.FinalAnswer, ".zero/specs/") {
 		t.Fatalf("final answer should mention saved spec, got %q", result.FinalAnswer)

@@ -1,6 +1,9 @@
 package zeroruntime
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // MessageRole identifies the origin of a conversation message.
 type MessageRole string
@@ -72,6 +75,7 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	Images     []ImageBlock // optional; nil for text-only messages
 }
 
 // ToolDefinition describes a model-visible tool and its JSON-schema parameters.
@@ -149,4 +153,48 @@ type CompletionRequest struct {
 // Provider streams normalized completion events for one request.
 type Provider interface {
 	StreamCompletion(ctx context.Context, request CompletionRequest) (<-chan StreamEvent, error)
+}
+
+// ImageBlock is a normalized image attachment carried on a Message. Data is the
+// RAW decoded image bytes (no base64, no data: prefix); each provider encodes it
+// into its own wire format. MediaType is a normalized MIME, e.g. "image/png".
+type ImageBlock struct {
+	MediaType string
+	Data      []byte
+}
+
+// NormalizeImageMediaType canonicalizes a caller-supplied image type to one of
+// the allow-listed MIME strings (image/png, image/jpeg, image/gif, image/webp)
+// or "" when the input is outside the allow-list (the caller then rejects it).
+//
+// It lowercases and trims the input, strips a leading "data:<m>;base64," prefix
+// (using <m>), maps a bare png|jpeg|jpg|gif|webp to image/<x> (jpg->jpeg), and
+// passes through an already-image/<x> value in the allow-list (image/jpg is
+// also folded to image/jpeg). It is pure and has no dependencies.
+func NormalizeImageMediaType(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	// Strip a data: URI wrapper, keeping the media type between "data:" and ";".
+	if rest, ok := strings.CutPrefix(s, "data:"); ok {
+		if i := strings.IndexByte(rest, ';'); i >= 0 {
+			s = rest[:i]
+		} else {
+			s = rest
+		}
+		s = strings.TrimSpace(s)
+	}
+	switch s {
+	case "png", "image/png":
+		return "image/png"
+	case "jpeg", "jpg", "image/jpeg", "image/jpg":
+		return "image/jpeg"
+	case "gif", "image/gif":
+		return "image/gif"
+	case "webp", "image/webp":
+		return "image/webp"
+	default:
+		return ""
+	}
 }
