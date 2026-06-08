@@ -19,6 +19,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -133,6 +134,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	// Register the escalate_model tool only when the run opted into mid-run
+	// escalation. It is registered before --list-tools formatting and
+	// validateExecToolFilters so the tool is both listable and filter-validatable.
+	// The no-arg constructor builds its own default registry internally (and
+	// degrades to an inert tool if the catalog fails), so no registry is threaded.
+	if options.allowEscalation {
+		registry.Register(tools.NewEscalateModelTool())
+	}
 	var specialistRuntime *specialist.Runtime
 	if shouldRegisterExecSpecialistTools(options) {
 		var err error

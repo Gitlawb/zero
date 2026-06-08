@@ -1180,3 +1180,31 @@ func TestRunExecHelpDocumentsAllowEscalation(t *testing.T) {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
 }
+
+func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantTool bool
+	}{
+		{name: "absent", args: []string{"exec", "--list-tools"}, wantTool: false},
+		{name: "present", args: []string{"exec", "--allow-escalation", "--list-tools"}, wantTool: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) {
+					return t.TempDir(), nil
+				},
+			})
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+			}
+			hasTool := strings.Contains(stdout.String(), "  escalate_model ")
+			if hasTool != tc.wantTool {
+				t.Fatalf("escalate_model visibility = %v, want %v; output:\n%s", hasTool, tc.wantTool, stdout.String())
+			}
+		})
+	}
+}
