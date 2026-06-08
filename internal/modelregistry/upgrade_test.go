@@ -1,6 +1,9 @@
 package modelregistry
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // upgradeEntry builds a minimal valid active entry with an upgrade target set.
 func upgradeEntry(id, alias, upgradeTargetID string) ModelEntry {
@@ -21,10 +24,7 @@ func upgradeTestRegistry(t *testing.T) Registry {
 	retired.Status = ModelStatusDeprecated
 	retired.Deprecation = &DeprecationRule{FallbackID: "claude-opus-4-1", WarningMsg: "retired"}
 
-	// A model whose target id does not resolve to any entry.
-	dangling := upgradeEntry("dangling-mini", "dangling-m", "does-not-exist")
-
-	reg, err := NewRegistry([]ModelEntry{haiku, sonnet, opus, legacy, retired, dangling})
+	reg, err := NewRegistry([]ModelEntry{haiku, sonnet, opus, legacy, retired})
 	if err != nil {
 		t.Fatalf("NewRegistry returned error: %v", err)
 	}
@@ -69,10 +69,17 @@ func TestUpgradeTargetDeprecatedTargetRejected(t *testing.T) {
 	}
 }
 
-func TestUpgradeTargetDanglingTargetRejected(t *testing.T) {
-	reg := upgradeTestRegistry(t)
-	if _, ok := reg.UpgradeTarget("dangling-mini"); ok {
-		t.Fatal("unresolvable target id should not yield an upgrade target")
+func TestNewRegistryRejectsDanglingUpgradeTarget(t *testing.T) {
+	// A non-empty UpgradeTargetID that does not resolve to a known model is a
+	// catalog typo; NewRegistry must fail loudly rather than silently disabling
+	// escalation at runtime (mirrors the deprecation-fallback validation).
+	dangling := upgradeEntry("dangling-mini", "dangling-m", "does-not-exist")
+	_, err := NewRegistry([]ModelEntry{dangling})
+	if err == nil {
+		t.Fatal("NewRegistry should reject an unresolvable upgrade target")
+	}
+	if !strings.Contains(err.Error(), "upgrade target") {
+		t.Fatalf("error %q should mention the upgrade target", err.Error())
 	}
 }
 
