@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -129,7 +130,10 @@ func userAgent() string {
 	return "zero/" + version
 }
 
-func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
+	// Convert an unexpected panic anywhere in the CLI into a saved crash report and
+	// a brief notice, rather than a raw stack trace dumped at the user.
+	defer observability.Recover(observability.DefaultCrashDir(), "cli", stderr, &exitCode)
 	deps = fillAppDeps(deps)
 
 	if len(args) == 0 {
