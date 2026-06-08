@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -38,6 +39,25 @@ func TestBashEscapeGatedByPermissionMode(t *testing.T) {
 	_, cmd := m.handleSubmit()
 	if cmd == nil {
 		t.Fatal("unsafe mode: !cmd should execute (non-nil cmd)")
+	}
+}
+
+// The "!" escape must use the platform shell (cmd.exe on Windows, /bin/sh
+// elsewhere), not a hardcoded "bash" that is absent on stock Windows.
+func TestEscapeShellWrapsCommandForPlatform(t *testing.T) {
+	name, args := escapeShell("echo hi")
+	if name == "" {
+		t.Fatal("escapeShell returned an empty executable")
+	}
+	if len(args) == 0 || args[len(args)-1] != "echo hi" {
+		t.Fatalf("escapeShell args = %v, want the command as the final arg", args)
+	}
+	if runtime.GOOS == "windows" {
+		if name != "cmd.exe" || args[0] != "/d" {
+			t.Fatalf("windows shell = %q %v, want cmd.exe /d /s /c", name, args)
+		}
+	} else if name != "/bin/sh" || args[0] != "-c" {
+		t.Fatalf("unix shell = %q %v, want /bin/sh -c", name, args)
 	}
 }
 

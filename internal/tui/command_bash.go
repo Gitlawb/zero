@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,7 +30,8 @@ func runBashEscape(cwd, command string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), bashEscapeTimeout)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "bash", "-c", command)
+		name, shellArgs := escapeShell(command)
+		cmd := exec.CommandContext(ctx, name, shellArgs...)
 		if strings.TrimSpace(cwd) != "" {
 			cmd.Dir = cwd
 		}
@@ -47,6 +49,17 @@ func runBashEscape(cwd, command string) tea.Cmd {
 		}
 		return bashResultMsg{command: command, output: text}
 	}
+}
+
+// escapeShell returns the platform shell and arguments for a "!cmd" escape,
+// matching the agent bash tool: cmd.exe on Windows, /bin/sh elsewhere. Hardcoding
+// "bash" broke the escape on stock Windows (no bash on PATH) and anywhere bash is
+// not installed at a predictable path.
+func escapeShell(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "cmd.exe", []string{"/d", "/s", "/c", command}
+	}
+	return "/bin/sh", []string{"-c", command}
 }
 
 func appendNote(text, note string) string {
