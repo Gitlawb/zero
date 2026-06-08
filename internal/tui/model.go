@@ -94,6 +94,13 @@ type model struct {
 	// /theme, /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and
 	// applies the chosen value through the existing command handlers.
 	picker *commandPicker
+
+	// pendingImages holds image attachments staged by /image for the next user
+	// turn; pendingImageLabels are their display names (base(path)) for the chip
+	// row. Both are cleared after a prompt is submitted (or /image clear). nil =
+	// no attachments = today's text-only behavior exactly.
+	pendingImages      []zeroruntime.ImageBlock
+	pendingImageLabels []string
 }
 
 type agentTextMsg struct {
@@ -849,6 +856,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			kind: actionAppendSystem,
 			text: shellOnlyCommandText(command.name),
 		})
+		return m, nil
+	case commandImage:
+		m.showSplash = false
+		m = m.handleImageCommand(command.text)
 		return m, nil
 	case commandUnknown:
 		m.showSplash = false
