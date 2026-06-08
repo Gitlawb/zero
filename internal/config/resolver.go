@@ -50,6 +50,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Provider:       active,
 		MaxTurns:       cfg.MaxTurns,
 		MCP:            cfg.MCP,
+		Sandbox:        cfg.Sandbox,
 	}, nil
 }
 
@@ -94,6 +95,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
+	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		dst.Sandbox.MaxAutonomy = maxAutonomy
+	}
 }
 
 func mergeProvider(cfg *FileConfig, provider ProviderProfile) {

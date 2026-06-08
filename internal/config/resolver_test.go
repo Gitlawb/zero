@@ -641,6 +641,26 @@ func TestResolveRedactsSecretsFromErrors(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxMaxAutonomyFromFile(t *testing.T) {
+	path := writeConfig(t, `{
+		"sandbox": {"maxAutonomy": "medium"},
+		"providers": [{
+			"name": "openai",
+			"provider": "openai",
+			"api_key": "sk-test",
+			"model": "gpt-test"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Sandbox.MaxAutonomy != "medium" {
+		t.Fatalf("resolved.Sandbox.MaxAutonomy = %q, want medium", resolved.Sandbox.MaxAutonomy)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 
