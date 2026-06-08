@@ -244,14 +244,16 @@ func configValidationCheck(userPath string, projectPath string) Check {
 	issueCount := 0
 	details := map[string]any{}
 	for _, path := range paths {
-		data, readErr := osReadFile(path)
+		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			// File unreadable (e.g. does not exist) — skip; configFilesCheck
-			// already surfaces presence issues.
+			// configFilesCheck only checks that path strings are non-empty, not
+			// that files are readable. DefaultResolveOptions returns "" for paths
+			// that fail to stat, so a non-empty resolved path that still can't be
+			// read is essentially unreachable — skip defensively.
 			continue
 		}
 		if line, col, ok := jsonParsePosition(data); ok {
-			_, issues := config.ValidateFile(path)
+			_, issues := config.ValidateBytes(data)
 			errMsg := ""
 			if len(issues) > 0 {
 				errMsg = issues[0].Message
@@ -263,7 +265,7 @@ func configValidationCheck(userPath string, projectPath string) Check {
 			issueCount++
 			continue
 		}
-		_, issues := config.ValidateFile(path)
+		_, issues := config.ValidateBytes(data)
 		if len(issues) == 0 {
 			continue
 		}
@@ -302,10 +304,6 @@ func jsonParsePosition(data []byte) (int, int, bool) {
 	}
 	// Non-positional JSON error (e.g. unexpected EOF without offset) — still a parse failure.
 	return 1, 1, true
-}
-
-func osReadFile(path string) ([]byte, error) {
-	return os.ReadFile(path)
 }
 
 func passFail(ok bool) string {

@@ -34,6 +34,21 @@ func ValidateFile(path string) (FileConfig, []Issue) {
 	return cfg, issues
 }
 
+// ValidateBytes parses data as a Zero FileConfig and runs the same semantic
+// provider/model rules as ValidateFile. It returns the parsed config (zero
+// value on parse failure) plus any structured issues. A parse failure yields a
+// single issue whose Message wraps the underlying JSON error (path-less form:
+// "invalid config JSON: <err>") so callers can extract *json.SyntaxError /
+// *json.UnmarshalTypeError offsets via errors.As.
+func ValidateBytes(data []byte) (FileConfig, []Issue) {
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, []Issue{{Message: fmt.Errorf("invalid config JSON: %w", err).Error()}}
+	}
+	issues := validateSemantics(cfg)
+	return cfg, issues
+}
+
 func validateSemantics(cfg FileConfig) []Issue {
 	if _, _, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider); err != nil {
 		// normalizeProviders already redacts secrets via providerError.

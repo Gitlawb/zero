@@ -167,19 +167,25 @@ func TestOffsetToLineCol(t *testing.T) {
 	data := []byte("{\n  \"a\": 1,\n  bad\n}")
 	cases := []struct {
 		name     string
+		data     []byte
 		offset   int64
 		wantLine int
 		wantCol  int
 	}{
-		{name: "start", offset: 0, wantLine: 1, wantCol: 1},
-		{name: "after first newline", offset: 2, wantLine: 2, wantCol: 1},
-		{name: "mid second line", offset: 7, wantLine: 2, wantCol: 6},
-		{name: "negative clamps to start", offset: -5, wantLine: 1, wantCol: 1},
-		{name: "past end clamps to last", offset: 9999, wantLine: 4, wantCol: 2},
+		{name: "start", data: data, offset: 0, wantLine: 1, wantCol: 1},
+		{name: "after first newline", data: data, offset: 2, wantLine: 2, wantCol: 1},
+		{name: "mid second line", data: data, offset: 7, wantLine: 2, wantCol: 6},
+		{name: "negative clamps to start", data: data, offset: -5, wantLine: 1, wantCol: 1},
+		{name: "past end clamps to last", data: data, offset: 9999, wantLine: 4, wantCol: 2},
+		// Multi-byte UTF-8: the rune '£' is 2 bytes (0xC2 0xA3).  The JSON parser
+		// reports byte offsets, so the column after '£' is byte-column 3, not
+		// rune-column 2.  This documents that offsetToLineCol counts BYTES, not
+		// runes.
+		{name: "utf8 multibyte byte columns", data: []byte("{\"£\": bad}"), offset: 6, wantLine: 1, wantCol: 7},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			line, col := offsetToLineCol(data, tc.offset)
+			line, col := offsetToLineCol(tc.data, tc.offset)
 			if line != tc.wantLine || col != tc.wantCol {
 				t.Fatalf("offsetToLineCol(%d) = (%d,%d), want (%d,%d)", tc.offset, line, col, tc.wantLine, tc.wantCol)
 			}
