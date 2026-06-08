@@ -36,3 +36,29 @@ func TestNormalizeImageMediaType(t *testing.T) {
 		})
 	}
 }
+
+func TestMessageImagesFieldDefaultsNil(t *testing.T) {
+	// A text-only message must leave Images nil (today's behavior, byte-identical).
+	textOnly := Message{Role: MessageRoleUser, Content: "hello"}
+	if textOnly.Images != nil {
+		t.Fatalf("expected nil Images on a text-only message, got %#v", textOnly.Images)
+	}
+
+	// The field accepts ImageBlock values carrying raw bytes.
+	withImage := Message{
+		Role:    MessageRoleUser,
+		Content: "look",
+		Images: []ImageBlock{
+			{MediaType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}},
+		},
+	}
+	if len(withImage.Images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(withImage.Images))
+	}
+	if withImage.Images[0].MediaType != "image/png" {
+		t.Fatalf("unexpected media type: %q", withImage.Images[0].MediaType)
+	}
+	if string(withImage.Images[0].Data) != "\x89PNG" {
+		t.Fatalf("unexpected raw data: %q", withImage.Images[0].Data)
+	}
+}

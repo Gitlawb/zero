@@ -75,6 +75,7 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	Images     []ImageBlock // optional; nil for text-only messages
 }
 
 // ToolDefinition describes a model-visible tool and its JSON-schema parameters.
