@@ -51,6 +51,50 @@ func (p *errorSummarizer) StreamCompletion(_ context.Context, _ zeroruntime.Comp
 	return ch, nil
 }
 
+// compressingSummarizer fails on more than maxMarkers messages but returns a
+// SHORT marker-free summary, so two partial summaries combine into something that
+// fits — modelling real summarization that shrinks its input.
+type compressingSummarizer struct {
+	maxMarkers int
+	calls      int32
+}
+
+func (p *compressingSummarizer) StreamCompletion(_ context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	atomic.AddInt32(&p.calls, 1)
+	text := request.Messages[len(request.Messages)-1].Content
+	ch := make(chan zeroruntime.StreamEvent, 2)
+	if len(markerPattern.FindAllString(text, -1)) > p.maxMarkers {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: "context length exceeded"}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "S"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+func TestSummarizeWithFallbackReSummarizesPartialsIntoOne(t *testing.T) {
+	messages := make([]zeroruntime.Message, 4)
+	for i := range messages {
+		messages[i] = zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: fmt.Sprintf("msg-%d body", i)}
+	}
+	provider := &compressingSummarizer{maxMarkers: 2}
+
+	summary, err := summarizeWithFallback(context.Background(), provider, messages)
+	if err != nil {
+		t.Fatalf("summarizeWithFallback failed: %v", err)
+	}
+	// The two chunk summaries ("S" / "S") are re-summarized into ONE unit, not
+	// returned as the joined "S\n\nS" blob — so a later compaction can shrink it.
+	if strings.Contains(summary, "\n\n") {
+		t.Fatalf("expected a single re-summarized result, got a joined blob: %q", summary)
+	}
+	if summary != "S" {
+		t.Fatalf("summary = %q, want the reduced %q", summary, "S")
+	}
+}
+
 func TestSummarizeWithFallbackChunksOnContextLimit(t *testing.T) {
 	const n = 8
 	messages := make([]zeroruntime.Message, n)

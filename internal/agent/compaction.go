@@ -344,7 +344,20 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	if rightErr != nil {
 		return "", rightErr
 	}
-	return strings.TrimSpace(left + "\n\n" + right), nil
+
+	// Re-summarize the two partial summaries into ONE so the persisted summary
+	// stays a single, further-summarizable unit — not an ever-growing concatenated
+	// blob that a later compaction (which can't split a single message) would fail
+	// on. If even the combined partials don't fit (extreme), fall back to the
+	// joined text: still better than failing, and each half is already compacted.
+	combined := strings.TrimSpace(left + "\n\n" + right)
+	reduced, reduceErr := summarizeMessagesOnce(ctx, provider, []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: combined},
+	})
+	if reduceErr != nil {
+		return combined, nil
+	}
+	return reduced, nil
 }
 
 // summarizeMessagesOnce performs a single tool-less summarization call.
