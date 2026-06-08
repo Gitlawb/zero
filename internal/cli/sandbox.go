@@ -147,6 +147,7 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 		"enforce_workspace: " + fmt.Sprintf("%t", policy.EnforceWorkspace),
 		"deny_destructive_shell: " + fmt.Sprintf("%t", policy.DenyDestructiveShell),
 		"allow_policy_only_runner: " + fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
+		"max_autonomy: " + string(policy.MaxAutonomy),
 		"backend: " + string(backend.Name),
 		"support_level: " + string(plan.SupportLevel),
 		"interactive_command_guard: " + enabledLabel(guards.InteractiveCommand),
@@ -416,6 +417,7 @@ func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backen
 		"root: " + workspaceRoot,
 		"mode: " + string(policy.Mode),
 		"network: " + string(policy.Network),
+		"max_autonomy: " + string(policy.MaxAutonomy),
 		"backend: " + string(backend.Name),
 		"support_level: " + string(plan.SupportLevel),
 	}

@@ -326,6 +326,33 @@ func TestRunSandboxPolicyAppliesConfiguredCeiling(t *testing.T) {
 	}
 }
 
+func TestRunSandboxPolicyTextShowsMaxAutonomy(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Sandbox: config.SandboxConfig{MaxAutonomy: "medium"}}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"sandbox", "policy"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("policy exit = %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "max_autonomy: medium") {
+		t.Fatalf("policy text missing max_autonomy line:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"sandbox", "policy", "--effective"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("effective policy exit = %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "max_autonomy: medium") {
+		t.Fatalf("effective policy text missing max_autonomy line:\n%s", stdout.String())
+	}
+}
+
 func newSandboxTestStore(t *testing.T) *sandbox.GrantStore {
 	t.Helper()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{
