@@ -68,6 +68,22 @@ func TestLoadFileUnsupportedType(t *testing.T) {
 	}
 }
 
+func TestLoadFileRejectsNonRegular(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "adir"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A directory is non-regular like a FIFO/device; the guard must reject it
+	// before os.Open (a writerless FIFO would otherwise block the read forever).
+	_, err := LoadFile("adir", root)
+	if err == nil {
+		t.Fatal("expected error for a non-regular file")
+	}
+	if !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("error %q should mention regular file", err.Error())
+	}
+}
+
 func TestLoadFileOversizeRejected(t *testing.T) {
 	root := t.TempDir()
 	big := make([]byte, (10<<20)+1)

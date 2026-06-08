@@ -37,6 +37,13 @@ func LoadFile(path string, workspaceRoot string) (zeroruntime.ImageBlock, error)
 	if err != nil {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
 	}
+	// Reject non-regular files (directories, FIFOs, devices) up front. os.Stat
+	// follows symlinks, so a symlink to a regular file still passes. This guards
+	// against os.Open blocking forever on a writerless FIFO (an --image/ /image
+	// path pointing at a named pipe would otherwise hang the process/UI).
+	if !info.Mode().IsRegular() {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("image file must be a regular file: %s", path)
+	}
 	if info.Size() > MaxImageBytes {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
 	}
