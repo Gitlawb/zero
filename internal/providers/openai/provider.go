@@ -347,7 +347,12 @@ func mapMessage(message zeroruntime.Message) chatMessage {
 		ToolCallID: message.ToolCallID,
 	}
 
-	if len(message.Images) == 0 {
+	// Image content-parts are only valid on a user turn. Anthropic/Gemini emit
+	// images solely from their user branches; OpenAI funnels every role through
+	// this one mapper, so guard the parts path to the user role. A non-user
+	// message that happens to carry Images keeps the plain string/nil content
+	// path (its images are simply not serialized).
+	if len(message.Images) == 0 || message.Role != zeroruntime.MessageRoleUser {
 		// Preserve today's behavior exactly: a string assigned only when
 		// non-empty, leaving Content nil otherwise so the `omitempty` tag still
 		// drops the key. An empty string boxed in `any` would NOT be omitted.

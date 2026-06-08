@@ -901,6 +901,28 @@ func TestMapMessageTextOnlyKeepsStringContent(t *testing.T) {
 	}
 }
 
+// TestMapMessageNonUserRolesNeverCarryImages locks the invariant that only the
+// user role emits image content-parts. Anthropic/Gemini only attach images on
+// their user branches; OpenAI funnels every role through mapMessage, so an
+// assistant/tool/system message that happens to carry Images must still
+// serialize plain string content (never a content-parts array).
+func TestMapMessageNonUserRolesNeverCarryImages(t *testing.T) {
+	images := []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("ABC")}}
+	for _, role := range []zeroruntime.MessageRole{
+		zeroruntime.MessageRoleAssistant,
+		zeroruntime.MessageRoleTool,
+		zeroruntime.MessageRoleSystem,
+	} {
+		msg := mapMessage(zeroruntime.Message{Role: role, Content: "plain", Images: images})
+		if got, ok := msg.Content.(string); !ok || got != "plain" {
+			t.Fatalf("role %q content = %#v, want plain string (no content-parts)", role, msg.Content)
+		}
+		if _, isParts := msg.Content.([]contentPart); isParts {
+			t.Fatalf("role %q must not emit image content-parts", role)
+		}
+	}
+}
+
 func TestStreamCompletionSerializesImageContentParts(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
