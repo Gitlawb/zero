@@ -1,7 +1,10 @@
 package doctor
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +53,7 @@ func Run(options Options) Report {
 	checks := []Check{
 		runtimeCheck(options.Runtime),
 		configFilesCheck(options.UserConfig, options.ProjectConfig),
+		configValidationCheck(options.UserConfig, options.ProjectConfig),
 	}
 	providerCheck := providerConfigCheck(options.Provider)
 	checks = append(checks, providerCheck)
@@ -223,6 +227,85 @@ func formatDetails(details map[string]any) string {
 		parts = append(parts, fmt.Sprintf("%s: %v", redaction.RedactString(key, redaction.Options{}), redaction.RedactValue(value, redaction.Options{})))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func configValidationCheck(userPath string, projectPath string) Check {
+	paths := make([]string, 0, 2)
+	for _, path := range []string{userPath, projectPath} {
+		if strings.TrimSpace(path) != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return check("config.validation", "Config validation", StatusWarn, "No Zero config files were available to validate.", nil)
+	}
+
+	status := StatusPass
+	issueCount := 0
+	details := map[string]any{}
+	for _, path := range paths {
+		data, readErr := osReadFile(path)
+		if readErr != nil {
+			// File unreadable (e.g. does not exist) — skip; configFilesCheck
+			// already surfaces presence issues.
+			continue
+		}
+		if line, col, ok := jsonParsePosition(data); ok {
+			_, issues := config.ValidateFile(path)
+			errMsg := ""
+			if len(issues) > 0 {
+				errMsg = issues[0].Message
+			}
+			details[path] = map[string]any{"line": line, "col": col, "error": errMsg}
+			details["line"] = line
+			details["col"] = col
+			status = StatusFail
+			issueCount++
+			continue
+		}
+		_, issues := config.ValidateFile(path)
+		if len(issues) == 0 {
+			continue
+		}
+		messages := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			messages = append(messages, issue.Message)
+		}
+		details[path] = map[string]any{"issues": messages}
+		status = StatusFail
+		issueCount += len(issues)
+	}
+
+	if status == StatusPass {
+		return check("config.validation", "Config validation", StatusPass, "Zero config files parsed and validated successfully.", nil)
+	}
+	return check("config.validation", "Config validation", StatusFail, fmt.Sprintf("Zero config validation found %d issue(s).", issueCount), details)
+}
+
+// jsonParsePosition reports whether data fails to parse as JSON and, if so, the
+// 1-based line/col of the failure using the concrete json error offset.
+func jsonParsePosition(data []byte) (int, int, bool) {
+	var probe any
+	err := json.Unmarshal(data, &probe)
+	if err == nil {
+		return 0, 0, false
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		line, col := offsetToLineCol(data, syntaxErr.Offset)
+		return line, col, true
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		line, col := offsetToLineCol(data, typeErr.Offset)
+		return line, col, true
+	}
+	// Non-positional JSON error (e.g. unexpected EOF without offset) — still a parse failure.
+	return 1, 1, true
+}
+
+func osReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
 }
 
 func passFail(ok bool) string {

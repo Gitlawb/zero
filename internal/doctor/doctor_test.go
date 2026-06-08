@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +83,83 @@ func TestRunReportWarnsForUnknownOpenAICompatibleModel(t *testing.T) {
 	}
 	if check := report.Check("provider.model"); check == nil || check.Status != StatusWarn || !strings.Contains(check.Message, "pass it through") {
 		t.Fatalf("expected custom model warning: %#v", report.Checks)
+	}
+}
+
+func writeDoctorConfig(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+func TestConfigValidationCheckPassesForValidConfig(t *testing.T) {
+	path := writeDoctorConfig(t, `{
+		"activeProvider": "main",
+		"providers": [{"name": "main", "provider_kind": "openai", "model": "gpt-4.1"}]
+	}`)
+
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:00:00Z"), Runtime: "go", ProjectConfig: path})
+
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusPass {
+		t.Fatalf("expected config.validation pass, got %#v", report.Checks)
+	}
+}
+
+func TestConfigValidationCheckFailsMalformedJSONWithLineCol(t *testing.T) {
+	path := writeDoctorConfig(t, "{\n  \"activeProvider\": \"openai\",\n")
+
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:05:00Z"), Runtime: "go", ProjectConfig: path})
+
+	if report.OK {
+		t.Fatalf("malformed config should fail report: %#v", report)
+	}
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusFail {
+		t.Fatalf("expected config.validation fail, got %#v", report.Checks)
+	}
+	if check.Details["line"] == nil || check.Details["col"] == nil {
+		t.Fatalf("expected line/col in details, got %#v", check.Details)
+	}
+}
+
+func TestConfigValidationCheckFailsSemanticIssue(t *testing.T) {
+	path := writeDoctorConfig(t, `{
+		"activeProvider": "main",
+		"providers": [{"name": "main", "provider_kind": "openai", "baseURL": "https://example.test/v1", "model": "gpt-4.1"}]
+	}`)
+
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:10:00Z"), Runtime: "go", ProjectConfig: path})
+
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusFail {
+		t.Fatalf("expected semantic fail, got %#v", report.Checks)
+	}
+}
+
+func TestConfigValidationCheckSkippedWhenNoPaths(t *testing.T) {
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:15:00Z"), Runtime: "go"})
+
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusWarn {
+		t.Fatalf("expected config.validation warn-skip, got %#v", report.Checks)
+	}
+}
+
+func TestConfigValidationCheckDoesNotLeakSecret(t *testing.T) {
+	path := writeDoctorConfig(t, `{
+		"activeProvider": "main",
+		"providers": [{"name": "main", "provider_kind": "openai", "baseURL": "https://example.test/v1", "apiKey": "sk-proj-secret1234567890", "model": "gpt-4.1"}]
+	}`)
+
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:20:00Z"), Runtime: "go", ProjectConfig: path})
+
+	if strings.Contains(Format(report), "sk-proj-secret") {
+		t.Fatalf("config.validation leaked apiKey: %q", Format(report))
 	}
 }
 
