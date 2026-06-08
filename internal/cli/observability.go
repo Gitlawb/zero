@@ -34,16 +34,28 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitProvider)
+
+	// Resolve config paths for the validation check even if resolution itself
+	// fails on malformed JSON — that failure is exactly what config.validation
+	// is meant to report, so it must not abort the run.
+	var userConfig, projectConfig string
+	if resolveOptions, optErr := config.DefaultResolveOptions(workspaceRoot); optErr == nil {
+		userConfig = resolveOptions.UserConfigPath
+		projectConfig = resolveOptions.ProjectConfigPath
+	}
+
+	var provider config.ProviderProfile
+	if resolved, resolveErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); resolveErr == nil {
+		provider = resolved.Provider
 	}
 
 	report := doctor.Run(doctor.Options{
-		Now:          deps.now,
-		Runtime:      "go",
-		Provider:     resolved.Provider,
-		Connectivity: options.connectivity,
+		Now:           deps.now,
+		Runtime:       "go",
+		UserConfig:    userConfig,
+		ProjectConfig: projectConfig,
+		Provider:      provider,
+		Connectivity:  options.connectivity,
 	})
 	if options.json {
 		if err := writePrettyJSON(stdout, report); err != nil {
