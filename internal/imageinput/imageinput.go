@@ -7,6 +7,7 @@ package imageinput
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,12 +41,24 @@ func LoadFile(path string, workspaceRoot string) (zeroruntime.ImageBlock, error)
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
 	}
 
-	data, err := os.ReadFile(resolved)
+	// Bounded read: the os.Stat above is only a fast-path hint (a non-regular
+	// file reports a misleading size, and the file can grow between Stat and the
+	// read). A LimitReader of MaxImageBytes+1 is the real bound — at most one byte
+	// past the cap is ever buffered, so an oversized or unbounded source (e.g. a
+	// FIFO) can never allocate a multi-gigabyte buffer just to be discarded.
+	file, err := os.Open(resolved)
+	if err != nil {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, MaxImageBytes+1))
 	if err != nil {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
 	}
 
-	// TOCTOU backstop: the file could have grown between Stat and ReadFile.
+	// The LimitReader yields at most MaxImageBytes+1 bytes; more than the cap means
+	// the source was oversized (caught here regardless of any stat/read race).
 	if len(data) > MaxImageBytes {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
 	}
