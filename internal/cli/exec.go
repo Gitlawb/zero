@@ -262,7 +262,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			if err != nil {
 				return nil, err
 			}
-			currentModel = modelID
+			// Mirror the agent loop's switch guard (it only reassigns the provider
+			// when newProvider != nil). Updating currentModel only on a non-nil
+			// provider keeps usage attribution consistent with whether the loop
+			// actually switched — a (nil, nil) return leaves both untouched.
+			if switchedProvider != nil {
+				currentModel = modelID
+			}
 			return switchedProvider, nil
 		}
 	}

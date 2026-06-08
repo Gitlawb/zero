@@ -1450,6 +1450,107 @@ func TestRunExecAttributesUsageToEscalatedModel(t *testing.T) {
 	}
 }
 
+func TestRunExecNilSwitchProviderKeepsOriginalAttribution(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	if _, ok := mustUpgradeTarget(t, "claude-haiku-4.5"); !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+
+	// The escalation rebuild returns (nil, nil): the loop must NOT swap the
+	// provider, and the CLI switcher must leave currentModel unchanged so usage
+	// after the declined switch stays attributed to the ORIGINAL model. Without
+	// the switchedProvider != nil guard, currentModel would advance to the target
+	// even though no switch happened, misattributing the post-turn usage.
+	builds := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--allow-escalation",
+		"--model", "claude-haiku-4.5",
+		"--init-session-id", "nil_switch_run",
+		"escalate please",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			builds++
+			// First build = the original (haiku). The escalation rebuild returns
+			// (nil, nil), so the loop keeps the original provider for every turn.
+			if builds == 1 {
+				return &escalateThenAnswerProvider{}, nil
+			}
+			return nil, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	events, err := store.ReadEvents("nil_switch_run")
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	sawUsage := false
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal usage payload: %v", err)
+		}
+		sawUsage = true
+		if model, _ := payload["model"].(string); model != "claude-haiku-4.5" {
+			t.Fatalf("usage attributed to %q after a (nil,nil) switch, want original claude-haiku-4.5", model)
+		}
+	}
+	if !sawUsage {
+		t.Fatal("expected at least one usage event")
+	}
+}
+
+// escalateThenAnswerProvider escalates on its first turn and answers afterward,
+// so a single instance can serve an entire run when no provider swap occurs
+// (e.g. a (nil,nil) switcher). It emits usage on every turn for attribution.
+type escalateThenAnswerProvider struct {
+	turns int
+}
+
+func (provider *escalateThenAnswerProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	turn := provider.turns
+	provider.turns++
+	ch := make(chan zeroruntime.StreamEvent, 6)
+	if turn == 0 {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 3, OutputTokens: 4}}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 7}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
 // usageEmittingEscalatingProvider emits a usage event on every turn it serves so
 // usage attribution can be traced across a mid-run switch. When escalate is set,
 // its turn requests an escalation (and emits pre-switch usage tokens 3/4);
