@@ -35,7 +35,10 @@ func runContext(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
 
-	modelRegistry, _ := modelregistry.DefaultRegistry()
+	modelRegistry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	report, err := contextreport.Build(contextreport.Options{
 		WorkspaceRoot: workspaceRoot,
 		Provider:      resolved.Provider,

@@ -207,6 +207,36 @@ func TestFormatIncludesRootModelAndCategories(t *testing.T) {
 	}
 }
 
+func TestFormatHandlesUnknownContextWindow(t *testing.T) {
+	report := Report{
+		Contract:     ContractV1,
+		Runtime:      RuntimeGo,
+		Root:         "D:/repo",
+		ProviderName: "openai",
+		ModelID:      "gpt-4.1",
+		APIModel:     "gpt-4.1",
+		UsedTokens:   250,
+		ToolCount:    2,
+		Categories:   []Category{{Key: CategorySystemPrompt, Name: "System prompt", Tokens: 100}, {Key: CategoryFree, Name: "Free"}},
+	}
+
+	formatted := Format(report)
+
+	for _, want := range []string{
+		"Zero context report",
+		"root: D:/repo",
+		"model: gpt-4.1",
+		"api_model: gpt-4.1",
+		"usage: 250 tokens (context window unknown)",
+		"System prompt: 100 tokens",
+		"Free: 0 tokens",
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("Format missing %q:\n%s", want, formatted)
+		}
+	}
+}
+
 func hasCategory(report Report, key string) bool {
 	return categoryByKey(report, key) != nil
 }

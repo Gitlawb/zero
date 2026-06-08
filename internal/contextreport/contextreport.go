@@ -29,6 +29,9 @@ var defaultProjectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.
 
 const maxProjectContextBytes = 8 << 10
 
+// toolDefinitionOverheadTokens approximates per-tool JSON/message framing.
+const toolDefinitionOverheadTokens = 4
+
 type Options struct {
 	WorkspaceRoot       string
 	Provider            config.ProviderProfile
@@ -207,7 +210,7 @@ func estimateRegistryTools(registry *tools.Registry) (int, int) {
 		if encoded, err := json.Marshal(tool.Parameters()); err == nil {
 			total += estimateTextTokens(string(encoded))
 		}
-		total += 4
+		total += toolDefinitionOverheadTokens
 	}
 	return len(all), total
 }
