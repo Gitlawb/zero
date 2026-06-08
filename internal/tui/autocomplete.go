@@ -200,6 +200,9 @@ func fileSuggestions(cwd, partial string) []commandSuggestion {
 		if relErr != nil {
 			rel = filepath.Base(path)
 		}
+		// Emit forward-slash paths on every platform (filepath.Rel uses "\" on
+		// Windows) so the inserted "@path" token is portable and matchable.
+		rel = filepath.ToSlash(rel)
 		if needle == "" || strings.Contains(strings.ToLower(rel), needle) {
 			out = append(out, commandSuggestion{Name: "@" + rel, Desc: "file"})
 		}
