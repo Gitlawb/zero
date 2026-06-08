@@ -52,7 +52,7 @@ type escalatingTool struct {
 	target string
 }
 
-func (t escalatingTool) Name() string       { return "escalate" }
+func (t escalatingTool) Name() string        { return "escalate" }
 func (t escalatingTool) Description() string { return "requests a model switch for testing" }
 func (t escalatingTool) Parameters() tools.Schema {
 	return tools.Schema{Type: "object", AdditionalProperties: false}
@@ -237,6 +237,44 @@ func TestRunEscalationSwitcherErrorIsNonFatal(t *testing.T) {
 	}
 	if !sawNote {
 		t.Fatalf("expected a non-fatal switch-failure note on the next turn, messages: %+v", provider.requests[1].Messages)
+	}
+}
+
+// TestRunEscalationSwitcherNilProviderKeepsOriginal verifies that when a
+// ModelSwitcher returns (nil, nil) — no error, but also no replacement provider —
+// the loop does NOT null out the active provider. The run must continue on the
+// ORIGINAL provider and return a result rather than panic on a nil provider.
+func TestRunEscalationSwitcherNilProviderKeepsOriginal(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	provider := &mockProvider{turns: escalateThenAnswerTurns("answered on original")}
+
+	switchCount := 0
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry: registry,
+		Model:    "claude-sonnet-4.5",
+		MaxTurns: 4,
+		ModelSwitcher: func(_ context.Context, _ string) (Provider, error) {
+			switchCount++
+			// No error, but no provider either: the loop must NOT swap to nil.
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected (nil,nil) switch to be non-fatal, got %v", err)
+	}
+	if switchCount != 1 {
+		t.Fatalf("expected exactly one switch attempt, got %d", switchCount)
+	}
+	// Both turns (escalate + answer) must run on the single original provider; if
+	// the loop nil'd out the provider on a (nil,nil) return, the second turn would
+	// panic or never run.
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected the original provider to serve both turns, got %d requests", len(provider.requests))
+	}
+	if result.FinalAnswer != "answered on original" {
+		t.Fatalf("expected final answer from the original provider, got %q", result.FinalAnswer)
 	}
 }
 
