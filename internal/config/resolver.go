@@ -18,15 +18,21 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		MaxTurns: defaultMaxTurns,
 	}
 
-	for _, path := range []string{options.UserConfigPath, options.ProjectConfigPath} {
-		if path == "" {
-			continue
-		}
-		fileConfig, err := loadConfigFile(path)
+	if options.UserConfigPath != "" {
+		fileConfig, err := loadConfigFile(options.UserConfigPath)
 		if err != nil {
 			return ResolvedConfig{}, err
 		}
 		mergeConfig(&cfg, fileConfig)
+	}
+	if options.ProjectConfigPath != "" {
+		fileConfig, err := loadConfigFile(options.ProjectConfigPath)
+		if err != nil {
+			return ResolvedConfig{}, err
+		}
+		if err := mergeProjectConfig(&cfg, fileConfig); err != nil {
+			return ResolvedConfig{}, err
+		}
 	}
 
 	applyEnv(&cfg, options.Env)
@@ -98,14 +104,26 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	mergeMCPConfig(&dst.MCP, src.MCP)
 }
 
+func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
+	if activeProvider := strings.TrimSpace(src.ActiveProvider); activeProvider != "" {
+		dst.ActiveProvider = activeProvider
+	}
+	if src.MaxTurns > 0 {
+		dst.MaxTurns = src.MaxTurns
+	}
+	for _, provider := range src.Providers {
+		candidate := providerMergeCandidate(*dst, provider)
+		if err := validateProjectProviderMerge(provider, candidate); err != nil {
+			return err
+		}
+		mergeProvider(dst, provider)
+	}
+	mergeMCPConfig(&dst.MCP, src.MCP)
+	return nil
+}
+
 func mergeProvider(cfg *FileConfig, provider ProviderProfile) {
-	provider.Name = strings.TrimSpace(provider.Name)
-	if provider.Name == "" {
-		provider.Name = strings.TrimSpace(cfg.ActiveProvider)
-	}
-	if provider.Name == "" {
-		provider.Name = string(ProviderKindOpenAI)
-	}
+	provider.Name = providerMergeName(*cfg, provider)
 
 	for index := range cfg.Providers {
 		if cfg.Providers[index].Name == provider.Name {
@@ -114,6 +132,138 @@ func mergeProvider(cfg *FileConfig, provider ProviderProfile) {
 		}
 	}
 	cfg.Providers = append(cfg.Providers, provider)
+}
+
+func providerMergeCandidate(cfg FileConfig, provider ProviderProfile) ProviderProfile {
+	provider.Name = providerMergeName(cfg, provider)
+	for _, existing := range cfg.Providers {
+		if existing.Name == provider.Name {
+			return mergeProfile(existing, provider)
+		}
+	}
+	return provider
+}
+
+func providerMergeName(cfg FileConfig, provider ProviderProfile) string {
+	name := strings.TrimSpace(provider.Name)
+	if name == "" {
+		name = strings.TrimSpace(cfg.ActiveProvider)
+	}
+	if name == "" {
+		name = string(ProviderKindOpenAI)
+	}
+	return name
+}
+
+func validateProjectProviderMerge(project ProviderProfile, candidate ProviderProfile) error {
+	if strings.TrimSpace(project.APIKeyEnv) != "" &&
+		projectEndpointNeedsCredentialGuard(candidate) &&
+		!projectAPIKeyEnvAllowed(candidate, project.APIKeyEnv) {
+		return providerError(candidate, "project provider %s cannot bind apiKeyEnv to custom provider endpoint", candidate.Name)
+	}
+	if strings.TrimSpace(project.BaseURL) != "" &&
+		projectEndpointNeedsCredentialGuard(candidate) &&
+		hasInheritedProviderCredentialMaterial(project, candidate) &&
+		!projectBaseURLAllowed(candidate) {
+		return providerError(candidate, "project provider %s cannot override baseURL for a credentialed custom provider endpoint", candidate.Name)
+	}
+	return nil
+}
+
+func projectEndpointNeedsCredentialGuard(profile ProviderProfile) bool {
+	kind := effectiveProviderKind(profile)
+	switch kind {
+	case ProviderKindOpenAICompatible, ProviderKindAnthropicCompat:
+		return strings.TrimSpace(profile.BaseURL) != "" || strings.TrimSpace(profile.CatalogID) != ""
+	case ProviderKindOpenAI:
+		return profile.BaseURL != "" && !isOfficialOpenAIBaseURL(profile.BaseURL)
+	case ProviderKindAnthropic:
+		return profile.BaseURL != "" && !isOfficialAnthropicBaseURL(profile.BaseURL)
+	case ProviderKindGoogle:
+		return profile.BaseURL != "" && !isOfficialGoogleBaseURL(profile.BaseURL)
+	default:
+		return strings.TrimSpace(profile.BaseURL) != ""
+	}
+}
+
+func projectAPIKeyEnvAllowed(profile ProviderProfile, envName string) bool {
+	descriptor, ok := catalogDescriptorForProfile(profile)
+	if !ok {
+		return false
+	}
+	baseURL := strings.TrimSpace(profile.BaseURL)
+	if baseURL == "" {
+		baseURL = descriptor.DefaultBaseURL
+	}
+	if !sameBaseURL(baseURL, descriptor.DefaultBaseURL) {
+		return false
+	}
+	return containsStringFold(descriptor.AuthEnvVars, envName)
+}
+
+func projectBaseURLAllowed(profile ProviderProfile) bool {
+	descriptor, ok := catalogDescriptorForProfile(profile)
+	return ok && sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
+}
+
+func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate ProviderProfile) bool {
+	if strings.TrimSpace(project.APIKey) == "" && strings.TrimSpace(candidate.APIKey) != "" {
+		return true
+	}
+	if strings.TrimSpace(project.APIKeyEnv) == "" && strings.TrimSpace(candidate.APIKeyEnv) != "" {
+		return true
+	}
+	if strings.TrimSpace(project.AuthHeaderValue) == "" && strings.TrimSpace(candidate.AuthHeaderValue) != "" {
+		return true
+	}
+	if project.CustomHeaders == nil && hasCustomHeaderMaterial(candidate.CustomHeaders) {
+		return true
+	}
+	return false
+}
+
+func hasCustomHeaderMaterial(headers map[string]string) bool {
+	for _, value := range headers {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveProviderKind(profile ProviderProfile) ProviderKind {
+	if kind := ProviderKind(strings.TrimSpace(strings.ToLower(string(profile.ProviderKind)))); kind != "" {
+		return kind
+	}
+	if provider := strings.TrimSpace(strings.ToLower(profile.Provider)); provider != "" {
+		return ProviderKind(provider)
+	}
+	if descriptor, ok := catalogDescriptorForProfile(profile); ok {
+		return providerKindForCatalogTransport(descriptor.Transport)
+	}
+	return ""
+}
+
+func catalogDescriptorForProfile(profile ProviderProfile) (providercatalog.Descriptor, bool) {
+	catalogID := providercatalog.NormalizeID(profile.CatalogID)
+	if catalogID == "" {
+		return providercatalog.Descriptor{}, false
+	}
+	descriptor, err := providercatalog.Require(catalogID)
+	if err != nil {
+		return providercatalog.Descriptor{}, false
+	}
+	return descriptor, true
+}
+
+func containsStringFold(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeProfile(base ProviderProfile, next ProviderProfile) ProviderProfile {
@@ -387,6 +537,7 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 	profile.ProviderKind = ProviderKind(strings.TrimSpace(strings.ToLower(string(profile.ProviderKind))))
 	profile.CatalogID = providercatalog.NormalizeID(profile.CatalogID)
 	profile.BaseURL = strings.TrimSpace(profile.BaseURL)
+	explicitBaseURL := profile.BaseURL != ""
 	profile.APIKeyEnv = strings.TrimSpace(profile.APIKeyEnv)
 	profile.APIFormat = strings.TrimSpace(profile.APIFormat)
 	profile.AuthHeader = strings.TrimSpace(profile.AuthHeader)
@@ -405,7 +556,7 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 		if !providercatalog.RuntimeSupported(descriptor) {
 			return ProviderProfile{}, providerError(profile, "provider %q uses transport %q: %s", descriptor.ID, descriptor.Transport, providercatalog.RuntimeUnsupportedReason(descriptor))
 		}
-		applyCatalogDescriptor(&profile, descriptor)
+		applyCatalogDescriptor(&profile, descriptor, explicitBaseURL)
 	}
 	if profile.ProviderKind == "" && profile.Provider != "" {
 		profile.ProviderKind = ProviderKind(strings.ToLower(profile.Provider))
@@ -460,7 +611,7 @@ func normalizeProvider(profile ProviderProfile, env map[string]string, options n
 	}
 }
 
-func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog.Descriptor) {
+func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog.Descriptor, explicitBaseURL bool) {
 	if descriptor.ID != "" {
 		profile.CatalogID = descriptor.ID
 	}
@@ -473,9 +624,16 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if profile.Model == "" {
 		profile.Model = descriptor.DefaultModel
 	}
-	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 {
+	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
+}
+
+func sameBaseURL(left string, right string) bool {
+	return strings.EqualFold(
+		strings.TrimRight(strings.TrimSpace(left), "/"),
+		strings.TrimRight(strings.TrimSpace(right), "/"),
+	)
 }
 
 func isOfficialAnthropicBaseURL(baseURL string) bool {
