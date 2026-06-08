@@ -158,10 +158,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err := preflightExecSession(options); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
-	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, deps)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
-	}
 
 	prompt, err := resolveExecPrompt(options, workspaceRoot, deps.stdin)
 	if err != nil {
@@ -196,6 +192,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	if resolved.Provider == (config.ProviderProfile{}) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
+	}
+	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps)
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
 	// Evaluate the --reasoning-effort advisory against the EFFECTIVE resolved
 	// model (resolved.Provider.Model), not the override. Without an explicit
@@ -392,12 +392,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	return exitSuccess
 }
 
-func buildExecSandboxEngine(workspaceRoot string, deps appDeps) (*sandbox.Engine, error) {
+func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps) (*sandbox.Engine, error) {
 	store, err := deps.newSandboxStore()
 	if err != nil {
 		return nil, err
 	}
-	policy := sandbox.DefaultPolicy()
+	policy := applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy)
 	backend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	return sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
@@ -405,6 +405,23 @@ func buildExecSandboxEngine(workspaceRoot string, deps appDeps) (*sandbox.Engine
 		Store:         store,
 		Backend:       backend,
 	}), nil
+}
+
+// applyConfiguredAutonomyCeiling overlays a config-sourced autonomy ceiling onto
+// a policy. An empty ceiling is a no-op so the default High ceiling is preserved
+// (backward compatible). An unrecognised value is ignored so a malformed config
+// never silently lowers or raises the ceiling.
+func applyConfiguredAutonomyCeiling(policy sandbox.Policy, maxAutonomy string) sandbox.Policy {
+	trimmed := strings.TrimSpace(maxAutonomy)
+	if trimmed == "" {
+		return policy
+	}
+	normalized, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(trimmed))
+	if err != nil {
+		return policy
+	}
+	policy.MaxAutonomy = normalized
+	return policy
 }
 
 func resolveWorkspaceRoot(cwd string, deps appDeps) (string, error) {

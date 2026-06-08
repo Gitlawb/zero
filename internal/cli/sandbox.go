@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/config"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -55,6 +56,9 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	policy := zeroSandbox.DefaultPolicy()
+	if resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{}); err == nil {
+		policy = applyConfiguredAutonomyCeiling(policy, resolved.Sandbox.MaxAutonomy)
+	}
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
 	plan := backend.BuildPlan(workspaceRoot, policy)
 	if options.effective {

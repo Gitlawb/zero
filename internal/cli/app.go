@@ -323,7 +323,7 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 	}
 	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
-		Policy:        sandbox.DefaultPolicy(),
+		Policy:        applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy),
 		Store:         sandboxStore,
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 	})

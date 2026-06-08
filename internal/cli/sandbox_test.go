@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -297,6 +298,31 @@ func TestRunSandboxHelpDoesNotOpenStore(t *testing.T) {
 				t.Fatalf("expected help output")
 			}
 		})
+	}
+}
+
+func TestRunSandboxPolicyAppliesConfiguredCeiling(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Sandbox: config.SandboxConfig{MaxAutonomy: "medium"}}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "policy", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("policy exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var payload struct {
+		Policy sandbox.Policy `json:"policy"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode policy JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Policy.MaxAutonomy != sandbox.AutonomyMedium {
+		t.Fatalf("policy.MaxAutonomy = %q, want medium", payload.Policy.MaxAutonomy)
 	}
 }
 
