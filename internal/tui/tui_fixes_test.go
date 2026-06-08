@@ -6,7 +6,40 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/agent"
 )
+
+// FIX 3 (safety): "!cmd" runs only in unsafe permission mode; auto/ask gate it.
+func TestBashEscapeGatedByPermissionMode(t *testing.T) {
+	lastSystemText := func(m model) string {
+		for i := len(m.transcript) - 1; i >= 0; i-- {
+			if m.transcript[i].kind == rowSystem {
+				return m.transcript[i].text
+			}
+		}
+		return ""
+	}
+
+	for _, mode := range []agent.PermissionMode{agent.PermissionModeAuto, agent.PermissionModeAsk} {
+		m := newModel(context.Background(), Options{PermissionMode: mode})
+		m.input.SetValue("!rm -rf /")
+		updated, cmd := m.handleSubmit()
+		if cmd != nil {
+			t.Fatalf("%s mode: !cmd must be gated (nil cmd), got a command to run", mode)
+		}
+		if msg := lastSystemText(updated.(model)); !strings.Contains(msg, "disabled") || !strings.Contains(msg, "unsafe") {
+			t.Fatalf("%s mode: expected a gate message naming unsafe, got %q", mode, msg)
+		}
+	}
+
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeUnsafe})
+	m.input.SetValue("!echo hi")
+	_, cmd := m.handleSubmit()
+	if cmd == nil {
+		t.Fatal("unsafe mode: !cmd should execute (non-nil cmd)")
+	}
+}
 
 // FIX 1: a bare "/" surfaces the full command palette (was suppressed).
 func TestBareSlashListsCommandPalette(t *testing.T) {
