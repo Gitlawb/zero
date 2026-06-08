@@ -512,6 +512,7 @@ Flags:
       --session-title <text>         Set the created session title
       --init-session-id <id>         Create a new exec session with this id
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
+      --allow-escalation             Let the agent escalate to a stronger model mid-run via escalate_model
 `)
 	return err
 }

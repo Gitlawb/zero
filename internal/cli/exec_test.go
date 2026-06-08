@@ -1163,3 +1163,20 @@ func TestParseExecAllowEscalationFlag(t *testing.T) {
 		}
 	})
 }
+
+func TestRunExecHelpDocumentsAllowEscalation(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec", "--help"}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if !strings.Contains(stdout.String(), "--allow-escalation") {
+		t.Fatalf("expected exec help to document --allow-escalation, got %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
