@@ -149,6 +149,10 @@ func applyEnv(cfg *FileConfig, env map[string]string) {
 		cfg.ActiveProvider = activeProvider
 	}
 
+	if maxAutonomy := strings.TrimSpace(envValue(env, "ZERO_SANDBOX_MAX_AUTONOMY")); maxAutonomy != "" {
+		cfg.Sandbox.MaxAutonomy = maxAutonomy
+	}
+
 	applyProviderEnv(cfg, ProviderKindOpenAI, envProfile{
 		Name:    string(ProviderKindOpenAI),
 		APIKey:  envValue(env, "OPENAI_API_KEY"),
@@ -249,6 +253,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
+	}
+	if maxAutonomy := strings.TrimSpace(overrides.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		cfg.Sandbox.MaxAutonomy = maxAutonomy
 	}
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)

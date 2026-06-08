@@ -661,6 +661,46 @@ func TestResolveSandboxMaxAutonomyFromFile(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxMaxAutonomyPrecedence(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"sandbox": {"maxAutonomy": "low"},
+		"providers": [{"name": "openai", "provider": "openai", "api_key": "sk-user", "model": "gpt-user"}]
+	}`)
+	projectPath := writeConfig(t, `{
+		"sandbox": {"maxAutonomy": "medium"},
+		"providers": [{"name": "openai", "provider": "openai", "api_key": "sk-proj", "model": "gpt-proj"}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:    userPath,
+		ProjectConfigPath: projectPath,
+		Env:               map[string]string{"ZERO_SANDBOX_MAX_AUTONOMY": "high"},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Sandbox.MaxAutonomy != "high" {
+		t.Fatalf("resolved.Sandbox.MaxAutonomy = %q, want high (env overrides project overrides user)", resolved.Sandbox.MaxAutonomy)
+	}
+}
+
+func TestResolveSandboxMaxAutonomyOverride(t *testing.T) {
+	path := writeConfig(t, `{
+		"sandbox": {"maxAutonomy": "low"},
+		"providers": [{"name": "openai", "provider": "openai", "api_key": "sk", "model": "gpt"}]
+	}`)
+	resolved, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Overrides:         Overrides{Sandbox: SandboxConfig{MaxAutonomy: "high"}},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Sandbox.MaxAutonomy != "high" {
+		t.Fatalf("resolved.Sandbox.MaxAutonomy = %q, want high (override wins)", resolved.Sandbox.MaxAutonomy)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 

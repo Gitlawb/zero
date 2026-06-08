@@ -55,6 +55,7 @@ type Overrides struct {
 	Provider       ProviderProfile
 	MaxTurns       int
 	MCP            MCPConfig
+	Sandbox        SandboxConfig
 }
 
 type ResolvedConfig struct {
