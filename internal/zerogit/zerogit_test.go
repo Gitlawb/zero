@@ -207,6 +207,70 @@ func TestInspectPreviewWorksWithUnbornHead(t *testing.T) {
 	}
 }
 
+func TestInspectBaseRefEmptyUsesSnapshotPath(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "main\n"},
+		{Stdout: "abc1234\n"},
+		{Stdout: " M README.md\n"},
+		{Stdout: "abc1234\n"},
+		{},
+		{},
+		{Stdout: " README.md | 1 +\n"},
+		{Stdout: "diff --git a/README.md b/README.md\n"},
+	}}
+
+	summary, err := Inspect(context.Background(), InspectOptions{Cwd: root, RunGit: runner.Run})
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+	if summary.Base != "" {
+		t.Fatalf("Base = %q, want empty for default path", summary.Base)
+	}
+	if got := runner.commandLine(3); got != "git status --short --untracked-files=all" {
+		t.Fatalf("default path must use git status, got %q", got)
+	}
+	if got := runner.commandLine(6); got != "git add -A" {
+		t.Fatalf("default path must use snapshot index, got %q", got)
+	}
+	for _, call := range runner.calls {
+		joined := strings.Join(call.args, " ")
+		if strings.Contains(joined, "...HEAD") {
+			t.Fatalf("default path must not issue a three-dot diff, saw %q", joined)
+		}
+	}
+}
+
+func TestInspectBaseRefRealGitDiffsBranchAgainstBase(t *testing.T) {
+	root := initGitRepo(t, true)
+	baseRef := runGitCommand(t, root, "rev-parse", "HEAD")
+	runGitCommand(t, root, "checkout", "-q", "-b", "feature")
+	writeTestFile(t, filepath.Join(root, "feature.md"), "branch only\n")
+	runGitCommand(t, root, "add", "feature.md")
+	runGitCommand(t, root, "-c", "user.name=Zero", "-c", "user.email=zero@example.invalid", "commit", "-m", "Add feature")
+
+	summary, err := Inspect(context.Background(), InspectOptions{Cwd: root, BaseRef: strings.TrimSpace(baseRef)})
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+	if summary.Clean {
+		t.Fatalf("Clean = true, want false")
+	}
+	if len(summary.Files) != 1 || summary.Files[0].Path != "feature.md" || summary.Files[0].Status != "added" {
+		t.Fatalf("unexpected base diff files: %#v", summary.Files)
+	}
+	if summary.Branch != "feature" {
+		t.Fatalf("Branch = %q, want feature (HEAD branch preserved)", summary.Branch)
+	}
+	if !strings.Contains(summary.Diff, "+branch only") {
+		t.Fatalf("diff missing branch content: %q", summary.Diff)
+	}
+	if staged := runGitCommand(t, root, "diff", "--cached", "--name-only"); strings.TrimSpace(staged) != "" {
+		t.Fatalf("Inspect mutated the real index, staged files: %q", staged)
+	}
+}
+
 func TestInspectBaseRefUsesThreeDotDiff(t *testing.T) {
 	root := t.TempDir()
 	runner := &fakeRunner{results: []CommandResult{
