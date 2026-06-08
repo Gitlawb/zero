@@ -21,7 +21,10 @@ func TestSendWithRetryDoesNotReplayTransportErrors(t *testing.T) {
 		return nil, errors.New("connection reset by peer")
 	})}
 
-	_, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
+	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
+	if resp != nil {
+		resp.Body.Close()
+	}
 	if err == nil {
 		t.Fatal("expected a transport error to surface")
 	}
@@ -36,10 +39,11 @@ func TestShouldRetryStatus(t *testing.T) {
 		http.StatusBadRequest:          false,
 		http.StatusNotFound:            false,
 		http.StatusUnauthorized:        false,
-		http.StatusTooManyRequests:     true,
-		http.StatusInternalServerError: true,
-		http.StatusBadGateway:          true,
-		http.StatusServiceUnavailable:  true,
+		http.StatusTooManyRequests:     true,  // 429: rate-limited, not accepted
+		http.StatusServiceUnavailable:  true,  // 503: unavailable, not accepted
+		http.StatusInternalServerError: false, // 500: ambiguous — may have had an effect
+		http.StatusBadGateway:          false, // 502: ambiguous
+		http.StatusGatewayTimeout:      false, // 504: upstream may have processed it
 	}
 	for code, want := range cases {
 		if got := ShouldRetryStatus(code); got != want {
@@ -92,7 +96,7 @@ func TestSendWithRetryRetriesThenSucceeds(t *testing.T) {
 	var hits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&hits, 1) == 1 {
-			w.WriteHeader(http.StatusInternalServerError) // first attempt fails
+			w.WriteHeader(http.StatusServiceUnavailable) // 503: retryable (not accepted)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

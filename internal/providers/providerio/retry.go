@@ -15,10 +15,11 @@ import (
 // (previously only the OpenAI provider retried; Anthropic and Gemini surfaced the
 // first failure).
 //
-// What is retried: ONLY server responses that say "rejected, try again" — 429
-// (rate limit) and 5xx — because the server explicitly declined the request with
-// no side effect. A transport/network error is NOT retried: a completion POST is
-// non-idempotent and may have reached the server, so replaying it could duplicate
+// What is retried: ONLY 429 (rate limit) and 503 (service unavailable) — the
+// statuses where the server explicitly did NOT accept the request, so replaying
+// it cannot duplicate work. Other 5xx (500/502/504) and transport/network errors
+// are NOT retried: a completion POST is non-idempotent and may have reached and
+// been processed by the server, so replaying it could duplicate
 // (billable) work. Only the INITIAL request is ever in scope; once the response
 // body starts streaming it is never re-issued.
 
@@ -28,17 +29,17 @@ const defaultMaxRetryAttempts = 3
 // stall the agent for minutes.
 const maxBackoff = 30 * time.Second
 
-// SendWithRetry issues an HTTP request, retrying ONLY retryable server responses
-// (429 and 5xx) up to maxAttempts — backing off between tries and honoring a
-// server Retry-After header and context cancellation. Transport/network errors
-// are returned immediately, never replayed (see the package note). The request
-// is rebuilt from body each attempt; setHeader (if non-nil) sets headers on every
-// attempt.
+// SendWithRetry issues an HTTP request, retrying ONLY the safe-to-replay server
+// responses (429 and 503, see ShouldRetryStatus) up to maxAttempts — backing off
+// between tries and honoring a server Retry-After header and context
+// cancellation. Other 5xx and transport/network errors are returned immediately,
+// never replayed (see the package note). The request is rebuilt from body each
+// attempt; setHeader (if non-nil) sets headers on every attempt.
 //
 // It returns the final *http.Response (which the caller inspects for a non-2xx
 // status, exactly as before) or an error for a network failure / context
-// cancellation. Retries exhausted on a 5xx return that 5xx response, not an
-// error, so the caller's existing HTTP-error path still runs.
+// cancellation. Retries exhausted on a retryable status return that response,
+// not an error, so the caller's existing HTTP-error path still runs.
 func SendWithRetry(
 	ctx context.Context,
 	client *http.Client,
@@ -66,8 +67,8 @@ func SendWithRetry(
 			// it — the request may have arrived and be generating a (billable,
 			// non-idempotent) completion while only the response/connection failed.
 			// Replaying it could duplicate that work, so surface the error instead
-			// of retrying. Only server responses (429/5xx below), where we KNOW the
-			// request was rejected without effect, are safe to retry.
+			// of retrying. Only 429/503 responses (below), where we KNOW the request
+			// was not accepted, are safe to retry.
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
@@ -95,10 +96,16 @@ func SendWithRetry(
 	}
 }
 
-// ShouldRetryStatus reports whether an HTTP status is a transient failure worth
-// retrying: 429 (rate limit) and any 5xx.
+// ShouldRetryStatus reports whether an HTTP status is safe to retry for a
+// non-idempotent completion POST: only 429 (Too Many Requests) and 503 (Service
+// Unavailable). Both mean the server explicitly did NOT accept the request — it
+// was rate-limited or the service was unavailable — so replaying it cannot
+// duplicate work. Other 5xx (500/502/504) are deliberately NOT retried: they do
+// not guarantee the request had no effect (e.g. a 504 gateway timeout may follow
+// an upstream that already produced a billable completion), so replaying them
+// risks duplicate work.
 func ShouldRetryStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable
 }
 
 // Backoff waits before retry attempt N (1-based), returning false if the context
