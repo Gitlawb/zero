@@ -21,7 +21,7 @@ type cliFakeDeferredTool struct {
 	name string
 }
 
-func (t cliFakeDeferredTool) Name() string            { return t.name }
+func (t cliFakeDeferredTool) Name() string             { return t.name }
 func (t cliFakeDeferredTool) Description() string      { return "fake deferred tool" }
 func (t cliFakeDeferredTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
 func (t cliFakeDeferredTool) Safety() tools.Safety {
@@ -85,7 +85,15 @@ func TestDeferredEligibleCountIgnoresCoreTools(t *testing.T) {
 	}
 }
 
-func TestRunExecListToolsBelowThresholdHasNoToolSearch(t *testing.T) {
+// TestRunExecListToolsAdvertisesMCPToolsWithoutToolSearch verifies that
+// `exec --list-tools` lists the core + MCP tools WITHOUT tool_search. This is
+// independent of the deferral threshold: --list-tools short-circuits and returns
+// before resolveConfig and registerToolSearchIfEligible ever run (see exec.go),
+// so tool_search is never registered on this path. The threshold gate itself is
+// exercised by TestRegisterToolSearchIfEligible{RegistersAtThreshold,
+// SkipsBelowThreshold,SkipsWhenThresholdZero} and the end-to-end at-threshold
+// path in TestTUIRunThreadsDeferThresholdAndRegistersToolSearch.
+func TestRunExecListToolsAdvertisesMCPToolsWithoutToolSearch(t *testing.T) {
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -102,7 +110,6 @@ func TestRunExecListToolsBelowThresholdHasNoToolSearch(t *testing.T) {
 		},
 		newMCPStore: func() (*mcp.PermissionStore, error) { return nil, nil },
 		registerMCPTools: func(_ context.Context, registry *tools.Registry, _ config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
-			// One deferred-eligible MCP tool — far below the default threshold of 10.
 			registry.Register(cliFakeMCPRegistryTool{})
 			return closeFunc(func() error { return nil }), nil
 		},
@@ -113,10 +120,12 @@ func TestRunExecListToolsBelowThresholdHasNoToolSearch(t *testing.T) {
 	}
 	out := stdout.String()
 	if !strings.Contains(out, "mcp_docs_lookup") {
-		t.Fatalf("expected MCP tool advertised below threshold, got %q", out)
+		t.Fatalf("expected MCP tool advertised by --list-tools, got %q", out)
 	}
+	// --list-tools never registers tool_search (it returns before the threshold
+	// gate runs); the threshold logic is verified by the unit/E2E tests named above.
 	if strings.Contains(out, "tool_search") {
-		t.Fatalf("expected NO tool_search below threshold, got %q", out)
+		t.Fatalf("expected NO tool_search from --list-tools, got %q", out)
 	}
 }
 
