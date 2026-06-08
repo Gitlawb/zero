@@ -259,8 +259,6 @@ func configValidationCheck(userPath string, projectPath string) Check {
 				errMsg = issues[0].Message
 			}
 			details[path] = map[string]any{"line": line, "col": col, "error": errMsg}
-			details["line"] = line
-			details["col"] = col
 			status = StatusFail
 			issueCount++
 			continue
@@ -286,8 +284,15 @@ func configValidationCheck(userPath string, projectPath string) Check {
 
 // jsonParsePosition reports whether data fails to parse as JSON and, if so, the
 // 1-based line/col of the failure using the concrete json error offset.
+//
+// The probe is a config.FileConfig (not `any`) so that a structurally-valid
+// document with a wrong field type (e.g. {"maxTurns":"twelve"}) surfaces a
+// *json.UnmarshalTypeError carrying the offset. FileConfig.UnmarshalJSON returns
+// the underlying json error unchanged, preserving that offset. Documents that
+// are structurally valid AND type-correct unmarshal cleanly (ok=false) and fall
+// through to the semantic ValidateBytes branch.
 func jsonParsePosition(data []byte) (int, int, bool) {
-	var probe any
+	var probe config.FileConfig
 	err := json.Unmarshal(data, &probe)
 	if err == nil {
 		return 0, 0, false

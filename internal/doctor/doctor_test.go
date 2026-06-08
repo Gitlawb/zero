@@ -111,6 +111,8 @@ func TestConfigValidationCheckPassesForValidConfig(t *testing.T) {
 }
 
 func TestConfigValidationCheckFailsMalformedJSONWithLineCol(t *testing.T) {
+	// Unterminated object: the trailing comma + EOF yields a *json.SyntaxError
+	// whose offset is the end of the 32-byte document (line 3, col 1).
 	path := writeDoctorConfig(t, "{\n  \"activeProvider\": \"openai\",\n")
 
 	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:05:00Z"), Runtime: "go", ProjectConfig: path})
@@ -122,8 +124,51 @@ func TestConfigValidationCheckFailsMalformedJSONWithLineCol(t *testing.T) {
 	if check == nil || check.Status != StatusFail {
 		t.Fatalf("expected config.validation fail, got %#v", report.Checks)
 	}
-	if check.Details["line"] == nil || check.Details["col"] == nil {
-		t.Fatalf("expected line/col in details, got %#v", check.Details)
+	entry, ok := check.Details[path].(map[string]any)
+	if !ok {
+		t.Fatalf("expected per-path map entry for %q, got %#v", path, check.Details)
+	}
+	// Redaction widens ints to int64 as it round-trips the details map.
+	if entry["line"] != int64(3) || entry["col"] != int64(1) {
+		t.Fatalf("line/col = (%v,%v), want (3,1): %#v", entry["line"], entry["col"], entry)
+	}
+	// The colliding flat top-level keys must be gone (they were ambiguous across
+	// multiple malformed files).
+	if _, exists := check.Details["line"]; exists {
+		t.Fatalf("flat details[\"line\"] should be removed, got %#v", check.Details)
+	}
+	if _, exists := check.Details["col"]; exists {
+		t.Fatalf("flat details[\"col\"] should be removed, got %#v", check.Details)
+	}
+}
+
+func TestConfigValidationCheckFailsTypeMismatchWithLineCol(t *testing.T) {
+	// {"maxTurns":"twelve"} is structurally valid JSON but the wrong type for
+	// FileConfig.MaxTurns. The probe (var probe config.FileConfig) surfaces a
+	// *json.UnmarshalTypeError carrying the offset, exercising the branch that a
+	// `var probe any` probe could never reach.
+	path := writeDoctorConfig(t, `{"maxTurns":"twelve"}`)
+
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:07:00Z"), Runtime: "go", ProjectConfig: path})
+
+	if report.OK {
+		t.Fatalf("type-mismatch config should fail report: %#v", report)
+	}
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusFail {
+		t.Fatalf("expected config.validation fail, got %#v", report.Checks)
+	}
+	entry, ok := check.Details[path].(map[string]any)
+	if !ok {
+		t.Fatalf("expected per-path map entry for %q, got %#v", path, check.Details)
+	}
+	if entry["line"] == nil || entry["col"] == nil {
+		t.Fatalf("expected non-nil line/col for type mismatch, got %#v", entry)
+	}
+	// offset=20 in a single-line document -> line 1, col 21. Redaction widens
+	// ints to int64 as it round-trips the details map.
+	if entry["line"] != int64(1) || entry["col"] != int64(21) {
+		t.Fatalf("line/col = (%v,%v), want (1,21): %#v", entry["line"], entry["col"], entry)
 	}
 }
 
