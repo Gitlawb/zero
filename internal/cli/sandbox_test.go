@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -104,6 +106,9 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 	deps := appDeps{
 		getwd:           func() (string, error) { return t.TempDir(), nil },
 		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
 				Name:     sandbox.BackendPolicyOnly,
@@ -187,6 +192,9 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 	deps := appDeps{
 		getwd:           func() (string, error) { return t.TempDir(), nil },
 		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
 				Name:     sandbox.BackendPolicyOnly,
@@ -295,6 +303,113 @@ func TestRunSandboxHelpDoesNotOpenStore(t *testing.T) {
 			}
 			if stdout.Len() == 0 {
 				t.Fatalf("expected help output")
+			}
+		})
+	}
+}
+
+func TestRunSandboxPolicyAppliesConfiguredCeiling(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Sandbox: config.SandboxConfig{MaxAutonomy: "medium"}}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "policy", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("policy exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var payload struct {
+		Policy sandbox.Policy `json:"policy"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode policy JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Policy.MaxAutonomy != sandbox.AutonomyMedium {
+		t.Fatalf("policy.MaxAutonomy = %q, want medium", payload.Policy.MaxAutonomy)
+	}
+}
+
+func TestRunSandboxPolicyTextShowsMaxAutonomy(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Sandbox: config.SandboxConfig{MaxAutonomy: "medium"}}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"sandbox", "policy"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("policy exit = %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "max_autonomy: medium") {
+		t.Fatalf("policy text missing max_autonomy line:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"sandbox", "policy", "--effective"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("effective policy exit = %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "max_autonomy: medium") {
+		t.Fatalf("effective policy text missing max_autonomy line:\n%s", stdout.String())
+	}
+}
+
+func TestRunSandboxPolicySurfacesResolveConfigError(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		getwd:           func() (string, error) { return t.TempDir(), nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q", "moderate")
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "policy"}, &stdout, &stderr, deps)
+	if exitCode != exitProvider {
+		t.Fatalf("policy exit = %d, want provider exit %d (resolve error surfaced, not silent DefaultPolicy fallback)", exitCode, exitProvider)
+	}
+	if !strings.Contains(stderr.String(), "invalid sandbox.maxAutonomy") {
+		t.Fatalf("expected surfaced resolve error in stderr, got %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout on resolve error, got %q", stdout.String())
+	}
+}
+
+func TestApplyConfiguredAutonomyCeiling(t *testing.T) {
+	cases := []struct {
+		name        string
+		maxAutonomy string
+		want        sandbox.Autonomy
+	}{
+		// Empty is a no-op: the default High ceiling is preserved.
+		{name: "empty keeps default high", maxAutonomy: "", want: sandbox.AutonomyHigh},
+		{name: "whitespace keeps default high", maxAutonomy: "   ", want: sandbox.AutonomyHigh},
+		{name: "valid low", maxAutonomy: "low", want: sandbox.AutonomyLow},
+		{name: "valid medium", maxAutonomy: "medium", want: sandbox.AutonomyMedium},
+		{name: "valid high", maxAutonomy: "high", want: sandbox.AutonomyHigh},
+		{name: "case-insensitive medium", maxAutonomy: "MEDIUM", want: sandbox.AutonomyMedium},
+		// Fail-closed: an invalid non-empty value clamps to the most restrictive
+		// ceiling instead of leaving the High default in place.
+		{name: "invalid banana clamps to low", maxAutonomy: "banana", want: sandbox.AutonomyLow},
+		{name: "invalid moderate clamps to low", maxAutonomy: "moderate", want: sandbox.AutonomyLow},
+		{name: "invalid med clamps to low", maxAutonomy: "med", want: sandbox.AutonomyLow},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if base := sandbox.DefaultPolicy(); base.MaxAutonomy != sandbox.AutonomyHigh {
+				t.Fatalf("precondition: DefaultPolicy().MaxAutonomy = %q, want high", base.MaxAutonomy)
+			}
+			policy := applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), tc.maxAutonomy)
+			if policy.MaxAutonomy != tc.want {
+				t.Fatalf("applyConfiguredAutonomyCeiling(_, %q).MaxAutonomy = %q, want %q", tc.maxAutonomy, policy.MaxAutonomy, tc.want)
 			}
 		})
 	}

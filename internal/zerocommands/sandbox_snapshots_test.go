@@ -265,3 +265,13 @@ func TestSandboxPolicySnapshotJSONOmitsEmptyEffectiveMode(t *testing.T) {
 		t.Fatalf("expected effectiveMode omitted when empty, got %q", string(encoded))
 	}
 }
+
+func TestSandboxPolicySnapshotCopiesMaxAutonomy(t *testing.T) {
+	policy := sandbox.DefaultPolicy()
+	policy.MaxAutonomy = sandbox.AutonomyMedium
+
+	snapshot := SandboxPolicySnapshotFromPolicy(policy)
+	if snapshot.MaxAutonomy != string(sandbox.AutonomyMedium) {
+		t.Fatalf("snapshot.MaxAutonomy = %q, want medium", snapshot.MaxAutonomy)
+	}
+}

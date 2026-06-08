@@ -54,11 +54,16 @@ func HasProviderProfile(profile ProviderProfile) bool {
 		strings.TrimSpace(profile.Description) != ""
 }
 
+type SandboxConfig struct {
+	MaxAutonomy string `json:"maxAutonomy,omitempty"`
+}
+
 type FileConfig struct {
 	ActiveProvider string            `json:"activeProvider,omitempty"`
 	Providers      []ProviderProfile `json:"providers,omitempty"`
 	MaxTurns       int               `json:"maxTurns,omitempty"`
 	MCP            MCPConfig         `json:"mcp,omitempty"`
+	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
 }
 
 type ResolveOptions struct {
@@ -75,6 +80,7 @@ type Overrides struct {
 	Provider       ProviderProfile
 	MaxTurns       int
 	MCP            MCPConfig
+	Sandbox        SandboxConfig
 }
 
 type ResolvedConfig struct {
@@ -83,6 +89,7 @@ type ResolvedConfig struct {
 	Provider       ProviderProfile
 	MaxTurns       int
 	MCP            MCPConfig
+	Sandbox        SandboxConfig
 }
 
 type MCPConfig struct {
@@ -106,6 +113,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Providers       []ProviderProfile          `json:"providers"`
 		MaxTurns        int                        `json:"maxTurns"`
 		MCP             MCPConfig                  `json:"mcp"`
+		Sandbox         SandboxConfig              `json:"sandbox"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -118,6 +126,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Providers = raw.Providers
 	cfg.MaxTurns = raw.MaxTurns
 	cfg.MCP = raw.MCP
+	cfg.Sandbox = raw.Sandbox
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

@@ -43,6 +43,29 @@ func TestSnapshotFromSummaryRedactsDiffAndBuildsEvents(t *testing.T) {
 	}
 }
 
+func TestSnapshotFromSummaryCarriesBase(t *testing.T) {
+	summary := ChangeSummary{
+		Root:   "/repo",
+		Branch: "feature",
+		Base:   "main",
+		Files:  []FileChange{{Path: "a.txt", Status: "added"}},
+	}
+	snapshot := SnapshotFromSummary(summary)
+	if snapshot.Base != "main" {
+		t.Fatalf("snapshot.Base = %q, want main", snapshot.Base)
+	}
+	if snapshot.Branch != "feature" {
+		t.Fatalf("snapshot.Branch = %q, want feature", snapshot.Branch)
+	}
+}
+
+func TestSnapshotFromSummaryOmitsEmptyBase(t *testing.T) {
+	snapshot := SnapshotFromSummary(ChangeSummary{Root: "/repo"})
+	if snapshot.Base != "" {
+		t.Fatalf("snapshot.Base = %q, want empty", snapshot.Base)
+	}
+}
+
 func TestEventsFromSummaryHandlesCleanRepository(t *testing.T) {
 	snapshot := SnapshotFromSummary(ChangeSummary{Root: "/repo", Branch: "main", Clean: true})
 	events := snapshot.Events

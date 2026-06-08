@@ -497,6 +497,95 @@ func TestRunChangesInspectAndCommit(t *testing.T) {
 	})
 }
 
+func TestRunChangesInspectThreadsBaseRef(t *testing.T) {
+	cwd := t.TempDir()
+	summary := zerogit.ChangeSummary{
+		Root:   cwd,
+		Branch: "feature",
+		Base:   "main",
+		Files:  []zerogit.FileChange{{Path: "feature.md", Status: "added"}},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "inspect", "--base", "main"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		inspectChanges: func(ctx context.Context, options zerogit.InspectOptions) (zerogit.ChangeSummary, error) {
+			if options.BaseRef != "main" {
+				t.Fatalf("InspectOptions.BaseRef = %q, want main", options.BaseRef)
+			}
+			return summary, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "base: main") {
+		t.Fatalf("expected base line in output, got %q", stdout.String())
+	}
+}
+
+func TestRunChangesCommitRejectsBaseRef(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"changes", "commit", "--base", "main"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		commitChanges: func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error) {
+			t.Fatal("commitChanges should not be called when --base is rejected")
+			return zerogit.CommitResult{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--base") {
+		t.Fatalf("expected --base rejection error, got %q", stderr.String())
+	}
+}
+
+func TestWriteChangesHelpMentionsBase(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeChangesHelp(&out); err != nil {
+		t.Fatalf("writeChangesHelp error: %v", err)
+	}
+	if !strings.Contains(out.String(), "--base") {
+		t.Fatalf("expected --base in changes help, got %q", out.String())
+	}
+}
+
+func TestParseChangesArgsBaseRef(t *testing.T) {
+	for _, args := range [][]string{
+		{"--base", "main"},
+		{"--base=main"},
+	} {
+		options, help, err := parseChangesArgs(args, "inspect")
+		if err != nil {
+			t.Fatalf("parseChangesArgs(%v) error: %v", args, err)
+		}
+		if help {
+			t.Fatalf("parseChangesArgs(%v) returned help", args)
+		}
+		if options.baseRef != "main" {
+			t.Fatalf("baseRef = %q, want main (args %v)", options.baseRef, args)
+		}
+	}
+}
+
+func TestParseChangesArgsRejectsBaseOnCommit(t *testing.T) {
+	_, _, err := parseChangesArgs([]string{"--base", "main"}, "commit")
+	if err == nil || !strings.Contains(err.Error(), "--base") {
+		t.Fatalf("expected --base rejection on commit, got %v", err)
+	}
+}
+
+func TestParseChangesArgsRequiresBaseValue(t *testing.T) {
+	if _, _, err := parseChangesArgs([]string{"--base"}, "inspect"); err == nil {
+		t.Fatalf("expected error when --base has no value")
+	}
+}
+
 func TestRunExecWorktreeUsesPreparedWorkspace(t *testing.T) {
 	root := t.TempDir()
 	worktreeDir := t.TempDir()

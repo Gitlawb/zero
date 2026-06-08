@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +240,59 @@ func TestRunSearchJSONRedactsQueryAndSessionMetadata(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "[REDACTED]") {
 		t.Fatalf("expected redacted metadata marker in JSON output: %q", stdout.String())
+	}
+}
+
+func TestRunDoctorReportsConfigValidationForMalformedFile(t *testing.T) {
+	cwd := t.TempDir()
+	zeroDir := filepath.Join(cwd, ".zero")
+	if err := os.MkdirAll(zeroDir, 0o755); err != nil {
+		t.Fatalf("mkdir .zero: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(zeroDir, "config.json"), []byte("{\n  \"activeProvider\": \"openai\",\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"doctor", "--json"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, fmt.Errorf("invalid config JSON %s: unexpected end of JSON input", filepath.Join(zeroDir, "config.json"))
+		},
+		now: fixedCLITime("2026-06-08T11:00:00Z"),
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	var report struct {
+		OK     bool `json:"ok"`
+		Checks []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("doctor JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if report.OK {
+		t.Fatalf("expected ok=false for malformed config, got %#v", report)
+	}
+	found := false
+	for _, check := range report.Checks {
+		if check.ID == "config.validation" {
+			found = true
+			if check.Status != "fail" {
+				t.Fatalf("expected config.validation fail, got %q", check.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected config.validation check in report: %#v", report)
 	}
 }
 

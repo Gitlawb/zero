@@ -20,6 +20,7 @@ type SandboxPolicySnapshot struct {
 	EnforceWorkspace      bool   `json:"enforceWorkspace"`
 	DenyDestructiveShell  bool   `json:"denyDestructiveShell"`
 	AllowPolicyOnlyRunner bool   `json:"allowPolicyOnlyRunner"`
+	MaxAutonomy           string `json:"maxAutonomy,omitempty"`
 	EffectiveMode         string `json:"effectiveMode,omitempty"`
 }
 
@@ -111,6 +112,7 @@ func SandboxPolicySnapshotFromPolicy(policy sandbox.Policy) SandboxPolicySnapsho
 		EnforceWorkspace:      policy.EnforceWorkspace,
 		DenyDestructiveShell:  policy.DenyDestructiveShell,
 		AllowPolicyOnlyRunner: policy.AllowPolicyOnlyRunner,
+		MaxAutonomy:           string(policy.MaxAutonomy),
 		EffectiveMode:         mode,
 	}
 }

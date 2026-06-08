@@ -33,6 +33,7 @@ type verifyCommandOptions struct {
 type changesCommandOptions struct {
 	json         bool
 	cwd          string
+	baseRef      string
 	message      string
 	dryRun       bool
 	maxDiffBytes int
@@ -179,6 +180,7 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 	case "inspect", "status":
 		summary, err := deps.inspectChanges(context.Background(), zerogit.InspectOptions{
 			Cwd:          workspaceRoot,
+			BaseRef:      options.baseRef,
 			MaxDiffBytes: options.maxDiffBytes,
 		})
 		if err != nil {
@@ -374,6 +376,19 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			index = next
 		case strings.HasPrefix(arg, "--cwd="):
 			options.cwd = strings.TrimSpace(strings.TrimPrefix(arg, "--cwd="))
+		case arg == "--base":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.baseRef = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--base="):
+			v := strings.TrimSpace(strings.TrimPrefix(arg, "--base="))
+			if v == "" || flagValueLooksLikeOption(v) {
+				return options, false, execUsageError{"--base requires a value"}
+			}
+			options.baseRef = v
 		case arg == "-m" || arg == "--message":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -408,6 +423,9 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 	}
 	if command != "commit" && (options.message != "" || options.dryRun) {
 		return options, false, execUsageError{"--message and --dry-run are only valid with `zero changes commit`"}
+	}
+	if command == "commit" && options.baseRef != "" {
+		return options, false, execUsageError{"--base is only valid with `zero changes inspect`"}
 	}
 	return options, false, nil
 }
@@ -481,6 +499,7 @@ func redactVerifyLoopReport(report selfverify.Report) selfverify.Report {
 
 func redactChangeSummary(summary zerogit.ChangeSummary) zerogit.ChangeSummary {
 	summary.Root = redactCLIString(summary.Root)
+	summary.Base = redactCLIString(summary.Base)
 	summary.Branch = redactCLIString(summary.Branch)
 	summary.Commit = redactCLIString(summary.Commit)
 	summary.DiffStat = redactCLIString(summary.DiffStat)
@@ -617,6 +636,9 @@ func formatChangeSummary(summary zerogit.ChangeSummary) string {
 	if summary.Branch != "" {
 		lines = append(lines, "branch: "+summary.Branch)
 	}
+	if summary.Base != "" {
+		lines = append(lines, "base: "+summary.Base)
+	}
 	if summary.Commit != "" {
 		lines = append(lines, "commit: "+summary.Commit)
 	}
@@ -687,6 +709,7 @@ Inspects local git changes and optionally creates a commit.
 
 Flags:
   -C, --cwd <path>        Workspace directory
+      --base <ref>        Diff against <ref>...HEAD instead of the working tree
       --diff-bytes <n>    Maximum diff bytes to include
   -m, --message <text>    Commit message for `+"`zero changes commit`"+`
       --dry-run           Preview commit metadata without mutating git state

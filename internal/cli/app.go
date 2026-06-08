@@ -201,6 +201,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runVerifyCommand(args[1:], stdout, stderr, deps)
 	case "changes", "change":
 		return runChanges(args[1:], stdout, stderr, deps)
+	case "usage":
+		return runUsage(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
 	case "zeroline":
@@ -330,7 +332,7 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 	}
 	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
-		Policy:        sandbox.DefaultPolicy(),
+		Policy:        applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy),
 		Store:         sandboxStore,
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 	})
@@ -452,6 +454,7 @@ Commands:
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
   changes    Inspect and commit local git changes
+  usage      Summarize token usage and estimated cost
   serve      Run Zero protocol servers
   zeroline    Launch the interactive TUI with the Zeroline reskin
   help       Show this help

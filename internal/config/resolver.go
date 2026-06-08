@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 const defaultMaxTurns = 12
@@ -47,6 +48,16 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 
 	applyOverrides(&cfg, options.Overrides)
 
+	if maxAutonomy := strings.TrimSpace(cfg.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		// Fail loud on an invalid ceiling. An unvalidated typo (e.g. "moderate")
+		// would otherwise survive Resolve untouched, reach the sandbox bridge,
+		// fail to normalize there, and silently leave the default High ceiling in
+		// place — fail-open on a security boundary. Reject it here instead.
+		if _, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(maxAutonomy)); err != nil {
+			return ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q: expected low, medium, or high", maxAutonomy)
+		}
+	}
+
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
 		return ResolvedConfig{}, err
@@ -58,6 +69,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Provider:       active,
 		MaxTurns:       cfg.MaxTurns,
 		MCP:            cfg.MCP,
+		Sandbox:        cfg.Sandbox,
 	}, nil
 }
 
@@ -102,6 +114,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
+	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		dst.Sandbox.MaxAutonomy = maxAutonomy
+	}
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -119,6 +134,9 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
+	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		dst.Sandbox.MaxAutonomy = maxAutonomy
+	}
 	return nil
 }
 
@@ -318,6 +336,10 @@ func applyEnv(cfg *FileConfig, env map[string]string) {
 		cfg.ActiveProvider = activeProvider
 	}
 
+	if maxAutonomy := strings.TrimSpace(envValue(env, "ZERO_SANDBOX_MAX_AUTONOMY")); maxAutonomy != "" {
+		cfg.Sandbox.MaxAutonomy = maxAutonomy
+	}
+
 	applyProviderEnv(cfg, ProviderKindOpenAI, envProfile{
 		Name:    string(ProviderKindOpenAI),
 		APIKey:  envValue(env, "OPENAI_API_KEY"),
@@ -415,6 +437,9 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
+	}
+	if maxAutonomy := strings.TrimSpace(overrides.Sandbox.MaxAutonomy); maxAutonomy != "" {
+		cfg.Sandbox.MaxAutonomy = maxAutonomy
 	}
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)

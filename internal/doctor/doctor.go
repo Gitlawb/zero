@@ -1,7 +1,10 @@
 package doctor
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +53,7 @@ func Run(options Options) Report {
 	checks := []Check{
 		runtimeCheck(options.Runtime),
 		configFilesCheck(options.UserConfig, options.ProjectConfig),
+		configValidationCheck(options.UserConfig, options.ProjectConfig),
 	}
 	providerCheck := providerConfigCheck(options.Provider)
 	checks = append(checks, providerCheck)
@@ -229,9 +233,123 @@ func formatDetails(details map[string]any) string {
 	return strings.Join(parts, " | ")
 }
 
+func configValidationCheck(userPath string, projectPath string) Check {
+	paths := make([]string, 0, 2)
+	for _, path := range []string{userPath, projectPath} {
+		if strings.TrimSpace(path) != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return check("config.validation", "Config validation", StatusWarn, "No Zero config files were available to validate.", nil)
+	}
+
+	status := StatusPass
+	issueCount := 0
+	details := map[string]any{}
+	for _, path := range paths {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			// A genuinely-missing path is configFilesCheck's job to report, and a
+			// "missing" path must stay a skip — so a not-exist read error is ignored
+			// here. Any OTHER read error (permissions, is-a-directory) means a
+			// present-but-unreadable config that would otherwise silently pass
+			// validation, so surface it as a failing per-path detail.
+			if os.IsNotExist(readErr) {
+				continue
+			}
+			details[path] = map[string]any{"error": "unreadable: " + readErr.Error()}
+			status = StatusFail
+			issueCount++
+			continue
+		}
+		if line, col, ok := jsonParsePosition(data); ok {
+			_, issues := config.ValidateBytes(data)
+			errMsg := ""
+			if len(issues) > 0 {
+				errMsg = issues[0].Message
+			}
+			details[path] = map[string]any{"line": line, "col": col, "error": errMsg}
+			status = StatusFail
+			issueCount++
+			continue
+		}
+		_, issues := config.ValidateBytes(data)
+		if len(issues) == 0 {
+			continue
+		}
+		messages := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			messages = append(messages, issue.Message)
+		}
+		details[path] = map[string]any{"issues": messages}
+		status = StatusFail
+		issueCount += len(issues)
+	}
+
+	if status == StatusPass {
+		return check("config.validation", "Config validation", StatusPass, "Zero config files parsed and validated successfully.", nil)
+	}
+	return check("config.validation", "Config validation", StatusFail, fmt.Sprintf("Zero config validation found %d issue(s).", issueCount), details)
+}
+
+// jsonParsePosition reports whether data fails to parse as JSON and, if so, the
+// 1-based line/col of the failure using the concrete json error offset.
+//
+// The probe is a config.FileConfig (not `any`) so that a structurally-valid
+// document with a wrong field type (e.g. {"maxTurns":"twelve"}) surfaces a
+// *json.UnmarshalTypeError carrying the offset. FileConfig.UnmarshalJSON returns
+// the underlying json error unchanged, preserving that offset. Documents that
+// are structurally valid AND type-correct unmarshal cleanly (ok=false) and fall
+// through to the semantic ValidateBytes branch.
+func jsonParsePosition(data []byte) (int, int, bool) {
+	var probe config.FileConfig
+	err := json.Unmarshal(data, &probe)
+	if err == nil {
+		return 0, 0, false
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		line, col := offsetToLineCol(data, syntaxErr.Offset)
+		return line, col, true
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		line, col := offsetToLineCol(data, typeErr.Offset)
+		return line, col, true
+	}
+	// Non-positional JSON error (e.g. unexpected EOF without offset): do not
+	// fabricate a (1,1) position. Returning ok=false routes the error through the
+	// no-position ValidateBytes path so it is reported without a fake line/col.
+	return 0, 0, false
+}
+
 func passFail(ok bool) string {
 	if ok {
 		return "pass"
 	}
 	return "fail"
+}
+
+// offsetToLineCol converts a byte offset (as reported by *json.SyntaxError /
+// *json.UnmarshalTypeError) into a 1-based line and column. Offsets out of range
+// are clamped into [0, len(data)].
+func offsetToLineCol(data []byte, offset int64) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(data)) {
+		offset = int64(len(data))
+	}
+	line := 1
+	col := 1
+	for index := int64(0); index < offset; index++ {
+		if data[index] == '\n' {
+			line++
+			col = 1
+			continue
+		}
+		col++
+	}
+	return line, col
 }
