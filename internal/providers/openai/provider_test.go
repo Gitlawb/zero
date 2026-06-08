@@ -900,3 +900,58 @@ func TestMapMessageTextOnlyKeepsStringContent(t *testing.T) {
 		t.Fatalf("empty text content = %#v, want nil so omitempty drops it", empty.Content)
 	}
 }
+
+func TestStreamCompletionSerializesImageContentParts(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"choices":[]}`)
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:  "sk-secret",
+		BaseURL: server.URL + "/",
+		Model:   "gpt-test",
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: "what is this",
+			Images:  []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("ABC")}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	messages := gotBody["messages"].([]any)
+	user := messages[0].(map[string]any)
+	content, ok := user["content"].([]any)
+	if !ok {
+		t.Fatalf("user content not an array: %#v", user["content"])
+	}
+	if len(content) != 2 {
+		t.Fatalf("content parts = %d, want 2", len(content))
+	}
+	textPart := content[0].(map[string]any)
+	if textPart["type"] != "text" || textPart["text"] != "what is this" {
+		t.Fatalf("text part = %#v", textPart)
+	}
+	imagePart := content[1].(map[string]any)
+	if imagePart["type"] != "image_url" {
+		t.Fatalf("image part type = %#v, want image_url", imagePart["type"])
+	}
+	imageURL := imagePart["image_url"].(map[string]any)
+	if imageURL["url"] != "data:image/png;base64,QUJD" {
+		t.Fatalf("image url = %#v, want data:image/png;base64,QUJD", imageURL["url"])
+	}
+}
