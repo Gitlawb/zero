@@ -350,6 +350,48 @@ func TestInspectBaseRefEmptyDiffIsClean(t *testing.T) {
 	}
 }
 
+func TestParseNameStatusRenameAndCopy(t *testing.T) {
+	cases := []struct {
+		name       string
+		line       string
+		wantPath   string
+		wantStatus string
+	}{
+		{
+			name:       "rename uses new path",
+			line:       "R100\told.txt\tnew.txt",
+			wantPath:   "new.txt",
+			wantStatus: "renamed",
+		},
+		{
+			name:       "copy uses destination path",
+			line:       "C75\tsrc.txt\tdst.txt",
+			wantPath:   "dst.txt",
+			wantStatus: "copied",
+		},
+		{
+			name:       "modify two-field no regression",
+			line:       "M\ta.txt",
+			wantPath:   "a.txt",
+			wantStatus: "modified",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			files := parseNameStatus(tc.line)
+			if len(files) != 1 {
+				t.Fatalf("expected 1 file entry, got %d: %#v", len(files), files)
+			}
+			if files[0].Path != tc.wantPath {
+				t.Fatalf("Path = %q, want %q", files[0].Path, tc.wantPath)
+			}
+			if files[0].Status != tc.wantStatus {
+				t.Fatalf("Status = %q, want %q", files[0].Status, tc.wantStatus)
+			}
+		})
+	}
+}
+
 func TestTruncateStringHonorsMaxBytesWithRedactionMarker(t *testing.T) {
 	value := strings.Repeat("a", 32) + redaction.RedactedSecret + strings.Repeat("b", 32)
 	for maxBytes := 1; maxBytes < len(redaction.RedactedSecret)+len("\n[truncated]"); maxBytes++ {

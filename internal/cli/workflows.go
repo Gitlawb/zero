@@ -384,7 +384,11 @@ func parseChangesArgs(args []string, command string) (changesCommandOptions, boo
 			options.baseRef = strings.TrimSpace(value)
 			index = next
 		case strings.HasPrefix(arg, "--base="):
-			options.baseRef = strings.TrimSpace(strings.TrimPrefix(arg, "--base="))
+			v := strings.TrimSpace(strings.TrimPrefix(arg, "--base="))
+			if v == "" || flagValueLooksLikeOption(v) {
+				return options, false, execUsageError{"--base requires a value"}
+			}
+			options.baseRef = v
 		case arg == "-m" || arg == "--message":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -495,6 +499,7 @@ func redactVerifyLoopReport(report selfverify.Report) selfverify.Report {
 
 func redactChangeSummary(summary zerogit.ChangeSummary) zerogit.ChangeSummary {
 	summary.Root = redactCLIString(summary.Root)
+	summary.Base = redactCLIString(summary.Base)
 	summary.Branch = redactCLIString(summary.Branch)
 	summary.Commit = redactCLIString(summary.Commit)
 	summary.DiffStat = redactCLIString(summary.DiffStat)
