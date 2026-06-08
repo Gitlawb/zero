@@ -30,3 +30,13 @@ func TestAutonomyAllowedNormalizesBothOperands(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeSideEffectPreservesNone(t *testing.T) {
+	if got := NormalizeSideEffect(SideEffectNone); got != SideEffectNone {
+		t.Fatalf("NormalizeSideEffect(none) = %q, want none (must not collapse to out_of_workspace)", got)
+	}
+	// An unrecognized value still fails closed to out_of_workspace.
+	if got := NormalizeSideEffect(SideEffect("bogus")); got != SideEffectOutOfWorkspace {
+		t.Fatalf("NormalizeSideEffect(bogus) = %q, want out_of_workspace", got)
+	}
+}
