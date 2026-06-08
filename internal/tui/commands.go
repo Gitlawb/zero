@@ -32,6 +32,7 @@ const (
 	commandTheme
 	commandInputStyle
 	commandBash
+	commandImage
 	commandUnknown
 )
 
@@ -114,6 +115,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show current workspace and runtime context.",
 		kind:        commandContext,
+	},
+	{
+		name:        "/image",
+		usage:       "/image <path> | clear",
+		group:       commandGroupSession,
+		description: "Attach a local image to the next message (vision models). /image clear removes pending attachments.",
+		kind:        commandImage,
 	},
 	{
 		name:        "/clear",
