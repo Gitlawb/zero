@@ -84,6 +84,30 @@ func TestRunReportWarnsForUnknownOpenAICompatibleModel(t *testing.T) {
 	}
 }
 
+func TestOffsetToLineCol(t *testing.T) {
+	data := []byte("{\n  \"a\": 1,\n  bad\n}")
+	cases := []struct {
+		name     string
+		offset   int64
+		wantLine int
+		wantCol  int
+	}{
+		{name: "start", offset: 0, wantLine: 1, wantCol: 1},
+		{name: "after first newline", offset: 2, wantLine: 2, wantCol: 1},
+		{name: "mid second line", offset: 7, wantLine: 2, wantCol: 6},
+		{name: "negative clamps to start", offset: -5, wantLine: 1, wantCol: 1},
+		{name: "past end clamps to last", offset: 9999, wantLine: 4, wantCol: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line, col := offsetToLineCol(data, tc.offset)
+			if line != tc.wantLine || col != tc.wantCol {
+				t.Fatalf("offsetToLineCol(%d) = (%d,%d), want (%d,%d)", tc.offset, line, col, tc.wantLine, tc.wantCol)
+			}
+		})
+	}
+}
+
 func fixedDoctorClock(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

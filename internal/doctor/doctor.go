@@ -231,3 +231,26 @@ func passFail(ok bool) string {
 	}
 	return "fail"
 }
+
+// offsetToLineCol converts a byte offset (as reported by *json.SyntaxError /
+// *json.UnmarshalTypeError) into a 1-based line and column. Offsets out of range
+// are clamped into [0, len(data)].
+func offsetToLineCol(data []byte, offset int64) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(data)) {
+		offset = int64(len(data))
+	}
+	line := 1
+	col := 1
+	for index := int64(0); index < offset; index++ {
+		if data[index] == '\n' {
+			line++
+			col = 1
+			continue
+		}
+		col++
+	}
+	return line, col
+}
