@@ -34,6 +34,7 @@ var version = "dev"
 type appDeps struct {
 	getwd                func() (string, error)
 	stdin                io.Reader
+	userConfigPath       func() (string, error)
 	resolveConfig        func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	resolveMCPConfig     func(workspaceRoot string) (config.MCPConfig, error)
 	newProvider          func(config.ProviderProfile) (zeroruntime.Provider, error)
@@ -75,8 +76,9 @@ func Run(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func defaultAppDeps() appDeps {
 	return appDeps{
-		getwd: os.Getwd,
-		stdin: os.Stdin,
+		getwd:          os.Getwd,
+		stdin:          os.Stdin,
+		userConfigPath: config.DefaultUserConfigPath,
 		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
 			options, err := config.DefaultResolveOptions(workspaceRoot)
 			if err != nil {
@@ -213,6 +215,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.stdin == nil {
 		deps.stdin = defaults.stdin
+	}
+	if deps.userConfigPath == nil {
+		deps.userConfigPath = defaults.userConfigPath
 	}
 	if deps.resolveConfig == nil {
 		deps.resolveConfig = defaults.resolveConfig

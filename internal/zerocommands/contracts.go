@@ -76,14 +76,16 @@ type ProviderCatalogSnapshotOptions struct {
 }
 
 type ProviderCatalogSnapshot struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Transport      string   `json:"transport"`
-	DefaultBaseURL string   `json:"defaultBaseUrl,omitempty"`
-	DefaultModel   string   `json:"defaultModel,omitempty"`
-	AuthEnvVars    []string `json:"authEnvVars,omitempty"`
-	RequiresAuth   bool     `json:"requiresAuth"`
-	Local          bool     `json:"local"`
+	ID                       string   `json:"id"`
+	Name                     string   `json:"name"`
+	Transport                string   `json:"transport"`
+	DefaultBaseURL           string   `json:"defaultBaseUrl,omitempty"`
+	DefaultModel             string   `json:"defaultModel,omitempty"`
+	AuthEnvVars              []string `json:"authEnvVars,omitempty"`
+	RequiresAuth             bool     `json:"requiresAuth"`
+	Local                    bool     `json:"local"`
+	RuntimeSupported         bool     `json:"runtimeSupported"`
+	RuntimeUnsupportedReason string   `json:"runtimeUnsupportedReason,omitempty"`
 }
 
 type SessionSnapshot struct {
@@ -220,14 +222,16 @@ func knownProviderCatalogTransport(transport string) bool {
 
 func ProviderCatalogSnapshotFromDescriptor(descriptor providercatalog.Descriptor) ProviderCatalogSnapshot {
 	return ProviderCatalogSnapshot{
-		ID:             descriptor.ID,
-		Name:           descriptor.Name,
-		Transport:      string(descriptor.Transport),
-		DefaultBaseURL: descriptor.DefaultBaseURL,
-		DefaultModel:   descriptor.DefaultModel,
-		AuthEnvVars:    append([]string{}, descriptor.AuthEnvVars...),
-		RequiresAuth:   descriptor.RequiresAuth,
-		Local:          descriptor.Local,
+		ID:                       descriptor.ID,
+		Name:                     descriptor.Name,
+		Transport:                string(descriptor.Transport),
+		DefaultBaseURL:           descriptor.DefaultBaseURL,
+		DefaultModel:             descriptor.DefaultModel,
+		AuthEnvVars:              append([]string{}, descriptor.AuthEnvVars...),
+		RequiresAuth:             descriptor.RequiresAuth,
+		Local:                    descriptor.Local,
+		RuntimeSupported:         providercatalog.RuntimeSupported(descriptor),
+		RuntimeUnsupportedReason: providercatalog.RuntimeUnsupportedReason(descriptor),
 	}
 }
 

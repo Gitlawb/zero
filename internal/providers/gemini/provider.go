@@ -25,12 +25,16 @@ const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures a Gemini streamGenerateContent provider.
 type Options struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
-	MaxTokens  int
-	HTTPClient *http.Client
-	UserAgent  string
+	APIKey          string
+	BaseURL         string
+	Model           string
+	MaxTokens       int
+	AuthHeader      string
+	AuthScheme      string
+	AuthHeaderValue string
+	CustomHeaders   map[string]string
+	HTTPClient      *http.Client
+	UserAgent       string
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
 	// Zero uses defaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
@@ -42,6 +46,10 @@ type Provider struct {
 	baseURL           string
 	model             string
 	maxTokens         int
+	authHeader        string
+	authScheme        string
+	authHeaderValue   string
+	customHeaders     map[string]string
 	httpClient        *http.Client
 	userAgent         string
 	streamIdleTimeout time.Duration
@@ -70,6 +78,10 @@ func New(options Options) (*Provider, error) {
 		baseURL:           baseURL,
 		model:             model,
 		maxTokens:         maxTokens,
+		authHeader:        strings.TrimSpace(options.AuthHeader),
+		authScheme:        strings.TrimSpace(options.AuthScheme),
+		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
+		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
 		httpClient:        providerio.HTTPClient(options.HTTPClient),
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: idleTimeout,
@@ -106,12 +118,17 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 
 	response, err := providerio.SendWithRetry(streamCtx, provider.httpClient, http.MethodPost, provider.streamURL(), body, func(request *http.Request) {
 		request.Header.Set("Content-Type", "application/json")
-		if provider.apiKey != "" {
-			request.Header.Set("x-goog-api-key", provider.apiKey)
-		}
 		if provider.userAgent != "" {
 			request.Header.Set("User-Agent", provider.userAgent)
 		}
+		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+			APIKey:            provider.apiKey,
+			DefaultAuthHeader: "x-goog-api-key",
+			AuthHeader:        provider.authHeader,
+			AuthScheme:        provider.authScheme,
+			AuthHeaderValue:   provider.authHeaderValue,
+			CustomHeaders:     provider.customHeaders,
+		})
 	}, 0)
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
@@ -420,11 +437,11 @@ func (provider *Provider) streamURL() string {
 }
 
 func (provider *Provider) classifiedError(statusCode int, message string) string {
-	return providerio.ClassifiedError(statusCode, message, provider.apiKey)
+	return providerio.ClassifiedError(statusCode, message, provider.apiKey, provider.authHeaderValue)
 }
 
 func (provider *Provider) redact(message string) string {
-	return providerio.Redact(message, provider.apiKey)
+	return providerio.Redact(message, provider.apiKey, provider.authHeaderValue)
 }
 
 func normalizeModel(model string) string {

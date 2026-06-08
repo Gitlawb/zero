@@ -10,12 +10,12 @@ import (
 // DefaultResolveOptions builds config resolution inputs from the local process
 // environment and workspace.
 func DefaultResolveOptions(workspaceRoot string) (ResolveOptions, error) {
-	userConfigDir, err := os.UserConfigDir()
+	userConfigPath, err := DefaultUserConfigPath()
 	if err != nil {
-		return ResolveOptions{}, fmt.Errorf("resolve user config directory: %w", err)
+		return ResolveOptions{}, err
 	}
 
-	userConfigPath, err := existingConfigFile(filepath.Join(userConfigDir, "zero", "config.json"))
+	userConfigPath, err = existingConfigFile(userConfigPath)
 	if err != nil {
 		return ResolveOptions{}, err
 	}
@@ -30,6 +30,14 @@ func DefaultResolveOptions(workspaceRoot string) (ResolveOptions, error) {
 		ProjectConfigPath: projectConfigPath,
 		ProviderCommand:   strings.TrimSpace(os.Getenv("ZERO_PROVIDER_COMMAND")),
 	}, nil
+}
+
+func DefaultUserConfigPath() (string, error) {
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config directory: %w", err)
+	}
+	return filepath.Join(userConfigDir, "zero", "config.json"), nil
 }
 
 func existingConfigFile(path string) (string, error) {

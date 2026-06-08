@@ -30,30 +30,42 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 	switch resolved.providerKind {
 	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
 		return openai.New(openai.Options{
-			APIKey:     profile.APIKey,
-			BaseURL:    resolved.baseURL,
-			Model:      resolved.apiModel,
-			MaxTokens:  resolved.maxOutputTokens,
-			HTTPClient: options.HTTPClient,
-			UserAgent:  options.UserAgent,
+			APIKey:          profile.APIKey,
+			BaseURL:         resolved.baseURL,
+			Model:           resolved.apiModel,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
+			MaxTokens:       resolved.maxOutputTokens,
+			HTTPClient:      options.HTTPClient,
+			UserAgent:       options.UserAgent,
 		})
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
-			APIKey:     profile.APIKey,
-			BaseURL:    resolved.baseURL,
-			Model:      resolved.apiModel,
-			MaxTokens:  resolved.maxOutputTokens,
-			HTTPClient: options.HTTPClient,
-			UserAgent:  options.UserAgent,
+			APIKey:          profile.APIKey,
+			BaseURL:         resolved.baseURL,
+			Model:           resolved.apiModel,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
+			MaxTokens:       resolved.maxOutputTokens,
+			HTTPClient:      options.HTTPClient,
+			UserAgent:       options.UserAgent,
 		})
 	case config.ProviderKindGoogle:
 		return gemini.New(gemini.Options{
-			APIKey:     profile.APIKey,
-			BaseURL:    resolved.baseURL,
-			Model:      resolved.apiModel,
-			MaxTokens:  resolved.maxOutputTokens,
-			HTTPClient: options.HTTPClient,
-			UserAgent:  options.UserAgent,
+			APIKey:          profile.APIKey,
+			BaseURL:         resolved.baseURL,
+			Model:           resolved.apiModel,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
+			MaxTokens:       resolved.maxOutputTokens,
+			HTTPClient:      options.HTTPClient,
+			UserAgent:       options.UserAgent,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported provider kind %q", resolved.providerKind)

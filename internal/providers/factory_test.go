@@ -55,6 +55,45 @@ func TestNewCreatesOpenAIProviderWithFactoryOptions(t *testing.T) {
 	}
 }
 
+func TestNewThreadsCustomProviderHeaders(t *testing.T) {
+	transport := &captureTransport{
+		responseBody: "data: [DONE]\n\n",
+	}
+	client := &http.Client{Transport: transport}
+
+	provider, err := New(config.ProviderProfile{
+		Name:          "gateway",
+		ProviderKind:  config.ProviderKindOpenAICompatible,
+		BaseURL:       "https://gateway.example/v1",
+		APIKey:        "sk-gateway",
+		AuthHeader:    "X-API-Key",
+		AuthScheme:    "Token",
+		CustomHeaders: map[string]string{"HTTP-Referer": "https://zero.dev"},
+		Model:         "gateway-model",
+	}, Options{HTTPClient: client})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+
+	if transport.request.Header.Get("Authorization") != "" {
+		t.Fatalf("Authorization = %q, want empty when custom auth header is set", transport.request.Header.Get("Authorization"))
+	}
+	if transport.request.Header.Get("X-API-Key") != "Token sk-gateway" {
+		t.Fatalf("X-API-Key = %q, want custom auth header", transport.request.Header.Get("X-API-Key"))
+	}
+	if transport.request.Header.Get("HTTP-Referer") != "https://zero.dev" {
+		t.Fatalf("HTTP-Referer = %q, want custom provider header", transport.request.Header.Get("HTTP-Referer"))
+	}
+}
+
 func TestNewSupportsOpenAIProviderKind(t *testing.T) {
 	provider, err := New(config.ProviderProfile{
 		Name:         "openai",

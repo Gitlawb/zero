@@ -65,6 +65,12 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
+	if command == "add" {
+		return runProvidersAdd(args, stdout, stderr, deps)
+	}
+	if command == "check" {
+		return runProvidersCheck(args, stdout, stderr, deps)
+	}
 	if command != "list" && command != "current" && command != "catalog" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown providers command %q", command))
 	}
@@ -338,7 +344,7 @@ func formatProviderCatalogSummaries(providers []providerCatalogSummary) string {
 }
 
 func formatProviderCatalogLine(provider providerCatalogSummary) string {
-	return fmt.Sprintf("id=%s name=%s transport=%s defaultModel=%s defaultBaseURL=%s authEnvVars=%s requiresAuth=%t local=%t",
+	return fmt.Sprintf("id=%s name=%s transport=%s defaultModel=%s defaultBaseURL=%s authEnvVars=%s requiresAuth=%t local=%t runtimeSupported=%t",
 		formatProviderCatalogValue(provider.ID, "unknown"),
 		formatProviderCatalogValue(provider.Name, "unknown"),
 		formatProviderCatalogValue(provider.Transport, "unknown"),
@@ -347,6 +353,7 @@ func formatProviderCatalogLine(provider providerCatalogSummary) string {
 		formatProviderCatalogValue(strings.Join(provider.AuthEnvVars, ","), "none"),
 		provider.RequiresAuth,
 		provider.Local,
+		provider.RuntimeSupported,
 	)
 }
 
@@ -417,12 +424,25 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers current [flags]
   zero providers list [flags]
   zero providers catalog [flags]
+  zero providers add <catalog-id> [flags]
+  zero providers check [name] [flags]
 
 Inspects resolved provider profiles and provider catalog descriptors without printing secrets.
 
 Flags:
       --json                    Print JSON summary
       --transport <transport>   Filter catalog descriptors by transport
+
+Add flags:
+      --name <name>             Saved provider profile name
+      --model <model>           Override catalog default model
+      --base-url <url>          Override catalog default base URL
+      --api-key-env <name>      Environment variable that contains the API key
+      --auth-header <header>    Custom API-key header name
+      --auth-scheme <scheme>    Auth scheme prefix, for example Bearer or Token
+      --auth-header-value <v>   Exact auth header value; stored in config
+      --header <key=value>      Custom provider header; repeatable
+      --set-active              Make the added provider active
   -h, --help                    Show this help
 `)
 	return err

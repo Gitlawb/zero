@@ -49,6 +49,27 @@ type Descriptor struct {
 	Aliases             []string
 }
 
+func RuntimeSupported(descriptor Descriptor) bool {
+	switch descriptor.Transport {
+	case TransportOpenAI, TransportOpenAICompatible, TransportAnthropic, TransportAnthropicCompatible, TransportGoogle:
+		return true
+	default:
+		return false
+	}
+}
+
+func RuntimeUnsupportedReason(descriptor Descriptor) string {
+	if RuntimeSupported(descriptor) {
+		return ""
+	}
+	switch descriptor.Transport {
+	case TransportBedrock, TransportVertex:
+		return "native adapter not implemented yet"
+	default:
+		return "provider transport not implemented yet"
+	}
+}
+
 var descriptors = []Descriptor{
 	openAI("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4.1", []string{"OPENAI_API_KEY"}),
 	anthropic("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4.5", []string{"ANTHROPIC_API_KEY"}),

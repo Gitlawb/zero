@@ -25,14 +25,18 @@ const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures an Anthropic Messages API provider.
 type Options struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
-	MaxTokens  int
-	Version    string
-	Beta       string
-	HTTPClient *http.Client
-	UserAgent  string
+	APIKey          string
+	BaseURL         string
+	Model           string
+	MaxTokens       int
+	Version         string
+	Beta            string
+	AuthHeader      string
+	AuthScheme      string
+	AuthHeaderValue string
+	CustomHeaders   map[string]string
+	HTTPClient      *http.Client
+	UserAgent       string
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
 	// Zero uses defaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
@@ -46,6 +50,10 @@ type Provider struct {
 	maxTokens         int
 	version           string
 	beta              string
+	authHeader        string
+	authScheme        string
+	authHeaderValue   string
+	customHeaders     map[string]string
 	httpClient        *http.Client
 	userAgent         string
 	streamIdleTimeout time.Duration
@@ -80,6 +88,10 @@ func New(options Options) (*Provider, error) {
 		maxTokens:         maxTokens,
 		version:           version,
 		beta:              strings.TrimSpace(options.Beta),
+		authHeader:        strings.TrimSpace(options.AuthHeader),
+		authScheme:        strings.TrimSpace(options.AuthScheme),
+		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
+		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
 		httpClient:        providerio.HTTPClient(options.HTTPClient),
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: idleTimeout,
@@ -117,15 +129,20 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	response, err := providerio.SendWithRetry(streamCtx, provider.httpClient, http.MethodPost, provider.baseURL+"/v1/messages", body, func(request *http.Request) {
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("anthropic-version", provider.version)
-		if provider.apiKey != "" {
-			request.Header.Set("x-api-key", provider.apiKey)
-		}
 		if provider.beta != "" {
 			request.Header.Set("anthropic-beta", provider.beta)
 		}
 		if provider.userAgent != "" {
 			request.Header.Set("User-Agent", provider.userAgent)
 		}
+		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+			APIKey:            provider.apiKey,
+			DefaultAuthHeader: "x-api-key",
+			AuthHeader:        provider.authHeader,
+			AuthScheme:        provider.authScheme,
+			AuthHeaderValue:   provider.authHeaderValue,
+			CustomHeaders:     provider.customHeaders,
+		})
 	}, 0)
 	if err != nil {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
@@ -423,11 +440,11 @@ func parseErrorMessage(body []byte) string {
 }
 
 func (provider *Provider) classifiedError(statusCode int, message string) string {
-	return providerio.ClassifiedError(statusCode, message, provider.apiKey)
+	return providerio.ClassifiedError(statusCode, message, provider.apiKey, provider.authHeaderValue)
 }
 
 func (provider *Provider) redact(message string) string {
-	return providerio.Redact(message, provider.apiKey)
+	return providerio.Redact(message, provider.apiKey, provider.authHeaderValue)
 }
 
 func firstNonEmpty(values ...string) string {

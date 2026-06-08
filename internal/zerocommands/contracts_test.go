@@ -178,11 +178,20 @@ func TestProviderCatalogSnapshotsExposeStableDescriptors(t *testing.T) {
 		openai.DefaultBaseURL != config.OpenAIBaseURL ||
 		openai.DefaultModel != modelregistry.DefaultModelID ||
 		!openai.RequiresAuth ||
-		openai.Local {
+		openai.Local ||
+		!openai.RuntimeSupported {
 		t.Fatalf("unexpected OpenAI catalog snapshot: %#v", openai)
 	}
 	if len(openai.AuthEnvVars) != 1 || openai.AuthEnvVars[0] != "OPENAI_API_KEY" {
 		t.Fatalf("unexpected OpenAI auth env vars: %#v", openai.AuthEnvVars)
+	}
+
+	bedrock := findCatalogSnapshot(t, snapshots, "bedrock")
+	if bedrock.RuntimeSupported {
+		t.Fatalf("Bedrock must stay catalog-only until the native adapter lands: %#v", bedrock)
+	}
+	if !strings.Contains(bedrock.RuntimeUnsupportedReason, "native adapter") {
+		t.Fatalf("Bedrock unsupported reason = %q, want native adapter reason", bedrock.RuntimeUnsupportedReason)
 	}
 }
 
