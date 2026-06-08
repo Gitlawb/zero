@@ -806,3 +806,97 @@ func TestContentPartImageURLMarshalsDataURI(t *testing.T) {
 		t.Fatalf("text part must omit nil image_url, got: %s", textOnly)
 	}
 }
+
+func TestOpenAIRequestEmptyContentStaysOmittedAfterAnyRefactor(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	got, err := json.Marshal(provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{
+				Role:    zeroruntime.MessageRoleAssistant,
+				Content: "",
+				ToolCalls: []zeroruntime.ToolCall{{
+					ID:        "call_1",
+					Name:      "read_file",
+					Arguments: `{}`,
+				}},
+			},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(got, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := raw.Messages[0]["content"]; present {
+		t.Fatalf("empty content boxed in any must stay omitted, got: %#v", raw.Messages[0])
+	}
+}
+
+func TestMapMessageBuildsImageURLContentParts(t *testing.T) {
+	msg := mapMessage(zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "describe these",
+		Images: []zeroruntime.ImageBlock{
+			{MediaType: "image/png", Data: []byte("ABC")},
+			{MediaType: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff}},
+		},
+	})
+
+	parts, ok := msg.Content.([]contentPart)
+	if !ok {
+		t.Fatalf("Content type = %T, want []contentPart", msg.Content)
+	}
+	if len(parts) != 3 {
+		t.Fatalf("len(parts) = %d, want 3 (1 text + 2 images)", len(parts))
+	}
+	if parts[0].Type != "text" || parts[0].Text != "describe these" {
+		t.Fatalf("part[0] = %#v, want text part", parts[0])
+	}
+	// Data "ABC" base64-encodes to "QUJD".
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil ||
+		parts[1].ImageURL.URL != "data:image/png;base64,QUJD" {
+		t.Fatalf("part[1] = %#v, want png data URI", parts[1])
+	}
+	// {0xff,0xd8,0xff} base64-encodes to "/9j/".
+	if parts[2].ImageURL == nil || parts[2].ImageURL.URL != "data:image/jpeg;base64,/9j/" {
+		t.Fatalf("part[2] = %#v, want jpeg data URI", parts[2])
+	}
+}
+
+func TestMapMessageImageOnlyOmitsTextPart(t *testing.T) {
+	msg := mapMessage(zeroruntime.Message{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "",
+		Images:  []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("A")}},
+	})
+	parts, ok := msg.Content.([]contentPart)
+	if !ok {
+		t.Fatalf("Content type = %T, want []contentPart", msg.Content)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("len(parts) = %d, want 1 (image only, no text part)", len(parts))
+	}
+	// Data "A" base64-encodes to "QQ==".
+	if parts[0].Type != "image_url" || parts[0].ImageURL == nil ||
+		parts[0].ImageURL.URL != "data:image/png;base64,QQ==" {
+		t.Fatalf("part[0] = %#v, want image-only png part", parts[0])
+	}
+}
+
+func TestMapMessageTextOnlyKeepsStringContent(t *testing.T) {
+	msg := mapMessage(zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "hi"})
+	if got, ok := msg.Content.(string); !ok || got != "hi" {
+		t.Fatalf("Content = %#v, want string \"hi\"", msg.Content)
+	}
+	empty := mapMessage(zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: ""})
+	if empty.Content != nil {
+		t.Fatalf("empty text content = %#v, want nil so omitempty drops it", empty.Content)
+	}
+}

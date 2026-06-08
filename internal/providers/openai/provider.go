@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -343,9 +344,33 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 func mapMessage(message zeroruntime.Message) chatMessage {
 	mapped := chatMessage{
 		Role:       string(message.Role),
-		Content:    message.Content,
 		ToolCallID: message.ToolCallID,
 	}
+
+	if len(message.Images) == 0 {
+		// Preserve today's behavior exactly: a string assigned only when
+		// non-empty, leaving Content nil otherwise so the `omitempty` tag still
+		// drops the key. An empty string boxed in `any` would NOT be omitted.
+		if message.Content != "" {
+			mapped.Content = message.Content
+		}
+	} else {
+		parts := make([]contentPart, 0, len(message.Images)+1)
+		if message.Content != "" {
+			parts = append(parts, contentPart{Type: "text", Text: message.Content})
+		}
+		for _, image := range message.Images {
+			parts = append(parts, contentPart{
+				Type: "image_url",
+				ImageURL: &imageURLPart{
+					URL: "data:" + image.MediaType + ";base64," +
+						base64.StdEncoding.EncodeToString(image.Data),
+				},
+			})
+		}
+		mapped.Content = parts
+	}
+
 	if len(message.ToolCalls) > 0 {
 		mapped.ToolCalls = make([]requestToolCall, 0, len(message.ToolCalls))
 		for _, toolCall := range message.ToolCalls {
