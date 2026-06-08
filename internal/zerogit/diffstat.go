@@ -5,9 +5,9 @@ import (
 	"strings"
 )
 
-// DiffStat is the parsed summary line of a `git diff --stat` invocation. It is
-// derived from the pre-redaction stat string: redaction can rewrite the numeric
-// summary line, so callers must parse the raw stat before any secret scrubbing.
+// DiffStat is the parsed summary line of a `git diff --stat` invocation. The
+// summary line ("N files changed, A insertions(+), B deletions(-)") carries no
+// secret-bearing tokens, so it is safe to parse from an already-redacted stat.
 type DiffStat struct {
 	FilesChanged int
 	Insertions   int

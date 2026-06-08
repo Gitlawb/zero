@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -112,8 +113,9 @@ func runUsage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	// Parse the pre-redaction --stat: redaction can rewrite the numeric summary
-	// line, so net-LOC must be derived from the raw stat before any scrubbing.
+	// The --stat summary line ("N files changed, A insertions(+), B deletions(-)")
+	// carries no secret-bearing tokens, so parsing the already-redacted DiffStat
+	// returned by zerogit.Inspect is safe.
 	diff := zerogit.ParseDiffStat(summary.DiffStat)
 
 	registry, err := modelregistry.DefaultRegistry()
@@ -182,10 +184,17 @@ func parseUsageArgs(args []string) (usageOptions, bool, error) {
 			if err != nil {
 				return options, false, err
 			}
+			if _, parseErr := time.Parse("2006-01-02", value); parseErr != nil {
+				return options, false, execUsageError{fmt.Sprintf("invalid --since %q: expected YYYY-MM-DD", value)}
+			}
 			options.since = value
 			index = next
 		case strings.HasPrefix(arg, "--since="):
-			options.since = strings.TrimSpace(strings.TrimPrefix(arg, "--since="))
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--since="))
+			if _, parseErr := time.Parse("2006-01-02", value); parseErr != nil {
+				return options, false, execUsageError{fmt.Sprintf("invalid --since %q: expected YYYY-MM-DD", value)}
+			}
+			options.since = value
 		case arg == "--session" || arg == "--session-id":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
