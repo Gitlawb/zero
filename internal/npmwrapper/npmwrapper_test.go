@@ -162,7 +162,10 @@ func nodeWrapperCommand(ctx context.Context, node string, wrapperPath string, ar
 
 func nodeWrapperTimeout() time.Duration {
 	if runtime.GOOS == "windows" {
-		return 30 * time.Second
+		// Windows CI runners cold-start node slowly under load; 30s intermittently
+		// timed out with empty output (a flake, not a wrapper bug — the same run
+		// passes in ~2.5s on a warm runner), so give the spawn ample headroom.
+		return 90 * time.Second
 	}
 	return 10 * time.Second
 }
