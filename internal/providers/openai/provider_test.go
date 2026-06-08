@@ -730,3 +730,54 @@ func TestStreamCompletionEmitsDroppedOnNamelessToolCall(t *testing.T) {
 		t.Errorf("expected a dropped-tool-call signal, got events: %+v", events)
 	}
 }
+
+func TestOpenAIRequestTextOnlyOmitsEmptyContent(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	got, err := json.Marshal(provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+			{Role: zeroruntime.MessageRoleUser, Content: "hello"},
+			{
+				Role:    zeroruntime.MessageRoleAssistant,
+				Content: "", // assistant turn that is *only* a tool call -> empty content must drop
+				ToolCalls: []zeroruntime.ToolCall{{
+					ID:        "call_1",
+					Name:      "read_file",
+					Arguments: `{"path":"README.md"}`,
+				}},
+			},
+			{Role: zeroruntime.MessageRoleTool, Content: "contents", ToolCallID: "call_1"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	// String content round-trips as a JSON string, and empty content is omitted.
+	if !strings.Contains(string(got), `"content":"hello"`) {
+		t.Fatalf("user content not serialized as string: %s", got)
+	}
+	if strings.Contains(string(got), `"content":""`) {
+		t.Fatalf("empty assistant content must be omitted, got: %s", got)
+	}
+
+	// Decode the assistant message and assert no content key at all.
+	var decoded chatCompletionRequest
+	var raw struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(got, &raw); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	_ = decoded
+	if _, present := raw.Messages[2]["content"]; present {
+		t.Fatalf("assistant (tool-only) message must omit content key, got: %#v", raw.Messages[2])
+	}
+	if raw.Messages[1]["content"] != "hello" {
+		t.Fatalf("user content = %#v, want \"hello\"", raw.Messages[1]["content"])
+	}
+}
