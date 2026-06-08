@@ -125,6 +125,48 @@ func TestSubmitToolRejectsInvalidArgs(t *testing.T) {
 	}
 }
 
+func TestLoadSpecFileRejectsPathsOutsideSpecDirectory(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(root, "notes.md")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := LoadSpecFile(root, outside)
+	if err == nil {
+		t.Fatal("expected LoadSpecFile to reject a path outside .zero/specs")
+	}
+}
+
+func TestLoadSpecFileRejectsNonRegularFiles(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, filepath.FromSlash(".zero/specs/not-a-file.md"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := LoadSpecFile(root, dir)
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("expected non-regular file error, got %v", err)
+	}
+}
+
+func TestImplementationPromptIncludesReviewContext(t *testing.T) {
+	prompt := ImplementationPrompt("# Goal\n\nShip it.", "/repo/.zero/specs/plan.md", "zero_1", "Keep tests focused.")
+
+	for _, want := range []string{
+		"Implement the following approved spec:",
+		"User note: Keep tests focused.",
+		"# Goal\n\nShip it.",
+		"Spec file: /repo/.zero/specs/plan.md",
+		"Planning session: zero_1",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
 func fixedSpecTime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

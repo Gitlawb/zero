@@ -500,6 +500,70 @@ func TestRecordSpecUpdatesMetadataAndAppendsEvents(t *testing.T) {
 	}
 }
 
+func TestEnsureSpecImplementationReusesExistingPromptSession(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
+		time.Date(2026, 6, 8, 11, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 8, 11, 0, 1, 0, time.UTC),
+		time.Date(2026, 6, 8, 11, 0, 2, 0, time.UTC),
+		time.Date(2026, 6, 8, 11, 0, 3, 0, time.UTC),
+	})})
+	draft, err := store.Create(CreateInput{
+		SessionID:   "draft",
+		SessionKind: SessionKindSpecDraft,
+		Title:       "Draft spec",
+		Cwd:         "/repo",
+		ModelID:     "gpt-5",
+		Provider:    "openai",
+		SpecID:      "2026-06-08-spec",
+		SpecStatus:  SpecStatusDraft,
+	})
+	if err != nil {
+		t.Fatalf("Create draft returned error: %v", err)
+	}
+	input := EnsureSpecImplementationInput{
+		Title:               "Draft spec implementation",
+		Cwd:                 draft.Cwd,
+		ModelID:             draft.ModelID,
+		Provider:            draft.Provider,
+		SpecID:              draft.SpecID,
+		SpecFilePath:        "/repo/.zero/specs/2026-06-08-spec.md",
+		SpecDraftModelID:    "gpt-5",
+		SpecDraftReasoning:  "high",
+		SpecUserComment:     "ship it",
+		SpecSourceSessionID: draft.SessionID,
+		Prompt:              "Implement the approved spec.",
+	}
+
+	first, firstEvents, err := store.EnsureSpecImplementation(input)
+	if err != nil {
+		t.Fatalf("EnsureSpecImplementation first returned error: %v", err)
+	}
+	second, secondEvents, err := store.EnsureSpecImplementation(input)
+	if err != nil {
+		t.Fatalf("EnsureSpecImplementation second returned error: %v", err)
+	}
+
+	if second.SessionID != first.SessionID {
+		t.Fatalf("implementation session was not reused: first=%s second=%s", first.SessionID, second.SessionID)
+	}
+	if len(firstEvents) != 1 || len(secondEvents) != 1 || second.EventCount != 1 {
+		t.Fatalf("expected one implementation prompt event, first=%#v second=%#v metadata=%#v", firstEvents, secondEvents, second)
+	}
+	items, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	implCount := 0
+	for _, item := range items {
+		if item.SessionKind == SessionKindSpecImpl {
+			implCount++
+		}
+	}
+	if implCount != 1 {
+		t.Fatalf("implementation session count = %d, want 1", implCount)
+	}
+}
+
 func fixedClock(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

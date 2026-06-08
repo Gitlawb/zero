@@ -55,6 +55,7 @@ func TestParseCommand(t *testing.T) {
 		{input: "/find needle", kind: commandSearch, text: "needle"},
 		{input: "/resume", kind: commandResume},
 		{input: "/sessions", kind: commandResume},
+		{input: "/spec add review flow", kind: commandSpec, text: "add review flow"},
 		{input: "/compact", kind: commandCompact},
 		{input: "/effort high", kind: commandEffort, text: "high"},
 		{input: "/style concise", kind: commandStyle, text: "concise"},
@@ -86,7 +87,7 @@ func TestCommandRegistryResolvesAliasesAndFormatsHelp(t *testing.T) {
 	}
 
 	help := strings.Join(formatCommandHelpLines(), "\n")
-	for _, want := range []string{"/model", "/context", "/debug", "/permissions", "model"} {
+	for _, want := range []string{"/model", "/context", "/debug", "/permissions", "/spec", "model"} {
 		assertContains(t, help, want)
 	}
 }

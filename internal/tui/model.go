@@ -68,6 +68,7 @@ type model struct {
 	flushRunIDs       map[int]struct{}
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
+	pendingSpecReview *pendingSpecReviewPrompt
 	width             int
 	height            int
 	now               func() time.Time
@@ -119,6 +120,7 @@ type agentResponseMsg struct {
 	usageEvents   []zeroruntime.Usage
 	usageModelID  string
 	sessionEvents []pendingSessionEvent
+	specReview    *pendingSpecReviewPrompt
 	err           error
 }
 
@@ -163,6 +165,21 @@ type pendingAskUserPrompt struct {
 	answer  func([]string)
 	index   int
 	answers []string
+}
+
+type pendingSpecReviewPrompt struct {
+	SpecID         string
+	SpecTitle      string
+	SpecFilePath   string
+	RelativePath   string
+	DraftSessionID string
+}
+
+type tuiAgentRunOptions struct {
+	registry       *tools.Registry
+	permissionMode agent.PermissionMode
+	systemPrompt   string
+	specDraft      bool
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -278,6 +295,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.resolveAskUser(true)
 			}
+			if m.pendingSpecReview != nil {
+				return m.cancelSpecReview()
+			}
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
 			if m.picker != nil {
@@ -301,6 +321,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.submitAskUserAnswer()
 			}
+			if m.pendingSpecReview != nil {
+				return m, nil
+			}
 			if m.picker != nil {
 				return m.choosePicker()
 			}
@@ -316,7 +339,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.picker == nil {
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.picker == nil {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
@@ -350,6 +373,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
+		}
+		if m.pendingSpecReview != nil {
+			return m.handleSpecReviewKey(msg)
 		}
 		if m.pendingPermission != nil {
 			return m.handlePermissionKey(msg)
@@ -487,6 +513,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text: msg.err.Error(),
 			})
 		}
+		if msg.specReview != nil {
+			m = m.activateSpecReview(*msg.specReview)
+		}
 		return m, nil
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
@@ -543,6 +572,11 @@ func (m model) transcriptView() string {
 		default:
 			builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
 		}
+		builder.WriteString("\n")
+	}
+	if m.pendingSpecReview != nil {
+		builder.WriteString("\n")
+		builder.WriteString(renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width))
 		builder.WriteString("\n")
 	}
 
@@ -804,6 +838,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
+	case commandSpec:
+		m.showSplash = false
+		return m.handleSpecCommand(command.text)
 	case commandCompact:
 		m.showSplash = false
 		text := ""
@@ -988,14 +1025,28 @@ func (m *model) cancelRun() {
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {
+	return m.runAgentWithOptions(runID, runCtx, prompt, images, tuiAgentRunOptions{})
+}
+
+func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
+		var specReview *pendingSpecReviewPrompt
 		options := m.agentOptions
 		options.Registry = m.registry
+		if runOptions.registry != nil {
+			options.Registry = runOptions.registry
+		}
 		options.PermissionMode = m.permissionMode
+		if runOptions.permissionMode != "" {
+			options.PermissionMode = runOptions.permissionMode
+		}
+		if runOptions.systemPrompt != "" {
+			options.SystemPrompt = runOptions.systemPrompt
+		}
 		options.SessionID = m.activeSession.SessionID
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
@@ -1121,6 +1172,11 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 
 		onToolResult := options.OnToolResult
 		options.OnToolResult = func(result agent.ToolResult) {
+			if runOptions.specDraft {
+				if info, ok := tuiSpecReviewFromToolResult(result, m.activeSession.SessionID); ok {
+					specReview = &info
+				}
+			}
 			row := transcriptRow{
 				kind:   rowToolResult,
 				id:     result.ToolCallID,
@@ -1139,6 +1195,9 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 			}
 			if result.Redacted {
 				toolPayload["redacted"] = true
+			}
+			if len(result.Meta) > 0 {
+				toolPayload["meta"] = result.Meta
 			}
 			if len(result.ChangedFiles) > 0 {
 				toolPayload["changedFiles"] = result.ChangedFiles
@@ -1189,6 +1248,17 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 				Payload: map[string]any{"message": err.Error()},
 			})
 			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err}
+		}
+		if runOptions.specDraft {
+			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
+				err := fmt.Errorf("spec draft ended without submit_spec")
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type:    sessions.EventError,
+					Payload: map[string]any{"message": err.Error()},
+				})
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err}
+			}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview}
 		}
 		rows = append(rows, transcriptRow{kind: rowAssistant, text: result.FinalAnswer})
 		sessionEvents = append(sessionEvents, pendingSessionEvent{

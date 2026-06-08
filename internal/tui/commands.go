@@ -25,6 +25,7 @@ const (
 	commandPlan
 	commandSearch
 	commandResume
+	commandSpec
 	commandCompact
 	commandRewind
 	commandEffort
@@ -145,6 +146,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "List recent sessions or show resume guidance.",
 		kind:        commandResume,
+	},
+	{
+		name:        "/spec",
+		usage:       "/spec <task>",
+		group:       commandGroupSession,
+		description: "Draft an implementation spec for review before editing.",
+		kind:        commandSpec,
 	},
 	{
 		name:        "/compact",

@@ -181,6 +181,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSearch(args[1:], stdout, stderr, deps)
 	case "sessions", "session":
 		return runSessions(args[1:], stdout, stderr, deps)
+	case "spec":
+		return runSpec(args[1:], stdout, stderr, deps)
 	case "specialists", "specialist":
 		return runSpecialists(args[1:], stdout, stderr, deps)
 	case "plugins", "plugin":
@@ -393,6 +395,9 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) (*s
 }
 
 func shouldRegisterExecSpecialistTools(options execOptions) bool {
+	if options.useSpec {
+		return false
+	}
 	if strings.EqualFold(strings.TrimSpace(options.tag), specialist.SessionTagSpecialist) {
 		return false
 	}
@@ -444,6 +449,7 @@ Commands:
   search     Search persisted local Zero session events
   find       Alias for search
   sessions   Inspect local Zero session lineage
+  spec       Review and approve saved spec-mode drafts
   specialist Manage local Zero specialist profiles
   plugins    Inspect local Zero plugin manifests
   skills     Inspect local Zero skills
@@ -487,6 +493,10 @@ Flags:
       --image <path>                 Attach a local image (repeatable; vision models only)
       --mode <name>                  Apply a preset (smart, deep, fast, large, precise); explicit flags override it
   -m, --model <model>                Select the model for provider setup
+      --use-spec                     Draft a spec first and stop for review
+      --spec-model <model>           Override the draft model when --use-spec is set
+      --spec-reasoning-effort <effort>
+                                    Override draft reasoning effort when --use-spec is set
       --max-turns <number>           Override the maximum agent loop turns
       --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
       --enabled-tools <tools>        Only expose these comma or space separated tools

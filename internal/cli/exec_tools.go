@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -47,7 +48,24 @@ func validateExecToolFilters(options execOptions, registry *tools.Registry) erro
 			return execUsageError{fmt.Sprintf("Tool cannot be both enabled and disabled: %s", name)}
 		}
 	}
+	if options.useSpec {
+		if disabled[specmode.SubmitToolName] {
+			return execUsageError{"--use-spec requires submit_spec; remove it from --disabled-tools."}
+		}
+		if len(options.enabledTools) > 0 && !toolListContains(options.enabledTools, specmode.SubmitToolName) {
+			return execUsageError{"--use-spec requires submit_spec; include it in --enabled-tools."}
+		}
+	}
 	return nil
+}
+
+func toolListContains(names []string, want string) bool {
+	for _, name := range names {
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error) {

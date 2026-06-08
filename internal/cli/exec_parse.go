@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/specialist"
 )
 
 func parseExecArgs(args []string) (execOptions, bool, error) {
@@ -112,6 +113,34 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--reasoning-effort="):
 			options.reasoningEffort = strings.TrimSpace(strings.TrimPrefix(arg, "--reasoning-effort="))
+		case arg == "--use-spec":
+			options.useSpec = true
+		case arg == "--spec-model":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.specModel = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--spec-model="):
+			value, err := requiredInlineFlagValue(arg, "--spec-model")
+			if err != nil {
+				return options, false, err
+			}
+			options.specModel = value
+		case arg == "--spec-reasoning-effort":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.specReasoningEffort = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--spec-reasoning-effort="):
+			value, err := requiredInlineFlagValue(arg, "--spec-reasoning-effort")
+			if err != nil {
+				return options, false, err
+			}
+			options.specReasoningEffort = value
 		case arg == "--max-turns":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -316,6 +345,18 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 
 	if (options.resume != "" || options.resumeLatest) && options.fork != "" {
 		return options, false, execUsageError{"Use either --resume or --fork, not both."}
+	}
+	if options.useSpec && (options.resume != "" || options.resumeLatest || options.fork != "") {
+		return options, false, execUsageError{"--use-spec cannot be combined with --resume or --fork."}
+	}
+	if options.useSpec && strings.EqualFold(strings.TrimSpace(options.tag), specialist.SessionTagSpecialist) {
+		return options, false, execUsageError{"--use-spec cannot be used inside a specialist child session."}
+	}
+	if !options.useSpec && options.specModel != "" {
+		return options, false, execUsageError{"--spec-model requires --use-spec."}
+	}
+	if !options.useSpec && options.specReasoningEffort != "" {
+		return options, false, execUsageError{"--spec-reasoning-effort requires --use-spec."}
 	}
 	if options.initSessionID != "" && (options.resume != "" || options.resumeLatest) {
 		return options, false, execUsageError{"Use --init-session-id only when creating or forking a session."}

@@ -18,6 +18,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -57,6 +58,9 @@ type execOptions struct {
 	// selection") and TestRunExecAcceptsLegacyModelProfileFlags.
 	modelProfile          string
 	reasoningEffort       string
+	useSpec               bool
+	specModel             string
+	specReasoningEffort   string
 	maxTurns              int
 	cwd                   string
 	inputFormat           execInputFormat
@@ -141,11 +145,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
+	if options.useSpec {
+		permissionMode = agent.PermissionModeSpecDraft
+	}
 	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options))
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
+	if options.useSpec {
+		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
+	}
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -177,8 +187,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	modelRegistry, _ := modelregistry.DefaultRegistry()
 
 	overrides := config.Overrides{}
-	if options.model != "" {
-		resolvedModel, notice := resolveSelectedModel(modelRegistry, options.model)
+	modelOverride := options.model
+	if options.useSpec && options.specModel != "" {
+		modelOverride = options.specModel
+	}
+	if modelOverride != "" {
+		resolvedModel, notice := resolveSelectedModel(modelRegistry, modelOverride)
 		overrides.Provider.Model = resolvedModel
 		if notice != "" {
 			if _, err := fmt.Fprintln(stderr, notice); err != nil {
@@ -218,12 +232,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
+	runReasoningEffort := options.reasoningEffort
+	if options.useSpec && options.specReasoningEffort != "" {
+		runReasoningEffort = options.specReasoningEffort
+	}
 	// Evaluate the --reasoning-effort advisory against the EFFECTIVE resolved
 	// model (resolved.Provider.Model), not the override. Without an explicit
 	// --model the override model is empty, so checking it here would silently
 	// skip the advisory even though the run uses a concrete effective model.
-	if options.reasoningEffort != "" {
-		if notice := reasoningEffortNotice(modelRegistry, resolved.Provider.Model, options.reasoningEffort); notice != "" {
+	if runReasoningEffort != "" {
+		if notice := reasoningEffortNotice(modelRegistry, resolved.Provider.Model, runReasoningEffort); notice != "" {
 			if _, err := fmt.Fprintln(stderr, notice); err != nil {
 				return exitCrash
 			}
@@ -237,6 +255,26 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	runMetadata, err := resolveExecRunMetadata(resolved.Provider)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
+	}
+	if options.useSpec {
+		return runExecSpecDraft(execSpecDraftRun{
+			options:            options,
+			stdout:             stdout,
+			stderr:             stderr,
+			deps:               deps,
+			workspaceRoot:      workspaceRoot,
+			registry:           registry,
+			modelRegistry:      modelRegistry,
+			resolved:           resolved,
+			runMetadata:        runMetadata,
+			provider:           provider,
+			sandboxEngine:      sandboxEngine,
+			prompt:             prompt,
+			sessionTitle:       sessionTitle,
+			images:             images,
+			reasoningEffort:    runReasoningEffort,
+			specPermissionMode: permissionMode,
+		})
 	}
 
 	preparedSession := sessions.PreparedExec{}
@@ -318,7 +356,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Depth:            options.depth,
 		SessionTitle:     sessionTitle,
 		Model:            resolved.Provider.Model,
-		ReasoningEffort:  options.reasoningEffort,
+		ReasoningEffort:  runReasoningEffort,
 		Cwd:              workspaceRoot,
 		Images:           images,
 		Registry:         registry,
