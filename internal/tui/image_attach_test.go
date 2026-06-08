@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 func TestModelSupportsVisionTUI(t *testing.T) {
@@ -155,5 +158,56 @@ func TestZerolineViewShowsImageChips(t *testing.T) {
 	view := m.zerolineView()
 	if !strings.Contains(view, "photo.png") {
 		t.Fatalf("zeroline view should show pending image chip, got:\n%s", view)
+	}
+}
+
+func TestSubmitThreadsImagesThenClears(t *testing.T) {
+	root := t.TempDir()
+	writeTestPNG(t, root, "photo.png")
+
+	captured := make(chan []zeroruntime.ImageBlock, 1)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ok"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+
+	m := newModel(context.Background(), Options{
+		Cwd:          root,
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
+	})
+	// Capture the Images the agent run is launched with.
+	m.agentOptions.OnText = func(string) {}
+	m.captureRunImages = func(imgs []zeroruntime.ImageBlock) { captured <- imgs }
+
+	m.input.SetValue("/image photo.png")
+	updated, _ := m.handleSubmit()
+	m = updated.(model)
+	if len(m.pendingImages) != 1 {
+		t.Fatalf("setup: expected 1 staged image, got %d", len(m.pendingImages))
+	}
+
+	m.input.SetValue("describe this")
+	updated, cmd := m.handleSubmit()
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected a prompt submit to start a run")
+	}
+	if len(next.pendingImages) != 0 || len(next.pendingImageLabels) != 0 {
+		t.Fatalf("submit must clear pending images, got %d/%d", len(next.pendingImages), len(next.pendingImageLabels))
+	}
+
+	cmd() // run the agent goroutine; it invokes captureRunImages
+
+	select {
+	case imgs := <-captured:
+		if len(imgs) != 1 || imgs[0].MediaType != "image/png" {
+			t.Fatalf("agent run should receive 1 png image, got %#v", imgs)
+		}
+	default:
+		t.Fatal("expected captureRunImages to be invoked with the staged image")
 	}
 }

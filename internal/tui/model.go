@@ -101,6 +101,11 @@ type model struct {
 	// no attachments = today's text-only behavior exactly.
 	pendingImages      []zeroruntime.ImageBlock
 	pendingImageLabels []string
+
+	// captureRunImages, when set, is invoked with the images a run is launched
+	// with. Nil in production; used by tests to assert image threading without a
+	// real provider round-trip.
+	captureRunImages func([]zeroruntime.ImageBlock)
 }
 
 type agentTextMsg struct {
@@ -923,12 +928,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 			command.text = agentPrompt
 		}
+		turnImages := m.pendingImages
+		m.pendingImages = nil
+		m.pendingImageLabels = nil
 		runCtx, cancel := context.WithCancel(m.ctx)
 		m.runID++
 		m.activeRunID = m.runID
 		m.runCancel = cancel
 		m.pending = true
-		return m, m.runAgent(m.activeRunID, runCtx, command.text)
+		return m, m.runAgent(m.activeRunID, runCtx, command.text, turnImages)
 	default:
 		return m, nil
 	}
@@ -962,7 +970,7 @@ func (m *model) cancelRun() {
 	m.pendingAskUser = nil
 }
 
-func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cmd {
+func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {
 	return func() tea.Msg {
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
@@ -975,6 +983,10 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string) tea.Cm
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.Cwd = m.cwd
+		options.Images = images
+		if m.captureRunImages != nil {
+			m.captureRunImages(images)
+		}
 		// Enable agent-loop compaction sized to the active model's context
 		// window. An unknown/custom model resolves to 0, leaving compaction off.
 		options.ContextWindow = modelContextWindow(m.modelName)
