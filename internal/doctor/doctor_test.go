@@ -186,6 +186,37 @@ func TestConfigValidationCheckFailsSemanticIssue(t *testing.T) {
 	}
 }
 
+func TestConfigValidationCheckFailsUnreadableConfig(t *testing.T) {
+	// A present-but-unreadable path (here: a directory, which os.ReadFile rejects
+	// with a non-not-exist error) must surface as a failing detail rather than
+	// silently passing validation. A missing path stays a skip (covered by
+	// TestRunReportRedactsProviderSecretsAndWarnsWithoutConnectivity), so this
+	// guards only the non-not-exist branch.
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config.json")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+
+	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:13:00Z"), Runtime: "go", ProjectConfig: configDir})
+
+	if report.OK {
+		t.Fatalf("unreadable config should fail report: %#v", report)
+	}
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusFail {
+		t.Fatalf("expected config.validation fail for unreadable path, got %#v", report.Checks)
+	}
+	entry, ok := check.Details[configDir].(map[string]any)
+	if !ok {
+		t.Fatalf("expected per-path map entry for %q, got %#v", configDir, check.Details)
+	}
+	message, _ := entry["error"].(string)
+	if !strings.Contains(message, "unreadable:") {
+		t.Fatalf("expected unreadable error detail, got %#v", entry)
+	}
+}
+
 func TestConfigValidationCheckSkippedWhenNoPaths(t *testing.T) {
 	report := Run(Options{Now: fixedDoctorClock("2026-06-08T10:15:00Z"), Runtime: "go"})
 

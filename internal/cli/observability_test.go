@@ -266,6 +266,9 @@ func TestRunDoctorReportsConfigValidationForMalformedFile(t *testing.T) {
 	if exitCode != exitProvider {
 		t.Fatalf("expected provider exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
 	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
 	var report struct {
 		OK     bool `json:"ok"`
 		Checks []struct {

@@ -246,10 +246,17 @@ func configValidationCheck(userPath string, projectPath string) Check {
 	for _, path := range paths {
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			// configFilesCheck only checks that path strings are non-empty, not
-			// that files are readable. DefaultResolveOptions returns "" for paths
-			// that fail to stat, so a non-empty resolved path that still can't be
-			// read is essentially unreachable — skip defensively.
+			// A genuinely-missing path is configFilesCheck's job to report, and a
+			// "missing" path must stay a skip — so a not-exist read error is ignored
+			// here. Any OTHER read error (permissions, is-a-directory) means a
+			// present-but-unreadable config that would otherwise silently pass
+			// validation, so surface it as a failing per-path detail.
+			if os.IsNotExist(readErr) {
+				continue
+			}
+			details[path] = map[string]any{"error": "unreadable: " + readErr.Error()}
+			status = StatusFail
+			issueCount++
 			continue
 		}
 		if line, col, ok := jsonParsePosition(data); ok {
@@ -307,8 +314,10 @@ func jsonParsePosition(data []byte) (int, int, bool) {
 		line, col := offsetToLineCol(data, typeErr.Offset)
 		return line, col, true
 	}
-	// Non-positional JSON error (e.g. unexpected EOF without offset) — still a parse failure.
-	return 1, 1, true
+	// Non-positional JSON error (e.g. unexpected EOF without offset): do not
+	// fabricate a (1,1) position. Returning ok=false routes the error through the
+	// no-position ValidateBytes path so it is reported without a fake line/col.
+	return 0, 0, false
 }
 
 func passFail(ok bool) string {
