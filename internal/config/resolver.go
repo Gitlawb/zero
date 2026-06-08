@@ -199,9 +199,6 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 	apiKey := strings.TrimSpace(env.APIKey)
 	baseURL := strings.TrimSpace(env.BaseURL)
 	model := strings.TrimSpace(env.Model)
-	if providerKind == ProviderKindOpenAI && apiKey != "" && model == "" && isOfficialOpenAIBaseURL(baseURL) {
-		model = modelregistry.DefaultModelID
-	}
 	if apiKey == "" && baseURL == "" && model == "" {
 		return
 	}
@@ -330,7 +327,19 @@ func hasProviderFields(profile ProviderProfile) bool {
 	return HasProviderProfile(profile)
 }
 
+type normalizeOptions struct {
+	defaultOpenAIModel bool
+}
+
 func normalizeProviders(providers []ProviderProfile, activeName string, envMaps ...map[string]string) ([]ProviderProfile, ProviderProfile, error) {
+	return normalizeProvidersWithOptions(providers, activeName, normalizeOptions{defaultOpenAIModel: true}, envMaps...)
+}
+
+func normalizeProvidersWithoutModelDefaults(providers []ProviderProfile, activeName string, envMaps ...map[string]string) ([]ProviderProfile, ProviderProfile, error) {
+	return normalizeProvidersWithOptions(providers, activeName, normalizeOptions{}, envMaps...)
+}
+
+func normalizeProvidersWithOptions(providers []ProviderProfile, activeName string, options normalizeOptions, envMaps ...map[string]string) ([]ProviderProfile, ProviderProfile, error) {
 	activeName = strings.TrimSpace(activeName)
 	var env map[string]string
 	if len(envMaps) > 0 {
@@ -351,7 +360,7 @@ func normalizeProviders(providers []ProviderProfile, activeName string, envMaps 
 	var active ProviderProfile
 	activeFound := false
 	for _, provider := range providers {
-		next, err := normalizeProvider(provider, env)
+		next, err := normalizeProvider(provider, env, options)
 		if err != nil {
 			return nil, ProviderProfile{}, err
 		}
@@ -372,7 +381,7 @@ func normalizeProviders(providers []ProviderProfile, activeName string, envMaps 
 	return normalized, active, nil
 }
 
-func normalizeProvider(profile ProviderProfile, env map[string]string) (ProviderProfile, error) {
+func normalizeProvider(profile ProviderProfile, env map[string]string, options normalizeOptions) (ProviderProfile, error) {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.Provider = strings.TrimSpace(profile.Provider)
 	profile.ProviderKind = ProviderKind(strings.TrimSpace(strings.ToLower(string(profile.ProviderKind))))
@@ -393,6 +402,9 @@ func normalizeProvider(profile ProviderProfile, env map[string]string) (Provider
 		if err != nil {
 			return ProviderProfile{}, providerError(profile, "%s", err.Error())
 		}
+		if !providercatalog.RuntimeSupported(descriptor) {
+			return ProviderProfile{}, providerError(profile, "provider %q uses transport %q: %s", descriptor.ID, descriptor.Transport, providercatalog.RuntimeUnsupportedReason(descriptor))
+		}
 		applyCatalogDescriptor(&profile, descriptor)
 	}
 	if profile.ProviderKind == "" && profile.Provider != "" {
@@ -409,6 +421,9 @@ func normalizeProvider(profile ProviderProfile, env map[string]string) (Provider
 	case ProviderKindOpenAI:
 		if profile.BaseURL == "" || isOfficialOpenAIBaseURL(profile.BaseURL) {
 			profile.BaseURL = OpenAIBaseURL
+			if options.defaultOpenAIModel && profile.Model == "" {
+				profile.Model = modelregistry.DefaultModelID
+			}
 			return profile, nil
 		}
 		return ProviderProfile{}, providerError(profile, "openai provider %s requires official baseURL %s", profile.Name, OpenAIBaseURL)
@@ -421,10 +436,11 @@ func normalizeProvider(profile ProviderProfile, env map[string]string) (Provider
 		}
 		return profile, nil
 	case ProviderKindAnthropic:
-		if profile.BaseURL == "" {
+		if profile.BaseURL == "" || isOfficialAnthropicBaseURL(profile.BaseURL) {
 			profile.BaseURL = AnthropicBaseURL
+			return profile, nil
 		}
-		return profile, nil
+		return ProviderProfile{}, providerError(profile, "anthropic provider %s requires official baseURL %s", profile.Name, AnthropicBaseURL)
 	case ProviderKindAnthropicCompat:
 		if profile.BaseURL == "" {
 			return ProviderProfile{}, providerError(profile, "anthropic-compatible provider %s requires baseURL", profile.Name)
@@ -434,10 +450,11 @@ func normalizeProvider(profile ProviderProfile, env map[string]string) (Provider
 		}
 		return profile, nil
 	case ProviderKindGoogle:
-		if profile.BaseURL == "" {
+		if profile.BaseURL == "" || isOfficialGoogleBaseURL(profile.BaseURL) {
 			profile.BaseURL = GoogleBaseURL
+			return profile, nil
 		}
-		return profile, nil
+		return ProviderProfile{}, providerError(profile, "google provider %s requires official baseURL %s", profile.Name, GoogleBaseURL)
 	default:
 		return ProviderProfile{}, providerError(profile, "unknown provider kind %q for provider %s", profile.ProviderKind, profile.Name)
 	}
@@ -471,6 +488,22 @@ func isOfficialAnthropicBaseURL(baseURL string) bool {
 		return false
 	}
 	official, err := url.Parse(AnthropicBaseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, official.Host)
+}
+
+func isOfficialGoogleBaseURL(baseURL string) bool {
+	normalized := strings.TrimSpace(baseURL)
+	if strings.TrimRight(normalized, "/") == strings.TrimRight(GoogleBaseURL, "/") {
+		return true
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	official, err := url.Parse(GoogleBaseURL)
 	if err != nil {
 		return false
 	}

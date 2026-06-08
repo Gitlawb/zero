@@ -94,7 +94,6 @@ var descriptors = []Descriptor{
 	openAICompat("bankr", "Bankr", "https://api.bankr.bot/v1", "bankr-large", []string{"BANKR_API_KEY"}),
 	openAICompat("zai", "Z.ai", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5", []string{"ZAI_API_KEY", "ZHIPU_API_KEY"}),
 	openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://gateway.gitlawb.com/v1", "gpt-4.1", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway"),
-	openAICompat("opencode", "OpenCode", "https://api.opencode.ai/v1", "qwen3-coder", []string{"OPENCODE_API_KEY"}),
 	openAICompat("atomic-chat", "Atomic Chat", "https://api.atomic.chat/v1", "gpt-4.1", []string{"ATOMIC_CHAT_API_KEY"}),
 	openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible"),
 	anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible"),

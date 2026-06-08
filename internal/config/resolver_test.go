@@ -511,6 +511,34 @@ func TestResolveUsesOpenAIAPIKeyOnlyWithDefaultModel(t *testing.T) {
 	}
 }
 
+func TestResolvePreservesOpenAIConfigModelWhenAPIKeyEnvIsSet(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "openai",
+		"providers": [{
+			"name": "openai",
+			"provider": "openai",
+			"model": "gpt-4.1-mini"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"OPENAI_API_KEY": "sk-env",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if resolved.Provider.Model != "gpt-4.1-mini" {
+		t.Fatalf("Model = %q, want configured model preserved", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKey != "sk-env" {
+		t.Fatalf("APIKey = %q, want env key attached", resolved.Provider.APIKey)
+	}
+}
+
 func TestResolveDoesNotDefaultOpenAICustomBaseURLModel(t *testing.T) {
 	_, err := Resolve(ResolveOptions{
 		Env: map[string]string{
@@ -533,15 +561,13 @@ func TestResolveDoesNotDefaultOpenAICustomBaseURLModel(t *testing.T) {
 func TestResolveUsesAnthropicEnvFallback(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		Env: map[string]string{
-			"ZERO_PROVIDER":      "anthropic",
-			"ANTHROPIC_API_KEY":  "sk-ant-env",
-			"ANTHROPIC_BASE_URL": "https://anthropic.example",
-			"ANTHROPIC_MODEL":    "claude-sonnet-4.5",
-			"OPENAI_API_KEY":     "sk-openai-env",
-			"OPENAI_MODEL":       "gpt-4.1",
-			"GEMINI_API_KEY":     "sk-google-env",
-			"GEMINI_MODEL":       "gemini-2.5-flash",
-			"GEMINI_BASE_URL":    "https://google.example",
+			"ZERO_PROVIDER":     "anthropic",
+			"ANTHROPIC_API_KEY": "sk-ant-env",
+			"ANTHROPIC_MODEL":   "claude-sonnet-4.5",
+			"OPENAI_API_KEY":    "sk-openai-env",
+			"OPENAI_MODEL":      "gpt-4.1",
+			"GEMINI_API_KEY":    "sk-google-env",
+			"GEMINI_MODEL":      "gemini-2.5-flash",
 		},
 	})
 	if err != nil {
@@ -557,11 +583,39 @@ func TestResolveUsesAnthropicEnvFallback(t *testing.T) {
 	if resolved.Provider.APIKey != "sk-ant-env" || resolved.Provider.Model != "claude-sonnet-4.5" {
 		t.Fatalf("Provider = %#v, want Anthropic env credentials/model", resolved.Provider)
 	}
-	if resolved.Provider.BaseURL != "https://anthropic.example" {
-		t.Fatalf("BaseURL = %q, want Anthropic env URL", resolved.Provider.BaseURL)
+	if resolved.Provider.BaseURL != AnthropicBaseURL {
+		t.Fatalf("BaseURL = %q, want official Anthropic URL", resolved.Provider.BaseURL)
 	}
 	if len(resolved.Providers) != 3 {
 		t.Fatalf("Providers = %#v, want openai, anthropic, and google env profiles", resolved.Providers)
+	}
+}
+
+func TestResolveRejectsAnthropicOfficialProviderCustomBaseURL(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "anthropic",
+		"providers": [{
+			"name": "anthropic",
+			"provider": "anthropic",
+			"baseURL": "https://attacker.example/anthropic",
+			"model": "claude-sonnet-4.5"
+		}]
+	}`)
+
+	_, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"ANTHROPIC_API_KEY": "sk-ant-secret",
+		},
+	})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want custom Anthropic baseURL rejection")
+	}
+	if !strings.Contains(err.Error(), "anthropic provider anthropic requires official baseURL") {
+		t.Fatalf("error = %q, want official Anthropic baseURL message", err.Error())
+	}
+	if strings.Contains(err.Error(), "sk-ant-secret") {
+		t.Fatalf("error leaked Anthropic API key: %q", err.Error())
 	}
 }
 
@@ -578,10 +632,9 @@ func TestResolveUsesAnthropicEnvFallbackWithCustomProfile(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		ProjectConfigPath: path,
 		Env: map[string]string{
-			"ZERO_PROVIDER":      "claude-prod",
-			"ANTHROPIC_API_KEY":  "sk-ant-env",
-			"ANTHROPIC_BASE_URL": "https://anthropic.example",
-			"ANTHROPIC_MODEL":    "claude-sonnet-4.5",
+			"ZERO_PROVIDER":     "claude-prod",
+			"ANTHROPIC_API_KEY": "sk-ant-env",
+			"ANTHROPIC_MODEL":   "claude-sonnet-4.5",
 		},
 	})
 	if err != nil {
@@ -597,8 +650,8 @@ func TestResolveUsesAnthropicEnvFallbackWithCustomProfile(t *testing.T) {
 	if resolved.Provider.APIKey != "sk-ant-env" || resolved.Provider.Model != "claude-sonnet-4.5" {
 		t.Fatalf("Provider = %#v, want Anthropic env credentials/model on custom profile", resolved.Provider)
 	}
-	if resolved.Provider.BaseURL != "https://anthropic.example" {
-		t.Fatalf("BaseURL = %q, want Anthropic env URL", resolved.Provider.BaseURL)
+	if resolved.Provider.BaseURL != AnthropicBaseURL {
+		t.Fatalf("BaseURL = %q, want official Anthropic URL", resolved.Provider.BaseURL)
 	}
 	if resolved.Provider.Description != "production Claude" {
 		t.Fatalf("Description = %q, want existing custom profile metadata preserved", resolved.Provider.Description)
@@ -611,10 +664,9 @@ func TestResolveUsesAnthropicEnvFallbackWithCustomProfile(t *testing.T) {
 func TestResolveUsesGoogleEnvFallbackAliases(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{
 		Env: map[string]string{
-			"ZERO_PROVIDER":   "google",
-			"GOOGLE_API_KEY":  "sk-google-env",
-			"GOOGLE_BASE_URL": "https://google.example",
-			"GOOGLE_MODEL":    "gemini-2.5-pro",
+			"ZERO_PROVIDER":  "google",
+			"GOOGLE_API_KEY": "sk-google-env",
+			"GOOGLE_MODEL":   "gemini-2.5-pro",
 		},
 	})
 	if err != nil {
@@ -630,8 +682,36 @@ func TestResolveUsesGoogleEnvFallbackAliases(t *testing.T) {
 	if resolved.Provider.APIKey != "sk-google-env" || resolved.Provider.Model != "gemini-2.5-pro" {
 		t.Fatalf("Provider = %#v, want Google env credentials/model", resolved.Provider)
 	}
-	if resolved.Provider.BaseURL != "https://google.example" {
-		t.Fatalf("BaseURL = %q, want Google env URL", resolved.Provider.BaseURL)
+	if resolved.Provider.BaseURL != GoogleBaseURL {
+		t.Fatalf("BaseURL = %q, want official Google URL", resolved.Provider.BaseURL)
+	}
+}
+
+func TestResolveRejectsGoogleOfficialProviderCustomBaseURL(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "google",
+		"providers": [{
+			"name": "google",
+			"provider": "google",
+			"baseURL": "https://attacker.example/google",
+			"model": "gemini-2.5-pro"
+		}]
+	}`)
+
+	_, err := Resolve(ResolveOptions{
+		ProjectConfigPath: path,
+		Env: map[string]string{
+			"GOOGLE_API_KEY": "sk-google-secret",
+		},
+	})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want custom Google baseURL rejection")
+	}
+	if !strings.Contains(err.Error(), "google provider google requires official baseURL") {
+		t.Fatalf("error = %q, want official Google baseURL message", err.Error())
+	}
+	if strings.Contains(err.Error(), "sk-google-secret") {
+		t.Fatalf("error leaked Google API key: %q", err.Error())
 	}
 }
 
@@ -934,6 +1014,24 @@ func TestResolveRejectsUnknownProviderCatalogID(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sk-secret-value") {
 		t.Fatalf("error leaked secret: %q", err.Error())
+	}
+}
+
+func TestResolveRejectsCatalogOnlyProviderRuntime(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "bedrock",
+		"providers": [{
+			"name": "bedrock",
+			"catalog_id": "bedrock"
+		}]
+	}`)
+
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want catalog-only runtime rejection")
+	}
+	if !strings.Contains(err.Error(), "native adapter not implemented yet") {
+		t.Fatalf("error = %q, want native adapter unsupported message", err.Error())
 	}
 }
 
