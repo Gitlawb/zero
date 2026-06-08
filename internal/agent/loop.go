@@ -396,6 +396,11 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
+		// A tool may signal a mid-run model escalation by carrying the target id
+		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
+		// the Run turn loop performs the actual provider switch. Empty for every
+		// ordinary tool result.
+		RequestedModel: result.Meta["escalate_to_model"],
 	}, nil
 }
 

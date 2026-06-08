@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -40,4 +41,69 @@ func TestToolResultRequestedModelFieldExists(t *testing.T) {
 	}
 	// Keep the zeroruntime import load-bearing so the file compiles standalone.
 	_ = zeroruntime.MessageRoleAssistant
+}
+
+// escalatingTool is a registered fake tool that returns the escalation signal
+// in result Meta (mirroring the real escalate_model tool's contract), used to
+// drive the loop-level switch in tests without depending on the tools package.
+type escalatingTool struct {
+	target string
+}
+
+func (t escalatingTool) Name() string       { return "escalate" }
+func (t escalatingTool) Description() string { return "requests a model switch for testing" }
+func (t escalatingTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (t escalatingTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow}
+}
+func (t escalatingTool) Run(_ context.Context, _ map[string]any) tools.Result {
+	meta := map[string]string{}
+	if t.target != "" {
+		meta["escalate_to_model"] = t.target
+	}
+	return tools.Result{Status: tools.StatusOK, Output: "escalating", Meta: meta}
+}
+
+// TestExecuteToolCallLiftsEscalationMeta verifies executeToolCall promotes the
+// tool's Meta["escalate_to_model"] into ToolResult.RequestedModel.
+func TestExecuteToolCallLiftsEscalationMeta(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: "claude-opus-4.1"})
+
+	result, abortErr := executeToolCall(
+		context.Background(),
+		registry,
+		ToolCall{ID: "c1", Name: "escalate"},
+		PermissionModeAuto,
+		Options{},
+	)
+	if abortErr != nil {
+		t.Fatal(abortErr)
+	}
+	if result.RequestedModel != "claude-opus-4.1" {
+		t.Fatalf("expected RequestedModel lifted from meta, got %q", result.RequestedModel)
+	}
+}
+
+// TestExecuteToolCallNoEscalationMetaLeavesRequestedModelEmpty verifies a normal
+// tool result (no escalate_to_model meta) leaves RequestedModel empty.
+func TestExecuteToolCallNoEscalationMetaLeavesRequestedModelEmpty(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(escalatingTool{target: ""})
+
+	result, abortErr := executeToolCall(
+		context.Background(),
+		registry,
+		ToolCall{ID: "c1", Name: "escalate"},
+		PermissionModeAuto,
+		Options{},
+	)
+	if abortErr != nil {
+		t.Fatal(abortErr)
+	}
+	if result.RequestedModel != "" {
+		t.Fatalf("expected empty RequestedModel without escalation meta, got %q", result.RequestedModel)
+	}
 }
