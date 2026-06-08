@@ -19,6 +19,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -196,6 +197,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if !config.HasProviderProfile(resolved.Provider) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
 	}
+	// Activate deferred MCP-tool loading for this run only when the deferred-
+	// eligible count meets the resolved threshold; below threshold this is a
+	// no-op and tool advertising stays byte-identical. The registry is already
+	// complete (core + MCP) at this point, so the count is accurate.
+	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold)
 	images, err := resolveExecImages(options.imagePaths, workspaceRoot)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -311,6 +317,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
+		DeferThreshold:   resolved.Tools.DeferThreshold,
 		SessionID:        preparedSession.Session.SessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,
@@ -412,6 +419,34 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// deferredEligibleCount returns the number of registered tools that are
+// deferred-eligible (MCP tools). Built-ins never implement the Deferred
+// interface, so they never count.
+func deferredEligibleCount(registry *tools.Registry) int {
+	count := 0
+	for _, tool := range registry.All() {
+		if tools.IsDeferred(tool) {
+			count++
+		}
+	}
+	return count
+}
+
+// registerToolSearchIfEligible registers the tool_search tool only when deferral
+// is active for this run: the deferred-eligible count meets the (positive)
+// threshold. Below threshold or with a zero/negative threshold, tool_search is
+// never registered, so the agent loop's partition stays inactive and tool
+// advertising is byte-identical to today.
+func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int) {
+	if deferThreshold <= 0 {
+		return
+	}
+	if deferredEligibleCount(registry) < deferThreshold {
+		return
+	}
+	registry.Register(tools.NewToolSearchTool(registry))
 }
 
 func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps) (*sandbox.Engine, error) {
