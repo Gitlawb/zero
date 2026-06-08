@@ -37,3 +37,13 @@ func TestParseExecImageFlagRequiresValue(t *testing.T) {
 		t.Fatalf("expected --image requires a value error, got %v", err)
 	}
 }
+
+// TestParseExecImageInlineFlagRejectsEmpty locks that the inline `--image=` form
+// rejects an empty value (the same empty-rejection the other inline flags use)
+// instead of appending an empty image path.
+func TestParseExecImageInlineFlagRejectsEmpty(t *testing.T) {
+	if _, _, err := parseExecArgs([]string{"--image=", "prompt"}); err == nil ||
+		!strings.Contains(err.Error(), "--image requires a value") {
+		t.Fatalf("expected --image requires a value error for empty inline value, got %v", err)
+	}
+}

@@ -67,7 +67,11 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.imagePaths = append(options.imagePaths, value)
 			index = next
 		case strings.HasPrefix(arg, "--image="):
-			options.imagePaths = append(options.imagePaths, strings.TrimSpace(strings.TrimPrefix(arg, "--image=")))
+			value, err := requiredInlineFlagValue(arg, "--image")
+			if err != nil {
+				return options, false, err
+			}
+			options.imagePaths = append(options.imagePaths, value)
 		case arg == "--mode":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
