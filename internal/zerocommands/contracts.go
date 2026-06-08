@@ -105,6 +105,15 @@ type SessionSnapshot struct {
 	ForkedFromSequence  int    `json:"forkedFromSequence,omitempty"`
 	SpawnedFromEventID  string `json:"spawnedFromEventId,omitempty"`
 	SpawnedFromSequence int    `json:"spawnedFromSequence,omitempty"`
+	SpecID              string `json:"specId,omitempty"`
+	SpecFilePath        string `json:"specFilePath,omitempty"`
+	SpecStatus          string `json:"specStatus,omitempty"`
+	SpecDraftModelID    string `json:"specDraftModelId,omitempty"`
+	SpecDraftReasoning  string `json:"specDraftReasoning,omitempty"`
+	SpecUserComment     string `json:"specUserComment,omitempty"`
+	SpecRejectReason    string `json:"specRejectReason,omitempty"`
+	SpecSourceSessionID string `json:"specSourceSessionId,omitempty"`
+	SpecImplSessionID   string `json:"specImplSessionId,omitempty"`
 	CreatedAt           string `json:"createdAt,omitempty"`
 	UpdatedAt           string `json:"updatedAt,omitempty"`
 	EventCount          int    `json:"eventCount"`
@@ -294,6 +303,15 @@ func SessionSnapshotFromMetadata(item sessions.Metadata) SessionSnapshot {
 		ForkedFromSequence:  item.ForkedFromSequence,
 		SpawnedFromEventID:  item.SpawnedFromEventID,
 		SpawnedFromSequence: item.SpawnedFromSequence,
+		SpecID:              item.SpecID,
+		SpecFilePath:        item.SpecFilePath,
+		SpecStatus:          string(item.SpecStatus),
+		SpecDraftModelID:    item.SpecDraftModelID,
+		SpecDraftReasoning:  item.SpecDraftReasoning,
+		SpecUserComment:     item.SpecUserComment,
+		SpecRejectReason:    item.SpecRejectReason,
+		SpecSourceSessionID: item.SpecSourceSessionID,
+		SpecImplSessionID:   item.SpecImplSessionID,
 		CreatedAt:           item.CreatedAt,
 		UpdatedAt:           item.UpdatedAt,
 		EventCount:          item.EventCount,

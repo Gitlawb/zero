@@ -266,6 +266,35 @@ func TestSessionSnapshotsPreserveLineageFields(t *testing.T) {
 	}
 }
 
+func TestSessionSnapshotsExposeSpecFields(t *testing.T) {
+	snapshot := SessionSnapshotFromMetadata(sessions.Metadata{
+		SessionID:           "draft",
+		SessionKind:         sessions.SessionKindSpecDraft,
+		SpecID:              "2026-06-08-spec-mode",
+		SpecFilePath:        "/repo/.zero/specs/2026-06-08-spec-mode.md",
+		SpecStatus:          sessions.SpecStatusDraft,
+		SpecDraftModelID:    "gpt-5",
+		SpecDraftReasoning:  "high",
+		SpecUserComment:     "looks good",
+		SpecRejectReason:    "too broad",
+		SpecSourceSessionID: "source",
+		SpecImplSessionID:   "impl",
+	})
+
+	if snapshot.Kind != string(sessions.SessionKindSpecDraft) ||
+		snapshot.SpecID != "2026-06-08-spec-mode" ||
+		snapshot.SpecFilePath == "" ||
+		snapshot.SpecStatus != string(sessions.SpecStatusDraft) ||
+		snapshot.SpecDraftModelID != "gpt-5" ||
+		snapshot.SpecDraftReasoning != "high" ||
+		snapshot.SpecUserComment != "looks good" ||
+		snapshot.SpecRejectReason != "too broad" ||
+		snapshot.SpecSourceSessionID != "source" ||
+		snapshot.SpecImplSessionID != "impl" {
+		t.Fatalf("spec fields missing from snapshot: %#v", snapshot)
+	}
+}
+
 func findCatalogSnapshot(t *testing.T, snapshots []ProviderCatalogSnapshot, id string) ProviderCatalogSnapshot {
 	t.Helper()
 

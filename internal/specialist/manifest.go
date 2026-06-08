@@ -104,6 +104,7 @@ var knownToolNames = map[string]bool{
 	"glob":           true,
 	"grep":           true,
 	"skill":          true,
+	"ask_user":       true,
 	"write_file":     true,
 	"edit_file":      true,
 	"apply_patch":    true,

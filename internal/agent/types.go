@@ -18,9 +18,16 @@ type PermissionAction string
 type PermissionDecisionAction string
 
 const (
-	PermissionModeAuto   PermissionMode = "auto"
-	PermissionModeAsk    PermissionMode = "ask"
-	PermissionModeUnsafe PermissionMode = "unsafe"
+	PermissionModeAuto      PermissionMode = "auto"
+	PermissionModeAsk       PermissionMode = "ask"
+	PermissionModeUnsafe    PermissionMode = "unsafe"
+	PermissionModeSpecDraft PermissionMode = "spec-draft"
+)
+
+type StopReason string
+
+const (
+	StopReasonSpecReviewRequired StopReason = "spec_review_required"
 )
 
 const (
@@ -129,6 +136,7 @@ type Options struct {
 	Model            string
 	ReasoningEffort  string
 	Cwd              string
+	SystemPrompt     string
 	// ContextWindow is the model's maximum input token budget. When > 0 the agent
 	// loop compacts long conversations once the estimated size crosses a fraction
 	// of this window. 0 DISABLES compaction entirely (every existing caller/test
@@ -160,4 +168,5 @@ type Result struct {
 	FinalAnswer string
 	Turns       int
 	Messages    []Message
+	StopReason  StopReason
 }

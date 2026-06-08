@@ -12,6 +12,7 @@ import (
 
 type sessionCommandOptions struct {
 	json           bool
+	kind           sessions.SessionKind
 	sequence       int
 	eventID        string
 	excludeTarget  bool
@@ -90,8 +91,26 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			options.json = true
 		case "--exclude-target":
 			options.excludeTarget = true
+		case "--kind":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			kind, err := parseSessionKindFlag(value)
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			options.kind = kind
+			index = next
 		default:
 			switch {
+			case strings.HasPrefix(arg, "--kind="):
+				kind, err := parseSessionKindFlag(strings.TrimPrefix(arg, "--kind="))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.kind = kind
+				continue
 			case arg == "--sequence":
 				value, next, err := nextFlagValue(args, index, arg)
 				if err != nil {
@@ -194,6 +213,16 @@ func parseNonEmptySessionsFlag(flag string, value string) (string, error) {
 	return trimmed, nil
 }
 
+func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
+	kind := sessions.SessionKind(strings.ToLower(strings.TrimSpace(value)))
+	switch kind {
+	case sessions.SessionKindFork, sessions.SessionKindChild, sessions.SessionKindSpecDraft, sessions.SessionKindSpecImpl:
+		return kind, nil
+	default:
+		return "", execUsageError{fmt.Sprintf("invalid --kind %q. Expected fork, child, spec-draft, or spec-impl.", value)}
+	}
+}
+
 func isSessionsCommand(command string) bool {
 	switch command {
 	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan":
@@ -204,6 +233,9 @@ func isSessionsCommand(command string) bool {
 }
 
 func validateSessionCommandFlags(command string, options sessionCommandOptions) error {
+	if options.kind != "" && command != "list" {
+		return execUsageError{"--kind is only valid for sessions list"}
+	}
 	hasRewindFlag := options.sequence > 0 || strings.TrimSpace(options.eventID) != "" || options.excludeTarget
 	if hasRewindFlag && command != "rewind-plan" && command != "rewind" {
 		return execUsageError{"--sequence, --event, and --exclude-target are only valid for sessions rewind-plan and rewind"}
@@ -220,6 +252,7 @@ func runSessionsList(store *sessions.Store, options sessionCommandOptions, stdou
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	items = filterSessionsByKind(items, options.kind)
 	if options.json {
 		if err := writePrettyJSON(stdout, redaction.RedactValue(zerocommands.SessionSnapshots(items), redaction.Options{})); err != nil {
 			return exitCrash
@@ -230,6 +263,19 @@ func runSessionsList(store *sessions.Store, options sessionCommandOptions, stdou
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func filterSessionsByKind(items []sessions.Metadata, kind sessions.SessionKind) []sessions.Metadata {
+	if kind == "" {
+		return items
+	}
+	filtered := make([]sessions.Metadata, 0, len(items))
+	for _, item := range items {
+		if item.SessionKind == kind {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
 }
 
 func runSessionsChildren(store *sessions.Store, sessionID string, options sessionCommandOptions, stdout io.Writer, stderr io.Writer) int {
@@ -446,6 +492,12 @@ func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {
 	if session.TaskID != "" {
 		details = append(details, "task="+redact(session.TaskID))
 	}
+	if session.SpecStatus != "" {
+		details = append(details, "spec="+redact(session.SpecStatus))
+	}
+	if session.SpecID != "" {
+		details = append(details, "spec_id="+redact(session.SpecID))
+	}
 	if session.Tag != "" {
 		details = append(details, "tag="+redact(session.Tag))
 	}
@@ -483,6 +535,7 @@ Commands:
 
 Flags:
       --json            Print JSON output
+      --kind <kind>     Filter list by fork, child, spec-draft, or spec-impl
       --sequence <n>    Rewind target sequence (rewind-plan, rewind)
       --event <id>      Rewind target event id (rewind-plan, rewind)
       --exclude-target  Drop the target event (rewind-plan, rewind)

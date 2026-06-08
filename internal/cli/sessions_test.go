@@ -216,6 +216,51 @@ func TestRunSessionsValidatesArgs(t *testing.T) {
 	}
 }
 
+func TestRunSessionsListFiltersByKind(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: sequenceClockCLI([]time.Time{
+		time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 8, 12, 0, 1, 0, time.UTC),
+	})})
+	if _, err := store.Create(sessions.CreateInput{SessionID: "regular", Title: "Regular"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(sessions.CreateInput{
+		SessionID:   "draft",
+		SessionKind: sessions.SessionKindSpecDraft,
+		Title:       "Spec draft",
+		SpecID:      "2026-06-08-spec-draft",
+		SpecStatus:  sessions.SpecStatusDraft,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sessions", "list", "--kind", "spec-draft"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("sessions list --kind exit = %d, stderr = %q", exitCode, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "draft") || strings.Contains(output, "regular") || !strings.Contains(output, "spec=draft") {
+		t.Fatalf("filtered sessions output = %q", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sessions", "tree", "draft", "--kind", "spec-draft"}, &stdout, &stderr, appDeps{
+		newSessionStore: func() *sessions.Store {
+			return store
+		},
+	})
+	if exitCode != exitUsage || !strings.Contains(stderr.String(), "--kind is only valid for sessions list") {
+		t.Fatalf("expected --kind validation error, exit=%d stderr=%q", exitCode, stderr.String())
+	}
+}
+
 func sequenceClockCLI(values []time.Time) func() time.Time {
 	index := 0
 	return func() time.Time {

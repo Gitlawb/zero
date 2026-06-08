@@ -39,7 +39,10 @@ const maxProjectContextBytes = 8 << 10 // 8 KiB
 // guidelines), and the safety confirmation policy. It is built once per run so
 // every turn shares one (cacheable) system turn.
 func buildSystemPrompt(options Options) string {
-	core := strings.TrimSpace(coreSystemPrompt)
+	core := strings.TrimSpace(options.SystemPrompt)
+	if core == "" {
+		core = strings.TrimSpace(coreSystemPrompt)
+	}
 	if core == "" {
 		core = fallbackSystemPrompt
 	}

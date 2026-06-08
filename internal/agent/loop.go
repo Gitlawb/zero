@@ -15,6 +15,11 @@ import (
 
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
 
+const (
+	toolResultMetaControl       = "control"
+	toolResultControlSpecReview = "spec_review_required"
+)
+
 // abortedToolResultNotice is the placeholder tool result recorded for a tool
 // call that was advertised by the assistant turn but never executed because the
 // repeated-failure guard halted the run first. It keeps every tool_use paired
@@ -214,6 +219,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
+			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
+				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				result.FinalAnswer = toolResult.Output
+				result.StopReason = stopReason
+				result.Messages = copyMessages(messages)
+				return result, nil
+			}
 
 			// Repeated-failure guard: if a tool keeps failing the same way, hint
 			// once (with its schema) then halt — so no model loops on a bad call.
@@ -312,6 +324,16 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			DenialReason: DenialFiltered,
 		}, nil
 	}
+	tool, toolFound := registry.Get(call.Name)
+	if permissionMode == PermissionModeSpecDraft && toolFound && !ToolAdvertised(tool, permissionMode) {
+		return ToolResult{
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusError,
+			Output:       `Error: Tool "` + call.Name + `" is not available in spec-draft mode.`,
+			DenialReason: DenialFiltered,
+		}, nil
+	}
 
 	// ask_user is intercepted in the loop (like permissions) so the question can
 	// be routed to an interactive front-end instead of blocking inside the tool.
@@ -320,7 +342,6 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		return executeAskUser(ctx, registry, call, args, permissionMode, options)
 	}
 
-	tool, toolFound := registry.Get(call.Name)
 	permissionGranted := permissionMode == PermissionModeUnsafe
 	if toolFound && tool.Safety().Permission == tools.PermissionAllow {
 		permissionGranted = true
@@ -886,10 +907,34 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if tool.Safety().Permission == tools.PermissionDeny {
 		return false
 	}
+	if permissionMode == PermissionModeSpecDraft {
+		return toolAdvertisedInSpecDraft(tool)
+	}
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
 	return true
+}
+
+func toolAdvertisedInSpecDraft(tool tools.Tool) bool {
+	switch tool.Name() {
+	case "ask_user", "ExitSpecMode":
+		return true
+	case "update_plan":
+		return false
+	}
+	safety := tool.Safety()
+	return safety.SideEffect == tools.SideEffectRead && safety.Permission == tools.PermissionAllow
+}
+
+func stopReasonFromToolResult(result ToolResult) StopReason {
+	if result.Meta == nil {
+		return ""
+	}
+	if result.Meta[toolResultMetaControl] == toolResultControlSpecReview {
+		return StopReasonSpecReviewRequired
+	}
+	return ""
 }
 
 // appendAbortedToolResults adds a placeholder tool-result message for each of

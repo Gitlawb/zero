@@ -39,13 +39,26 @@ const (
 	EventSessionChild       EventType = "session_child"
 	EventSpecialistStart    EventType = "specialist_start"
 	EventSpecialistStop     EventType = "specialist_stop"
+	EventSpecDraft          EventType = "spec_draft"
+	EventSpecApproved       EventType = "spec_approved"
+	EventSpecRejected       EventType = "spec_rejected"
 )
 
 type SessionKind string
 
 const (
-	SessionKindFork  SessionKind = "fork"
-	SessionKindChild SessionKind = "child"
+	SessionKindFork      SessionKind = "fork"
+	SessionKindChild     SessionKind = "child"
+	SessionKindSpecDraft SessionKind = "spec-draft"
+	SessionKindSpecImpl  SessionKind = "spec-impl"
+)
+
+type SpecStatus string
+
+const (
+	SpecStatusDraft    SpecStatus = "draft"
+	SpecStatusApproved SpecStatus = "approved"
+	SpecStatusRejected SpecStatus = "rejected"
 )
 
 type Metadata struct {
@@ -65,6 +78,15 @@ type Metadata struct {
 	ForkedFromSequence  int         `json:"forkedFromSequence,omitempty"`
 	SpawnedFromEventID  string      `json:"spawnedFromEventId,omitempty"`
 	SpawnedFromSequence int         `json:"spawnedFromSequence,omitempty"`
+	SpecID              string      `json:"specId,omitempty"`
+	SpecFilePath        string      `json:"specFilePath,omitempty"`
+	SpecStatus          SpecStatus  `json:"specStatus,omitempty"`
+	SpecDraftModelID    string      `json:"specDraftModelId,omitempty"`
+	SpecDraftReasoning  string      `json:"specDraftReasoning,omitempty"`
+	SpecUserComment     string      `json:"specUserComment,omitempty"`
+	SpecRejectReason    string      `json:"specRejectReason,omitempty"`
+	SpecSourceSessionID string      `json:"specSourceSessionId,omitempty"`
+	SpecImplSessionID   string      `json:"specImplSessionId,omitempty"`
 	CreatedAt           string      `json:"createdAt"`
 	UpdatedAt           string      `json:"updatedAt"`
 	EventCount          int         `json:"eventCount"`
@@ -88,6 +110,15 @@ type CreateInput struct {
 	ForkedFromSequence  int
 	SpawnedFromEventID  string
 	SpawnedFromSequence int
+	SpecID              string
+	SpecFilePath        string
+	SpecStatus          SpecStatus
+	SpecDraftModelID    string
+	SpecDraftReasoning  string
+	SpecUserComment     string
+	SpecRejectReason    string
+	SpecSourceSessionID string
+	SpecImplSessionID   string
 }
 
 type ForkInput struct {
@@ -119,6 +150,18 @@ type TreeNode struct {
 type AppendEventInput struct {
 	Type    EventType
 	Payload any
+}
+
+type RecordSpecInput struct {
+	SpecID              string
+	SpecFilePath        string
+	SpecStatus          SpecStatus
+	SpecDraftModelID    string
+	SpecDraftReasoning  string
+	SpecUserComment     string
+	SpecRejectReason    string
+	SpecSourceSessionID string
+	SpecImplSessionID   string
 }
 
 type Event struct {
@@ -216,6 +259,15 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 		ForkedFromSequence:  input.ForkedFromSequence,
 		SpawnedFromEventID:  strings.TrimSpace(input.SpawnedFromEventID),
 		SpawnedFromSequence: input.SpawnedFromSequence,
+		SpecID:              strings.TrimSpace(input.SpecID),
+		SpecFilePath:        strings.TrimSpace(input.SpecFilePath),
+		SpecStatus:          normalizeSpecStatus(input.SpecStatus),
+		SpecDraftModelID:    strings.TrimSpace(input.SpecDraftModelID),
+		SpecDraftReasoning:  strings.TrimSpace(input.SpecDraftReasoning),
+		SpecUserComment:     strings.TrimSpace(input.SpecUserComment),
+		SpecRejectReason:    strings.TrimSpace(input.SpecRejectReason),
+		SpecSourceSessionID: strings.TrimSpace(input.SpecSourceSessionID),
+		SpecImplSessionID:   strings.TrimSpace(input.SpecImplSessionID),
 		CreatedAt:           timestamp,
 		UpdatedAt:           timestamp,
 		EventCount:          0,
@@ -361,6 +413,52 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		return Metadata{}, err
 	}
 	return loaded, nil
+}
+
+func (store *Store) RecordSpec(sessionID string, input RecordSpecInput) (Metadata, Event, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, Event{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	status := normalizeSpecStatus(input.SpecStatus)
+	if status == "" {
+		return Metadata{}, Event{}, fmt.Errorf("zero spec status is required")
+	}
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, Event{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, Event{}, err
+	}
+	applySpecRecord(&session, input, status)
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, Event{}, err
+	}
+	event, err := store.appendEventLocked(sessionID, AppendEventInput{
+		Type: specEventType(status),
+		Payload: map[string]any{
+			"specId":              session.SpecID,
+			"specFilePath":        session.SpecFilePath,
+			"specStatus":          session.SpecStatus,
+			"specDraftModelId":    session.SpecDraftModelID,
+			"specDraftReasoning":  session.SpecDraftReasoning,
+			"specUserComment":     session.SpecUserComment,
+			"specRejectReason":    session.SpecRejectReason,
+			"specSourceSessionId": session.SpecSourceSessionID,
+			"specImplSessionId":   session.SpecImplSessionID,
+		},
+	})
+	if err != nil {
+		return Metadata{}, Event{}, err
+	}
+	loaded, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, Event{}, err
+	}
+	return loaded, event, nil
 }
 
 func (store *Store) AppendEvent(sessionID string, input AppendEventInput) (Event, error) {
@@ -576,4 +674,56 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeSpecStatus(status SpecStatus) SpecStatus {
+	switch SpecStatus(strings.ToLower(strings.TrimSpace(string(status)))) {
+	case SpecStatusDraft:
+		return SpecStatusDraft
+	case SpecStatusApproved:
+		return SpecStatusApproved
+	case SpecStatusRejected:
+		return SpecStatusRejected
+	default:
+		return ""
+	}
+}
+
+func specEventType(status SpecStatus) EventType {
+	switch normalizeSpecStatus(status) {
+	case SpecStatusApproved:
+		return EventSpecApproved
+	case SpecStatusRejected:
+		return EventSpecRejected
+	default:
+		return EventSpecDraft
+	}
+}
+
+func applySpecRecord(session *Metadata, input RecordSpecInput, status SpecStatus) {
+	if specID := strings.TrimSpace(input.SpecID); specID != "" {
+		session.SpecID = specID
+	}
+	if path := strings.TrimSpace(input.SpecFilePath); path != "" {
+		session.SpecFilePath = path
+	}
+	session.SpecStatus = status
+	if modelID := strings.TrimSpace(input.SpecDraftModelID); modelID != "" {
+		session.SpecDraftModelID = modelID
+	}
+	if reasoning := strings.TrimSpace(input.SpecDraftReasoning); reasoning != "" {
+		session.SpecDraftReasoning = reasoning
+	}
+	if comment := strings.TrimSpace(input.SpecUserComment); comment != "" {
+		session.SpecUserComment = comment
+	}
+	if reason := strings.TrimSpace(input.SpecRejectReason); reason != "" {
+		session.SpecRejectReason = reason
+	}
+	if sourceID := strings.TrimSpace(input.SpecSourceSessionID); sourceID != "" {
+		session.SpecSourceSessionID = sourceID
+	}
+	if implID := strings.TrimSpace(input.SpecImplSessionID); implID != "" {
+		session.SpecImplSessionID = implID
+	}
 }

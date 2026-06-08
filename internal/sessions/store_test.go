@@ -445,6 +445,61 @@ func TestPrepareExecWhitespaceResumeDoesNotFallbackToLatest(t *testing.T) {
 	}
 }
 
+func TestRecordSpecUpdatesMetadataAndAppendsEvents(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
+		time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 8, 10, 0, 1, 0, time.UTC),
+		time.Date(2026, 6, 8, 10, 0, 2, 0, time.UTC),
+	})})
+	session, err := store.Create(CreateInput{
+		SessionID:          "draft",
+		SessionKind:        SessionKindSpecDraft,
+		SpecDraftModelID:   "gpt-5",
+		SpecDraftReasoning: "high",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+
+	updated, event, err := store.RecordSpec(session.SessionID, RecordSpecInput{
+		SpecID:       "2026-06-08-spec-mode",
+		SpecFilePath: "/repo/.zero/specs/2026-06-08-spec-mode.md",
+		SpecStatus:   SpecStatusDraft,
+	})
+
+	if err != nil {
+		t.Fatalf("RecordSpec returned error: %v", err)
+	}
+	if updated.SpecID != "2026-06-08-spec-mode" || updated.SpecStatus != SpecStatusDraft || updated.LastEventType != EventSpecDraft {
+		t.Fatalf("updated metadata = %#v", updated)
+	}
+	if event.Type != EventSpecDraft {
+		t.Fatalf("event type = %s, want %s", event.Type, EventSpecDraft)
+	}
+
+	approved, event, err := store.RecordSpec(session.SessionID, RecordSpecInput{
+		SpecStatus:        SpecStatusApproved,
+		SpecUserComment:   "ship it",
+		SpecImplSessionID: "impl",
+	})
+	if err != nil {
+		t.Fatalf("RecordSpec approve returned error: %v", err)
+	}
+	if approved.SpecID != "2026-06-08-spec-mode" || approved.SpecStatus != SpecStatusApproved || approved.SpecUserComment != "ship it" || approved.SpecImplSessionID != "impl" {
+		t.Fatalf("approved metadata = %#v", approved)
+	}
+	if event.Type != EventSpecApproved {
+		t.Fatalf("event type = %s, want %s", event.Type, EventSpecApproved)
+	}
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected two spec events, got %#v", events)
+	}
+}
+
 func fixedClock(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
