@@ -22,10 +22,12 @@ const (
 	toolNameSkill      = "skill"
 )
 
-// planPreserveLabel / skillsPreserveLabel head the preserved sections so they
-// are unmistakable in the transcript (and so tests can assert on them).
-const planPreserveLabel = "## Active plan (preserved across compaction)"
-const skillsPreserveLabel = "## Loaded skills (preserved across compaction)"
+// preservedStateLabel heads the preserved-state block. The block body is a
+// single line of JSON (see formatPreservedState): JSON escapes everything, so a
+// skill body containing markdown headings (## / ###), code fences, or quotes
+// round-trips losslessly across repeated compactions — unlike a markdown-
+// delimited format, which would be truncated or mis-split when re-parsed.
+const preservedStateLabel = "## Preserved state (active plan + loaded skills; carried across compaction)"
 
 // maxPreservedSkillBytes caps how much of each loaded skill body is carried
 // across a compaction, so a large skill can't defeat the compaction it is part
@@ -77,14 +79,6 @@ func formatPlanArguments(arguments string) string {
 		lines = append(lines, "- ["+status+"] "+content)
 	}
 	return strings.Join(lines, "\n")
-}
-
-// extractLoadedSkills returns the names and bodies of skills loaded via the skill
-// tool in messages, so loaded skill instructions survive compaction. Each skill
-// tool call is matched to its tool result by id; the latest body per skill wins,
-// and bodies are capped at maxPreservedSkillBytes. Returns "" when none loaded.
-func extractLoadedSkills(messages []zeroruntime.Message) string {
-	return formatSkills(loadedSkills(messages))
 }
 
 // skillEntry is one loaded skill: its name and (capped) body.
@@ -139,18 +133,6 @@ func loadedSkills(messages []zeroruntime.Message) []skillEntry {
 	return entries
 }
 
-// formatSkills renders skill entries as "### name\nbody" blocks.
-func formatSkills(entries []skillEntry) string {
-	if len(entries) == 0 {
-		return ""
-	}
-	sections := make([]string, 0, len(entries))
-	for _, e := range entries {
-		sections = append(sections, "### "+e.name+"\n"+e.body)
-	}
-	return strings.Join(sections, "\n\n")
-}
-
 // skillNameFromArguments pulls the "name" field from a skill tool call's JSON
 // arguments ({"name":"..."}). Returns "" on malformed arguments.
 func skillNameFromArguments(arguments string) string {
@@ -186,37 +168,94 @@ func capBody(body string) string {
 	return body[:limit] + truncationNote
 }
 
-// appendPreservedState appends the active plan and loaded-skill sections to a
-// compaction summary so structured state survives verbatim. middle is the slice
-// being summarized away.
+// preservedState is the JSON shape of the carried-across-compaction block.
+type preservedState struct {
+	Plan   string           `json:"plan,omitempty"`
+	Skills []preservedSkill `json:"skills,omitempty"`
+}
+
+type preservedSkill struct {
+	Name string `json:"name"`
+	Body string `json:"body"`
+}
+
+// appendPreservedState appends the active plan and loaded skills to a compaction
+// summary as a single JSON block, so structured state survives verbatim. middle
+// is the slice being summarized away.
 //
 // It is robust across REPEATED compactions: after the first compaction the plan
-// and skills live only as text inside the injected summary message, which on a
-// later compaction lands in middle with no real tool calls left to extract. So
-// when middle has no fresh update_plan / skill tool calls, the preserved
-// sections are carried forward from the prior summary instead of being lost.
-// Fresh tool calls always override the carried-forward copy.
+// and skills live only inside the injected summary message, which on a later
+// compaction lands in middle with no real tool calls left to extract. So when
+// middle has no fresh update_plan / skill tool calls, the preserved state is
+// carried forward by re-parsing the prior block (JSON → lossless for arbitrary
+// markdown bodies). Fresh tool calls always override the carried-forward copy.
 func appendPreservedState(summary string, middle []zeroruntime.Message) string {
-	prior := latestSummaryContent(middle)
+	priorPlan, priorSkills := parsePreservedState(latestSummaryContent(middle))
 
-	// Plan: a fresh update_plan in middle is authoritative; otherwise carry
-	// forward the plan section preserved by an earlier compaction.
+	// Plan: a fresh update_plan in middle is authoritative; otherwise carry the
+	// plan preserved by an earlier compaction.
 	plan := extractLatestPlan(middle)
 	if plan == "" {
-		plan = sectionText(prior, planPreserveLabel)
-	}
-	if plan != "" {
-		summary += "\n\n" + planPreserveLabel + "\n" + plan
+		plan = priorPlan
 	}
 
-	// Skills: merge skills preserved by an earlier compaction (older) with fresh
-	// skill loads in middle (newer wins per name), so a loaded skill survives
-	// repeated compactions even when the summarizer drops the section.
-	skills := mergeSkillEntries(parseSkillSection(sectionText(prior, skillsPreserveLabel)), loadedSkills(middle))
-	if formatted := formatSkills(skills); formatted != "" {
-		summary += "\n\n" + skillsPreserveLabel + "\n" + formatted
+	// Skills: merge skills preserved earlier (older) with fresh loads (newer wins
+	// per name), so a loaded skill survives repeated compactions.
+	skills := mergeSkillEntries(priorSkills, loadedSkills(middle))
+
+	if block := formatPreservedState(plan, skills); block != "" {
+		summary += "\n\n" + block
 	}
 	return summary
+}
+
+// formatPreservedState renders the plan + skills as the labelled, single-line
+// JSON block. Returns "" when there is nothing to preserve.
+func formatPreservedState(plan string, skills []skillEntry) string {
+	if plan == "" && len(skills) == 0 {
+		return ""
+	}
+	state := preservedState{Plan: plan}
+	for _, s := range skills {
+		state.Skills = append(state.Skills, preservedSkill{Name: s.name, Body: s.body})
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return ""
+	}
+	return preservedStateLabel + "\n" + string(encoded)
+}
+
+// parsePreservedState recovers the plan + skills from a prior summary's preserved
+// block. JSON escaping makes this lossless even when a skill body contains
+// markdown headings, code fences, or quotes. Returns ("", nil) when absent or
+// malformed.
+func parsePreservedState(summaryContent string) (string, []skillEntry) {
+	idx := strings.LastIndex(summaryContent, preservedStateLabel)
+	if idx < 0 {
+		return "", nil
+	}
+	rest := strings.TrimPrefix(summaryContent[idx+len(preservedStateLabel):], "\n")
+	// The JSON is a single line (json.Marshal escapes newlines).
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", nil
+	}
+	var state preservedState
+	if err := json.Unmarshal([]byte(rest), &state); err != nil {
+		return "", nil
+	}
+	entries := make([]skillEntry, 0, len(state.Skills))
+	for _, s := range state.Skills {
+		if s.Name == "" {
+			continue
+		}
+		entries = append(entries, skillEntry{name: s.Name, body: s.Body})
+	}
+	return state.Plan, entries
 }
 
 // latestSummaryContent returns the content of the most recent injected summary
@@ -229,46 +268,6 @@ func latestSummaryContent(messages []zeroruntime.Message) string {
 		}
 	}
 	return ""
-}
-
-// sectionText returns the body of the preserved section introduced by label in
-// content (from the LAST occurrence — the authoritative copy this code appended
-// — up to the next "## " heading or the end), or "".
-func sectionText(content, label string) string {
-	idx := strings.LastIndex(content, label)
-	if idx < 0 {
-		return ""
-	}
-	rest := strings.TrimPrefix(content[idx+len(label):], "\n")
-	if next := strings.Index(rest, "\n## "); next >= 0 {
-		rest = rest[:next]
-	}
-	return strings.TrimSpace(rest)
-}
-
-// parseSkillSection parses a preserved skills section ("### name\nbody" blocks)
-// back into ordered skill entries.
-func parseSkillSection(text string) []skillEntry {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
-	}
-	var entries []skillEntry
-	for _, block := range strings.Split(text, "### ") {
-		block = strings.TrimSpace(block)
-		if block == "" {
-			continue
-		}
-		name, body := block, ""
-		if nl := strings.IndexByte(block, '\n'); nl >= 0 {
-			name = strings.TrimSpace(block[:nl])
-			body = strings.TrimSpace(block[nl+1:])
-		}
-		if name != "" {
-			entries = append(entries, skillEntry{name: name, body: body})
-		}
-	}
-	return entries
 }
 
 // mergeSkillEntries overlays newer skill loads onto older preserved entries by

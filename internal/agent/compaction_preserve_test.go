@@ -49,8 +49,8 @@ func compactStateConversation(t *testing.T, messages []zeroruntime.Message) stri
 
 func TestCompactPreservesActivePlan(t *testing.T) {
 	summary := compactStateConversation(t, stateConversation())
-	if !strings.Contains(summary, planPreserveLabel) {
-		t.Fatalf("expected plan preserve section, got %q", summary)
+	if !strings.Contains(summary, preservedStateLabel) {
+		t.Fatalf("expected preserved-state block, got %q", summary)
 	}
 	for _, want := range []string{"- [in_progress] write code", "- [pending] add tests"} {
 		if !strings.Contains(summary, want) {
@@ -61,10 +61,10 @@ func TestCompactPreservesActivePlan(t *testing.T) {
 
 func TestCompactPreservesLoadedSkills(t *testing.T) {
 	summary := compactStateConversation(t, stateConversation())
-	if !strings.Contains(summary, skillsPreserveLabel) {
-		t.Fatalf("expected skills preserve section, got %q", summary)
+	if !strings.Contains(summary, preservedStateLabel) {
+		t.Fatalf("expected preserved-state block, got %q", summary)
 	}
-	if !strings.Contains(summary, "### deploy") || !strings.Contains(summary, "make deploy") {
+	if !strings.Contains(summary, `"name":"deploy"`) || !strings.Contains(summary, "make deploy") {
 		t.Fatalf("skill name/body not preserved in %q", summary)
 	}
 }
@@ -80,8 +80,8 @@ func TestCompactWithoutStateHasNoPreserveSections(t *testing.T) {
 		{Role: zeroruntime.MessageRoleAssistant, Content: "ok"},
 	}
 	summary := compactStateConversation(t, messages)
-	if strings.Contains(summary, planPreserveLabel) || strings.Contains(summary, skillsPreserveLabel) {
-		t.Fatalf("did not expect preserve sections without plan/skill: %q", summary)
+	if strings.Contains(summary, preservedStateLabel) {
+		t.Fatalf("did not expect a preserved-state block without plan/skill: %q", summary)
 	}
 }
 
@@ -118,12 +118,56 @@ func TestCompactCarriesPreservedStateAcrossRepeatedCompaction(t *testing.T) {
 	}
 	newSummary := out[1].Content
 	// Plan and skill must survive even though the summarizer didn't copy them.
-	if !strings.Contains(newSummary, planPreserveLabel) || !strings.Contains(newSummary, "write code") {
+	if !strings.Contains(newSummary, preservedStateLabel) || !strings.Contains(newSummary, "write code") {
 		t.Fatalf("active plan lost on the second compaction: %q", newSummary)
 	}
-	if !strings.Contains(newSummary, "### deploy") || !strings.Contains(newSummary, "make deploy") {
+	if !strings.Contains(newSummary, `"name":"deploy"`) || !strings.Contains(newSummary, "make deploy") {
 		t.Fatalf("loaded skill lost on the second compaction: %q", newSummary)
 	}
+}
+
+// TestCompactPreservesSkillBodyWithMarkdownHeadings is CodeRabbit's regression:
+// a verbatim skill body containing ## / ### headings (and a code fence) must
+// round-trip across TWO compactions without truncation or bogus extra skills —
+// which the old markdown-delimited format could not guarantee.
+func TestCompactPreservesSkillBodyWithMarkdownHeadings(t *testing.T) {
+	body := "## Usage\nrun it\n### Examples\n```\nzero do\n```\n## Notes\ndone"
+	conv := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		{Role: zeroruntime.MessageRoleUser, Content: "load a skill"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "loading", ToolCalls: []zeroruntime.ToolCall{
+			{ID: "s1", Name: "skill", Arguments: `{"name":"guide"}`},
+		}},
+		{Role: zeroruntime.MessageRoleTool, Content: body, ToolCallID: "s1"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "done step 1"},
+		{Role: zeroruntime.MessageRoleUser, Content: "continue"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+	}
+
+	mustContainBody := func(label string, messages []zeroruntime.Message) []zeroruntime.Message {
+		out, err := Compact(messages, CompactionOptions{
+			PreserveLast: 2,
+			Summarize:    func([]zeroruntime.Message) (string, error) { return "SUMMARY", nil },
+		})
+		if err != nil {
+			t.Fatalf("%s Compact: %v", label, err)
+		}
+		_, skills := parsePreservedState(out[1].Content)
+		if len(skills) != 1 || skills[0].name != "guide" || skills[0].body != body {
+			t.Fatalf("%s: skill body not round-tripped intact: %#v", label, skills)
+		}
+		return out
+	}
+
+	first := mustContainBody("first", conv)
+	// Second compaction with NO fresh tool calls and a summarizer that drops it.
+	second := append(append([]zeroruntime.Message{}, first...),
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "more"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "ok"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "again"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "fine"},
+	)
+	mustContainBody("second", second)
 }
 
 func TestExtractLatestPlanReturnsMostRecent(t *testing.T) {
@@ -182,13 +226,13 @@ func TestCapBodyNoteOnlyWhenTruncated(t *testing.T) {
 	}
 }
 
-func TestExtractLoadedSkillsSkipsCallsWithoutResult(t *testing.T) {
+func TestLoadedSkillsSkipsCallsWithoutResult(t *testing.T) {
 	messages := []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{
 			{ID: "s1", Name: "skill", Arguments: `{"name":"ghost"}`}, // no matching tool result
 		}},
 	}
-	if got := extractLoadedSkills(messages); got != "" {
-		t.Fatalf("expected no skills without a result body, got %q", got)
+	if got := loadedSkills(messages); len(got) != 0 {
+		t.Fatalf("expected no skills without a result body, got %#v", got)
 	}
 }
