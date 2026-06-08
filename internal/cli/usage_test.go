@@ -156,6 +156,41 @@ func TestRunUsageUnknownFlag(t *testing.T) {
 	}
 }
 
+// TestRunUsageEmptySessionRejected verifies that an empty --session/--session-id
+// value is rejected with exitUsage and the value-required error, matching the
+// --since validation style, rather than silently filtering to no session.
+func TestRunUsageEmptySessionRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{name: "session equals empty", args: []string{"usage", "report", "--session="}, flag: "--session"},
+		{name: "session-id equals empty", args: []string{"usage", "report", "--session-id="}, flag: "--session-id"},
+		{name: "session spaced empty", args: []string{"usage", "report", "--session", "   "}, flag: "--session"},
+		{name: "session-id spaced empty", args: []string{"usage", "report", "--session-id", ""}, flag: "--session-id"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				newSessionStore: func() *sessions.Store {
+					return sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+				},
+				inspectChanges: stubInspectChanges(""),
+			})
+			if exitCode != exitUsage {
+				t.Fatalf("%s: expected exitUsage (%d), got %d", tc.flag, exitUsage, exitCode)
+			}
+			msg := stderr.String()
+			if !strings.Contains(msg, tc.flag+" requires a value") {
+				t.Fatalf("%s: expected value-required error in stderr, got %q", tc.flag, msg)
+			}
+		})
+	}
+}
+
 // seedUsageStoreDates creates a store with usage events spread across two
 // different calendar dates. The "recent" session's events fall on recentDate
 // and the "old" session's events fall on oldDate. Both dates must be

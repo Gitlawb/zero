@@ -60,15 +60,24 @@ func filterEventsSince(events []sessions.Event, since string) []sessions.Event {
 	}
 	filtered := make([]sessions.Event, 0, len(events))
 	for _, event := range events {
-		date := event.CreatedAt
-		if len(date) >= 10 {
-			date = date[:10]
-		}
-		if date >= since {
+		if eventUTCDate(event.CreatedAt) >= since {
 			filtered = append(filtered, event)
 		}
 	}
 	return filtered
+}
+
+// eventUTCDate maps an RFC3339 timestamp to its UTC calendar date (YYYY-MM-DD)
+// so the --since/--days cutoff compares against the same UTC day the report
+// buckets under. On a parse failure it falls back to the leading-10 slice.
+func eventUTCDate(createdAt string) string {
+	if parsed, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		return parsed.UTC().Format("2006-01-02")
+	}
+	if len(createdAt) >= 10 {
+		return createdAt[:10]
+	}
+	return createdAt
 }
 
 func runUsage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -200,12 +209,23 @@ func parseUsageArgs(args []string) (usageOptions, bool, error) {
 			if err != nil {
 				return options, false, err
 			}
-			options.sessionID = value
+			if strings.TrimSpace(value) == "" {
+				return options, false, execUsageError{fmt.Sprintf("%s requires a value", arg)}
+			}
+			options.sessionID = strings.TrimSpace(value)
 			index = next
 		case strings.HasPrefix(arg, "--session="):
-			options.sessionID = strings.TrimSpace(strings.TrimPrefix(arg, "--session="))
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--session="))
+			if value == "" {
+				return options, false, execUsageError{"--session requires a value"}
+			}
+			options.sessionID = value
 		case strings.HasPrefix(arg, "--session-id="):
-			options.sessionID = strings.TrimSpace(strings.TrimPrefix(arg, "--session-id="))
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--session-id="))
+			if value == "" {
+				return options, false, execUsageError{"--session-id requires a value"}
+			}
+			options.sessionID = value
 		default:
 			return options, false, execUsageError{fmt.Sprintf("unknown usage flag %q", arg)}
 		}

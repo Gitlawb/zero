@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"sort"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -81,10 +82,7 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			}
 		}
 
-		date := event.CreatedAt
-		if len(date) >= 10 {
-			date = date[:10]
-		}
+		date := utcDayBucket(event.CreatedAt)
 		bucket, ok := buckets[date]
 		if !ok {
 			bucket = &DayBucket{Date: date}
@@ -134,4 +132,19 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		report.CostPerNetLOC = report.Total.TotalCost / float64(netLOC)
 	}
 	return report, nil
+}
+
+// utcDayBucket maps an RFC3339 timestamp to its UTC calendar date (YYYY-MM-DD).
+// Normalizing to UTC first keeps an offset timestamp (e.g. ...T23:30:00-07:00,
+// which is the next UTC day) bucketed by its true UTC day. On a parse failure it
+// falls back to the leading-10 slice so malformed timestamps still bucket
+// defensively rather than collapsing into one empty-string bucket.
+func utcDayBucket(createdAt string) string {
+	if parsed, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		return parsed.UTC().Format("2006-01-02")
+	}
+	if len(createdAt) >= 10 {
+		return createdAt[:10]
+	}
+	return createdAt
 }

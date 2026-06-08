@@ -37,10 +37,15 @@ func TestBuildReportBucketsByDayAndSumsTokens(t *testing.T) {
 		usageEvent(t, "s1", 1, "2026-06-01T09:00:00Z", 1000, 200),
 		usageEvent(t, "s1", 2, "2026-06-01T11:00:00Z", 500, 100),
 		usageEvent(t, "s2", 1, "2026-06-02T09:00:00Z", 2000, 400),
+		// Non-UTC offset event: local day is 2026-06-01, but its UTC instant is
+		// 2026-06-02T06:30:00Z, so it must bucket under 2026-06-02 (the UTC day),
+		// not 2026-06-01.
+		usageEvent(t, "s3", 1, "2026-06-01T23:30:00-07:00", 300, 50),
 	}
 	meta := []sessions.Metadata{
 		{SessionID: "s1", ModelID: "gpt-4.1"},
 		{SessionID: "s2", ModelID: "gpt-4.1"},
+		{SessionID: "s3", ModelID: "gpt-4.1"},
 	}
 
 	report, err := BuildReport(events, meta, &registry, 70)
@@ -56,7 +61,12 @@ func TestBuildReportBucketsByDayAndSumsTokens(t *testing.T) {
 	if report.Buckets[0].Requests != 2 || report.Buckets[0].TotalTokens != 1800 {
 		t.Fatalf("day-1 aggregation wrong: %+v", report.Buckets[0])
 	}
-	if report.Total.Requests != 3 || report.Total.TotalTokens != 4200 {
+	// Day-2 holds the UTC 2026-06-02 event (2400 tokens) plus the offset event
+	// whose UTC day is also 2026-06-02 (350 tokens) = 2 requests, 2750 tokens.
+	if report.Buckets[1].Requests != 2 || report.Buckets[1].TotalTokens != 2750 {
+		t.Fatalf("day-2 aggregation wrong (offset event must bucket under UTC 2026-06-02): %+v", report.Buckets[1])
+	}
+	if report.Total.Requests != 4 || report.Total.TotalTokens != 4550 {
 		t.Fatalf("totals wrong: %+v", report.Total)
 	}
 	if !report.LOCEstimated {
