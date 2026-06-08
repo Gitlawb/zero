@@ -44,7 +44,20 @@ type ToolResult struct {
 	Redacted     bool
 	ChangedFiles []string
 	Display      tools.Display
+	// DenialReason categorizes why a tool call was blocked (empty when it ran).
+	// It lets a surface distinguish the cause precisely instead of parsing Output.
+	DenialReason DenialCategory
 }
+
+// DenialCategory classifies why a tool call was blocked before it executed.
+type DenialCategory string
+
+const (
+	DenialNone             DenialCategory = ""
+	DenialFiltered         DenialCategory = "filtered"          // tool not enabled for this run
+	DenialPermissionDenied DenialCategory = "permission_denied" // approval declined
+	DenialSandboxViolation DenialCategory = "sandbox_violation" // blocked by the sandbox
+)
 
 type PermissionRequest struct {
 	ToolCallID     string             `json:"toolCallId"`

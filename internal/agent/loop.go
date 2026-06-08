@@ -305,10 +305,11 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 	if !ToolAllowedByFilters(call.Name, options.EnabledTools, options.DisabledTools) {
 		return ToolResult{
-			ToolCallID: call.ID,
-			Name:       call.Name,
-			Status:     tools.StatusError,
-			Output:     `Error: Tool "` + call.Name + `" is not enabled for this run.`,
+			ToolCallID:   call.ID,
+			Name:         call.Name,
+			Status:       tools.StatusError,
+			Output:       `Error: Tool "` + call.Name + `" is not enabled for this run.`,
+			DenialReason: DenialFiltered,
 		}, nil
 	}
 
@@ -639,11 +640,18 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 	if requestEvent.ToolName == "" {
 		event.ToolName = call.Name
 	}
+	// A denial driven by a sandbox violation is categorized distinctly from a
+	// plain approval-declined so a surface can tell policy from user choice.
+	denial := DenialPermissionDenied
+	if requestEvent.Violation != nil {
+		denial = DenialSandboxViolation
+	}
 	return ToolResult{
-		ToolCallID: call.ID,
-		Name:       call.Name,
-		Status:     tools.StatusError,
-		Output:     "Error: Permission denied for " + call.Name + ": " + reason,
+		ToolCallID:   call.ID,
+		Name:         call.Name,
+		Status:       tools.StatusError,
+		Output:       "Error: Permission denied for " + call.Name + ": " + reason,
+		DenialReason: denial,
 		Meta: map[string]string{
 			"permission_action": string(event.Action),
 		},
