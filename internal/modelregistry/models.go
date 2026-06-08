@@ -96,7 +96,11 @@ type ModelEntry struct {
 	MatchPatterns []string
 	// Deprecation, when set, redirects this model to a replacement.
 	Deprecation *DeprecationRule
-	Description string
+	// UpgradeTargetID, when set, names the stronger model this one escalates to
+	// during mid-run escalation. Empty means no escalation target (e.g. top-tier
+	// models). Resolved and availability-checked by Registry.UpgradeTarget.
+	UpgradeTargetID string
+	Description     string
 }
 
 // DeprecationRule describes how a deprecated model is phased out and what to use
