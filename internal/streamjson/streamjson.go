@@ -224,7 +224,7 @@ func validateInputEvent(event InputEvent) error {
 	if event.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("schemaVersion must be %d", SchemaVersion)
 	}
-	if strings.TrimSpace(event.Content) == "" {
+	if strings.TrimSpace(event.Content) == "" && len(event.Images) == 0 {
 		return fmt.Errorf("content is required")
 	}
 	switch event.Type {

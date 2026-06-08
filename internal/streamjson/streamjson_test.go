@@ -155,6 +155,30 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
+	// image-only message (empty content) is valid
+	imageOnly := `{"schemaVersion":1,"type":"message","role":"user","content":"","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	events, err := ParseInput(imageOnly)
+	if err != nil {
+		t.Fatalf("image-only message should be valid, got %v", err)
+	}
+	if len(events) != 1 || len(events[0].Images) != 1 {
+		t.Fatalf("image-only event not parsed: %+v", events)
+	}
+
+	// empty content AND no images is still rejected
+	empty := `{"schemaVersion":1,"type":"message","role":"user","content":""}`
+	if _, err := ParseInput(empty); err == nil || !strings.Contains(err.Error(), "content is required") {
+		t.Fatalf("expected empty-content rejection, got %v", err)
+	}
+
+	// prompt event with empty content is still rejected (no images allowed there)
+	emptyPrompt := `{"schemaVersion":1,"type":"prompt","content":""}`
+	if _, err := ParseInput(emptyPrompt); err == nil || !strings.Contains(err.Error(), "content is required") {
+		t.Fatalf("expected empty prompt rejection, got %v", err)
+	}
+}
+
 func TestParseInputImagesAcceptedOnlyOnMessageEvents(t *testing.T) {
 	// images allowed on a message event
 	msg := `{"schemaVersion":1,"type":"message","role":"user","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
