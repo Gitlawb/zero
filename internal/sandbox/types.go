@@ -104,6 +104,7 @@ type Policy struct {
 	EnforceWorkspace      bool        `json:"enforceWorkspace"`
 	DenyDestructiveShell  bool        `json:"denyDestructiveShell"`
 	AllowPolicyOnlyRunner bool        `json:"allowPolicyOnlyRunner"`
+	MaxAutonomy           Autonomy    `json:"maxAutonomy,omitempty"`
 }
 
 type Request struct {
@@ -167,5 +168,6 @@ func DefaultPolicy() Policy {
 		EnforceWorkspace:      true,
 		DenyDestructiveShell:  true,
 		AllowPolicyOnlyRunner: true,
+		MaxAutonomy:           AutonomyHigh,
 	}
 }

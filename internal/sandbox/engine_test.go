@@ -249,6 +249,13 @@ func TestEngineReportsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestDefaultPolicyMaxAutonomyIsHigh(t *testing.T) {
+	policy := DefaultPolicy()
+	if policy.MaxAutonomy != AutonomyHigh {
+		t.Fatalf("DefaultPolicy().MaxAutonomy = %q, want %q (no-op ceiling)", policy.MaxAutonomy, AutonomyHigh)
+	}
+}
+
 func fixedSandboxTime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
