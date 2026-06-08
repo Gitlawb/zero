@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -428,7 +429,7 @@ func normalizeProvider(profile ProviderProfile, env map[string]string) (Provider
 		if profile.BaseURL == "" {
 			return ProviderProfile{}, providerError(profile, "anthropic-compatible provider %s requires baseURL", profile.Name)
 		}
-		if strings.TrimRight(profile.BaseURL, "/") == strings.TrimRight(AnthropicBaseURL, "/") {
+		if isOfficialAnthropicBaseURL(profile.BaseURL) {
 			return ProviderProfile{}, providerError(profile, "anthropic-compatible provider %s requires custom baseURL", profile.Name)
 		}
 		return profile, nil
@@ -458,6 +459,22 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
+}
+
+func isOfficialAnthropicBaseURL(baseURL string) bool {
+	normalized := strings.TrimSpace(baseURL)
+	if strings.TrimRight(normalized, "/") == strings.TrimRight(AnthropicBaseURL, "/") {
+		return true
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	official, err := url.Parse(AnthropicBaseURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, official.Host)
 }
 
 func providerKindForCatalogTransport(transport providercatalog.Transport) ProviderKind {

@@ -331,7 +331,7 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 		if !providercatalog.RuntimeSupported(descriptor) {
 			return fmt.Errorf("provider %q uses transport %q: %s", descriptor.ID, descriptor.Transport, providercatalog.RuntimeUnsupportedReason(descriptor))
 		}
-		if descriptor.RequiresAuth && strings.TrimSpace(profile.APIKey) == "" {
+		if descriptor.RequiresAuth && strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.AuthHeaderValue) == "" {
 			apiKeyEnv := strings.TrimSpace(profile.APIKeyEnv)
 			if apiKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 {
 				apiKeyEnv = descriptor.AuthEnvVars[0]

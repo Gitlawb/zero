@@ -407,6 +407,42 @@ func TestRunProvidersCheckConstructsProvider(t *testing.T) {
 	}
 }
 
+func TestRunProvidersCheckAcceptsAuthHeaderValueCredential(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var checked config.ProviderProfile
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:            "groq",
+			ProviderKind:    config.ProviderKindOpenAICompatible,
+			CatalogID:       "groq",
+			BaseURL:         "https://api.groq.com/openai/v1",
+			APIKeyEnv:       "GROQ_API_KEY",
+			AuthHeader:      "X-API-Key",
+			AuthHeaderValue: "direct-secret",
+			Model:           "llama-3.3-70b-versatile",
+		}
+		return config.ResolvedConfig{ActiveProvider: "groq", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
+	}
+	deps.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+		checked = profile
+		return commandCenterProvider{}, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "check", "groq"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if checked.AuthHeaderValue != "direct-secret" || checked.APIKey != "" {
+		t.Fatalf("checked profile = %#v, want direct auth header value without API key", checked)
+	}
+	if !strings.Contains(stdout.String(), "status: ok") {
+		t.Fatalf("expected successful check output, got %q", stdout.String())
+	}
+}
+
 func TestRunProvidersCheckFailsWhenCatalogAuthEnvIsMissing(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

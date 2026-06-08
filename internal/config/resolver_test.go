@@ -674,7 +674,7 @@ func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
 	if len(resolved.Providers) != 0 {
 		t.Fatalf("Providers = %#v, want empty", resolved.Providers)
 	}
-	if !providerProfileIsZero(resolved.Provider) {
+	if HasProviderProfile(resolved.Provider) {
 		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
 	}
 	if resolved.MaxTurns != defaultMaxTurns {
@@ -698,7 +698,7 @@ func TestResolveRejectsActiveProviderWithoutConfiguredProfiles(t *testing.T) {
 	if len(resolved.Providers) != 0 {
 		t.Fatalf("Providers = %#v, want empty", resolved.Providers)
 	}
-	if !providerProfileIsZero(resolved.Provider) {
+	if HasProviderProfile(resolved.Provider) {
 		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
 	}
 	if resolved.MaxTurns != 0 {
@@ -786,6 +786,27 @@ func TestResolveAcceptsOfficialAnthropicAndGoogleProfiles(t *testing.T) {
 	}
 	if resolved.Providers[1].BaseURL != GoogleBaseURL {
 		t.Fatalf("Google BaseURL = %q, want default Google URL", resolved.Providers[1].BaseURL)
+	}
+}
+
+func TestResolveRejectsAnthropicCompatibleOfficialHostWithPath(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "claude-compatible",
+		"providers": [{
+			"name": "claude-compatible",
+			"provider_kind": "anthropic-compatible",
+			"baseURL": "https://api.anthropic.com/v1",
+			"apiKey": "sk-ant",
+			"model": "custom-claude"
+		}]
+	}`)
+
+	_, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want official Anthropic host rejection")
+	}
+	if !strings.Contains(err.Error(), "requires custom baseURL") {
+		t.Fatalf("error = %q, want custom baseURL message", err.Error())
 	}
 }
 
@@ -999,21 +1020,4 @@ func providerByName(t *testing.T, providers []ProviderProfile, name string) Prov
 	}
 	t.Fatalf("provider %q not found in %#v", name, providers)
 	return ProviderProfile{}
-}
-
-func providerProfileIsZero(profile ProviderProfile) bool {
-	return profile.Name == "" &&
-		profile.Provider == "" &&
-		profile.ProviderKind == "" &&
-		profile.CatalogID == "" &&
-		profile.BaseURL == "" &&
-		profile.APIKey == "" &&
-		profile.APIKeyEnv == "" &&
-		profile.APIFormat == "" &&
-		profile.AuthHeader == "" &&
-		profile.AuthScheme == "" &&
-		profile.AuthHeaderValue == "" &&
-		profile.CustomHeaders == nil &&
-		profile.Model == "" &&
-		profile.Description == ""
 }
