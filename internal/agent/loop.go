@@ -913,6 +913,9 @@ func copyMessages(messages []Message) []Message {
 		if message.ToolCalls != nil {
 			copied[index].ToolCalls = append([]ToolCall{}, message.ToolCalls...)
 		}
+		// Deep-copy image attachments (slice AND each Data byte slice) so the
+		// raw image bytes are never aliased across history/request/result copies.
+		copied[index].Images = zeroruntime.CloneImageBlocks(message.Images)
 	}
 	return copied
 }

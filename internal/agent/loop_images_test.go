@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -42,6 +43,35 @@ func TestRunSeedsImagesIntoUserTurn(t *testing.T) {
 	}
 	if len(user.Images) != 1 || user.Images[0].MediaType != "image/png" {
 		t.Fatalf("user.Images = %#v, want one image/png block", user.Images)
+	}
+}
+
+// TestCopyMessagesDeepCopiesImageBytes locks the anti-aliasing guarantee for
+// copyMessages: copies must carry INDEPENDENT image bytes, so mutating the
+// source message's Data never bleeds into a history/request/result copy.
+func TestCopyMessagesDeepCopiesImageBytes(t *testing.T) {
+	source := []Message{
+		{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: "look",
+			Images: []zeroruntime.ImageBlock{
+				{MediaType: "image/png", Data: []byte{0x89, 0x50, 0x4e, 0x47}},
+			},
+		},
+	}
+
+	copied := copyMessages(source)
+	if len(copied) != 1 || len(copied[0].Images) != 1 {
+		t.Fatalf("unexpected copy shape: %#v", copied)
+	}
+
+	// Mutating the source bytes must not change the copy.
+	source[0].Images[0].Data[0] = 0x00
+	if !bytes.Equal(copied[0].Images[0].Data, []byte{0x89, 0x50, 0x4e, 0x47}) {
+		t.Fatalf("copy image bytes aliased the source: %v", copied[0].Images[0].Data)
+	}
+	if &source[0].Images[0].Data[0] == &copied[0].Images[0].Data[0] {
+		t.Fatal("copy Data shares backing array with source")
 	}
 }
 
