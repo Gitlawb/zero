@@ -15,6 +15,7 @@ type ChangeSnapshot struct {
 	Runtime   string       `json:"runtime"`
 	Root      string       `json:"root"`
 	Branch    string       `json:"branch,omitempty"`
+	Base      string       `json:"base,omitempty"`
 	Commit    string       `json:"commit,omitempty"`
 	Clean     bool         `json:"clean"`
 	Files     []FileChange `json:"files"`
@@ -47,6 +48,7 @@ func SnapshotFromSummary(summary ChangeSummary) ChangeSnapshot {
 		Runtime:   RuntimeGo,
 		Root:      redactText(summary.Root),
 		Branch:    redactText(summary.Branch),
+		Base:      redactText(summary.Base),
 		Commit:    redactText(summary.Commit),
 		Clean:     summary.Clean,
 		Files:     files,
