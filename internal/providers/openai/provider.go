@@ -24,11 +24,15 @@ const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures an OpenAI-compatible chat completions provider.
 type Options struct {
-	APIKey     string
-	BaseURL    string
-	Model      string
-	HTTPClient *http.Client
-	UserAgent  string
+	APIKey          string
+	BaseURL         string
+	Model           string
+	AuthHeader      string
+	AuthScheme      string
+	AuthHeaderValue string
+	CustomHeaders   map[string]string
+	HTTPClient      *http.Client
+	UserAgent       string
 	// MaxTokens caps the model's output tokens. Zero omits the cap (the model's
 	// own default applies). Resolved from the model registry by the factory.
 	MaxTokens int
@@ -42,6 +46,10 @@ type Provider struct {
 	apiKey            string
 	baseURL           string
 	model             string
+	authHeader        string
+	authScheme        string
+	authHeaderValue   string
+	customHeaders     map[string]string
 	maxTokens         int
 	httpClient        *http.Client
 	userAgent         string
@@ -83,6 +91,10 @@ func New(options Options) (*Provider, error) {
 		apiKey:            options.APIKey,
 		baseURL:           baseURL,
 		model:             model,
+		authHeader:        strings.TrimSpace(options.AuthHeader),
+		authScheme:        strings.TrimSpace(options.AuthScheme),
+		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
+		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
 		maxTokens:         maxTokens,
 		httpClient:        httpClient,
 		userAgent:         options.UserAgent,
@@ -126,9 +138,15 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		if provider.userAgent != "" {
 			request.Header.Set("User-Agent", provider.userAgent)
 		}
-		if provider.apiKey != "" {
-			request.Header.Set("Authorization", "Bearer "+provider.apiKey)
-		}
+		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+			APIKey:            provider.apiKey,
+			DefaultAuthHeader: "Authorization",
+			DefaultAuthScheme: "Bearer",
+			AuthHeader:        provider.authHeader,
+			AuthScheme:        provider.authScheme,
+			AuthHeaderValue:   provider.authHeaderValue,
+			CustomHeaders:     provider.customHeaders,
+		})
 	}, 0)
 	if err != nil {
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
@@ -269,11 +287,11 @@ func (provider *Provider) emitHTTPError(ctx context.Context, response *http.Resp
 }
 
 func (provider *Provider) classifiedError(statusCode int, message string) string {
-	return providerio.ClassifiedError(statusCode, message, provider.apiKey)
+	return providerio.ClassifiedError(statusCode, message, provider.apiKey, provider.authHeaderValue)
 }
 
 func (provider *Provider) redact(message string) string {
-	return providerio.Redact(message, provider.apiKey)
+	return providerio.Redact(message, provider.apiKey, provider.authHeaderValue)
 }
 
 func sendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event zeroruntime.StreamEvent) {

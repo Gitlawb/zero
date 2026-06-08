@@ -155,6 +155,77 @@ func TestModelSnapshotsRejectUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestProviderCatalogSnapshotsExposeStableDescriptors(t *testing.T) {
+	snapshots, err := ProviderCatalogSnapshots(ProviderCatalogSnapshotOptions{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) < 4 {
+		t.Fatalf("expected provider catalog descriptors, got %#v", snapshots)
+	}
+	for index, snapshot := range snapshots {
+		if snapshot.ID == "" || snapshot.Name == "" || snapshot.Transport == "" {
+			t.Fatalf("catalog snapshot missing identity fields: %#v", snapshot)
+		}
+		if index > 0 && snapshots[index-1].ID > snapshot.ID {
+			t.Fatalf("provider catalog snapshots are not sorted by id: %#v", snapshots)
+		}
+	}
+	openai := findCatalogSnapshot(t, snapshots, "openai")
+	if openai.Name != "OpenAI" ||
+		openai.Transport != "openai" ||
+		openai.DefaultBaseURL != config.OpenAIBaseURL ||
+		openai.DefaultModel != modelregistry.DefaultModelID ||
+		!openai.RequiresAuth ||
+		openai.Local ||
+		!openai.RuntimeSupported {
+		t.Fatalf("unexpected OpenAI catalog snapshot: %#v", openai)
+	}
+	if len(openai.AuthEnvVars) != 1 || openai.AuthEnvVars[0] != "OPENAI_API_KEY" {
+		t.Fatalf("unexpected OpenAI auth env vars: %#v", openai.AuthEnvVars)
+	}
+
+	bedrock := findCatalogSnapshot(t, snapshots, "bedrock")
+	if bedrock.RuntimeSupported {
+		t.Fatalf("Bedrock must stay catalog-only until the native adapter lands: %#v", bedrock)
+	}
+	if !strings.Contains(bedrock.RuntimeUnsupportedReason, "native adapter") {
+		t.Fatalf("Bedrock unsupported reason = %q, want native adapter reason", bedrock.RuntimeUnsupportedReason)
+	}
+}
+
+func TestProviderCatalogSnapshotsFilterByTransport(t *testing.T) {
+	snapshots, err := ProviderCatalogSnapshots(ProviderCatalogSnapshotOptions{Transport: "OPENAI"})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) == 0 {
+		t.Fatal("expected OpenAI provider catalog descriptors")
+	}
+	for _, snapshot := range snapshots {
+		if snapshot.Transport != "openai" {
+			t.Fatalf("unexpected transport in filtered catalog: %#v", snapshot)
+		}
+	}
+}
+
+func TestProviderCatalogSnapshotsRejectUnknownTransport(t *testing.T) {
+	_, err := ProviderCatalogSnapshots(ProviderCatalogSnapshotOptions{Transport: "space-link"})
+
+	if err == nil {
+		t.Fatal("expected unknown transport error")
+	}
+	commandErr, ok := err.(CommandError)
+	if !ok {
+		t.Fatalf("expected CommandError, got %T: %v", err, err)
+	}
+	if commandErr.Kind != ErrorKindUsage || !strings.Contains(commandErr.Message, `unknown provider transport "space-link"`) {
+		t.Fatalf("unexpected command error: %#v", commandErr)
+	}
+}
+
 func TestSessionSnapshotsPreserveLineageFields(t *testing.T) {
 	items := []sessions.Metadata{
 		{
@@ -193,6 +264,18 @@ func TestSessionSnapshotsPreserveLineageFields(t *testing.T) {
 	if child.Tag != "specialist" || child.Depth != 1 {
 		t.Fatalf("session specialist metadata was not preserved: %#v", child)
 	}
+}
+
+func findCatalogSnapshot(t *testing.T, snapshots []ProviderCatalogSnapshot, id string) ProviderCatalogSnapshot {
+	t.Helper()
+
+	for _, snapshot := range snapshots {
+		if snapshot.ID == id {
+			return snapshot
+		}
+	}
+	t.Fatalf("catalog descriptor %q not found in %#v", id, snapshots)
+	return ProviderCatalogSnapshot{}
 }
 
 func TestSessionTreeSnapshotConvertsChildren(t *testing.T) {

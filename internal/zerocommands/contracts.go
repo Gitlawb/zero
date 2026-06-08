@@ -8,6 +8,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -68,6 +69,23 @@ type ModelSnapshot struct {
 	Capabilities     []string `json:"capabilities"`
 	ReasoningEfforts []string `json:"reasoningEfforts,omitempty"`
 	Description      string   `json:"description,omitempty"`
+}
+
+type ProviderCatalogSnapshotOptions struct {
+	Transport string
+}
+
+type ProviderCatalogSnapshot struct {
+	ID                       string   `json:"id"`
+	Name                     string   `json:"name"`
+	Transport                string   `json:"transport"`
+	DefaultBaseURL           string   `json:"defaultBaseUrl,omitempty"`
+	DefaultModel             string   `json:"defaultModel,omitempty"`
+	AuthEnvVars              []string `json:"authEnvVars,omitempty"`
+	RequiresAuth             bool     `json:"requiresAuth"`
+	Local                    bool     `json:"local"`
+	RuntimeSupported         bool     `json:"runtimeSupported"`
+	RuntimeUnsupportedReason string   `json:"runtimeUnsupportedReason,omitempty"`
 }
 
 type SessionSnapshot struct {
@@ -171,6 +189,50 @@ func ModelSnapshots(registry modelregistry.Registry, options ModelSnapshotOption
 		return snapshots[i].Provider < snapshots[j].Provider
 	})
 	return snapshots, nil
+}
+
+func ProviderCatalogSnapshots(options ProviderCatalogSnapshotOptions) ([]ProviderCatalogSnapshot, error) {
+	transportFilter := strings.TrimSpace(strings.ToLower(options.Transport))
+	if transportFilter != "" && !knownProviderCatalogTransport(transportFilter) {
+		return nil, UsageError(fmt.Sprintf("unknown provider transport %q", options.Transport))
+	}
+
+	descriptors := providercatalog.All()
+	snapshots := make([]ProviderCatalogSnapshot, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if transportFilter != "" && strings.ToLower(string(descriptor.Transport)) != transportFilter {
+			continue
+		}
+		snapshots = append(snapshots, ProviderCatalogSnapshotFromDescriptor(descriptor))
+	}
+	sort.SliceStable(snapshots, func(i int, j int) bool {
+		return snapshots[i].ID < snapshots[j].ID
+	})
+	return snapshots, nil
+}
+
+func knownProviderCatalogTransport(transport string) bool {
+	for _, descriptor := range providercatalog.All() {
+		if strings.ToLower(string(descriptor.Transport)) == transport {
+			return true
+		}
+	}
+	return false
+}
+
+func ProviderCatalogSnapshotFromDescriptor(descriptor providercatalog.Descriptor) ProviderCatalogSnapshot {
+	return ProviderCatalogSnapshot{
+		ID:                       descriptor.ID,
+		Name:                     descriptor.Name,
+		Transport:                string(descriptor.Transport),
+		DefaultBaseURL:           descriptor.DefaultBaseURL,
+		DefaultModel:             descriptor.DefaultModel,
+		AuthEnvVars:              append([]string{}, descriptor.AuthEnvVars...),
+		RequiresAuth:             descriptor.RequiresAuth,
+		Local:                    descriptor.Local,
+		RuntimeSupported:         providercatalog.RuntimeSupported(descriptor),
+		RuntimeUnsupportedReason: providercatalog.RuntimeUnsupportedReason(descriptor),
+	}
 }
 
 func modelMatchesProvider(model modelregistry.ModelEntry, providerFilter modelregistry.ProviderKind) bool {

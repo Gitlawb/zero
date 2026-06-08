@@ -28,6 +28,26 @@ func TestLoadProviderCommandSuccess(t *testing.T) {
 	}
 }
 
+func TestLoadProviderCommandDoesNotResolveAPIKeyEnvFromProcess(t *testing.T) {
+	t.Setenv("ZERO_CMD_API_KEY", "sk-process")
+	command := writeCommand(t, commandScript{
+		Stdout: `{"name":"cmd","provider":"openai","apiKeyEnv":"ZERO_CMD_API_KEY","model":"gpt-command"}`,
+	})
+
+	cfg, err := LoadProviderCommand(command)
+	if err != nil {
+		t.Fatalf("LoadProviderCommand() error = %v", err)
+	}
+
+	provider := cfg.Providers[0]
+	if provider.APIKey != "" {
+		t.Fatalf("APIKey = %q, want unresolved provider-command apiKeyEnv", provider.APIKey)
+	}
+	if provider.APIKeyEnv != "ZERO_CMD_API_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want command apiKeyEnv preserved", provider.APIKeyEnv)
+	}
+}
+
 func TestLoadProviderCommandFailureIncludesExitAndRedactsOutput(t *testing.T) {
 	command := writeCommand(t, commandScript{
 		Stderr:   "failed with sk-command-secret",

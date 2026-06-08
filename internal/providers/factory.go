@@ -30,30 +30,42 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 	switch resolved.providerKind {
 	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
 		return openai.New(openai.Options{
-			APIKey:     profile.APIKey,
-			BaseURL:    resolved.baseURL,
-			Model:      resolved.apiModel,
-			MaxTokens:  resolved.maxOutputTokens,
-			HTTPClient: options.HTTPClient,
-			UserAgent:  options.UserAgent,
+			APIKey:          profile.APIKey,
+			BaseURL:         resolved.baseURL,
+			Model:           resolved.apiModel,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
+			MaxTokens:       resolved.maxOutputTokens,
+			HTTPClient:      options.HTTPClient,
+			UserAgent:       options.UserAgent,
 		})
-	case config.ProviderKindAnthropic:
+	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
-			APIKey:     profile.APIKey,
-			BaseURL:    resolved.baseURL,
-			Model:      resolved.apiModel,
-			MaxTokens:  resolved.maxOutputTokens,
-			HTTPClient: options.HTTPClient,
-			UserAgent:  options.UserAgent,
+			APIKey:          profile.APIKey,
+			BaseURL:         resolved.baseURL,
+			Model:           resolved.apiModel,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
+			MaxTokens:       resolved.maxOutputTokens,
+			HTTPClient:      options.HTTPClient,
+			UserAgent:       options.UserAgent,
 		})
 	case config.ProviderKindGoogle:
 		return gemini.New(gemini.Options{
-			APIKey:     profile.APIKey,
-			BaseURL:    resolved.baseURL,
-			Model:      resolved.apiModel,
-			MaxTokens:  resolved.maxOutputTokens,
-			HTTPClient: options.HTTPClient,
-			UserAgent:  options.UserAgent,
+			APIKey:          profile.APIKey,
+			BaseURL:         resolved.baseURL,
+			Model:           resolved.apiModel,
+			AuthHeader:      profile.AuthHeader,
+			AuthScheme:      profile.AuthScheme,
+			AuthHeaderValue: profile.AuthHeaderValue,
+			CustomHeaders:   profile.CustomHeaders,
+			MaxTokens:       resolved.maxOutputTokens,
+			HTTPClient:      options.HTTPClient,
+			UserAgent:       options.UserAgent,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported provider kind %q", resolved.providerKind)
@@ -106,6 +118,10 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 		if providerKind == config.ProviderKindOpenAICompatible {
 			if !entry.AllowsProvider(modelregistry.ProviderOpenAICompatible) {
 				return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, modelregistry.ProviderOpenAICompatible)
+			}
+		} else if providerKind == config.ProviderKindAnthropicCompat {
+			if !entry.AllowsProvider(modelregistry.ProviderAnthropic) {
+				return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)
 			}
 		} else if providerKind != modelProvider {
 			return resolvedProfile{}, fmt.Errorf("zero model %s belongs to %s, not %s", entry.ID, entry.Provider, providerKind)

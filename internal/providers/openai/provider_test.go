@@ -147,6 +147,48 @@ func TestStreamCompletionOmitsAuthAndToolsWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
+	var gotAuth string
+	var gotAltAuth string
+	var gotReferer string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAltAuth = r.Header.Get("X-API-Key")
+		gotReferer = r.Header.Get("HTTP-Referer")
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:        "sk-custom",
+		BaseURL:       server.URL,
+		Model:         "custom-model",
+		AuthHeader:    "X-API-Key",
+		AuthScheme:    "Token",
+		CustomHeaders: map[string]string{"HTTP-Referer": "https://zero.dev"},
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want empty when custom auth header is used", gotAuth)
+	}
+	if gotAltAuth != "Token sk-custom" {
+		t.Fatalf("X-API-Key = %q, want custom scheme token", gotAltAuth)
+	}
+	if gotReferer != "https://zero.dev" {
+		t.Fatalf("HTTP-Referer = %q, want custom header", gotReferer)
+	}
+}
+
 func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)

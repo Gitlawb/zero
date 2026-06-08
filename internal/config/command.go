@@ -30,7 +30,7 @@ func LoadProviderCommand(command string) (FileConfig, error) {
 		return FileConfig{}, fmt.Errorf("provider command returned no providers")
 	}
 
-	providers, _, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider)
+	providers, _, err := normalizeProvidersWithoutModelDefaults(cfg.Providers, cfg.ActiveProvider, map[string]string{})
 	if err != nil {
 		return FileConfig{}, err
 	}

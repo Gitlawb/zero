@@ -100,7 +100,7 @@ func (m model) providerText() string {
 		"provider: " + displayValue(m.providerName, "none"),
 		"model: " + displayValue(m.modelName, "none"),
 	}
-	if m.providerProfile != (config.ProviderProfile{}) {
+	if config.HasProviderProfile(m.providerProfile) {
 		snapshot := zerocommands.ProviderSnapshotFromProfile(m.providerProfile, true)
 		profileLines = append(profileLines,
 			"kind: "+displayValue(snapshot.ProviderKind, "unknown"),

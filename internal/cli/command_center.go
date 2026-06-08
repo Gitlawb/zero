@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -14,15 +16,17 @@ import (
 type commandCenterOptions struct {
 	json              bool
 	provider          string
+	transport         string
 	includeDeprecated bool
 }
 
 type configSummary = zerocommands.ConfigSnapshot
 type providerSummary = zerocommands.ProviderSnapshot
 type modelSummary = zerocommands.ModelSnapshot
+type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	options, help, err := parseCommandCenterArgs(args, false)
+	options, help, err := parseCommandCenterArgs(args, false, false)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -62,15 +66,37 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		}
 		return exitSuccess
 	}
-	if command != "list" && command != "current" {
+	if command == "add" {
+		return runProvidersAdd(args, stdout, stderr, deps)
+	}
+	if command == "check" {
+		return runProvidersCheck(args, stdout, stderr, deps)
+	}
+	if command != "list" && command != "current" && command != "catalog" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown providers command %q", command))
 	}
-	options, help, err := parseCommandCenterArgs(args, false)
+	options, help, err := parseCommandCenterArgs(args, false, command == "catalog")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
 	if help {
 		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if command == "catalog" {
+		catalog, err := listProviderCatalogSummaries(options)
+		if err != nil {
+			return writeExecUsageError(stderr, err.Error())
+		}
+		if options.json {
+			if err := writePrettyJSON(stdout, map[string]any{"providers": catalog}); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		}
+		if _, err := fmt.Fprintln(stdout, formatProviderCatalogSummaries(catalog)); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
@@ -117,7 +143,7 @@ func runModels(args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) > 0 && (args[0] == "list" || args[0] == "ls") {
 		args = args[1:]
 	}
-	options, help, err := parseCommandCenterArgs(args, true)
+	options, help, err := parseCommandCenterArgs(args, true, false)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -160,7 +186,7 @@ func resolveCommandCenterConfig(stderr io.Writer, deps appDeps) (config.Resolved
 	return resolved, exitSuccess
 }
 
-func parseCommandCenterArgs(args []string, allowModelFilters bool) (commandCenterOptions, bool, error) {
+func parseCommandCenterArgs(args []string, allowModelFilters bool, allowProviderCatalogFilters bool) (commandCenterOptions, bool, error) {
 	options := commandCenterOptions{}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -179,7 +205,24 @@ func parseCommandCenterArgs(args []string, allowModelFilters bool) (commandCente
 			options.provider = value
 			index = next
 		case allowModelFilters && strings.HasPrefix(arg, "--provider="):
-			options.provider = strings.TrimSpace(strings.TrimPrefix(arg, "--provider="))
+			value, err := requiredInlineFlagValue(arg, "--provider")
+			if err != nil {
+				return options, false, err
+			}
+			options.provider = value
+		case allowProviderCatalogFilters && arg == "--transport":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.transport = value
+			index = next
+		case allowProviderCatalogFilters && strings.HasPrefix(arg, "--transport="):
+			value, err := requiredInlineFlagValue(arg, "--transport")
+			if err != nil {
+				return options, false, err
+			}
+			options.transport = value
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown flag %q", arg)}
 		default:
@@ -213,6 +256,19 @@ func listModelSummaries(registry modelregistry.Registry, options commandCenterOp
 			return summaries[i].ID < summaries[j].ID
 		}
 		return summaries[i].Provider < summaries[j].Provider
+	})
+	return summaries, nil
+}
+
+func listProviderCatalogSummaries(options commandCenterOptions) ([]providerCatalogSummary, error) {
+	summaries, err := zerocommands.ProviderCatalogSnapshots(zerocommands.ProviderCatalogSnapshotOptions{
+		Transport: options.transport,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(summaries, func(i int, j int) bool {
+		return summaries[i].ID < summaries[j].ID
 	})
 	return summaries, nil
 }
@@ -276,6 +332,32 @@ func formatProviderLine(provider providerSummary) string {
 	return line
 }
 
+func formatProviderCatalogSummaries(providers []providerCatalogSummary) string {
+	lines := []string{"Provider Catalog"}
+	if len(providers) == 0 {
+		lines = append(lines, "  (none)")
+		return strings.Join(lines, "\n")
+	}
+	for _, provider := range providers {
+		lines = append(lines, "  "+formatProviderCatalogLine(provider))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatProviderCatalogLine(provider providerCatalogSummary) string {
+	return fmt.Sprintf("id=%s name=%s transport=%s defaultModel=%s defaultBaseURL=%s authEnvVars=%s requiresAuth=%t local=%t runtimeSupported=%t",
+		formatProviderCatalogValue(provider.ID, "unknown"),
+		formatProviderCatalogValue(provider.Name, "unknown"),
+		formatProviderCatalogValue(provider.Transport, "unknown"),
+		formatProviderCatalogValue(provider.DefaultModel, "none"),
+		formatProviderCatalogValue(provider.DefaultBaseURL, "none"),
+		formatProviderCatalogValue(strings.Join(provider.AuthEnvVars, ","), "none"),
+		provider.RequiresAuth,
+		provider.Local,
+		provider.RuntimeSupported,
+	)
+}
+
 func formatModelSummaries(models []modelSummary) string {
 	lines := []string{"Models"}
 	if len(models) == 0 {
@@ -298,6 +380,16 @@ func apiKeyState(set bool) string {
 func displayCLIValue(value string, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
+	}
+	return value
+}
+
+func formatProviderCatalogValue(value string, fallback string) string {
+	value = displayCLIValue(value, fallback)
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == '"' {
+			return strconv.Quote(value)
+		}
 	}
 	return value
 }
@@ -334,12 +426,27 @@ func writeProvidersHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero providers current [flags]
   zero providers list [flags]
+  zero providers catalog [flags]
+  zero providers add <catalog-id> [flags]
+  zero providers check [name] [flags]
 
-Inspects resolved provider profiles without printing secrets.
+Inspects resolved provider profiles and provider catalog descriptors without printing secrets.
 
 Flags:
-      --json      Print JSON summary
-  -h, --help      Show this help
+      --json                    Print JSON summary
+      --transport <transport>   Filter catalog descriptors by transport
+
+Add flags:
+      --name <name>             Saved provider profile name
+      --model <model>           Override catalog default model
+      --base-url <url>          Override catalog default base URL
+      --api-key-env <name>      Environment variable that contains the API key
+      --auth-header <header>    Custom API-key header name
+      --auth-scheme <scheme>    Auth scheme prefix, for example Bearer or Token
+      --auth-header-value <v>   Exact auth header value; stored in config
+      --header <key=value>      Custom provider header; repeatable
+      --set-active              Make the added provider active
+  -h, --help                    Show this help
 `)
 	return err
 }

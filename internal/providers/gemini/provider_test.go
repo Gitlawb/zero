@@ -116,6 +116,48 @@ func TestStreamCompletionPostsGenerateContentRequest(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
+	var gotDefaultAuth string
+	var gotCustomAuth string
+	var gotTenant string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotDefaultAuth = r.Header.Get("x-goog-api-key")
+		gotCustomAuth = r.Header.Get("Authorization")
+		gotTenant = r.Header.Get("X-Tenant")
+		writeSSE(w, `{}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{
+		APIKey:        "sk-google",
+		BaseURL:       server.URL,
+		Model:         "gemini-test",
+		AuthHeader:    "Authorization",
+		AuthScheme:    "Bearer",
+		CustomHeaders: map[string]string{"X-Tenant": "zero"},
+	})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if gotDefaultAuth != "" {
+		t.Fatalf("x-goog-api-key = %q, want empty when custom auth header is used", gotDefaultAuth)
+	}
+	if gotCustomAuth != "Bearer sk-google" {
+		t.Fatalf("Authorization = %q, want bearer token", gotCustomAuth)
+	}
+	if gotTenant != "zero" {
+		t.Fatalf("X-Tenant = %q, want custom header", gotTenant)
+	}
+}
+
 func TestStreamCompletionEmitsTextUsageAndReasoningTokens(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}`)

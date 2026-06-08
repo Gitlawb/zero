@@ -194,7 +194,7 @@ func ScanSSEDataWithContext(
 }
 
 // ClassifiedError normalizes provider HTTP/stream errors and redacts secrets.
-func ClassifiedError(statusCode int, message string, apiKey string) string {
+func ClassifiedError(statusCode int, message string, secrets ...string) string {
 	prefix := "provider error: "
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -206,13 +206,15 @@ func ClassifiedError(statusCode int, message string, apiKey string) string {
 			prefix = "provider request error: "
 		}
 	}
-	return Redact(prefix+message, apiKey)
+	return Redact(prefix+message, secrets...)
 }
 
 // Redact removes known API-key and bearer-token forms from provider messages.
-func Redact(message string, apiKey string) string {
-	if apiKey != "" {
-		message = strings.ReplaceAll(message, apiKey, "[REDACTED]")
+func Redact(message string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[REDACTED]")
+		}
 	}
 	words := strings.Fields(message)
 	for index := 0; index < len(words)-1; index++ {
