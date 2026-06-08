@@ -18,9 +18,22 @@ type streamOptions struct {
 
 type chatMessage struct {
 	Role       string            `json:"role"`
-	Content    string            `json:"content,omitempty"`
+	Content    any               `json:"content,omitempty"`
 	ToolCalls  []requestToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string            `json:"tool_call_id,omitempty"`
+}
+
+// contentPart is one element of an OpenAI multimodal `content` array. A part is
+// either text (Type "text") or an inline image data URI (Type "image_url").
+type contentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *imageURLPart `json:"image_url,omitempty"`
+}
+
+// imageURLPart carries an inline image as a `data:<media>;base64,<b64>` URI.
+type imageURLPart struct {
+	URL string `json:"url"`
 }
 
 type requestToolCall struct {

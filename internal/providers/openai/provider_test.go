@@ -781,3 +781,28 @@ func TestOpenAIRequestTextOnlyOmitsEmptyContent(t *testing.T) {
 		t.Fatalf("user content = %#v, want \"hello\"", raw.Messages[1]["content"])
 	}
 }
+
+func TestContentPartImageURLMarshalsDataURI(t *testing.T) {
+	parts := []contentPart{
+		{Type: "text", Text: "look"},
+		{Type: "image_url", ImageURL: &imageURLPart{URL: "data:image/png;base64,QUJD"}},
+	}
+	got, err := json.Marshal(parts)
+	if err != nil {
+		t.Fatalf("marshal content parts: %v", err)
+	}
+	want := `[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}}]`
+	if string(got) != want {
+		t.Fatalf("content parts JSON =\n  %s\nwant\n  %s", got, want)
+	}
+
+	// The text field is omitted on an image-only part; image_url is omitted on a text part.
+	imgOnly, _ := json.Marshal(contentPart{Type: "image_url", ImageURL: &imageURLPart{URL: "data:image/png;base64,QQ=="}})
+	if strings.Contains(string(imgOnly), `"text"`) {
+		t.Fatalf("image-only part must omit empty text, got: %s", imgOnly)
+	}
+	textOnly, _ := json.Marshal(contentPart{Type: "text", Text: "hi"})
+	if strings.Contains(string(textOnly), `"image_url"`) {
+		t.Fatalf("text part must omit nil image_url, got: %s", textOnly)
+	}
+}
