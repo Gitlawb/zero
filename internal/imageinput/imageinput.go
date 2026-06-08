@@ -28,11 +28,24 @@ func LoadFile(path string, workspaceRoot string) (zeroruntime.ImageBlock, error)
 		resolved = filepath.Join(workspaceRoot, resolved)
 	}
 
+	// Reject oversized files via Stat BEFORE reading them into memory, so a huge
+	// file never allocates a multi-gigabyte buffer just to be discarded by the
+	// post-read cap. A missing file surfaces the same "not found" notice as a
+	// failed read.
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
+	}
+	if info.Size() > MaxImageBytes {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
+	}
+
 	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
 	}
 
+	// TOCTOU backstop: the file could have grown between Stat and ReadFile.
 	if len(data) > MaxImageBytes {
 		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
 	}
