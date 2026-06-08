@@ -66,5 +66,18 @@ func NormalizeGrantDecision(value GrantDecision) (GrantDecision, error) {
 }
 
 func autonomyAllowed(requested Autonomy, max Autonomy) bool {
-	return autonomyRank[requested] <= autonomyRank[max]
+	requestedNorm, requestedErr := NormalizeAutonomy(requested)
+	maxNorm, maxErr := NormalizeAutonomy(max)
+	// An unknown requested tier ranks above every valid tier so it is never
+	// allowed (fail-closed), even against a High ceiling. An unknown ceiling
+	// ranks below every valid tier so it admits nothing above Low (fail-closed).
+	requestedScore := autonomyRank[requestedNorm]
+	if requestedErr != nil {
+		requestedScore = autonomyRank[AutonomyHigh] + 1
+	}
+	maxScore := autonomyRank[maxNorm]
+	if maxErr != nil {
+		maxScore = autonomyRank[AutonomyLow] - 1
+	}
+	return requestedScore <= maxScore
 }
