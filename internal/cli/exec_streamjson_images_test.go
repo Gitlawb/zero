@@ -105,3 +105,68 @@ func TestRunExecStreamJSONImageReachesAgent(t *testing.T) {
 		t.Fatalf("image bytes = %v, want decoded png", provider.images[0].Data)
 	}
 }
+
+// TestRunExecStreamJSONImageOnlyMessageProceeds locks that an IMAGE-ONLY turn
+// (a message event with EMPTY content but at least one image) is accepted: the
+// run proceeds with an empty prompt and the image still reaches the agent. Before
+// the fix, ResolvePrompt's "must include at least one prompt or user message
+// event" error was returned before images were considered, rejecting the turn.
+func TestRunExecStreamJSONImageOnlyMessageProceeds(t *testing.T) {
+	cwd := t.TempDir()
+
+	png := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+	}
+	encoded := base64.StdEncoding.EncodeToString(png)
+	// Empty content, one image: the image-only turn.
+	input := `{"schemaVersion":1,"type":"message","role":"user","content":"","images":[{"mediaType":"image/png","data":"` + encoded + `"}]}` + "\n"
+
+	provider := &capturingImageProvider{}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--cwd", cwd,
+		"--input-format", "stream-json",
+		"--model", "gpt-4.1",
+	}, &stdout, &stderr, appDeps{
+		stdin: strings.NewReader(input),
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "gpt-4.1"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			return config.ResolvedConfig{
+				ActiveProvider: "echo",
+				Provider: config.ProviderProfile{
+					Name:         "echo",
+					ProviderKind: config.ProviderKindOpenAICompatible,
+					BaseURL:      "http://127.0.0.1/v1",
+					Model:        model,
+				},
+				MaxTurns: 3,
+			}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return provider, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("image-only turn rejected: exit code %d (want %d): %s", exitCode, exitSuccess, stderr.String())
+	}
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if len(provider.images) != 1 {
+		t.Fatalf("expected 1 image to reach the agent run, got %d (stderr=%q)", len(provider.images), stderr.String())
+	}
+	if provider.images[0].MediaType != "image/png" || !bytes.Equal(provider.images[0].Data, png) {
+		t.Fatalf("image not threaded: %#v", provider.images[0])
+	}
+}

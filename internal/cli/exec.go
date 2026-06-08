@@ -502,13 +502,20 @@ func resolveExecPrompt(options execOptions, workspaceRoot string, stdin io.Reade
 		if err != nil {
 			return "", nil, execUsageError{err.Error()}
 		}
-		prompt, err := streamjson.ResolvePrompt(events)
-		if err != nil {
-			return "", nil, execUsageError{err.Error()}
-		}
 		streamImages, err := streamjson.ResolveImages(events)
 		if err != nil {
 			return "", nil, execUsageError{err.Error()}
+		}
+		prompt, perr := streamjson.ResolvePrompt(events)
+		if perr != nil {
+			// An image-only turn (a message event with empty content but at least
+			// one image) is valid: ResolvePrompt rejects empty content, but with
+			// images present the run proceeds with an empty prompt. Only a turn
+			// with neither text nor images is a real error.
+			if len(streamImages) == 0 {
+				return "", nil, execUsageError{perr.Error()}
+			}
+			prompt = ""
 		}
 		return prompt, streamImages, nil
 	}

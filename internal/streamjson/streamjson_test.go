@@ -216,6 +216,29 @@ func TestResolveImagesRejectsBadInputs(t *testing.T) {
 	}
 }
 
+// TestResolveImagesRejectsOversizedEncodedLengthBeforeDecode asserts that an
+// over-encoded-length payload is rejected from its ENCODED length BEFORE the
+// expensive base64 decode runs — so a huge blob never allocates a decode buffer
+// just to be capped after the fact. The Data here is NOT valid base64 ('@' is
+// outside the alphabet); reaching DecodeString would surface a "base64" error,
+// so an "exceeds" error proves the size gate fired first, before any decode.
+func TestResolveImagesRejectsOversizedEncodedLengthBeforeDecode(t *testing.T) {
+	// Encoded length whose DecodedLen exceeds the cap, made of non-base64 bytes
+	// so a decode attempt would fail loudly rather than silently allocate.
+	encodedLen := base64.StdEncoding.EncodedLen(maxStreamImageBytes) + 8
+	huge := strings.Repeat("@", encodedLen)
+	event := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/png", Data: huge}}}}
+
+	_, err := ResolveImages(event)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected pre-decode oversize rejection, got %v", err)
+	}
+	if strings.Contains(err.Error(), "base64") {
+		t.Fatalf("decode ran before the size gate: %v", err)
+	}
+}
+
 func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
 	// image-only message (empty content) is valid
 	imageOnly := `{"schemaVersion":1,"type":"message","role":"user","content":"","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`

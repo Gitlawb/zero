@@ -212,10 +212,18 @@ func ResolveImages(events []InputEvent) ([]zeroruntime.ImageBlock, error) {
 	var images []zeroruntime.ImageBlock
 	for _, event := range events {
 		for _, image := range event.Images {
+			// Reject an oversized payload from the ENCODED length BEFORE decoding,
+			// so a multi-gigabyte base64 blob is never allocated just to be capped
+			// after the fact. DecodedLen is the upper bound on the decoded size.
+			if base64.StdEncoding.DecodedLen(len(image.Data)) > maxStreamImageBytes {
+				return nil, ProtocolError{fmt.Sprintf("Stream-json image exceeds the %d byte limit.", maxStreamImageBytes)}
+			}
 			data, err := base64.StdEncoding.DecodeString(image.Data)
 			if err != nil {
 				return nil, ProtocolError{fmt.Sprintf("Stream-json image data is not valid base64: %s", err.Error())}
 			}
+			// Backstop: the exact decoded length (padding makes DecodedLen an upper
+			// bound) must also stay within the cap.
 			if len(data) > maxStreamImageBytes {
 				return nil, ProtocolError{fmt.Sprintf("Stream-json image exceeds the %d byte limit.", maxStreamImageBytes)}
 			}
