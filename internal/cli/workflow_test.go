@@ -497,6 +497,37 @@ func TestRunChangesInspectAndCommit(t *testing.T) {
 	})
 }
 
+func TestParseChangesArgsBaseRef(t *testing.T) {
+	for _, args := range [][]string{
+		{"--base", "main"},
+		{"--base=main"},
+	} {
+		options, help, err := parseChangesArgs(args, "inspect")
+		if err != nil {
+			t.Fatalf("parseChangesArgs(%v) error: %v", args, err)
+		}
+		if help {
+			t.Fatalf("parseChangesArgs(%v) returned help", args)
+		}
+		if options.baseRef != "main" {
+			t.Fatalf("baseRef = %q, want main (args %v)", options.baseRef, args)
+		}
+	}
+}
+
+func TestParseChangesArgsRejectsBaseOnCommit(t *testing.T) {
+	_, _, err := parseChangesArgs([]string{"--base", "main"}, "commit")
+	if err == nil || !strings.Contains(err.Error(), "--base") {
+		t.Fatalf("expected --base rejection on commit, got %v", err)
+	}
+}
+
+func TestParseChangesArgsRequiresBaseValue(t *testing.T) {
+	if _, _, err := parseChangesArgs([]string{"--base"}, "inspect"); err == nil {
+		t.Fatalf("expected error when --base has no value")
+	}
+}
+
 func TestRunExecWorktreeUsesPreparedWorkspace(t *testing.T) {
 	root := t.TempDir()
 	worktreeDir := t.TempDir()
