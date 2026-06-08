@@ -37,6 +37,7 @@ func TestRunExecHelpDocumentsM1Flags(t *testing.T) {
 			}
 			for _, want := range []string{
 				"-f, --file",
+				"--image <path>",
 				"--mode <name>",
 				"-m, --model",
 				"--max-turns",
