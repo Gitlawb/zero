@@ -267,10 +267,21 @@ func (manager *Manager) Kill(taskID string) error {
 	if !manager.isRunningPID(taskID, pid) {
 		return nil
 	}
+	// Record the kill intent BEFORE terminating. terminateProcess can block until
+	// the child exits, during which the background Wait-goroutine may reap it and
+	// call MarkExited; marking killed first makes that MarkExited a no-op (it only
+	// acts on a running task), so a user-initiated stop stays "killed" instead of
+	// being clobbered to "error".
+	if err := manager.markKilledIfStillRunning(taskID, pid); err != nil {
+		return err
+	}
 	if err := manager.killProcess(pid); err != nil {
+		// Couldn't terminate — undo the optimistic kill mark so the still-running
+		// task is not falsely reported as killed.
+		manager.restoreRunningAfterFailedKill(taskID, pid)
 		return fmt.Errorf("kill background task %s: %w", taskID, err)
 	}
-	return manager.markKilledIfStillRunning(taskID, pid)
+	return nil
 }
 
 func (manager *Manager) KillRunning() error {
@@ -332,6 +343,26 @@ func (manager *Manager) markKilledIfStillRunning(taskID string, pid int) error {
 	}
 	manager.tasks[taskID] = task
 	return nil
+}
+
+// restoreRunningAfterFailedKill reverts a task that was optimistically marked
+// killed back to running when the terminate failed (the process is presumed
+// still alive). It only touches a task still killed with the same pid, so a real
+// exit recorded meanwhile is left untouched.
+func (manager *Manager) restoreRunningAfterFailedKill(taskID string, pid int) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	task, ok := manager.tasks[taskID]
+	if !ok || task.Status != StatusKilled || task.PID != pid {
+		return
+	}
+	task.Status = StatusRunning
+	task.ExitCode = 0
+	task.CompletedAt = time.Time{}
+	if err := manager.persistTaskLocked(task); err != nil {
+		return
+	}
+	manager.tasks[taskID] = task
 }
 
 func (manager *Manager) loadTasks() error {
