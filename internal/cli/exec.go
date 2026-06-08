@@ -45,6 +45,7 @@ const (
 type execOptions struct {
 	promptParts []string
 	file        string
+	imagePaths  []string
 	mode        string
 	model       string
 	// modelProfile captures the legacy --profile flag. It is accepted for
