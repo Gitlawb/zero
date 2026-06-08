@@ -84,6 +84,19 @@ func formatPlanArguments(arguments string) string {
 // tool call is matched to its tool result by id; the latest body per skill wins,
 // and bodies are capped at maxPreservedSkillBytes. Returns "" when none loaded.
 func extractLoadedSkills(messages []zeroruntime.Message) string {
+	return formatSkills(loadedSkills(messages))
+}
+
+// skillEntry is one loaded skill: its name and (capped) body.
+type skillEntry struct {
+	name string
+	body string
+}
+
+// loadedSkills returns the skills loaded via the skill tool in messages — the
+// latest body per name, in first-seen order — matching each skill tool call to
+// its tool result by id.
+func loadedSkills(messages []zeroruntime.Message) []skillEntry {
 	nameByID := map[string]string{}
 	for _, message := range messages {
 		for _, call := range message.ToolCalls {
@@ -93,7 +106,7 @@ func extractLoadedSkills(messages []zeroruntime.Message) string {
 		}
 	}
 	if len(nameByID) == 0 {
-		return ""
+		return nil
 	}
 
 	bodyByName := map[string]string{}
@@ -118,13 +131,22 @@ func extractLoadedSkills(messages []zeroruntime.Message) string {
 		}
 		bodyByName[name] = capBody(body)
 	}
-	if len(nameOrder) == 0 {
+
+	entries := make([]skillEntry, 0, len(nameOrder))
+	for _, name := range nameOrder {
+		entries = append(entries, skillEntry{name: name, body: bodyByName[name]})
+	}
+	return entries
+}
+
+// formatSkills renders skill entries as "### name\nbody" blocks.
+func formatSkills(entries []skillEntry) string {
+	if len(entries) == 0 {
 		return ""
 	}
-
-	sections := make([]string, 0, len(nameOrder))
-	for _, name := range nameOrder {
-		sections = append(sections, "### "+name+"\n"+bodyByName[name])
+	sections := make([]string, 0, len(entries))
+	for _, e := range entries {
+		sections = append(sections, "### "+e.name+"\n"+e.body)
 	}
 	return strings.Join(sections, "\n\n")
 }
@@ -164,15 +186,115 @@ func capBody(body string) string {
 	return body[:limit] + truncationNote
 }
 
-// appendPreservedState appends the active plan and loaded-skill sections found
-// in the elided messages to a compaction summary, so structured state survives
-// verbatim. middle is the slice being summarized away.
+// appendPreservedState appends the active plan and loaded-skill sections to a
+// compaction summary so structured state survives verbatim. middle is the slice
+// being summarized away.
+//
+// It is robust across REPEATED compactions: after the first compaction the plan
+// and skills live only as text inside the injected summary message, which on a
+// later compaction lands in middle with no real tool calls left to extract. So
+// when middle has no fresh update_plan / skill tool calls, the preserved
+// sections are carried forward from the prior summary instead of being lost.
+// Fresh tool calls always override the carried-forward copy.
 func appendPreservedState(summary string, middle []zeroruntime.Message) string {
-	if plan := extractLatestPlan(middle); plan != "" {
+	prior := latestSummaryContent(middle)
+
+	// Plan: a fresh update_plan in middle is authoritative; otherwise carry
+	// forward the plan section preserved by an earlier compaction.
+	plan := extractLatestPlan(middle)
+	if plan == "" {
+		plan = sectionText(prior, planPreserveLabel)
+	}
+	if plan != "" {
 		summary += "\n\n" + planPreserveLabel + "\n" + plan
 	}
-	if skills := extractLoadedSkills(middle); skills != "" {
-		summary += "\n\n" + skillsPreserveLabel + "\n" + skills
+
+	// Skills: merge skills preserved by an earlier compaction (older) with fresh
+	// skill loads in middle (newer wins per name), so a loaded skill survives
+	// repeated compactions even when the summarizer drops the section.
+	skills := mergeSkillEntries(parseSkillSection(sectionText(prior, skillsPreserveLabel)), loadedSkills(middle))
+	if formatted := formatSkills(skills); formatted != "" {
+		summary += "\n\n" + skillsPreserveLabel + "\n" + formatted
 	}
 	return summary
+}
+
+// latestSummaryContent returns the content of the most recent injected summary
+// message in messages (a user message beginning with summaryLabel), or "".
+func latestSummaryContent(messages []zeroruntime.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role == zeroruntime.MessageRoleUser && strings.HasPrefix(strings.TrimSpace(m.Content), summaryLabel) {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// sectionText returns the body of the preserved section introduced by label in
+// content (from the LAST occurrence — the authoritative copy this code appended
+// — up to the next "## " heading or the end), or "".
+func sectionText(content, label string) string {
+	idx := strings.LastIndex(content, label)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimPrefix(content[idx+len(label):], "\n")
+	if next := strings.Index(rest, "\n## "); next >= 0 {
+		rest = rest[:next]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// parseSkillSection parses a preserved skills section ("### name\nbody" blocks)
+// back into ordered skill entries.
+func parseSkillSection(text string) []skillEntry {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	var entries []skillEntry
+	for _, block := range strings.Split(text, "### ") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		name, body := block, ""
+		if nl := strings.IndexByte(block, '\n'); nl >= 0 {
+			name = strings.TrimSpace(block[:nl])
+			body = strings.TrimSpace(block[nl+1:])
+		}
+		if name != "" {
+			entries = append(entries, skillEntry{name: name, body: body})
+		}
+	}
+	return entries
+}
+
+// mergeSkillEntries overlays newer skill loads onto older preserved entries by
+// name (newer body wins), keeping the older order and appending genuinely-new
+// skills after.
+func mergeSkillEntries(older, newer []skillEntry) []skillEntry {
+	if len(newer) == 0 {
+		return older
+	}
+	newBody := make(map[string]string, len(newer))
+	for _, e := range newer {
+		newBody[e.name] = e.body
+	}
+	merged := make([]skillEntry, 0, len(older)+len(newer))
+	seen := make(map[string]bool, len(older))
+	for _, e := range older {
+		if b, ok := newBody[e.name]; ok {
+			e.body = b
+		}
+		merged = append(merged, e)
+		seen[e.name] = true
+	}
+	for _, e := range newer {
+		if !seen[e.name] {
+			merged = append(merged, e)
+		}
+	}
+	return merged
 }

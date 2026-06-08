@@ -85,6 +85,47 @@ func TestCompactWithoutStateHasNoPreserveSections(t *testing.T) {
 	}
 }
 
+func TestCompactCarriesPreservedStateAcrossRepeatedCompaction(t *testing.T) {
+	// First compaction: real update_plan + skill load in the elided middle.
+	first, err := Compact(stateConversation(), CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "FIRST SUMMARY", nil },
+	})
+	if err != nil {
+		t.Fatalf("first Compact: %v", err)
+	}
+
+	// Grow the history so the first summary (which holds the preserved sections,
+	// but no real tool calls) falls into the SECOND compaction's middle.
+	second := append([]zeroruntime.Message{}, first...)
+	second = append(second,
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "what next"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "keep going"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "done"},
+	)
+
+	// The second summarizer deliberately DROPS the preserved sections.
+	out, err := Compact(second, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SECOND SUMMARY with no preserved sections", nil },
+	})
+	if err != nil {
+		t.Fatalf("second Compact: %v", err)
+	}
+	if len(out) < 2 || out[1].Role != zeroruntime.MessageRoleUser {
+		t.Fatalf("unexpected compacted shape: %#v", out)
+	}
+	newSummary := out[1].Content
+	// Plan and skill must survive even though the summarizer didn't copy them.
+	if !strings.Contains(newSummary, planPreserveLabel) || !strings.Contains(newSummary, "write code") {
+		t.Fatalf("active plan lost on the second compaction: %q", newSummary)
+	}
+	if !strings.Contains(newSummary, "### deploy") || !strings.Contains(newSummary, "make deploy") {
+		t.Fatalf("loaded skill lost on the second compaction: %q", newSummary)
+	}
+}
+
 func TestExtractLatestPlanReturnsMostRecent(t *testing.T) {
 	messages := []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{
