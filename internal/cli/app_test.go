@@ -200,6 +200,79 @@ func TestRunNoArgsLaunchesTUIInAskPermissionMode(t *testing.T) {
 	}
 }
 
+func TestRunSkipPermissionsUnsafeLaunchesTUIInUnsafeMode(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	launched := false
+	var launchedOptions tui.Options
+
+	// "zero --skip-permissions-unsafe" must launch the interactive TUI in unsafe
+	// mode (not fall through to "unknown command"). This is the only way to reach
+	// unsafe mode in the shell, which the "!" escape is gated behind.
+	exitCode := runWithDeps([]string{"--skip-permissions-unsafe"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("expected the interactive TUI to launch, but runTUI was never called")
+	}
+	if launchedOptions.PermissionMode != agent.PermissionModeUnsafe {
+		t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeUnsafe)
+	}
+	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeUnsafe {
+		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeUnsafe)
+	}
+}
+
+func TestRunZerolineSkipPermissionsUnsafeLaunchesInUnsafeMode(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	launched := false
+	var launchedOptions tui.Options
+
+	exitCode := runWithDeps([]string{"zeroline", "--skip-permissions-unsafe"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("expected the zeroline TUI to launch, but runTUI was never called")
+	}
+	if launchedOptions.Skin != "zeroline" {
+		t.Fatalf("Skin = %q, want zeroline", launchedOptions.Skin)
+	}
+	if launchedOptions.PermissionMode != agent.PermissionModeUnsafe {
+		t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeUnsafe)
+	}
+}
+
 func TestRunNoArgsReportsConfigErrorsWithoutLaunchingTUI(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

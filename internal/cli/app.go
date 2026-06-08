@@ -137,10 +137,16 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	deps = fillAppDeps(deps)
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk)
 	}
 
 	switch args[0] {
+	case "--skip-permissions-unsafe":
+		// Launch the interactive TUI directly in unsafe mode. Without this, the
+		// flag fell through to the unknown-command path, so a user could never
+		// reach unsafe mode in the shell — and the "!" shell escape (which is
+		// gated behind unsafe) was therefore unreachable.
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -280,11 +286,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps) int {
-	return runInteractiveTUIWithSkin(stderr, deps, "")
+func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode) int {
+	return runInteractiveTUIWithSkin(stderr, deps, "", permissionMode)
 }
 
-func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string) int {
+func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, permissionMode agent.PermissionMode) int {
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
@@ -325,8 +331,12 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string) int 
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
 	// files nor run shell. Ask advertises them and routes each through the existing
-	// OnPermissionRequest flow; shift+tab lets the user switch modes live.
-	permissionMode := agent.PermissionModeAsk
+	// OnPermissionRequest flow; shift+tab lets the user switch modes live. An
+	// explicit --skip-permissions-unsafe launch overrides this to unsafe (the only
+	// way to reach unsafe, since shift+tab deliberately cycles auto↔ask only).
+	if permissionMode == "" {
+		permissionMode = agent.PermissionModeAsk
+	}
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
 		ProviderName:    resolved.Provider.Name,
@@ -440,9 +450,10 @@ Commands:
   version    Print version
 
 Flags:
-  -h, --help       Show this help
-  -v, --version    Print version
-  -p, --prompt     Run a one-shot prompt
+  -h, --help                     Show this help
+  -v, --version                  Print version
+  -p, --prompt                   Run a one-shot prompt
+      --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
 `)
 	return err
 }

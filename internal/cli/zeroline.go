@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/zeroline"
 )
 
@@ -27,6 +28,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	stream := fs.Bool("stream", false, "show a streaming assistant response in the chat snapshot")
 	width := fs.Int("width", 100, "snapshot width")
 	height := fs.Int("height", 30, "snapshot height")
+	skipUnsafe := fs.Bool("skip-permissions-unsafe", false, "launch in unsafe permission mode (enables the ! shell escape)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -81,5 +83,9 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return 0
 	}
 
-	return runInteractiveTUIWithSkin(stderr, deps, "zeroline")
+	permissionMode := agent.PermissionModeAsk
+	if *skipUnsafe {
+		permissionMode = agent.PermissionModeUnsafe
+	}
+	return runInteractiveTUIWithSkin(stderr, deps, "zeroline", permissionMode)
 }
