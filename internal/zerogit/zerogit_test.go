@@ -207,6 +207,85 @@ func TestInspectPreviewWorksWithUnbornHead(t *testing.T) {
 	}
 }
 
+func TestInspectBaseRefUsesThreeDotDiff(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},                                                   // rev-parse --show-toplevel
+		{Stdout: "feature/m5\n"},                                                // rev-parse --abbrev-ref HEAD
+		{Stdout: "abc1234\n"},                                                   // rev-parse --short HEAD
+		{Stdout: "M\ta.txt\nA\tb.txt\n"},                                        // diff --name-status main...HEAD
+		{Stdout: " a.txt | 1 +\n b.txt | 1 +\n 2 files changed, 2 insertions(+)\n"}, // diff --stat main...HEAD
+		{Stdout: "diff --git a/internal/changes/changes.go b/internal/changes/changes.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz\n"}, // diff main...HEAD
+	}}
+
+	summary, err := Inspect(context.Background(), InspectOptions{
+		Cwd:          root,
+		BaseRef:      "main",
+		MaxDiffBytes: 80,
+		RunGit:       runner.Run,
+	})
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+
+	if summary.Base != "main" {
+		t.Fatalf("Base = %q, want main", summary.Base)
+	}
+	if summary.Branch != "feature/m5" {
+		t.Fatalf("Branch = %q, want feature/m5 (HEAD branch must be preserved)", summary.Branch)
+	}
+	if summary.Clean {
+		t.Fatalf("Clean = true, want false")
+	}
+	if len(summary.Files) != 2 {
+		t.Fatalf("expected two files from name-status, got %#v", summary.Files)
+	}
+	if summary.Files[0].Path != "a.txt" || summary.Files[0].Status != "modified" {
+		t.Fatalf("unexpected first file: %#v", summary.Files[0])
+	}
+	if summary.Files[1].Path != "b.txt" || summary.Files[1].Status != "added" {
+		t.Fatalf("unexpected second file: %#v", summary.Files[1])
+	}
+	if strings.Contains(summary.Diff, "sk-proj-abcdefghijklmnopqrstuvwxyz") || !strings.Contains(summary.Diff, "[REDACTED]") {
+		t.Fatalf("expected redacted diff, got %q", summary.Diff)
+	}
+	if !summary.Truncated {
+		t.Fatalf("expected diff to be marked truncated")
+	}
+	if got := runner.commandLine(3); got != "git diff --name-status main...HEAD --" {
+		t.Fatalf("name-status command = %q", got)
+	}
+	if got := runner.commandLine(4); got != "git diff --stat main...HEAD --" {
+		t.Fatalf("stat command = %q", got)
+	}
+	if got := runner.commandLine(5); got != "git diff main...HEAD --" {
+		t.Fatalf("diff command = %q", got)
+	}
+}
+
+func TestInspectBaseRefEmptyDiffIsClean(t *testing.T) {
+	root := t.TempDir()
+	runner := &fakeRunner{results: []CommandResult{
+		{Stdout: root + "\n"},
+		{Stdout: "main\n"},
+		{Stdout: "abc1234\n"},
+		{Stdout: ""}, // diff --name-status (no changes vs base)
+		{Stdout: ""}, // diff --stat
+		{Stdout: ""}, // diff
+	}}
+
+	summary, err := Inspect(context.Background(), InspectOptions{Cwd: root, BaseRef: "main", RunGit: runner.Run})
+	if err != nil {
+		t.Fatalf("Inspect returned error: %v", err)
+	}
+	if !summary.Clean || len(summary.Files) != 0 {
+		t.Fatalf("expected clean base diff, got %#v", summary)
+	}
+	if summary.Base != "main" {
+		t.Fatalf("Base = %q, want main", summary.Base)
+	}
+}
+
 func TestTruncateStringHonorsMaxBytesWithRedactionMarker(t *testing.T) {
 	value := strings.Repeat("a", 32) + redaction.RedactedSecret + strings.Repeat("b", 32)
 	for maxBytes := 1; maxBytes < len(redaction.RedactedSecret)+len("\n[truncated]"); maxBytes++ {

@@ -23,6 +23,7 @@ type CommandResult struct {
 
 type InspectOptions struct {
 	Cwd          string
+	BaseRef      string
 	MaxDiffBytes int
 	RunGit       Runner
 	RunGitEnv    EnvRunner
@@ -48,6 +49,7 @@ type FileChange struct {
 type ChangeSummary struct {
 	Root      string       `json:"root"`
 	Branch    string       `json:"branch,omitempty"`
+	Base      string       `json:"base,omitempty"`
 	Commit    string       `json:"commit,omitempty"`
 	Clean     bool         `json:"clean"`
 	Files     []FileChange `json:"files"`
@@ -81,6 +83,38 @@ func Inspect(ctx context.Context, options InspectOptions) (ChangeSummary, error)
 	root = filepath.Clean(root)
 	branch, _ := gitOutput(ctx, runGit, root, "rev-parse", "--abbrev-ref", "HEAD")
 	commit, _ := gitOutput(ctx, runGit, root, "rev-parse", "--short", "HEAD")
+
+	maxDiffBytes := firstPositive(options.MaxDiffBytes, defaultMaxDiffBytes)
+
+	base := strings.TrimSpace(options.BaseRef)
+	if base != "" {
+		nameStatus, err := gitRawOutput(ctx, runGit, root, "diff", "--name-status", base+"...HEAD", "--")
+		if err != nil {
+			return ChangeSummary{}, fmt.Errorf("inspect base diff status: %w", err)
+		}
+		diffStat, err := gitRawOutput(ctx, runGit, root, "diff", "--stat", base+"...HEAD", "--")
+		if err != nil {
+			return ChangeSummary{}, fmt.Errorf("inspect base diff stat: %w", err)
+		}
+		diff, err := gitRawOutput(ctx, runGit, root, "diff", base+"...HEAD", "--")
+		if err != nil {
+			return ChangeSummary{}, fmt.Errorf("inspect base diff: %w", err)
+		}
+		redactedDiff, truncated := truncateString(redactText(diff), maxDiffBytes)
+		files := parseNameStatus(nameStatus)
+		return ChangeSummary{
+			Root:      root,
+			Branch:    redactText(branch),
+			Base:      redactText(base),
+			Commit:    redactText(commit),
+			Clean:     len(files) == 0,
+			Files:     files,
+			DiffStat:  redactText(diffStat),
+			Diff:      redactedDiff,
+			Truncated: truncated,
+		}, nil
+	}
+
 	status, err := gitRawOutput(ctx, runGit, root, "status", "--short", "--untracked-files=all")
 	if err != nil {
 		return ChangeSummary{}, fmt.Errorf("inspect git status: %w", err)
@@ -90,7 +124,6 @@ func Inspect(ctx context.Context, options InspectOptions) (ChangeSummary, error)
 		return ChangeSummary{}, err
 	}
 
-	maxDiffBytes := firstPositive(options.MaxDiffBytes, defaultMaxDiffBytes)
 	redactedDiff, truncated := truncateString(redactText(diff), maxDiffBytes)
 	files := parseStatus(status)
 	return ChangeSummary{
@@ -199,6 +232,51 @@ func parseStatus(status string) []FileChange {
 		})
 	}
 	return files
+}
+
+func parseNameStatus(output string) []FileChange {
+	files := []FileChange{}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		code := strings.TrimSpace(fields[0])
+		if code == "" {
+			continue
+		}
+		path := strings.TrimSpace(fields[len(fields)-1])
+		if path == "" {
+			continue
+		}
+		files = append(files, FileChange{
+			Path:   redactText(path),
+			Status: nameStatusName(code[:1]),
+		})
+	}
+	return files
+}
+
+func nameStatusName(letter string) string {
+	switch letter {
+	case "A":
+		return "added"
+	case "D":
+		return "deleted"
+	case "R":
+		return "renamed"
+	case "C":
+		return "copied"
+	case "U":
+		return "conflicted"
+	case "T":
+		return "modified"
+	default:
+		return "modified"
+	}
 }
 
 func statusName(code string) string {
