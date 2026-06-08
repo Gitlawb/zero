@@ -31,6 +31,7 @@ const (
 	commandStyle
 	commandTheme
 	commandInputStyle
+	commandBash
 	commandUnknown
 )
 
@@ -223,6 +224,11 @@ func parseCommand(input string) parsedCommand {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return parsedCommand{kind: commandEmpty}
+	}
+
+	// "!cmd" is a shell escape (the footer advertises "! bash"): run it directly.
+	if strings.HasPrefix(trimmed, "!") {
+		return parsedCommand{kind: commandBash, text: strings.TrimSpace(trimmed[1:])}
 	}
 
 	if strings.HasPrefix(trimmed, "/") {

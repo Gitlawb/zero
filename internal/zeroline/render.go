@@ -17,6 +17,7 @@ type Header struct {
 	Dirty                        bool
 	CtxPct                       int
 	Cost                         float64
+	TotalTokens                  int
 }
 
 // Row is one rendered transcript entry, mapped from the TUI's live state.
@@ -539,7 +540,8 @@ func (s styles) botBar(run string, h Header, variant, tokS, w int) string {
 		tps = s.green.Render(strconv.Itoa(tokS))
 	}
 	left := b1(dot+" "+stStyle.Render(stTxt)) + b2(s.dim.Render("utf-8")) +
-		b2(s.mute.Render("tok/s ")+tps)
+		b2(s.mute.Render("tok/s ")+tps) +
+		b2(s.mute.Render("tok ")+s.fg.Render(humanTokens(h.TotalTokens)))
 	right := b2(s.mute.Render("ctx ")+s.gauge(float64(h.CtxPct)/100, 8)) +
 		b2(s.mute.Render(ThemeName(variant))) +
 		b1(s.mute.Render("1-5 theme · ^L light"))
@@ -1113,6 +1115,17 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// humanTokens formats a cumulative token count compactly (e.g. 1234 -> "1.2k").
+func humanTokens(n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return strings.Replace(fmt.Sprintf("%.1fk", float64(n)/1000), ".0k", "k", 1)
 }
 
 func wrap(text string, w int) []string {

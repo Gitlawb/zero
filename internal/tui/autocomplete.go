@@ -1,6 +1,10 @@
 package tui
 
-import "strings"
+import (
+	"io/fs"
+	"path/filepath"
+	"strings"
+)
 
 // commandSuggestion is one row in the slash-command autocomplete overlay: the
 // canonical command name and its short description.
@@ -35,18 +39,29 @@ func (m *model) recomputeSuggestions() {
 	}
 
 	value := m.input.Value()
+
+	// File reference: a trailing "@token" (even mid-prompt) drives a workspace
+	// file picker. Checked before the slash path so "@" is handled distinctly.
+	if token, ok := trailingAtToken(value); ok {
+		m.suggestionsAreFiles = true
+		m.suggestions = fileSuggestions(m.cwd, token)
+		if m.suggestionIdx >= len(m.suggestions) || m.suggestionIdx < 0 {
+			m.suggestionIdx = 0
+		}
+		return
+	}
+	m.suggestionsAreFiles = false
+
 	trimmed := strings.TrimLeft(value, " ")
-	// Only a single bare "/token" (no whitespace, so no argument started yet)
-	// drives suggestions.
+	// A leading slash token (no whitespace yet) drives the command palette. A bare
+	// "/" now lists the full palette (the footer advertises "/ commands").
 	if !strings.HasPrefix(trimmed, "/") || strings.ContainsAny(trimmed, " \t") {
 		m.suggestions = nil
 		m.suggestionIdx = 0
 		return
 	}
 	token := strings.TrimSpace(trimmed)
-	if token == "" || token == "/" {
-		// "/" alone surfaces nothing until at least one more char is typed; this
-		// keeps the overlay from popping for an empty slash.
+	if token == "" {
 		m.suggestions = nil
 		m.suggestionIdx = 0
 		return
@@ -116,11 +131,81 @@ func (m model) completeSuggestion() model {
 	if idx < 0 || idx >= len(m.suggestions) {
 		idx = 0
 	}
-	m.input.SetValue(m.suggestions[idx].Name + " ")
+	chosen := m.suggestions[idx].Name
+	if m.suggestionsAreFiles {
+		// Replace only the trailing "@token" with the chosen path so any preceding
+		// prompt text ("read @foo") is preserved.
+		m.input.SetValue(replaceTrailingAtToken(m.input.Value(), chosen) + " ")
+	} else {
+		m.input.SetValue(chosen + " ")
+	}
 	m.input.CursorEnd()
 	m.suggestions = nil
 	m.suggestionIdx = 0
+	m.suggestionsAreFiles = false
 	return m
+}
+
+// trailingAtToken returns the file-reference fragment at the end of value: the
+// part AFTER an "@" in the last whitespace-delimited word (empty for a bare "@").
+// ok is false when that word does not start with "@".
+func trailingAtToken(value string) (string, bool) {
+	last := value
+	if i := strings.LastIndexAny(value, " \t\n"); i >= 0 {
+		last = value[i+1:]
+	}
+	if !strings.HasPrefix(last, "@") {
+		return "", false
+	}
+	return last[1:], true
+}
+
+// replaceTrailingAtToken swaps the trailing "@token" word in value for path.
+func replaceTrailingAtToken(value, path string) string {
+	if i := strings.LastIndexAny(value, " \t\n"); i >= 0 {
+		return value[:i+1] + path
+	}
+	return path
+}
+
+// fileSuggestions lists workspace files whose path matches partial (case-
+// insensitive substring), for the "@file" picker. The walk skips VCS/dependency/
+// hidden directories and is bounded so it stays responsive per keystroke. Each
+// suggestion's Name is the "@<relpath>" token that completion inserts.
+func fileSuggestions(cwd, partial string) []commandSuggestion {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return nil
+	}
+	needle := strings.ToLower(strings.TrimSpace(partial))
+	out := make([]commandSuggestion, 0, maxCommandSuggestions)
+	visited := 0
+	const maxVisited = 4000
+	_ = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if visited > maxVisited || len(out) >= maxCommandSuggestions {
+			return fs.SkipAll
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != cwd && (name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" || strings.HasPrefix(name, ".")) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		visited++
+		rel, relErr := filepath.Rel(cwd, path)
+		if relErr != nil {
+			rel = filepath.Base(path)
+		}
+		if needle == "" || strings.Contains(strings.ToLower(rel), needle) {
+			out = append(out, commandSuggestion{Name: "@" + rel, Desc: "file"})
+		}
+		return nil
+	})
+	return out
 }
 
 // dismissSuggestions clears the overlay without touching the input or the run.

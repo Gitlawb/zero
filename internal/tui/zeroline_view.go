@@ -42,6 +42,27 @@ func (m model) handleZerolineKeys(msg tea.KeyMsg) (model, bool) {
 	return m, false
 }
 
+// zerolineHeader builds the zeroline header, including the live cost and
+// cumulative token total from the usage tracker (with the unpriced fallback) so
+// the top/bottom bars actually reflect consumption instead of always showing $0.
+func (m model) zerolineHeader() zeroline.Header {
+	h := zeroline.Header{
+		Cwd:      m.cwd,
+		Branch:   m.gitBranch,
+		Model:    m.modelName,
+		Provider: m.providerName,
+	}
+	if m.usageTracker != nil {
+		summary := m.usageTracker.Summary()
+		h.Cost = summary.TotalCost
+		h.TotalTokens = summary.TotalTokens
+	}
+	if h.TotalTokens == 0 && m.unpricedTokens > 0 {
+		h.TotalTokens = m.unpricedTokens
+	}
+	return h
+}
+
 func (m model) zerolineView() string {
 	width, height := m.width, m.height
 	if width <= 0 {
@@ -56,12 +77,7 @@ func (m model) zerolineView() string {
 		return zeroline.RenderBoot(m.themeVariant, m.themeDark, m.frame, width, height)
 	}
 
-	header := zeroline.Header{
-		Cwd:      m.cwd,
-		Branch:   m.gitBranch,
-		Model:    m.modelName,
-		Provider: m.providerName,
-	}
+	header := m.zerolineHeader()
 
 	// Home until the first turn is submitted.
 	if m.showSplash {
