@@ -363,6 +363,74 @@ func TestEngineEmptyPolicyCeilingDefaultsToHigh(t *testing.T) {
 	}
 }
 
+// TestEngineInvalidAutonomyFailsClosedOnUnsafeEscalation guards the fail-closed
+// default in Evaluate: a genuinely-invalid Autonomy must NOT be sanitized down to
+// Low (which would slip under a Medium ceiling and auto-allow the unsafe
+// escalation). It must be treated as the highest tier so it exceeds the ceiling
+// and clamps to Prompt.
+func TestEngineInvalidAutonomyFailsClosedOnUnsafeEscalation(t *testing.T) {
+	root := t.TempDir()
+	policy := DefaultPolicy()
+	policy.MaxAutonomy = AutonomyMedium
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       Autonomy("bogus"),
+		Args:           map[string]any{"path": "notes.txt"},
+	})
+	if decision.Action != ActionPrompt {
+		t.Fatalf("invalid-autonomy unsafe decision = %#v, want prompt (fail closed above ceiling, not allow)", decision)
+	}
+	if decision.Reason != reasonAboveCeiling {
+		t.Fatalf("decision.Reason = %q, want %q", decision.Reason, reasonAboveCeiling)
+	}
+}
+
+// TestEngineInvalidAutonomyFailsClosedOnGrantAllow exercises the persistent
+// grant-allow path: an invalid requested autonomy must exceed a Medium ceiling
+// and clamp to Prompt instead of matching the grant and auto-allowing.
+func TestEngineInvalidAutonomyFailsClosedOnGrantAllow(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.Grant(GrantInput{
+		ToolName:    "write_file",
+		Decision:    GrantAllow,
+		MaxAutonomy: AutonomyHigh,
+		Reason:      "broad grant",
+	}); err != nil {
+		t.Fatalf("Grant allow returned error: %v", err)
+	}
+
+	policy := DefaultPolicy()
+	policy.MaxAutonomy = AutonomyMedium
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Store: store})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       Autonomy("bogus"),
+		Args:           map[string]any{"path": "notes.txt"},
+	})
+	if decision.Action != ActionPrompt {
+		t.Fatalf("invalid-autonomy grant decision = %#v, want prompt (fail closed above ceiling, not grant allow)", decision)
+	}
+	if decision.Reason != reasonAboveCeiling {
+		t.Fatalf("decision.Reason = %q, want %q", decision.Reason, reasonAboveCeiling)
+	}
+}
+
 func fixedSandboxTime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

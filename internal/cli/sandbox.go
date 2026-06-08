@@ -55,10 +55,15 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	policy := zeroSandbox.DefaultPolicy()
-	if resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{}); err == nil {
-		policy = applyConfiguredAutonomyCeiling(policy, resolved.Sandbox.MaxAutonomy)
+	// Surface config resolution failures instead of silently falling back to
+	// DefaultPolicy() (High): an unresolvable config (e.g. an invalid
+	// sandbox.maxAutonomy that now errors at resolve time) would otherwise
+	// misreport the trust posture as the permissive default.
+	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitProvider)
 	}
+	policy := applyConfiguredAutonomyCeiling(zeroSandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy)
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
 	plan := backend.BuildPlan(workspaceRoot, policy)
 	if options.effective {

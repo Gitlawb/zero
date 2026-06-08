@@ -66,7 +66,11 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	request.SideEffect = NormalizeSideEffect(request.SideEffect)
 	autonomy, err := NormalizeAutonomy(request.Autonomy)
 	if err != nil {
-		autonomy = AutonomyLow
+		// Fail CLOSED: a genuinely-invalid autonomy (NormalizeAutonomy("") is Low,
+		// not an error, so only bogus values land here) is treated as the highest
+		// tier so it exceeds any Medium/Low ceiling and clamps to Prompt rather than
+		// slipping under the ceiling as Low and auto-allowing on the grant/unsafe path.
+		autonomy = AutonomyHigh
 	}
 	request.Autonomy = autonomy
 	risk := Classify(request)

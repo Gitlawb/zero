@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,6 +106,9 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 	deps := appDeps{
 		getwd:           func() (string, error) { return t.TempDir(), nil },
 		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
 				Name:     sandbox.BackendPolicyOnly,
@@ -188,6 +192,9 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 	deps := appDeps{
 		getwd:           func() (string, error) { return t.TempDir(), nil },
 		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
 				Name:     sandbox.BackendPolicyOnly,
@@ -350,6 +357,29 @@ func TestRunSandboxPolicyTextShowsMaxAutonomy(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "max_autonomy: medium") {
 		t.Fatalf("effective policy text missing max_autonomy line:\n%s", stdout.String())
+	}
+}
+
+func TestRunSandboxPolicySurfacesResolveConfigError(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{
+		getwd:           func() (string, error) { return t.TempDir(), nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q", "moderate")
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "policy"}, &stdout, &stderr, deps)
+	if exitCode != exitProvider {
+		t.Fatalf("policy exit = %d, want provider exit %d (resolve error surfaced, not silent DefaultPolicy fallback)", exitCode, exitProvider)
+	}
+	if !strings.Contains(stderr.String(), "invalid sandbox.maxAutonomy") {
+		t.Fatalf("expected surfaced resolve error in stderr, got %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout on resolve error, got %q", stdout.String())
 	}
 }
 
