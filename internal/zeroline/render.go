@@ -1117,7 +1117,9 @@ func firstLine(s string) string {
 	return s
 }
 
-// humanTokens formats a cumulative token count compactly (e.g. 1234 -> "1.2k").
+// humanTokens formats a cumulative token count compactly (e.g. 1234 -> "1.2k",
+// 1_500_000 -> "1.5M"). Counts climb into the millions on large-context models,
+// so the readout switches to "M" past a million rather than showing "1000k".
 func humanTokens(n int) string {
 	if n < 0 {
 		n = 0
@@ -1125,7 +1127,10 @@ func humanTokens(n int) string {
 	if n < 1000 {
 		return strconv.Itoa(n)
 	}
-	return strings.Replace(fmt.Sprintf("%.1fk", float64(n)/1000), ".0k", "k", 1)
+	if n < 1_000_000 {
+		return strings.Replace(fmt.Sprintf("%.1fk", float64(n)/1000), ".0k", "k", 1)
+	}
+	return strings.Replace(fmt.Sprintf("%.1fM", float64(n)/1_000_000), ".0M", "M", 1)
 }
 
 func wrap(text string, w int) []string {

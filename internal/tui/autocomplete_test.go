@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -224,4 +226,72 @@ func TestSuggestionOverlayRendersInZerolineSkin(t *testing.T) {
 	if !strings.Contains(view, "/model") || !strings.Contains(view, "/mode") {
 		t.Fatal("zeroline chat view should render the suggestion overlay")
 	}
+}
+
+func TestFileSuggestionsMatchesAndSkipsVCSDirs(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel string) {
+		t.Helper()
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("cmd/server/main.go")
+	mustWrite(".git/config")             // hidden VCS dir: must be skipped
+	mustWrite("node_modules/dep/index.js") // dependency dir: must be skipped
+
+	got := suggestionTokens(fileSuggestions(root, "main"))
+	if !contains(got, "@cmd/server/main.go") {
+		t.Fatalf("expected @cmd/server/main.go in %v", got)
+	}
+
+	all := suggestionTokens(fileSuggestions(root, ""))
+	for _, name := range all {
+		if strings.Contains(name, ".git/") || strings.Contains(name, "node_modules/") {
+			t.Fatalf("walk must skip VCS/dependency dirs, got %q", name)
+		}
+	}
+}
+
+// TestFileSuggestionsBoundCountsDirectories proves the walk budget counts
+// directory entries (not just files): with a tiny budget, a match that sits
+// behind many directories is never reached, so the per-keystroke walk stays
+// bounded in directory-heavy trees.
+func TestFileSuggestionsBoundCountsDirectories(t *testing.T) {
+	root := t.TempDir()
+	// Many empty directories sort before "zzz" lexically, so WalkDir visits them
+	// first and exhausts the budget before reaching the matching file.
+	for i := 0; i < 50; i++ {
+		if err := os.MkdirAll(filepath.Join(root, "dir"+string(rune('a'+i%26))+string(rune('0'+i/26))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deep := filepath.Join(root, "zzz")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "needle.go"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Budget smaller than the directory count: must bail before the match.
+	if got := suggestionTokens(fileSuggestionsBounded(root, "needle", 5)); contains(got, "@zzz/needle.go") {
+		t.Fatalf("walk should have hit the budget before the deep match, got %v", got)
+	}
+	// Ample budget: the match is reachable.
+	if got := suggestionTokens(fileSuggestionsBounded(root, "needle", maxFileWalk)); !contains(got, "@zzz/needle.go") {
+		t.Fatalf("with an ample budget the match should be found, got %v", got)
+	}
+}
+
+func suggestionTokens(s []commandSuggestion) []string {
+	names := make([]string, 0, len(s))
+	for _, c := range s {
+		names = append(names, c.Name)
+	}
+	return names
 }

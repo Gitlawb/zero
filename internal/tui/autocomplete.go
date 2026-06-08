@@ -168,11 +168,21 @@ func replaceTrailingAtToken(value, path string) string {
 	return path
 }
 
+// maxFileWalk bounds how many filesystem entries the "@file" picker visits per
+// keystroke so a large workspace tree can't stall the TUI.
+const maxFileWalk = 4000
+
 // fileSuggestions lists workspace files whose path matches partial (case-
 // insensitive substring), for the "@file" picker. The walk skips VCS/dependency/
 // hidden directories and is bounded so it stays responsive per keystroke. Each
 // suggestion's Name is the "@<relpath>" token that completion inserts.
 func fileSuggestions(cwd, partial string) []commandSuggestion {
+	return fileSuggestionsBounded(cwd, partial, maxFileWalk)
+}
+
+// fileSuggestionsBounded is fileSuggestions with an explicit walk budget so the
+// per-keystroke bound is unit-testable without materializing maxFileWalk entries.
+func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSuggestion {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return nil
@@ -180,14 +190,17 @@ func fileSuggestions(cwd, partial string) []commandSuggestion {
 	needle := strings.ToLower(strings.TrimSpace(partial))
 	out := make([]commandSuggestion, 0, maxCommandSuggestions)
 	visited := 0
-	const maxVisited = 4000
 	_ = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if visited > maxVisited || len(out) >= maxCommandSuggestions {
+		if visited >= maxVisited || len(out) >= maxCommandSuggestions {
 			return fs.SkipAll
 		}
+		// Count every entry (directories included) so the walk is bounded even in
+		// directory-heavy trees where few entries are files; otherwise a deep tree
+		// could be traversed in full on each keystroke and stall the TUI.
+		visited++
 		if d.IsDir() {
 			name := d.Name()
 			if path != cwd && (name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" || strings.HasPrefix(name, ".")) {
@@ -195,7 +208,6 @@ func fileSuggestions(cwd, partial string) []commandSuggestion {
 			}
 			return nil
 		}
-		visited++
 		rel, relErr := filepath.Rel(cwd, path)
 		if relErr != nil {
 			rel = filepath.Base(path)
