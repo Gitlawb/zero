@@ -399,12 +399,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		},
 		OnUsage: func(usage agent.Usage) {
 			writer.usage(usage)
-			sessionRecorder.append(sessions.EventUsage, map[string]any{
-				"model":            currentModel,
+			payload := map[string]any{
 				"promptTokens":     usage.EffectiveInputTokens(),
 				"completionTokens": usage.EffectiveOutputTokens(),
 				"totalTokens":      usage.TotalTokens(),
-			})
+			}
+			// Attribute usage to a specific model ONLY when escalation is enabled:
+			// the model in force can change mid-run only under --allow-escalation, so
+			// the "model" key is meaningful exclusively then. Omitting it otherwise
+			// keeps a non-escalation run's persisted usage payload byte-identical to
+			// before this feature (the origin/main guarantee).
+			if options.allowEscalation {
+				payload["model"] = currentModel
+			}
+			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	})
 	if writer.err != nil {
