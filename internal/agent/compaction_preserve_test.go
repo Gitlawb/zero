@@ -152,6 +152,9 @@ func TestCompactPreservesSkillBodyWithMarkdownHeadings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s Compact: %v", label, err)
 		}
+		if len(out) < 2 || out[1].Role != zeroruntime.MessageRoleUser {
+			t.Fatalf("%s: unexpected compacted shape: %#v", label, out)
+		}
 		_, skills := parsePreservedState(out[1].Content)
 		if len(skills) != 1 || skills[0].name != "guide" || skills[0].body != body {
 			t.Fatalf("%s: skill body not round-tripped intact: %#v", label, skills)
