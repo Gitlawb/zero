@@ -323,6 +323,7 @@ func selectProviderForCheck(resolved config.ResolvedConfig, name string) (config
 }
 
 func validateProviderRuntimeReady(profile config.ProviderProfile) error {
+	hasCredential := providerProfileHasCredential(profile)
 	if profile.CatalogID != "" {
 		descriptor, err := providercatalog.Require(profile.CatalogID)
 		if err != nil {
@@ -331,7 +332,7 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 		if !providercatalog.RuntimeSupported(descriptor) {
 			return fmt.Errorf("provider %q uses transport %q: %s", descriptor.ID, descriptor.Transport, providercatalog.RuntimeUnsupportedReason(descriptor))
 		}
-		if descriptor.RequiresAuth && strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.AuthHeaderValue) == "" {
+		if descriptor.RequiresAuth && !hasCredential {
 			apiKeyEnv := strings.TrimSpace(profile.APIKeyEnv)
 			if apiKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 {
 				apiKeyEnv = descriptor.AuthEnvVars[0]
@@ -345,11 +346,15 @@ func validateProviderRuntimeReady(profile config.ProviderProfile) error {
 	}
 	switch profile.ProviderKind {
 	case config.ProviderKindOpenAI, config.ProviderKindAnthropic, config.ProviderKindGoogle:
-		if strings.TrimSpace(profile.APIKey) == "" {
+		if !hasCredential {
 			return fmt.Errorf("provider %s requires API key", profile.Name)
 		}
 	}
 	return nil
+}
+
+func providerProfileHasCredential(profile config.ProviderProfile) bool {
+	return strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != ""
 }
 
 func providerKindForDescriptor(descriptor providercatalog.Descriptor) config.ProviderKind {

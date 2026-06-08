@@ -452,6 +452,36 @@ func TestRunProvidersCheckAcceptsAuthHeaderValueCredential(t *testing.T) {
 	}
 }
 
+func TestRunProvidersCheckAcceptsOfficialAuthHeaderValueCredential(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var checked config.ProviderProfile
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:            "manual-openai",
+			ProviderKind:    config.ProviderKindOpenAI,
+			BaseURL:         config.OpenAIBaseURL,
+			AuthHeaderValue: "Bearer direct-secret",
+			Model:           "gpt-4.1",
+		}
+		return config.ResolvedConfig{ActiveProvider: "manual-openai", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
+	}
+	deps.newProvider = func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+		checked = profile
+		return commandCenterProvider{}, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "check", "manual-openai"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if checked.AuthHeaderValue != "Bearer direct-secret" || checked.APIKey != "" {
+		t.Fatalf("checked profile = %#v, want direct auth header value without API key", checked)
+	}
+}
+
 func TestRunProvidersCheckFailsWhenCatalogAuthEnvIsMissing(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
