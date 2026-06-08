@@ -74,6 +74,40 @@ func TestRenderChatLiveData(t *testing.T) {
 	}
 }
 
+// TestRenderChatFrameHeightWithImageChips locks the frame-height accounting: the
+// composed frame must be EXACTLY Height rows whether or not the pending-attachment
+// chip row is present. cmdRegion emits two rows when ImageChips is set, so a body
+// computed for a one-row cmd would overflow the fixed frame by one line.
+func TestRenderChatFrameHeightWithImageChips(t *testing.T) {
+	base := ChatData{
+		Variant: 0, Dark: true, Width: 80, Height: 24,
+		Header: Header{Cwd: "~/src", Branch: "main", Model: "m", Provider: "p"},
+		Input:  "describe these",
+		Rows: []Row{
+			{Kind: "user", Text: "hello"},
+			{Kind: "assistant", Text: "hi there"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name  string
+		chips string
+	}{
+		{"without chips", ""},
+		{"with chips", "[1] pic.png  [2] shot.jpg"},
+	} {
+		d := base
+		d.ImageChips = tc.chips
+		out := RenderChat(d)
+		if got := strings.Count(out, "\n") + 1; got != d.Height {
+			t.Errorf("%s: frame has %d rows, want exactly %d", tc.name, got, d.Height)
+		}
+		if tc.chips != "" && !strings.Contains(out, "pic.png") {
+			t.Errorf("%s: chip row not rendered", tc.name)
+		}
+	}
+}
+
 func TestRenderChatAskUserShowsQuestionNotSpinner(t *testing.T) {
 	d := ChatData{
 		Variant: 0, Dark: true, Width: 100, Height: 30,
