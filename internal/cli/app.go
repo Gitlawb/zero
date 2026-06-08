@@ -167,6 +167,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runProviders(args[1:], stdout, stderr, deps)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr, deps)
+	case "context":
+		return runContext(args[1:], stdout, stderr, deps)
 	case "search", "find":
 		return runSearch(args[1:], stdout, stderr, deps)
 	case "sessions", "session":
@@ -421,6 +423,7 @@ Commands:
   models     List Zero model registry entries
   providers  Inspect resolved provider profiles
   doctor     Run backend health checks for config and provider setup
+  context    Report workspace context budget usage
   search     Search persisted local Zero session events
   find       Alias for search
   sessions   Inspect local Zero session lineage
