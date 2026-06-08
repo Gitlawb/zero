@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// ToolSearchToolName is the canonical registry name of the deferred-tool loader.
+// It is exported so the agent loop, CLI filter validation, and the partition can
+// reference the loader without re-stating the literal (keeping all the gates that
+// must treat it specially in agreement).
+const ToolSearchToolName = "tool_search"
+
 // toolSearchMaxKeywordMatches caps how many deferred tools a bare-keyword query
 // loads in one call, keeping the returned schemas bounded.
 const toolSearchMaxKeywordMatches = 10
@@ -26,7 +32,7 @@ type toolSearchTool struct {
 func NewToolSearchTool(registry *Registry) Tool {
 	return toolSearchTool{
 		baseTool: baseTool{
-			name:        "tool_search",
+			name:        ToolSearchToolName,
 			description: "Search for and load deferred tools by exact name or keyword. Use query \"select:Name1,Name2\" to load specific tools, or keywords to find matching tools. Loading a tool returns its full schema so you can call it on the next turn.",
 			parameters: Schema{
 				Type: "object",
@@ -55,14 +61,17 @@ func (tool toolSearchTool) Run(ctx context.Context, args map[string]any) Result 
 	return tool.RunWithOptions(ctx, args, RunOptions{})
 }
 
-func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any, _ RunOptions) Result {
+func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
 	query, err := stringArg(args, "query", "", true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for tool_search: " + err.Error())
 	}
 	query = strings.TrimSpace(query)
 
-	deferred := tool.deferredTools()
+	// Honor the run's operator filters so an operator-hidden deferred tool is
+	// invisible to tool_search: it never resolves via select:, never ranks for a
+	// keyword query, and is omitted from the no-match listing.
+	deferred := tool.visibleDeferredTools(options.EnabledTools, options.DisabledTools)
 
 	var matches []Tool
 	if rest, ok := strings.CutPrefix(query, "select:"); ok {
@@ -89,18 +98,52 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 // deferredTools returns the registry's deferred-eligible tools sorted by name so
 // keyword ranking and listings are deterministic.
 func (tool toolSearchTool) deferredTools() []Tool {
+	return tool.visibleDeferredTools(nil, nil)
+}
+
+// visibleDeferredTools returns the registry's deferred-eligible tools that pass
+// the operator allow/deny filters, sorted by name so keyword ranking and
+// listings stay deterministic. A nil/empty filter pair admits every deferred
+// tool (the pre-filter behavior). The allow/deny semantics mirror the agent's
+// ToolAllowedByFilters: denied if in disabled; if enabled is non-empty, the tool
+// must be listed in it.
+func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []string) []Tool {
 	var deferred []Tool
 	if tool.registry != nil {
 		for _, candidate := range tool.registry.All() {
-			if IsDeferred(candidate) {
-				deferred = append(deferred, candidate)
+			if !IsDeferred(candidate) {
+				continue
 			}
+			if !toolAllowedByFilters(candidate.Name(), enabled, disabled) {
+				continue
+			}
+			deferred = append(deferred, candidate)
 		}
 	}
 	sort.Slice(deferred, func(left, right int) bool {
 		return deferred[left].Name() < deferred[right].Name()
 	})
 	return deferred
+}
+
+// toolAllowedByFilters mirrors agent.ToolAllowedByFilters (kept here to avoid an
+// import cycle: the agent package imports tools, not the other way around). A
+// name is denied when it appears in disabled; when enabled is non-empty, the
+// name must appear in it to be allowed.
+func toolAllowedByFilters(name string, enabled []string, disabled []string) bool {
+	if len(enabled) > 0 && !containsName(enabled, name) {
+		return false
+	}
+	return !containsName(disabled, name)
+}
+
+func containsName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveExact maps a comma-separated name list (the part after "select:") to

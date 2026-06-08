@@ -23,6 +23,13 @@ type RunOptions struct {
 	ReasoningEffort   string
 	Depth             int
 	Cwd               string
+	// EnabledTools / DisabledTools carry the run's operator tool filters so a
+	// filter-aware tool (tool_search) never discloses or loads an operator-hidden
+	// tool. They use the same allow/deny semantics as the agent's filter gate:
+	// denied if listed in DisabledTools; if EnabledTools is non-empty, allowed
+	// only when listed in it.
+	EnabledTools  []string
+	DisabledTools []string
 }
 
 type sandboxAwareTool interface {

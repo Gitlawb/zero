@@ -155,12 +155,30 @@ func formatDeferredToolLine(name, description, server string, schema Schema) str
 	return strings.Join(parts, " | ")
 }
 
+// mcpServerNamed is an optional interface a deferred MCP tool implements to
+// report its true (un-sanitized-token) server name for the reminder label. When
+// a tool provides it, DeferredLine prefers it over the name-derived token, which
+// would mislabel a server whose sanitized name itself contains an underscore
+// (e.g. "git_hub" → "git"). It affects the cosmetic reminder label only; tool
+// resolution never depends on this.
+type mcpServerNamed interface {
+	MCPServerName() string
+}
+
 // DeferredLine renders the compact advertisement line for a single deferred
-// tool, deriving the MCP server token from the tool's name. It is the exported
-// entry point the agent loop uses to build each line of the deferred-tools
-// reminder, so callers in other packages never touch the unexported formatters.
+// tool, deriving the MCP server label from the tool's reported server name when
+// available, falling back to the token parsed from the tool's name. It is the
+// exported entry point the agent loop uses to build each line of the
+// deferred-tools reminder, so callers in other packages never touch the
+// unexported formatters.
 func DeferredLine(t Tool) string {
-	return formatDeferredToolLine(t.Name(), t.Description(), mcpServerFromToolName(t.Name()), t.Parameters())
+	server := mcpServerFromToolName(t.Name())
+	if named, ok := t.(mcpServerNamed); ok {
+		if reported := strings.TrimSpace(named.MCPServerName()); reported != "" {
+			server = reported
+		}
+	}
+	return formatDeferredToolLine(t.Name(), t.Description(), server, t.Parameters())
 }
 
 const (

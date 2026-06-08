@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -269,6 +270,71 @@ func TestDeferredLineUsesToolFieldsAndServer(t *testing.T) {
 	for _, want := range []string{"mcp_docs_lookup: Look up documentation", "server: docs", "inputs (* required): symbol (string)*"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("DeferredLine = %q, missing %q", got, want)
+		}
+	}
+}
+
+// serverNamedTool implements the optional mcpServerNamed interface so DeferredLine
+// can prefer the reported server name over the name-derived token.
+type serverNamedTool struct {
+	baseTool
+	server string
+}
+
+func (t serverNamedTool) Run(context.Context, map[string]any) Result { return okResult("ok") }
+func (t serverNamedTool) Deferred() bool                             { return true }
+func (t serverNamedTool) MCPServerName() string                      { return t.server }
+
+func TestDeferredLinePrefersMCPServerName(t *testing.T) {
+	// The tool name sanitizes to a server token containing an underscore
+	// ("git_hub"): mcpServerFromToolName would truncate the label to "git", so the
+	// reported server name must win.
+	tool := serverNamedTool{
+		baseTool: baseTool{
+			name:        "mcp_git_hub_create_issue",
+			description: "Create a GitHub issue.",
+			parameters:  Schema{Type: "object"},
+		},
+		server: "git hub",
+	}
+	got := DeferredLine(tool)
+	if !strings.Contains(got, "server: git hub") {
+		t.Fatalf("DeferredLine = %q, want server label from MCPServerName() (%q)", got, "git hub")
+	}
+	if strings.Contains(got, "server: git |") {
+		t.Fatalf("DeferredLine = %q, used truncated name-derived token instead of MCPServerName()", got)
+	}
+}
+
+// A blank/whitespace MCPServerName() must fall back to the name-derived token so a
+// tool that reports nothing useful is still labeled from its synthesized name.
+func TestDeferredLineFallsBackWhenMCPServerNameBlank(t *testing.T) {
+	tool := serverNamedTool{
+		baseTool: baseTool{
+			name:        "mcp_docs_lookup",
+			description: "Look up docs.",
+			parameters:  Schema{Type: "object"},
+		},
+		server: "  ",
+	}
+	got := DeferredLine(tool)
+	if !strings.Contains(got, "server: docs") {
+		t.Fatalf("DeferredLine = %q, want fallback server token %q", got, "docs")
+	}
+}
+
+// TestMCPServerFromToolNameRoundTrip pins the fallback parser against the name
+// format produced for a single-token MCP server ("mcp_<server>_<tool>"), the same
+// format mcp.registryToolName synthesizes.
+func TestMCPServerFromToolNameRoundTrip(t *testing.T) {
+	cases := map[string]string{
+		"mcp_docs_lookup":         "docs",
+		"mcp_weather_forecast":    "weather",
+		"mcp_github_create_issue": "github",
+	}
+	for name, wantServer := range cases {
+		if got := mcpServerFromToolName(name); got != wantServer {
+			t.Fatalf("mcpServerFromToolName(%q) = %q, want %q", name, got, wantServer)
 		}
 	}
 }

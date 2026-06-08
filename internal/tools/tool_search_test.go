@@ -228,3 +228,72 @@ func TestToolSearchSelectLoadsExactNames(t *testing.T) {
 		t.Fatalf("output missing full schema for stock_quote: %q", result.Output)
 	}
 }
+
+// A deferred tool the operator hid via DisabledTools must be invisible to
+// tool_search: it never resolves via select:, it cannot be the operator-hidden
+// candidate, and it must not appear in the no-match listing.
+func TestToolSearchExcludesDisabledDeferredTool(t *testing.T) {
+	reg := newDeferredFixtureRegistry()
+	tool := NewToolSearchTool(reg).(optionsAwareTool)
+	disabled := RunOptions{DisabledTools: []string{"stock_quote"}}
+
+	// select: a hidden tool must NOT resolve (no load_tools, informational message).
+	// Query "select:stock_quote_x" avoids echoing the disabled name verbatim so the
+	// listing-omission assertion below is not confused by the query echo.
+	selectResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "select:stock_quote_x"}, disabled)
+	if _, present := selectResult.Meta["load_tools"]; present {
+		t.Fatalf("disabled tool must not resolve via select:, got load_tools=%q", selectResult.Meta["load_tools"])
+	}
+	// The available-tools listing (the segment after "Available tools: ") must omit
+	// the disabled tool while still naming the allowed one.
+	listing := selectResult.Output
+	if idx := strings.Index(listing, "Available tools: "); idx >= 0 {
+		listing = listing[idx:]
+	}
+	if strings.Contains(listing, "stock_quote") {
+		t.Fatalf("disabled tool leaked into no-match listing: %q", selectResult.Output)
+	}
+	if !strings.Contains(listing, "weather_lookup") {
+		t.Fatalf("no-match listing must still name the allowed tool, got %q", selectResult.Output)
+	}
+
+	// keyword: a hidden tool must NOT rank.
+	keywordResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "stock"}, disabled)
+	if got := keywordResult.Meta["load_tools"]; got != "" {
+		t.Fatalf("disabled tool must not rank for a keyword query, got load_tools=%q", got)
+	}
+	if strings.Contains(keywordResult.Output, "stock_quote") {
+		t.Fatalf("disabled tool leaked into keyword output: %q", keywordResult.Output)
+	}
+}
+
+// With a non-empty EnabledTools allowlist, a deferred tool absent from it is
+// invisible to tool_search even though it is registered and deferred-eligible.
+func TestToolSearchHonorsEnabledAllowlist(t *testing.T) {
+	reg := newDeferredFixtureRegistry()
+	tool := NewToolSearchTool(reg).(optionsAwareTool)
+	// Allowlist admits only weather_lookup; stock_quote is excluded.
+	allow := RunOptions{EnabledTools: []string{"weather_lookup"}}
+
+	// The excluded tool must not resolve, even by exact name.
+	selectResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "select:weather_lookup,stock_quote"}, allow)
+	if got := selectResult.Meta["load_tools"]; got != "weather_lookup" {
+		t.Fatalf("allowlist must load only weather_lookup, got load_tools=%q", got)
+	}
+	if strings.Contains(selectResult.Output, "ticker") {
+		t.Fatalf("excluded tool's schema leaked into output: %q", selectResult.Output)
+	}
+
+	// A keyword for the excluded tool finds nothing and the listing omits it.
+	keywordResult := tool.RunWithOptions(context.Background(),
+		map[string]any{"query": "stock"}, allow)
+	if _, present := keywordResult.Meta["load_tools"]; present {
+		t.Fatalf("excluded tool must not rank under the allowlist, got %q", keywordResult.Meta["load_tools"])
+	}
+	if strings.Contains(keywordResult.Output, "stock_quote") {
+		t.Fatalf("excluded tool leaked into keyword no-match listing: %q", keywordResult.Output)
+	}
+}
