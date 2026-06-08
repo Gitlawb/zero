@@ -1,6 +1,7 @@
 package streamjson
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -153,6 +154,66 @@ func TestCreateRunIDUsesStablePrefix(t *testing.T) {
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func TestResolveImagesDecodesNormalizesAndCaps(t *testing.T) {
+	// happy path: two images across two events, jpg media type normalized to image/jpeg
+	rawPNG := []byte("\x89PNG fake bytes")
+	rawJPG := []byte("\xff\xd8\xff fake jpeg")
+	events := []InputEvent{
+		{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a", Images: []InputImage{
+			{MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(rawPNG)},
+		}},
+		{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "b", Images: []InputImage{
+			{MediaType: "jpg", Data: base64.StdEncoding.EncodeToString(rawJPG)},
+		}},
+	}
+	images, err := ResolveImages(events)
+	if err != nil {
+		t.Fatalf("ResolveImages returned error: %v", err)
+	}
+	if len(images) != 2 {
+		t.Fatalf("expected 2 images, got %d", len(images))
+	}
+	if images[0].MediaType != "image/png" || string(images[0].Data) != string(rawPNG) {
+		t.Fatalf("png image not resolved: %+v", images[0])
+	}
+	if images[1].MediaType != "image/jpeg" || string(images[1].Data) != string(rawJPG) {
+		t.Fatalf("jpg image not normalized/decoded: %+v", images[1])
+	}
+
+	// no images -> nil, no error
+	none, err := ResolveImages([]InputEvent{{SchemaVersion: 1, Type: InputPrompt, Content: "x"}})
+	if err != nil {
+		t.Fatalf("ResolveImages with no images errored: %v", err)
+	}
+	if none != nil {
+		t.Fatalf("expected nil for no images, got %+v", none)
+	}
+}
+
+func TestResolveImagesRejectsBadInputs(t *testing.T) {
+	// invalid base64
+	badB64 := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/png", Data: "not base64!!"}}}}
+	if _, err := ResolveImages(badB64); err == nil || !strings.Contains(err.Error(), "base64") {
+		t.Fatalf("expected base64 decode error, got %v", err)
+	}
+
+	// unsupported media type
+	badType := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/svg+xml", Data: base64.StdEncoding.EncodeToString([]byte("x"))}}}}
+	if _, err := ResolveImages(badType); err == nil || !strings.Contains(err.Error(), "unsupported image media type") {
+		t.Fatalf("expected unsupported media type error, got %v", err)
+	}
+
+	// oversized image (> 10 MiB decoded)
+	oversize := make([]byte, (10<<20)+1)
+	bigEvent := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+		Images: []InputImage{{MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(oversize)}}}}
+	if _, err := ResolveImages(bigEvent); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected oversize rejection, got %v", err)
+	}
 }
 
 func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
