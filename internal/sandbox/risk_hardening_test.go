@@ -219,3 +219,13 @@ func TestClassifyRmLongFlagRootQuotedAndSeparator(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyNoneSideEffectIsLowRisk(t *testing.T) {
+	risk := Classify(Request{ToolName: "escalate_model", SideEffect: SideEffectNone})
+	if risk.Level != RiskLow {
+		t.Fatalf("none side-effect risk level = %s, want low", risk.Level)
+	}
+	if HasRiskCategory(risk, "out_of_workspace") {
+		t.Fatalf("control-only tool must not classify as out_of_workspace: %#v", risk)
+	}
+}

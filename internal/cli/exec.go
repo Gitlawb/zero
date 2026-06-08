@@ -20,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -82,6 +83,11 @@ type execOptions struct {
 	worktreeName          string
 	worktreeDir           string
 	skipPermissionsUnsafe bool
+	// allowEscalation opts the run into mid-run model escalation: it registers
+	// the escalate_model tool and wires agent.Options.ModelSwitcher. Off by
+	// default — a run without the flag is byte-identical to before (no tool, nil
+	// switcher).
+	allowEscalation bool
 }
 
 type execUsageError struct {
@@ -132,6 +138,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	registry := newCoreRegistry(workspaceRoot)
+	// Register the escalate_model tool only when the run opted into mid-run
+	// escalation. It is registered before --list-tools formatting and
+	// validateExecToolFilters so the tool is both listable and filter-validatable.
+	// The no-arg constructor builds its own default registry internally (and
+	// degrades to an inert tool if the catalog fails), so no registry is threaded.
+	if options.allowEscalation {
+		registry.Register(tools.NewEscalateModelTool())
+	}
 	var specialistRuntime *specialist.Runtime
 	if shouldRegisterExecSpecialistTools(options) {
 		var err error
@@ -252,6 +266,31 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+
+	// currentModel tracks the model in force for usage attribution. It starts at
+	// the resolved model and is reassigned by the model switcher on a mid-run
+	// escalation so post-switch turns are attributed to the escalated model.
+	currentModel := resolved.Provider.Model
+	var modelSwitcher func(context.Context, string) (agent.Provider, error)
+	if options.allowEscalation {
+		modelSwitcher = func(_ context.Context, modelID string) (agent.Provider, error) {
+			switchedProfile := resolved.Provider
+			switchedProfile.Model = modelID
+			switchedProvider, err := deps.newProvider(switchedProfile)
+			if err != nil {
+				return nil, err
+			}
+			// Mirror the agent loop's switch guard (it only reassigns the provider
+			// when newProvider != nil). Updating currentModel only on a non-nil
+			// provider keeps usage attribution consistent with whether the loop
+			// actually switched — a (nil, nil) return leaves both untouched.
+			if switchedProvider != nil {
+				currentModel = modelID
+			}
+			return switchedProvider, nil
+		}
+	}
+
 	runMetadata, err := resolveExecRunMetadata(resolved.Provider)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
@@ -356,6 +395,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Depth:            options.depth,
 		SessionTitle:     sessionTitle,
 		Model:            resolved.Provider.Model,
+		ModelSwitcher:    modelSwitcher,
 		ReasoningEffort:  runReasoningEffort,
 		Cwd:              workspaceRoot,
 		Images:           images,
@@ -403,11 +443,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		},
 		OnUsage: func(usage agent.Usage) {
 			writer.usage(usage)
-			sessionRecorder.append(sessions.EventUsage, map[string]any{
+			payload := map[string]any{
 				"promptTokens":     usage.EffectiveInputTokens(),
 				"completionTokens": usage.EffectiveOutputTokens(),
 				"totalTokens":      usage.TotalTokens(),
-			})
+			}
+			// Attribute usage to a specific model ONLY when escalation is enabled:
+			// the model in force can change mid-run only under --allow-escalation, so
+			// the "model" key is meaningful exclusively then. Omitting it otherwise
+			// keeps a non-escalation run's persisted usage payload byte-identical to
+			// before this feature (the origin/main guarantee).
+			if options.allowEscalation {
+				payload["model"] = currentModel
+			}
+			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	})
 	if writer.err != nil {

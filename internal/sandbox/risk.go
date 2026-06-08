@@ -83,6 +83,9 @@ func Classify(request Request) Risk {
 		add("network", RiskHigh)
 	case SideEffectOutOfWorkspace:
 		add("out_of_workspace", RiskCritical)
+	case SideEffectNone:
+		// Control-only tool (e.g. escalate_model): no read/write/shell/network
+		// effect, so it contributes no side-effect risk category and stays low.
 	}
 
 	// The bash tool accepts the command under any of these aliases; resolve the

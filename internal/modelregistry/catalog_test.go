@@ -216,6 +216,49 @@ func reasoningEffortAllowedIn(efforts []ReasoningEffort, want ReasoningEffort) b
 	return false
 }
 
+func TestDefaultRegistryUpgradeTargets(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+
+	// Seeded escalation chains across the concrete catalog ids.
+	chains := map[string]string{
+		"claude-haiku-4.5":      "claude-sonnet-4.5",
+		"claude-sonnet-4.5":     "claude-opus-4.1",
+		"gpt-4.1-mini":          "gpt-4.1",
+		"gpt-4.1-nano":          "gpt-4.1-mini",
+		"gpt-4o-mini":           "gpt-4o",
+		"gemini-2.5-flash-lite": "gemini-2.5-flash",
+		"gemini-2.5-flash":      "gemini-2.5-pro",
+	}
+	for source, want := range chains {
+		target, ok := registry.UpgradeTarget(source)
+		if !ok {
+			t.Fatalf("UpgradeTarget(%q) returned no target, want %q", source, want)
+		}
+		if target.ID != want {
+			t.Fatalf("UpgradeTarget(%q) = %q, want %q", source, target.ID, want)
+		}
+	}
+
+	// Top-tier models declare no escalation target.
+	for _, topTier := range []string{"claude-opus-4.1", "gpt-4.1", "gemini-2.5-pro"} {
+		if target, ok := registry.UpgradeTarget(topTier); ok {
+			t.Fatalf("top-tier model %q should have no upgrade target, got %q", topTier, target.ID)
+		}
+	}
+
+	// The seeded field is present on the decorated entry, not only via the method.
+	haiku, err := registry.Require("claude-haiku-4.5")
+	if err != nil {
+		t.Fatalf("Require(claude-haiku-4.5) returned error: %v", err)
+	}
+	if haiku.UpgradeTargetID != "claude-sonnet-4.5" {
+		t.Fatalf("claude-haiku-4.5 UpgradeTargetID = %q, want claude-sonnet-4.5", haiku.UpgradeTargetID)
+	}
+}
+
 func containsModelID(models []ModelEntry, id string) bool {
 	for _, model := range models {
 		if model.ID == id {

@@ -1135,3 +1135,692 @@ func TestRunExecInvalidAutoValidatedWithSkipPermissions(t *testing.T) {
 		t.Fatalf("expected autonomy validation error, got %q", got)
 	}
 }
+
+func TestParseExecAllowEscalationFlag(t *testing.T) {
+	t.Run("absent defaults to false", func(t *testing.T) {
+		options, help, err := parseExecArgs([]string{"hello"})
+		if err != nil {
+			t.Fatalf("parseExecArgs returned error: %v", err)
+		}
+		if help {
+			t.Fatal("help = true, want false")
+		}
+		if options.allowEscalation {
+			t.Fatal("allowEscalation = true, want false by default")
+		}
+	})
+
+	t.Run("flag sets true", func(t *testing.T) {
+		options, _, err := parseExecArgs([]string{"--allow-escalation", "hello"})
+		if err != nil {
+			t.Fatalf("parseExecArgs returned error: %v", err)
+		}
+		if !options.allowEscalation {
+			t.Fatal("allowEscalation = false, want true")
+		}
+		if strings.Join(options.promptParts, " ") != "hello" {
+			t.Fatalf("promptParts = %#v, want [hello]", options.promptParts)
+		}
+	})
+}
+
+func TestRunExecHelpDocumentsAllowEscalation(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run([]string{"exec", "--help"}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if !strings.Contains(stdout.String(), "--allow-escalation") {
+		t.Fatalf("expected exec help to document --allow-escalation, got %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantTool bool
+	}{
+		{name: "absent", args: []string{"exec", "--list-tools"}, wantTool: false},
+		{name: "present", args: []string{"exec", "--allow-escalation", "--list-tools"}, wantTool: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) {
+					return t.TempDir(), nil
+				},
+			})
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+			}
+			hasTool := strings.Contains(stdout.String(), "  escalate_model ")
+			if hasTool != tc.wantTool {
+				t.Fatalf("escalate_model visibility = %v, want %v; output:\n%s", hasTool, tc.wantTool, stdout.String())
+			}
+		})
+	}
+}
+
+// escalatingExecProvider drives an exec run through a mid-run switch without a
+// live model. Each instance tracks how many turns IT served (turns) so a test
+// can assert exactly which provider handled which turn across a switch.
+//
+// escalateOnce controls behavior: when true, the FIRST turn this instance serves
+// emits an escalate_model tool call (later turns answer); when false, every turn
+// emits a final text answer. Pointing escalateOnce at distinct instances lets a
+// test prove the post-switch turn lands on the SECOND (escalated) provider.
+type escalatingExecProvider struct {
+	// turns counts how many StreamCompletion calls THIS instance handled.
+	turns int
+	// escalateOnce makes this instance's first served turn request an escalation.
+	escalateOnce bool
+}
+
+func (provider *escalatingExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	turn := provider.turns
+	provider.turns++
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	if provider.escalateOnce && turn == 0 {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+func TestRunExecWiresModelSwitcherUnderFlag(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var providerModels []string
+	// Each newProvider build returns a DISTINCT provider instance with its OWN
+	// turn counter, mirroring the agent-layer firstProvider/secondProvider split.
+	// The first build (escalation source) must handle exactly the escalation turn;
+	// the second build (escalation target) must handle exactly the post-switch
+	// answer turn. Sharing a single counter would hide a dropped `provider =
+	// newProvider` in loop.go — here it is mutation-proven by the per-instance
+	// turn assertions below.
+	var builtProviders []*escalatingExecProvider
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--allow-escalation", "--model", "claude-haiku-4.5", "escalate please"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			// The escalation chain (haiku -> sonnet) is anthropic; declare the
+			// provider kind to match so provider-metadata resolution accepts it.
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerModels = append(providerModels, profile.Model)
+			// First build escalates; every later build answers. Each instance owns
+			// its turn counter so we can assert exactly-one-turn per provider.
+			provider := &escalatingExecProvider{escalateOnce: len(builtProviders) == 0}
+			builtProviders = append(builtProviders, provider)
+			return provider, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	// Initial provider build + one rebuild for the escalation target.
+	if len(providerModels) != 2 {
+		t.Fatalf("newProvider called for models %#v, want exactly 2 builds (initial + escalated)", providerModels)
+	}
+	if providerModels[0] != "claude-haiku-4.5" {
+		t.Fatalf("initial provider model = %q, want claude-haiku-4.5", providerModels[0])
+	}
+	target, ok := mustUpgradeTarget(t, "claude-haiku-4.5")
+	if !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+	if providerModels[1] != target {
+		t.Fatalf("escalated provider model = %q, want %q", providerModels[1], target)
+	}
+	if len(builtProviders) != 2 {
+		t.Fatalf("built %d providers, want 2", len(builtProviders))
+	}
+	// The original (escalation-source) provider handled ONLY the escalation turn;
+	// the escalated (target) provider handled ONLY the post-switch answer turn.
+	// This FAILS if loop.go drops `provider = newProvider` (the second provider
+	// would then handle zero turns and the first would handle both).
+	if builtProviders[0].turns != 1 {
+		t.Fatalf("first (source) provider handled %d turns, want exactly 1 (the escalation turn)", builtProviders[0].turns)
+	}
+	if builtProviders[1].turns != 1 {
+		t.Fatalf("second (escalated) provider handled %d turns, want exactly 1 (the post-switch answer turn)", builtProviders[1].turns)
+	}
+}
+
+func mustUpgradeTarget(t *testing.T, id string) (string, bool) {
+	t.Helper()
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	entry, ok := registry.UpgradeTarget(id)
+	return entry.ID, ok
+}
+
+func TestRunExecNoSwitcherWithoutFlag(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var providerModels []string
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--model", "claude-haiku-4.5", "escalate please"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			// The escalation chain (haiku -> sonnet) is anthropic; declare the
+			// provider kind to match so provider-metadata resolution accepts it.
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerModels = append(providerModels, profile.Model)
+			return &escalatingExecProvider{escalateOnce: true}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if len(providerModels) != 1 {
+		t.Fatalf("newProvider called for %#v, want exactly 1 build (no switcher wired)", providerModels)
+	}
+	if providerModels[0] != "claude-haiku-4.5" {
+		t.Fatalf("provider model = %q, want claude-haiku-4.5", providerModels[0])
+	}
+}
+
+func TestRunExecAttributesUsageToEscalatedModel(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	target, ok := mustUpgradeTarget(t, "claude-haiku-4.5")
+	if !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+
+	// The escalation turn (turn 0, pre-switch) emits usage with distinct tokens so
+	// it can be told apart from the post-switch usage; the first build escalates,
+	// the second answers.
+	builds := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--allow-escalation",
+		"--model", "claude-haiku-4.5",
+		"--init-session-id", "escalation_run",
+		"escalate please",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			// The escalation chain (haiku -> sonnet) is anthropic; declare the
+			// provider kind to match so provider-metadata resolution accepts it.
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			// First build = escalation source (escalate + usage 3/4 pre-switch);
+			// second build = escalation target (answer + usage 5/7 post-switch).
+			escalate := builds == 0
+			builds++
+			return &usageEmittingEscalatingProvider{escalate: escalate}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	events, err := store.ReadEvents("escalation_run")
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	// Collect every usage model attribution IN ORDER. The pre-switch usage must
+	// attribute to the ORIGINAL model and the post-switch usage to the escalated
+	// target — proving the loop's ordering guarantee (usage is attributed to the
+	// model that produced it, not retroactively reassigned after the switch).
+	var usageModels []string
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal usage payload: %v", err)
+		}
+		model, _ := payload["model"].(string)
+		usageModels = append(usageModels, model)
+	}
+	if len(usageModels) != 2 {
+		t.Fatalf("recorded usage model attributions = %#v, want exactly 2 (pre- and post-switch)", usageModels)
+	}
+	if usageModels[0] != "claude-haiku-4.5" {
+		t.Fatalf("first (pre-switch) usage model = %q, want claude-haiku-4.5", usageModels[0])
+	}
+	if usageModels[1] != target {
+		t.Fatalf("second (post-switch) usage model = %q, want escalated target %q", usageModels[1], target)
+	}
+}
+
+func TestRunExecNilSwitchProviderKeepsOriginalAttribution(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	if _, ok := mustUpgradeTarget(t, "claude-haiku-4.5"); !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+
+	// The escalation rebuild returns (nil, nil): the loop must NOT swap the
+	// provider, and the CLI switcher must leave currentModel unchanged so usage
+	// after the declined switch stays attributed to the ORIGINAL model. Without
+	// the switchedProvider != nil guard, currentModel would advance to the target
+	// even though no switch happened, misattributing the post-turn usage.
+	builds := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--allow-escalation",
+		"--model", "claude-haiku-4.5",
+		"--init-session-id", "nil_switch_run",
+		"escalate please",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			builds++
+			// First build = the original (haiku). The escalation rebuild returns
+			// (nil, nil), so the loop keeps the original provider for every turn.
+			if builds == 1 {
+				return &escalateThenAnswerProvider{}, nil
+			}
+			return nil, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	events, err := store.ReadEvents("nil_switch_run")
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	sawUsage := false
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal usage payload: %v", err)
+		}
+		sawUsage = true
+		if model, _ := payload["model"].(string); model != "claude-haiku-4.5" {
+			t.Fatalf("usage attributed to %q after a (nil,nil) switch, want original claude-haiku-4.5", model)
+		}
+	}
+	if !sawUsage {
+		t.Fatal("expected at least one usage event")
+	}
+}
+
+// escalateThenAnswerProvider escalates on its first turn and answers afterward,
+// so a single instance can serve an entire run when no provider swap occurs
+// (e.g. a (nil,nil) switcher). It emits usage on every turn for attribution.
+type escalateThenAnswerProvider struct {
+	turns int
+}
+
+func (provider *escalateThenAnswerProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	turn := provider.turns
+	provider.turns++
+	ch := make(chan zeroruntime.StreamEvent, 6)
+	if turn == 0 {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 3, OutputTokens: 4}}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 7}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+// usageEmittingEscalatingProvider emits a usage event on every turn it serves so
+// usage attribution can be traced across a mid-run switch. When escalate is set,
+// its turn requests an escalation (and emits pre-switch usage tokens 3/4);
+// otherwise it answers (post-switch usage tokens 5/7).
+type usageEmittingEscalatingProvider struct {
+	escalate bool
+}
+
+func (provider *usageEmittingEscalatingProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	ch := make(chan zeroruntime.StreamEvent, 6)
+	if provider.escalate {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		// Pre-switch usage: still attributed to the ORIGINAL model.
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 3, OutputTokens: 4}}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	// Post-switch usage: attributed to the escalated model.
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 7}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+// usageEmittingEchoProvider answers in a single turn and emits a usage event. It
+// has no escalation behavior, so it exercises a plain (flag-OFF) run that still
+// records usage.
+type usageEmittingEchoProvider struct{}
+
+func (usageEmittingEchoProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	ch := make(chan zeroruntime.StreamEvent, 3)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 7}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+// TestRunExecUsageOmitsModelKeyWithoutEscalationFlag verifies the back-compat
+// guarantee: a run WITHOUT --allow-escalation persists EventUsage payloads that
+// carry NO "model" key (byte-identical to before the escalation feature), since
+// the model can never change mid-run when escalation is off. The flag-ON,
+// post-escalation case is covered by TestRunExecAttributesUsageToEscalatedModel.
+func TestRunExecUsageOmitsModelKeyWithoutEscalationFlag(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--model", "claude-haiku-4.5",
+		"--init-session-id", "no_escalation_run",
+		"hello",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return usageEmittingEchoProvider{}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	events, err := store.ReadEvents("no_escalation_run")
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	var sawUsage bool
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		sawUsage = true
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal usage payload: %v", err)
+		}
+		if _, ok := payload["model"]; ok {
+			t.Fatalf("flag-OFF usage payload must NOT carry a model key, got %#v", payload)
+		}
+	}
+	if !sawUsage {
+		t.Fatal("expected at least one usage event to be recorded")
+	}
+}
+
+// usageThenAnswerProvider serves a two-turn run on ONE instance: turn 0 requests
+// an escalation and emits usage, turn 1 answers and emits usage. It is used by
+// the switch-error test where no second provider is ever built, so a single
+// instance must serve both turns on the original model.
+type usageThenAnswerProvider struct {
+	turns int
+}
+
+func (provider *usageThenAnswerProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	turn := provider.turns
+	provider.turns++
+	ch := make(chan zeroruntime.StreamEvent, 6)
+	if turn == 0 {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 3, OutputTokens: 4}}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 7}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+// TestRunExecSwitcherErrorKeepsOriginalModelAttribution verifies that when the
+// ModelSwitcher fails on the rebuild (deps.newProvider errors for the escalation
+// target), the run is NON-FATAL and stays on the original provider — and every
+// usage event, including the one AFTER the failed switch, stays attributed to the
+// ORIGINAL model (currentModel is never reassigned on a failed switch).
+func TestRunExecSwitcherErrorKeepsOriginalModelAttribution(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	if _, ok := mustUpgradeTarget(t, "claude-haiku-4.5"); !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+
+	builds := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--allow-escalation",
+		"--model", "claude-haiku-4.5",
+		"--init-session-id", "switch_error_run",
+		"escalate please",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			builds++
+			// The first build (original model) succeeds; the rebuild on escalation
+			// FAILS, so the switcher returns an error and the run continues on the
+			// original provider.
+			if builds >= 2 {
+				return nil, errors.New("provider rebuild failed")
+			}
+			return &usageThenAnswerProvider{}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("expected non-fatal switch error, exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if builds != 2 {
+		t.Fatalf("newProvider builds = %d, want 2 (initial + one failed rebuild attempt)", builds)
+	}
+
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: filepath.Join(dataHome, "zero", "sessions")})
+	events, err := store.ReadEvents("switch_error_run")
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	var usageModels []string
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal usage payload: %v", err)
+		}
+		model, _ := payload["model"].(string)
+		usageModels = append(usageModels, model)
+	}
+	if len(usageModels) != 2 {
+		t.Fatalf("recorded usage attributions = %#v, want 2", usageModels)
+	}
+	// Both usages (pre- AND post-failed-switch) stay on the ORIGINAL model.
+	for i, model := range usageModels {
+		if model != "claude-haiku-4.5" {
+			t.Fatalf("usage[%d] model = %q, want claude-haiku-4.5 (currentModel must not change on a failed switch)", i, model)
+		}
+	}
+}
+
+// TestRunExecTopTierDeclineNoSwitch verifies an end-to-end flag-ON run where the
+// agent calls escalate_model while ALREADY on a top-tier model (claude-opus-4.1):
+// the tool returns the informational no-meta result, NO switch happens
+// (newProvider is called exactly once), and the run succeeds.
+func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	// Sanity: claude-opus-4.1 must genuinely be top-tier (no upgrade target), or
+	// the scenario is meaningless.
+	if _, ok := mustUpgradeTarget(t, "claude-opus-4.1"); ok {
+		t.Skip("registry unexpectedly has an upgrade target for claude-opus-4.1")
+	}
+
+	var providerModels []string
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{
+		"exec",
+		"--allow-escalation",
+		"--model", "claude-opus-4.1",
+		"escalate please",
+	}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-opus-4.1"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerModels = append(providerModels, profile.Model)
+			return &escalatingExecProvider{escalateOnce: true}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	// The escalate_model call resolved to a no-target informational result, so the
+	// loop never requested a switch and newProvider was built exactly once.
+	if len(providerModels) != 1 {
+		t.Fatalf("newProvider built for %#v, want exactly 1 (top-tier decline performs no switch)", providerModels)
+	}
+	if providerModels[0] != "claude-opus-4.1" {
+		t.Fatalf("provider model = %q, want claude-opus-4.1", providerModels[0])
+	}
+}

@@ -33,6 +33,12 @@ const abortedToolResultNotice = "aborted: run halted by the repeated-failure gua
 const droppedToolCallNotice = "Your previous tool call was malformed (it was missing a tool name) and was not executed. " +
 	"Re-issue the tool call with a valid tool name and JSON arguments, or reply with your final answer."
 
+// escalationFailedNoticePrefix introduces the brief, user-role note recorded
+// when a requested mid-run model switch could not be performed (the
+// ModelSwitcher returned an error). The run continues on the current model;
+// escalation is best-effort, never fatal.
+const escalationFailedNoticePrefix = "Note: could not switch to the requested model"
+
 // The system prompt (core coding-craft instructions + workspace context + safety
 // confirmation policy) is assembled in system_prompt.go via buildSystemPrompt.
 
@@ -193,6 +199,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		guards.observeTurn(collected)
 
 		failureHint := ""
+		// turnRequestedModel records the FIRST mid-run escalation target requested
+		// during this turn's tool batch. The actual provider switch happens once,
+		// after the batch, so every tool_result is recorded first and at most one
+		// switch occurs per turn.
+		turnRequestedModel := ""
 		for index, call := range collected.ToolCalls {
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
@@ -200,6 +211,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			toolResult, abortErr := executeToolCall(ctx, registry, call, permissionMode, options)
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
+			}
+			if turnRequestedModel == "" && toolResult.RequestedModel != "" {
+				turnRequestedModel = toolResult.RequestedModel
 			}
 			messages = append(messages, zeroruntime.Message{
 				Role:       zeroruntime.MessageRoleTool,
@@ -249,6 +263,32 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if outcome.InjectHint && failureHint == "" {
 				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
+			}
+		}
+
+		// Mid-run model escalation: if a tool asked to switch models this turn and
+		// a switcher is wired, rebuild the provider on the new model for the rest
+		// of the run. At most one switch per turn (first request wins). A switcher
+		// error is NON-FATAL — record a brief note and continue on the current
+		// model. nil switcher ⇒ requests are ignored entirely (escalation off).
+		if turnRequestedModel != "" && options.ModelSwitcher != nil {
+			newProvider, switchErr := options.ModelSwitcher(ctx, turnRequestedModel)
+			if switchErr != nil {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: escalationFailedNoticePrefix + " (" + turnRequestedModel + "): " + switchErr.Error() + ". Continuing on " + options.Model + ".",
+				})
+			} else if newProvider != nil {
+				// Reassign the local provider so the next turn's StreamCompletion and
+				// compaction use it; update options.Model so subsequent RunOptions.Model,
+				// context-window sizing, and usage attribution follow the new model.
+				provider = newProvider
+				options.Model = turnRequestedModel
+				// KNOWN LIMITATION (deferred): the compactor's context-window budget
+				// is fixed at run start from options.ContextWindow and is NOT updated
+				// here, so a switch to a model with a different window keeps compacting
+				// against the original budget. Fixing it needs a ModelSwitcher contract
+				// change (return the new window) — out of scope for this change.
 			}
 		}
 
@@ -417,6 +457,11 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
+		// A tool may signal a mid-run model escalation by carrying the target id
+		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
+		// the Run turn loop performs the actual provider switch. Empty for every
+		// ordinary tool result.
+		RequestedModel: result.Meta["escalate_to_model"],
 	}, nil
 }
 

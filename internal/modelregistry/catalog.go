@@ -51,10 +51,12 @@ func decorateModelDepth(entries []ModelEntry) {
 		defaultEffort ReasoningEffort
 		patterns      []string
 		deprecation   *DeprecationRule
+		upgradeTarget string
 	}{
 		"claude-sonnet-4.5": {
 			defaultEffort: ReasoningEffortMedium,
 			patterns:      []string{`(?i)^sonnet[^a-z0-9]*4[.\s]?5$`},
+			upgradeTarget: "claude-opus-4.1",
 		},
 		"claude-opus-4.1": {
 			defaultEffort: ReasoningEffortHigh,
@@ -63,6 +65,7 @@ func decorateModelDepth(entries []ModelEntry) {
 		"claude-haiku-4.5": {
 			defaultEffort: ReasoningEffortLow,
 			patterns:      []string{`(?i)^haiku[^a-z0-9]*4[.\s]?5$`},
+			upgradeTarget: "claude-sonnet-4.5",
 		},
 		"gemini-2.5-pro": {
 			defaultEffort: ReasoningEffortMedium,
@@ -70,6 +73,19 @@ func decorateModelDepth(entries []ModelEntry) {
 		},
 		"gemini-2.5-flash": {
 			defaultEffort: ReasoningEffortLow,
+			upgradeTarget: "gemini-2.5-pro",
+		},
+		"gemini-2.5-flash-lite": {
+			upgradeTarget: "gemini-2.5-flash",
+		},
+		"gpt-4.1-mini": {
+			upgradeTarget: "gpt-4.1",
+		},
+		"gpt-4.1-nano": {
+			upgradeTarget: "gpt-4.1-mini",
+		},
+		"gpt-4o-mini": {
+			upgradeTarget: "gpt-4o",
 		},
 		"gpt-4-turbo": {
 			deprecation: &DeprecationRule{
@@ -99,6 +115,9 @@ func decorateModelDepth(entries []ModelEntry) {
 		}
 		if extra.deprecation != nil {
 			entries[index].Deprecation = extra.deprecation.Clone()
+		}
+		if extra.upgradeTarget != "" {
+			entries[index].UpgradeTargetID = extra.upgradeTarget
 		}
 	}
 }

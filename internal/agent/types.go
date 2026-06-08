@@ -54,6 +54,11 @@ type ToolResult struct {
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
+	// RequestedModel is the model id a tool asked the loop to switch to for the
+	// rest of the run (lifted from the tool's Meta["escalate_to_model"]). Empty
+	// for every normal tool result; the Run loop performs the switch when it is
+	// set and Options.ModelSwitcher is wired.
+	RequestedModel string
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.
@@ -166,6 +171,13 @@ type Options struct {
 	// budget of the request about to be sent, so a surface (TUI/CLI) can show
 	// context utilization. Opt-in like the other callbacks; nil is a no-op.
 	OnContext func(ContextBreakdown)
+	// ModelSwitcher, when set, lets a tool escalate the run to a stronger model
+	// mid-run: the loop calls it with the requested model id and, on success,
+	// swaps the active provider and updates Options.Model for the rest of the
+	// run. nil DISABLES escalation entirely (the loop ignores any switch
+	// request), so every existing caller is unaffected. A returned error is
+	// non-fatal: the run continues on the current model.
+	ModelSwitcher func(ctx context.Context, modelID string) (Provider, error)
 }
 
 type Result struct {

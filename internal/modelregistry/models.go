@@ -96,7 +96,11 @@ type ModelEntry struct {
 	MatchPatterns []string
 	// Deprecation, when set, redirects this model to a replacement.
 	Deprecation *DeprecationRule
-	Description string
+	// UpgradeTargetID, when set, names the stronger model this one escalates to
+	// during mid-run escalation. Empty means no escalation target (e.g. top-tier
+	// models). Resolved and availability-checked by Registry.UpgradeTarget.
+	UpgradeTargetID string
+	Description     string
 }
 
 // DeprecationRule describes how a deprecated model is phased out and what to use
@@ -340,6 +344,18 @@ func NewRegistry(entries []ModelEntry) (Registry, error) {
 		}
 		if _, ok := registry.Get(fallbackID); !ok {
 			return Registry{}, fmt.Errorf("model %q deprecation fallback %q does not resolve to a known model", entry.ID, fallbackID)
+		}
+	}
+	// A non-empty UpgradeTargetID must resolve to a known model. Otherwise
+	// UpgradeTarget would silently disable escalation at runtime (a catalog typo)
+	// instead of failing loudly here — mirroring the deprecation fallback check.
+	for _, entry := range registry.models {
+		targetID := strings.TrimSpace(entry.UpgradeTargetID)
+		if targetID == "" {
+			continue
+		}
+		if _, ok := registry.Get(targetID); !ok {
+			return Registry{}, fmt.Errorf("model %q upgrade target %q does not resolve to a known model", entry.ID, targetID)
 		}
 	}
 	return registry, nil

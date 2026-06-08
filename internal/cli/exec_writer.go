@@ -390,6 +390,8 @@ func streamJSONSideEffect(name string, registry *tools.Registry) string {
 		return "shell"
 	case tools.SideEffectNetwork:
 		return "network"
+	case tools.SideEffectNone:
+		return "none"
 	default:
 		return "unknown"
 	}

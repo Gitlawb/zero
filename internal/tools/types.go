@@ -16,6 +16,10 @@ const (
 	SideEffectShell          SideEffect = "shell"
 	SideEffectNetwork        SideEffect = "network"
 	SideEffectOutOfWorkspace SideEffect = "out_of_workspace"
+	// SideEffectNone marks a control-only tool that performs no read/write/shell/
+	// network/out-of-workspace effect (e.g. escalate_model, whose only effect is a
+	// loop-level model switch the agent loop performs).
+	SideEffectNone SideEffect = "none"
 )
 
 const (
