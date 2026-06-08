@@ -1208,3 +1208,88 @@ func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
 		})
 	}
 }
+
+// escalatingExecProvider emits an escalate_model tool call on its first turn,
+// then a final text answer. It lets an exec run exercise the mid-run switch
+// without a live model.
+type escalatingExecProvider struct {
+	calls *int
+}
+
+func (provider escalatingExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	turn := *provider.calls
+	*provider.calls++
+	ch := make(chan zeroruntime.StreamEvent, 4)
+	if turn == 0 {
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_escalate", ToolName: "escalate_model"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_escalate", ArgumentsFragment: "{}"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_escalate"}
+		ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+		close(ch)
+		return ch, nil
+	}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "done"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch, nil
+}
+
+func TestRunExecWiresModelSwitcherUnderFlag(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var providerModels []string
+	calls := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--allow-escalation", "--model", "claude-haiku-4.5", "escalate please"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			// The escalation chain (haiku -> sonnet) is anthropic; declare the
+			// provider kind to match so provider-metadata resolution accepts it.
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerModels = append(providerModels, profile.Model)
+			return escalatingExecProvider{calls: &calls}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	// Initial provider build + one rebuild for the escalation target.
+	if len(providerModels) != 2 {
+		t.Fatalf("newProvider called for models %#v, want exactly 2 builds (initial + escalated)", providerModels)
+	}
+	if providerModels[0] != "claude-haiku-4.5" {
+		t.Fatalf("initial provider model = %q, want claude-haiku-4.5", providerModels[0])
+	}
+	target, ok := mustUpgradeTarget(t, "claude-haiku-4.5")
+	if !ok {
+		t.Skip("registry has no upgrade target for claude-haiku-4.5")
+	}
+	if providerModels[1] != target {
+		t.Fatalf("escalated provider model = %q, want %q", providerModels[1], target)
+	}
+}
+
+func mustUpgradeTarget(t *testing.T, id string) (string, bool) {
+	t.Helper()
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	entry, ok := registry.UpgradeTarget(id)
+	return entry.ID, ok
+}

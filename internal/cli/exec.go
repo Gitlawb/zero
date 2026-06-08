@@ -248,6 +248,25 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+
+	// currentModel tracks the model in force for usage attribution. It starts at
+	// the resolved model and is reassigned by the model switcher on a mid-run
+	// escalation so post-switch turns are attributed to the escalated model.
+	currentModel := resolved.Provider.Model
+	var modelSwitcher func(context.Context, string) (agent.Provider, error)
+	if options.allowEscalation {
+		modelSwitcher = func(_ context.Context, modelID string) (agent.Provider, error) {
+			switchedProfile := resolved.Provider
+			switchedProfile.Model = modelID
+			switchedProvider, err := deps.newProvider(switchedProfile)
+			if err != nil {
+				return nil, err
+			}
+			currentModel = modelID
+			return switchedProvider, nil
+		}
+	}
+
 	runMetadata, err := resolveExecRunMetadata(resolved.Provider)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
@@ -332,6 +351,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Depth:            options.depth,
 		SessionTitle:     sessionTitle,
 		Model:            resolved.Provider.Model,
+		ModelSwitcher:    modelSwitcher,
 		ReasoningEffort:  options.reasoningEffort,
 		Cwd:              workspaceRoot,
 		Images:           images,
@@ -380,6 +400,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		OnUsage: func(usage agent.Usage) {
 			writer.usage(usage)
 			sessionRecorder.append(sessions.EventUsage, map[string]any{
+				"model":            currentModel,
 				"promptTokens":     usage.EffectiveInputTokens(),
 				"completionTokens": usage.EffectiveOutputTokens(),
 				"totalTokens":      usage.TotalTokens(),
