@@ -64,12 +64,16 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	request.Permission = NormalizePermission(request.Permission)
 	request.PermissionMode = NormalizePermissionMode(request.PermissionMode)
 	request.SideEffect = NormalizeSideEffect(request.SideEffect)
+	// Preserve the raw requested autonomy for the ceiling checks below. A
+	// genuinely-invalid value (NormalizeAutonomy("") is Low, not an error, so only
+	// bogus values land here) gets a safe High placeholder for risk classification
+	// and grant lookup, but the ceiling check uses rawAutonomy so autonomyAllowed's
+	// unknown-tier guard fails it CLOSED (clamps to Prompt) under ANY ceiling —
+	// including the default High, where a normalized-High value would wrongly pass
+	// autonomyAllowed(High, High).
+	rawAutonomy := request.Autonomy
 	autonomy, err := NormalizeAutonomy(request.Autonomy)
 	if err != nil {
-		// Fail CLOSED: a genuinely-invalid autonomy (NormalizeAutonomy("") is Low,
-		// not an error, so only bogus values land here) is treated as the highest
-		// tier so it exceeds any Medium/Low ceiling and clamps to Prompt rather than
-		// slipping under the ceiling as Low and auto-allowing on the grant/unsafe path.
 		autonomy = AutonomyHigh
 	}
 	request.Autonomy = autonomy
@@ -102,7 +106,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 				decision.Grant = &grant
 				return decision
 			}
-			if !autonomyAllowed(request.Autonomy, policy.MaxAutonomy) {
+			if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
 				return Decision{
 					Action:       ActionPrompt,
 					Reason:       reasonAboveCeiling,
@@ -124,7 +128,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
-		if !autonomyAllowed(request.Autonomy, policy.MaxAutonomy) {
+		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
 		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
