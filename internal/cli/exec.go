@@ -200,6 +200,19 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if !config.HasProviderProfile(resolved.Provider) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
 	}
+	images, err := resolveExecImages(options.imagePaths, workspaceRoot)
+	if err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	// Gate against the EFFECTIVE resolved model (not the --model override). An
+	// unknown/custom id can't be confirmed vision-capable, so drop+warn rather
+	// than error: image input is best-effort, never fatal to the run.
+	if len(images) > 0 && !modelregistry.SupportsVision(modelRegistry, resolved.Provider.Model) {
+		if _, err := fmt.Fprintf(stderr, "Model %s does not support image input; ignoring %d image(s).\n", resolved.Provider.Model, len(images)); err != nil {
+			return exitCrash
+		}
+		images = nil
+	}
 	// Evaluate the --reasoning-effort advisory against the EFFECTIVE resolved
 	// model (resolved.Provider.Model), not the override. Without an explicit
 	// --model the override model is empty, so checking it here would silently
@@ -302,6 +315,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Model:            resolved.Provider.Model,
 		ReasoningEffort:  options.reasoningEffort,
 		Cwd:              workspaceRoot,
+		Images:           images,
 		Registry:         registry,
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,
