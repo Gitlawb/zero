@@ -211,3 +211,65 @@ func TestSubmitThreadsImagesThenClears(t *testing.T) {
 		t.Fatal("expected captureRunImages to be invoked with the staged image")
 	}
 }
+
+// TestSubmitDropsImagesWhenModelSwitchedToNonVision attaches an image on a vision
+// model, then simulates a /model switch to a non-vision id before submit. The
+// submit-time re-check must drop the images (the agent run receives none), append
+// an inline notice mirroring exec's drop+warn wording, and still clear pending
+// state.
+func TestSubmitDropsImagesWhenModelSwitchedToNonVision(t *testing.T) {
+	root := t.TempDir()
+	writeTestPNG(t, root, "photo.png")
+
+	captured := make(chan []zeroruntime.ImageBlock, 1)
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ok"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+
+	m := newModel(context.Background(), Options{
+		Cwd:          root,
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
+	})
+	m.agentOptions.OnText = func(string) {}
+	m.captureRunImages = func(imgs []zeroruntime.ImageBlock) { captured <- imgs }
+
+	// Attach on the vision model.
+	m.input.SetValue("/image photo.png")
+	updated, _ := m.handleSubmit()
+	m = updated.(model)
+	if len(m.pendingImages) != 1 {
+		t.Fatalf("setup: expected 1 staged image, got %d", len(m.pendingImages))
+	}
+
+	// Simulate a /model switch to a non-vision (catalog-unknown) model.
+	m.modelName = "totally-unknown-custom"
+
+	m.input.SetValue("describe this")
+	updated, cmd := m.handleSubmit()
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected a prompt submit to start a run")
+	}
+	if len(next.pendingImages) != 0 || len(next.pendingImageLabels) != 0 {
+		t.Fatalf("submit must clear pending images, got %d/%d", len(next.pendingImages), len(next.pendingImageLabels))
+	}
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "does not support image input") {
+		t.Fatalf("expected an inline drop notice, got %q", notice)
+	}
+
+	cmd() // run the agent goroutine; it invokes captureRunImages
+
+	select {
+	case imgs := <-captured:
+		if len(imgs) != 0 {
+			t.Fatalf("non-vision model must receive no images, got %#v", imgs)
+		}
+	default:
+		t.Fatal("expected captureRunImages to be invoked (with no images)")
+	}
+}

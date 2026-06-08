@@ -928,7 +928,24 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 			command.text = agentPrompt
 		}
+		// Re-check vision support against the CURRENT effective model at submit
+		// time, not just at /image attach time: the user may have attached on a
+		// vision model and then /model-switched to a non-vision one. If the active
+		// model can't accept images, drop them (with an inline notice mirroring
+		// exec's drop+warn wording) rather than sending them to a model that
+		// rejects them. Pending state is cleared either way below.
 		turnImages := m.pendingImages
+		if len(turnImages) > 0 && !modelSupportsVisionTUI(m.modelName) {
+			name := m.modelName
+			if name == "" {
+				name = "the active model"
+			}
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendSystem,
+				text: fmt.Sprintf("Model %s does not support image input; ignoring %d image(s).", name, len(turnImages)),
+			})
+			turnImages = nil
+		}
 		m.pendingImages = nil
 		m.pendingImageLabels = nil
 		runCtx, cancel := context.WithCancel(m.ctx)
