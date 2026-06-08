@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -385,8 +386,10 @@ func displayCLIValue(value string, fallback string) string {
 
 func formatProviderCatalogValue(value string, fallback string) string {
 	value = displayCLIValue(value, fallback)
-	if strings.ContainsAny(value, " \t\n\"") {
-		return strconv.Quote(value)
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == '"' {
+			return strconv.Quote(value)
+		}
 	}
 	return value
 }

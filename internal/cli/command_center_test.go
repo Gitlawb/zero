@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -215,6 +216,14 @@ func TestRunProvidersCatalogListsDescriptors(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
+func TestFormatProviderCatalogValueQuotesControlCharacters(t *testing.T) {
+	value := formatProviderCatalogValue("bad\rvalue", "none")
+
+	if value != strconv.Quote("bad\rvalue") {
+		t.Fatalf("formatProviderCatalogValue() = %q, want quoted control character value", value)
 	}
 }
 
