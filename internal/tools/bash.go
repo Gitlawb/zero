@@ -12,6 +12,7 @@ import (
 	"time"
 
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/secrets"
 )
 
 const defaultBashTimeoutMS = 120000
@@ -224,6 +225,11 @@ func formatBashOutput(stdout string, stderr string, exitCode int) string {
 	parts := []string{}
 	stdout = strings.TrimRight(stdout, "\r\n")
 	stderr = strings.TrimRight(stderr, "\r\n")
+	// Redact high-confidence secrets a command may have printed, so they are not
+	// echoed back into the model context (additive to the configured-key scrub
+	// done at the registry boundary).
+	stdout, outFindings := secrets.Redact(stdout)
+	stderr, errFindings := secrets.Redact(stderr)
 	if stdout != "" {
 		parts = append(parts, "stdout:\n"+stdout)
 	}
@@ -232,6 +238,9 @@ func formatBashOutput(stdout string, stderr string, exitCode int) string {
 	}
 	if exitCode != 0 {
 		parts = append(parts, fmt.Sprintf("exit_code: %d", exitCode))
+	}
+	if n := len(outFindings) + len(errFindings); n > 0 {
+		parts = append(parts, fmt.Sprintf("[zero] redacted %d likely secret(s) from this output before showing it.", n))
 	}
 	if len(parts) == 0 {
 		return "Command completed with no output."
