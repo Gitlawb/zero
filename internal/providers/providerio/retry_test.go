@@ -23,7 +23,9 @@ func TestSendWithRetryDoesNotReplayTransportErrors(t *testing.T) {
 
 	resp, err := SendWithRetry(context.Background(), client, http.MethodPost, "http://example.invalid", []byte("{}"), nil, 3)
 	if resp != nil {
-		resp.Body.Close()
+		if cerr := resp.Body.Close(); cerr != nil {
+			t.Errorf("close response body: %v", cerr)
+		}
 	}
 	if err == nil {
 		t.Fatal("expected a transport error to surface")
