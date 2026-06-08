@@ -289,8 +289,8 @@ func TestEnginePolicyCeilingOverridesGrant(t *testing.T) {
 	if decision.Action != ActionPrompt {
 		t.Fatalf("decision.Action = %q, want %q (clamped above ceiling, not allow)", decision.Action, ActionPrompt)
 	}
-	if decision.Reason != "above policy ceiling" {
-		t.Fatalf("decision.Reason = %q, want \"above policy ceiling\"", decision.Reason)
+	if decision.Reason != reasonAboveCeiling {
+		t.Fatalf("decision.Reason = %q, want %q", decision.Reason, reasonAboveCeiling)
 	}
 }
 
@@ -308,7 +308,7 @@ func TestEnginePolicyCeilingBlocksUnsafeEscalation(t *testing.T) {
 		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"path": "notes.txt"},
 	})
-	if decision.Action != ActionPrompt || decision.Reason != "above policy ceiling" {
+	if decision.Action != ActionPrompt || decision.Reason != reasonAboveCeiling {
 		t.Fatalf("unsafe high-autonomy decision = %#v, want prompt above policy ceiling", decision)
 	}
 }
@@ -327,6 +327,39 @@ func TestEngineDefaultCeilingIsNoOp(t *testing.T) {
 	})
 	if decision.Action != ActionAllow {
 		t.Fatalf("default-High ceiling decision = %#v, want allow (backward compatible)", decision)
+	}
+}
+
+// TestEngineEmptyPolicyCeilingDefaultsToHigh guards the defensive default in
+// Evaluate: a Policy built directly (bypassing DefaultPolicy) leaves MaxAutonomy
+// empty, which would otherwise be read as Low and clamp this High-autonomy unsafe
+// escalation to Prompt. Evaluate must treat the empty ceiling as High (no-op) and
+// allow the request, so the over-restriction trap stays closed.
+func TestEngineEmptyPolicyCeilingDefaultsToHigh(t *testing.T) {
+	root := t.TempDir()
+	// Real enforce mode, but MaxAutonomy deliberately left empty (the landmine).
+	policy := Policy{
+		Mode:             ModeEnforce,
+		EnforceWorkspace: true,
+	}
+	if policy.MaxAutonomy != "" {
+		t.Fatalf("test precondition failed: MaxAutonomy = %q, want empty", policy.MaxAutonomy)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       AutonomyHigh,
+		Args:           map[string]any{"path": "notes.txt"},
+	})
+	if decision.Action != ActionAllow {
+		t.Fatalf("empty-ceiling decision = %#v, want allow (empty ceiling defaults to High, not clamped to prompt)", decision)
+	}
+	if decision.Reason == reasonAboveCeiling {
+		t.Fatalf("empty-ceiling decision clamped to %q, want allow without ceiling clamp", reasonAboveCeiling)
 	}
 }
 

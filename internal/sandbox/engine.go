@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// reasonAboveCeiling is the Decision.Reason emitted when a grant-allow or unsafe
+// escalation is clamped to a prompt because it exceeds the configured autonomy ceiling.
+const reasonAboveCeiling = "above policy ceiling"
+
 type EngineOptions struct {
 	WorkspaceRoot string
 	Policy        Policy
@@ -48,6 +52,14 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
+	if policy.MaxAutonomy == "" {
+		// A directly-constructed Policy{} (bypassing DefaultPolicy) leaves the
+		// ceiling empty, which NormalizeAutonomy would read as Low and clamp every
+		// Medium/High decision to Prompt. Default empty to High so the ceiling is a
+		// no-op unless explicitly configured (fail-open is correct here: the empty
+		// value signals "unset", not "lock everything down").
+		policy.MaxAutonomy = AutonomyHigh
+	}
 	request.WorkspaceRoot = firstNonEmpty(request.WorkspaceRoot, engine.workspaceRoot)
 	request.Permission = NormalizePermission(request.Permission)
 	request.PermissionMode = NormalizePermissionMode(request.PermissionMode)
@@ -89,7 +101,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			if !autonomyAllowed(request.Autonomy, policy.MaxAutonomy) {
 				return Decision{
 					Action:       ActionPrompt,
-					Reason:       "above policy ceiling",
+					Reason:       reasonAboveCeiling,
 					Risk:         risk,
 					GrantMatched: true,
 					Grant:        &grant,
@@ -109,7 +121,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
 		if !autonomyAllowed(request.Autonomy, policy.MaxAutonomy) {
-			return Decision{Action: ActionPrompt, Risk: risk, Reason: "above policy ceiling"}
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
 		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
