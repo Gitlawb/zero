@@ -95,6 +95,9 @@ type ChatData struct {
 	// skin instead of showing a misleading "working…".
 	AskUser *AskUser
 	Input   string
+	// ImageChips, when non-empty, is the pending-attachment chip row shown above
+	// the command input ("[img: a.png] [img: b.png]"); "" when nothing is staged.
+	ImageChips string
 	// Suggestions / SelectedIdx drive the slash-command autocomplete overlay; an
 	// empty slice means no overlay. Picker, when non-nil, is an open selector.
 	Suggestions []Suggestion
@@ -588,6 +591,10 @@ func (s styles) cmdRegion(d ChatData, w int) string {
 		return padRight(hint, w, p.Bg)
 	}
 	line := s.acc.Bold(true).Render(":") + " " + d.Input
+	if d.ImageChips != "" {
+		chips := s.mute.Render(d.ImageChips)
+		return padRight(chips, w, p.Bg) + "\n" + padRight(line, w, p.Bg)
+	}
 	return padRight(line, w, p.Bg)
 }
 

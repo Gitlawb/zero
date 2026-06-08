@@ -130,3 +130,30 @@ func TestImageCommandMissingFileNotice(t *testing.T) {
 		t.Fatalf("expected a notice naming the missing file, got %q", notice)
 	}
 }
+
+func TestTranscriptViewShowsImageChips(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	m.width = 100
+	m.height = 30
+	m.showSplash = false
+	m.pendingImageLabels = []string{"photo.png", "diagram.gif"}
+
+	view := m.transcriptView()
+	if !strings.Contains(view, "photo.png") || !strings.Contains(view, "diagram.gif") {
+		t.Fatalf("transcript view should show pending image chips, got:\n%s", view)
+	}
+}
+
+func TestZerolineViewShowsImageChips(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1", Skin: "zeroline"})
+	m.width = 100
+	m.height = 30
+	m.showSplash = false
+	m.booted = true
+	m.pendingImageLabels = []string{"photo.png"}
+
+	view := m.zerolineView()
+	if !strings.Contains(view, "photo.png") {
+		t.Fatalf("zeroline view should show pending image chip, got:\n%s", view)
+	}
+}

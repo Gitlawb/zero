@@ -542,6 +542,10 @@ func (m model) transcriptView() string {
 	}
 
 	builder.WriteString("\n")
+	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
+		builder.WriteString(zeroTheme.muted.Render(chips))
+		builder.WriteString("\n")
+	}
 	builder.WriteString(borderedBlock(width, []string{m.input.View()}))
 	if overlay := m.suggestionOverlay(width); overlay != "" {
 		builder.WriteString("\n")
