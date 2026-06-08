@@ -129,6 +129,10 @@ type Options struct {
 	Model            string
 	ReasoningEffort  string
 	Cwd              string
+	// Images are optional image attachments to seed onto the initial user turn.
+	// nil for text-only runs (the seeded message then carries no images, exactly
+	// as before).
+	Images []zeroruntime.ImageBlock
 	// ContextWindow is the model's maximum input token budget. When > 0 the agent
 	// loop compacts long conversations once the estimated size crosses a fraction
 	// of this window. 0 DISABLES compaction entirely (every existing caller/test

@@ -51,7 +51,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		permissionMode = PermissionModeAuto
 	}
 
-	messages := zeroruntime.SeedMessages(buildSystemPrompt(options), prompt)
+	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
