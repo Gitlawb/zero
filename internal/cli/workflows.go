@@ -180,6 +180,7 @@ func runChanges(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 	case "inspect", "status":
 		summary, err := deps.inspectChanges(context.Background(), zerogit.InspectOptions{
 			Cwd:          workspaceRoot,
+			BaseRef:      options.baseRef,
 			MaxDiffBytes: options.maxDiffBytes,
 		})
 		if err != nil {
@@ -630,6 +631,9 @@ func formatChangeSummary(summary zerogit.ChangeSummary) string {
 	if summary.Branch != "" {
 		lines = append(lines, "branch: "+summary.Branch)
 	}
+	if summary.Base != "" {
+		lines = append(lines, "base: "+summary.Base)
+	}
 	if summary.Commit != "" {
 		lines = append(lines, "commit: "+summary.Commit)
 	}
@@ -700,6 +704,7 @@ Inspects local git changes and optionally creates a commit.
 
 Flags:
   -C, --cwd <path>        Workspace directory
+      --base <ref>        Diff against <ref>...HEAD instead of the working tree
       --diff-bytes <n>    Maximum diff bytes to include
   -m, --message <text>    Commit message for `+"`zero changes commit`"+`
       --dry-run           Preview commit metadata without mutating git state
