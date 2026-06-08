@@ -1293,3 +1293,45 @@ func mustUpgradeTarget(t *testing.T, id string) (string, bool) {
 	entry, ok := registry.UpgradeTarget(id)
 	return entry.ID, ok
 }
+
+func TestRunExecNoSwitcherWithoutFlag(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	cwd := t.TempDir()
+
+	var providerModels []string
+	calls := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"exec", "--model", "claude-haiku-4.5", "escalate please"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			model := "claude-haiku-4.5"
+			if overrides.Provider.Model != "" {
+				model = overrides.Provider.Model
+			}
+			cfg := execResolvedConfig()
+			// The escalation chain (haiku -> sonnet) is anthropic; declare the
+			// provider kind to match so provider-metadata resolution accepts it.
+			cfg.Provider.ProviderKind = config.ProviderKindAnthropic
+			cfg.Provider.Model = model
+			cfg.MaxTurns = 3
+			return cfg, nil
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerModels = append(providerModels, profile.Model)
+			return escalatingExecProvider{calls: &calls}, nil
+		},
+	})
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	if len(providerModels) != 1 {
+		t.Fatalf("newProvider called for %#v, want exactly 1 build (no switcher wired)", providerModels)
+	}
+	if providerModels[0] != "claude-haiku-4.5" {
+		t.Fatalf("provider model = %q, want claude-haiku-4.5", providerModels[0])
+	}
+}
