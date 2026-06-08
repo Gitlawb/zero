@@ -101,10 +101,19 @@ type Event struct {
 }
 
 type InputEvent struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	Type          InputType `json:"type"`
-	Role          string    `json:"role,omitempty"`
-	Content       string    `json:"content"`
+	SchemaVersion int          `json:"schemaVersion"`
+	Type          InputType    `json:"type"`
+	Role          string       `json:"role,omitempty"`
+	Content       string       `json:"content"`
+	Images        []InputImage `json:"images,omitempty"`
+}
+
+// InputImage carries a base64-encoded image attached to a stream-json
+// message event. MediaType is a MIME type (e.g. "image/png"); Data is the
+// standard base64 encoding of the raw image bytes (no data: URI prefix).
+type InputImage struct {
+	MediaType string `json:"mediaType"`
+	Data      string `json:"data"`
 }
 
 type ProtocolError struct {

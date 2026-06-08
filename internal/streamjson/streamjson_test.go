@@ -155,6 +155,42 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
+func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
+	ev := InputEvent{
+		SchemaVersion: 1,
+		Type:          InputMessage,
+		Role:          "user",
+		Content:       "look at this",
+		Images: []InputImage{
+			{MediaType: "image/png", Data: "aGVsbG8="},
+		},
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"mediaType":"image/png"`) {
+		t.Fatalf("expected mediaType key, got %s", data)
+	}
+	if !strings.Contains(string(data), `"data":"aGVsbG8="`) {
+		t.Fatalf("expected data key, got %s", data)
+	}
+
+	var back InputEvent
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.Images) != 1 || back.Images[0].MediaType != "image/png" || back.Images[0].Data != "aGVsbG8=" {
+		t.Fatalf("images lost in round-trip: %+v", back.Images)
+	}
+
+	// omitempty: a text-only event must not emit the new key.
+	bare, _ := json.Marshal(InputEvent{SchemaVersion: 1, Type: InputPrompt, Content: "hi"})
+	if strings.Contains(string(bare), "images") {
+		t.Fatalf("expected images omitted on text-only event, got %s", bare)
+	}
+}
+
 func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {
 	redacted := true
 	truncated := false
