@@ -36,8 +36,13 @@ var Themes = []Theme{
 	},
 	{
 		Name: "Cyan", Swt: "#38bdf8",
-		Dark:  mkPal("#0a111c", "#0e1726", "#11203a", "#cfe0f0", "#7f93ad", "#566b86", "#1d2d44", "#28415f", "#38bdf8", "#67e8f9", "#4ade80", "#fbbf24", "#f87171", "#13243a"),
-		Light: mkPal("#eef2f7", "#ffffff", "#e7eef6", "#15202e", "#52647a", "#8fa1b5", "#d3dde8", "#bccbdb", "#0b74c4", "#0e7490", "#1a7f37", "#9a6700", "#cf222e", "#dde9f4"),
+		// Cyan Dark/Light use zeroTheme's exact cyan #34E2EA / green #43D17A / amber #E8B84B / red #F2616B / dim-muted
+		// for palette unification (consistent accents/dim across hybrid V1 home + timeline execution).
+		// See design doc: "Hybrid Target: V1 + V4 Screen-by-Screen Specification" (color/palette notes,
+		// "Exact chrome/layout..."), "## Key Decisions" (nomenclature "var zeroTheme tuiTheme"),
+		// PR1 "Theme & shared chrome unification (hybrid base)", and "References" (Lip Gloss dark terminals).
+		Dark:  mkPal("#0a111c", "#0e1726", "#11203a", "#cfe0f0", "#6C7682", "#6C7682", "#1d2d44", "#28415f", "#34E2EA", "#5EC8D8", "#43D17A", "#E8B84B", "#F2616B", "#1F6E78"),
+		Light: mkPal("#eef2f7", "#ffffff", "#e7eef6", "#15202e", "#6C7682", "#6C7682", "#d3dde8", "#bccbdb", "#34E2EA", "#5EC8D8", "#43D17A", "#E8B84B", "#F2616B", "#1F6E78"),
 	},
 	{
 		Name: "Sage", Swt: "#9cb98f",

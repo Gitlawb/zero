@@ -172,6 +172,12 @@ func RenderBoot(variant int, dark bool, frame, w, h int) string {
 // ---------------------------------------------------------------- HOME (ZEN)
 
 // RenderHome renders the centered Zen landing surface.
+//
+// Stable bordered input (home box + cmdRegion) + headerStripe prepare for hybrid
+// reuse of V1 borderedBlock + headerBar/status from tui pkg (unified via zeroTheme/Pal
+// in PR1). Current zeroline path visuals unchanged for non-hybrid. Cites design doc
+// "Hybrid Target..." ("Input composer: Stable bottom, using borderedBlock ... or aligned
+// cmdRegion", "Make V1 header + status + stable bordered input reusable for both phases").
 func RenderHome(d HomeData) string {
 	p := Resolve(d.Variant, d.Dark)
 	s := newCanvasStyles(p, d.Variant, d.Dark)
@@ -219,6 +225,9 @@ func RenderHome(d HomeData) string {
 }
 
 func headerStripe(s styles, h Header) string {
+	// headerStripe (and topBar/botBar for status) will share V1-aligned chrome in hybrid
+	// timeline phase per design "Exact chrome/layout for timeline execution phase".
+	// Palette now consistent via theme unification. See PR1 + Hybrid Target spec.
 	dirty := ""
 	if h.Dirty {
 		dirty = s.amb.Render("✱")

@@ -15,6 +15,12 @@ import (
 
 // headerBar renders the top zone of the working view: a single status line plus a
 // thin rule. Layout: zero · cwd · branch · provider/model  ............  ● state
+//
+// V1 header + statusLine (with zeroTheme accents) are the reusable base chrome for
+// hybrid timeline execution phase (and V1 home). See design: "Hybrid Target: V1 + V4
+// Screen-by-Screen Specification" ("Exact chrome/layout for timeline execution phase",
+// "Header: V1-aligned minimal headerBar style...", status integrated, "Precise model/view
+// transition"), PR1 theme+shared-chrome-unification.
 func (m model) headerBar(width int) string {
 	left := strings.Join(nonEmpty([]string{
 		zeroTheme.accent.Render("zero"),
@@ -61,6 +67,8 @@ func branchSegment(branch string) string {
 
 // statusLine renders the bottom zone: the permission-mode indicator on the left and
 // the live model/usage readout on the right.
+//
+// (See headerBar comment for hybrid reuse of V1 chrome per design doc Hybrid Target.)
 func (m model) statusLine(width int) string {
 	left := m.modeSegment()
 	right := m.usageSegment()

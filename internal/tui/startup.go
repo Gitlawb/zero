@@ -362,3 +362,19 @@ func minInt(left int, right int) int {
 	}
 	return right
 }
+
+// eightyCol and narrowFor80 are small helpers for 80-col collapse of V1 chrome
+// (startupHeader with its headerCandidate narrowing, borderedBlock input, header
+// segments). Used to prepare reusable chrome for hybrid V1 home + timeline.
+// See design doc "Hybrid Target: V1 + V4 Screen-by-Screen Specification"
+// ("Hybrid-specific responsive notes (esp. 80-col)": time/glyphs only, header
+// narrowing like current, no rail <120, permMinBoxWidth) and PR1 "Add small
+// helpers for 80-col collapse".
+func eightyCol(w int) bool { return w <= 80 }
+
+func narrowFor80(w int, full, collapsed string) string {
+	if eightyCol(w) {
+		return collapsed
+	}
+	return full
+}

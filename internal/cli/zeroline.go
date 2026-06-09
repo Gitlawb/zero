@@ -77,6 +77,9 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				Input: "❯ message zero — / commands · @ files · ! bash",
 			})
 		}
+		// --snapshot --page home --width 80/120 (and variant=2 for Cyan) now uses
+		// unified palette + prepares V1 chrome consistency for hybrid DoD verification.
+		// (cli/zeroline.go snapshot path updated with comment for PR1.)
 		if _, err := fmt.Fprintln(stdout, frame); err != nil {
 			return 1
 		}

@@ -73,3 +73,11 @@ var zeroTheme = tuiTheme{
 	modeAsk:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)).Bold(true),
 	modeUnsafe: lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)).Bold(true),
 }
+
+// zeroTheme (tuiTheme) is the single source of truth for the accent/dim palette used by V1
+// headerBar/statusLine/borderedBlock (startup) chrome. Zeroline's Cyan Pal is now aliased
+// to the same hex values for consistent cyan/green/amber/red/dim in hybrid V1 home +
+// timeline execution. No default (non-hybrid) visuals changed. See design doc
+// "Hybrid Target: V1 + V4 Screen-by-Screen Specification" ("Exact chrome/layout for timeline
+// execution phase", "color/palette notes", Row->Ev), "## Key Decisions" (hybrid target,
+// "var zeroTheme tuiTheme"), "## References", PR1 "feat/tui-theme-and-shared-chrome-unification".

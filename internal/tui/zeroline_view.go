@@ -64,6 +64,11 @@ func (m model) zerolineHeader() zeroline.Header {
 }
 
 func (m model) zerolineView() string {
+	// zerolineView uses RenderHome (V1-style minimal for !showSplash) and RenderChat.
+	// Foundation for hybrid: V1 chrome (header/status/bordered from view/startup + zeroTheme)
+	// + unified Pal reusable for timeline execution after first turn.
+	// See design "Precise model/view transition", "Startup remains V1 minimal (RenderHome...)",
+	// "PR Plan" entry for pr-1, and "var zeroTheme tuiTheme". Minor updates only per PR1.
 	width, height := m.width, m.height
 	if width <= 0 {
 		width = 100
