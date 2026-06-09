@@ -9,7 +9,9 @@ var extToLanguage = map[string]string{
 	"cs": "C#", "rb": "Ruby", "php": "PHP", "swift": "Swift", "scala": "Scala",
 	"sh": "Shell", "bash": "Shell", "zsh": "Shell",
 	"sql": "SQL", "html": "HTML", "htm": "HTML", "css": "CSS", "scss": "SCSS", "sass": "SCSS",
-	"json": "JSON", "yaml": "YAML", "yml": "YAML", "toml": "TOML", "md": "Markdown",
+	// Pure data/prose formats (json/yaml/toml/md) are intentionally NOT languages:
+	// they would drown out the "primary language" signal. Markup-code (html/css)
+	// is kept since it is authored frontend code.
 	"proto": "Protobuf", "lua": "Lua", "dart": "Dart", "ex": "Elixir", "exs": "Elixir",
 	"clj": "Clojure", "hs": "Haskell", "ml": "OCaml", "r": "R", "jl": "Julia",
 	"vue": "Vue", "svelte": "Svelte", "pl": "Perl", "pm": "Perl", "groovy": "Groovy",
