@@ -63,8 +63,8 @@ func (m model) appendImageNotice(text string) model {
 }
 
 // renderImageChips builds a one-line "[img: a.png] [img: b.png]" row for the
-// pending attachments, or "" when there are none. Kept plain so both the default
-// and zeroline skins can wrap/style it consistently.
+// pending attachments, or "" when there are none. Kept plain so the renderer
+// can wrap/style it consistently.
 func renderImageChips(labels []string) string {
 	if len(labels) == 0 {
 		return ""

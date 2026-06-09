@@ -104,29 +104,14 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 	}
 }
 
-func TestThemePickerOnlyInZerolineSkin(t *testing.T) {
-	// Default skin keeps the existing shell-only message; no picker opens.
+func TestThemeCommandOpensNoPicker(t *testing.T) {
+	// /theme keeps the existing shell-only message; no picker opens.
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/theme")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if m.picker != nil {
-		t.Fatal("default skin should not open a theme picker")
-	}
-
-	// Zeroline skin opens the theme picker and choosing sets the variant.
-	z := newModel(context.Background(), Options{Skin: "zeroline", ThemeDark: true})
-	z.input.SetValue("/theme")
-	updatedZ, _ := z.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	z = updatedZ.(model)
-	if z.picker == nil || z.picker.kind != pickerTheme {
-		t.Fatalf("zeroline /theme should open a theme picker, got %#v", z.picker)
-	}
-	z.picker.selected = 2
-	updatedZ, _ = z.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	z = updatedZ.(model)
-	if z.themeVariant != 2 {
-		t.Fatalf("choosing a theme should set the variant, got %d", z.themeVariant)
+		t.Fatal("/theme should not open a picker")
 	}
 }
 
@@ -137,18 +122,14 @@ func TestPickersRefuseToOpenWhileRunPending(t *testing.T) {
 	cases := []struct {
 		name    string
 		command string
-		skin    string
 	}{
 		{name: "model", command: "/model"},
 		{name: "mode", command: "/mode"},
 		{name: "effort", command: "/effort"},
-		{name: "theme", command: "/theme", skin: "zeroline"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newModel(context.Background(), Options{
-				Skin:      tc.skin,
-				ThemeDark: true,
 				ModelName: "claude-sonnet-4.5",
 			})
 			m.pending = true
@@ -172,8 +153,7 @@ func TestPickersRefuseToOpenWhileRunPending(t *testing.T) {
 	}
 }
 
-func TestPickerRendersInBothSkins(t *testing.T) {
-	// Default skin.
+func TestPickerRenders(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.width, m.height = 96, 30
 	m.showSplash = false
@@ -181,18 +161,6 @@ func TestPickerRendersInBothSkins(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if !strings.Contains(m.View(), "select model") {
-		t.Fatal("default-skin view should render the picker title")
-	}
-
-	// Zeroline skin.
-	z := newModel(context.Background(), Options{Skin: "zeroline", ThemeDark: true, ModelName: "claude-sonnet-4.5"})
-	z.width, z.height = 100, 30
-	z.booted = true
-	z.showSplash = false
-	z.input.SetValue("/model")
-	updatedZ, _ := z.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	z = updatedZ.(model)
-	if !strings.Contains(z.View(), "select model") {
-		t.Fatal("zeroline view should render the picker title")
+		t.Fatal("view should render the picker title")
 	}
 }

@@ -203,7 +203,7 @@ func TestSuggestionsSuppressedDuringModals(t *testing.T) {
 	}
 }
 
-func TestSuggestionOverlayRendersInDefaultSkin(t *testing.T) {
+func TestSuggestionOverlayRenders(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 30
 	m.showSplash = false
@@ -211,20 +211,7 @@ func TestSuggestionOverlayRendersInDefaultSkin(t *testing.T) {
 
 	view := m.View()
 	if !strings.Contains(view, "/model") || !strings.Contains(view, "/mode") {
-		t.Fatal("default-skin view should render the suggestion overlay")
-	}
-}
-
-func TestSuggestionOverlayRendersInZerolineSkin(t *testing.T) {
-	m := newModel(context.Background(), Options{Skin: "zeroline", ThemeDark: true})
-	m.width, m.height = 100, 30
-	m.booted = true
-	m.showSplash = false
-	m = typeRunes(t, m, "/mo")
-
-	view := m.View()
-	if !strings.Contains(view, "/model") || !strings.Contains(view, "/mode") {
-		t.Fatal("zeroline chat view should render the suggestion overlay")
+		t.Fatal("view should render the suggestion overlay")
 	}
 }
 

@@ -147,20 +147,6 @@ func TestTranscriptViewShowsImageChips(t *testing.T) {
 	}
 }
 
-func TestZerolineViewShowsImageChips(t *testing.T) {
-	m := newModel(context.Background(), Options{ModelName: "gpt-4.1", Skin: "zeroline"})
-	m.width = 100
-	m.height = 30
-	m.showSplash = false
-	m.booted = true
-	m.pendingImageLabels = []string{"photo.png"}
-
-	view := m.zerolineView()
-	if !strings.Contains(view, "photo.png") {
-		t.Fatalf("zeroline view should show pending image chip, got:\n%s", view)
-	}
-}
-
 func TestSubmitThreadsImagesThenClears(t *testing.T) {
 	root := t.TempDir()
 	writeTestPNG(t, root, "photo.png")

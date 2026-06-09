@@ -32,12 +32,6 @@ type Options struct {
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string
 
-	// Skin selects the rendering style. "" is the default Zero shell; "zeroline"
-	// renders the Zen home / Statusline chat surface with switchable color themes.
-	Skin         string
-	ThemeVariant int  // zeroline color theme index (0-4)
-	ThemeDark    bool // zeroline light/dark mode
-
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
 }

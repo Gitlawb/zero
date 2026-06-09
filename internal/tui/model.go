@@ -75,13 +75,7 @@ type model struct {
 	height            int
 	now               func() time.Time
 
-	skin             string // "" default shell, "zeroline" reskin
-	themeVariant     int    // zeroline color theme (0-4)
-	themeDark        bool   // zeroline light/dark
-	frame            int    // animation frame counter (zeroline spinner)
-	booted           bool   // zeroline boot splash finished
-	streamingText    string // live assistant text for the current segment
-	streamStartFrame int    // frame the current stream segment began (tok/s)
+	streamingText string // live assistant text for the current segment
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
@@ -224,10 +218,6 @@ func newModel(ctx context.Context, options Options) model {
 	input := textinput.New()
 	input.Prompt = "zero > "
 	input.Placeholder = "Ask Zero to inspect, edit, explain, or run a command..."
-	if options.Skin == "zeroline" {
-		input.Prompt = "❯ "
-		input.Placeholder = "message zero — / commands · @ files · ! bash"
-	}
 	input.Focus()
 
 	notifier := notify.New(os.Stderr, notify.Config{
@@ -237,9 +227,6 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	return model{
-		skin:               options.Skin,
-		themeVariant:       options.ThemeVariant,
-		themeDark:          options.ThemeDark,
 		ctx:                ctx,
 		cwd:                cwd,
 		gitBranch:          gitBranch(cwd),
@@ -266,9 +253,6 @@ func newModel(ctx context.Context, options Options) model {
 }
 
 func (m model) Init() tea.Cmd {
-	if m.skin == "zeroline" {
-		return tea.Batch(textinput.Blink, zerolineTick())
-	}
 	return textinput.Blink
 }
 
@@ -390,16 +374,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePermissionKey(msg)
 		}
 		// An open picker is modal over the input: swallow remaining keys so they
-		// neither type into the field nor trigger zeroline theme shortcuts.
-		// ↑/↓/Enter/Esc were already handled above.
+		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
 		if m.picker != nil {
 			return m, nil
-		}
-		if m.skin == "zeroline" {
-			m.booted = true // any key dismisses the boot splash
-			if nm, handled := m.handleZerolineKeys(msg); handled {
-				return nm, nil
-			}
 		}
 		// The key fell through to the text input: let it update, then refresh the
 		// autocomplete match list from the new value.
@@ -417,21 +394,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifier.SetFocused(false)
 		}
 		return m, nil
-	case zerolineTickMsg:
-		if m.skin != "zeroline" {
-			return m, nil
-		}
-		m.frame++
-		if m.frame >= bootFrames {
-			m.booted = true
-		}
-		return m, zerolineTick()
 	case agentTextMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
-		}
-		if m.streamingText == "" {
-			m.streamStartFrame = m.frame
 		}
 		m.streamingText += msg.delta
 		m.showSplash = false
@@ -560,9 +525,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if m.skin == "zeroline" {
-		return m.zerolineView()
-	}
 	if m.showSplash {
 		return m.startupView()
 	}
@@ -717,7 +679,7 @@ func permissionDecisionReason(decision permissionDecision) string {
 // choosePicker applies the highlighted picker item through the same handler the
 // typed command would have used, appends the resulting status text, and closes
 // the picker. Behavior is identical to running "/model <id>", "/effort <v>",
-// "/mode <name>", or selecting a zeroline theme by key.
+// or "/mode <name>".
 func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	picker := m.picker
 	m.picker = nil
@@ -744,10 +706,6 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		m, text = m.handleModeCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-	case pickerTheme:
-		// Theme selection mirrors the zeroline number-key shortcut: set the active
-		// variant by its catalog index.
-		m.themeVariant = picker.selected
 	}
 	return m, nil
 }
@@ -899,19 +857,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:
-		// Only the zeroline skin renders themes; there a no-argument /theme opens
-		// the picker. The default skin keeps its existing shell-only message.
-		if m.skin == "zeroline" && strings.TrimSpace(command.text) == "" {
-			if m.pending {
-				m.showSplash = false
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
-				return m, nil
-			}
-			if picker := m.newThemePicker(); picker != nil {
-				m.picker = picker
-				return m, nil
-			}
-		}
 		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,

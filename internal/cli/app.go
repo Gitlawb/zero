@@ -214,8 +214,6 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runRepoInfo(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
-	case "zeroline":
-		return runZeroline(args[1:], stdout, stderr, deps)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -308,10 +306,6 @@ func fillAppDeps(deps appDeps) appDeps {
 }
 
 func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode) int {
-	return runInteractiveTUIWithSkin(stderr, deps, "", permissionMode)
-}
-
-func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, permissionMode agent.PermissionMode) int {
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
@@ -388,8 +382,6 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 			DeferThreshold: resolved.Tools.DeferThreshold,
 		},
 		PermissionMode: permissionMode,
-		Skin:           skin,
-		ThemeDark:      true,
 		Notify:         resolved.Notify,
 	})
 }
@@ -487,7 +479,6 @@ Commands:
   cron       Schedule agent jobs (foreground, file-backed)
   repo-info  Characterize the current repository (local git only)
   serve      Run Zero protocol servers
-  zeroline    Launch the interactive TUI with the Zeroline reskin
   help       Show this help
   version    Print version
 

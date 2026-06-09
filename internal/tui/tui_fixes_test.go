@@ -129,19 +129,6 @@ func TestFileSuggestionsListsAndFiltersWorkspaceFiles(t *testing.T) {
 	}
 }
 
-// FIX 2: the zeroline header reflects cost + cumulative tokens from the tracker.
-func TestZerolineHeaderReflectsUsage(t *testing.T) {
-	m := newModel(context.Background(), Options{})
-	if m.usageTracker == nil {
-		t.Skip("no usage tracker")
-	}
-	m.unpricedTokens = 1234 // fallback path when nothing is priced yet
-	h := m.zerolineHeader()
-	if h.TotalTokens != 1234 {
-		t.Fatalf("header TotalTokens = %d, want 1234 (unpriced fallback)", h.TotalTokens)
-	}
-}
-
 // FIX 3: "!cmd" parses as a shell escape, not a chat prompt.
 func TestParseCommandBangIsShellEscape(t *testing.T) {
 	got := parseCommand("!ls -la")

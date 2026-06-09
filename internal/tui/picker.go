@@ -2,7 +2,6 @@ package tui
 
 import (
 	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/zeroline"
 )
 
 // pickerKind identifies which command a picker selection feeds back into.
@@ -10,7 +9,6 @@ type pickerKind int
 
 const (
 	pickerModel pickerKind = iota
-	pickerTheme
 	pickerEffort
 	pickerMode
 )
@@ -22,9 +20,9 @@ type pickerItem struct {
 	Value string
 }
 
-// commandPicker is a generic single-select overlay reused by /model, /theme,
-// /effort, and /mode (invoked with no argument). It owns only list state; the
-// chosen value is applied through the existing command handlers.
+// commandPicker is a generic single-select overlay reused by /model, /effort,
+// and /mode (invoked with no argument). It owns only list state; the chosen
+// value is applied through the existing command handlers.
 type commandPicker struct {
 	kind     pickerKind
 	title    string
@@ -72,19 +70,6 @@ func (m model) newModelPicker() *commandPicker {
 		}
 	}
 	return &commandPicker{kind: pickerModel, title: "select model", items: items, selected: selected}
-}
-
-// newThemePicker lists the zeroline color themes, preselecting the active one.
-func (m model) newThemePicker() *commandPicker {
-	items := make([]pickerItem, 0, len(zeroline.Themes))
-	for _, theme := range zeroline.Themes {
-		items = append(items, pickerItem{Label: theme.Name, Value: theme.Name})
-	}
-	selected := m.themeVariant
-	if selected < 0 || selected >= len(items) {
-		selected = 0
-	}
-	return &commandPicker{kind: pickerTheme, title: "select theme", items: items, selected: selected}
 }
 
 // newEffortPicker lists the reasoning efforts the active model supports plus an
