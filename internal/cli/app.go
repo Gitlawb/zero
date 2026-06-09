@@ -138,12 +138,10 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	defer observability.Recover(observability.DefaultCrashDir(), "cli", stderr, &exitCode)
 	deps = fillAppDeps(deps)
 
-	// PR4: support `go run ./cmd/zero --skin hybrid` (and zeroline) for first runnable hybrid.
-	// Wires tui.Options.Skin so View dispatch uses V1 startupView home -> timeline Ev.
-	// Smallest extension of existing --skip pattern + runInteractiveTUIWithSkin.
-	skin := ""
+	// PR6: make hybrid the default (ship target after soak on opt-in per rollout). Supports --skin hybrid|zeroline|"" (""/zeroline kept for back-compat + 1-5 theme fans; deprecate pure transcriptView for main path). Flag-guarded via --skin (per risks: any obscuring-perm change guarded). Cites design doc: Rollout Plan (staged default after soak, config "ui.skin", --skin hybrid), Hybrid Target ("Enable hybrid as default", "deprecate pure transcriptView"), PR6 entry, "keep zeroline/\"\"", "Mitigates rollout risks". Also supports explicit --skin "" to force old path.
+	skin := "hybrid"
 	if len(args) > 1 && args[0] == "--skin" {
-		if args[1] == "hybrid" || args[1] == "zeroline" {
+		if args[1] == "hybrid" || args[1] == "zeroline" || args[1] == "" {
 			skin = args[1]
 			args = args[2:]
 		}
@@ -492,7 +490,7 @@ Commands:
   changes    Inspect and commit local git changes
   usage      Summarize token usage and estimated cost
   serve      Run Zero protocol servers
-  zeroline    Launch the interactive TUI with the Zeroline reskin
+  zeroline    Launch the interactive TUI with the Zeroline reskin (5 themes; main 'zero' now ships hybrid V1+V4 default per PR6)
   help       Show this help
   version    Print version
 

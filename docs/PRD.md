@@ -70,6 +70,8 @@ It combines the best of:
 └─────────────────────────────────────────────────┘
 ```
 
+**Source context note (relative paths only):** Primary Go TUI sources (internal/tui/*, internal/zeroline/*, internal/cli/app.go, internal/cli/zeroline.go, cmd/zero/main.go, go.mod, docs/*.md, AGENTS.MD) are in task-specific worktrees under `~/.local/state/zero/worktrees/...` (e.g. the tree used here). ustom/ prototypes + some PRDs from `/home/anaxy/Projects/`. TS/Ink surface (Projects/zero*) is not the target — Go Bubble Tea + Lip Gloss only (per AGENTS.MD + go.mod; no Ink). All path citations relative module-root (e.g. "internal/cli/app.go"). Hybrid (V1 ZeroLine Minimal startup + V4 Agent Timeline execution) is the shipped default target (PR6); deprecate pure transcriptView for main path; full 5 variations kept as reference designs + hybrid spec. Review flows via /spec (not top-level /review); review verdict surface qualified as skeleton/partial per spec_mode + internal/review. Cites design doc Hybrid Target + PR Plan + References + Rollout ( --skin hybrid, config "ui.skin").
+
 **Layering Rules:**
 - Agent Core never imports a surface
 - Surfaces are thin shells (I/O + rendering)
@@ -153,6 +155,7 @@ type ModelEntry struct {
 - **Robustness:** resize, wide-char, ANSI, non-TTY fallback
 - **Splash:** ZERO wordmark
 - **Themes:** light/dark + custom
+- Hybrid (V1 home + V4 timeline) is shipped default (after PR1-5 soak/opt-in via tui skin / --skin hybrid or config); pure transcriptView deprecated for main path (kept for back-compat via explicit skin=""). Full 5 variations (ZeroLine Minimal, Command Workbench, Review Desk, Agent Timeline, Terminal Studio) kept as refs + hybrid spec (see design doc). Review verdict surface qualified as skeleton/partial (wired via /spec + spec_mode + internal/review, not full dedicated lane in base). Relative paths; accurate /spec for review flows (no top-level /review). Cites: design Hybrid Target, PR6, References.
 
 ### F5 — Sessions (P0)
 - Persist to `~/.local/share/zero/sessions/<id>/`
@@ -262,12 +265,15 @@ type ModelEntry struct {
 
 ### F17 — Slash Commands (P0)
 
-**Built-in (20):**
-- Session: `/clear`, `/compact`, `/context`, `/rewind`, `/resume`, `/exit`
-- Model: `/model`, `/effort`, `/style`, `/permissions`
-- Project: `/init`, `/memory`, `/skills`
+**Built-in (accurate surface, see internal/tui/commands.go relative):**
+- Session: `/clear`, `/compact`, `/context`, `/rewind`, `/resume` ( /sessions alias), `/exit`
+- Model/provider: `/model`, `/provider`, `/effort`, `/style`, `/permissions`, `/mode`
+- Tools/plan: `/plan`, `/debug`, `/tools`, `/search`, `/image`
+- Project: `/init`, `/memory`, `/skills`, `/spec` (entry for review/spec drafts + verdict surface)
 - Extensibility: `/mcp`, `/hooks`, `/agents`
-- Meta: `/help`, `/config`, `/doctor`, `/feedback`
+- Meta: `/help`, `/config`, `/doctor`, `/feedback`, `/theme`, `/compact`
+
+Review flows via `/spec` (Draft an implementation spec for review before editing; StopReasonSpecReviewRequired); review verdict surface is qualified skeleton/partial (per spec_mode + internal/review + backend from verify/testrunner/zerogit; not full top-level /review cmd in TUI). 5 variations as refs + hybrid as target.
 
 **Custom:** `./.zero/commands/*.md`
 

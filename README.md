@@ -146,6 +146,8 @@ Write/shell tools route through the permission policy before any side effect.
 - **Edges are interfaces**: `Provider`, `Tool`, `SessionStore`, and the permission policy are swappable.
 - **Model is data**: capabilities, cost, and routing live in the registry — never hard-coded.
 
+**Source context note (relative paths):** Primary Go TUI sources are in task worktrees under `~/.local/state/zero/worktrees/...` (this tree for verification). ustom/ from `/home/anaxy/Projects/`. TS/Ink surface at Projects/zero* is separate/not the target (Go Bubble Tea/Lip Gloss only per AGENTS.MD + go.mod; no Ink). Citations use relative form e.g. `internal/cli/app.go`, `docs/PRD.md`. Hybrid (V1+ V4) is shipped default target (after soak); deprecate pure transcriptView for main path; full 5 variations kept as refs + hybrid spec. Review flows via `/spec` (not top-level `/review`); review verdict surface qualified as skeleton/partial per `spec_mode` + `internal/review`. See design doc (Hybrid Target, References, PR6). Accurate slash cmds per `internal/tui/commands.go`: /plan /debug /tools /model /provider /spec /context /resume /permissions /doctor /mode /effort /style /compact /rewind /search /image /clear /help /exit /theme etc. (relative).
+
 ## Project layout
 
 ```

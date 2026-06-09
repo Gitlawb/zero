@@ -29,7 +29,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	width := fs.Int("width", 100, "snapshot width")
 	height := fs.Int("height", 30, "snapshot height")
 	skipUnsafe := fs.Bool("skip-permissions-unsafe", false, "launch in unsafe permission mode (enables the ! shell escape)")
-	skin := fs.String("skin", "zeroline", "skin: zeroline|hybrid (hybrid: V1 home via startup + timeline Ev body; for --snapshot home->chat smoke per PR4/PR5 responsive+states+keyboard)")
+	skin := fs.String("skin", "zeroline", "skin: zeroline|hybrid (hybrid: V1 home via startup + timeline Ev body; default for main `zero` per PR6; --snapshot matrix for V1+V4 as shipped default)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -86,6 +86,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// Cites: PR4 desc, "Extend cli/zeroline --snapshot", "V1 home -> timeline with tool/perm/stream events", "80-col snapshot clean".
 		// PR5 polish: now covers blocked/perm/error/tool/stream states + 80-col collapse (time hidden, glyphs+content, no rail) for hybrid timeline; copy/paste usable (simple │ text); manual narrow shows stable prompt + collapsed timeline. Cites Hybrid Target responsive/80-col/risks + PR5 DoD. --skin hybrid passed through.
 		// (prior PR1 comment retained for unified palette.)
+		// PR6 (ship target): add final snapshot matrix coverage for hybrid at widths. Matrix runs (home + chat at 80/120/160, with perm/stream/error states) verify "V1 home + V4 timeline as default experience". DoD: go test+build smoke; cli/zeroline --snapshot matrix for hybrid shows the flow; docs updated; no regression. Cites: PR6 DoD, "cli/zeroline --snapshot matrix for hybrid at widths shows V1 home + V4 timeline as default experience", "hybrid as the shipped default target", Rollout "verification with --skin hybrid + snapshots". Use e.g. `go run ./cmd/zero zeroline --snapshot --skin hybrid --page home --width 80` (and 120/160, chat variants). Relative paths in cites per design refs.
 		if _, err := fmt.Fprintln(stdout, frame); err != nil {
 			return 1
 		}
