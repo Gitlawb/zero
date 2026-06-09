@@ -445,7 +445,8 @@ func TestRunProvidersCheckConnectivityJSON(t *testing.T) {
 		return config.ResolvedConfig{ActiveProvider: "local", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
 	}
 	deps.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
-		return commandCenterProvider{}, nil
+		t.Fatal("newProvider should not run during connectivity health check")
+		return nil, nil
 	}
 
 	exitCode := runWithDeps([]string{"providers", "check", "local", "--connectivity", "--json"}, &stdout, &stderr, deps)

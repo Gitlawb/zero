@@ -96,6 +96,67 @@ func TestProbeConnectivityClassifiesAndRedactsAuthError(t *testing.T) {
 	}
 }
 
+func TestProbeResolvedKindRequiresAuthWhenUnset(t *testing.T) {
+	called := false
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return nil, errors.New("network should not be reached")
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:  "openai-test",
+			Model: "gpt-4.1",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+	})
+
+	if result.Status != StatusFail {
+		t.Fatalf("Status = %q, want fail: %#v", result.Status, result.Checks)
+	}
+	check := result.Check("provider.auth")
+	if check == nil || check.Status != StatusFail || check.Category != CategoryAuth {
+		t.Fatalf("provider.auth = %#v, want auth failure", check)
+	}
+	if called {
+		t.Fatal("HTTP client was called after missing credentials")
+	}
+}
+
+func TestProbeResolvedKindConnectivityAuthErrorRedactsSecret(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test-secret" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad key sk-test-secret"}}`))
+	}))
+	defer server.Close()
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:    "openai-test",
+			BaseURL: server.URL,
+			APIKey:  "sk-test-secret",
+			Model:   "custom-model",
+		},
+		Connectivity: true,
+		HTTPClient:   server.Client(),
+	})
+
+	if result.Status != StatusFail {
+		t.Fatalf("Status = %q, want fail: %#v", result.Status, result.Checks)
+	}
+	check := result.Check("provider.connectivity")
+	if check == nil || check.Category != CategoryAuth {
+		t.Fatalf("provider.connectivity = %#v, want auth failure", check)
+	}
+	if strings.Contains(check.Message, "sk-test-secret") {
+		t.Fatalf("secret leaked in message: %q", check.Message)
+	}
+}
+
 func TestProbeConnectivityClassifiesTimeout(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, context.DeadlineExceeded

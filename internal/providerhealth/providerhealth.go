@@ -144,7 +144,7 @@ func Probe(ctx context.Context, options Options) Result {
 		"providerKind": metadata.ProviderKind,
 	}, profile))
 
-	if credentialRequired(profile) && !hasCredential(profile) {
+	if credentialRequired(profile, metadata.ProviderKind) && !hasCredential(profile) {
 		result.add(check("provider.auth", "Provider auth", StatusFail, CategoryAuth, fmt.Sprintf("Provider %s requires API credentials.", providerName(profile)), credentialDetails(profile), profile))
 		return result.finalize()
 	}
@@ -440,13 +440,13 @@ func hasCredential(profile config.ProviderProfile) bool {
 	return strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != ""
 }
 
-func credentialRequired(profile config.ProviderProfile) bool {
+func credentialRequired(profile config.ProviderProfile, providerKind config.ProviderKind) bool {
 	if strings.TrimSpace(profile.CatalogID) != "" {
 		if descriptor, err := providercatalog.Require(profile.CatalogID); err == nil {
 			return descriptor.RequiresAuth
 		}
 	}
-	switch profile.ProviderKind {
+	switch providerKind {
 	case config.ProviderKindOpenAI, config.ProviderKindAnthropic, config.ProviderKindGoogle:
 		return true
 	default:
