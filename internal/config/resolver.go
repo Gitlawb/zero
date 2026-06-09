@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
@@ -66,6 +67,20 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			return ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q: expected low, medium, or high", maxAutonomy)
 		}
 	}
+	if mode := strings.TrimSpace(cfg.Notify.Mode); mode != "" {
+		switch notify.Mode(mode) {
+		case notify.ModeOff, notify.ModeBell, notify.ModeNotify, notify.ModeBoth:
+		default:
+			return ResolvedConfig{}, fmt.Errorf("invalid notify.mode %q: expected off, bell, notify, or both", mode)
+		}
+	}
+	if focusMode := strings.TrimSpace(cfg.Notify.FocusMode); focusMode != "" {
+		switch notify.FocusMode(focusMode) {
+		case notify.FocusUnfocused, notify.FocusAlways, notify.FocusFocused:
+		default:
+			return ResolvedConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focusMode)
+		}
+	}
 
 	providers, active, err := normalizeProviders(cfg.Providers, cfg.ActiveProvider, options.Env)
 	if err != nil {
@@ -79,6 +94,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		MaxTurns:       cfg.MaxTurns,
 		MCP:            cfg.MCP,
 		Sandbox:        cfg.Sandbox,
+		Notify:         cfg.Notify,
 		Tools:          cfg.Tools,
 	}, nil
 }
@@ -127,6 +143,12 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
 	}
+	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
+		dst.Notify.Mode = mode
+	}
+	if focusMode := strings.TrimSpace(src.Notify.FocusMode); focusMode != "" {
+		dst.Notify.FocusMode = focusMode
+	}
 	if src.Tools.deferThresholdSet {
 		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
 		dst.Tools.deferThresholdSet = true
@@ -150,6 +172,12 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	mergeMCPConfig(&dst.MCP, src.MCP)
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
+	}
+	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
+		dst.Notify.Mode = mode
+	}
+	if focusMode := strings.TrimSpace(src.Notify.FocusMode); focusMode != "" {
+		dst.Notify.FocusMode = focusMode
 	}
 	if src.Tools.deferThresholdSet {
 		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
@@ -458,6 +486,12 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if maxAutonomy := strings.TrimSpace(overrides.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		cfg.Sandbox.MaxAutonomy = maxAutonomy
+	}
+	if mode := strings.TrimSpace(overrides.Notify.Mode); mode != "" {
+		cfg.Notify.Mode = mode
+	}
+	if focusMode := strings.TrimSpace(overrides.Notify.FocusMode); focusMode != "" {
+		cfg.Notify.FocusMode = focusMode
 	}
 	if overrides.Tools.deferThresholdSet || overrides.Tools.DeferThreshold != 0 {
 		cfg.Tools.DeferThreshold = overrides.Tools.DeferThreshold

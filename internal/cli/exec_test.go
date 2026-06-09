@@ -1773,6 +1773,59 @@ func TestRunExecSwitcherErrorKeepsOriginalModelAttribution(t *testing.T) {
 // agent calls escalate_model while ALREADY on a top-tier model (claude-opus-4.1):
 // the tool returns the informational no-meta result, NO switch happens
 // (newProvider is called exactly once), and the run succeeds.
+func TestParseExecNotifyFlag(t *testing.T) {
+	opts, _, err := parseExecArgs([]string{"--notify", "both", "hello"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.notifyMode != "both" || opts.noNotify {
+		t.Fatalf("got mode=%q noNotify=%v", opts.notifyMode, opts.noNotify)
+	}
+}
+
+func TestParseExecNoNotifyFlag(t *testing.T) {
+	opts, _, err := parseExecArgs([]string{"--no-notify", "hello"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !opts.noNotify {
+		t.Fatal("expected noNotify=true")
+	}
+}
+
+func TestParseExecNotifyConflict(t *testing.T) {
+	if _, _, err := parseExecArgs([]string{"--notify", "bell", "--no-notify", "hi"}); err == nil {
+		t.Fatal("expected error for --notify with --no-notify")
+	}
+}
+
+func TestParseExecNotifyInvalidValue(t *testing.T) {
+	for _, arg := range [][]string{{"--notify", "buzz", "hi"}, {"--notify=loud", "hi"}} {
+		if _, _, err := parseExecArgs(arg); err == nil {
+			t.Fatalf("expected error for invalid notify value in %v", arg)
+		}
+	}
+	// Valid values still parse.
+	for _, mode := range []string{"off", "bell", "notify", "both"} {
+		if _, _, err := parseExecArgs([]string{"--notify", mode, "hi"}); err != nil {
+			t.Fatalf("valid --notify %s rejected: %v", mode, err)
+		}
+	}
+}
+
+func TestExecNotifyModeResolution(t *testing.T) {
+	resolved := config.ResolvedConfig{Notify: config.NotifyConfig{Mode: "bell"}}
+	if got := execNotifyMode(execOptions{}, resolved); got != "bell" {
+		t.Fatalf("config passthrough got %q", got)
+	}
+	if got := execNotifyMode(execOptions{notifyMode: "both"}, resolved); got != "both" {
+		t.Fatalf("flag override got %q", got)
+	}
+	if got := execNotifyMode(execOptions{noNotify: true}, resolved); got != "off" {
+		t.Fatalf("--no-notify got %q", got)
+	}
+}
+
 func TestRunExecTopTierDeclineNoSwitch(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)

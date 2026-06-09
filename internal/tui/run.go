@@ -3,8 +3,11 @@ package tui
 import (
 	"context"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gitlawb/zero/internal/notify"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -24,6 +27,9 @@ func Run(ctx context.Context, options Options) int {
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
+	}
+	if notify.Enabled(notify.Mode(strings.TrimSpace(options.Notify.Mode))) {
+		programOpts = append(programOpts, tea.WithReportFocus())
 	}
 	// NOTE: we intentionally do NOT enable mouse capture. Mouse cell-motion
 	// reporting routes clicks/drags to the program, which breaks the terminal's

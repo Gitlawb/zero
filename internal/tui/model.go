@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -41,6 +42,7 @@ type model struct {
 	usageTracker       *usage.Tracker
 	runtimeMessageSink func(tea.Msg)
 	agentOptions       agent.Options
+	notifier           *notify.Notifier
 	permissionMode     agent.PermissionMode
 	reasoningEffort    modelregistry.ReasoningEffort
 	responseStyle      string
@@ -228,6 +230,12 @@ func newModel(ctx context.Context, options Options) model {
 	}
 	input.Focus()
 
+	notifier := notify.New(os.Stderr, notify.Config{
+		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
+		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
+	})
+	notifier.SetFocused(true)
+
 	return model{
 		skin:               options.Skin,
 		themeVariant:       options.ThemeVariant,
@@ -253,6 +261,7 @@ func newModel(ctx context.Context, options Options) model {
 		input:              input,
 		showSplash:         true,
 		now:                time.Now,
+		notifier:           notifier,
 	}
 }
 
@@ -398,6 +407,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(msg)
 		m.recomputeSuggestions()
 		return m, cmd
+	case tea.FocusMsg:
+		if m.notifier != nil {
+			m.notifier.SetFocused(true)
+		}
+		return m, nil
+	case tea.BlurMsg:
+		if m.notifier != nil {
+			m.notifier.SetFocused(false)
+		}
+		return m, nil
 	case zerolineTickMsg:
 		if m.skin != "zeroline" {
 			return m, nil
@@ -515,6 +534,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
+		}
+		if m.notifier != nil {
+			m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 		}
 		return m, nil
 	case agentRowMsg:
@@ -1075,6 +1097,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if m.runtimeMessageSink == nil {
 				return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission prompt unavailable"}, nil
 			}
+			if m.notifier != nil {
+				m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
+			}
 			decisionCh := make(chan agent.PermissionDecision, 1)
 			m.sendPermissionRequest(runID, request, func(decision agent.PermissionDecision) {
 				select {
@@ -1105,6 +1130,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if m.runtimeMessageSink == nil {
 				// No interactive surface: let the loop degrade gracefully.
 				return agent.AskUserResponse{}, fmt.Errorf("ask_user prompt unavailable")
+			}
+			// Only notify when there is actually something to answer — a request
+			// with no questions auto-resolves without ever prompting the user.
+			if m.notifier != nil && len(request.Questions) > 0 {
+				m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
 			}
 			answerCh := make(chan []string, 1)
 			m.sendAskUserRequest(runID, request, func(answers []string) {

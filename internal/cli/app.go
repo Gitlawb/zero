@@ -382,6 +382,7 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 		PermissionMode: permissionMode,
 		Skin:           skin,
 		ThemeDark:      true,
+		Notify:         resolved.Notify,
 	})
 }
 
@@ -538,6 +539,9 @@ Flags:
       --init-session-id <id>         Create a new exec session with this id
       --skip-permissions-unsafe      Allow prompt-gated tools without approval
       --allow-escalation             Let the agent escalate to a stronger model mid-run via escalate_model
+      --notify <off|bell|notify|both>
+                                    Override notification mode for this run
+      --no-notify                   Disable notifications for this run
 `)
 	return err
 }

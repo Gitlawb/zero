@@ -26,6 +26,21 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.listTools = true
 		case arg == "--allow-escalation":
 			options.allowEscalation = true
+		case arg == "--no-notify":
+			options.noNotify = true
+		case arg == "--notify":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.notifyMode = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--notify="):
+			value, err := requiredInlineFlagValue(arg, "--notify")
+			if err != nil {
+				return options, false, err
+			}
+			options.notifyMode = value
 		case arg == "--auto":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -345,6 +360,16 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 		}
 	}
 
+	if options.noNotify && options.notifyMode != "" {
+		return options, false, execUsageError{"Use either --notify or --no-notify, not both."}
+	}
+	if options.notifyMode != "" {
+		switch options.notifyMode {
+		case "off", "bell", "notify", "both":
+		default:
+			return options, false, execUsageError{fmt.Sprintf("invalid --notify %q. Expected off, bell, notify, or both.", options.notifyMode)}
+		}
+	}
 	if (options.resume != "" || options.resumeLatest) && options.fork != "" {
 		return options, false, execUsageError{"Use either --resume or --fork, not both."}
 	}

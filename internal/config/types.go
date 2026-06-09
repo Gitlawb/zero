@@ -58,6 +58,11 @@ type SandboxConfig struct {
 	MaxAutonomy string `json:"maxAutonomy,omitempty"`
 }
 
+type NotifyConfig struct {
+	Mode      string `json:"mode,omitempty"`
+	FocusMode string `json:"focusMode,omitempty"`
+}
+
 type ToolsConfig struct {
 	DeferThreshold    int `json:"deferThreshold,omitempty"`
 	deferThresholdSet bool
@@ -94,6 +99,7 @@ type FileConfig struct {
 	MaxTurns       int               `json:"maxTurns,omitempty"`
 	MCP            MCPConfig         `json:"mcp,omitempty"`
 	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
+	Notify         NotifyConfig      `json:"notify,omitempty"`
 	Tools          ToolsConfig       `json:"tools,omitempty"`
 }
 
@@ -112,6 +118,7 @@ type Overrides struct {
 	MaxTurns       int
 	MCP            MCPConfig
 	Sandbox        SandboxConfig
+	Notify         NotifyConfig
 	Tools          ToolsConfig
 }
 
@@ -122,6 +129,7 @@ type ResolvedConfig struct {
 	MaxTurns       int
 	MCP            MCPConfig
 	Sandbox        SandboxConfig
+	Notify         NotifyConfig
 	Tools          ToolsConfig
 }
 
@@ -147,6 +155,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		MaxTurns        int                        `json:"maxTurns"`
 		MCP             MCPConfig                  `json:"mcp"`
 		Sandbox         SandboxConfig              `json:"sandbox"`
+		Notify          NotifyConfig               `json:"notify"`
 		Tools           ToolsConfig                `json:"tools"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
@@ -161,6 +170,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.MaxTurns = raw.MaxTurns
 	cfg.MCP = raw.MCP
 	cfg.Sandbox = raw.Sandbox
+	cfg.Notify = raw.Notify
 	cfg.Tools = raw.Tools
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
