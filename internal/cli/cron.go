@@ -44,9 +44,7 @@ func runCronWith(store *cron.Store, now func() time.Time, args []string, stdout 
 	case "resume":
 		return cronResume(store, now, rest, stderr)
 	case "run":
-		// Task 6 wires the real cronRun; for now signal not yet implemented.
-		fmt.Fprintln(stderr, "zero cron run: not yet implemented (coming in Task 6)")
-		return exitUsage
+		return cronRun(store, now, rest, stdout, stderr, Run)
 	default:
 		fmt.Fprintf(stderr, "Unknown cron subcommand: %s\n", sub)
 		return exitUsage
