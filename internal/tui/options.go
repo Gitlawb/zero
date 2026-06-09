@@ -37,4 +37,7 @@ type Options struct {
 	Skin         string
 	ThemeVariant int  // zeroline color theme index (0-4)
 	ThemeDark    bool // zeroline light/dark mode
+
+	// Notify configures completion / awaiting-input notifications.
+	Notify config.NotifyConfig
 }

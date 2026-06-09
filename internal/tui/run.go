@@ -24,6 +24,7 @@ func Run(ctx context.Context, options Options) int {
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
+		tea.WithReportFocus(),
 	}
 	// NOTE: we intentionally do NOT enable mouse capture. Mouse cell-motion
 	// reporting routes clicks/drags to the program, which breaks the terminal's

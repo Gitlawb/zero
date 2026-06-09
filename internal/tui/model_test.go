@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -1292,5 +1294,34 @@ func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
 	// must not make it less strict).
 	if got := nextPermissionMode(agent.PermissionModeUnsafe); got != agent.PermissionModeAsk {
 		t.Fatalf("Unsafe -> %s, want Ask", got)
+	}
+}
+
+func TestModelNotifierFocusAndCompletion(t *testing.T) {
+	var buf bytes.Buffer
+	m := model{notifier: notify.New(&buf, notify.Config{Mode: notify.ModeBell, FocusMode: notify.FocusUnfocused})}
+	m.notifier.SetFocused(true)
+
+	// Focused → completion under unfocused-mode is silent.
+	m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
+	if buf.Len() != 0 {
+		t.Fatalf("focused should be silent, got %q", buf.String())
+	}
+
+	// BlurMsg flips focus; completion now bells.
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
+	if buf.String() != "\x07" {
+		t.Fatalf("unfocused should bell, got %q", buf.String())
+	}
+
+	// FocusMsg flips back.
+	updated, _ = m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	buf.Reset()
+	m.notifier.Notify(notify.Completion, "x")
+	if buf.Len() != 0 {
+		t.Fatalf("refocused should be silent, got %q", buf.String())
 	}
 }

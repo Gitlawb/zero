@@ -368,6 +368,7 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 		PermissionMode: permissionMode,
 		Skin:           skin,
 		ThemeDark:      true,
+		Notify:         resolved.Notify,
 	})
 }
 
