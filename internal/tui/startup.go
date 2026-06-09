@@ -17,6 +17,8 @@ const (
 // zeroLogoLines is the ZERO wordmark in the ANSI Shadow figlet style. The solid
 // block strokes render in bright cyan and the drop-shadow box-drawing strokes in
 // dim cyan, which gives the wordmark depth without any per-glyph color hacks.
+// PR4: used for V1 ZeroLine home alignment in hybrid (via startupView when skin=hybrid && showSplash);
+// minimal centered, strong identity per "Hybrid Target" + "wordmark from zeroLogoLines in startup.go".
 var zeroLogoLines = []string{
 	`███████╗███████╗██████╗  ██████╗ `,
 	`╚══███╔╝██╔════╝██╔══██╗██╔═══██╗`,
@@ -33,6 +35,9 @@ var logoShadowRunes = map[rune]bool{
 }
 
 func (m model) startupView() string {
+	// PR4: V1 ZeroLine home for hybrid skin (startupView chosen in model.View when showSplash && hybrid).
+	// Delivers "minimal centered, stable input, wordmark from zeroLogoLines". Uses borderedBlock (PR1 chrome).
+	// On first turn showSplash=false switches to timeline Ev. See Hybrid Target spec, PR4 DoD, no default breakage.
 	width := normalizedStartupWidth(m.width)
 	height := normalizedStartupHeight(m.height)
 

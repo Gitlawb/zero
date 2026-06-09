@@ -273,7 +273,7 @@ func newModel(ctx context.Context, options Options) model {
 }
 
 func (m model) Init() tea.Cmd {
-	if m.skin == "zeroline" {
+	if m.skin == "zeroline" || m.skin == "hybrid" {
 		return tea.Batch(textinput.Blink, zerolineTick())
 	}
 	return textinput.Blink
@@ -402,8 +402,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.picker != nil {
 			return m, nil
 		}
-		if m.skin == "zeroline" {
-			m.booted = true // any key dismisses the boot splash
+		if m.skin == "zeroline" || m.skin == "hybrid" {
+			m.booted = true // any key dismisses the boot splash (hybrid uses for theme keys only)
 			if nm, handled := m.handleZerolineKeys(msg); handled {
 				return nm, nil
 			}
@@ -425,7 +425,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case zerolineTickMsg:
-		if m.skin != "zeroline" {
+		if m.skin != "zeroline" && m.skin != "hybrid" {
 			return m, nil
 		}
 		m.frame++
@@ -567,10 +567,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if m.skin == "zeroline" || m.skin == "hybrid" {
-		// hybrid skin reuses zerolineView (V1 chrome + now Ev timeline body from PR2 mapper/renderer in RenderChat).
-		// Precise model/view transition prepared (showSplash etc); full first-turn + default in PR4.
-		// "if dispatch touches" per plan for this PR. Non-hybrid default (transcriptView flat rows) untouched.
+	if m.skin == "zeroline" {
+		return m.zerolineView()
+	}
+	if m.skin == "hybrid" {
+		// PR4: V1 ZeroLine home alignment + first-turn switch to timeline Ev body.
+		// showSplash true -> startupView (V1 minimal centered wordmark from zeroLogoLines in startup.go + stable borderedBlock input per PR1 chrome).
+		// On first activity (submit or agent*Msg set showSplash=false): switch body to zerolineView's RenderChat (PR2 Ev timeline with tool/perm/stream).
+		// See design: "Hybrid Target: ... Precise model/view transition", "V1 home via startupView or aligned RenderHome", "Startup remains V1 minimal (RenderHome...)", "switch body rendering to timeline", "first end-to-end runnable hybrid (V1 home -> timeline with tool/perm/stream events)", "prompt always stable", "skin/hybrid flag".
+		// Transition preserves pending*, streamingText, input focus. Default (non-hybrid) path untouched.
+		if m.showSplash {
+			return m.startupView()
+		}
 		return m.zerolineView()
 	}
 	if m.showSplash {
@@ -909,9 +917,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:
-		// Only the zeroline skin renders themes; there a no-argument /theme opens
-		// the picker. The default skin keeps its existing shell-only message.
-		if m.skin == "zeroline" && strings.TrimSpace(command.text) == "" {
+		// Only the zeroline/hybrid skins render themes; no-arg /theme opens picker.
+		// hybrid back-compat with 1-5 (PR4).
+		if (m.skin == "zeroline" || m.skin == "hybrid") && strings.TrimSpace(command.text) == "" {
 			if m.pending {
 				m.showSplash = false
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})

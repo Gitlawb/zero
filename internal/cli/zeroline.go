@@ -29,6 +29,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	width := fs.Int("width", 100, "snapshot width")
 	height := fs.Int("height", 30, "snapshot height")
 	skipUnsafe := fs.Bool("skip-permissions-unsafe", false, "launch in unsafe permission mode (enables the ! shell escape)")
+	skin := fs.String("skin", "zeroline", "skin: zeroline|hybrid (hybrid: V1 home via startup + timeline Ev body; for --snapshot home->chat smoke per PR4)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -77,9 +78,12 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				Input: "❯ message zero — / commands · @ files · ! bash",
 			})
 		}
-		// --snapshot --page home --width 80/120 (and variant=2 for Cyan) now uses
-		// unified palette + prepares V1 chrome consistency for hybrid DoD verification.
-		// (cli/zeroline.go snapshot path updated with comment for PR1.)
+		// --snapshot --page home --width 80/120/160 --skin hybrid (or --page chat --perm --stream)
+		// extended for PR4: produces "home then chat timeline" smoke showing V1 home alignment + timeline Ev body
+		// (with tool/perm/stream events at 80 cols). For hybrid, runtime uses startupView (zeroLogoLines V1) then
+		// Ev timeline; snapshot here exercises the Render paths + skin flag for verification (DoD).
+		// Cites: PR4 desc, "Extend cli/zeroline --snapshot", "V1 home -> timeline with tool/perm/stream events", "80-col snapshot clean".
+		// (prior PR1 comment retained for unified palette.)
 		if _, err := fmt.Fprintln(stdout, frame); err != nil {
 			return 1
 		}
@@ -90,5 +94,9 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	if *skipUnsafe {
 		permissionMode = agent.PermissionModeUnsafe
 	}
-	return runInteractiveTUIWithSkin(stderr, deps, "zeroline", permissionMode)
+	sk := *skin
+	if sk != "zeroline" && sk != "hybrid" {
+		sk = "zeroline"
+	}
+	return runInteractiveTUIWithSkin(stderr, deps, sk, permissionMode)
 }

@@ -138,7 +138,21 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	defer observability.Recover(observability.DefaultCrashDir(), "cli", stderr, &exitCode)
 	deps = fillAppDeps(deps)
 
+	// PR4: support `go run ./cmd/zero --skin hybrid` (and zeroline) for first runnable hybrid.
+	// Wires tui.Options.Skin so View dispatch uses V1 startupView home -> timeline Ev.
+	// Smallest extension of existing --skip pattern + runInteractiveTUIWithSkin.
+	skin := ""
+	if len(args) > 1 && args[0] == "--skin" {
+		if args[1] == "hybrid" || args[1] == "zeroline" {
+			skin = args[1]
+			args = args[2:]
+		}
+	}
+
 	if len(args) == 0 {
+		if skin != "" {
+			return runInteractiveTUIWithSkin(stderr, deps, skin, agent.PermissionModeAsk)
+		}
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk)
 	}
 
@@ -148,6 +162,9 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// flag fell through to the unknown-command path, so a user could never
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
 		// gated behind unsafe) was therefore unreachable.
+		if skin != "" {
+			return runInteractiveTUIWithSkin(stderr, deps, skin, agent.PermissionModeUnsafe)
+		}
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {

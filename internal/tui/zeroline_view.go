@@ -64,11 +64,13 @@ func (m model) zerolineHeader() zeroline.Header {
 }
 
 func (m model) zerolineView() string {
-	// zerolineView uses RenderHome (V1-style minimal for !showSplash) and RenderChat.
+	// zerolineView uses RenderHome (for zeroline skin) and RenderChat (timeline Ev body from PR2 for !showSplash).
+	// PR4: for hybrid skin, startupView (V1 from startup.go zeroLogoLines + bordered) used on showSplash;
+	// !showSplash hybrid reaches here for RenderChat (V4 Ev timeline w/ tool/perm/stream).
+	// See design: "V1 ZeroLine home alignment", "first-turn switch to timeline Ev body", "Startup remains V1 minimal (RenderHome...)", PR4 files list, "prompt always stable".
 	// Foundation for hybrid: V1 chrome (header/status/bordered from view/startup + zeroTheme)
 	// + unified Pal reusable for timeline execution after first turn.
-	// See design "Precise model/view transition", "Startup remains V1 minimal (RenderHome...)",
-	// "PR Plan" entry for pr-1, and "var zeroTheme tuiTheme". Minor updates only per PR1.
+	// See design "Precise model/view transition", "PR Plan" entry for pr-1, and "var zeroTheme tuiTheme".
 	width, height := m.width, m.height
 	if width <= 0 {
 		width = 100
@@ -77,14 +79,14 @@ func (m model) zerolineView() string {
 		height = 30
 	}
 
-	// Boot splash reveals on launch, then the home page.
+	// Boot splash reveals on launch, then the home page. (hybrid skin uses startupView V1 home instead per PR4)
 	if !m.booted && m.showSplash {
 		return zeroline.RenderBoot(m.themeVariant, m.themeDark, m.frame, width, height)
 	}
 
 	header := m.zerolineHeader()
 
-	// Home until the first turn is submitted.
+	// Home until the first turn is submitted. (only reached for pure "zeroline" skin; hybrid dispatches to startupView for V1 align)
 	if m.showSplash {
 		return zeroline.RenderHome(zeroline.HomeData{
 			Variant:     m.themeVariant,

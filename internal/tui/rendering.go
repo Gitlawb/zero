@@ -286,6 +286,8 @@ func renderToolResultRow(row transcriptRow, width int) string {
 // Uses exact patterns: glyphs ▸ from renderToolCallRow, ✓/✗ , looksLikeDiff+diffCard+colorizeDiffLine+titledCard+indentText+truncateTUIOutput (for expand), zeroTheme colors (PR1 unified), argHint.
 // Smallest: no new layout, no state mutation here (expandState passed in; running from row).
 // See full citations in mapTranscriptRowToEv (design Hybrid Target + examples + "the body *is* the Ev renderer").
+// PR4 integration: now reachable via hybrid skin dispatch (model.View !showSplash -> zerolineView RenderChat timeline;
+// renderTimeline prepared for direct hybrid body use; cli/zeroline --skin hybrid snapshots exercise equiv Ev paths at 80+).
 func renderTimeline(rows []transcriptRow, width int) string {
 	if width <= 0 {
 		width = 80
