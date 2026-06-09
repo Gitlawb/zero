@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -414,6 +416,133 @@ func TestRunProvidersCheckConstructsProvider(t *testing.T) {
 	if !strings.Contains(output, "Provider check") || !strings.Contains(output, "status: ok") {
 		t.Fatalf("unexpected check output: %q", output)
 	}
+}
+
+func TestRunProvidersCheckConnectivityJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("path = %q, want /models", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test-secret" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"custom-model"}]}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:         "local",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      server.URL,
+			APIKey:       "sk-test-secret",
+			Model:        "custom-model",
+		}
+		return config.ResolvedConfig{ActiveProvider: "local", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
+	}
+	deps.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+		return commandCenterProvider{}, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "check", "local", "--connectivity", "--json"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Health struct {
+			Status string `json:"status"`
+			Checks []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"checks"`
+		} `json:"health"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("providers check JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload.Status != "ok" || payload.Health.Status != "pass" {
+		t.Fatalf("unexpected health payload: %#v", payload)
+	}
+	if !providerHealthCheckStatus(payload.Health.Checks, "provider.connectivity", "pass") {
+		t.Fatalf("missing provider.connectivity pass: %#v", payload.Health.Checks)
+	}
+}
+
+func TestRunProvidersCheckConnectivityJSONReturnsHealthFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:         "local",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://user:base-secret@example.invalid/v1?api_key=query-secret",
+		}
+		return config.ResolvedConfig{ActiveProvider: "local", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
+	}
+	deps.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+		t.Fatal("newProvider should not run before emitting connectivity health")
+		return nil, nil
+	}
+
+	exitCode := runWithDeps([]string{"providers", "check", "local", "--connectivity", "--json"}, &stdout, &stderr, deps)
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected exit code %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Health struct {
+			Status  string `json:"status"`
+			BaseURL string `json:"baseURL"`
+			Checks  []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"checks"`
+		} `json:"health"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("providers check JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload.Status != "fail" || payload.Health.Status != "fail" {
+		t.Fatalf("unexpected health failure payload: %#v", payload)
+	}
+	if !providerHealthCheckStatus(payload.Health.Checks, "provider.config", "fail") {
+		t.Fatalf("missing provider.config failure: %#v", payload.Health.Checks)
+	}
+	output := stdout.String()
+	for _, secret := range []string{"base-secret", "query-secret"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("secret %q leaked in providers check JSON: %s", secret, output)
+		}
+	}
+	if strings.Contains(output, "user:") {
+		t.Fatalf("URL userinfo leaked in providers check JSON: %s", output)
+	}
+}
+
+func providerHealthCheckStatus(checks []struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}, id string, status string) bool {
+	for _, check := range checks {
+		if check.ID == id && check.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunProvidersCheckAcceptsAuthHeaderValueCredential(t *testing.T) {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +56,119 @@ func TestRunDoctorFormatsRedactedProviderDiagnostics(t *testing.T) {
 	}
 	if strings.Contains(output, "sk-proj-secret") {
 		t.Fatalf("doctor output leaked secret: %q", output)
+	}
+}
+
+func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("path = %q, want /models", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"custom-model"}]}`))
+	}))
+	defer server.Close()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+
+	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			profile := config.ProviderProfile{
+				Name:         "local",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      server.URL,
+				APIKey:       "sk-test-secret",
+				Model:        "custom-model",
+			}
+			return config.ResolvedConfig{Provider: profile, Providers: []config.ProviderProfile{profile}, ActiveProvider: "local"}, nil
+		},
+		now: fixedCLITime("2026-06-04T16:00:00Z"),
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "[pass] provider.connectivity") {
+		t.Fatalf("expected provider.connectivity pass, got %q", output)
+	}
+	if strings.Contains(output, "not wired") {
+		t.Fatalf("doctor still returned placeholder connectivity message: %q", output)
+	}
+}
+
+func TestRunDoctorConnectivityReportsProviderHealthFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+
+	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			profile := config.ProviderProfile{
+				Name:         "openai",
+				ProviderKind: config.ProviderKindOpenAI,
+				BaseURL:      config.OpenAIBaseURL,
+				Model:        "gpt-4.1",
+			}
+			return config.ResolvedConfig{Provider: profile, Providers: []config.ProviderProfile{profile}, ActiveProvider: "openai"}, nil
+		},
+		now: fixedCLITime("2026-06-04T16:05:00Z"),
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected exit code %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "[fail] provider.connectivity") {
+		t.Fatalf("expected provider.connectivity failure, got %q", output)
+	}
+	if !strings.Contains(output, "requires API credentials") {
+		t.Fatalf("expected concrete auth failure, got %q", output)
+	}
+	if strings.Contains(output, "completed without a connectivity check") || strings.Contains(output, "not wired") {
+		t.Fatalf("doctor returned generic connectivity message: %q", output)
+	}
+}
+
+func TestRunDoctorConnectivityDoesNotMaskConfigHealthFailure(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+
+	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			profile := config.ProviderProfile{
+				Name:         "local",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://example.invalid/v1",
+			}
+			return config.ResolvedConfig{Provider: profile, Providers: []config.ProviderProfile{profile}, ActiveProvider: "local"}, nil
+		},
+		now: fixedCLITime("2026-06-04T16:06:00Z"),
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected exit code %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "[fail] provider.connectivity") || !strings.Contains(output, "requires model") {
+		t.Fatalf("expected concrete config health failure, got %q", output)
+	}
+	if strings.Contains(output, "runtime did not resolve") || strings.Contains(output, "completed without a connectivity check") {
+		t.Fatalf("doctor masked provider health failure: %q", output)
 	}
 }
 

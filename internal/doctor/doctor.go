@@ -11,6 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
@@ -37,12 +38,13 @@ type Report struct {
 }
 
 type Options struct {
-	Now           func() time.Time
-	Runtime       string
-	UserConfig    string
-	ProjectConfig string
-	Provider      config.ProviderProfile
-	Connectivity  bool
+	Now            func() time.Time
+	Runtime        string
+	UserConfig     string
+	ProjectConfig  string
+	Provider       config.ProviderProfile
+	Connectivity   bool
+	ProviderHealth *providerhealth.Result
 }
 
 func Run(options Options) Report {
@@ -59,7 +61,7 @@ func Run(options Options) Report {
 	checks = append(checks, providerCheck)
 	modelCheck := providerModelCheck(options.Provider)
 	checks = append(checks, modelCheck)
-	checks = append(checks, connectivityCheck(options.Provider, options.Connectivity, modelCheck.Status))
+	checks = append(checks, connectivityCheck(options.Provider, options.Connectivity, modelCheck.Status, options.ProviderHealth))
 
 	report := Report{
 		GeneratedAt: now().UTC().Format(time.RFC3339),
@@ -159,14 +161,34 @@ func providerModelCheck(profile config.ProviderProfile) Check {
 	})
 }
 
-func connectivityCheck(profile config.ProviderProfile, enabled bool, modelStatus Status) Check {
+func connectivityCheck(profile config.ProviderProfile, enabled bool, modelStatus Status, health *providerhealth.Result) Check {
+	if !enabled {
+		if emptyProviderProfile(profile) || modelStatus == StatusFail {
+			return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity check was skipped because provider runtime did not resolve.", nil)
+		}
+		return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity probe skipped. Run `zero doctor --connectivity` to probe the provider endpoint.", map[string]any{"baseURL": profile.BaseURL})
+	}
+	if health != nil {
+		if providerCheck := health.PrimaryCheck(); providerCheck != nil {
+			return check("provider.connectivity", "Provider connectivity", doctorStatus(providerCheck.Status), providerCheck.Message, providerCheck.Details)
+		}
+		return check("provider.connectivity", "Provider connectivity", doctorStatus(health.Status), "Provider health probe completed without a connectivity check.", map[string]any{"healthStatus": health.Status})
+	}
 	if emptyProviderProfile(profile) || modelStatus == StatusFail {
 		return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity check was skipped because provider runtime did not resolve.", nil)
 	}
-	if !enabled {
-		return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity probe skipped. Run `zero doctor --connectivity` to probe the provider endpoint.", map[string]any{"baseURL": profile.BaseURL})
-	}
 	return check("provider.connectivity", "Provider connectivity", StatusWarn, "Connectivity probing is not wired in the Go doctor backend yet.", map[string]any{"baseURL": profile.BaseURL})
+}
+
+func doctorStatus(status providerhealth.Status) Status {
+	switch status {
+	case providerhealth.StatusPass:
+		return StatusPass
+	case providerhealth.StatusFail:
+		return StatusFail
+	default:
+		return StatusWarn
+	}
 }
 
 func emptyProviderProfile(profile config.ProviderProfile) bool {

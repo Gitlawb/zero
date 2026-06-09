@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 )
 
@@ -25,8 +27,9 @@ type providerAddOptions struct {
 }
 
 type providerCheckOptions struct {
-	name string
-	json bool
+	name         string
+	json         bool
+	connectivity bool
 }
 
 func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -90,22 +93,58 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	if err := validateProviderRuntimeReady(profile); err != nil {
-		return writeAppError(stderr, err.Error(), exitProvider)
-	}
-	if _, err := deps.newProvider(profile); err != nil {
-		return writeAppError(stderr, err.Error(), exitProvider)
+	var health providerhealth.Result
+	if options.connectivity {
+		health = deps.probeProviderHealth(context.Background(), providerhealth.Options{
+			Profile:      profile,
+			Connectivity: true,
+			UserAgent:    userAgent(),
+		})
+	} else {
+		if err := validateProviderRuntimeReady(profile); err != nil {
+			return writeAppError(stderr, err.Error(), exitProvider)
+		}
+		if _, err := deps.newProvider(profile); err != nil {
+			return writeAppError(stderr, err.Error(), exitProvider)
+		}
 	}
 
 	snapshot := zerocommands.ProviderSnapshotFromProfile(profile, profile.Name == resolved.ActiveProvider)
 	if options.json {
-		if err := writePrettyJSON(stdout, map[string]any{"provider": snapshot, "status": "ok"}); err != nil {
+		payload := map[string]any{"provider": snapshot, "status": "ok"}
+		if options.connectivity {
+			payload["health"] = health
+			if health.Status == providerhealth.StatusFail {
+				payload["status"] = "fail"
+			}
+		}
+		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
+		}
+		if options.connectivity && health.Status == providerhealth.StatusFail {
+			return exitProvider
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintf(stdout, "Provider check\nname: %s\nstatus: ok\nkind: %s\nmodel: %s\napi model: %s\n", snapshot.Name, snapshot.ProviderKind, snapshot.Model, snapshot.APIModel); err != nil {
+	status := "ok"
+	if options.connectivity && health.Status == providerhealth.StatusFail {
+		status = "fail"
+	}
+	if _, err := fmt.Fprintf(stdout, "Provider check\nname: %s\nstatus: %s\nkind: %s\nmodel: %s\napi model: %s\n", snapshot.Name, status, snapshot.ProviderKind, snapshot.Model, snapshot.APIModel); err != nil {
 		return exitCrash
+	}
+	if options.connectivity {
+		if _, err := fmt.Fprintf(stdout, "connectivity: %s\n", health.Status); err != nil {
+			return exitCrash
+		}
+		if check := health.PrimaryCheck(); check != nil {
+			if _, err := fmt.Fprintf(stdout, "%s: %s\n", check.ID, check.Message); err != nil {
+				return exitCrash
+			}
+		}
+		if health.Status == providerhealth.StatusFail {
+			return exitProvider
+		}
 	}
 	return exitSuccess
 }
@@ -249,6 +288,8 @@ func parseProviderCheckArgs(args []string) (providerCheckOptions, bool, error) {
 			return options, true, nil
 		case arg == "--json":
 			options.json = true
+		case arg == "--connectivity":
+			options.connectivity = true
 		case strings.HasPrefix(arg, "-"):
 			return options, false, execUsageError{fmt.Sprintf("unknown flag %q", arg)}
 		default:

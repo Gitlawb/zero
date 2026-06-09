@@ -434,6 +434,7 @@ Inspects resolved provider profiles and provider catalog descriptors without pri
 
 Flags:
       --json                    Print JSON summary
+      --connectivity            Probe provider endpoint for providers check
       --transport <transport>   Filter catalog descriptors by transport
 
 Add flags:

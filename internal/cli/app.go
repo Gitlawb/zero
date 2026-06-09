@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/plugins"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
@@ -38,6 +39,7 @@ type appDeps struct {
 	resolveConfig        func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	resolveMCPConfig     func(workspaceRoot string) (config.MCPConfig, error)
 	newProvider          func(config.ProviderProfile) (zeroruntime.Provider, error)
+	probeProviderHealth  func(context.Context, providerhealth.Options) providerhealth.Result
 	newSessionStore      func() *sessions.Store
 	loadPlugins          func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
@@ -97,6 +99,7 @@ func defaultAppDeps() appDeps {
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			return providers.New(profile, providers.Options{UserAgent: userAgent()})
 		},
+		probeProviderHealth: providerhealth.Probe,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -239,6 +242,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.newProvider == nil {
 		deps.newProvider = defaults.newProvider
+	}
+	if deps.probeProviderHealth == nil {
+		deps.probeProviderHealth = defaults.probeProviderHealth
 	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
