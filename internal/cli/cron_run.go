@@ -44,8 +44,7 @@ func cronRun(store *cron.Store, now func() time.Time, args []string, stdout io.W
 	fireDue := func() {
 		jobs, err := store.List()
 		if err != nil {
-			fmt.Fprintln(stderr, err.Error())
-			return
+			fmt.Fprintln(stderr, "warning:", err.Error()) // jobs still valid; never fatal
 		}
 		for _, j := range jobs {
 			if !selected(j) || j.NextRunAt.After(now()) {
@@ -56,29 +55,17 @@ func cronRun(store *cron.Store, now func() time.Time, args []string, stdout io.W
 	}
 
 	if once {
+		// --once fires every currently-due job once and exits, so --catch-up is a
+		// no-op when combined with --once. Intended for use under an external
+		// scheduler (system cron / launchd).
 		fireDue()
 		return exitSuccess
 	}
 
-	// Startup: reconcile overdue jobs. Without --catch-up, an overdue job is
-	// rescheduled to its next future slot (skip) instead of firing the backlog.
+	// Forever-mode startup: unless --catch-up, push STRICTLY-overdue jobs to their
+	// next future slot (skip the backlog) without firing.
 	if !catchUp {
-		jobs, err := store.List()
-		if err != nil {
-			fmt.Fprintln(stderr, err.Error())
-			return exitCrash
-		}
-		for _, j := range jobs {
-			if !selected(j) || j.NextRunAt.After(now()) {
-				continue
-			}
-			if sched, perr := cron.Parse(j.Expr); perr == nil {
-				if nxt := sched.Next(now()); !nxt.IsZero() {
-					j.NextRunAt = nxt
-					_ = store.Update(j)
-				}
-			}
-		}
+		reconcileOverdue(store, now, ids, stderr)
 	}
 
 	ctx, stop := signalContext()
@@ -107,6 +94,36 @@ func contains(ss []string, want string) bool {
 	return false
 }
 
+// reconcileOverdue (forever-mode startup, non --catch-up) reschedules jobs that
+// are STRICTLY overdue (NextRunAt before the current minute) to their next future
+// slot without firing the backlog. A job due within the current minute is left
+// for the fireDue pass so it still fires now. List errors are warnings, never
+// fatal (jobs remains valid).
+func reconcileOverdue(store *cron.Store, now func() time.Time, ids []string, stderr io.Writer) {
+	jobs, err := store.List()
+	if err != nil {
+		fmt.Fprintln(stderr, "warning:", err.Error())
+	}
+	nowMin := now().Truncate(time.Minute)
+	for _, j := range jobs {
+		if j.Status != cron.StatusActive {
+			continue
+		}
+		if len(ids) > 0 && !contains(ids, j.ID) {
+			continue
+		}
+		if !j.NextRunAt.Before(nowMin) {
+			continue // not strictly overdue
+		}
+		if sched, perr := cron.Parse(j.Expr); perr == nil {
+			if nxt := sched.Next(now()); !nxt.IsZero() {
+				j.NextRunAt = nxt
+				_ = store.Update(j)
+			}
+		}
+	}
+}
+
 // fireJob runs one job via the exec runner, records the outcome, advances the
 // schedule, and persists. The foreground loop is single-goroutine, so the
 // previous fire has already returned before the next tick — no overlap.
@@ -119,16 +136,43 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 	if job.Model != "" {
 		args = append(args, "--model", job.Model)
 	}
-	args = append(args, "--prompt", job.Prompt)
+	// Inline --prompt= form: a bare "--prompt" "<value>" makes exec reject a
+	// dash-leading prompt as a misplaced flag; the =VALUE form is taken verbatim.
+	args = append(args, "--prompt="+job.Prompt)
 
 	var outBuf, errBuf strings.Builder
 	code := exec(args, &outBuf, &errBuf)
-	_ = store.AppendRun(job.ID, cron.RunRecord{JobID: job.ID, At: fired, ExitCode: code, SessionTitle: "cron:" + job.ID})
+
+	rec := cron.RunRecord{JobID: job.ID, At: fired, ExitCode: code, SessionTitle: "cron:" + job.ID}
+	if code != 0 {
+		rec.Error = cronTruncate(strings.TrimSpace(errBuf.String()), 500)
+	}
 
 	job.FireCount++
-	if sched, err := cron.Parse(job.Expr); err == nil {
-		job.NextRunAt = sched.Next(fired)
+	// Advance the schedule. If the expression can no longer produce a future run
+	// (became invalid, or is an impossible spec whose Next is zero), pause the job
+	// so it cannot re-fire on every tick.
+	if sched, perr := cron.Parse(job.Expr); perr != nil {
+		job.Status = cron.StatusPaused
+		if rec.Error == "" {
+			rec.Error = "invalid schedule; job paused: " + perr.Error()
+		}
+	} else if nxt := sched.Next(fired); nxt.IsZero() {
+		job.Status = cron.StatusPaused
+		if rec.Error == "" {
+			rec.Error = "schedule no longer fires; job paused"
+		}
+	} else {
+		job.NextRunAt = nxt
 	}
+	_ = store.AppendRun(job.ID, rec)
 	_ = store.Update(job)
 	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(job.NextRunAt))
+}
+
+func cronTruncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }

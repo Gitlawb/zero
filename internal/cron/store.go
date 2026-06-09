@@ -109,6 +109,13 @@ func (s *Store) allocID() (string, error) {
 
 func (s *Store) jobDir(id string) string { return filepath.Join(s.root, id) }
 
+// validID rejects ids that could escape the store root (path separators or
+// traversal). allocID-generated timestamp ids always pass; this guards
+// externally-supplied ids (get/update/remove/append).
+func validID(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\`) && filepath.Base(id) == id
+}
+
 func (s *Store) writeJob(job Job) error {
 	dir := s.jobDir(job.ID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -126,6 +133,9 @@ func (s *Store) writeJob(job Job) error {
 }
 
 func (s *Store) Get(id string) (Job, error) {
+	if !validID(id) {
+		return Job{}, fmt.Errorf("invalid cron job id %q", id)
+	}
 	data, err := os.ReadFile(filepath.Join(s.jobDir(id), "metadata.json"))
 	if err != nil {
 		return Job{}, fmt.Errorf("cron job %q not found", id)
@@ -138,6 +148,9 @@ func (s *Store) Get(id string) (Job, error) {
 }
 
 func (s *Store) Update(job Job) error {
+	if !validID(job.ID) {
+		return fmt.Errorf("invalid cron job id %q", job.ID)
+	}
 	if _, err := os.Stat(s.jobDir(job.ID)); err != nil {
 		return fmt.Errorf("cron job %q not found", job.ID)
 	}
@@ -145,6 +158,9 @@ func (s *Store) Update(job Job) error {
 }
 
 func (s *Store) Remove(id string) error {
+	if !validID(id) {
+		return fmt.Errorf("invalid cron job id %q", id)
+	}
 	if _, err := os.Stat(s.jobDir(id)); err != nil {
 		return fmt.Errorf("cron job %q not found", id)
 	}
@@ -160,18 +176,33 @@ func (s *Store) List() ([]Job, error) {
 		return nil, err
 	}
 	var jobs []Job
+	var corrupt []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		if job, err := s.Get(e.Name()); err == nil {
-			jobs = append(jobs, job)
+		if _, statErr := os.Stat(filepath.Join(s.jobDir(e.Name()), "metadata.json")); statErr != nil {
+			continue // a directory without metadata.json is not a job
 		}
+		job, gerr := s.Get(e.Name())
+		if gerr != nil {
+			corrupt = append(corrupt, e.Name())
+			continue
+		}
+		jobs = append(jobs, job)
+	}
+	// Surface corrupt jobs (jobs slice is still authoritative; callers treat this
+	// as a warning, not a fatal error, so one bad job never hides the rest).
+	if len(corrupt) > 0 {
+		return jobs, fmt.Errorf("skipped %d unreadable cron job(s): %s", len(corrupt), strings.Join(corrupt, ", "))
 	}
 	return jobs, nil
 }
 
 func (s *Store) AppendRun(id string, rec RunRecord) error {
+	if !validID(id) {
+		return fmt.Errorf("invalid cron job id %q", id)
+	}
 	dir := s.jobDir(id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err

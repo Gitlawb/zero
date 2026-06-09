@@ -158,33 +158,44 @@ func parseValue(tok string, min, max int, names map[string]int) (int, error) {
 	return n, nil
 }
 
-const nextSearchYears = 5
+// nextSearchYears bounds the forward search. It must exceed the worst-case gap
+// between consecutive valid days for any field — notably Feb 29, whose gap can be
+// 8 years across a century non-leap-year (e.g. 2096 -> 2104).
+const nextSearchYears = 9
 
 // Next returns the first scheduled instant strictly after `after`, evaluated in
 // after's location. It returns the zero time.Time if no match occurs within
-// nextSearchYears (an impossible schedule such as Feb 30).
+// nextSearchYears (an impossible schedule such as Feb 30). It is robust to DST
+// gaps: a per-iteration forward-progress guard prevents stalling on a
+// non-existent local instant (e.g. 02:30 on a spring-forward day).
 func (s Schedule) Next(after time.Time) time.Time {
 	loc := after.Location()
 	t := after.Truncate(time.Minute).Add(time.Minute)
 	yearCap := after.Year() + nextSearchYears
 	for t.Year() <= yearCap {
-		if !has(s.month, int(t.Month())) {
+		start := t
+		switch {
+		case !has(s.month, int(t.Month())):
 			t = time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, loc) // first of next month
-			continue
-		}
-		if !s.dayMatches(t) {
+		case !s.dayMatches(t):
 			t = time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, loc) // next day 00:00
-			continue
-		}
-		if !has(s.hour, t.Hour()) {
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+1, 0, 0, 0, loc) // next hour :00
-			continue
-		}
-		if !has(s.minute, t.Minute()) {
+		case !has(s.hour, t.Hour()):
+			// Advance to the next hour by ABSOLUTE addition from this hour's :00.
+			// Using time.Date(..., Hour()+1, ...) can map back into a DST spring-
+			// forward gap (02:00 -> 01:00) and stall; adding an hour always moves
+			// forward in absolute time and correctly skips the missing hour.
+			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc).Add(time.Hour)
+		case !has(s.minute, t.Minute()):
 			t = t.Add(time.Minute)
-			continue
+		default:
+			return t
 		}
-		return t
+		// Forward-progress guard: if a wall-clock jump landed on a non-existent
+		// local instant (DST gap) and did not advance, step a minute so the search
+		// always terminates.
+		if !t.After(start) {
+			t = start.Add(time.Minute)
+		}
 	}
 	return time.Time{}
 }

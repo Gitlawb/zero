@@ -140,8 +140,11 @@ func cronAdd(store *cron.Store, now func() time.Time, args []string, stdout io.W
 			return exitCrash
 		}
 	}
+	// Reject an impossible schedule (e.g. "0 0 30 2 *") regardless of --run-now,
+	// so a job that can never advance is never persisted (it would otherwise
+	// re-fire every tick under `cron run`).
 	next := schedule.Next(now())
-	if !runNow && next.IsZero() {
+	if next.IsZero() {
 		fmt.Fprintln(stderr, "That schedule never fires.")
 		return exitUsage
 	}
@@ -161,8 +164,8 @@ func cronAdd(store *cron.Store, now func() time.Time, args []string, stdout io.W
 func cronList(store *cron.Store, now func() time.Time, stdout io.Writer, stderr io.Writer) int {
 	jobs, err := store.List()
 	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
-		return exitCrash
+		// A corrupt job is surfaced as a warning; the listable jobs are still shown.
+		fmt.Fprintln(stderr, "warning:", err.Error())
 	}
 	if len(jobs) == 0 {
 		fmt.Fprintln(stdout, "No scheduled jobs.")

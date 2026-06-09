@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -65,5 +66,41 @@ func TestDefaultRootHonorsXDG(t *testing.T) {
 	root := DefaultRoot(map[string]string{"XDG_DATA_HOME": "/tmp/xdg"})
 	if root != filepath.Join("/tmp/xdg", "zero", "cron") {
 		t.Fatalf("DefaultRoot=%q", root)
+	}
+}
+
+func TestStoreRejectsUnsafeID(t *testing.T) {
+	root := t.TempDir()
+	s := NewStore(StoreOptions{RootDir: root, Now: func() time.Time { return time.Unix(0, 0).UTC() }})
+	sibling := filepath.Join(filepath.Dir(root), "victim")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"../victim", "a/b", "..", ""} {
+		if err := s.Remove(id); err == nil {
+			t.Fatalf("Remove(%q) must be rejected", id)
+		}
+		if _, err := s.Get(id); err == nil {
+			t.Fatalf("Get(%q) must be rejected", id)
+		}
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatalf("traversal must not delete a sibling directory: %v", err)
+	}
+}
+
+func TestListSurfacesCorruptJob(t *testing.T) {
+	s := newTestStore(t)
+	good, _ := s.Add(Job{Expr: "0 9 * * *", Prompt: "ok", Status: StatusActive})
+	bad, _ := s.Add(Job{Expr: "0 9 * * *", Prompt: "bad", Status: StatusActive})
+	if err := os.WriteFile(filepath.Join(s.jobDir(bad.ID), "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := s.List()
+	if err == nil {
+		t.Fatal("List should surface a corrupt job via a non-nil (warning) error")
+	}
+	if len(jobs) != 1 || jobs[0].ID != good.ID {
+		t.Fatalf("good job must still list despite a corrupt sibling, got %+v", jobs)
 	}
 }
