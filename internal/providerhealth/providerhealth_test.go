@@ -125,9 +125,11 @@ func TestProbeResolvedKindRequiresAuthWhenUnset(t *testing.T) {
 }
 
 func TestProbeResolvedKindConnectivityAuthErrorRedactsSecret(t *testing.T) {
+	authHeader := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer sk-test-secret" {
-			t.Fatalf("Authorization = %q", got)
+		select {
+		case authHeader <- r.Header.Get("Authorization"):
+		default:
 		}
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"bad key sk-test-secret"}}`))
@@ -147,6 +149,14 @@ func TestProbeResolvedKindConnectivityAuthErrorRedactsSecret(t *testing.T) {
 
 	if result.Status != StatusFail {
 		t.Fatalf("Status = %q, want fail: %#v", result.Status, result.Checks)
+	}
+	select {
+	case got := <-authHeader:
+		if got != "Bearer sk-test-secret" {
+			t.Fatalf("Authorization = %q", got)
+		}
+	default:
+		t.Fatal("expected connectivity probe request")
 	}
 	check := result.Check("provider.connectivity")
 	if check == nil || check.Category != CategoryAuth {
