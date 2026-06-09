@@ -95,12 +95,6 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 	}
 }
 
-// deferredTools returns the registry's deferred-eligible tools sorted by name so
-// keyword ranking and listings are deterministic.
-func (tool toolSearchTool) deferredTools() []Tool {
-	return tool.visibleDeferredTools(nil, nil)
-}
-
 // visibleDeferredTools returns the registry's deferred-eligible tools that pass
 // the operator allow/deny filters, sorted by name so keyword ranking and
 // listings stay deterministic. A nil/empty filter pair admits every deferred

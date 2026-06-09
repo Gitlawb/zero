@@ -253,6 +253,7 @@ func TestPartitionToolsActiveExcludesDisabledDeferredFromReminderAndExposed(t *t
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__gamma", desc: "gamma"})
+	registry.Register(fakeToolSearchTool{}) // usable loader => deferral can activate
 
 	// 3 deferred, disable beta => 2 surviving eligible, threshold 2 => active.
 	exposed, reminder := partitionTools(registry, PermissionModeAuto, Options{
@@ -321,12 +322,20 @@ func TestPartitionToolsActiveNothingHiddenEmptyReminder(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})
+	registry.Register(fakeToolSearchTool{}) // usable loader => deferral can activate
 
 	loaded := map[string]bool{"mcp__srv__alpha": true, "mcp__srv__beta": true}
 	exposed, reminder := partitionTools(registry, PermissionModeAuto, Options{DeferThreshold: 2}, loaded)
 
-	if len(exposed) != 2 {
+	exposedNames := map[string]bool{}
+	for _, def := range exposed {
+		exposedNames[def.Name] = true
+	}
+	if !exposedNames["mcp__srv__alpha"] || !exposedNames["mcp__srv__beta"] {
 		t.Fatalf("expected both loaded deferred tools exposed, got %#v", exposed)
+	}
+	if !exposedNames["tool_search"] {
+		t.Fatalf("expected tool_search exposed on active path, got %#v", exposed)
 	}
 	// BuildDeferredReminder returns "" for no hidden lines.
 	if reminder != "" {
@@ -340,6 +349,9 @@ func TestRunLoadsDeferredToolThenAdvertisesNextTurn(t *testing.T) {
 	registry.Register(loadSignalTool{value: "mcp__srv__alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta tool"})
+	// A real, usable tool_search must be registered for deferral to activate
+	// (otherwise the loop falls back to eager so it never strands the loader).
+	registry.Register(tools.NewToolSearchTool(registry))
 
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
 		{ // turn 1: call load_signal
@@ -408,6 +420,9 @@ func TestRunReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testing.T) {
 	registry.Register(loadSignalTool{value: "mcp__srv__alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta tool"})
+	// A real, usable tool_search must be registered for deferral to activate
+	// (otherwise the loop falls back to eager so it never strands the loader).
+	registry.Register(tools.NewToolSearchTool(registry))
 
 	// Request indices (mockProvider plays one turn per request, in order):
 	//   0: turn 1 — calls load_signal (loads mcp__srv__alpha for later turns)
@@ -542,6 +557,9 @@ func TestRunConnectTimeReactiveRetryKeepsLoadedDeferredToolAndReminder(t *testin
 	registry.Register(loadSignalTool{value: "mcp__srv__alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha tool"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta tool"})
+	// A real, usable tool_search must be registered for deferral to activate
+	// (otherwise the loop falls back to eager so it never strands the loader).
+	registry.Register(tools.NewToolSearchTool(registry))
 
 	// Request indices:
 	//   0: turn 1 — calls load_signal (loads mcp__srv__alpha for later turns)
@@ -701,7 +719,7 @@ func TestAllowlistedDeferredToolsKeepToolSearchReachable(t *testing.T) {
 // DisabledTools entry for tool_search is STILL honored on the active path: the
 // loader is not exposed and a call to it is rejected (FIX 2 exempts the allowlist
 // only, never the denylist).
-func TestDisabledToolSearchStaysHiddenAndRejectedWhenActive(t *testing.T) {
+func TestDisabledToolSearchFallsBackToEager(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(fakeDeferredTool{name: "mcp__srv__alpha", desc: "alpha"})
 	registry.Register(fakeDeferredTool{name: "mcp__srv__beta", desc: "beta"})
@@ -712,24 +730,39 @@ func TestDisabledToolSearchStaysHiddenAndRejectedWhenActive(t *testing.T) {
 		DisabledTools:  []string{"tool_search"},
 	}
 
-	exposed, _ := partitionTools(registry, PermissionModeAuto, options, map[string]bool{})
+	// tool_search is explicitly disabled, so it can never run. Deferral must NOT
+	// activate — otherwise the loop would hide the deferred tools behind a loader
+	// the dispatch gate rejects (an inescapable dead-end). Expect the eager /
+	// inactive fallback: every deferred tool exposed with its full schema, no
+	// tool_search definition, and an empty reminder.
+	exposed, reminder := partitionTools(registry, PermissionModeAuto, options, map[string]bool{})
+	if reminder != "" {
+		t.Fatalf("inactive fallback must emit no reminder, got %q", reminder)
+	}
+	exposedNames := make(map[string]bool, len(exposed))
 	for _, def := range exposed {
-		if def.Name == "tool_search" {
-			t.Fatalf("tool_search must stay hidden when explicitly disabled, got %#v", exposed)
-		}
+		exposedNames[def.Name] = true
+	}
+	if exposedNames["tool_search"] {
+		t.Fatalf("tool_search must not be advertised when disabled, got %#v", exposed)
+	}
+	if !exposedNames["mcp__srv__alpha"] || !exposedNames["mcp__srv__beta"] {
+		t.Fatalf("deferred tools must be exposed eagerly when deferral is inactive, got %#v", exposed)
 	}
 
+	// The deferred tools themselves stay directly callable (not stranded behind a
+	// disabled loader).
 	result, abortErr := executeToolCall(
 		context.Background(),
 		registry,
-		ToolCall{ID: "c1", Name: "tool_search", Arguments: `{"query":"select:mcp__srv__alpha"}`},
+		ToolCall{ID: "c1", Name: "mcp__srv__alpha", Arguments: `{}`},
 		PermissionModeAuto,
 		options,
 	)
 	if abortErr != nil {
 		t.Fatalf("unexpected abort error: %v", abortErr)
 	}
-	if result.Status != tools.StatusError || result.DenialReason != DenialFiltered {
-		t.Fatalf("a disabled tool_search call must be filtered out, got status=%s denial=%v output=%q", result.Status, result.DenialReason, result.Output)
+	if result.Status != tools.StatusOK {
+		t.Fatalf("deferred tool must be callable under eager fallback, got status=%s output=%q", result.Status, result.Output)
 	}
 }

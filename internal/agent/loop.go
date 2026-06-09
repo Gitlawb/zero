@@ -936,7 +936,20 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 		}
 	}
 
-	active := options.DeferThreshold > 0 && eligible >= options.DeferThreshold
+	// Deferral may activate only when tool_search is actually runnable; otherwise
+	// the loop would hide deferred tools behind a loader the dispatch gate rejects
+	// — an inescapable dead-end. "Runnable" mirrors executeToolCall's gate:
+	// registered, not in DisabledTools, and advertised in the current permission
+	// mode (e.g. not spec-draft, where tool_search is not advertised). The
+	// EnabledTools allowlist is intentionally NOT checked here — tool_search is
+	// exempt from the allowlist at dispatch, so an allowlist that omits it must
+	// not disable deferral.
+	loader, loaderFound := registry.Get(tools.ToolSearchToolName)
+	loaderUsable := loaderFound &&
+		!containsToolName(options.DisabledTools, tools.ToolSearchToolName) &&
+		ToolAdvertised(loader, permissionMode)
+
+	active := options.DeferThreshold > 0 && eligible >= options.DeferThreshold && loaderUsable
 
 	definitions := make([]zeroruntime.ToolDefinition, 0, len(visible))
 	exposedNames := make(map[string]bool, len(visible))
@@ -972,20 +985,18 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 		exposedNames[name] = true
 	}
 
-	// On the ACTIVE path, tool_search is the gateway to the allowlisted deferred
-	// tools, so it must ALWAYS be reachable — even when a non-empty EnabledTools
-	// allowlist omits it (the operator allowlisted the deferred tools, not the
-	// loader). Expose its full definition unless an explicit DisabledTools entry
-	// turns the loader itself off. This never runs on the inactive path, so the
+	// On the ACTIVE path tool_search is guaranteed runnable (active implies
+	// loaderUsable), so it must ALWAYS be reachable — even when a non-empty
+	// EnabledTools allowlist omits it (the operator allowlisted the deferred
+	// tools, not the loader). Expose its full definition whenever it is not
+	// already in the exposed set. This never runs on the inactive path, so the
 	// byte-identical below-threshold output is preserved.
-	if active && !exposedNames[tools.ToolSearchToolName] && !containsToolName(options.DisabledTools, tools.ToolSearchToolName) {
-		if loader, ok := registry.Get(tools.ToolSearchToolName); ok {
-			definitions = append(definitions, zeroruntime.ToolDefinition{
-				Name:        loader.Name(),
-				Description: loader.Description(),
-				Parameters:  schemaToRuntimeMap(loader.Parameters()),
-			})
-		}
+	if active && !exposedNames[tools.ToolSearchToolName] {
+		definitions = append(definitions, zeroruntime.ToolDefinition{
+			Name:        loader.Name(),
+			Description: loader.Description(),
+			Parameters:  schemaToRuntimeMap(loader.Parameters()),
+		})
 	}
 
 	sort.Slice(definitions, func(left int, right int) bool {
