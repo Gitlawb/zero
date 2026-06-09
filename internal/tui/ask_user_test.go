@@ -22,7 +22,6 @@ func testAskUserRequest() agent.AskUserRequest {
 
 func TestAskUserRequestShowsFocusedPrompt(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.showSplash = false
 	m.pending = true
 	m.activeRunID = 7
 	m.width = 96

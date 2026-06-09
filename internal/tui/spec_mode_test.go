@@ -29,7 +29,7 @@ func TestSpecCommandCreatesDraftReview(t *testing.T) {
 		t.Fatal("expected /spec to start a draft run")
 	}
 
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 
 	if next.pendingSpecReview == nil {
@@ -60,7 +60,7 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 	review := next.pendingSpecReview
 	if review == nil {
@@ -79,7 +79,7 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 		t.Fatalf("expected active implementation session, got %#v", next.activeSession)
 	}
 
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 	if !transcriptContains(next.transcript, "implemented from approved spec") {
 		t.Fatalf("implementation answer missing from transcript: %#v", next.transcript)

@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -51,7 +53,10 @@ type model struct {
 	unpricedTokens     int
 	transcript         []transcriptRow
 	input              textinput.Model
-	showSplash         bool
+	// spinner animates the running-tool glyph in card heads. Its tick is started
+	// with each run and stops itself once pending clears (the TickMsg is simply
+	// not forwarded), so an idle UI schedules no timers.
+	spinner            spinner.Model
 	pending            bool
 	exiting            bool
 	runCancel          context.CancelFunc
@@ -118,6 +123,10 @@ type agentResponseMsg struct {
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
+	// Done-line metadata for the error path, where no final assistant row
+	// carries it (the success path marks the row itself).
+	turnTools   int
+	turnElapsed time.Duration
 }
 
 type agentRowMsg struct {
@@ -216,9 +225,14 @@ func newModel(ctx context.Context, options Options) model {
 	}
 
 	input := textinput.New()
-	input.Prompt = "zero > "
-	input.Placeholder = "Ask Zero to inspect, edit, explain, or run a command..."
+	input.Prompt = "❯ "
+	input.PromptStyle = zeroTheme.userPrompt
+	input.TextStyle = zeroTheme.ink
+	input.PlaceholderStyle = zeroTheme.faint
+	input.Placeholder = composerPlaceholderIdle
 	input.Focus()
+
+	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(zeroTheme.accent))
 
 	notifier := notify.New(os.Stderr, notify.Config{
 		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
@@ -246,10 +260,23 @@ func newModel(ctx context.Context, options Options) model {
 		usageTracker:       usageTracker,
 		transcript:         initialTranscript(),
 		input:              input,
-		showSplash:         true,
+		spinner:            runSpinner,
 		now:                time.Now,
 		notifier:           notifier,
 	}
+}
+
+const (
+	composerPlaceholderIdle    = "describe a task for zero…"
+	composerPlaceholderRunning = "running… ctrl+c to interrupt"
+)
+
+// emptyStateSuggestions are the three starter prompts offered on the empty
+// chat surface; pressing 1–3 while the composer is empty inserts one.
+var emptyStateSuggestions = []string{
+	"add a --version flag",
+	"explain internal/agent/loop.go",
+	"fix the failing test in internal/tools",
 }
 
 func (m model) Init() tea.Cmd {
@@ -378,6 +405,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.picker != nil {
 			return m, nil
 		}
+		// On the empty chat surface a bare 1–3 keypress (composer empty, no modal)
+		// inserts the matching starter suggestion instead of typing the digit.
+		if m.transcriptEmpty() && strings.TrimSpace(m.input.Value()) == "" {
+			if k := msg.String(); len(k) == 1 && k >= "1" && k <= "3" {
+				if index := int(k[0] - '1'); index < len(emptyStateSuggestions) {
+					m.input.SetValue(emptyStateSuggestions[index])
+					m.input.CursorEnd()
+					return m, nil
+				}
+			}
+		}
 		// The key fell through to the text input: let it update, then refresh the
 		// autocomplete match list from the new value.
 		var cmd tea.Cmd
@@ -399,8 +437,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamingText += msg.delta
-		m.showSplash = false
 		return m, nil
+	case spinner.TickMsg:
+		// Not forwarding the tick while idle stops the spinner's self-scheduling,
+		// so no timer fires between runs.
+		if !m.pending {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -409,7 +455,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.showSplash = false
 		m.transcript = appendTranscriptRow(m.transcript, permissionTranscriptRow(permissionEventFromRequest(msg.request)))
 		if msg.request.Action == agent.PermissionActionPrompt {
 			m.pendingPermission = &pendingPermissionPrompt{
@@ -422,7 +467,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.showSplash = false
 		// A request with no questions has nothing to answer — resolve it
 		// immediately so the run isn't stalled waiting on manual input. Mirror the
 		// normal flow: record the (empty) request in the transcript and answer with
@@ -492,9 +536,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if msg.err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendError,
-				text: msg.err.Error(),
+			// The error row terminates the turn, so it carries the done-line
+			// metadata a final assistant row would have carried.
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind:        rowError,
+				text:        msg.err.Error(),
+				final:       true,
+				turnTools:   msg.turnTools,
+				turnElapsed: msg.turnElapsed,
 			})
 		}
 		if msg.specReview != nil {
@@ -525,25 +574,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if m.showSplash {
-		return m.startupView()
-	}
 	return m.transcriptView()
+}
+
+// transcriptEmpty reports whether the chat surface has no real content yet
+// (only the welcome row), which is when the empty state renders.
+func (m model) transcriptEmpty() bool {
+	for _, row := range m.transcript {
+		if row.kind != rowWelcome {
+			return false
+		}
+	}
+	return true
 }
 
 func (m model) transcriptView() string {
 	width := normalizedStartupWidth(m.width)
 
 	var builder strings.Builder
-	builder.WriteString(m.headerBar(width))
-	builder.WriteString("\n\n")
+	builder.WriteString(m.titleBar(width))
+	builder.WriteString("\n")
 
-	for index, row := range m.transcript {
-		if index > 0 && startsTurn(row.kind) {
-			builder.WriteString("\n")
-		}
-		builder.WriteString(renderRow(row, width))
+	if m.transcriptEmpty() && !m.pending {
+		builder.WriteString(m.emptyState(width))
 		builder.WriteString("\n")
+	} else {
+		rc := buildRowContext(m.transcript)
+		previousShown := -1
+		for index, row := range m.transcript {
+			// A welcome row carries no Lime visual (the empty state replaced it)
+			// and a resolved tool call collapses into its result's card.
+			if row.kind == rowWelcome || rc.skip(row) {
+				continue
+			}
+			if previousShown >= 0 && startsTurn(row.kind) {
+				builder.WriteString("\n")
+			}
+			builder.WriteString(m.renderRow(row, width, rc))
+			builder.WriteString("\n")
+			previousShown = index
+		}
 	}
 
 	if m.pending {
@@ -554,7 +624,7 @@ func (m model) transcriptView() string {
 		case m.pendingAskUser != nil:
 			builder.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
 		default:
-			builder.WriteString(zeroTheme.accent.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
+			builder.WriteString(m.interimBlock(width))
 		}
 		builder.WriteString("\n")
 	}
@@ -569,7 +639,9 @@ func (m model) transcriptView() string {
 		builder.WriteString(zeroTheme.muted.Render(chips))
 		builder.WriteString("\n")
 	}
-	builder.WriteString(borderedBlock(width, []string{m.input.View()}))
+	builder.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
+	builder.WriteString("\n")
+	builder.WriteString(m.composerLine(width))
 	if overlay := m.suggestionOverlay(width); overlay != "" {
 		builder.WriteString("\n")
 		builder.WriteString(overlay)
@@ -579,9 +651,51 @@ func (m model) transcriptView() string {
 		builder.WriteString(picker)
 	}
 	builder.WriteString("\n")
+	builder.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
+	builder.WriteString("\n")
 	builder.WriteString(m.statusLine(width))
 
 	return builder.String()
+}
+
+// interimBlock renders the live assistant text while a turn streams: muted
+// prose wrapped to the say measure with a trailing accent cursor. Before the
+// first delta arrives it falls back to the spinner so the surface still shows
+// liveness. The cursor needs no ticker — it appears exactly while pending.
+func (m model) interimBlock(width int) string {
+	text := strings.TrimRight(m.streamingText, "\n")
+	if strings.TrimSpace(text) == "" {
+		return m.spinner.View() + " " + zeroTheme.muted.Render("working…")
+	}
+	lines := wrapPlainText(text, sayMeasure(width))
+	for index, line := range lines {
+		lines[index] = zeroTheme.sayText.Render(line)
+	}
+	if len(lines) > 0 {
+		lines[len(lines)-1] += zeroTheme.accent.Render("▌")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// composerLine renders the borderless composer: the styled textinput plus a
+// right-aligned faint key hint that tracks run state.
+func (m model) composerLine(width int) string {
+	input := m.input
+	if m.pending {
+		input.Placeholder = composerPlaceholderRunning
+	}
+	hint := ""
+	switch {
+	case m.pending:
+		hint = zeroTheme.faint.Render("esc stop")
+	case strings.TrimSpace(m.input.Value()) != "":
+		hint = zeroTheme.faint.Render("run ↵")
+	}
+	line := input.View()
+	if hint == "" {
+		return fitStyledLine(line, width)
+	}
+	return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
 }
 
 // startsTurn reports whether a row begins a new conversational turn and therefore
@@ -692,17 +806,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	}
 	switch picker.kind {
 	case pickerModel:
-		m.showSplash = false
 		text := ""
 		m, text = m.handleModelCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerEffort:
-		m.showSplash = false
 		text := ""
 		m, text = m.handleEffortCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerMode:
-		m.showSplash = false
 		text := ""
 		m, text = m.handleModeCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
@@ -723,32 +834,26 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandEmpty:
 		return m, nil
 	case commandHelp:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: helpText()})
 		return m, nil
 	case commandClear:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
-		m.showSplash = true
 		return m, nil
 	case commandExit:
 		m.exiting = true
 		return m, tea.Quit
 	case commandTools:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
 	case commandPermissions:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
 	case commandProvider:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
-				m.showSplash = false
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
@@ -757,7 +862,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		m.showSplash = false
 		text := ""
 		m, text = m.handleModelCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
@@ -765,7 +869,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandMode:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
-				m.showSplash = false
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
@@ -774,37 +877,29 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		m.showSplash = false
 		text := ""
 		m, text = m.handleModeCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandContext:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
 	case commandConfig:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.configText()})
 		return m, nil
 	case commandDebug:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
 		return m, nil
 	case commandDoctor:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.doctorText()})
 		return m, nil
 	case commandSearch:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil
 	case commandResume:
-		m.showSplash = false
 		if m.pending {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
@@ -819,16 +914,13 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case commandSpec:
-		m.showSplash = false
 		return m.handleSpecCommand(command.text)
 	case commandCompact:
-		m.showSplash = false
 		text := ""
 		m, text = m.handleCompactCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandRewind:
-		m.showSplash = false
 		text := ""
 		m, text = m.handleRewindCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
@@ -836,7 +928,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandEffort:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
-				m.showSplash = false
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
@@ -845,44 +936,37 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		m.showSplash = false
 		text := ""
 		m, text = m.handleEffortCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandStyle:
-		m.showSplash = false
 		text := ""
 		m, text = m.handleStyleCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
 			text: shellOnlyCommandText(command.name),
 		})
 		return m, nil
 	case commandInputStyle:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendSystem,
 			text: shellOnlyCommandText(command.name),
 		})
 		return m, nil
 	case commandImage:
-		m.showSplash = false
 		m = m.handleImageCommand(command.text)
 		return m, nil
 	case commandUnknown:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,
 			text: "unknown command: " + command.text,
 		})
 		return m, nil
 	case commandBash:
-		m.showSplash = false
 		cmdText := strings.TrimSpace(command.text)
 		if cmdText == "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Usage: !<shell command>"})
@@ -902,7 +986,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "$ " + cmdText})
 		return m, runBashEscape(m.cwd, cmdText)
 	case commandPrompt:
-		m.showSplash = false
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: command.text})
 		if m.provider == nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -957,7 +1040,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.activeRunID = m.runID
 		m.runCancel = cancel
 		m.pending = true
-		return m, m.runAgent(m.activeRunID, runCtx, command.text, turnImages)
+		return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, command.text, turnImages), m.spinner.Tick)
 	default:
 		return m, nil
 	}
@@ -997,6 +1080,8 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
+		started := m.now()
+		toolCalls := 0
 		rows := []transcriptRow{}
 		usageEvents := []zeroruntime.Usage{}
 		sessionEvents := []pendingSessionEvent{}
@@ -1102,6 +1187,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
+			toolCalls++
 			row := transcriptRow{
 				kind:   rowToolCall,
 				id:     call.ID,
@@ -1222,7 +1308,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -1231,11 +1317,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 			}
 			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview}
 		}
-		rows = append(rows, transcriptRow{kind: rowAssistant, text: result.FinalAnswer})
+		rows = append(rows, transcriptRow{
+			kind:        rowAssistant,
+			text:        result.FinalAnswer,
+			final:       true,
+			turnTools:   toolCalls,
+			turnElapsed: m.now().Sub(started),
+		})
 		sessionEvents = append(sessionEvents, pendingSessionEvent{
 			Type: sessions.EventMessage,
 			Payload: map[string]any{

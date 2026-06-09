@@ -69,12 +69,12 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
-	return m, m.runAgentWithOptions(m.activeRunID, runCtx, task, turnImages, tuiAgentRunOptions{
+	return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, task, turnImages, tuiAgentRunOptions{
 		registry:       specRegistry,
 		permissionMode: agent.PermissionModeSpecDraft,
 		systemPrompt:   specmode.DraftSystemPrompt,
 		specDraft:      true,
-	})
+	}), m.spinner.Tick)
 }
 
 func (m model) createSpecDraftSession(task string) (model, error) {
@@ -204,7 +204,7 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
-	return m, m.runAgent(m.activeRunID, runCtx, prompt, nil)
+	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, nil), m.spinner.Tick)
 }
 
 func (m model) rejectSpecReview(reason string) (tea.Model, tea.Cmd) {

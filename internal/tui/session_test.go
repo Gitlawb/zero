@@ -70,7 +70,7 @@ func TestPromptSubmitPersistsTUISessionEvents(t *testing.T) {
 		t.Fatal("expected prompt submit to start an agent run")
 	}
 
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 
 	list, err := store.List()
@@ -164,7 +164,7 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
 	}
-	_, _ = next.Update(cmd())
+	_, _ = next.Update(execCmd(cmd))
 
 	list, err := store.List()
 	if err != nil {
@@ -244,7 +244,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 
 	finalCh := make(chan tea.Msg, 1)
 	go func() {
-		finalCh <- cmd()
+		finalCh <- execCmd(cmd)
 	}()
 
 	for received := 0; received < 4; received++ {
@@ -448,7 +448,7 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 
 	finalCh := make(chan tea.Msg, 1)
 	go func() {
-		finalCh <- cmd()
+		finalCh <- execCmd(cmd)
 	}()
 
 	for received := 0; received < expectedRuntimeMessages; received++ {
@@ -776,7 +776,7 @@ func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
 
 	finalCh := make(chan tea.Msg, 1)
 	go func() {
-		finalCh <- cmd()
+		finalCh <- execCmd(cmd)
 	}()
 
 	// Drain live runtime messages until the permission prompt is up. The tool call
@@ -850,7 +850,7 @@ func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
 
 	finalCh := make(chan tea.Msg, 1)
 	go func() {
-		finalCh <- cmd()
+		finalCh <- execCmd(cmd)
 	}()
 
 	// Drain live runtime messages until the permission prompt is up; the tool call
@@ -939,7 +939,7 @@ func TestResumedPromptIncludesSessionContext(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected resumed prompt to start an agent run")
 	}
-	_, _ = next.Update(cmd())
+	_, _ = next.Update(execCmd(cmd))
 
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider request, got %d", len(provider.requests))

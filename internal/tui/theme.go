@@ -43,11 +43,19 @@ type tuiTheme struct {
 
 	// Diff bodies. The sign/count styles are bare foregrounds; the line styles
 	// carry the tinted backgrounds standing in for the prototype's 9% overlays.
-	diffAdd  lipgloss.Style // + sign column, +N counts
-	diffDel  lipgloss.Style // − sign column, −N counts
-	diffMeta lipgloss.Style // @@ hunks, +++/--- headers
-	addLine  lipgloss.Style // added-line text: addInk on addBg
-	delLine  lipgloss.Style // deleted-line text: delInk on delBg
+	// Gutter and sign columns get their own bg-carrying styles because lipgloss
+	// resets the background between adjacent Render calls — every segment of a
+	// tinted row must carry the tint itself.
+	diffAdd    lipgloss.Style // + sign in counts
+	diffDel    lipgloss.Style // − sign in counts
+	diffMeta   lipgloss.Style // @@ hunks, +++/--- headers
+	addLine    lipgloss.Style // added-line text: addInk on addBg
+	delLine    lipgloss.Style // deleted-line text: delInk on delBg
+	addLineNum lipgloss.Style // gutter number on addBg
+	delLineNum lipgloss.Style // gutter number on delBg
+	addSign    lipgloss.Style // + column on addBg
+	delSign    lipgloss.Style // − column on delBg
+	delText    lipgloss.Style // delInk as bare foreground (stderr-ish output)
 
 	// Permission surfaces.
 	permBadge lipgloss.Style // PERMISSION chip: onAccent on amber, bold
@@ -127,11 +135,16 @@ var zeroTheme = tuiTheme{
 	bashPrompt: lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
 	grepLoc:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
 
-	diffAdd:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
-	diffDel:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
-	diffMeta: lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
-	addLine:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAddInk)).Background(lipgloss.Color(colorAddBg)),
-	delLine:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorDelInk)).Background(lipgloss.Color(colorDelBg)),
+	diffAdd:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
+	diffDel:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
+	diffMeta:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
+	addLine:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAddInk)).Background(lipgloss.Color(colorAddBg)),
+	delLine:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorDelInk)).Background(lipgloss.Color(colorDelBg)),
+	addLineNum: lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)).Background(lipgloss.Color(colorAddBg)),
+	delLineNum: lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)).Background(lipgloss.Color(colorDelBg)),
+	addSign:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Background(lipgloss.Color(colorAddBg)),
+	delSign:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)).Background(lipgloss.Color(colorDelBg)),
+	delText:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorDelInk)),
 
 	permBadge: lipgloss.NewStyle().Background(lipgloss.Color(colorAmber)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
 	permRisk:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),

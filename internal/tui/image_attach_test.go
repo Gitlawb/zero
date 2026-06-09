@@ -138,7 +138,6 @@ func TestTranscriptViewShowsImageChips(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
 	m.width = 100
 	m.height = 30
-	m.showSplash = false
 	m.pendingImageLabels = []string{"photo.png", "diagram.gif"}
 
 	view := m.transcriptView()
@@ -186,7 +185,7 @@ func TestSubmitThreadsImagesThenClears(t *testing.T) {
 		t.Fatalf("submit must clear pending images, got %d/%d", len(next.pendingImages), len(next.pendingImageLabels))
 	}
 
-	cmd() // run the agent goroutine; it invokes captureRunImages
+	execCmd(cmd) // run the agent goroutine; it invokes captureRunImages
 
 	select {
 	case imgs := <-captured:
@@ -248,7 +247,7 @@ func TestSubmitDropsImagesWhenModelSwitchedToNonVision(t *testing.T) {
 		t.Fatalf("expected an inline drop notice, got %q", notice)
 	}
 
-	cmd() // run the agent goroutine; it invokes captureRunImages
+	execCmd(cmd) // run the agent goroutine; it invokes captureRunImages
 
 	select {
 	case imgs := <-captured:

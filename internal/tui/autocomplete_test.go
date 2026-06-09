@@ -206,7 +206,6 @@ func TestSuggestionsSuppressedDuringModals(t *testing.T) {
 func TestSuggestionOverlayRenders(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 30
-	m.showSplash = false
 	m = typeRunes(t, m, "/mo")
 
 	view := m.View()

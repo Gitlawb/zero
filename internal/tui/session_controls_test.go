@@ -145,7 +145,7 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
 	}
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 
 	footer := next.footerText()
@@ -194,7 +194,7 @@ func TestUsageEventsForwardExistingAgentCallback(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
 	}
-	msg := cmd()
+	msg := execCmd(cmd)
 	if len(seen) != 1 || seen[0].TotalTokens() != 15 {
 		t.Fatalf("expected original usage callback to receive event, got %#v", seen)
 	}
@@ -225,7 +225,7 @@ func TestUsageEventsForCustomModelUseTokenOnlyFallback(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
 	}
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 
 	footer := next.footerText()
@@ -258,7 +258,7 @@ func TestInvalidUsageEventsAppendTranscriptError(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
 	}
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
 
 	if !transcriptContains(next.transcript, "usage: expected inputTokens to be non-negative") {

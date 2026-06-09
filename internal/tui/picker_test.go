@@ -156,7 +156,6 @@ func TestPickersRefuseToOpenWhileRunPending(t *testing.T) {
 func TestPickerRenders(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.width, m.height = 96, 30
-	m.showSplash = false
 	m.input.SetValue("/model")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)

@@ -13,63 +13,68 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 )
 
-// headerBar renders the top zone of the working view: a single status line plus a
-// thin rule. Layout: zero · cwd · branch · provider/model  ............  ● state
-func (m model) headerBar(width int) string {
-	left := strings.Join(nonEmpty([]string{
-		zeroTheme.accent.Render("zero"),
-		zeroTheme.ink.Render(shortenPath(m.cwd)),
-		branchSegment(m.gitBranch),
-		m.providerSegment(),
-	}), zeroTheme.muted.Render(" · "))
+// titleBar renders the top zone of the chat surface: the brand badge, cwd and
+// branch on the left, provider/model and context window on the right, then a
+// rule. Segments drop in fixed order as width shrinks (full → no ctx → no cwd
+// → badge+model only), reusing the startupHeaderLine candidate fallback.
+func (m model) titleBar(width int) string {
+	badge := zeroTheme.badge.Render(" 0 ") + " " + zeroTheme.ink.Bold(true).Render("zero")
+	cwd := zeroTheme.faintest.Render(" / ") + zeroTheme.muted.Render(shortenPath(m.cwd))
+	branch := ""
+	if b := strings.TrimSpace(m.gitBranch); b != "" {
+		branch = " " + zeroTheme.faint.Render(b)
+	}
+	model := m.titleModelSegment()
+	ctx := ""
+	if window := modelContextWindow(m.modelName); window > 0 {
+		ctx = zeroTheme.faint.Render(" · " + formatContextWindow(window))
+	}
 
-	right := m.stateSegment()
-	line := joinHeaderLine(left, right, width)
+	line := startupHeaderLine(width, []headerCandidate{
+		{left: badge + cwd + branch, right: model + ctx},
+		{left: badge + cwd + branch, right: model},
+		{left: badge, right: model},
+	})
 	rule := zeroTheme.line.Render(strings.Repeat("─", width))
 	return line + "\n" + rule
 }
 
-func (m model) providerSegment() string {
+func (m model) titleModelSegment() string {
 	provider := strings.TrimSpace(m.providerName)
 	model := strings.TrimSpace(m.modelName)
-	if provider == "" && model == "" {
+	switch {
+	case provider == "" && model == "":
 		return zeroTheme.muted.Render("no provider")
-	}
-	if model == "" {
-		return zeroTheme.accent.Render(provider)
-	}
-	if provider == "" {
+	case model == "":
+		return zeroTheme.ink.Render(provider)
+	case provider == "":
 		return zeroTheme.ink.Render(model)
+	default:
+		return zeroTheme.ink.Render(provider + "/" + model)
 	}
-	return zeroTheme.accent.Render(provider) + zeroTheme.muted.Render("/") + zeroTheme.ink.Render(model)
 }
 
-func (m model) stateSegment() string {
-	if m.pending {
-		return zeroTheme.amber.Render("● working")
-	}
-	return zeroTheme.green.Render("● ready")
-}
-
-func branchSegment(branch string) string {
-	branch = strings.TrimSpace(branch)
-	if branch == "" {
-		return ""
-	}
-	return zeroTheme.muted.Render(branch)
-}
-
-// statusLine renders the bottom zone: the permission-mode indicator on the left and
-// the live model/usage readout on the right.
+// statusLine renders the bottom readout as ` │ `-separated groups: provider
+// and model on the left, then a flexible gap, then tokens/cost, the surface
+// name, and the permission mode.
 func (m model) statusLine(width int) string {
-	left := m.modeSegment()
-	right := m.usageSegment()
-	return joinHeaderLine(left, right, width)
-}
+	separator := zeroTheme.line.Render(" │ ")
 
-func (m model) modeSegment() string {
+	left := zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
+	if model := strings.TrimSpace(m.modelName); model != "" {
+		left += separator + zeroTheme.muted.Render(model)
+	}
+
+	rightGroups := []string{}
+	if usage := m.usageStatusSegment(); usage != "" {
+		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
+	}
+	rightGroups = append(rightGroups, zeroTheme.faint.Render("interactive"))
 	label, style := m.modeLabel()
-	return style.Render("⏵⏵ "+label) + zeroTheme.muted.Render(" · shift+tab to cycle")
+	rightGroups = append(rightGroups, style.Render("⏵⏵ "+label))
+	right := strings.Join(rightGroups, separator)
+
+	return joinHeaderLine(left, right, width)
 }
 
 // nextPermissionMode toggles between the two prompt-respecting modes:
@@ -94,29 +99,22 @@ func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
 func (m model) modeLabel() (string, lipgloss.Style) {
 	switch m.permissionMode {
 	case agent.PermissionModeAuto:
-		return "auto-approve edits", zeroTheme.modeAuto
+		return "auto-approve", zeroTheme.modeAuto
 	case agent.PermissionModeAsk:
-		return "approve each action", zeroTheme.modeAsk
+		return "ask", zeroTheme.modeAsk
 	case agent.PermissionModeUnsafe:
-		return "bypass permissions", zeroTheme.modeUnsafe
+		return "unsafe", zeroTheme.modeUnsafe
 	default:
 		mode := strings.TrimSpace(string(m.permissionMode))
 		if mode == "" {
-			return "auto-approve edits", zeroTheme.modeAuto
+			return "auto-approve", zeroTheme.modeAuto
 		}
 		return mode, zeroTheme.muted
 	}
 }
 
-func (m model) usageSegment() string {
-	model := displayValue(m.modelName, "no model")
-	usage := m.usageStatusSegment()
-	if usage == "" {
-		return zeroTheme.ink.Render(model)
-	}
-	return zeroTheme.ink.Render(model) + zeroTheme.muted.Render(" · "+usage)
-}
-
+// usageStatusSegment summarizes this session's consumption for the status
+// line: cumulative tokens, plus cost once anything is priced.
 func (m model) usageStatusSegment() string {
 	if m.usageTracker == nil {
 		return ""
@@ -124,26 +122,18 @@ func (m model) usageStatusSegment() string {
 	summary := m.usageTracker.Summary()
 	if summary.RecordCount == 0 {
 		if m.unpricedRequests > 0 {
-			return fmt.Sprintf("%s tok", humanCount(m.unpricedTokens))
+			return humanCount(m.unpricedTokens) + " tok"
 		}
 		return ""
 	}
-	return fmt.Sprintf("%s↑ %s↓ · %s",
-		humanCount(summary.InputTokens),
-		humanCount(summary.OutputTokens),
+	return fmt.Sprintf("%s tok · %s",
+		humanCount(summary.InputTokens+summary.OutputTokens),
 		summary.FormattedTotalCost,
 	)
 }
 
-// modeHint is the splash-screen variant of the mode indicator, mirroring the
-// professional CLI status line instead of raw keycap hints.
-func (m model) modeHint() string {
-	label, style := m.modeLabel()
-	return style.Render("⏵⏵ "+label) +
-		zeroTheme.muted.Render(" · shift+tab to cycle · ") +
-		zeroTheme.muted.Render("← agents")
-}
-
+// humanCount renders a token count the way the status line wants it: 999,
+// 12.4K, 200K.
 func humanCount(n int) string {
 	if n < 0 {
 		n = 0
@@ -152,8 +142,20 @@ func humanCount(n int) string {
 		return strconv.Itoa(n)
 	}
 	value := float64(n) / 1000
-	text := fmt.Sprintf("%.1fk", value)
-	return strings.Replace(text, ".0k", "k", 1)
+	text := fmt.Sprintf("%.1fK", value)
+	return strings.Replace(text, ".0K", "K", 1)
+}
+
+// formatContextWindow renders a model's context window for the title bar
+// (200000 → 200K, 1048576 → 1M).
+func formatContextWindow(window int) string {
+	if window <= 0 {
+		return ""
+	}
+	if window >= 1_000_000 && window%1_000_000 < 100_000 {
+		return strconv.Itoa(window/1_000_000) + "M"
+	}
+	return strconv.Itoa(window/1000) + "K"
 }
 
 func shortenPath(path string) string {
@@ -310,67 +312,6 @@ func looksLikeDiff(text string) bool {
 		}
 	}
 	return false
-}
-
-func colorizeDiffLine(line string) string {
-	switch {
-	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"), strings.HasPrefix(line, "@@"):
-		return zeroTheme.diffMeta.Render(line)
-	case strings.HasPrefix(line, "+"):
-		return zeroTheme.diffAdd.Render(line)
-	case strings.HasPrefix(line, "-"):
-		return zeroTheme.diffDel.Render(line)
-	default:
-		return zeroTheme.muted.Render(line)
-	}
-}
-
-const diffCardMaxLines = 16
-
-func diffCard(title string, detail string, width int) string {
-	budget := width - 4
-	if budget < 16 {
-		budget = 16
-	}
-	rawLines := strings.Split(strings.ReplaceAll(detail, "\r\n", "\n"), "\n")
-	body := make([]string, 0, len(rawLines))
-	for _, line := range rawLines {
-		line = truncateRunes(line, budget)
-		body = append(body, colorizeDiffLine(line))
-	}
-	if len(body) > diffCardMaxLines {
-		hidden := len(body) - diffCardMaxLines
-		body = body[:diffCardMaxLines]
-		body = append(body, zeroTheme.muted.Render(fmt.Sprintf("… %d more lines", hidden)))
-	}
-	return titledCard("edit · "+title, body, width)
-}
-
-// titledCard draws a rounded box with a title embedded in the top border.
-func titledCard(title string, body []string, width int) string {
-	if width < 24 {
-		width = 24
-	}
-	remaining := width - 5 - lipgloss.Width(title)
-	if remaining < 0 {
-		remaining = 0
-	}
-	top := zeroTheme.line.Render("╭─ ") +
-		zeroTheme.ink.Render(title) +
-		zeroTheme.line.Render(" "+strings.Repeat("─", remaining)+"╮")
-
-	lines := make([]string, 0, len(body)+2)
-	lines = append(lines, top)
-	budget := width - 4
-	for _, line := range body {
-		pad := budget - lipgloss.Width(line)
-		if pad < 0 {
-			pad = 0
-		}
-		lines = append(lines, zeroTheme.line.Render("│ ")+line+strings.Repeat(" ", pad)+zeroTheme.line.Render(" │"))
-	}
-	lines = append(lines, zeroTheme.line.Render("╰"+strings.Repeat("─", width-2)+"╯"))
-	return strings.Join(lines, "\n")
 }
 
 func truncateRunes(text string, limit int) string {

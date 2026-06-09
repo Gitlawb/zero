@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -31,6 +32,15 @@ type transcriptRow struct {
 	detail     string       // raw multi-line output (e.g. a diff to render as a card)
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
+
+	// Final-answer metadata, set at append time. Interim assistant text streams
+	// through model.streamingText and never lands in the transcript, so a
+	// rowAssistant marked final IS the turn's answer — the renderer must not
+	// re-parse text to tell the two apart. turnTools/turnElapsed feed the done
+	// line; zero values mean "unknown" and the segment is omitted.
+	final       bool
+	turnTools   int
+	turnElapsed time.Duration
 }
 
 type transcriptActionKind int
