@@ -58,9 +58,10 @@ type tuiTheme struct {
 	delText    lipgloss.Style // delInk as bare foreground (stderr-ish output)
 
 	// Permission surfaces.
-	permBadge lipgloss.Style // PERMISSION chip: onAccent on amber, bold
-	permRisk  lipgloss.Style // risk: <level> readout, amber
-	permBg    lipgloss.Style // permission card body tint
+	permBadge  lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	permRisk   lipgloss.Style // risk: <level> readout, amber
+	permBg     lipgloss.Style // permission card body tint
+	permBorder lipgloss.Style // permission card border (amber-mixed line)
 
 	// Overlays.
 	selRow lipgloss.Style // selected picker/suggestion row, on selBg
@@ -108,6 +109,7 @@ const (
 	colorOnAccent = "#000000" // text on accent or amber fills
 	colorCardRun  = "#5a6b2e" // running card border (accent mixed into line)
 	colorCardErr  = "#6b3434" // errored card border (red mixed into line)
+	colorCardPerm = "#6b5a2e" // permission card border (amber mixed into line)
 )
 
 var zeroTheme = tuiTheme{
@@ -149,9 +151,10 @@ var zeroTheme = tuiTheme{
 	delSign:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)).Background(lipgloss.Color(colorDelBg)),
 	delText:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorDelInk)),
 
-	permBadge: lipgloss.NewStyle().Background(lipgloss.Color(colorAmber)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
-	permRisk:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
-	permBg:    lipgloss.NewStyle().Background(lipgloss.Color(colorPermBg)),
+	permBadge:  lipgloss.NewStyle().Background(lipgloss.Color(colorAmber)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
+	permRisk:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
+	permBg:     lipgloss.NewStyle().Background(lipgloss.Color(colorPermBg)),
+	permBorder: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCardPerm)),
 
 	selRow: lipgloss.NewStyle().Background(lipgloss.Color(colorSelBg)),
 
@@ -172,4 +175,19 @@ var zeroTheme = tuiTheme{
 // wrap their foreground styles through this instead of referencing hex.
 func (t tuiTheme) onPanel(style lipgloss.Style) lipgloss.Style {
 	return style.Background(lipgloss.Color(colorPanel))
+}
+
+// onPanel2 paints on the header/picker-row surface.
+func (t tuiTheme) onPanel2(style lipgloss.Style) lipgloss.Style {
+	return style.Background(lipgloss.Color(colorPanel2))
+}
+
+// onSel paints on the selected-row tint.
+func (t tuiTheme) onSel(style lipgloss.Style) lipgloss.Style {
+	return style.Background(lipgloss.Color(colorSelBg))
+}
+
+// onPerm paints on the permission-card tint.
+func (t tuiTheme) onPerm(style lipgloss.Style) lipgloss.Style {
+	return style.Background(lipgloss.Color(colorPermBg))
 }

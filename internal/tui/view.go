@@ -222,10 +222,10 @@ func gitBranch(cwd string) string {
 	return ref
 }
 
-// suggestionOverlay renders the slash-command autocomplete list below the input
-// in the default skin: one row per match (name + dim description), the selected
-// row highlighted with a caret and the accent color. Returns "" when no overlay
-// should show.
+// suggestionOverlay renders the slash-command autocomplete list below the
+// composer: one row per match on the panel surface, the selected row on the
+// selection tint with an accent ❯ marker. Returns "" when no overlay should
+// show.
 func (m model) suggestionOverlay(width int) string {
 	if !m.suggestionsActive() {
 		return ""
@@ -238,35 +238,53 @@ func (m model) suggestionOverlay(width int) string {
 	}
 	lines := make([]string, 0, len(m.suggestions))
 	for index, s := range m.suggestions {
-		pad := strings.Repeat(" ", maxInt(0, nameWidth-lipgloss.Width(s.Name)))
-		marker := "  "
-		name := zeroTheme.ink.Render(s.Name)
+		surface := zeroTheme.onPanel
+		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == m.suggestionIdx {
-			marker = zeroTheme.accent.Render("› ")
-			name = zeroTheme.accent.Render(s.Name)
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
 		}
-		line := marker + name + pad + "  " + zeroTheme.muted.Render(s.Desc)
+		pad := surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(0, nameWidth-lipgloss.Width(s.Name))))
+		line := marker + surface(zeroTheme.ink).Render(s.Name) + pad + surface(zeroTheme.faint).Render("  "+s.Desc)
 		lines = append(lines, fitStyledLine(line, width-2))
 	}
 	return strings.Join(lines, "\n")
 }
 
-// pickerOverlay renders an open interactive selector below the input in the
-// default skin: a titled bordered list with the selected row highlighted.
+// pickerOverlay renders an open interactive selector below the composer: a
+// bordered panel with a title-and-hints row, rows carrying a provider dot and
+// right metadata when the catalog exposes them, and the selected row on the
+// selection tint.
 func (m model) pickerOverlay(width int) string {
 	if m.picker == nil {
 		return ""
 	}
+	innerWidth := width - 4
 	lines := make([]string, 0, len(m.picker.items)+1)
-	lines = append(lines, zeroTheme.accent.Render(m.picker.title)+zeroTheme.muted.Render("  ↑/↓ move · ⏎ select · esc cancel"))
+	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render("  ↑/↓ · ⏎ · esc"))
 	for index, item := range m.picker.items {
-		marker := "  "
-		label := zeroTheme.ink.Render(item.Label)
+		surface := zeroTheme.onPanel2
+		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == m.picker.selected {
-			marker = zeroTheme.accent.Render("› ")
-			label = zeroTheme.accent.Render(item.Label)
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
 		}
-		lines = append(lines, fitStyledLine(marker+label, width-4))
+		left := marker
+		switch {
+		case item.Local:
+			left += surface(zeroTheme.blue).Render("● ")
+		case item.Remote:
+			left += surface(zeroTheme.accent).Render("● ")
+		}
+		left += surface(zeroTheme.ink).Render(item.Label)
+		right := ""
+		if item.Meta != "" {
+			right = surface(zeroTheme.faintest).Render(item.Meta)
+		}
+		line := joinHeaderLine(left, right, innerWidth)
+		// joinHeaderLine pads with bare spaces; repaint the gap on the row
+		// surface so selected rows read as one solid band.
+		lines = append(lines, fitStyledLine(line, innerWidth))
 	}
 	return borderedBlock(width, lines)
 }

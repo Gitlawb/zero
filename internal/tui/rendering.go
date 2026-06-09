@@ -126,6 +126,7 @@ type rowContext struct {
 	hints    map[string]string
 	args     map[string]string
 	auto     map[string]bool
+	decided  map[string]bool
 }
 
 func buildRowContext(rows []transcriptRow) rowContext {
@@ -134,6 +135,7 @@ func buildRowContext(rows []transcriptRow) rowContext {
 		hints:    map[string]string{},
 		args:     map[string]string{},
 		auto:     map[string]bool{},
+		decided:  map[string]bool{},
 	}
 	prompted := map[string]bool{}
 	for _, row := range rows {
@@ -157,12 +159,15 @@ func buildRowContext(rows []transcriptRow) rowContext {
 				prompted[event.ToolCallID] = true
 				delete(rc.auto, event.ToolCallID)
 			case agent.PermissionActionAllow:
+				rc.decided[event.ToolCallID] = true
 				// "auto" means approved without asking: a mode/policy allow or a
 				// stored grant match. Any allow that followed a prompt — including a
 				// first-time "always" — was a manual decision, not auto.
 				if !prompted[event.ToolCallID] {
 					rc.auto[event.ToolCallID] = true
 				}
+			case agent.PermissionActionDeny:
+				rc.decided[event.ToolCallID] = true
 			}
 		}
 	}
@@ -170,9 +175,26 @@ func buildRowContext(rows []transcriptRow) rowContext {
 }
 
 // skip reports whether a row renders nothing itself: a tool call whose result
-// already arrived collapses into the result's card.
+// arrived collapses into the result's card; a permission prompt that has been
+// decided collapses into its decision line; an unprompted allow is already
+// surfaced as the card's [auto] tag.
 func (rc rowContext) skip(row transcriptRow) bool {
-	return row.kind == rowToolCall && row.id != "" && rc.resolved[row.id]
+	switch row.kind {
+	case rowToolCall:
+		return row.id != "" && rc.resolved[row.id]
+	case rowPermission:
+		event := row.permission
+		if event == nil || event.ToolCallID == "" {
+			return false
+		}
+		switch event.Action {
+		case agent.PermissionActionPrompt:
+			return rc.decided[event.ToolCallID]
+		case agent.PermissionActionAllow:
+			return rc.auto[event.ToolCallID]
+		}
+	}
+	return false
 }
 
 func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
@@ -184,6 +206,9 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	case rowAssistant:
 		return renderAssistantRow(row, width)
 	case rowSystem:
+		if row.tool == "sessions" {
+			return renderSessionsCards(row.text, width)
+		}
 		return renderSystemNote(row.text, width)
 	case rowError:
 		return renderErrorRow(row, width)
@@ -192,7 +217,7 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	case rowToolResult:
 		return renderToolResultCard(row, width, rc)
 	case rowPermission:
-		return renderPermissionRow(row)
+		return renderPermissionRow(row, width)
 	case rowAskUser:
 		return renderAskUserRow(row)
 	default:
@@ -358,7 +383,11 @@ func renderAskUserRow(row transcriptRow) string {
 	return line
 }
 
-func renderPermissionRow(row transcriptRow) string {
+// renderPermissionRow draws the transcript record of a permission event. A
+// decided prompt and an auto-approved allow are skipped upstream, so this
+// sees: undecided prompts (one amber line + detail), manual decisions (the
+// spec's collapsed one-liner), and denials.
+func renderPermissionRow(row transcriptRow, width int) string {
 	event := row.permission
 	if event == nil {
 		return zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(row.text)
@@ -368,64 +397,75 @@ func renderPermissionRow(row transcriptRow) string {
 	if name == "" {
 		name = row.tool
 	}
-	action := strings.TrimSpace(string(event.Action))
-	if action == "" {
-		action = "prompt"
-	}
+	dot := zeroTheme.faintest.Render(" · ")
 
-	actionStyle := zeroTheme.amber
-	actionLabel := action
 	switch event.Action {
-	case "allow":
-		actionStyle = zeroTheme.green
-	case "deny":
-		actionStyle = zeroTheme.red
-		actionLabel = "denied"
-	case "prompt":
-		actionStyle = zeroTheme.amber
+	case agent.PermissionActionAllow:
+		label := "allowed once"
+		if event.Grant != nil {
+			label = "always"
+		}
+		return zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
+	case agent.PermissionActionDeny:
+		line := zeroTheme.red.Render("denied") + dot + zeroTheme.red.Render(name)
+		if event.Risk.Level != "" {
+			line += dot + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
+		}
+		if reason := strings.TrimSpace(event.Reason); reason != "" {
+			line += zeroTheme.faint.Render(" — " + truncateRunes(reason, maxInt(16, width-lipgloss.Width(name)-16)))
+		}
+		if detail := strings.TrimSpace(row.detail); detail != "" {
+			line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
+		}
+		return line
+	default:
+		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
+		if event.Risk.Level != "" {
+			line += "  " + zeroTheme.muted.Render("risk:" + string(event.Risk.Level))
+		}
+		if detail := strings.TrimSpace(row.detail); detail != "" {
+			line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
+		}
+		return line
 	}
-
-	line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + actionStyle.Render(actionLabel)
-	if event.Risk.Level != "" {
-		line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
-	}
-	if event.GrantMatched {
-		line += "  " + zeroTheme.green.Render("grant")
-	}
-	if detail := strings.TrimSpace(row.detail); detail != "" {
-		line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
-	}
-	return line
 }
 
+// renderFocusedPermissionPrompt draws the modal permission card: PERMISSION
+// badge + risk on top, tool + reason body, then the key-chip action row. The
+// keys themselves are handled in handlePermissionKey, unchanged.
 func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) string {
 	name := strings.TrimSpace(request.ToolName)
 	if name == "" {
 		name = "tool"
 	}
+	fill := zeroTheme.onPerm
 
-	header := zeroTheme.amber.Render("permission required") + "  " + zeroTheme.ink.Render(name)
-	choices := zeroTheme.ink.Render("[a] allow") + "  " +
-		zeroTheme.ink.Render("[d] deny") + "  " +
-		zeroTheme.ink.Render("[y] always")
-
-	details := []string{}
+	top := zeroTheme.permBadge.Render(" PERMISSION ")
 	if request.Risk.Level != "" {
-		details = append(details, "risk:"+string(request.Risk.Level))
-	}
-	if request.Reason != "" {
-		details = append(details, request.Reason)
-	}
-	if request.SideEffect != "" {
-		details = append(details, "side_effect:"+request.SideEffect)
-	}
-	if len(details) > 0 {
-		choices += "\n" + zeroTheme.muted.Render(strings.Join(details, "  "))
+		top += fill(zeroTheme.permRisk).Render("  risk: " + string(request.Risk.Level))
 	}
 
-	return borderedBlock(width, []string{header, choices})
+	body := fill(zeroTheme.amber).Bold(true).Render(name)
+	if request.SideEffect != "" {
+		body += fill(zeroTheme.ink).Render("  " + request.SideEffect)
+	}
+	lines := []string{top, body}
+	if reason := strings.TrimSpace(request.Reason); reason != "" {
+		lines = append(lines, fill(zeroTheme.muted).Render(reason))
+	}
+
+	actions := zeroTheme.badge.Render(" [a] allow once ") +
+		fill(zeroTheme.ink).Render(" ") +
+		fill(zeroTheme.accent).Render("[y]") + fill(zeroTheme.ink).Render(" always ") +
+		fill(zeroTheme.red).Render("[d]") + fill(zeroTheme.ink).Render(" deny ") +
+		fill(zeroTheme.faint).Render("[esc]")
+	lines = append(lines, actions)
+
+	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg)
 }
 
+// renderFocusedAskUserPrompt draws the ask-user questionnaire in the same
+// card language as the permission card, with line borders.
 func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width int) string {
 	questions := prompt.request.Questions
 	total := len(questions)
@@ -436,25 +476,25 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width
 	if index < 0 {
 		index = 0
 	}
+	fill := zeroTheme.onPanel
 
-	lines := []string{}
-	heading := zeroTheme.accent.Render("ask zero")
+	heading := zeroTheme.badge.Render(" ASK ")
 	if header := strings.TrimSpace(prompt.request.Header); header != "" {
-		heading += "  " + zeroTheme.ink.Render(header)
+		heading += fill(zeroTheme.ink).Render(" " + header)
 	}
-	lines = append(lines, heading)
+	lines := []string{heading}
 
 	if total > 0 {
 		question := questions[index]
-		lines = append(lines, zeroTheme.muted.Render(fmt.Sprintf("question %d of %d", index+1, total)))
-		lines = append(lines, zeroTheme.ink.Render(question.Question))
+		lines = append(lines, fill(zeroTheme.faint).Render(fmt.Sprintf("question %d of %d", index+1, total)))
+		lines = append(lines, fill(zeroTheme.ink).Render(question.Question))
 		if len(question.Options) > 0 {
-			lines = append(lines, zeroTheme.muted.Render("options: "+strings.Join(question.Options, ", ")))
+			lines = append(lines, fill(zeroTheme.muted).Render("options: "+strings.Join(question.Options, ", ")))
 		}
 	}
-	lines = append(lines, zeroTheme.muted.Render("type an answer, Enter to submit · Esc to skip"))
+	lines = append(lines, fill(zeroTheme.faint).Render("type an answer, Enter to submit · Esc to skip"))
 
-	return borderedBlock(width, lines)
+	return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
 }
 
 // --- Tool cards -------------------------------------------------------------
@@ -763,6 +803,35 @@ func bashCardBody(command string, detail string, width int) cardBody {
 		}
 	}
 	return cardBody{lines: capCardLines(lines), footer: footer}
+}
+
+// renderSessionsCards draws the /resume list as stacked cards: id (accent) +
+// age (faint) on the top row, title (ink), then the meta line (faint with
+// faintest dots). Records arrive as sessionsCardFieldSep-joined fields; a
+// record without separators is a plain trailing hint.
+func renderSessionsCards(payload string, width int) string {
+	blocks := []string{}
+	for _, record := range strings.Split(payload, "\n") {
+		fields := strings.Split(record, sessionsCardFieldSep)
+		if len(fields) < 4 {
+			blocks = append(blocks, zeroTheme.faint.Render(record))
+			continue
+		}
+		id, age, title, meta := fields[0], fields[1], fields[2], fields[3]
+		innerWidth := width - 4
+		top := joinHeaderLine(zeroTheme.onPanel(zeroTheme.accent).Render(id), zeroTheme.onPanel(zeroTheme.faint).Render(age), innerWidth)
+		metaParts := strings.Split(meta, " · ")
+		for index := range metaParts {
+			metaParts[index] = zeroTheme.onPanel(zeroTheme.faint).Render(metaParts[index])
+		}
+		lines := []string{
+			top,
+			zeroTheme.onPanel(zeroTheme.ink).Render(title),
+			strings.Join(metaParts, zeroTheme.onPanel(zeroTheme.faintest).Render(" · ")),
+		}
+		blocks = append(blocks, styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel))
+	}
+	return strings.Join(blocks, "\n")
 }
 
 // grepMatchPattern matches the grep tool's "path:line: text" content rows.

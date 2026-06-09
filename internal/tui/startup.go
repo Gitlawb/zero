@@ -85,6 +85,12 @@ func borderedBlock(width int, lines []string) string {
 // styledBlock draws a rounded box around lines with the given border style,
 // padding every row to the full width.
 func styledBlock(width int, lines []string, borderStyle lipgloss.Style) string {
+	return styledBlockFill(width, lines, borderStyle, lipgloss.NewStyle())
+}
+
+// styledBlockFill is styledBlock with a fill style painting the row padding,
+// so tinted cards (permission, panel surfaces) read as solid bands.
+func styledBlockFill(width int, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style) string {
 	if width < 4 {
 		width = 4
 	}
@@ -97,7 +103,8 @@ func styledBlock(width int, lines []string, borderStyle lipgloss.Style) string {
 	for _, line := range lines {
 		available := width - 4
 		fitted := fitStyledLine(line, available)
-		body = append(body, borderStyle.Render("│ ")+fitted+strings.Repeat(" ", maxInt(0, available-lipgloss.Width(fitted)))+borderStyle.Render(" │"))
+		pad := fill.Render(strings.Repeat(" ", maxInt(0, available-lipgloss.Width(fitted))))
+		body = append(body, borderStyle.Render("│ ")+fitted+pad+borderStyle.Render(" │"))
 	}
 	body = append(body, bottom)
 	return strings.Join(body, "\n")

@@ -250,13 +250,22 @@ func cloneToolRegistry(registry *tools.Registry) *tools.Registry {
 	return clone
 }
 
+// renderFocusedSpecReviewPrompt draws the spec-review gate in the shared card
+// language (badge + body + key chips) with line borders. Key handling lives
+// in handleSpecReviewKey, unchanged.
 func renderFocusedSpecReviewPrompt(review pendingSpecReviewPrompt, width int) string {
+	fill := zeroTheme.onPanel
+	actions := zeroTheme.badge.Render(" [a] approve ") +
+		fill(zeroTheme.ink).Render(" ") +
+		fill(zeroTheme.red).Render("[r]") + fill(zeroTheme.ink).Render(" reject ") +
+		fill(zeroTheme.accent).Render("[e]") + fill(zeroTheme.ink).Render(" edit file ") +
+		fill(zeroTheme.faint).Render("[esc] cancel")
 	lines := []string{
-		zeroTheme.accent.Render("◇ spec review"),
-		"path: " + reviewDisplayPath(review),
-		"[a] approve  [r] reject  [e] edit file  [esc] cancel",
+		zeroTheme.badge.Render(" SPEC REVIEW "),
+		fill(zeroTheme.faint).Render("path: ") + fill(zeroTheme.ink).Render(reviewDisplayPath(review)),
+		actions,
 	}
-	return borderedBlock(width, lines)
+	return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
 }
 
 func specReviewSummary(review pendingSpecReviewPrompt) string {

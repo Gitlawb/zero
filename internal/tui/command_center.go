@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
@@ -76,24 +77,58 @@ func (m model) resumeText(args string) string {
 	if limit > 8 {
 		limit = 8
 	}
-	lines := []string{fmt.Sprintf("recent sessions: %d", len(sessions))}
+	// The list renders as stacked cards (renderSessionsCards); each record is
+	// one session's fields joined by the unit separator so the renderer can
+	// restyle them at the current width. Flow and data are unchanged.
+	records := make([]string, 0, limit+1)
 	for index := 0; index < limit; index++ {
 		session := sessions[index]
-		title := displayValue(session.Title, "untitled")
-		lines = append(lines, commandBullet(fmt.Sprintf("%s  %s  model=%s provider=%s events=%d updated=%s", session.SessionID, title, displayValue(session.ModelID, "none"), displayValue(session.Provider, "none"), session.EventCount, session.UpdatedAt)))
+		meta := strings.Join([]string{
+			displayValue(session.ModelID, "no model"),
+			displayValue(session.Provider, "no provider"),
+			fmt.Sprintf("%d events", session.EventCount),
+		}, " · ")
+		records = append(records, strings.Join([]string{
+			session.SessionID,
+			relativeAge(session.UpdatedAt, m.now()),
+			displayValue(session.Title, "untitled"),
+			meta,
+		}, sessionsCardFieldSep))
 	}
 	if len(sessions) > limit {
-		lines = append(lines, fmt.Sprintf("... %d more", len(sessions)-limit))
+		records = append(records, fmt.Sprintf("… %d more · /resume <id>", len(sessions)-limit))
+	} else {
+		records = append(records, "use /resume latest or /resume <id> to load a session")
 	}
-	return renderCommandOutput(commandOutput{
-		Title:  "Sessions",
-		Status: commandStatusOK,
-		Sections: []commandSection{{
-			Title: "Recent",
-			Lines: lines,
-		}},
-		Hints: []string{"use /resume latest or /resume <id> to load a session"},
-	})
+	return sessionsCardsPrefix + strings.Join(records, "\n")
+}
+
+const (
+	// sessionsCardsPrefix marks a resumeText payload that renders as stacked
+	// session cards instead of a plain system note.
+	sessionsCardsPrefix = "\x00sessions\x00"
+	// sessionsCardFieldSep separates the id/age/title/meta fields of one card.
+	sessionsCardFieldSep = "\x1f"
+)
+
+// relativeAge renders an RFC3339 timestamp as a short age ("2h ago"); ""
+// when the timestamp does not parse, so the card simply omits it.
+func relativeAge(timestamp string, now time.Time) string {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
+	if err != nil {
+		return ""
+	}
+	age := now.Sub(parsed)
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		return fmt.Sprintf("%dm ago", int(age.Minutes()))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(age.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
+	}
 }
 
 func (m model) handleModelCommand(args string) (model, string) {

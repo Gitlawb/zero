@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -396,5 +397,108 @@ func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
 	got := plainRender(t, m.renderRow(rows[1], 90, rc))
 	if !strings.Contains(got, "internal/cli") || !strings.Contains(got, `flag\.|RegisterFlag`) {
 		t.Fatalf("grep card head = %q, want separate target and pattern columns", got)
+	}
+}
+
+// --- Stage 3: interactive surfaces ------------------------------------------
+
+func TestFocusedPermissionCardShowsBadgeRiskAndKeys(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName:   "edit_file",
+		Reason:     "writes internal/agent/exec.go",
+		SideEffect: "write",
+		Risk:       sandbox.Risk{Level: sandbox.RiskMedium},
+	}
+	got := plainRender(t, renderFocusedPermissionPrompt(request, 80))
+	for _, want := range []string{"PERMISSION", "risk: medium", "edit_file", "writes internal/agent/exec.go", "[a] allow once", "[y] always", "[d] deny", "[esc]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("permission card = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
+	m := limeTestModel()
+	prompt := transcriptRow{kind: rowPermission, id: "call_1", permission: &agent.PermissionEvent{
+		ToolCallID: "call_1", ToolName: "bash", Action: agent.PermissionActionPrompt,
+	}}
+	allowed := transcriptRow{kind: rowPermission, id: "call_1", permission: &agent.PermissionEvent{
+		ToolCallID: "call_1", ToolName: "bash", Action: agent.PermissionActionAllow,
+	}}
+	rc := buildRowContext([]transcriptRow{prompt, allowed})
+
+	if !rc.skip(prompt) {
+		t.Fatal("a decided prompt row must collapse away")
+	}
+	if got := plainRender(t, m.renderRow(allowed, 80, rc)); !strings.Contains(got, "allowed once · bash") {
+		t.Fatalf("manual allow = %q, want allowed once · bash", got)
+	}
+
+	grant := &agent.PermissionEvent{ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionAllow}
+	grant.Grant = &sandbox.Grant{ToolName: "bash"}
+	always := transcriptRow{kind: rowPermission, id: "call_2", permission: grant}
+	promptTwo := transcriptRow{kind: rowPermission, id: "call_2", permission: &agent.PermissionEvent{
+		ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionPrompt,
+	}}
+	rcTwo := buildRowContext([]transcriptRow{promptTwo, always})
+	if got := plainRender(t, m.renderRow(always, 80, rcTwo)); !strings.Contains(got, "always · bash") {
+		t.Fatalf("always allow = %q, want always · bash", got)
+	}
+
+	denied := transcriptRow{kind: rowPermission, id: "call_3", permission: &agent.PermissionEvent{
+		ToolCallID: "call_3", ToolName: "bash", Action: agent.PermissionActionDeny,
+	}}
+	if got := plainRender(t, m.renderRow(denied, 80, buildRowContext(nil))); !strings.Contains(got, "denied · bash") {
+		t.Fatalf("deny = %q, want denied · bash", got)
+	}
+}
+
+func TestUnpromptedAllowRowsCollapseIntoAutoTag(t *testing.T) {
+	allow := transcriptRow{kind: rowPermission, id: "call_1", permission: &agent.PermissionEvent{
+		ToolCallID: "call_1", ToolName: "edit_file", Action: agent.PermissionActionAllow,
+	}}
+	rc := buildRowContext([]transcriptRow{allow})
+	if !rc.skip(allow) {
+		t.Fatal("an unprompted (auto) allow row must collapse — the tool card carries [auto]")
+	}
+}
+
+func TestModelPickerRowsCarryContextAndKeyEnvMeta(t *testing.T) {
+	m := limeTestModel()
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected a model picker")
+	}
+	withMeta := 0
+	for _, item := range picker.items {
+		if strings.Contains(item.Meta, "K") || strings.Contains(item.Meta, "M") {
+			withMeta++
+		}
+		if !item.Remote && !item.Local {
+			continue
+		}
+	}
+	if withMeta == 0 {
+		t.Fatalf("expected catalog models to expose ctx metadata, got %#v", picker.items[:minInt(3, len(picker.items))])
+	}
+
+	m.picker = picker
+	got := plainRender(t, m.pickerOverlay(100))
+	for _, want := range []string{"select model", "↑/↓ · ⏎ · esc", "❯"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("picker overlay = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestSpecReviewCardShowsBadgePathAndKeys(t *testing.T) {
+	got := plainRender(t, renderFocusedSpecReviewPrompt(pendingSpecReviewPrompt{
+		SpecFilePath: "/repo/specs/zero-1.md",
+		RelativePath: "specs/zero-1.md",
+	}, 80))
+	for _, want := range []string{"SPEC REVIEW", "specs/zero-1.md", "[a] approve", "[r] reject", "[e] edit file", "[esc] cancel"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("spec review card = %q, missing %q", got, want)
+		}
 	}
 }

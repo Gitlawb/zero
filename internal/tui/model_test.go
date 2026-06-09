@@ -641,8 +641,15 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /resume to be handled without starting an agent run")
 	}
-	if !transcriptContains(next.transcript, "Sessions") || !transcriptContains(next.transcript, "Newer") || !transcriptContains(next.transcript, "Older") {
+	if !transcriptContains(next.transcript, "Newer") || !transcriptContains(next.transcript, "Older") {
 		t.Fatalf("expected session list in transcript, got %#v", next.transcript)
+	}
+	// The list renders as stacked cards: id + age + title + meta per session.
+	view := next.View()
+	for _, want := range []string{first.SessionID, second.SessionID, "1 events", "anthropic"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("sessions card view missing %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -944,7 +951,7 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 
 	rendered := newModel(context.Background(), Options{}).renderRow(permissionTranscriptRow(event), 96, buildRowContext(nil))
 
-	for _, want := range []string{"permission", "write_file", "denied", "risk:high", "violation=outside_workspace risk=critical", "../secret.txt"} {
+	for _, want := range []string{"write_file", "denied", "risk:high", "violation=outside_workspace risk=critical", "../secret.txt"} {
 		assertContains(t, rendered, want)
 	}
 }

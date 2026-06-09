@@ -2,6 +2,7 @@ package tui
 
 import (
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
 // pickerKind identifies which command a picker selection feeds back into.
@@ -14,10 +15,15 @@ const (
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
-// underlying command handler when chosen.
+// underlying command handler when chosen. Meta is the optional right-aligned
+// readout (ctx window · key env); the dot flags mark provider locality for
+// model rows (accent = remote, blue = local).
 type pickerItem struct {
-	Label string
-	Value string
+	Label  string
+	Value  string
+	Meta   string
+	Remote bool
+	Local  bool
 }
 
 // commandPicker is a generic single-select overlay reused by /model, /effort,
@@ -64,7 +70,23 @@ func (m model) newModelPicker() *commandPicker {
 		if label == "" {
 			label = entry.ID
 		}
-		items = append(items, pickerItem{Label: label + "  " + entry.ID, Value: entry.ID})
+		item := pickerItem{Label: label + "  " + entry.ID, Value: entry.ID}
+		// Right meta + locality dot come straight from data the registry and
+		// provider catalog already expose; rows without it just omit the meta.
+		if window := entry.ContextLimits.ContextWindow; window > 0 {
+			item.Meta = formatContextWindow(window)
+		}
+		if descriptor, ok := providercatalog.Get(string(entry.Provider)); ok {
+			item.Remote = !descriptor.Local
+			item.Local = descriptor.Local
+			if len(descriptor.AuthEnvVars) > 0 {
+				if item.Meta != "" {
+					item.Meta += " · "
+				}
+				item.Meta += descriptor.AuthEnvVars[0]
+			}
+		}
+		items = append(items, item)
 		if entry.ID == m.modelName {
 			selected = i
 		}

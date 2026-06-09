@@ -918,7 +918,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleResumeCommand(command.text)
-		if text != "" {
+		if strings.HasPrefix(text, sessionsCardsPrefix) {
+			// The list payload renders as stacked session cards, not a note.
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind: rowSystem,
+				tool: "sessions",
+				text: strings.TrimPrefix(text, sessionsCardsPrefix),
+			})
+		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
 		return m, nil
