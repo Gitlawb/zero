@@ -58,12 +58,18 @@ type SandboxConfig struct {
 	MaxAutonomy string `json:"maxAutonomy,omitempty"`
 }
 
+type NotifyConfig struct {
+	Mode      string `json:"mode,omitempty"`
+	FocusMode string `json:"focusMode,omitempty"`
+}
+
 type FileConfig struct {
 	ActiveProvider string            `json:"activeProvider,omitempty"`
 	Providers      []ProviderProfile `json:"providers,omitempty"`
 	MaxTurns       int               `json:"maxTurns,omitempty"`
 	MCP            MCPConfig         `json:"mcp,omitempty"`
 	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
+	Notify         NotifyConfig      `json:"notify,omitempty"`
 }
 
 type ResolveOptions struct {
@@ -81,6 +87,7 @@ type Overrides struct {
 	MaxTurns       int
 	MCP            MCPConfig
 	Sandbox        SandboxConfig
+	Notify         NotifyConfig
 }
 
 type ResolvedConfig struct {
@@ -90,6 +97,7 @@ type ResolvedConfig struct {
 	MaxTurns       int
 	MCP            MCPConfig
 	Sandbox        SandboxConfig
+	Notify         NotifyConfig
 }
 
 type MCPConfig struct {
@@ -114,6 +122,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		MaxTurns        int                        `json:"maxTurns"`
 		MCP             MCPConfig                  `json:"mcp"`
 		Sandbox         SandboxConfig              `json:"sandbox"`
+		Notify          NotifyConfig               `json:"notify"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -127,6 +136,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.MaxTurns = raw.MaxTurns
 	cfg.MCP = raw.MCP
 	cfg.Sandbox = raw.Sandbox
+	cfg.Notify = raw.Notify
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}
