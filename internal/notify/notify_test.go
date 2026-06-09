@@ -117,3 +117,12 @@ func TestDefaultMessage(t *testing.T) {
 		t.Fatal("awaiting message")
 	}
 }
+
+func TestEnabled(t *testing.T) {
+	if Enabled(ModeOff) || Enabled("") {
+		t.Fatal("off/empty should be disabled")
+	}
+	if !Enabled(ModeBell) || !Enabled(ModeNotify) || !Enabled(ModeBoth) {
+		t.Fatal("bell/notify/both should be enabled")
+	}
+}

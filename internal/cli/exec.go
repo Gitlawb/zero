@@ -301,6 +301,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	// Notify on completion via stderr (never stdout, which may carry stream-json).
+	// Headless has no terminal-focus signal, so focus gating does not apply here:
+	// always emit when a mode is configured (focusMode is a TUI-only concept).
+	notifier := notify.New(stderr, notify.Config{
+		Mode:      notify.Mode(strings.TrimSpace(execNotifyMode(options, resolved))),
+		FocusMode: notify.FocusAlways,
+	})
 	if options.useSpec {
 		return runExecSpecDraft(execSpecDraftRun{
 			options:            options,
@@ -319,6 +326,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			images:             images,
 			reasoningEffort:    runReasoningEffort,
 			specPermissionMode: permissionMode,
+			notifier:           notifier,
 		})
 	}
 
@@ -381,14 +389,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	sessionRecorder.append(sessions.EventMessage, map[string]any{
 		"role":    "user",
 		"content": prompt,
-	})
-
-	// Build the completion notifier targeting stderr so it never pollutes stdout
-	// (which may carry stream-json). The notifier fires once after agent.Run
-	// returns regardless of success or error.
-	notifier := notify.New(stderr, notify.Config{
-		Mode:      notify.Mode(strings.TrimSpace(execNotifyMode(options, resolved))),
-		FocusMode: notify.FocusMode(strings.TrimSpace(resolved.Notify.FocusMode)),
 	})
 
 	// OnAskUser is intentionally left unset: headless runs have no interactive

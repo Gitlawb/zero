@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/specmode"
@@ -35,6 +36,7 @@ type execSpecDraftRun struct {
 	images             []zeroruntime.ImageBlock
 	reasoningEffort    string
 	specPermissionMode agent.PermissionMode
+	notifier           *notify.Notifier
 }
 
 type execSpecDraftInfo struct {
@@ -154,6 +156,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 			})
 		},
 	})
+	run.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 	if writer.err != nil {
 		return exitCrash
 	}
