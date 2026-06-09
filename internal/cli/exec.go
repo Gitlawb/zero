@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -88,6 +89,11 @@ type execOptions struct {
 	// default — a run without the flag is byte-identical to before (no tool, nil
 	// switcher).
 	allowEscalation bool
+	// notifyMode overrides config.Notify.Mode for this run. Mutually exclusive
+	// with noNotify.
+	notifyMode string
+	// noNotify forces ModeOff for this run. Mutually exclusive with notifyMode.
+	noNotify bool
 }
 
 type execUsageError struct {
@@ -377,6 +383,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		"content": prompt,
 	})
 
+	// Build the completion notifier targeting stderr so it never pollutes stdout
+	// (which may carry stream-json). The notifier fires once after agent.Run
+	// returns regardless of success or error.
+	notifier := notify.New(stderr, notify.Config{
+		Mode:      notify.Mode(strings.TrimSpace(execNotifyMode(options, resolved))),
+		FocusMode: notify.FocusMode(strings.TrimSpace(resolved.Notify.FocusMode)),
+	})
+
 	// OnAskUser is intentionally left unset: headless runs have no interactive
 	// user, so ask_user degrades to a "proceed with your best assumption" result
 	// rather than blocking. (Future enhancement: collect answers over stream-json
@@ -459,6 +473,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			sessionRecorder.append(sessions.EventUsage, payload)
 		},
 	})
+	notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 	if writer.err != nil {
 		return exitCrash
 	}
@@ -843,4 +858,17 @@ func sessionPermissionEventType(event agent.PermissionEvent) sessions.EventType 
 		return sessions.EventPermissionDecision
 	}
 	return sessions.EventPermission
+}
+
+// execNotifyMode resolves the effective notification mode for a run:
+// --no-notify forces "off", --notify <mode> overrides config, otherwise the
+// config value is used.
+func execNotifyMode(options execOptions, resolved config.ResolvedConfig) string {
+	if options.noNotify {
+		return string(notify.ModeOff)
+	}
+	if options.notifyMode != "" {
+		return options.notifyMode
+	}
+	return resolved.Notify.Mode
 }
