@@ -77,3 +77,28 @@ func TestCronAddRecipe(t *testing.T) {
 		t.Fatalf("recipe job not stored: %+v", jobs)
 	}
 }
+
+func TestCronAddRejectsExtraArgs(t *testing.T) {
+	store := testCronStore(t)
+	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }
+	var out, errb bytes.Buffer
+	if code := runCronWith(store, now, []string{"add", "0 9 * * *", "extra", "--prompt", "x"}, &out, &errb); code == 0 {
+		t.Fatal("expected non-zero exit for extra positional args")
+	}
+	if jobs, _ := store.List(); len(jobs) != 0 {
+		t.Fatalf("no job should be stored on a usage error, got %v", jobs)
+	}
+}
+
+func TestCronResumeRejectsImpossibleSchedule(t *testing.T) {
+	store := testCronStore(t)
+	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }
+	job, _ := store.Add(cron.Job{Expr: "0 0 30 2 *", Prompt: "x", Status: cron.StatusPaused})
+	var out, errb bytes.Buffer
+	if code := runCronWith(store, now, []string{"resume", job.ID}, &out, &errb); code == 0 {
+		t.Fatal("resume of an impossible schedule must be rejected")
+	}
+	if j, _ := store.Get(job.ID); j.Status != cron.StatusPaused {
+		t.Fatalf("job must remain paused after a rejected resume, got %q", j.Status)
+	}
+}

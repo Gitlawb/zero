@@ -83,6 +83,9 @@ func TestStoreRejectsUnsafeID(t *testing.T) {
 		if _, err := s.Get(id); err == nil {
 			t.Fatalf("Get(%q) must be rejected", id)
 		}
+		if _, err := s.Runs(id); err == nil {
+			t.Fatalf("Runs(%q) must be rejected", id)
+		}
 	}
 	if _, err := os.Stat(sibling); err != nil {
 		t.Fatalf("traversal must not delete a sibling directory: %v", err)

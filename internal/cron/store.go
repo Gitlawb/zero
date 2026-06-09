@@ -211,16 +211,23 @@ func (s *Store) AppendRun(id string, rec RunRecord) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	line, err := json.Marshal(rec)
 	if err != nil {
+		_ = f.Close()
 		return err
 	}
-	_, err = f.Write(append(line, '\n'))
-	return err
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Surface a buffered-write failure that only materializes on Close.
+	return f.Close()
 }
 
 func (s *Store) Runs(id string) ([]RunRecord, error) {
+	if !validID(id) {
+		return nil, fmt.Errorf("invalid cron job id %q", id)
+	}
 	f, err := os.Open(filepath.Join(s.jobDir(id), "runs.jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

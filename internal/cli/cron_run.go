@@ -50,7 +50,7 @@ func cronRun(store *cron.Store, now func() time.Time, args []string, stdout io.W
 			if !selected(j) || j.NextRunAt.After(now()) {
 				continue
 			}
-			fireJob(store, now, j, stdout, exec)
+			fireJob(store, now, j, stdout, stderr, exec)
 		}
 	}
 
@@ -118,7 +118,9 @@ func reconcileOverdue(store *cron.Store, now func() time.Time, ids []string, std
 		if sched, perr := cron.Parse(j.Expr); perr == nil {
 			if nxt := sched.Next(now()); !nxt.IsZero() {
 				j.NextRunAt = nxt
-				_ = store.Update(j)
+				if err := store.Update(j); err != nil {
+					fmt.Fprintf(stderr, "warning: failed to reschedule %s: %v\n", j.ID, err)
+				}
 			}
 		}
 	}
@@ -127,7 +129,7 @@ func reconcileOverdue(store *cron.Store, now func() time.Time, ids []string, std
 // fireJob runs one job via the exec runner, records the outcome, advances the
 // schedule, and persists. The foreground loop is single-goroutine, so the
 // previous fire has already returned before the next tick — no overlap.
-func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Writer, exec execRunner) {
+func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Writer, stderr io.Writer, exec execRunner) {
 	fired := now()
 	args := []string{"exec", "--output-format", "stream-json", "--session-title", "cron:" + job.ID}
 	if job.Cwd != "" {
@@ -165,8 +167,12 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 	} else {
 		job.NextRunAt = nxt
 	}
-	_ = store.AppendRun(job.ID, rec)
-	_ = store.Update(job)
+	if err := store.AppendRun(job.ID, rec); err != nil {
+		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, err)
+	}
+	if err := store.Update(job); err != nil {
+		fmt.Fprintf(stderr, "warning: failed to persist job state for %s: %v\n", job.ID, err)
+	}
 	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(job.NextRunAt))
 }
 

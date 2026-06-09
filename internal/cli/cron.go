@@ -116,7 +116,11 @@ func cronAdd(store *cron.Store, now func() time.Time, args []string, stdout io.W
 			prompt = r.Prompt
 		}
 	}
-	if len(positional) > 0 && expr == "" {
+	if len(positional) > 1 {
+		fmt.Fprintf(stderr, "Unexpected extra arguments: %s\n", strings.Join(positional[1:], " "))
+		return exitUsage
+	}
+	if len(positional) == 1 && expr == "" {
 		expr = positional[0]
 	}
 	if expr == "" {
@@ -230,9 +234,19 @@ func cronResume(store *cron.Store, now func() time.Time, args []string, stderr i
 		return exitUsage
 	}
 	job.Status = cron.StatusActive
-	if sched, perr := cron.Parse(job.Expr); perr == nil {
-		job.NextRunAt = sched.Next(now())
+	// Don't reactivate a job whose schedule can't advance (corrupt expr or an
+	// impossible spec) — it would leave a stale/zero NextRunAt for the runner.
+	sched, perr := cron.Parse(job.Expr)
+	if perr != nil {
+		fmt.Fprintln(stderr, perr.Error())
+		return exitUsage
 	}
+	next := sched.Next(now())
+	if next.IsZero() {
+		fmt.Fprintln(stderr, "That schedule never fires.")
+		return exitUsage
+	}
+	job.NextRunAt = next
 	if err := store.Update(job); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return exitCrash
