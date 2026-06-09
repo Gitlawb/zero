@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -38,8 +41,9 @@ func TestFormatRepoInfoText(t *testing.T) {
 }
 
 func TestRunRepoInfoJSON(t *testing.T) {
+	dir := initTempGitRepo(t) // hermetic: do not depend on running inside a checkout
 	var stdout, stderr bytes.Buffer
-	code := runRepoInfo([]string{"--json"}, &stdout, &stderr, testRepoInfoDeps())
+	code := runRepoInfo([]string{"--json", "--cwd", dir}, &stdout, &stderr, testRepoInfoDeps())
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
@@ -50,6 +54,38 @@ func TestRunRepoInfoJSON(t *testing.T) {
 	if info["hasGit"] != true {
 		t.Fatalf("expected hasGit=true, got %v", info["hasGit"])
 	}
+	if info["primaryLanguage"] != "Go" {
+		t.Fatalf("expected primaryLanguage Go, got %v", info["primaryLanguage"])
+	}
+}
+
+// initTempGitRepo creates a throwaway git repo with a single Go file committed,
+// so the command can be exercised end-to-end without depending on the test being
+// run inside a git checkout.
+func initTempGitRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init")
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-m", "init")
+	return dir
 }
 
 func repoInfoTestData(age, contrib int) repoinfo.Info {

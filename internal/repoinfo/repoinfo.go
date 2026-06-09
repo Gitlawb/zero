@@ -3,7 +3,6 @@
 package repoinfo
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -81,7 +80,10 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 	}
 	dir := opts.Cwd
 
-	tree, err := run(ctx, dir, "ls-tree", "-r", "-l", "HEAD")
+	// -z gives NUL-terminated records with UNQUOTED paths; without it git wraps
+	// non-ASCII/special filenames in C-quoted "..." (core.quotePath), which would
+	// corrupt extension/tooling matching and silently drop those files.
+	tree, err := run(ctx, dir, "ls-tree", "-r", "-l", "-z", "HEAD")
 	if err != nil {
 		return Info{}, ErrNotGitRepo
 	}
@@ -94,19 +96,19 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 	cicdSet := map[string]bool{}
 	pkgDirs := map[string]bool{}
 	appDirs := map[string]bool{}
-	lastDir := ""
+	dirSet := map[string]bool{}
 	hasPackageJSON := false
 	hasCargoToml := false
 
-	scanner := bufio.NewScanner(strings.NewReader(tree))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		tab := strings.IndexByte(line, '\t')
+	for _, entry := range strings.Split(tree, "\x00") {
+		if entry == "" {
+			continue
+		}
+		tab := strings.IndexByte(entry, '\t')
 		if tab < 0 {
 			continue
 		}
-		fields := strings.Fields(line[:tab])
+		fields := strings.Fields(entry[:tab])
 		if len(fields) < 4 {
 			continue
 		}
@@ -114,16 +116,19 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 		if convErr != nil {
 			continue
 		}
-		filePath := line[tab+1:]
+		filePath := entry[tab+1:]
 		info.FileCount++
 
-		dirName := path.Dir(filePath)
-		if dirName != lastDir && dirName != "." {
-			info.DirectoryCount++
-			lastDir = dirName
-			if depth := strings.Count(filePath, "/"); depth > info.MaxDepth {
-				info.MaxDepth = depth
+		// Count every directory on the path to this file, including "passthrough"
+		// directories that hold only subdirectories: git ls-tree -r lists blobs
+		// only, so we expand each file's ancestors rather than count file parents.
+		if dirName := path.Dir(filePath); dirName != "." {
+			for d := dirName; d != "." && !dirSet[d]; d = path.Dir(d) {
+				dirSet[d] = true
 			}
+		}
+		if depth := strings.Count(filePath, "/"); depth > info.MaxDepth {
+			info.MaxDepth = depth
 		}
 
 		base := path.Base(filePath)
@@ -157,6 +162,8 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 			appDirs[sub] = true
 		}
 	}
+
+	info.DirectoryCount = len(dirSet)
 
 	// Total LOCEstimate is the SUM of the per-language estimates so the parts
 	// always add up to the whole (a single per-file truncation would not).
