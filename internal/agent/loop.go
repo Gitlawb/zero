@@ -903,15 +903,6 @@ func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
 	}
 }
 
-// toolDefinitions returns the full-schema tool list for a turn. It now delegates
-// to partitionTools with no loaded set; with deferral inactive (the only state
-// the bare toolDefinitions is used in) the exposed slice is byte-identical to the
-// pre-deferral output. Retained so existing callers/tests keep their signature.
-func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode, options Options) []zeroruntime.ToolDefinition {
-	exposed, _ := partitionTools(registry, permissionMode, options, map[string]bool{})
-	return exposed
-}
-
 // partitionTools builds the per-turn advertised tool list and an optional
 // deferred-tools reminder. INACTIVE (DeferThreshold <= 0 or the eligible count is
 // below it): every visible tool is exposed with its full schema EXCEPT tool_search

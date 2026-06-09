@@ -231,7 +231,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// permission mode and operator tool filters MUST match the values passed to
 	// agent.Run below so this registration gate counts the same population the
 	// loop's partition gate counts.
-	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, options.enabledTools, options.disabledTools)
+	// tool_search is the only way to reach a hidden deferred tool, so if the
+	// operator explicitly disables it, deferral must not activate at all —
+	// otherwise a positive threshold would hide tools behind a loader the run
+	// rejects (a dead-end). Force the effective threshold to 0 so this
+	// registration gate and agent.Run's partition gate agree the run is inactive.
+	effectiveDeferThreshold := resolved.Tools.DeferThreshold
+	if toolListContains(options.disabledTools, tools.ToolSearchToolName) {
+		effectiveDeferThreshold = 0
+	}
+	registerToolSearchIfEligible(registry, effectiveDeferThreshold, permissionMode, options.enabledTools, options.disabledTools)
 	images, err := resolveExecImages(options.imagePaths, workspaceRoot)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -396,7 +405,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
-		DeferThreshold:   resolved.Tools.DeferThreshold,
+		DeferThreshold:   effectiveDeferThreshold,
 		SessionID:        preparedSession.Session.SessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,
