@@ -35,7 +35,11 @@ func validateExecToolFilters(options execOptions, registry *tools.Registry) erro
 		if !toolNamePattern.MatchString(name) {
 			return execUsageError{fmt.Sprintf("Invalid tool name %q.", name)}
 		}
-		if _, ok := registry.Get(name); !ok {
+		// tool_search is registered later (only when deferral activates), so it is
+		// not in the registry yet at validation time. Treat it as always-valid so an
+		// operator can list it in --enabled-tools / --disabled-tools without a
+		// spurious "Unknown tool" error.
+		if _, ok := registry.Get(name); !ok && name != tools.ToolSearchToolName {
 			return execUsageError{fmt.Sprintf("Unknown tool: %s", name)}
 		}
 	}

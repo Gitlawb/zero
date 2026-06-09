@@ -14,6 +14,8 @@ import (
 
 const defaultMaxTurns = 12
 
+const defaultDeferThreshold = 10
+
 func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	cfg := FileConfig{
 		MaxTurns: defaultMaxTurns,
@@ -48,6 +50,13 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 
 	applyOverrides(&cfg, options.Overrides)
 
+	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
+		cfg.Tools.DeferThreshold = defaultDeferThreshold
+	}
+	if cfg.Tools.DeferThreshold < 0 {
+		return ResolvedConfig{}, fmt.Errorf("invalid tools.deferThreshold %d: must be >= 0", cfg.Tools.DeferThreshold)
+	}
+
 	if maxAutonomy := strings.TrimSpace(cfg.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		// Fail loud on an invalid ceiling. An unvalidated typo (e.g. "moderate")
 		// would otherwise survive Resolve untouched, reach the sandbox bridge,
@@ -70,6 +79,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		MaxTurns:       cfg.MaxTurns,
 		MCP:            cfg.MCP,
 		Sandbox:        cfg.Sandbox,
+		Tools:          cfg.Tools,
 	}, nil
 }
 
@@ -117,6 +127,10 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
 	}
+	if src.Tools.deferThresholdSet {
+		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
+		dst.Tools.deferThresholdSet = true
+	}
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -136,6 +150,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	mergeMCPConfig(&dst.MCP, src.MCP)
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
+	}
+	if src.Tools.deferThresholdSet {
+		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
+		dst.Tools.deferThresholdSet = true
 	}
 	return nil
 }
@@ -440,6 +458,10 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if maxAutonomy := strings.TrimSpace(overrides.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		cfg.Sandbox.MaxAutonomy = maxAutonomy
+	}
+	if overrides.Tools.deferThresholdSet || overrides.Tools.DeferThreshold != 0 {
+		cfg.Tools.DeferThreshold = overrides.Tools.DeferThreshold
+		cfg.Tools.deferThresholdSet = true
 	}
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)

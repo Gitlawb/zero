@@ -329,3 +329,47 @@ func TestRunWithOptionsLeavesCleanOutputUnchanged(t *testing.T) {
 		t.Fatalf("clean output altered: redacted=%v output=%q", res.Redacted, res.Output)
 	}
 }
+
+// fakeDeferredTool implements the optional Deferred() interface and reports
+// itself as deferred-eligible; fakePlainTool does not implement it.
+type fakeDeferredTool struct {
+	baseTool
+	deferred bool
+}
+
+func (tool fakeDeferredTool) Run(context.Context, map[string]any) Result {
+	return okResult("ok")
+}
+
+func (tool fakeDeferredTool) Deferred() bool { return tool.deferred }
+
+type fakePlainTool struct {
+	baseTool
+}
+
+func (tool fakePlainTool) Run(context.Context, map[string]any) Result {
+	return okResult("ok")
+}
+
+func TestIsDeferredReportsOptionalInterface(t *testing.T) {
+	eligible := fakeDeferredTool{
+		baseTool: baseTool{name: "eligible", description: "deferred-eligible tool"},
+		deferred: true,
+	}
+	if !IsDeferred(eligible) {
+		t.Fatal("IsDeferred(eligible) = false, want true for a tool whose Deferred() returns true")
+	}
+
+	notEligible := fakeDeferredTool{
+		baseTool: baseTool{name: "not_eligible", description: "implements interface but opts out"},
+		deferred: false,
+	}
+	if IsDeferred(notEligible) {
+		t.Fatal("IsDeferred(notEligible) = true, want false when Deferred() returns false")
+	}
+
+	plain := fakePlainTool{baseTool: baseTool{name: "plain", description: "no deferred interface"}}
+	if IsDeferred(plain) {
+		t.Fatal("IsDeferred(plain) = true, want false for a tool that does not implement deferredTool")
+	}
+}

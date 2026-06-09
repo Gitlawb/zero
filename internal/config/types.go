@@ -58,12 +58,43 @@ type SandboxConfig struct {
 	MaxAutonomy string `json:"maxAutonomy,omitempty"`
 }
 
+type ToolsConfig struct {
+	DeferThreshold    int `json:"deferThreshold,omitempty"`
+	deferThresholdSet bool
+}
+
+// ToolsOverride builds a ToolsConfig that explicitly overrides the deferred-tool
+// threshold (including to 0, which disables deferral). Use this for programmatic
+// Overrides — a bare ToolsConfig{DeferThreshold: 0} is indistinguishable from
+// "unset" and will not override.
+func ToolsOverride(deferThreshold int) ToolsConfig {
+	return ToolsConfig{DeferThreshold: deferThreshold, deferThresholdSet: true}
+}
+
+func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
+	type rawTools struct {
+		DeferThreshold *int `json:"deferThreshold"`
+	}
+	var raw rawTools
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	cfg.DeferThreshold = 0
+	cfg.deferThresholdSet = false
+	if raw.DeferThreshold != nil {
+		cfg.DeferThreshold = *raw.DeferThreshold
+		cfg.deferThresholdSet = true
+	}
+	return nil
+}
+
 type FileConfig struct {
 	ActiveProvider string            `json:"activeProvider,omitempty"`
 	Providers      []ProviderProfile `json:"providers,omitempty"`
 	MaxTurns       int               `json:"maxTurns,omitempty"`
 	MCP            MCPConfig         `json:"mcp,omitempty"`
 	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
+	Tools          ToolsConfig       `json:"tools,omitempty"`
 }
 
 type ResolveOptions struct {
@@ -81,6 +112,7 @@ type Overrides struct {
 	MaxTurns       int
 	MCP            MCPConfig
 	Sandbox        SandboxConfig
+	Tools          ToolsConfig
 }
 
 type ResolvedConfig struct {
@@ -90,6 +122,7 @@ type ResolvedConfig struct {
 	MaxTurns       int
 	MCP            MCPConfig
 	Sandbox        SandboxConfig
+	Tools          ToolsConfig
 }
 
 type MCPConfig struct {
@@ -114,6 +147,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		MaxTurns        int                        `json:"maxTurns"`
 		MCP             MCPConfig                  `json:"mcp"`
 		Sandbox         SandboxConfig              `json:"sandbox"`
+		Tools           ToolsConfig                `json:"tools"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -127,6 +161,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.MaxTurns = raw.MaxTurns
 	cfg.MCP = raw.MCP
 	cfg.Sandbox = raw.Sandbox
+	cfg.Tools = raw.Tools
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

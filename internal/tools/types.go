@@ -11,15 +11,16 @@ type Permission string
 type Status string
 
 const (
+	// SideEffectNone marks a control-only tool that neither reads nor mutates
+	// state — no read/write/shell/network/out-of-workspace effect. Examples:
+	// tool_search (only reports already-registered tool schemas) and
+	// escalate_model (only requests a loop-level model switch).
+	SideEffectNone           SideEffect = "none"
 	SideEffectRead           SideEffect = "read"
 	SideEffectWrite          SideEffect = "write"
 	SideEffectShell          SideEffect = "shell"
 	SideEffectNetwork        SideEffect = "network"
 	SideEffectOutOfWorkspace SideEffect = "out_of_workspace"
-	// SideEffectNone marks a control-only tool that performs no read/write/shell/
-	// network/out-of-workspace effect (e.g. escalate_model, whose only effect is a
-	// loop-level model switch the agent loop performs).
-	SideEffectNone SideEffect = "none"
 )
 
 const (

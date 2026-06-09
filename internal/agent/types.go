@@ -54,6 +54,10 @@ type ToolResult struct {
 	// DenialReason categorizes why a tool call was blocked (empty when it ran).
 	// It lets a surface distinguish the cause precisely instead of parsing Output.
 	DenialReason DenialCategory
+	// LoadedTools carries the deferred-tool names a tool_search call asked the
+	// loop to expose next turn (lifted from Meta["load_tools"]). nil for every
+	// ordinary tool result; only tool_search populates it.
+	LoadedTools []string
 	// RequestedModel is the model id a tool asked the loop to switch to for the
 	// rest of the run (lifted from the tool's Meta["escalate_to_model"]). Empty
 	// for every normal tool result; the Run loop performs the switch when it is
@@ -130,6 +134,12 @@ type AskUserResponse struct {
 
 type Options struct {
 	MaxTurns int
+	// DeferThreshold activates deferred MCP-tool loading: when the number of
+	// deferred-eligible visible tools is >= this value (and it is > 0), their
+	// full schemas are withheld and advertised as compact lines via tool_search.
+	// 0 (or below the eligible count) keeps every tool eager — byte-identical to
+	// the pre-deferral behavior.
+	DeferThreshold int
 	// Specialist/sub-agent metadata is carried through exec now and consumed by
 	// the specialist runtime in later slices.
 	SessionID        string
