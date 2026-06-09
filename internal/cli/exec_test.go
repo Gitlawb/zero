@@ -1799,6 +1799,20 @@ func TestParseExecNotifyConflict(t *testing.T) {
 	}
 }
 
+func TestParseExecNotifyInvalidValue(t *testing.T) {
+	for _, arg := range [][]string{{"--notify", "buzz", "hi"}, {"--notify=loud", "hi"}} {
+		if _, _, err := parseExecArgs(arg); err == nil {
+			t.Fatalf("expected error for invalid notify value in %v", arg)
+		}
+	}
+	// Valid values still parse.
+	for _, mode := range []string{"off", "bell", "notify", "both"} {
+		if _, _, err := parseExecArgs([]string{"--notify", mode, "hi"}); err != nil {
+			t.Fatalf("valid --notify %s rejected: %v", mode, err)
+		}
+	}
+}
+
 func TestExecNotifyModeResolution(t *testing.T) {
 	resolved := config.ResolvedConfig{Notify: config.NotifyConfig{Mode: "bell"}}
 	if got := execNotifyMode(execOptions{}, resolved); got != "bell" {

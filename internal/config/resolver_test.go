@@ -1286,7 +1286,7 @@ func TestResolveSandboxMaxAutonomyValidResolves(t *testing.T) {
 
 func TestResolveNotifyValid(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"mode":"both","focusMode":"always"}}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path})
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -1297,21 +1297,21 @@ func TestResolveNotifyValid(t *testing.T) {
 
 func TestResolveNotifyInvalidMode(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"mode":"buzz"}}`)
-	if _, err := Resolve(ResolveOptions{UserConfigPath: path}); err == nil {
+	if _, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}}); err == nil {
 		t.Fatal("expected error for invalid notify.mode")
 	}
 }
 
 func TestResolveNotifyInvalidFocusMode(t *testing.T) {
 	path := writeConfig(t, `{"notify":{"focusMode":"sideways"}}`)
-	if _, err := Resolve(ResolveOptions{UserConfigPath: path}); err == nil {
+	if _, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}}); err == nil {
 		t.Fatal("expected error for invalid notify.focusMode")
 	}
 }
 
 func TestResolveNotifyDefaultEmpty(t *testing.T) {
 	path := writeConfig(t, `{}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path})
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

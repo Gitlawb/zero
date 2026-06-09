@@ -363,6 +363,13 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 	if options.noNotify && options.notifyMode != "" {
 		return options, false, execUsageError{"Use either --notify or --no-notify, not both."}
 	}
+	if options.notifyMode != "" {
+		switch options.notifyMode {
+		case "off", "bell", "notify", "both":
+		default:
+			return options, false, execUsageError{fmt.Sprintf("invalid --notify %q. Expected off, bell, notify, or both.", options.notifyMode)}
+		}
+	}
 	if (options.resume != "" || options.resumeLatest) && options.fork != "" {
 		return options, false, execUsageError{"Use either --resume or --fork, not both."}
 	}

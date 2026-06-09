@@ -1131,7 +1131,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				// No interactive surface: let the loop degrade gracefully.
 				return agent.AskUserResponse{}, fmt.Errorf("ask_user prompt unavailable")
 			}
-			if m.notifier != nil {
+			// Only notify when there is actually something to answer — a request
+			// with no questions auto-resolves without ever prompting the user.
+			if m.notifier != nil && len(request.Questions) > 0 {
 				m.notifier.Notify(notify.AwaitingInput, notify.DefaultMessage(notify.AwaitingInput))
 			}
 			answerCh := make(chan []string, 1)
