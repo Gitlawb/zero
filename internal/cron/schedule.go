@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Schedule is a parsed 5-field cron expression. Field sets are bitsets over the
@@ -155,4 +156,55 @@ func parseValue(tok string, min, max int, names map[string]int) (int, error) {
 		return 0, fmt.Errorf("value %d out of range %d-%d", n, min, max)
 	}
 	return n, nil
+}
+
+const nextSearchYears = 5
+
+// Next returns the first scheduled instant strictly after `after`, evaluated in
+// after's location. It returns the zero time.Time if no match occurs within
+// nextSearchYears (an impossible schedule such as Feb 30).
+func (s Schedule) Next(after time.Time) time.Time {
+	loc := after.Location()
+	t := after.Truncate(time.Minute).Add(time.Minute)
+	yearCap := after.Year() + nextSearchYears
+	for t.Year() <= yearCap {
+		if !has(s.month, int(t.Month())) {
+			t = time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, loc) // first of next month
+			continue
+		}
+		if !s.dayMatches(t) {
+			t = time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, loc) // next day 00:00
+			continue
+		}
+		if !has(s.hour, t.Hour()) {
+			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+1, 0, 0, 0, loc) // next hour :00
+			continue
+		}
+		if !has(s.minute, t.Minute()) {
+			t = t.Add(time.Minute)
+			continue
+		}
+		return t
+	}
+	return time.Time{}
+}
+
+func has(set uint64, n int) bool { return set&(1<<uint(n)) != 0 }
+
+// dayMatches applies standard Vixie day-of-month / day-of-week semantics: when
+// both fields are restricted (neither was "*"), a day matches if EITHER matches;
+// otherwise only the restricted field constrains.
+func (s Schedule) dayMatches(t time.Time) bool {
+	domMatch := has(s.dom, t.Day())
+	dowMatch := has(s.dow, int(t.Weekday()))
+	switch {
+	case s.domStar && s.dowStar:
+		return true
+	case s.domStar:
+		return dowMatch
+	case s.dowStar:
+		return domMatch
+	default:
+		return domMatch || dowMatch
+	}
 }
