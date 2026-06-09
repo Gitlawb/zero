@@ -193,9 +193,21 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 	if remote, err := run(ctx, dir, "remote", "get-url", "origin"); err == nil {
 		info.RemoteURL = strings.TrimSpace(remote)
 	}
-	if first, err := run(ctx, dir, "log", "--reverse", "-1", "--format=%ct"); err == nil {
-		if ts, perr := strconv.ParseInt(strings.TrimSpace(first), 10, 64); perr == nil {
-			days := int((now.Unix() - ts) / 86400)
+	// Age = time since the FIRST commit. Use --max-parents=0 (root commits) — NOT
+	// `log --reverse -1`, where git applies the -1 limit BEFORE reversing and so
+	// returns the LATEST commit (age would always be ~0). Output is tiny (one root
+	// for a normal repo; take the oldest across multiple roots).
+	if roots, err := run(ctx, dir, "log", "--max-parents=0", "--format=%ct"); err == nil {
+		oldest, found := int64(0), false
+		for _, line := range strings.Split(roots, "\n") {
+			if ts, perr := strconv.ParseInt(strings.TrimSpace(line), 10, 64); perr == nil {
+				if !found || ts < oldest {
+					oldest, found = ts, true
+				}
+			}
+		}
+		if found {
+			days := int((now.Unix() - oldest) / 86400)
 			if days < 0 {
 				days = 0
 			}
