@@ -554,7 +554,7 @@ func (m model) transcriptView() string {
 		case m.pendingAskUser != nil:
 			builder.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
 		default:
-			builder.WriteString(zeroTheme.zero.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
+			builder.WriteString(zeroTheme.accent.Render("◇ zero") + "  " + zeroTheme.muted.Render("working…"))
 		}
 		builder.WriteString("\n")
 	}

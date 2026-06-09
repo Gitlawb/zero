@@ -70,23 +70,23 @@ func (m model) startupHeader(width int) string {
 	line := startupHeaderLine(width-4, []headerCandidate{
 		{
 			left: zeroTheme.accent.Render("ZERO") +
-				zeroTheme.muted.Render(" | cwd: ") + zeroTheme.text.Render(displayValue(m.cwd, "unknown")) +
-				zeroTheme.muted.Render(" | project: ") + zeroTheme.text.Render(project),
+				zeroTheme.muted.Render(" | cwd: ") + zeroTheme.ink.Render(displayValue(m.cwd, "unknown")) +
+				zeroTheme.muted.Render(" | project: ") + zeroTheme.ink.Render(project),
 			right: zeroTheme.muted.Render("status: ") + zeroTheme.green.Render("READY") +
 				zeroTheme.muted.Render(" | provider: ") + zeroTheme.accent.Render(provider) +
-				zeroTheme.text.Render(" / "+model),
+				zeroTheme.ink.Render(" / "+model),
 		},
 		{
 			left: zeroTheme.accent.Render("ZERO") +
-				zeroTheme.muted.Render(" | cwd: ") + zeroTheme.text.Render(displayValue(pathBaseName(m.cwd), "unknown")) +
-				zeroTheme.muted.Render(" | project: ") + zeroTheme.text.Render(project),
+				zeroTheme.muted.Render(" | cwd: ") + zeroTheme.ink.Render(displayValue(pathBaseName(m.cwd), "unknown")) +
+				zeroTheme.muted.Render(" | project: ") + zeroTheme.ink.Render(project),
 			right: zeroTheme.green.Render("READY") +
 				zeroTheme.muted.Render(" | provider: ") + zeroTheme.accent.Render(provider) +
-				zeroTheme.text.Render(" / "+model),
+				zeroTheme.ink.Render(" / "+model),
 		},
 		{
-			left:  zeroTheme.accent.Render("ZERO") + zeroTheme.muted.Render(" | ") + zeroTheme.text.Render(project),
-			right: zeroTheme.green.Render("READY") + zeroTheme.muted.Render(" | ") + zeroTheme.accent.Render(provider) + zeroTheme.text.Render("/"+model),
+			left:  zeroTheme.accent.Render("ZERO") + zeroTheme.muted.Render(" | ") + zeroTheme.ink.Render(project),
+			right: zeroTheme.green.Render("READY") + zeroTheme.muted.Render(" | ") + zeroTheme.accent.Render(provider) + zeroTheme.ink.Render("/"+model),
 		},
 		{
 			left:  zeroTheme.accent.Render("ZERO"),
@@ -142,9 +142,9 @@ func renderTwoToneLogo(line string) string {
 		case glyph == ' ':
 			builder.WriteByte(' ')
 		case logoShadowRunes[glyph]:
-			builder.WriteString(zeroTheme.logoDim.Render(string(glyph)))
+			builder.WriteString(zeroTheme.faintest.Render(string(glyph)))
 		default:
-			builder.WriteString(zeroTheme.logoBright.Render(string(glyph)))
+			builder.WriteString(zeroTheme.accent.Render(string(glyph)))
 		}
 	}
 	return builder.String()
@@ -154,7 +154,7 @@ func (m model) commandChips() string {
 	chips := startupCommandNames()
 	parts := make([]string, 0, len(chips))
 	for _, chip := range chips {
-		parts = append(parts, zeroTheme.border.Render("[ "+chip+" ]"))
+		parts = append(parts, zeroTheme.line.Render("[ "+chip+" ]"))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -178,14 +178,14 @@ func borderedBlock(width int, lines []string) string {
 	}
 
 	rule := strings.Repeat("─", width-2)
-	top := zeroTheme.border.Render("╭" + rule + "╮")
-	bottom := zeroTheme.border.Render("╰" + rule + "╯")
+	top := zeroTheme.line.Render("╭" + rule + "╮")
+	bottom := zeroTheme.line.Render("╰" + rule + "╯")
 	body := make([]string, 0, len(lines)+2)
 	body = append(body, top)
 	for _, line := range lines {
 		available := width - 4
 		fitted := fitStyledLine(line, available)
-		body = append(body, zeroTheme.border.Render("│ ")+fitted+strings.Repeat(" ", maxInt(0, available-lipgloss.Width(fitted)))+zeroTheme.border.Render(" │"))
+		body = append(body, zeroTheme.line.Render("│ ")+fitted+strings.Repeat(" ", maxInt(0, available-lipgloss.Width(fitted)))+zeroTheme.line.Render(" │"))
 	}
 	body = append(body, bottom)
 	return strings.Join(body, "\n")

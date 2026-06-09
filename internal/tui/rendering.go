@@ -117,13 +117,13 @@ func renderRow(row transcriptRow, width int) string {
 	case rowWelcome:
 		return zeroTheme.muted.Render(row.text)
 	case rowUser:
-		return zeroTheme.you.Render("▍ you") + "\n" + indentText(zeroTheme.text.Render(row.text), 2)
+		return zeroTheme.userPrompt.Render("▍ you") + "\n" + indentText(zeroTheme.ink.Render(row.text), 2)
 	case rowAssistant:
-		return zeroTheme.zero.Render("◇ zero") + "\n" + indentText(zeroTheme.text.Render(row.text), 2)
+		return zeroTheme.accent.Render("◇ zero") + "\n" + indentText(zeroTheme.ink.Render(row.text), 2)
 	case rowSystem:
-		return indentText(zeroTheme.text.Render(row.text), 2)
+		return indentText(zeroTheme.ink.Render(row.text), 2)
 	case rowError:
-		return zeroTheme.red.Render("✗ ") + zeroTheme.text.Render(row.text)
+		return zeroTheme.red.Render("✗ ") + zeroTheme.ink.Render(row.text)
 	case rowToolCall:
 		return renderToolCallRow(row)
 	case rowToolResult:
@@ -138,7 +138,7 @@ func renderRow(row transcriptRow, width int) string {
 }
 
 func renderAskUserRow(row transcriptRow) string {
-	line := zeroTheme.zero.Render("ask zero") + "  " + zeroTheme.text.Render(strings.TrimPrefix(row.text, "ask_user: "))
+	line := zeroTheme.accent.Render("ask zero") + "  " + zeroTheme.ink.Render(strings.TrimPrefix(row.text, "ask_user: "))
 	if detail := strings.TrimSpace(row.detail); detail != "" {
 		line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
 	}
@@ -150,9 +150,9 @@ func renderToolCallRow(row transcriptRow) string {
 	if name == "" {
 		name = strings.TrimPrefix(row.text, "tool call: ")
 	}
-	line := zeroTheme.tool.Render("▸ ") + zeroTheme.text.Render(name)
+	line := zeroTheme.faint.Render("▸ ") + zeroTheme.toolName.Render(name)
 	if hint := strings.TrimSpace(row.detail); hint != "" {
-		line += "  " + zeroTheme.muted.Render(hint)
+		line += "  " + zeroTheme.toolArg.Render(hint)
 	}
 	return line
 }
@@ -160,7 +160,7 @@ func renderToolCallRow(row transcriptRow) string {
 func renderPermissionRow(row transcriptRow) string {
 	event := row.permission
 	if event == nil {
-		return zeroTheme.amber.Render("permission") + "  " + zeroTheme.text.Render(row.text)
+		return zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(row.text)
 	}
 
 	name := event.ToolName
@@ -184,7 +184,7 @@ func renderPermissionRow(row transcriptRow) string {
 		actionStyle = zeroTheme.amber
 	}
 
-	line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.text.Render(name) + "  " + actionStyle.Render(actionLabel)
+	line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + actionStyle.Render(actionLabel)
 	if event.Risk.Level != "" {
 		line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
 	}
@@ -203,10 +203,10 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) s
 		name = "tool"
 	}
 
-	header := zeroTheme.amber.Render("permission required") + "  " + zeroTheme.text.Render(name)
-	choices := zeroTheme.text.Render("[a] allow") + "  " +
-		zeroTheme.text.Render("[d] deny") + "  " +
-		zeroTheme.text.Render("[y] always")
+	header := zeroTheme.amber.Render("permission required") + "  " + zeroTheme.ink.Render(name)
+	choices := zeroTheme.ink.Render("[a] allow") + "  " +
+		zeroTheme.ink.Render("[d] deny") + "  " +
+		zeroTheme.ink.Render("[y] always")
 
 	details := []string{}
 	if request.Risk.Level != "" {
@@ -237,16 +237,16 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width
 	}
 
 	lines := []string{}
-	heading := zeroTheme.zero.Render("ask zero")
+	heading := zeroTheme.accent.Render("ask zero")
 	if header := strings.TrimSpace(prompt.request.Header); header != "" {
-		heading += "  " + zeroTheme.text.Render(header)
+		heading += "  " + zeroTheme.ink.Render(header)
 	}
 	lines = append(lines, heading)
 
 	if total > 0 {
 		question := questions[index]
 		lines = append(lines, zeroTheme.muted.Render(fmt.Sprintf("question %d of %d", index+1, total)))
-		lines = append(lines, zeroTheme.text.Render(question.Question))
+		lines = append(lines, zeroTheme.ink.Render(question.Question))
 		if len(question.Options) > 0 {
 			lines = append(lines, zeroTheme.muted.Render("options: "+strings.Join(question.Options, ", ")))
 		}
@@ -267,7 +267,7 @@ func renderToolResultRow(row transcriptRow, width int) string {
 		icon = zeroTheme.red.Render("✗")
 	}
 
-	line := zeroTheme.tool.Render("▸ ") + zeroTheme.text.Render(name) + "  " + icon
+	line := zeroTheme.faint.Render("▸ ") + zeroTheme.toolName.Render(name) + "  " + icon
 
 	// A diff card already shows the change in full, so skip the flattened
 	// one-line summary in that case to avoid duplicating the content.

@@ -252,7 +252,7 @@ func cloneToolRegistry(registry *tools.Registry) *tools.Registry {
 
 func renderFocusedSpecReviewPrompt(review pendingSpecReviewPrompt, width int) string {
 	lines := []string{
-		zeroTheme.zero.Render("◇ spec review"),
+		zeroTheme.accent.Render("◇ spec review"),
 		"path: " + reviewDisplayPath(review),
 		"[a] approve  [r] reject  [e] edit file  [esc] cancel",
 	}

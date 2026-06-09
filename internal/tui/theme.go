@@ -2,33 +2,64 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// tuiTheme is the single source of truth for Zero's terminal palette. Colors are
-// truecolor hex so the brand cyan renders consistently across terminals; lipgloss
-// downsamples automatically on limited displays and renders plain text when there
-// is no TTY (e.g. during tests).
+// tuiTheme is the single source of truth for Zero's terminal palette — the
+// Lime design: a near-black chat surface with one lime accent (the terminal
+// translation of docs/design/zero_tui_lime.html). Colors are truecolor hex so
+// the palette renders consistently across terminals; lipgloss downsamples
+// automatically on limited displays and renders plain text when there is no
+// TTY (e.g. during tests). Every renderer consumes these named styles — no hex
+// literal may appear outside this file.
 type tuiTheme struct {
-	// Brand + structure.
-	accent lipgloss.Style // bright brand cyan, bold
-	border lipgloss.Style // dim cyan rules / frames
-	text   lipgloss.Style // primary foreground
-	muted  lipgloss.Style // secondary / hints
-	green  lipgloss.Style // success / ready
-	red    lipgloss.Style // errors
-	amber  lipgloss.Style // warnings / context pressure
+	// Base tokens.
+	ink      lipgloss.Style // primary text
+	muted    lipgloss.Style // secondary text, assistant interim prose
+	faint    lipgloss.Style // hints, metadata
+	faintest lipgloss.Style // line numbers, separators, tool args
+	accent   lipgloss.Style // brand lime: prompts, spinner, focus, final rail
+	green    lipgloss.Style // success, diff add sign, ✓
+	red      lipgloss.Style // errors, diff del sign, ✗, deny
+	amber    lipgloss.Style // permission surfaces, warnings, auto badge
+	blue     lipgloss.Style // grep file locations, local-model dot
+	line     lipgloss.Style // default borders, rules, status separators
+	line2    lipgloss.Style // emphasized borders
 
-	// Two-tone logo.
-	logoBright lipgloss.Style // solid block strokes
-	logoDim    lipgloss.Style // drop-shadow strokes
+	// Title bar.
+	badge lipgloss.Style // ` 0 ` brand chip: onAccent on accent, bold
 
-	// Conversation roles.
-	you  lipgloss.Style // user gutter
-	zero lipgloss.Style // assistant gutter
-	tool lipgloss.Style // tool glyph / name
+	// Stream roles.
+	userPrompt lipgloss.Style // ❯ user gutter, accent bold
+	sayText    lipgloss.Style // assistant interim prose, muted
+	finalRail  lipgloss.Style // │ gutter rail on the final answer, accent
 
-	// Diff cards.
-	diffAdd  lipgloss.Style
-	diffDel  lipgloss.Style
-	diffMeta lipgloss.Style
+	// Tool cards.
+	toolName   lipgloss.Style // head-row tool name, ink bold
+	toolTarget lipgloss.Style // head-row target path, muted
+	toolArg    lipgloss.Style // one-line arg hint, faintest
+	autoTag    lipgloss.Style // `auto` auto-approval marker, amber
+	cardRun    lipgloss.Style // card border while the call runs (accent-mixed)
+	cardErr    lipgloss.Style // card border after an error (red-mixed)
+	bashPrompt lipgloss.Style // ❯ command gutter inside bash cards, accent bold
+	grepLoc    lipgloss.Style // file:line locations in grep bodies, blue
+
+	// Diff bodies. The sign/count styles are bare foregrounds; the line styles
+	// carry the tinted backgrounds standing in for the prototype's 9% overlays.
+	diffAdd  lipgloss.Style // + sign column, +N counts
+	diffDel  lipgloss.Style // − sign column, −N counts
+	diffMeta lipgloss.Style // @@ hunks, +++/--- headers
+	addLine  lipgloss.Style // added-line text: addInk on addBg
+	delLine  lipgloss.Style // deleted-line text: delInk on delBg
+
+	// Permission surfaces.
+	permBadge lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	permRisk  lipgloss.Style // risk: <level> readout, amber
+	permBg    lipgloss.Style // permission card body tint
+
+	// Overlays.
+	selRow lipgloss.Style // selected picker/suggestion row, on selBg
+
+	// Status line.
+	statusOk  lipgloss.Style // ✓ / healthy segments
+	statusErr lipgloss.Style // ✗ / failing segments
 
 	// Permission modes.
 	modeAuto   lipgloss.Style
@@ -36,38 +67,80 @@ type tuiTheme struct {
 	modeUnsafe lipgloss.Style
 }
 
+// The Lime token table. bg (#070708) is the terminal's own canvas — it is
+// deliberately never painted full-bleed, so no style references it. Terminals
+// cannot alpha-blend or glow: the four solid tint tokens (addBg/delBg/permBg/
+// selBg) ARE the translation of the prototype's rgba overlays, and the two
+// card-border mixes stand in for its focus glow. All tints stay darker than
+// ink so every pairing survives 256-color downsampling.
 const (
-	colorCyanBright = "#34E2EA"
-	colorCyanSoft   = "#5EC8D8"
-	colorCyanDim    = "#1F6E78"
-	colorBorder     = "#2C6E78"
-	colorText       = "#DCE2EA"
-	colorMuted      = "#6C7682"
-	colorGreen      = "#43D17A"
-	colorRed        = "#F2616B"
-	colorAmber      = "#E8B84B"
-	colorToolName   = "#9BA6B2"
+	colorPanel    = "#0e0e10" // card backgrounds
+	colorPanel2   = "#121215" // card header rows, picker rows
+	colorPanel3   = "#17171b" // selected/hovered row bg
+	colorLine     = "#242429" // default borders, rules
+	colorLine2    = "#2e2e34" // emphasized borders
+	colorInk      = "#ececee" // primary text
+	colorMuted    = "#8b8b93" // secondary text
+	colorFaint    = "#5b5b63" // hints, metadata
+	colorFaintest = "#3a3a40" // line numbers, separators, tool args
+	colorAccent   = "#caff3f" // brand lime
+	colorGreen    = "#5dd1a4" // success, diff add
+	colorRed      = "#ff7a7a" // errors, diff del
+	colorAmber    = "#ffc25c" // permission, warnings
+	colorBlue     = "#7db4ff" // grep locations, local-model dot
+	colorAddBg    = "#15201d" // diff added-line bg (green @9% over panel)
+	colorDelBg    = "#241819" // diff deleted-line bg (red @9%)
+	colorPermBg   = "#1c1915" // permission card bg (amber @6%)
+	colorSelBg    = "#1d2114" // selected row bg (accent @8%)
+	colorAddInk   = "#bdeed7" // added-line text
+	colorDelInk   = "#f2c4c4" // deleted-line text
+	colorOnAccent = "#000000" // text on accent or amber fills
+	colorCardRun  = "#5a6b2e" // running card border (accent mixed into line)
+	colorCardErr  = "#6b3434" // errored card border (red mixed into line)
 )
 
 var zeroTheme = tuiTheme{
-	accent: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCyanBright)).Bold(true),
-	border: lipgloss.NewStyle().Foreground(lipgloss.Color(colorBorder)),
-	text:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)),
-	muted:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
-	green:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true),
-	red:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)).Bold(true),
-	amber:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
+	ink:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk)),
+	muted:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+	faint:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaint)),
+	faintest: lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
+	accent:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
+	green:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
+	red:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
+	amber:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
+	blue:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
+	line:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine)),
+	line2:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine2)),
 
-	logoBright: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCyanBright)).Bold(true),
-	logoDim:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorCyanDim)),
+	badge: lipgloss.NewStyle().Background(lipgloss.Color(colorAccent)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
 
-	you:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorCyanSoft)).Bold(true),
-	zero: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCyanBright)).Bold(true),
-	tool: lipgloss.NewStyle().Foreground(lipgloss.Color(colorToolName)),
+	userPrompt: lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
+	sayText:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+	finalRail:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)),
+
+	toolName:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk)).Bold(true),
+	toolTarget: lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+	toolArg:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
+	autoTag:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
+	cardRun:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorCardRun)),
+	cardErr:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorCardErr)),
+	bashPrompt: lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
+	grepLoc:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
 
 	diffAdd:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
 	diffDel:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
-	diffMeta: lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+	diffMeta: lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
+	addLine:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAddInk)).Background(lipgloss.Color(colorAddBg)),
+	delLine:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorDelInk)).Background(lipgloss.Color(colorDelBg)),
+
+	permBadge: lipgloss.NewStyle().Background(lipgloss.Color(colorAmber)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
+	permRisk:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
+	permBg:    lipgloss.NewStyle().Background(lipgloss.Color(colorPermBg)),
+
+	selRow: lipgloss.NewStyle().Background(lipgloss.Color(colorSelBg)),
+
+	statusOk:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
+	statusErr: lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
 
 	modeAuto:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true),
 	modeAsk:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)).Bold(true),

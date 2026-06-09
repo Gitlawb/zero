@@ -18,14 +18,14 @@ import (
 func (m model) headerBar(width int) string {
 	left := strings.Join(nonEmpty([]string{
 		zeroTheme.accent.Render("zero"),
-		zeroTheme.text.Render(shortenPath(m.cwd)),
+		zeroTheme.ink.Render(shortenPath(m.cwd)),
 		branchSegment(m.gitBranch),
 		m.providerSegment(),
 	}), zeroTheme.muted.Render(" · "))
 
 	right := m.stateSegment()
 	line := joinHeaderLine(left, right, width)
-	rule := zeroTheme.border.Render(strings.Repeat("─", width))
+	rule := zeroTheme.line.Render(strings.Repeat("─", width))
 	return line + "\n" + rule
 }
 
@@ -39,9 +39,9 @@ func (m model) providerSegment() string {
 		return zeroTheme.accent.Render(provider)
 	}
 	if provider == "" {
-		return zeroTheme.text.Render(model)
+		return zeroTheme.ink.Render(model)
 	}
-	return zeroTheme.accent.Render(provider) + zeroTheme.muted.Render("/") + zeroTheme.text.Render(model)
+	return zeroTheme.accent.Render(provider) + zeroTheme.muted.Render("/") + zeroTheme.ink.Render(model)
 }
 
 func (m model) stateSegment() string {
@@ -112,9 +112,9 @@ func (m model) usageSegment() string {
 	model := displayValue(m.modelName, "no model")
 	usage := m.usageStatusSegment()
 	if usage == "" {
-		return zeroTheme.text.Render(model)
+		return zeroTheme.ink.Render(model)
 	}
-	return zeroTheme.text.Render(model) + zeroTheme.muted.Render(" · "+usage)
+	return zeroTheme.ink.Render(model) + zeroTheme.muted.Render(" · "+usage)
 }
 
 func (m model) usageStatusSegment() string {
@@ -238,7 +238,7 @@ func (m model) suggestionOverlay(width int) string {
 	for index, s := range m.suggestions {
 		pad := strings.Repeat(" ", maxInt(0, nameWidth-lipgloss.Width(s.Name)))
 		marker := "  "
-		name := zeroTheme.text.Render(s.Name)
+		name := zeroTheme.ink.Render(s.Name)
 		if index == m.suggestionIdx {
 			marker = zeroTheme.accent.Render("› ")
 			name = zeroTheme.accent.Render(s.Name)
@@ -259,7 +259,7 @@ func (m model) pickerOverlay(width int) string {
 	lines = append(lines, zeroTheme.accent.Render(m.picker.title)+zeroTheme.muted.Render("  ↑/↓ move · ⏎ select · esc cancel"))
 	for index, item := range m.picker.items {
 		marker := "  "
-		label := zeroTheme.text.Render(item.Label)
+		label := zeroTheme.ink.Render(item.Label)
 		if index == m.picker.selected {
 			marker = zeroTheme.accent.Render("› ")
 			label = zeroTheme.accent.Render(item.Label)
@@ -355,9 +355,9 @@ func titledCard(title string, body []string, width int) string {
 	if remaining < 0 {
 		remaining = 0
 	}
-	top := zeroTheme.border.Render("╭─ ") +
-		zeroTheme.text.Render(title) +
-		zeroTheme.border.Render(" "+strings.Repeat("─", remaining)+"╮")
+	top := zeroTheme.line.Render("╭─ ") +
+		zeroTheme.ink.Render(title) +
+		zeroTheme.line.Render(" "+strings.Repeat("─", remaining)+"╮")
 
 	lines := make([]string, 0, len(body)+2)
 	lines = append(lines, top)
@@ -367,9 +367,9 @@ func titledCard(title string, body []string, width int) string {
 		if pad < 0 {
 			pad = 0
 		}
-		lines = append(lines, zeroTheme.border.Render("│ ")+line+strings.Repeat(" ", pad)+zeroTheme.border.Render(" │"))
+		lines = append(lines, zeroTheme.line.Render("│ ")+line+strings.Repeat(" ", pad)+zeroTheme.line.Render(" │"))
 	}
-	lines = append(lines, zeroTheme.border.Render("╰"+strings.Repeat("─", width-2)+"╯"))
+	lines = append(lines, zeroTheme.line.Render("╰"+strings.Repeat("─", width-2)+"╯"))
 	return strings.Join(lines, "\n")
 }
 
