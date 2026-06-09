@@ -268,7 +268,11 @@ func newModel(ctx context.Context, options Options) model {
 
 const (
 	composerPlaceholderIdle    = "describe a task for zero…"
-	composerPlaceholderRunning = "running… ctrl+c to interrupt"
+	// Esc is the run-interrupt key; Ctrl+C quits the whole app (after the
+	// cancelled run's checkpoint flush). The spec mock said "ctrl+c to
+	// interrupt", but advertising a quit keystroke as an interrupt would teach
+	// users to lose their session — the hint follows the actual binding.
+	composerPlaceholderRunning = "running… esc to interrupt"
 )
 
 // emptyStateSuggestions are the three starter prompts offered on the empty
@@ -407,7 +411,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// On the empty chat surface a bare 1–3 keypress (composer empty, no modal)
 		// inserts the matching starter suggestion instead of typing the digit.
-		if m.transcriptEmpty() && strings.TrimSpace(m.input.Value()) == "" {
+		// !pending mirrors the render condition exactly — the chips are off
+		// screen during a run (e.g. after /clear mid-run), so digits must type.
+		if m.transcriptEmpty() && !m.pending && strings.TrimSpace(m.input.Value()) == "" {
 			if k := msg.String(); len(k) == 1 && k >= "1" && k <= "3" {
 				if index := int(k[0] - '1'); index < len(emptyStateSuggestions) {
 					m.input.SetValue(emptyStateSuggestions[index])
@@ -823,7 +829,10 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	command := parseCommand(m.input.Value())
-	if command.kind == commandPrompt && m.pending {
+	// While exiting (Ctrl+C waiting on the cancelled run's checkpoint flush) a
+	// new run must not start: the deferred tea.Quit would abort it mid-flight
+	// and orphan its checkpoint blobs — the exact loss flushRunIDs prevents.
+	if command.kind == commandPrompt && (m.pending || m.exiting) {
 		return m, nil
 	}
 	m.input.SetValue("")
@@ -1072,6 +1081,9 @@ func (m *model) cancelRun() {
 	m.activeRunID = 0
 	m.pendingPermission = nil
 	m.pendingAskUser = nil
+	// The interim block renders streamingText live; a cancelled run's partial
+	// answer must not leak into (and concatenate with) the next turn's stream.
+	m.streamingText = ""
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {
@@ -1194,6 +1206,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				text:   "tool call: " + call.Name,
 				tool:   call.Name,
 				detail: argHint(call.Arguments),
+				arg:    argHintSecondary(call.Arguments),
+				runID:  runID,
 			}
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)

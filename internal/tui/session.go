@@ -213,6 +213,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				text:   "tool call: " + name,
 				tool:   name,
 				detail: argHint(payloadString(payload, "arguments")),
+				arg:    argHintSecondary(payloadString(payload, "arguments")),
 			})
 		case sessions.EventPermission, sessions.EventPermissionRequest, sessions.EventPermissionDecision:
 			rows = append(rows, permissionTranscriptRow(permissionEventFromPayload(payload)))

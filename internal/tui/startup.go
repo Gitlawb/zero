@@ -142,7 +142,13 @@ func startupHeaderLine(width int, candidates []headerCandidate) string {
 			return line
 		}
 	}
-	return zeroTheme.accent.Render("ZERO") + strings.Repeat(" ", maxInt(1, width-10)) + zeroTheme.green.Render("READY")
+	// Nothing fits whole: truncate the most minimal candidate rather than
+	// inventing different content.
+	if len(candidates) == 0 {
+		return ""
+	}
+	last := candidates[len(candidates)-1]
+	return fitStyledLine(joinHeaderLine(last.left, last.right, width), width)
 }
 
 func centerLine(line string, width int) string {

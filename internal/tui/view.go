@@ -274,6 +274,22 @@ func (m model) pickerOverlay(width int) string {
 // argHint extracts the most representative argument from a tool call's raw JSON
 // arguments for the single-line tool row (the path, pattern, or command acted on).
 func argHint(raw string) string {
+	return firstArgValue(raw, []string{"path", "file", "file_path", "filepath", "pattern", "query", "command", "cmd", "url"})
+}
+
+// argHintSecondary extracts the card head's faintest arg column: the
+// non-target argument (pattern/query/command) when argHint already resolved to
+// a path. With no path argument the value is argHint itself, so it stays in
+// the target slot and this returns "".
+func argHintSecondary(raw string) string {
+	secondary := firstArgValue(raw, []string{"pattern", "query", "command", "cmd", "url"})
+	if secondary == "" || secondary == argHint(raw) {
+		return ""
+	}
+	return secondary
+}
+
+func firstArgValue(raw string, keys []string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "{}" {
 		return ""
@@ -282,7 +298,7 @@ func argHint(raw string) string {
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
 		return ""
 	}
-	for _, key := range []string{"path", "file", "file_path", "filepath", "pattern", "query", "command", "cmd", "url"} {
+	for _, key := range keys {
 		if value, ok := args[key]; ok {
 			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
 				return strings.TrimSpace(text)

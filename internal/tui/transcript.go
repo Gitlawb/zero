@@ -30,6 +30,8 @@ type transcriptRow struct {
 	tool       string       // tool name, for tool call/result rows
 	status     tools.Status // result status, for tool result rows
 	detail     string       // raw multi-line output (e.g. a diff to render as a card)
+	arg        string       // secondary argument hint (pattern/command), for tool call rows
+	runID      int          // owning run, for tool call rows (0 = rehydrated/unknown)
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
 

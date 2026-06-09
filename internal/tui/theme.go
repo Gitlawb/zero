@@ -64,6 +64,9 @@ type tuiTheme struct {
 
 	// Overlays.
 	selRow lipgloss.Style // selected picker/suggestion row, on selBg
+	// Surfaces.
+	panel  lipgloss.Style // bare panel background (card padding, body fill)
+	panel2 lipgloss.Style // bare panel2 background (header/picker rows)
 
 	// Status line.
 	statusOk  lipgloss.Style // ✓ / healthy segments
@@ -152,10 +155,21 @@ var zeroTheme = tuiTheme{
 
 	selRow: lipgloss.NewStyle().Background(lipgloss.Color(colorSelBg)),
 
+	panel:  lipgloss.NewStyle().Background(lipgloss.Color(colorPanel)),
+	panel2: lipgloss.NewStyle().Background(lipgloss.Color(colorPanel2)),
+
 	statusOk:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
 	statusErr: lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
 
 	modeAuto:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true),
 	modeAsk:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)).Bold(true),
 	modeUnsafe: lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)).Bold(true),
+}
+
+// onPanel returns a copy of style that paints on the panel surface. lipgloss
+// resets the background between adjacent Render calls, so every segment of a
+// panel row (including padding) must carry the background itself — renderers
+// wrap their foreground styles through this instead of referencing hex.
+func (t tuiTheme) onPanel(style lipgloss.Style) lipgloss.Style {
+	return style.Background(lipgloss.Color(colorPanel))
 }

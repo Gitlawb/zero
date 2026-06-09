@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -118,11 +119,12 @@ func formatCommandFooterText(commands []commandDefinition, pending bool) string 
 
 // rowContext carries the cross-row knowledge renderRow needs: which tool
 // calls already have results (their call rows collapse into the result card),
-// each call's argument hint for the card head, and which calls were
+// each call's argument hints for the card head, and which calls were
 // auto-approved (by permission mode or a stored grant).
 type rowContext struct {
 	resolved map[string]bool
 	hints    map[string]string
+	args     map[string]string
 	auto     map[string]bool
 }
 
@@ -130,6 +132,7 @@ func buildRowContext(rows []transcriptRow) rowContext {
 	rc := rowContext{
 		resolved: map[string]bool{},
 		hints:    map[string]string{},
+		args:     map[string]string{},
 		auto:     map[string]bool{},
 	}
 	prompted := map[string]bool{}
@@ -138,6 +141,7 @@ func buildRowContext(rows []transcriptRow) rowContext {
 		case rowToolCall:
 			if row.id != "" {
 				rc.hints[row.id] = strings.TrimSpace(row.detail)
+				rc.args[row.id] = strings.TrimSpace(row.arg)
 			}
 		case rowToolResult:
 			if row.id != "" {
@@ -154,8 +158,9 @@ func buildRowContext(rows []transcriptRow) rowContext {
 				delete(rc.auto, event.ToolCallID)
 			case agent.PermissionActionAllow:
 				// "auto" means approved without asking: a mode/policy allow or a
-				// stored grant. An allow that followed a prompt was a manual decision.
-				if event.GrantMatched || !prompted[event.ToolCallID] {
+				// stored grant match. Any allow that followed a prompt — including a
+				// first-time "always" — was a manual decision, not auto.
+				if !prompted[event.ToolCallID] {
 					rc.auto[event.ToolCallID] = true
 				}
 			}
@@ -227,9 +232,9 @@ func wrapPlainText(text string, measure int) []string {
 					out = append(out, line)
 					line = ""
 				}
-				runes := []rune(word)
-				out = append(out, string(runes[:measure]))
-				word = string(runes[measure:])
+				head, tail := splitAtWidth(word, measure)
+				out = append(out, head)
+				word = tail
 			}
 			switch {
 			case line == "":
@@ -246,6 +251,26 @@ func wrapPlainText(text string, measure int) []string {
 		}
 	}
 	return out
+}
+
+// splitAtWidth cuts text at the largest rune boundary whose display width
+// fits the measure. CJK and emoji runes are double-width, so slicing by rune
+// count would either panic or emit lines up to twice the measure.
+func splitAtWidth(text string, measure int) (string, string) {
+	used := 0
+	for index, glyph := range text {
+		glyphWidth := lipgloss.Width(string(glyph))
+		if used+glyphWidth > measure {
+			if index == 0 {
+				// A single glyph wider than the measure still has to go somewhere.
+				_, size := utf8.DecodeRuneInString(text)
+				return text[:size], text[size:]
+			}
+			return text[:index], text[index:]
+		}
+		used += glyphWidth
+	}
+	return text, ""
 }
 
 func renderUserRow(row transcriptRow, width int) string {
@@ -301,10 +326,10 @@ func doneLine(row transcriptRow, failed bool) string {
 	return glyph + " " + strings.Join(segments, zeroTheme.faintest.Render(" · "))
 }
 
-// renderSystemNote draws a system notice as a bordered note: faint text
-// inside a line border. Content is passed through unchanged.
+// renderSystemNote draws a system notice as a bordered note: faint text on
+// the panel surface inside a line border. Content is passed through unchanged.
 func renderSystemNote(text string, width int) string {
-	return noteBox(text, width, zeroTheme.line, zeroTheme.faint)
+	return noteBox(text, width, zeroTheme.line, zeroTheme.onPanel(zeroTheme.faint))
 }
 
 func renderErrorRow(row transcriptRow, width int) string {
@@ -448,20 +473,25 @@ type cardBody struct {
 }
 
 // renderRunningToolCard draws the head-only card for a tool call that has no
-// result yet: spinner glyph while the run is live, a static placeholder when
-// rehydrated from history.
+// result yet: spinner glyph while ITS run is live, a static placeholder for
+// orphans (cancelled/errored turns, rehydrated history) — keying off the
+// global pending flag alone would re-animate dead cards on every later run.
 func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext) string {
 	glyph := zeroTheme.faintest.Render("…")
-	if m.pending {
+	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
 		glyph = m.spinner.View()
 	}
-	// The call row carries its own argHint in detail; rc.hints only matters for
+	// The call row carries its own argHints; rc.hints/args only matter for
 	// result rows, whose detail is the tool output.
 	hint := strings.TrimSpace(row.detail)
 	if hint == "" {
 		hint = rc.hints[row.id]
 	}
-	head := toolCardHead(toolRowName(row), hint, "", glyph, rc.auto[row.id], width)
+	arg := strings.TrimSpace(row.arg)
+	if arg == "" {
+		arg = rc.args[row.id]
+	}
+	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[row.id], width)
 	return toolCard(head, nil, "", zeroTheme.cardRun, width)
 }
 
@@ -475,7 +505,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext) string {
 		borderStyle = zeroTheme.cardErr
 	}
 	body := toolCardBody(name, rc.hints[row.id], row.detail, width)
-	head := toolCardHead(name, rc.hints[row.id], body.headTag, glyph, rc.auto[row.id], width)
+	head := toolCardHead(name, rc.hints[row.id], rc.args[row.id], body.headTag, glyph, rc.auto[row.id], width)
 	return toolCard(head, body.lines, body.footer, borderStyle, width)
 }
 
@@ -488,11 +518,15 @@ func toolRowName(row transcriptRow) string {
 }
 
 // toolCardHead composes the border-embedded head: tool name, middle-truncated
-// target, optional extra tag, the auto marker, and the status glyph.
-func toolCardHead(name string, target string, headTag string, glyph string, auto bool, width int) string {
+// target, the faintest arg column, optional extra tag, the auto marker, and
+// the status glyph.
+func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int) string {
 	head := zeroTheme.toolName.Render(name)
 	if target = strings.TrimSpace(target); target != "" {
 		head += " " + zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
+	}
+	if arg = strings.TrimSpace(arg); arg != "" {
+		head += "  " + zeroTheme.toolArg.Render(truncateRunes(arg, maxInt(12, width/3)))
 	}
 	if headTag != "" {
 		head += "  " + zeroTheme.faint.Render(headTag)
@@ -504,7 +538,8 @@ func toolCardHead(name string, target string, headTag string, glyph string, auto
 }
 
 // toolCard draws the rounded card: head embedded in the top border, optional
-// footer embedded in the bottom border, body lines between.
+// footer embedded in the bottom border, body lines between on the panel
+// surface. Every emitted line is exactly `width` cells.
 func toolCard(head string, body []string, footer string, borderStyle lipgloss.Style, width int) string {
 	if width < 24 {
 		width = 24
@@ -513,13 +548,13 @@ func toolCard(head string, body []string, footer string, borderStyle lipgloss.St
 
 	head = fitStyledLine(head, width-6)
 	dashes := maxInt(1, width-4-lipgloss.Width(head))
-	top := borderStyle.Render("╭ ") + head + " " + borderStyle.Render(strings.Repeat("─", dashes-1)+"╮")
+	top := borderStyle.Render("╭ ") + head + " " + borderStyle.Render(strings.Repeat("─", dashes)+"╮")
 
 	lines := make([]string, 0, len(body)+2)
 	lines = append(lines, top)
 	for _, line := range body {
 		fitted := fitStyledLine(line, innerWidth)
-		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+		pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted))))
 		lines = append(lines, borderStyle.Render("│ ")+fitted+pad+borderStyle.Render(" │"))
 	}
 
@@ -528,7 +563,7 @@ func toolCard(head string, body []string, footer string, borderStyle lipgloss.St
 	} else {
 		footer = fitStyledLine(footer, width-6)
 		dashes = maxInt(1, width-4-lipgloss.Width(footer))
-		lines = append(lines, borderStyle.Render("╰ ")+footer+" "+borderStyle.Render(strings.Repeat("─", dashes-1)+"╯"))
+		lines = append(lines, borderStyle.Render("╰ ")+footer+" "+borderStyle.Render(strings.Repeat("─", dashes)+"╯"))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -562,14 +597,14 @@ func capCardLines(lines []string) []string {
 	}
 	hidden := len(lines) - cardBodyMaxLines
 	lines = lines[:cardBodyMaxLines]
-	return append(lines, zeroTheme.faint.Render(fmt.Sprintf("… %d more lines", hidden)))
+	return append(lines, zeroTheme.onPanel(zeroTheme.faint).Render(fmt.Sprintf("… %d more lines", hidden)))
 }
 
 func genericCardBody(detail string) cardBody {
 	raw := strings.Split(detail, "\n")
 	lines := make([]string, 0, len(raw))
 	for _, line := range raw {
-		lines = append(lines, zeroTheme.muted.Render(line))
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
 	}
 	return cardBody{lines: capCardLines(lines)}
 }
@@ -600,22 +635,24 @@ func diffCardBody(detail string, width int) cardBody {
 	}
 
 	innerWidth := width - 4
-	headLeft := zeroTheme.ink.Render(middleTruncate(path, maxInt(16, innerWidth/2)))
+	headLeft := zeroTheme.onPanel(zeroTheme.ink).Render(middleTruncate(path, maxInt(16, innerWidth/2)))
 	if newFile {
-		headLeft += "  " + zeroTheme.diffAdd.Render("NEW FILE")
+		headLeft += zeroTheme.panel.Render("  ") + zeroTheme.addSign.Render(" NEW FILE ")
 	}
 	counts := []string{}
 	if adds > 0 {
-		counts = append(counts, zeroTheme.diffAdd.Render(fmt.Sprintf("+%d", adds)))
+		counts = append(counts, zeroTheme.onPanel(zeroTheme.diffAdd).Render(fmt.Sprintf("+%d", adds)))
 	}
 	if dels > 0 {
-		counts = append(counts, zeroTheme.diffDel.Render(fmt.Sprintf("−%d", dels)))
+		counts = append(counts, zeroTheme.onPanel(zeroTheme.diffDel).Render(fmt.Sprintf("−%d", dels)))
 	}
 	lines := []string{joinHeaderLine(headLeft, strings.Join(counts, " "), innerWidth)}
 
-	// textBudget leaves room for the 4-col gutter, the sign column, and spaces.
+	// textBudget leaves room for the 4-col gutter, the sign column, and spaces:
+	// 4 + 3 + textBudget == innerWidth, so tinted rows span the full card body.
 	textBudget := maxInt(8, innerWidth-7)
 	oldLine, newLine := 0, 0
+	inHunk := false
 	for _, line := range rawLines {
 		switch {
 		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
@@ -624,19 +661,25 @@ func diffCardBody(detail string, width int) cardBody {
 			if match := hunkHeaderPattern.FindStringSubmatch(line); match != nil {
 				oldLine, _ = strconv.Atoi(match[1])
 				newLine, _ = strconv.Atoi(match[2])
+				inHunk = true
 			}
-			lines = append(lines, zeroTheme.diffMeta.Render(truncateRunes(line, innerWidth)))
+			lines = append(lines, zeroTheme.onPanel(zeroTheme.diffMeta).Render(truncateRunes(line, innerWidth)))
+		case !inHunk, strings.HasPrefix(line, `\`):
+			// Preamble ("diff --git", "index …", a stray "stdout:") and the
+			// "\ No newline at end of file" marker are not content lines: no
+			// gutter number, and the hunk counters must not advance.
+			lines = append(lines, zeroTheme.onPanel(zeroTheme.diffMeta).Render(truncateRunes(line, innerWidth)))
 		case strings.HasPrefix(line, "+"):
 			text := truncateRunes(strings.TrimPrefix(line, "+"), textBudget)
-			lines = append(lines, diffBodyLine(newLine, "+", text, true))
+			lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget))
 			newLine++
 		case strings.HasPrefix(line, "-"):
 			text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
-			lines = append(lines, diffBodyLine(oldLine, "−", text, false))
+			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget))
 			oldLine++
 		default:
 			text := truncateRunes(strings.TrimPrefix(line, " "), textBudget)
-			lines = append(lines, zeroTheme.faintest.Render(fmt.Sprintf("%4d", newLine))+"   "+zeroTheme.muted.Render(text))
+			lines = append(lines, zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4d", newLine))+zeroTheme.panel.Render("   ")+zeroTheme.onPanel(zeroTheme.muted).Render(text))
 			oldLine++
 			newLine++
 		}
@@ -644,18 +687,23 @@ func diffCardBody(detail string, width int) cardBody {
 	return cardBody{lines: capCardLines(lines)}
 }
 
-// diffBodyLine paints one changed row: gutter number, sign column, and text,
-// all on the add/del tint so the row reads as a solid band.
-func diffBodyLine(number int, sign string, text string, added bool) string {
+// diffBodyLine paints one changed row: gutter number, sign column, and text
+// padded to the full budget, all on the add/del tint so the row reads as one
+// solid band edge to edge.
+func diffBodyLine(number int, sign string, text string, added bool, textBudget int) string {
 	gutter := fmt.Sprintf("%4d", number)
+	if pad := textBudget - lipgloss.Width(text); pad > 0 {
+		text += strings.Repeat(" ", pad)
+	}
 	if added {
 		return zeroTheme.addLineNum.Render(gutter) + zeroTheme.addSign.Render(" "+sign+" ") + zeroTheme.addLine.Render(text)
 	}
 	return zeroTheme.delLineNum.Render(gutter) + zeroTheme.delSign.Render(" "+sign+" ") + zeroTheme.delLine.Render(text)
 }
 
-// readNumberedLinePattern matches read_file's "N: text" body rows.
-var readNumberedLinePattern = regexp.MustCompile(`^(\s*)(\d+): (.*)$`)
+// readNumberedLinePattern matches read_file's body rows, which the tool emits
+// as "<right-aligned N> | <text>" (see internal/tools/read_file.go).
+var readNumberedLinePattern = regexp.MustCompile(`^\s*(\d+) \| (.*)$`)
 
 func readCardBody(detail string) cardBody {
 	raw := strings.Split(detail, "\n")
@@ -666,15 +714,15 @@ func readCardBody(detail string) cardBody {
 			continue
 		}
 		if match := readNumberedLinePattern.FindStringSubmatch(line); match != nil {
-			number, _ := strconv.Atoi(match[2])
+			number, _ := strconv.Atoi(match[1])
 			if first == 0 {
 				first = number
 			}
 			last = number
-			lines = append(lines, zeroTheme.faintest.Render(fmt.Sprintf("%4s", match[2]))+" "+zeroTheme.muted.Render(match[3]))
+			lines = append(lines, zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4s", match[1]))+zeroTheme.panel.Render(" ")+zeroTheme.onPanel(zeroTheme.muted).Render(match[2]))
 			continue
 		}
-		lines = append(lines, zeroTheme.muted.Render(line))
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
 	}
 	headTag := ""
 	if first > 0 && last >= first {
@@ -687,8 +735,8 @@ func bashCardBody(command string, detail string, width int) cardBody {
 	innerWidth := width - 4
 	lines := []string{}
 	if command = strings.TrimSpace(command); command != "" {
-		lines = append(lines, zeroTheme.bashPrompt.Render("❯ ")+zeroTheme.ink.Render(truncateRunes(command, maxInt(8, innerWidth-2))))
-		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", maxInt(1, innerWidth))))
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.bashPrompt).Render("❯ ")+zeroTheme.onPanel(zeroTheme.ink).Render(truncateRunes(command, maxInt(8, innerWidth-2))))
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.line).Render(strings.Repeat("─", maxInt(1, innerWidth))))
 	}
 
 	footer := ""
@@ -711,7 +759,7 @@ func bashCardBody(command string, detail string, width int) cardBody {
 			if section == "stderr" {
 				style = zeroTheme.delText
 			}
-			lines = append(lines, "  "+style.Render(line))
+			lines = append(lines, zeroTheme.panel.Render("  ")+zeroTheme.onPanel(style).Render(line))
 		}
 	}
 	return cardBody{lines: capCardLines(lines), footer: footer}
@@ -728,12 +776,12 @@ func grepCardBody(detail string, width int) cardBody {
 	for _, line := range raw {
 		if match := grepMatchPattern.FindStringSubmatch(line); match != nil {
 			matches++
-			location := zeroTheme.grepLoc.Render(match[1])
+			location := zeroTheme.onPanel(zeroTheme.grepLoc).Render(match[1])
 			budget := maxInt(8, innerWidth-lipgloss.Width(match[1])-2)
-			lines = append(lines, location+"  "+zeroTheme.muted.Render(truncateRunes(match[2], budget)))
+			lines = append(lines, location+zeroTheme.panel.Render("  ")+zeroTheme.onPanel(zeroTheme.muted).Render(truncateRunes(match[2], budget)))
 			continue
 		}
-		lines = append(lines, zeroTheme.muted.Render(line))
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
 	}
 	footer := ""
 	if matches > 0 {

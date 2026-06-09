@@ -167,7 +167,8 @@ func TestDiffCardBodyRendersCountsNumbersAndCap(t *testing.T) {
 
 func TestReadCardBodyShowsGutterAndRange(t *testing.T) {
 	m := limeTestModel()
-	detail := "File: internal/agent/loop.go\n\n12: func Run() {\n13: }\n"
+	// Mirrors the real read_file output shape: "<right-aligned N> | <text>".
+	detail := "File: internal/agent/loop.go\n\n  12 | func Run() {\n  13 | }\n"
 	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "read_file", status: tools.StatusOK, detail: detail}
 	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "read_file", detail: "internal/agent/loop.go"}})
 	got := plainRender(t, m.renderRow(row, 80, rc))
@@ -283,5 +284,117 @@ func TestFormatContextWindow(t *testing.T) {
 		if got := formatContextWindow(window); got != want {
 			t.Fatalf("formatContextWindow(%d) = %q, want %q", window, got, want)
 		}
+	}
+}
+
+// --- Regression tests for review-confirmed Stage 2 findings -----------------
+
+func TestWrapPlainTextHandlesWideRunes(t *testing.T) {
+	// CJK prose has no spaces: one giant double-width "word". This used to
+	// panic (rune-count slicing) or emit lines ~2x the measure.
+	lines := wrapPlainText(strings.Repeat("漢", 40), 20)
+	if len(lines) == 0 {
+		t.Fatal("expected wrapped output")
+	}
+	for _, line := range lines {
+		if w := displayWidth(line); w > 20 {
+			t.Fatalf("wrapped CJK line width %d exceeds measure 20: %q", w, line)
+		}
+	}
+}
+
+func displayWidth(line string) int {
+	width := 0
+	for _, glyph := range line {
+		width += len([]rune{glyph})
+		if glyph > 0x2E80 { // rough CJK double-width check for the test
+			width++
+		}
+	}
+	return width
+}
+
+func TestToolCardLinesAllSameWidth(t *testing.T) {
+	m := limeTestModel()
+	detail := "internal/cli/root.go:41: fs := flag.NewFlagSet"
+	row := transcriptRow{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: detail}
+	card := plainRender(t, m.renderRow(row, 60, buildRowContext(nil)))
+	for _, line := range strings.Split(card, "\n") {
+		if got := len([]rune(line)); got != 60 {
+			t.Fatalf("card line width %d, want 60: %q", got, line)
+		}
+	}
+}
+
+func TestCancelRunClearsStreamingText(t *testing.T) {
+	m := limeTestModel()
+	m.pending = true
+	m.activeRunID = 3
+	m.streamingText = "partial answer from a doomed run"
+	m.cancelRun()
+	if m.streamingText != "" {
+		t.Fatalf("cancelRun must clear streamingText, got %q", m.streamingText)
+	}
+}
+
+func TestOrphanToolCardDoesNotAnimateOnLaterRuns(t *testing.T) {
+	m := limeTestModel()
+	// A call row from run 1 that never resolved; run 2 is now live.
+	orphan := transcriptRow{kind: rowToolCall, id: "old", tool: "bash", runID: 1}
+	m.pending = true
+	m.activeRunID = 2
+	got := plainRender(t, m.renderRow(orphan, 60, buildRowContext(nil)))
+	if !strings.Contains(got, "…") {
+		t.Fatalf("orphaned call card = %q, want static … placeholder, not a live spinner", got)
+	}
+}
+
+func TestDiffPreambleLinesCarryNoGutterNumbers(t *testing.T) {
+	m := limeTestModel()
+	detail := strings.Join([]string{
+		"stdout:",
+		"diff --git a/foo.txt b/foo.txt",
+		"index 1111111..2222222 100644",
+		"--- a/foo.txt",
+		"+++ b/foo.txt",
+		"@@ -1,2 +1,2 @@",
+		" alpha",
+		"-old",
+		`\ No newline at end of file`,
+		"+new",
+	}, "\n")
+	row := transcriptRow{kind: rowToolResult, id: "c", tool: "bash", status: tools.StatusOK, detail: detail}
+	got := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if strings.Contains(got, "   0") {
+		t.Fatalf("diff card = %q, preamble lines must not be numbered from 0", got)
+	}
+	// "+new" is the second line of the new file: the no-newline marker must
+	// not have advanced the counter past 2.
+	if !strings.Contains(got, "   2 + new") {
+		t.Fatalf("diff card = %q, expected +new numbered 2", got)
+	}
+}
+
+func TestSuggestionDigitsTypeNormallyWhilePending(t *testing.T) {
+	m := limeTestModel()
+	// /clear mid-run leaves the transcript empty while pending; the chips are
+	// not on screen, so digits must type into the composer.
+	m.pending = true
+	m = typeRunes(t, m, "1")
+	if got := m.input.Value(); got != "1" {
+		t.Fatalf("digit while pending should type normally, got %q", got)
+	}
+}
+
+func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
+	m := limeTestModel()
+	rows := []transcriptRow{
+		{kind: rowToolCall, id: "c", tool: "grep", detail: "internal/cli", arg: `flag\.|RegisterFlag`},
+		{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: "internal/cli/root.go:41: fs := flag.NewFlagSet"},
+	}
+	rc := buildRowContext(rows)
+	got := plainRender(t, m.renderRow(rows[1], 90, rc))
+	if !strings.Contains(got, "internal/cli") || !strings.Contains(got, `flag\.|RegisterFlag`) {
+		t.Fatalf("grep card head = %q, want separate target and pattern columns", got)
 	}
 }
