@@ -93,8 +93,8 @@ type model struct {
 	suggestionsAreFiles bool
 
 	// picker, when non-nil, is an open interactive selector overlay (/model,
-	// /theme, /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and
-	// applies the chosen value through the existing command handlers.
+	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
+	// the chosen value through the existing command handlers.
 	picker *commandPicker
 
 	// pendingImages holds image attachments staged by /image for the next user
@@ -461,7 +461,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.transcript = appendTranscriptRow(m.transcript, permissionTranscriptRow(permissionEventFromRequest(msg.request)))
+		promptRow := permissionTranscriptRow(permissionEventFromRequest(msg.request))
+		promptRow.runID = msg.runID
+		m.transcript = appendTranscriptRow(m.transcript, promptRow)
 		if msg.request.Action == agent.PermissionActionPrompt {
 			m.pendingPermission = &pendingPermissionPrompt{
 				request: msg.request,
@@ -642,7 +644,7 @@ func (m model) transcriptView() string {
 
 	builder.WriteString("\n")
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
-		builder.WriteString(zeroTheme.muted.Render(chips))
+		builder.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		builder.WriteString("\n")
 	}
 	builder.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
@@ -1266,6 +1268,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				tool:   result.Name,
 				status: result.Status,
 				detail: result.Output,
+				runID:  runID,
 			}
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)
@@ -1296,6 +1299,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onPermission := options.OnPermission
 		options.OnPermission = func(event agent.PermissionEvent) {
 			row := permissionTranscriptRow(event)
+			row.runID = runID
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{

@@ -819,7 +819,7 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 		t.Fatalf("permission metadata was not preserved: %#v", row)
 	}
 	rendered := next.renderRow(row, 96, buildRowContext(next.transcript))
-	for _, want := range []string{"permission", "write_file", "prompt", "risk:high", "mode=ask", "Creates or overwrites files."} {
+	for _, want := range []string{"permission", "write_file", "prompt", "risk:high", "mode=ask", "Creates or overwrites"} {
 		assertContains(t, rendered, want)
 	}
 }

@@ -231,16 +231,6 @@ func shortenPath(path string) string {
 	return path
 }
 
-func nonEmpty(values []string) []string {
-	out := values[:0]
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
 // gitBranch reads the current branch (or short SHA when detached) for cwd, handling
 // both regular checkouts (.git dir) and worktrees (.git file). Returns "" on any
 // problem — the header simply omits the segment.
@@ -341,9 +331,10 @@ func (m model) pickerOverlay(width int) string {
 		if item.Meta != "" {
 			right = surface(zeroTheme.faintest).Render(item.Meta)
 		}
-		line := joinHeaderLine(left, right, innerWidth)
-		// joinHeaderLine pads with bare spaces; repaint the gap on the row
-		// surface so selected rows read as one solid band.
+		// Paint the gap on the row surface so selected rows read as one solid
+		// band; joinHeaderLine would pad with bare (untinted) spaces.
+		gap := innerWidth - lipgloss.Width(left) - lipgloss.Width(right)
+		line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap))) + right
 		lines = append(lines, fitStyledLine(line, innerWidth))
 	}
 	return borderedBlock(width, lines)

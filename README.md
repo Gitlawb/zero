@@ -69,12 +69,12 @@ go run ./cmd/zero    # or: zero after installation
 
 Zero boots straight into the Lime chat surface. On the empty screen, keys **1–3**
 insert a starter prompt. Type to chat and press **Enter** to send; `/` opens command
-suggestions (**Tab** accepts the first). Tool calls render as live cards — diffs,
-reads, shell output, and grep matches each get their own body — and the turn ends
-with a `● done` line. **Esc** interrupts a running turn, **shift+tab** cycles the
-permission mode, and **Ctrl+C** exits. When the prompt is empty, the arrow keys,
-**PgUp/PgDn**, and **Home/End** scroll the transcript. The layout adapts down to
-narrow terminals, dropping metadata columns before content.
+suggestions (**Tab**/**↑↓** move the highlight, **Enter** accepts). Tool calls render
+as live cards — diffs, reads, shell output, and grep matches each get their own
+body — and the turn ends with a `● done` line. **Esc** interrupts a running turn,
+**shift+tab** cycles the permission mode, and **Ctrl+C** exits (the transcript stays
+in your terminal's scrollback). The layout adapts down to narrow terminals, dropping
+metadata columns before content.
 
 ### Headless (`exec`)
 

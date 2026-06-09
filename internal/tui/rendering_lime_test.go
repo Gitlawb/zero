@@ -502,3 +502,45 @@ func TestSpecReviewCardShowsBadgePathAndKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestPermissionCollapseIsRunScoped(t *testing.T) {
+	// Providers like Gemini synthesize repeating ToolCallIDs (gemini_tool_1 in
+	// every turn). A decision from run 2 must not collapse run 1's undecided
+	// prompt or steal its [auto]/hint attribution.
+	runOnePrompt := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 1, permission: &agent.PermissionEvent{
+		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionPrompt,
+	}}
+	runTwoDecision := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 2, permission: &agent.PermissionEvent{
+		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionAllow,
+	}}
+	rc := buildRowContext([]transcriptRow{runOnePrompt, runTwoDecision})
+
+	if rc.skip(runOnePrompt) {
+		t.Fatal("run 1's undecided prompt must not collapse on run 2's decision")
+	}
+	// Run 2's allow had no prompt in run 2, so it reads as auto there.
+	if !rc.skip(runTwoDecision) {
+		t.Fatal("run 2's unprompted allow should fold into its tool card's [auto] tag")
+	}
+
+	// Same-run prompt+decision still collapses as before.
+	sameRunPrompt := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 3, permission: &agent.PermissionEvent{
+		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionPrompt,
+	}}
+	sameRunAllow := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 3, permission: &agent.PermissionEvent{
+		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionAllow,
+	}}
+	rcSame := buildRowContext([]transcriptRow{sameRunPrompt, sameRunAllow})
+	if !rcSame.skip(sameRunPrompt) {
+		t.Fatal("a same-run decided prompt must collapse")
+	}
+	if rcSame.skip(sameRunAllow) {
+		t.Fatal("the same-run manual decision line must render")
+	}
+}
+
+func TestSessionsCardFieldsAreSanitized(t *testing.T) {
+	if got := sanitizeCardField("evil\x1ftitle\nwith\x00bytes"); strings.ContainsAny(got, "\x1f\n\x00") {
+		t.Fatalf("sanitizeCardField left separator bytes: %q", got)
+	}
+}

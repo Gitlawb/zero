@@ -39,6 +39,11 @@ func (m model) emptyState(width int) string {
 	lines = append(lines, centerLine(m.emptyStateModelHint(), width))
 	lines = append(lines, "")
 	lines = append(lines, m.emptyStateChips(width)...)
+	// centerLine pads but never truncates; below ~62 cols the tagline (and on
+	// long model ids, the hint) would exceed the frame without this fit.
+	for index := range lines {
+		lines[index] = fitStyledLine(lines[index], width)
+	}
 
 	// Vertically center within the stream area: the frame around it (title bar,
 	// rules, composer, status line) occupies ~6 terminal rows.
@@ -89,10 +94,23 @@ func styledBlock(width int, lines []string, borderStyle lipgloss.Style) string {
 }
 
 // styledBlockFill is styledBlock with a fill style painting the row padding,
-// so tinted cards (permission, panel surfaces) read as solid bands.
+// so tinted cards (permission, panel surfaces) read as solid bands. On tiny
+// terminals every card loses its side borders (top/bottom rules stay) so the
+// 4 border cells go back to content.
 func styledBlockFill(width int, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style) string {
 	if width < 4 {
 		width = 4
+	}
+
+	if widthTier(width) == tierTiny {
+		rule := borderStyle.Render(strings.Repeat("─", width))
+		body := make([]string, 0, len(lines)+2)
+		body = append(body, rule)
+		for _, line := range lines {
+			body = append(body, fitStyledLine(line, width))
+		}
+		body = append(body, rule)
+		return strings.Join(body, "\n")
 	}
 
 	rule := strings.Repeat("─", width-2)
@@ -256,19 +274,11 @@ func ansiSequenceEnd(value string, start int) int {
 	return len(value)
 }
 
-func normalizedStartupWidth(width int) int {
-	if width <= 0 {
-		return defaultStartupWidth
-	}
-	if width < minStartupWidth {
-		return minStartupWidth
-	}
-	return width
-}
-
 // chatWidth resolves the render width for the chat surface. Unlike the old
 // splash floor it respects genuinely tiny terminals (so the <58 tier can
-// engage) and only refuses widths the cards cannot draw at all.
+// engage). The 24-cell floor is deliberate: below it the cards' own minimum
+// width makes the layout meaningless, so we accept terminal-side wrapping
+// there rather than degrade every wider tier.
 func chatWidth(width int) int {
 	if width <= 0 {
 		return defaultStartupWidth
@@ -287,13 +297,6 @@ func normalizedStartupHeight(height int) int {
 		return 18
 	}
 	return height
-}
-
-func countLines(value string) int {
-	if value == "" {
-		return 0
-	}
-	return strings.Count(value, "\n") + 1
 }
 
 func clamp(value int, minimum int, maximum int) int {

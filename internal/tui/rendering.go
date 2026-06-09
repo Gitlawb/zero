@@ -27,7 +27,7 @@ func (m model) runState() string {
 	return "ready"
 }
 
-// pickerBusyText explains that a settings picker (/model, /mode, /effort, /theme)
+// pickerBusyText explains that a settings picker (/model, /mode, /effort)
 // can't be opened while a run is in flight. Opening it then would silently refuse
 // the selection once the run lands, so the no-arg command no-ops into this notice.
 func pickerBusyText(name string) string {
@@ -120,13 +120,20 @@ func formatCommandFooterText(commands []commandDefinition, pending bool) string 
 // rowContext carries the cross-row knowledge renderRow needs: which tool
 // calls already have results (their call rows collapse into the result card),
 // each call's argument hints for the card head, and which calls were
-// auto-approved (by permission mode or a stored grant).
+// auto-approved (by permission mode or a stored grant). All maps are keyed by
+// run-scoped ids (rcKey): some providers synthesize ToolCallIDs that repeat
+// across turns (e.g. Gemini's gemini_tool_N), so a bare id could attribute a
+// decision or a result to a different run's call.
 type rowContext struct {
 	resolved map[string]bool
 	hints    map[string]string
 	args     map[string]string
 	auto     map[string]bool
 	decided  map[string]bool
+}
+
+func rcKey(runID int, id string) string {
+	return strconv.Itoa(runID) + ":" + id
 }
 
 func buildRowContext(rows []transcriptRow) rowContext {
@@ -142,32 +149,33 @@ func buildRowContext(rows []transcriptRow) rowContext {
 		switch row.kind {
 		case rowToolCall:
 			if row.id != "" {
-				rc.hints[row.id] = strings.TrimSpace(row.detail)
-				rc.args[row.id] = strings.TrimSpace(row.arg)
+				rc.hints[rcKey(row.runID, row.id)] = strings.TrimSpace(row.detail)
+				rc.args[rcKey(row.runID, row.id)] = strings.TrimSpace(row.arg)
 			}
 		case rowToolResult:
 			if row.id != "" {
-				rc.resolved[row.id] = true
+				rc.resolved[rcKey(row.runID, row.id)] = true
 			}
 		case rowPermission:
 			event := row.permission
 			if event == nil || event.ToolCallID == "" {
 				continue
 			}
+			key := rcKey(row.runID, event.ToolCallID)
 			switch event.Action {
 			case agent.PermissionActionPrompt:
-				prompted[event.ToolCallID] = true
-				delete(rc.auto, event.ToolCallID)
+				prompted[key] = true
+				delete(rc.auto, key)
 			case agent.PermissionActionAllow:
-				rc.decided[event.ToolCallID] = true
+				rc.decided[key] = true
 				// "auto" means approved without asking: a mode/policy allow or a
 				// stored grant match. Any allow that followed a prompt — including a
 				// first-time "always" — was a manual decision, not auto.
-				if !prompted[event.ToolCallID] {
-					rc.auto[event.ToolCallID] = true
+				if !prompted[key] {
+					rc.auto[key] = true
 				}
 			case agent.PermissionActionDeny:
-				rc.decided[event.ToolCallID] = true
+				rc.decided[key] = true
 			}
 		}
 	}
@@ -181,17 +189,18 @@ func buildRowContext(rows []transcriptRow) rowContext {
 func (rc rowContext) skip(row transcriptRow) bool {
 	switch row.kind {
 	case rowToolCall:
-		return row.id != "" && rc.resolved[row.id]
+		return row.id != "" && rc.resolved[rcKey(row.runID, row.id)]
 	case rowPermission:
 		event := row.permission
 		if event == nil || event.ToolCallID == "" {
 			return false
 		}
+		key := rcKey(row.runID, event.ToolCallID)
 		switch event.Action {
 		case agent.PermissionActionPrompt:
-			return rc.decided[event.ToolCallID]
+			return rc.decided[key]
 		case agent.PermissionActionAllow:
-			return rc.auto[event.ToolCallID]
+			return rc.auto[key]
 		}
 	}
 	return false
@@ -199,8 +208,6 @@ func (rc rowContext) skip(row transcriptRow) bool {
 
 func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	switch row.kind {
-	case rowWelcome:
-		return zeroTheme.muted.Render(row.text)
 	case rowUser:
 		return renderUserRow(row, width)
 	case rowAssistant:
@@ -219,7 +226,7 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	case rowPermission:
 		return renderPermissionRow(row, width)
 	case rowAskUser:
-		return renderAskUserRow(row)
+		return renderAskUserRow(row, width)
 	default:
 		return row.text
 	}
@@ -375,10 +382,10 @@ func noteBox(text string, width int, borderStyle lipgloss.Style, textStyle lipgl
 	return styledBlock(width, lines, borderStyle)
 }
 
-func renderAskUserRow(row transcriptRow) string {
-	line := zeroTheme.accent.Render("ask zero") + "  " + zeroTheme.ink.Render(strings.TrimPrefix(row.text, "ask_user: "))
+func renderAskUserRow(row transcriptRow, width int) string {
+	line := fitStyledLine(zeroTheme.accent.Render("ask zero")+"  "+zeroTheme.ink.Render(strings.TrimPrefix(row.text, "ask_user: ")), width)
 	if detail := strings.TrimSpace(row.detail); detail != "" {
-		line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
+		line += "\n" + wrapDetailBlock(detail, width)
 	}
 	return line
 }
@@ -402,7 +409,9 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	switch event.Action {
 	case agent.PermissionActionAllow:
 		label := "allowed once"
-		if event.Grant != nil {
+		// Rehydrated events lose the grant object but keep GrantMatched, which
+		// for a prompted allow is set exactly by the always path.
+		if event.Grant != nil || event.GrantMatched {
 			label = "always"
 		}
 		return zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
@@ -414,20 +423,32 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		if reason := strings.TrimSpace(event.Reason); reason != "" {
 			line += zeroTheme.faint.Render(" — " + truncateRunes(reason, maxInt(16, width-lipgloss.Width(name)-16)))
 		}
+		out := fitStyledLine(line, width)
 		if detail := strings.TrimSpace(row.detail); detail != "" {
-			line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
+			out += "\n" + wrapDetailBlock(detail, width)
 		}
-		return line
+		return out
 	default:
 		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
 		if event.Risk.Level != "" {
 			line += "  " + zeroTheme.muted.Render("risk:" + string(event.Risk.Level))
 		}
+		out := fitStyledLine(line, width)
 		if detail := strings.TrimSpace(row.detail); detail != "" {
-			line += "\n" + indentText(zeroTheme.muted.Render(detail), 2)
+			out += "\n" + wrapDetailBlock(detail, width)
 		}
-		return line
+		return out
 	}
+}
+
+// wrapDetailBlock wraps a metadata detail blob to the terminal and indents it
+// two cells, so no permission/ask row can emit a line wider than the frame.
+func wrapDetailBlock(detail string, width int) string {
+	lines := wrapPlainText(detail, maxInt(16, width-2))
+	for index := range lines {
+		lines[index] = "  " + zeroTheme.muted.Render(lines[index])
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderFocusedPermissionPrompt draws the modal permission card: PERMISSION
@@ -525,13 +546,13 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	// result rows, whose detail is the tool output.
 	hint := strings.TrimSpace(row.detail)
 	if hint == "" {
-		hint = rc.hints[row.id]
+		hint = rc.hints[rcKey(row.runID, row.id)]
 	}
 	arg := strings.TrimSpace(row.arg)
 	if arg == "" {
-		arg = rc.args[row.id]
+		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[row.id], width)
+	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[rcKey(row.runID, row.id)], width)
 	return toolCard(head, nil, "", zeroTheme.cardRun, width)
 }
 
@@ -544,8 +565,9 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext) string {
 		glyph = zeroTheme.red.Render("✗")
 		borderStyle = zeroTheme.cardErr
 	}
-	body := toolCardBody(name, rc.hints[row.id], row.detail, width)
-	head := toolCardHead(name, rc.hints[row.id], rc.args[row.id], body.headTag, glyph, rc.auto[row.id], width)
+	key := rcKey(row.runID, row.id)
+	body := toolCardBody(name, rc.hints[key], row.detail, width)
+	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width)
 	return toolCard(head, body.lines, body.footer, borderStyle, width)
 }
 
@@ -860,7 +882,7 @@ func renderSessionsCards(payload string, width int) string {
 	for _, record := range strings.Split(payload, "\n") {
 		fields := strings.Split(record, sessionsCardFieldSep)
 		if len(fields) < 4 {
-			blocks = append(blocks, zeroTheme.faint.Render(record))
+			blocks = append(blocks, fitStyledLine(zeroTheme.faint.Render(record), width))
 			continue
 		}
 		id, age, title, meta := fields[0], fields[1], fields[2], fields[3]

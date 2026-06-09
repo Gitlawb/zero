@@ -84,14 +84,14 @@ func (m model) resumeText(args string) string {
 	for index := 0; index < limit; index++ {
 		session := sessions[index]
 		meta := strings.Join([]string{
-			displayValue(session.ModelID, "no model"),
-			displayValue(session.Provider, "no provider"),
+			sanitizeCardField(displayValue(session.ModelID, "no model")),
+			sanitizeCardField(displayValue(session.Provider, "no provider")),
 			fmt.Sprintf("%d events", session.EventCount),
 		}, " · ")
 		records = append(records, strings.Join([]string{
-			session.SessionID,
+			sanitizeCardField(session.SessionID),
 			relativeAge(session.UpdatedAt, m.now()),
-			displayValue(session.Title, "untitled"),
+			sanitizeCardField(displayValue(session.Title, "untitled")),
 			meta,
 		}, sessionsCardFieldSep))
 	}
@@ -110,6 +110,16 @@ const (
 	// sessionsCardFieldSep separates the id/age/title/meta fields of one card.
 	sessionsCardFieldSep = "\x1f"
 )
+
+// sanitizeCardField strips the card protocol's separator bytes from
+// user-controlled values (titles can legally contain anything --session-title
+// was given), so a hostile or accidental \x1f / newline cannot shift fields
+// or leak control characters into the transcript.
+func sanitizeCardField(value string) string {
+	value = strings.ReplaceAll(value, sessionsCardFieldSep, " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.ReplaceAll(value, "\x00", "")
+}
 
 // relativeAge renders an RFC3339 timestamp as a short age ("2h ago"); ""
 // when the timestamp does not parse, so the card simply omits it.
