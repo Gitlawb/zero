@@ -394,7 +394,7 @@ func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
 		{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: "internal/cli/root.go:41: fs := flag.NewFlagSet"},
 	}
 	rc := buildRowContext(rows)
-	got := plainRender(t, m.renderRow(rows[1], 90, rc))
+	got := plainRender(t, m.renderRow(rows[1], 110, rc))
 	if !strings.Contains(got, "internal/cli") || !strings.Contains(got, `flag\.|RegisterFlag`) {
 		t.Fatalf("grep card head = %q, want separate target and pattern columns", got)
 	}

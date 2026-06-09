@@ -595,7 +595,7 @@ func (m model) transcriptEmpty() bool {
 }
 
 func (m model) transcriptView() string {
-	width := normalizedStartupWidth(m.width)
+	width := chatWidth(m.width)
 
 	var builder strings.Builder
 	builder.WriteString(m.titleBar(width))

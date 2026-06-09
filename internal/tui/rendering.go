@@ -565,7 +565,8 @@ func toolCardHead(name string, target string, arg string, headTag string, glyph 
 	if target = strings.TrimSpace(target); target != "" {
 		head += " " + zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
 	}
-	if arg = strings.TrimSpace(arg); arg != "" {
+	// The arg column is the first thing the width tiers drop (below 100 cols).
+	if arg = strings.TrimSpace(arg); arg != "" && widthTier(width) == tierFull {
 		head += "  " + zeroTheme.toolArg.Render(truncateRunes(arg, maxInt(12, width/3)))
 	}
 	if headTag != "" {
@@ -579,28 +580,46 @@ func toolCardHead(name string, target string, arg string, headTag string, glyph 
 
 // toolCard draws the rounded card: head embedded in the top border, optional
 // footer embedded in the bottom border, body lines between on the panel
-// surface. Every emitted line is exactly `width` cells.
+// surface. Every emitted line is exactly `width` cells. On tiny terminals the
+// side borders go away (top/bottom rules stay) so content keeps the columns.
 func toolCard(head string, body []string, footer string, borderStyle lipgloss.Style, width int) string {
+	tiny := widthTier(width) == tierTiny
 	if width < 24 {
 		width = 24
 	}
 	innerWidth := width - 4
+	if tiny {
+		innerWidth = width
+	}
 
 	head = fitStyledLine(head, width-6)
 	dashes := maxInt(1, width-4-lipgloss.Width(head))
 	top := borderStyle.Render("╭ ") + head + " " + borderStyle.Render(strings.Repeat("─", dashes)+"╮")
+	if tiny {
+		top = head + " " + borderStyle.Render(strings.Repeat("─", maxInt(1, width-1-lipgloss.Width(head))))
+	}
 
 	lines := make([]string, 0, len(body)+2)
 	lines = append(lines, top)
 	for _, line := range body {
 		fitted := fitStyledLine(line, innerWidth)
+		if tiny {
+			lines = append(lines, fitted)
+			continue
+		}
 		pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted))))
 		lines = append(lines, borderStyle.Render("│ ")+fitted+pad+borderStyle.Render(" │"))
 	}
 
-	if strings.TrimSpace(footer) == "" {
+	switch {
+	case tiny && strings.TrimSpace(footer) == "":
+		lines = append(lines, borderStyle.Render(strings.Repeat("─", width)))
+	case tiny:
+		footer = fitStyledLine(footer, width-4)
+		lines = append(lines, footer+" "+borderStyle.Render(strings.Repeat("─", maxInt(1, width-1-lipgloss.Width(footer)))))
+	case strings.TrimSpace(footer) == "":
 		lines = append(lines, borderStyle.Render("╰"+strings.Repeat("─", width-2)+"╯"))
-	} else {
+	default:
 		footer = fitStyledLine(footer, width-6)
 		dashes = maxInt(1, width-4-lipgloss.Width(footer))
 		lines = append(lines, borderStyle.Render("╰ ")+footer+" "+borderStyle.Render(strings.Repeat("─", dashes)+"╯"))
@@ -612,6 +631,10 @@ func toolCard(head string, body []string, footer string, borderStyle lipgloss.St
 // diff detection; the other shapes key off the core tool names.
 func toolCardBody(name string, hint string, detail string, width int) cardBody {
 	detail = strings.TrimRight(strings.ReplaceAll(detail, "\r\n", "\n"), "\n")
+	// Terminal tab stops are unknowable from here and break the width math
+	// (lipgloss measures \t as one cell, the terminal expands it further), so
+	// card bodies render tabs as a fixed indent.
+	detail = strings.ReplaceAll(detail, "\t", "    ")
 	if strings.TrimSpace(detail) == "" {
 		return cardBody{}
 	}
@@ -619,7 +642,7 @@ func toolCardBody(name string, hint string, detail string, width int) cardBody {
 	case looksLikeDiff(detail):
 		return diffCardBody(detail, width)
 	case name == "read_file":
-		return readCardBody(detail)
+		return readCardBody(detail, width)
 	case name == "bash":
 		return bashCardBody(hint, detail, width)
 	case name == "grep":
@@ -688,9 +711,14 @@ func diffCardBody(detail string, width int) cardBody {
 	}
 	lines := []string{joinHeaderLine(headLeft, strings.Join(counts, " "), innerWidth)}
 
-	// textBudget leaves room for the 4-col gutter, the sign column, and spaces:
-	// 4 + 3 + textBudget == innerWidth, so tinted rows span the full card body.
-	textBudget := maxInt(8, innerWidth-7)
+	// The line-number gutter drops below 80 cols (the 60–79 tier). With it,
+	// gutter(4) + sign(3) + textBudget == innerWidth; without, sign(3) + text.
+	gutter := widthTier(width) >= tierMedium
+	gutterWidth := 0
+	if gutter {
+		gutterWidth = 4
+	}
+	textBudget := maxInt(8, innerWidth-3-gutterWidth)
 	oldLine, newLine := 0, 0
 	inHunk := false
 	for _, line := range rawLines {
@@ -711,15 +739,19 @@ func diffCardBody(detail string, width int) cardBody {
 			lines = append(lines, zeroTheme.onPanel(zeroTheme.diffMeta).Render(truncateRunes(line, innerWidth)))
 		case strings.HasPrefix(line, "+"):
 			text := truncateRunes(strings.TrimPrefix(line, "+"), textBudget)
-			lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget))
+			lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget, gutter))
 			newLine++
 		case strings.HasPrefix(line, "-"):
 			text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
-			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget))
+			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
 			oldLine++
 		default:
 			text := truncateRunes(strings.TrimPrefix(line, " "), textBudget)
-			lines = append(lines, zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4d", newLine))+zeroTheme.panel.Render("   ")+zeroTheme.onPanel(zeroTheme.muted).Render(text))
+			row := zeroTheme.panel.Render("   ") + zeroTheme.onPanel(zeroTheme.muted).Render(text)
+			if gutter {
+				row = zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4d", newLine)) + row
+			}
+			lines = append(lines, row)
 			oldLine++
 			newLine++
 		}
@@ -727,25 +759,35 @@ func diffCardBody(detail string, width int) cardBody {
 	return cardBody{lines: capCardLines(lines)}
 }
 
-// diffBodyLine paints one changed row: gutter number, sign column, and text
-// padded to the full budget, all on the add/del tint so the row reads as one
-// solid band edge to edge.
-func diffBodyLine(number int, sign string, text string, added bool, textBudget int) string {
-	gutter := fmt.Sprintf("%4d", number)
+// diffBodyLine paints one changed row: optional gutter number, sign column,
+// and text padded to the full budget, all on the add/del tint so the row
+// reads as one solid band edge to edge.
+func diffBodyLine(number int, sign string, text string, added bool, textBudget int, gutter bool) string {
 	if pad := textBudget - lipgloss.Width(text); pad > 0 {
 		text += strings.Repeat(" ", pad)
 	}
-	if added {
-		return zeroTheme.addLineNum.Render(gutter) + zeroTheme.addSign.Render(" "+sign+" ") + zeroTheme.addLine.Render(text)
+	numCol := ""
+	if gutter {
+		num := fmt.Sprintf("%4d", number)
+		if added {
+			numCol = zeroTheme.addLineNum.Render(num)
+		} else {
+			numCol = zeroTheme.delLineNum.Render(num)
+		}
 	}
-	return zeroTheme.delLineNum.Render(gutter) + zeroTheme.delSign.Render(" "+sign+" ") + zeroTheme.delLine.Render(text)
+	if added {
+		return numCol + zeroTheme.addSign.Render(" "+sign+" ") + zeroTheme.addLine.Render(text)
+	}
+	return numCol + zeroTheme.delSign.Render(" "+sign+" ") + zeroTheme.delLine.Render(text)
 }
 
 // readNumberedLinePattern matches read_file's body rows, which the tool emits
 // as "<right-aligned N> | <text>" (see internal/tools/read_file.go).
 var readNumberedLinePattern = regexp.MustCompile(`^\s*(\d+) \| (.*)$`)
 
-func readCardBody(detail string) cardBody {
+func readCardBody(detail string, width int) cardBody {
+	// The number gutter drops with the diff gutter below 80 cols.
+	gutter := widthTier(width) >= tierMedium
 	raw := strings.Split(detail, "\n")
 	lines := make([]string, 0, len(raw))
 	first, last := 0, 0
@@ -759,7 +801,11 @@ func readCardBody(detail string) cardBody {
 				first = number
 			}
 			last = number
-			lines = append(lines, zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4s", match[1]))+zeroTheme.panel.Render(" ")+zeroTheme.onPanel(zeroTheme.muted).Render(match[2]))
+			row := zeroTheme.onPanel(zeroTheme.muted).Render(match[2])
+			if gutter {
+				row = zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4s", match[1])) + zeroTheme.panel.Render(" ") + row
+			}
+			lines = append(lines, row)
 			continue
 		}
 		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))

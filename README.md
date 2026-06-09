@@ -31,7 +31,7 @@ the Go runtime is the default app path.
 ## Highlights
 
 - 🔌 **Multi-provider** — OpenAI-compatible, Anthropic, and Gemini behind one interface, with a model registry (capabilities, context limits, cost). Bring your own key and endpoint.
-- 🖥️ **Premium TUI** — Bubble Tea/Lip Gloss powers the Go-native terminal interface.
+- 🖥️ **Lime TUI** — a near-black, lime-accent chat surface (Bubble Tea/Lip Gloss) with live tool cards, inline diffs, and an adaptive layout from 58 to 120+ columns.
 - 🤖 **Headless & scriptable** — `zero exec` with clean `text` / `json` / `stream-json` I/O and meaningful exit codes for CI and automation.
 - 🧰 **Real tools** — read / write / edit files, `apply_patch`, `grep`, `glob`, `bash`, directory listing, and a live plan/todo.
 - 🛡️ **Safe by default** — mutating tools are permission-gated; `--skip-permissions-unsafe` is an explicit, clearly-labeled opt-out.
@@ -67,9 +67,14 @@ export OPENAI_MODEL=gpt-4.1
 go run ./cmd/zero    # or: zero after installation
 ```
 
-Inside the TUI: type to chat and press **Enter** to send. `/` opens command suggestions
-(**Tab** accepts the first). When the prompt is empty, the arrow keys, **PgUp/PgDn**, and
-**Home/End** scroll the transcript. **Ctrl+C** exits.
+Zero boots straight into the Lime chat surface. On the empty screen, keys **1–3**
+insert a starter prompt. Type to chat and press **Enter** to send; `/` opens command
+suggestions (**Tab** accepts the first). Tool calls render as live cards — diffs,
+reads, shell output, and grep matches each get their own body — and the turn ends
+with a `● done` line. **Esc** interrupts a running turn, **shift+tab** cycles the
+permission mode, and **Ctrl+C** exits. When the prompt is empty, the arrow keys,
+**PgUp/PgDn**, and **Home/End** scroll the transcript. The layout adapts down to
+narrow terminals, dropping metadata columns before content.
 
 ### Headless (`exec`)
 

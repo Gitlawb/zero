@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"sort"
 	"strings"
 )
 
@@ -54,7 +53,6 @@ type commandDefinition struct {
 	group        commandGroup
 	description  string
 	kind         commandKind
-	startupOrder int
 }
 
 type parsedCommand struct {
@@ -70,7 +68,6 @@ var commandDefinitions = []commandDefinition{
 		group:        commandGroupModel,
 		description:  "Show the active provider.",
 		kind:         commandProvider,
-		startupOrder: 5,
 	},
 	{
 		name:         "/model",
@@ -78,7 +75,6 @@ var commandDefinitions = []commandDefinition{
 		group:        commandGroupModel,
 		description:  "Show or switch the active model.",
 		kind:         commandModel,
-		startupOrder: 4,
 	},
 	{
 		name:        "/mode",
@@ -93,7 +89,6 @@ var commandDefinitions = []commandDefinition{
 		group:        commandGroupSession,
 		description:  "Show planning mode status.",
 		kind:         commandPlan,
-		startupOrder: 1,
 	},
 	{
 		name:        "/permissions",
@@ -108,7 +103,6 @@ var commandDefinitions = []commandDefinition{
 		group:        commandGroupTools,
 		description:  "List registered tools.",
 		kind:         commandTools,
-		startupOrder: 3,
 	},
 	{
 		name:        "/context",
@@ -203,7 +197,6 @@ var commandDefinitions = []commandDefinition{
 		group:        commandGroupRuntime,
 		description:  "Show debug mode status.",
 		kind:         commandDebug,
-		startupOrder: 2,
 	},
 	{
 		name:        "/theme",
@@ -344,26 +337,6 @@ func formatCommandHelpLine(command commandDefinition) string {
 	return label + " - " + command.description
 }
 
-func startupCommandNames() []string {
-	chips := make([]commandDefinition, 0, len(commandDefinitions))
-	for _, command := range commandDefinitions {
-		if command.startupOrder > 0 {
-			chips = append(chips, command)
-		}
-	}
-	sort.SliceStable(chips, func(left int, right int) bool {
-		if chips[left].startupOrder == chips[right].startupOrder {
-			return chips[left].name < chips[right].name
-		}
-		return chips[left].startupOrder < chips[right].startupOrder
-	})
-
-	names := make([]string, 0, len(chips))
-	for _, command := range chips {
-		names = append(names, command.name)
-	}
-	return names
-}
 
 func commandGroupOrder() []commandGroup {
 	return []commandGroup{

@@ -13,12 +13,42 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 )
 
+// layoutTier buckets the terminal width into the spec's adaptive tiers. It
+// is derived from the live width at every render, so a WindowSizeMsg
+// re-evaluates it implicitly.
+type layoutTier int
+
+const (
+	tierTiny   layoutTier = iota // < 58: single-segment header, rail-less cards
+	tierNarrow                   // 58–79: no gutters, bare badge, lean status
+	tierMedium                   // 80–99: no tool-arg column, no ctx, no "interactive"
+	tierFull                     // ≥ 100: everything
+)
+
+func widthTier(width int) layoutTier {
+	switch {
+	case width >= 100:
+		return tierFull
+	case width >= 80:
+		return tierMedium
+	case width >= minStartupWidth:
+		return tierNarrow
+	default:
+		return tierTiny
+	}
+}
+
 // titleBar renders the top zone of the chat surface: the brand badge, cwd and
 // branch on the left, provider/model and context window on the right, then a
-// rule. Segments drop in fixed order as width shrinks (full → no ctx → no cwd
-// → badge+model only), reusing the startupHeaderLine candidate fallback.
+// rule. Segments drop with the width tier (full → no ctx → no cwd → bare
+// badge + model only), reusing the startupHeaderLine candidate fallback.
 func (m model) titleBar(width int) string {
+	tier := widthTier(width)
+
 	badge := zeroTheme.badge.Render(" 0 ") + " " + zeroTheme.ink.Bold(true).Render("zero")
+	if tier <= tierNarrow {
+		badge = zeroTheme.accent.Render("0") + " " + zeroTheme.ink.Bold(true).Render("zero")
+	}
 	cwd := zeroTheme.faintest.Render(" / ") + zeroTheme.muted.Render(shortenPath(m.cwd))
 	branch := ""
 	if b := strings.TrimSpace(m.gitBranch); b != "" {
@@ -30,11 +60,31 @@ func (m model) titleBar(width int) string {
 		ctx = zeroTheme.faint.Render(" · " + formatContextWindow(window))
 	}
 
-	line := startupHeaderLine(width, []headerCandidate{
-		{left: badge + cwd + branch, right: model + ctx},
-		{left: badge + cwd + branch, right: model},
-		{left: badge, right: model},
-	})
+	var candidates []headerCandidate
+	switch tier {
+	case tierFull:
+		candidates = []headerCandidate{
+			{left: badge + cwd + branch, right: model + ctx},
+			{left: badge + cwd + branch, right: model},
+			{left: badge, right: model},
+		}
+	case tierMedium:
+		candidates = []headerCandidate{
+			{left: badge + cwd + branch, right: model},
+			{left: badge, right: model},
+		}
+	case tierNarrow:
+		candidates = []headerCandidate{
+			{left: badge, right: model},
+		}
+	default:
+		// Tiny: one segment, no right column.
+		candidates = []headerCandidate{
+			{left: badge, right: ""},
+		}
+	}
+
+	line := startupHeaderLine(width, candidates)
 	rule := zeroTheme.line.Render(strings.Repeat("─", width))
 	return line + "\n" + rule
 }
@@ -56,12 +106,21 @@ func (m model) titleModelSegment() string {
 
 // statusLine renders the bottom readout as ` │ `-separated groups: provider
 // and model on the left, then a flexible gap, then tokens/cost, the surface
-// name, and the permission mode.
+// name, and the permission mode. Groups drop with the width tier: medium
+// loses "interactive", narrow keeps provider+tokens+mode only, tiny shows
+// just the mode.
 func (m model) statusLine(width int) string {
+	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
+	label, style := m.modeLabel()
+	mode := style.Render("⏵⏵ " + label)
+
+	if tier == tierTiny {
+		return fitStyledLine(mode, width)
+	}
 
 	left := zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
-	if model := strings.TrimSpace(m.modelName); model != "" {
+	if model := strings.TrimSpace(m.modelName); model != "" && tier >= tierMedium {
 		left += separator + zeroTheme.muted.Render(model)
 	}
 
@@ -69,12 +128,13 @@ func (m model) statusLine(width int) string {
 	if usage := m.usageStatusSegment(); usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
 	}
-	rightGroups = append(rightGroups, zeroTheme.faint.Render("interactive"))
-	label, style := m.modeLabel()
-	rightGroups = append(rightGroups, style.Render("⏵⏵ "+label))
+	if tier == tierFull {
+		rightGroups = append(rightGroups, zeroTheme.faint.Render("interactive"))
+	}
+	rightGroups = append(rightGroups, mode)
 	right := strings.Join(rightGroups, separator)
 
-	return joinHeaderLine(left, right, width)
+	return fitStyledLine(joinHeaderLine(left, right, width), width)
 }
 
 // nextPermissionMode toggles between the two prompt-respecting modes:

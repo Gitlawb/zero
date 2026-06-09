@@ -266,6 +266,19 @@ func normalizedStartupWidth(width int) int {
 	return width
 }
 
+// chatWidth resolves the render width for the chat surface. Unlike the old
+// splash floor it respects genuinely tiny terminals (so the <58 tier can
+// engage) and only refuses widths the cards cannot draw at all.
+func chatWidth(width int) int {
+	if width <= 0 {
+		return defaultStartupWidth
+	}
+	if width < 24 {
+		return 24
+	}
+	return width
+}
+
 func normalizedStartupHeight(height int) int {
 	if height <= 0 {
 		return defaultStartupHeight
