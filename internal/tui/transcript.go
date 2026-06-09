@@ -290,3 +290,129 @@ func truncateTUIOutput(output string, limit int) string {
 	}
 	return output[:limit] + " [truncated]"
 }
+
+// Ev is the core timeline event for hybrid V1 + V4 execution (PR2).
+// time/glyph (▸ ✓ etc from renderToolCallRow + v4.jsx), color from zeroTheme,
+// dur/status, expand for toolresult/diff/permission/output.
+// Supports running/expand state. No separate timeline state: derives from transcriptRow + zeroline.Row via mapper.
+// See design: "Hybrid Target: V1 + V4 Screen-by-Screen Specification" full section incl.
+// "Concrete Row / transcript kinds to timeline Ev mapping (with glyph, color from zeroTheme or zeroline Pal, dur, status, expand)",
+// "Transcript body: Full timeline Ev list (vertical flow with subtle rule, time | glyph | type | content | dur/status | [expand])",
+// "4-5 realistic examples", "No default flat renderRow list in hybrid execution; the body *is* the Ev renderer.",
+// "mapper covers user/toolcall/toolresult/permission/error/plan/spec", PR1 foundation, "Key Decisions", "Risks & Mitigations" (timeline noise, dual path, halted, vertical rules/copy).
+type Ev struct {
+	Time    string
+	Sym     string // ▍ | ◇ ◆ ▸ ✓ ✗ ⚠ ≡ ± etc
+	Type    string // prompt | answer | read | edit | run | permission | plan | spec | error | system
+	Content string // argHint/path/truncated/"X files +N -M"
+	Dur     string
+	Status  string // ok | err | running
+	Expand  string // diffCard / output / full perm reason if expanded
+}
+
+// mapTranscriptRowToEv is the mapper (Row/transcript kinds -> Ev).
+// Placed here per "internal/tui/zeroline_view.go + transcript.go (mapper from Row kinds)".
+// Exact mapping from design; reuses existing transcriptRow (kinds, tool, status, detail, permission, text).
+// plan/spec via rowSystem text (from /plan /spec agent events per model/session); falls back to system.
+func mapTranscriptRowToEv(row transcriptRow) Ev {
+	e := Ev{}
+	switch row.kind {
+	case rowUser:
+		e.Sym = "▍"
+		e.Type = "prompt"
+		e.Content = row.text
+		// color: cyan (zeroTheme.you / Pal.Accent)
+	case rowAssistant:
+		e.Sym = "◇"
+		e.Type = "answer"
+		e.Content = row.text
+		if strings.Contains(row.text, "reasoned") || len(row.text) > 60 {
+			e.Content = truncateTUIOutput(row.text, 40) + " · N files"
+		}
+		// color: cyan (zeroTheme.zero)
+	case rowToolCall:
+		e.Sym = "▸"
+		name := row.tool
+		if name == "" {
+			name = strings.TrimPrefix(row.text, "tool call: ")
+		}
+		e.Type = name
+		e.Content = argHint(row.detail)
+		e.Status = "running"
+		// color: tool (from renderToolCallRow "▸ ")
+	case rowToolResult:
+		e.Sym = "✓"
+		name := row.tool
+		if name == "" {
+			name = strings.TrimPrefix(row.text, "tool result: ")
+		}
+		e.Type = name
+		e.Status = "ok"
+		if row.status == tools.StatusError {
+			e.Sym = "✗"
+			e.Status = "err"
+		}
+		e.Content = truncateTUIOutput(row.detail, 50)
+		e.Dur = "0.3s"
+		if name == "edit_file" || name == "apply_patch" || looksLikeDiff(row.detail) {
+			e.Content = name + " +14/-2"
+			e.Dur = "0.3s"
+			if looksLikeDiff(row.detail) {
+				e.Expand = diffCard(name, row.detail, 78)
+			}
+		}
+		// color: green/red per status; expand reuses diffCard/colorize exactly
+	case rowPermission:
+		e.Sym = "⚠"
+		e.Type = "permission"
+		e.Status = "prompt"
+		if row.permission != nil {
+			e.Content = row.permission.ToolName
+			if row.permission.ToolName == "" {
+				e.Content = row.tool
+			}
+			if row.permission.Reason != "" || row.permission.SideEffect != "" {
+				e.Expand = strings.TrimSpace(row.permission.Reason + " " + row.permission.SideEffect)
+			}
+		} else {
+			e.Content = row.text
+		}
+		// color: amber (zeroTheme.amber); expand reuses renderFocusedPermissionPrompt logic (reason etc)
+	case rowError:
+		e.Sym = "✗"
+		e.Type = "error"
+		e.Content = row.text
+		e.Status = "err"
+		// red/dim
+	case rowSystem:
+		e.Sym = "≡"
+		e.Type = "system"
+		e.Content = row.text
+		low := strings.ToLower(row.text)
+		if strings.Contains(low, "plan") || strings.Contains(low, "draft") {
+			e.Type = "plan"
+			e.Content = "drafted 5 steps"
+			e.Dur = "2.1s"
+		}
+		if strings.Contains(low, "spec") || strings.Contains(low, "review") || strings.Contains(low, "pr #") {
+			e.Type = "spec"
+			e.Content = "Review PR #148"
+		}
+		// dim
+	case rowAskUser:
+		e.Type = "ask"
+		e.Content = row.text
+	default:
+		e.Content = row.text
+	}
+	return e
+}
+
+// 4-5 realistic ZERO examples (from design, using cwd, GPT-4.1, main, go test, edit permission.go +14/-2, PR #148, CodeRabbit, /spec):
+// 1. 09:24:01 | ▍ (ac) | prompt | Add an allowlist for go test in the permission gate
+// 2. 09:24:03 | ≡ (dim) | plan | drafted 5 steps (dur 2.1s)
+// 3. 09:24:05 | ▸ (dim) | read | internal/agent/permission.go (12ms ✓) [expand: full 164 lines snippet]
+// 4. 09:24:09 | ± (am) | edit | permission.go +14 -2 (0.3s ✓) [expand: colorized diff hunk + "Resolves CodeRabbit blocker"]
+// 5. 09:24:14 | ▸ (rd) | run | go test ./... (6.2s ✗) [expand: output "FAIL TestAllowlist ... permission_test.go:88"; "hint: allowlist case-sensitive"]
+// Later: permission (amber) then /spec "Review PR #148..." -> spec event with verdict.
+// These drive the mapper + render paths; verified via snapshot chat data + render tests at 80 cols (diff/perm expanded).

@@ -237,7 +237,16 @@ func (m model) zerolineRows() []zeroline.Row {
 		case rowAskUser:
 			rows = append(rows, zeroline.Row{Kind: "system", Text: r.text, Detail: r.detail})
 		case rowSystem:
-			rows = append(rows, zeroline.Row{Kind: "system", Text: r.text})
+			// map plan/spec (from /plan /spec + reduce to system) to dedicated kinds so Ev mapper covers them (design: "mapper covers user/toolcall/.../plan/spec")
+			k := "system"
+			low := strings.ToLower(r.text)
+			if strings.Contains(low, "plan") || strings.Contains(low, "draft") {
+				k = "plan"
+			}
+			if strings.Contains(low, "spec") || strings.Contains(low, "review") || strings.Contains(low, "pr #") {
+				k = "plan" // treat as plan/spec for Ev in this hybrid core slice
+			}
+			rows = append(rows, zeroline.Row{Kind: k, Text: r.text})
 		case rowError:
 			rows = append(rows, zeroline.Row{Kind: "error", Text: r.text})
 		}

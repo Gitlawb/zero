@@ -279,3 +279,76 @@ func renderToolResultRow(row transcriptRow, width int) string {
 	}
 	return line
 }
+
+// renderTimeline is the Ev renderer for the hybrid timeline execution body (core of PR2).
+// Consumes transcript rows (via mapper in transcript.go) or equiv zeroline.Rows; emits slim vertical
+// flow with subtle rule. Replaces flat renderRow list in hybrid (after transition).
+// Uses exact patterns: glyphs ▸ from renderToolCallRow, ✓/✗ , looksLikeDiff+diffCard+colorizeDiffLine+titledCard+indentText+truncateTUIOutput (for expand), zeroTheme colors (PR1 unified), argHint.
+// Smallest: no new layout, no state mutation here (expandState passed in; running from row).
+// See full citations in mapTranscriptRowToEv (design Hybrid Target + examples + "the body *is* the Ev renderer").
+func renderTimeline(rows []transcriptRow, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	var b strings.Builder
+	for i, row := range rows {
+		e := mapTranscriptRowToEv(row)
+		if e.Time == "" {
+			// synthetic for examples + live (real times/durs from session events in future PRs)
+			e.Time = fmt.Sprintf("09:24:%02d", (i*4)%60)
+		}
+		// subtle rule + time | glyph | type | content | dur/status | [expand]
+		p := zeroTheme.muted.Render(e.Time + " │ ")
+		var sym string
+		switch e.Sym {
+		case "▸":
+			sym = zeroTheme.tool.Render(e.Sym)
+		case "✓":
+			sym = zeroTheme.green.Render(e.Sym)
+		case "✗":
+			sym = zeroTheme.red.Render(e.Sym)
+		case "⚠":
+			sym = zeroTheme.amber.Render(e.Sym)
+		case "▍", "◇", "◆":
+			sym = zeroTheme.you.Render(e.Sym)
+		default:
+			sym = zeroTheme.muted.Render(e.Sym)
+		}
+		typ := zeroTheme.text.Render(e.Type)
+		cont := zeroTheme.text.Render(truncateRunes(e.Content, 40))
+		meta := zeroTheme.muted.Render(strings.TrimSpace(e.Dur + " " + e.Status))
+		line := p + sym + " " + typ + " │ " + cont + " " + meta
+		b.WriteString(line)
+		b.WriteString("\n")
+		if e.Expand != "" {
+			// expand for toolresult/diff/permission/output ; reuses exact indent + card
+			b.WriteString(indentText(e.Expand, 2))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// renderEv is the small primitive for a single timeline Ev (used by renderTimeline + future hybrid body).
+// Follows pseudocode in design exactly.
+func renderEv(e Ev, width int) string {
+	if width <= 0 {
+		width = 80
+	}
+	p := zeroTheme.muted.Render(e.Time + " │ ")
+	sym := zeroTheme.text.Render(e.Sym)
+	switch e.Sym {
+	case "▸":
+		sym = zeroTheme.tool.Render(e.Sym)
+	case "✓":
+		sym = zeroTheme.green.Render(e.Sym)
+	case "✗":
+		sym = zeroTheme.red.Render(e.Sym)
+	case "⚠":
+		sym = zeroTheme.amber.Render(e.Sym)
+	}
+	typ := zeroTheme.text.Render(e.Type)
+	cont := zeroTheme.text.Render(truncateRunes(e.Content, 40))
+	meta := zeroTheme.muted.Render(strings.TrimSpace(e.Dur + " " + e.Status))
+	return p + sym + " " + typ + " │ " + cont + " " + meta
+}

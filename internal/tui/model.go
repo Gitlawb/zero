@@ -83,6 +83,12 @@ type model struct {
 	streamingText    string // live assistant text for the current segment
 	streamStartFrame int    // frame the current stream segment began (tok/s)
 
+	// expandedTimelineEvents: supports expand state for Ev timeline (toolresult/diff/permission/output).
+	// Per PR2 "Supports running/expand state", design "expand: per-event state ... using existing indentText + titledCard".
+	// No separate timeline state (derives from transcript/zerolineRows + this small map keyed by id).
+	// Populated in future PRs on key (→/e); used by renderTimeline + map*ToEv.
+	expandedTimelineEvents map[string]bool
+
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
 	// row. Active only when suggestionsActive() (no modal, non-empty matches).
@@ -237,31 +243,32 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	return model{
-		skin:               options.Skin,
-		themeVariant:       options.ThemeVariant,
-		themeDark:          options.ThemeDark,
-		ctx:                ctx,
-		cwd:                cwd,
-		gitBranch:          gitBranch(cwd),
-		providerName:       options.ProviderName,
-		modelName:          options.ModelName,
-		providerProfile:    options.ProviderProfile,
-		provider:           options.Provider,
-		newProvider:        options.NewProvider,
-		registry:           registry,
-		sessionStore:       sessionStore,
-		sandboxStore:       sandboxStore,
-		agentOptions:       options.AgentOptions,
-		runtimeMessageSink: options.RuntimeMessageSink,
-		permissionMode:     permissionMode,
-		reasoningEffort:    options.ReasoningEffort,
-		responseStyle:      defaultedResponseStyle(options.ResponseStyle),
-		usageTracker:       usageTracker,
-		transcript:         initialTranscript(),
-		input:              input,
-		showSplash:         true,
-		now:                time.Now,
-		notifier:           notifier,
+		skin:                   options.Skin,
+		themeVariant:           options.ThemeVariant,
+		themeDark:              options.ThemeDark,
+		ctx:                    ctx,
+		cwd:                    cwd,
+		gitBranch:              gitBranch(cwd),
+		providerName:           options.ProviderName,
+		modelName:              options.ModelName,
+		providerProfile:        options.ProviderProfile,
+		provider:               options.Provider,
+		newProvider:            options.NewProvider,
+		registry:               registry,
+		sessionStore:           sessionStore,
+		sandboxStore:           sandboxStore,
+		agentOptions:           options.AgentOptions,
+		runtimeMessageSink:     options.RuntimeMessageSink,
+		permissionMode:         permissionMode,
+		reasoningEffort:        options.ReasoningEffort,
+		responseStyle:          defaultedResponseStyle(options.ResponseStyle),
+		usageTracker:           usageTracker,
+		transcript:             initialTranscript(),
+		input:                  input,
+		showSplash:             true,
+		now:                    time.Now,
+		notifier:               notifier,
+		expandedTimelineEvents: make(map[string]bool),
 	}
 }
 
@@ -560,7 +567,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	if m.skin == "zeroline" {
+	if m.skin == "zeroline" || m.skin == "hybrid" {
+		// hybrid skin reuses zerolineView (V1 chrome + now Ev timeline body from PR2 mapper/renderer in RenderChat).
+		// Precise model/view transition prepared (showSplash etc); full first-turn + default in PR4.
+		// "if dispatch touches" per plan for this PR. Non-hybrid default (transcriptView flat rows) untouched.
 		return m.zerolineView()
 	}
 	if m.showSplash {
