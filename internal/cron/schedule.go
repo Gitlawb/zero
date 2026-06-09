@@ -1,0 +1,158 @@
+// Package cron implements a small, dependency-free standard 5-field cron parser
+// and next-run evaluator for the `zero cron` scheduler.
+package cron
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+// Schedule is a parsed 5-field cron expression. Field sets are bitsets over the
+// field's value range. domStar/dowStar record whether the day-of-month /
+// day-of-week field was "*", which selects the standard Vixie OR semantics.
+type Schedule struct {
+	minute  uint64 // bits 0-59
+	hour    uint64 // bits 0-23
+	dom     uint64 // bits 1-31
+	month   uint64 // bits 1-12
+	dow     uint64 // bits 0-6 (Sunday = 0)
+	domStar bool
+	dowStar bool
+	expr    string
+}
+
+func (s Schedule) String() string { return s.expr }
+
+// full returns a bitset with every value in [min,max] set.
+func full(min, max int) uint64 {
+	var m uint64
+	for n := min; n <= max; n++ {
+		m |= 1 << uint(n)
+	}
+	return m
+}
+
+var monthNames = map[string]int{"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+var dowNames = map[string]int{"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+// Parse parses a standard 5-field cron expression: minute hour day-of-month
+// month day-of-week. Supports *, lists (a,b), ranges (a-b), steps (*/s, a-b/s,
+// a/s), 3-letter month/weekday names, and 7 as Sunday.
+func Parse(expr string) (Schedule, error) {
+	fields := strings.Fields(strings.TrimSpace(expr))
+	if len(fields) != 5 {
+		return Schedule{}, fmt.Errorf("cron expression must have 5 fields (minute hour day-of-month month day-of-week), got %d", len(fields))
+	}
+	var s Schedule
+	var err error
+	if s.minute, _, err = parseField(fields[0], 0, 59, nil); err != nil {
+		return Schedule{}, fmt.Errorf("minute field: %w", err)
+	}
+	if s.hour, _, err = parseField(fields[1], 0, 23, nil); err != nil {
+		return Schedule{}, fmt.Errorf("hour field: %w", err)
+	}
+	if s.dom, s.domStar, err = parseField(fields[2], 1, 31, nil); err != nil {
+		return Schedule{}, fmt.Errorf("day-of-month field: %w", err)
+	}
+	if s.month, _, err = parseField(fields[3], 1, 12, monthNames); err != nil {
+		return Schedule{}, fmt.Errorf("month field: %w", err)
+	}
+	if s.dow, s.dowStar, err = parseField(fields[4], 0, 7, dowNames); err != nil {
+		return Schedule{}, fmt.Errorf("day-of-week field: %w", err)
+	}
+	// Normalize 7 -> 0 (Sunday) in the dow bitset.
+	if s.dow&(1<<7) != 0 {
+		s.dow = (s.dow &^ (1 << 7)) | 1
+	}
+	s.expr = strings.Join(fields, " ")
+	return s, nil
+}
+
+// parseField parses one cron field into a bitset over [min,max]. It returns the
+// bitset, whether the field was exactly "*", and any error. names maps lowercase
+// 3-letter names to numbers (nil if the field has no names).
+func parseField(field string, min, max int, names map[string]int) (uint64, bool, error) {
+	if field == "*" {
+		return full(min, max), true, nil
+	}
+	var set uint64
+	for _, item := range strings.Split(field, ",") {
+		if item == "" {
+			return 0, false, fmt.Errorf("empty list element in %q", field)
+		}
+		bitsForItem, err := parseItem(item, min, max, names)
+		if err != nil {
+			return 0, false, err
+		}
+		set |= bitsForItem
+	}
+	return set, false, nil
+}
+
+func parseItem(item string, min, max int, names map[string]int) (uint64, error) {
+	rangePart := item
+	step := 1
+	if slash := strings.IndexByte(item, '/'); slash >= 0 {
+		rangePart = item[:slash]
+		stepStr := item[slash+1:]
+		n, err := strconv.Atoi(stepStr)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid step %q in %q", stepStr, item)
+		}
+		step = n
+	}
+
+	var lo, hi int
+	switch {
+	case rangePart == "*":
+		lo, hi = min, max
+	case strings.IndexByte(rangePart, '-') >= 0:
+		dash := strings.IndexByte(rangePart, '-')
+		var err error
+		if lo, err = parseValue(rangePart[:dash], min, max, names); err != nil {
+			return 0, err
+		}
+		if hi, err = parseValue(rangePart[dash+1:], min, max, names); err != nil {
+			return 0, err
+		}
+		if lo > hi {
+			return 0, fmt.Errorf("range start %d after end %d in %q", lo, hi, item)
+		}
+	default:
+		v, err := parseValue(rangePart, min, max, names)
+		if err != nil {
+			return 0, err
+		}
+		lo = v
+		// A bare "n/s" means n..max step s; a bare "n" is just n.
+		if step > 1 {
+			hi = max
+		} else {
+			hi = v
+		}
+	}
+
+	var set uint64
+	for n := lo; n <= hi; n += step {
+		set |= 1 << uint(n)
+	}
+	return set, nil
+}
+
+func parseValue(tok string, min, max int, names map[string]int) (int, error) {
+	tok = strings.TrimSpace(tok)
+	if names != nil {
+		if v, ok := names[strings.ToLower(tok)]; ok {
+			return v, nil
+		}
+	}
+	n, err := strconv.Atoi(tok)
+	if err != nil {
+		return 0, fmt.Errorf("invalid value %q (expected %d-%d or a name)", tok, min, max)
+	}
+	if n < min || n > max {
+		return 0, fmt.Errorf("value %d out of range %d-%d", n, min, max)
+	}
+	return n, nil
+}
