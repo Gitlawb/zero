@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,11 +172,75 @@ func TestRegisterToolsPreservesPriorRegistryStateOnFailure(t *testing.T) {
 	}
 }
 
+func TestRegistryToolIsDeferredEligible(t *testing.T) {
+	client := &fakeToolClient{}
+	tool := newRegistryTool(
+		Server{Name: "docs", Type: "stdio"},
+		RemoteTool{Name: "lookup", Description: "Lookup documentation"},
+		client,
+		RegisterOptions{},
+	)
+
+	// Sanity: the wrapper synthesizes the expected sanitized name so the test
+	// exercises the real production path, not a hand-built struct.
+	if tool.Name() != "mcp_docs_lookup" {
+		t.Fatalf("registryTool.Name() = %q, want mcp_docs_lookup", tool.Name())
+	}
+
+	if !tool.Deferred() {
+		t.Fatal("registryTool.Deferred() = false, want true (all MCP tools are deferred-eligible)")
+	}
+
+	// The exported helper in the tools package must agree via the optional
+	// interface, since the agent loop partitions tools through tools.IsDeferred.
+	if !tools.IsDeferred(tool) {
+		t.Fatal("tools.IsDeferred(registryTool) = false, want true")
+	}
+}
+
+// TestRegistryToolReportsMCPServerName verifies the registryTool reports its true
+// configured server name (not the sanitized tool-name token) so the deferred-tools
+// reminder labels a multi-token server correctly via tools.DeferredLine.
+func TestRegistryToolReportsMCPServerName(t *testing.T) {
+	client := &fakeToolClient{}
+	// A server name that sanitizes to a token containing an underscore ("git_hub"):
+	// the name-only parser would truncate the label to "git".
+	tool := newRegistryTool(
+		Server{Name: "git hub", Type: "stdio"},
+		RemoteTool{Name: "create_issue", Description: "Create a GitHub issue."},
+		client,
+		RegisterOptions{},
+	)
+
+	if tool.MCPServerName() != "git hub" {
+		t.Fatalf("MCPServerName() = %q, want %q", tool.MCPServerName(), "git hub")
+	}
+
+	// DeferredLine must prefer the reported server name over the name-derived token.
+	line := tools.DeferredLine(tool)
+	if !strings.Contains(line, "server: git hub") {
+		t.Fatalf("DeferredLine = %q, want it to label server as %q via MCPServerName()", line, "git hub")
+	}
+	// The truncated token-only label ("git") must NOT be the server segment.
+	if strings.Contains(line, "server: git |") {
+		t.Fatalf("DeferredLine = %q, mislabeled multi-token server with the truncated token", line)
+	}
+}
+
+// TestRegistryToolNameRoundTripsToServerToken pins the synthesized name format
+// for a single-token server so the fallback label parser (mcpServerFromToolName,
+// exercised in the tools package) recovers the right server token.
+func TestRegistryToolNameRoundTripsToServerToken(t *testing.T) {
+	if name := registryToolName("docs", "lookup"); name != "mcp_docs_lookup" {
+		t.Fatalf("registryToolName(docs, lookup) = %q, want mcp_docs_lookup", name)
+	}
+}
+
 type fakePreexistingTool struct {
 	name string
 }
 
-func (t *fakePreexistingTool) Name() string            { return t.name }
+func (t *fakePreexistingTool) Name() string             { return t.name }
 func (t *fakePreexistingTool) Description() string      { return "preexisting tool" }
 func (t *fakePreexistingTool) Parameters() tools.Schema { return tools.Schema{} }
 func (t *fakePreexistingTool) Safety() tools.Safety     { return tools.Safety{} }

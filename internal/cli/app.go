@@ -328,6 +328,27 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
+	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
+	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
+	// apply_patch) would never be offered to the model — the TUI could neither edit
+	// files nor run shell. Ask advertises them and routes each through the existing
+	// OnPermissionRequest flow; shift+tab lets the user switch modes live. An
+	// explicit --skip-permissions-unsafe launch overrides this to unsafe (the only
+	// way to reach unsafe, since shift+tab deliberately cycles auto↔ask only).
+	//
+	// Resolve the effective mode BEFORE the deferral gate below so the registration
+	// count uses the SAME permission mode the agent loop's partition will use; an
+	// empty mode here would mis-gate prompt-advertised deferred tools.
+	if permissionMode == "" {
+		permissionMode = agent.PermissionModeAsk
+	}
+	// Activate deferred MCP-tool loading for the interactive run only when the
+	// VISIBLE deferred-eligible count meets the resolved threshold, matching exec.
+	// The registry is complete (core + specialist + MCP) here, so the count is
+	// accurate; below threshold this is a no-op and the surface is unchanged. The
+	// interactive surface applies no operator tool filters, so enabled/disabled are
+	// nil — matching the AgentOptions below.
+	registerToolSearchIfEligible(registry, resolved.Tools.DeferThreshold, permissionMode, nil, nil)
 	sandboxStore, err := deps.newSandboxStore()
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
@@ -338,16 +359,6 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 		Store:         sandboxStore,
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 	})
-	// Ask (not Auto) is the interactive default: in Auto, ToolAdvertised exposes
-	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
-	// apply_patch) would never be offered to the model — the TUI could neither edit
-	// files nor run shell. Ask advertises them and routes each through the existing
-	// OnPermissionRequest flow; shift+tab lets the user switch modes live. An
-	// explicit --skip-permissions-unsafe launch overrides this to unsafe (the only
-	// way to reach unsafe, since shift+tab deliberately cycles auto↔ask only).
-	if permissionMode == "" {
-		permissionMode = agent.PermissionModeAsk
-	}
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
 		ProviderName:    resolved.Provider.Name,
@@ -364,6 +375,7 @@ func runInteractiveTUIWithSkin(stderr io.Writer, deps appDeps, skin string, perm
 			PermissionMode: permissionMode,
 			Autonomy:       string(sandbox.AutonomyLow),
 			Sandbox:        sandboxEngine,
+			DeferThreshold: resolved.Tools.DeferThreshold,
 		},
 		PermissionMode: permissionMode,
 		Skin:           skin,

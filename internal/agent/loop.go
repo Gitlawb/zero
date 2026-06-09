@@ -67,6 +67,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	guards := newGuardState()
 	compactor := newCompactionState(options)
 
+	// loaded tracks deferred-eligible tools the model has pulled via tool_search
+	// during THIS run. It is consulted by partitionTools each turn to expose a
+	// loaded tool's full schema; it lives only for the run (v1 within-run scope).
+	loaded := map[string]bool{}
+
 	result := Result{Messages: copyMessages(messages)}
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
@@ -76,9 +81,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// request. A no-op when ContextWindow == 0 (compaction disabled).
 		messages = compactor.maybeCompact(ctx, provider, messages)
 
+		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
 		request := zeroruntime.CompletionRequest{
 			Messages: copyMessages(messages),
-			Tools:    toolDefinitions(registry, permissionMode, options),
+			Tools:    exposed,
+		}
+		if reminder != "" {
+			// Append to the per-turn request copy only — NEVER to persistent
+			// messages — so the reminder refreshes each turn and never accumulates
+			// in the saved transcript.
+			request.Messages = append(request.Messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: reminder,
+			})
 		}
 
 		// Report the per-category context budget for this turn so a surface can
@@ -97,9 +112,23 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					result.Messages = copyMessages(messages)
 					return result, retryErr
 				}
+				// Rebuild from the compacted messages but reuse the SAME active-mode
+				// partition (exposed) and reminder computed for this turn: they depend
+				// on registry+loaded, not on the messages, so they stay valid after
+				// compaction. Using the bare toolDefinitions here would route through an
+				// empty-loaded partition, re-hiding every already-loaded deferred tool
+				// and dropping the reminder when deferral is active.
 				request = zeroruntime.CompletionRequest{
 					Messages: copyMessages(messages),
-					Tools:    toolDefinitions(registry, permissionMode, options),
+					Tools:    exposed,
+				}
+				if reminder != "" {
+					// Append to the per-turn retry copy only — NEVER to persistent
+					// messages — matching the main path's reminder-not-persisted invariant.
+					request.Messages = append(request.Messages, zeroruntime.Message{
+						Role:    zeroruntime.MessageRoleUser,
+						Content: reminder,
+					})
 				}
 				stream, err = provider.StreamCompletion(ctx, request)
 			}
@@ -123,9 +152,22 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					result.Messages = copyMessages(messages)
 					return result, retryErr
 				}
+				// Reuse the SAME active-mode partition (exposed) and reminder from this
+				// turn rather than the bare toolDefinitions: exposed/reminder depend on
+				// registry+loaded (not the messages), so they stay valid after compaction.
+				// Routing through an empty-loaded partition here would re-hide every
+				// already-loaded deferred tool and drop the reminder when deferral is active.
 				retryRequest := zeroruntime.CompletionRequest{
 					Messages: copyMessages(messages),
-					Tools:    toolDefinitions(registry, permissionMode, options),
+					Tools:    exposed,
+				}
+				if reminder != "" {
+					// Append to the per-turn retry copy only — NEVER to persistent
+					// messages — matching the main path's reminder-not-persisted invariant.
+					retryRequest.Messages = append(retryRequest.Messages, zeroruntime.Message{
+						Role:    zeroruntime.MessageRoleUser,
+						Content: reminder,
+					})
 				}
 				retryStream, retryStreamErr := provider.StreamCompletion(ctx, retryRequest)
 				if retryStreamErr != nil {
@@ -211,6 +253,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			toolResult, abortErr := executeToolCall(ctx, registry, call, permissionMode, options)
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
+			}
+			// Union the deferred tools this result asked to load into the per-run
+			// set BEFORE any abort/stop/guard branch, so a load that coincides with
+			// a turn-ending result is still recorded for the next turn's partition.
+			for _, name := range toolResult.LoadedTools {
+				loaded[name] = true
 			}
 			if turnRequestedModel == "" && toolResult.RequestedModel != "" {
 				turnRequestedModel = toolResult.RequestedModel
@@ -355,7 +403,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			}, nil
 		}
 	}
-	if !ToolAllowedByFilters(call.Name, options.EnabledTools, options.DisabledTools) {
+	// tool_search is the gateway to the allowlisted deferred tools, so a non-empty
+	// EnabledTools allowlist that omits it must NOT reject the call — otherwise the
+	// reminder points the model at a tool the dispatch gate rejects (an inescapable
+	// dead-end). The allowlist is exempted; an explicit DisabledTools entry for
+	// tool_search is still honored (only the allowlist is exempted, not the denylist).
+	toolSearchAllowed := call.Name == tools.ToolSearchToolName && !containsToolName(options.DisabledTools, tools.ToolSearchToolName)
+	if !toolSearchAllowed && !ToolAllowedByFilters(call.Name, options.EnabledTools, options.DisabledTools) {
 		return ToolResult{
 			ToolCallID:   call.ID,
 			Name:         call.Name,
@@ -435,6 +489,10 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ReasoningEffort:   options.ReasoningEffort,
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
+		// Forward the run's operator tool filters so a filter-aware tool
+		// (tool_search) never discloses or loads an operator-hidden deferred tool.
+		EnabledTools:  options.EnabledTools,
+		DisabledTools: options.DisabledTools,
 		// The sandbox decision (if any) is returned synchronously on the Result and
 		// used here for permission event building.
 	})
@@ -457,6 +515,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Redacted:     result.Redacted,
 		ChangedFiles: result.ChangedFiles,
 		Display:      result.Display,
+		LoadedTools:  loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
 		// the Run turn loop performs the actual provider switch. Empty for every
@@ -844,24 +903,102 @@ func permissionActionFromSandbox(action sandbox.Action) PermissionAction {
 	}
 }
 
-func toolDefinitions(registry *tools.Registry, permissionMode PermissionMode, options Options) []zeroruntime.ToolDefinition {
+// partitionTools builds the per-turn advertised tool list and an optional
+// deferred-tools reminder. INACTIVE (DeferThreshold <= 0 or the eligible count is
+// below it): every visible tool is exposed with its full schema EXCEPT tool_search
+// (dropped so it is never advertised when it cannot help), and the reminder is
+// empty — byte-identical to the pre-deferral output. ACTIVE: a deferred-eligible
+// tool is exposed only when loaded[name]; otherwise it is hidden and its compact
+// line goes into the reminder. Non-deferred tools (including tool_search) are
+// always exposed. The exposed slice is alpha-sorted by name, matching the legacy
+// order so the inactive path is stable.
+func partitionTools(registry *tools.Registry, permissionMode PermissionMode, options Options, loaded map[string]bool) ([]zeroruntime.ToolDefinition, string) {
 	registeredTools := registry.All()
-	definitions := make([]zeroruntime.ToolDefinition, 0, len(registeredTools))
+
+	visible := make([]tools.Tool, 0, len(registeredTools))
+	eligible := 0
 	for _, tool := range registeredTools {
 		if !ToolVisible(tool, permissionMode, options.EnabledTools, options.DisabledTools) {
 			continue
 		}
+		visible = append(visible, tool)
+		if tools.IsDeferred(tool) {
+			eligible++
+		}
+	}
+
+	// Deferral may activate only when tool_search is actually runnable; otherwise
+	// the loop would hide deferred tools behind a loader the dispatch gate rejects
+	// — an inescapable dead-end. "Runnable" mirrors executeToolCall's gate:
+	// registered, not in DisabledTools, and advertised in the current permission
+	// mode (e.g. not spec-draft, where tool_search is not advertised). The
+	// EnabledTools allowlist is intentionally NOT checked here — tool_search is
+	// exempt from the allowlist at dispatch, so an allowlist that omits it must
+	// not disable deferral.
+	loader, loaderFound := registry.Get(tools.ToolSearchToolName)
+	loaderUsable := loaderFound &&
+		!containsToolName(options.DisabledTools, tools.ToolSearchToolName) &&
+		ToolAdvertised(loader, permissionMode)
+
+	active := options.DeferThreshold > 0 && eligible >= options.DeferThreshold && loaderUsable
+
+	definitions := make([]zeroruntime.ToolDefinition, 0, len(visible))
+	exposedNames := make(map[string]bool, len(visible))
+	var hiddenLines []string
+	for _, tool := range visible {
+		name := tool.Name()
+		deferred := tools.IsDeferred(tool)
+
+		if !active {
+			// Inactive: byte-identical to legacy, but tool_search is never advertised.
+			if name == tools.ToolSearchToolName {
+				continue
+			}
+			definitions = append(definitions, zeroruntime.ToolDefinition{
+				Name:        name,
+				Description: tool.Description(),
+				Parameters:  schemaToRuntimeMap(tool.Parameters()),
+			})
+			exposedNames[name] = true
+			continue
+		}
+
+		// Active path.
+		if deferred && !loaded[name] {
+			hiddenLines = append(hiddenLines, tools.DeferredLine(tool))
+			continue
+		}
 		definitions = append(definitions, zeroruntime.ToolDefinition{
-			Name:        tool.Name(),
+			Name:        name,
 			Description: tool.Description(),
 			Parameters:  schemaToRuntimeMap(tool.Parameters()),
+		})
+		exposedNames[name] = true
+	}
+
+	// On the ACTIVE path tool_search is guaranteed runnable (active implies
+	// loaderUsable), so it must ALWAYS be reachable — even when a non-empty
+	// EnabledTools allowlist omits it (the operator allowlisted the deferred
+	// tools, not the loader). Expose its full definition whenever it is not
+	// already in the exposed set. This never runs on the inactive path, so the
+	// byte-identical below-threshold output is preserved.
+	if active && !exposedNames[tools.ToolSearchToolName] {
+		definitions = append(definitions, zeroruntime.ToolDefinition{
+			Name:        loader.Name(),
+			Description: loader.Description(),
+			Parameters:  schemaToRuntimeMap(loader.Parameters()),
 		})
 	}
 
 	sort.Slice(definitions, func(left int, right int) bool {
 		return definitions[left].Name < definitions[right].Name
 	})
-	return definitions
+
+	reminder := ""
+	if active {
+		reminder = tools.BuildDeferredReminder(hiddenLines)
+	}
+	return definitions, reminder
 }
 
 func ToolVisible(tool tools.Tool, permissionMode PermissionMode, enabledTools []string, disabledTools []string) bool {
@@ -980,6 +1117,25 @@ func stopReasonFromToolResult(result ToolResult) StopReason {
 		return StopReasonSpecReviewRequired
 	}
 	return ""
+}
+
+// loadedToolsFromResult extracts the deferred-tool names a tool (tool_search)
+// asked the loop to expose next turn from Meta["load_tools"] (comma-separated).
+// It trims each name and drops empties; returns nil when the key is absent or
+// yields no names, so an ordinary result keeps a nil LoadedTools. Mirrors the
+// Meta-driven control signal read by stopReasonFromToolResult.
+func loadedToolsFromResult(meta map[string]string) []string {
+	raw := meta["load_tools"]
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var names []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			names = append(names, trimmed)
+		}
+	}
+	return names
 }
 
 // appendAbortedToolResults adds a placeholder tool-result message for each of

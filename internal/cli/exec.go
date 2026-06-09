@@ -230,6 +230,23 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if !config.HasProviderProfile(resolved.Provider) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
 	}
+	// Activate deferred MCP-tool loading for this run only when the VISIBLE
+	// deferred-eligible count meets the resolved threshold; below threshold this
+	// is a no-op and tool advertising stays byte-identical. The registry is
+	// already complete (core + MCP) at this point, so the count is accurate. The
+	// permission mode and operator tool filters MUST match the values passed to
+	// agent.Run below so this registration gate counts the same population the
+	// loop's partition gate counts.
+	// tool_search is the only way to reach a hidden deferred tool, so if the
+	// operator explicitly disables it, deferral must not activate at all —
+	// otherwise a positive threshold would hide tools behind a loader the run
+	// rejects (a dead-end). Force the effective threshold to 0 so this
+	// registration gate and agent.Run's partition gate agree the run is inactive.
+	effectiveDeferThreshold := resolved.Tools.DeferThreshold
+	if toolListContains(options.disabledTools, tools.ToolSearchToolName) {
+		effectiveDeferThreshold = 0
+	}
+	registerToolSearchIfEligible(registry, effectiveDeferThreshold, permissionMode, options.enabledTools, options.disabledTools)
 	images, err := resolveExecImages(options.imagePaths, workspaceRoot)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -402,6 +419,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
+		DeferThreshold:   effectiveDeferThreshold,
 		SessionID:        preparedSession.Session.SessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,
@@ -514,6 +532,46 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// deferredEligibleCount returns the number of registered tools that are
+// deferred-eligible (MCP tools) AND visible to the model for THIS run — i.e. they
+// pass the same agent.ToolVisible gate (permission-mode advertising + operator
+// allow/deny filters) that the agent loop's partitionTools applies when it
+// decides whether deferral activates. Counting the SAME visible-deferred
+// population here keeps registration and activation in agreement: tool_search is
+// registered iff the partition will actually go active. Built-ins never implement
+// the Deferred interface, so they never count.
+func deferredEligibleCount(registry *tools.Registry, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) int {
+	count := 0
+	for _, tool := range registry.All() {
+		if !tools.IsDeferred(tool) {
+			continue
+		}
+		if !agent.ToolVisible(tool, permissionMode, enabledTools, disabledTools) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+// registerToolSearchIfEligible registers the tool_search tool only when deferral
+// is active for this run: the visible-deferred count (the same population the
+// agent loop's partition counts) meets the (positive) threshold. Below threshold
+// or with a zero/negative threshold, tool_search is never registered, so the
+// agent loop's partition stays inactive and tool advertising is byte-identical to
+// today. The permissionMode + enabled/disabled filters MUST match the values the
+// run passes to agent.Run so the registration gate and the activation gate count
+// the same tools.
+func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) {
+	if deferThreshold <= 0 {
+		return
+	}
+	if deferredEligibleCount(registry, permissionMode, enabledTools, disabledTools) < deferThreshold {
+		return
+	}
+	registry.Register(tools.NewToolSearchTool(registry))
 }
 
 func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps) (*sandbox.Engine, error) {

@@ -15,6 +15,8 @@ import (
 
 const defaultMaxTurns = 12
 
+const defaultDeferThreshold = 10
+
 func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	cfg := FileConfig{
 		MaxTurns: defaultMaxTurns,
@@ -48,6 +50,13 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	}
 
 	applyOverrides(&cfg, options.Overrides)
+
+	if !cfg.Tools.deferThresholdSet && cfg.Tools.DeferThreshold == 0 {
+		cfg.Tools.DeferThreshold = defaultDeferThreshold
+	}
+	if cfg.Tools.DeferThreshold < 0 {
+		return ResolvedConfig{}, fmt.Errorf("invalid tools.deferThreshold %d: must be >= 0", cfg.Tools.DeferThreshold)
+	}
 
 	if maxAutonomy := strings.TrimSpace(cfg.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		// Fail loud on an invalid ceiling. An unvalidated typo (e.g. "moderate")
@@ -86,6 +95,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		MCP:            cfg.MCP,
 		Sandbox:        cfg.Sandbox,
 		Notify:         cfg.Notify,
+		Tools:          cfg.Tools,
 	}, nil
 }
 
@@ -139,6 +149,10 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if focusMode := strings.TrimSpace(src.Notify.FocusMode); focusMode != "" {
 		dst.Notify.FocusMode = focusMode
 	}
+	if src.Tools.deferThresholdSet {
+		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
+		dst.Tools.deferThresholdSet = true
+	}
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -164,6 +178,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if focusMode := strings.TrimSpace(src.Notify.FocusMode); focusMode != "" {
 		dst.Notify.FocusMode = focusMode
+	}
+	if src.Tools.deferThresholdSet {
+		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
+		dst.Tools.deferThresholdSet = true
 	}
 	return nil
 }
@@ -474,6 +492,10 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if focusMode := strings.TrimSpace(overrides.Notify.FocusMode); focusMode != "" {
 		cfg.Notify.FocusMode = focusMode
+	}
+	if overrides.Tools.deferThresholdSet || overrides.Tools.DeferThreshold != 0 {
+		cfg.Tools.DeferThreshold = overrides.Tools.DeferThreshold
+		cfg.Tools.deferThresholdSet = true
 	}
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
