@@ -288,6 +288,7 @@ func renderToolResultRow(row transcriptRow, width int) string {
 // See full citations in mapTranscriptRowToEv (design Hybrid Target + examples + "the body *is* the Ev renderer").
 // PR4 integration: now reachable via hybrid skin dispatch (model.View !showSplash -> zerolineView RenderChat timeline;
 // renderTimeline prepared for direct hybrid body use; cli/zeroline --skin hybrid snapshots exercise equiv Ev paths at 80+).
+// PR5: hybrid-specific responsive (80-col metadata collapse per Hybrid Target "time hidden or narrow (glyphs+content only), vertical rule still but thin; no right rail<120"), elegant error/blocked/loading/stream states in Ev/timeline (builds rowError + current stream/blocked/perm), keyboard polish prep (map used by →/g). Exact: clamp/narrowFor80/bodyH patterns, renderTimeline. Cites design "Hybrid-specific responsive notes (esp. 80-col...)", "error/blocked/loading/stream states elegant in timeline", "keyboard (→/g etc for timeline)", "References risks table (80-col collapse, vertical rules + per-event expand + copy/paste artifacts, timeline visual noise → fallback, performance/repaint, ...)", PR5 plan + PR4 runnable base.
 func renderTimeline(rows []transcriptRow, width int) string {
 	if width <= 0 {
 		width = 80
@@ -299,8 +300,17 @@ func renderTimeline(rows []transcriptRow, width int) string {
 			// synthetic for examples + live (real times/durs from session events in future PRs)
 			e.Time = fmt.Sprintf("09:24:%02d", (i*4)%60)
 		}
+		// PR5: 80-col collapse (time hidden/narrow, glyphs+content only, thin vrule); follows exact narrowFor80/eightyCol from PR1, clamp patterns.
+		narrow := eightyCol(width)
+		timePrefix := ""
+		rule := " │ "
+		if narrow {
+			rule = "│ "
+		} else {
+			timePrefix = e.Time + " "
+		}
 		// subtle rule + time | glyph | type | content | dur/status | [expand]
-		p := zeroTheme.muted.Render(e.Time + " │ ")
+		p := zeroTheme.muted.Render(timePrefix + rule)
 		var sym string
 		switch e.Sym {
 		case "▸":
@@ -317,9 +327,17 @@ func renderTimeline(rows []transcriptRow, width int) string {
 			sym = zeroTheme.muted.Render(e.Sym)
 		}
 		typ := zeroTheme.text.Render(e.Type)
-		cont := zeroTheme.text.Render(truncateRunes(e.Content, 40))
+		cw := 40
+		if narrow {
+			cw = 22
+		}
+		cont := zeroTheme.text.Render(truncateRunes(e.Content, cw))
 		meta := zeroTheme.muted.Render(strings.TrimSpace(e.Dur + " " + e.Status))
-		line := p + sym + " " + typ + " │ " + cont + " " + meta
+		second := " │ "
+		if narrow {
+			second = " "
+		}
+		line := p + sym + " " + typ + second + cont + " " + meta
 		b.WriteString(line)
 		b.WriteString("\n")
 		if e.Expand != "" {
@@ -333,11 +351,20 @@ func renderTimeline(rows []transcriptRow, width int) string {
 
 // renderEv is the small primitive for a single timeline Ev (used by renderTimeline + future hybrid body).
 // Follows pseudocode in design exactly.
+// PR5 responsive: 80-col collapse (see renderTimeline).
 func renderEv(e Ev, width int) string {
 	if width <= 0 {
 		width = 80
 	}
-	p := zeroTheme.muted.Render(e.Time + " │ ")
+	narrow := eightyCol(width)
+	timePrefix := ""
+	rule := " │ "
+	if narrow {
+		rule = "│ "
+	} else {
+		timePrefix = e.Time + " "
+	}
+	p := zeroTheme.muted.Render(timePrefix + rule)
 	sym := zeroTheme.text.Render(e.Sym)
 	switch e.Sym {
 	case "▸":
@@ -350,7 +377,15 @@ func renderEv(e Ev, width int) string {
 		sym = zeroTheme.amber.Render(e.Sym)
 	}
 	typ := zeroTheme.text.Render(e.Type)
-	cont := zeroTheme.text.Render(truncateRunes(e.Content, 40))
+	cw := 40
+	if narrow {
+		cw = 22
+	}
+	cont := zeroTheme.text.Render(truncateRunes(e.Content, cw))
 	meta := zeroTheme.muted.Render(strings.TrimSpace(e.Dur + " " + e.Status))
-	return p + sym + " " + typ + " │ " + cont + " " + meta
+	second := " │ "
+	if narrow {
+		second = " "
+	}
+	return p + sym + " " + typ + second + cont + " " + meta
 }

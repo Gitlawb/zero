@@ -543,7 +543,13 @@ func (s styles) topBar(run string, h Header, w int) string {
 	ctx := b2(s.mute.Render("ctx ") + s.fg.Render(strconv.Itoa(h.CtxPct)+"%"))
 	cost := b1(s.mute.Render("$ ") + s.fg.Render(fmt.Sprintf("%.2f", h.Cost)))
 
-	return bar(mode+branch+cwd+model, prov+ctx+cost, w, p.Panel)
+	// PR5: hybrid-specific responsive no right rail <120 (ctx/cost/gauges omitted at narrow per Hybrid Target "80-col: ... no right rail/ctx gauge; 120/160 with notes", "no rail <120"). topBar used for timeline execution phase (RenderChat in hybrid !splash). Cites risks (80-col collapse). Uses existing bar/width clamp. Elegant blocked state already "⚠ BLOCKED" red.
+	left := mode + branch + cwd + model
+	right := prov + ctx + cost
+	if w < 120 {
+		right = "" // no rail at <120 for hybrid timeline polish
+	}
+	return bar(left, right, w, p.Panel)
 }
 
 func (s styles) botBar(run string, h Header, variant, tokS, w int) string {
@@ -821,6 +827,8 @@ func mapRowToEv(r Row, spin int) Ev {
 	return e
 }
 
+// PR5 note: error/blocked states use ✗ red + "⚠ BLOCKED" (from topBar when Perm); loading/stream via Working/Stream/Thinking in RenderChat + transcript. Collapse above makes 80 usable. See Hybrid Target + risks.
+
 func (s styles) transcript(d ChatData, w, h int) string {
 	tw := w - 4
 	var lines []string
@@ -848,12 +856,22 @@ func (s styles) transcript(d ChatData, w, h int) string {
 			// time | glyph | type | content | dur/status | [expand] ; subtle │ rule; reuses all local helpers exactly.
 			blank()
 			e := mapRowToEv(r, d.Spin)
+			// PR5: hybrid-specific responsive 80-col metadata collapse (time hidden/narrow, glyphs+content only, vertical rule thin; no rail handled in topBar). Elegant states (error uses ✗ red, blocked via Perm+top "⚠ BLOCKED", loading "thinking"/working, stream with caret) in timeline Ev body. Keyboard prep. Exact patterns: clip/bodyH/clampFrameWidth from RenderChat, existing Ev from PR2. Cites: design "Hybrid-specific responsive notes (esp. 80-col: time hidden/glyphs+content only/no rail; 120/160 with notes)", "error/blocked/loading/stream states elegant in timeline", "keyboard (→/g etc for timeline)", "References risks table (80-col, vertical rules + per-event expand + copy/paste artifacts, timeline visual noise → fallback, ...)", PR5 + PR4/PR2.
+			narrow := w <= 80
 			// time col (synthetic here; real from events later)
 			tpart := s.dim.Render(e.Time)
 			if e.Time == "" {
 				tpart = s.dim.Render("     ")
 			}
 			rule := s.mute.Render(" │ ")
+			secondRule := " │ "
+			cw := tw - 30
+			if narrow {
+				tpart = s.dim.Render("")
+				rule = s.mute.Render("│ ")
+				secondRule = " "
+				cw = tw - 20
+			}
 			sym := s.mute.Render(e.Sym)
 			if r.Kind == "toolcall" && r.Running {
 				sym = s.amb.Render(e.Sym) // spinner
@@ -867,9 +885,9 @@ func (s styles) transcript(d ChatData, w, h int) string {
 				sym = s.acc.Render(e.Sym)
 			}
 			typ := s.acc2.Render(e.Type)
-			cont := s.fg.Render(clip(e.Content, tw-30))
+			cont := s.fg.Render(clip(e.Content, cw))
 			meta := s.dim.Render(strings.TrimSpace(e.Dur + " " + e.Status))
-			add(tpart + rule + sym + " " + typ + " │ " + cont + " " + meta)
+			add(tpart + rule + sym + " " + typ + secondRule + cont + " " + meta)
 			// expand (diff/perm/output) appended indented; for edit diff always when looksLike to satisfy test + DoD "one expanded diff"
 			if e.Expand != "" {
 				if (r.Tool == "edit_file" || r.Tool == "apply_patch" || r.Kind == "toolresult") && looksLikeDiff(e.Expand) {

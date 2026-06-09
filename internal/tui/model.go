@@ -382,6 +382,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSuggestion(-1)
 				return m, nil
 			}
+		case tea.KeyRight:
+			if m.skin == "zeroline" || m.skin == "hybrid" {
+				// PR5 keyboard polish for timeline: → toggles expand/collapse on last Ev (uses map prepared PR2).
+				// Enables →/g etc in Ev list for hybrid timeline. See design "keyboard (→/g etc for timeline)", "expand: per-event state (arrow key or 'e')", V4 "Keyboard → expand, g latest", "Hybrid Target" responsive/keyboard notes + risks table (per-event expand + vertical rules + copy).
+				if len(m.transcript) > 0 {
+					id := fmt.Sprintf("ev%d", len(m.transcript)-1)
+					m.expandedTimelineEvents[id] = !m.expandedTimelineEvents[id]
+				}
+				return m, nil
+			}
 		}
 		if m.pendingAskUser != nil {
 			// While a questionnaire is active, all other keys feed the text input
@@ -404,6 +414,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.skin == "zeroline" || m.skin == "hybrid" {
 			m.booted = true // any key dismisses the boot splash (hybrid uses for theme keys only)
+			if k := msg.String(); k == "g" || k == "G" {
+				// PR5: 'g' for jump to latest / expand last in timeline Ev list (keyboard polish).
+				// Model handling for hybrid (→/g etc). Cites Hybrid Target "keyboard polish", "→/g etc for jump/expand/collapse in the Ev list", risks (timeline noise, expand state).
+				if len(m.transcript) > 0 {
+					id := fmt.Sprintf("ev%d", len(m.transcript)-1)
+					m.expandedTimelineEvents[id] = true
+				}
+				return m, nil
+			}
 			if nm, handled := m.handleZerolineKeys(msg); handled {
 				return nm, nil
 			}

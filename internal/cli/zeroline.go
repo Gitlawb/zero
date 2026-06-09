@@ -29,7 +29,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	width := fs.Int("width", 100, "snapshot width")
 	height := fs.Int("height", 30, "snapshot height")
 	skipUnsafe := fs.Bool("skip-permissions-unsafe", false, "launch in unsafe permission mode (enables the ! shell escape)")
-	skin := fs.String("skin", "zeroline", "skin: zeroline|hybrid (hybrid: V1 home via startup + timeline Ev body; for --snapshot home->chat smoke per PR4)")
+	skin := fs.String("skin", "zeroline", "skin: zeroline|hybrid (hybrid: V1 home via startup + timeline Ev body; for --snapshot home->chat smoke per PR4/PR5 responsive+states+keyboard)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -59,6 +59,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 					{Kind: "toolcall", Tool: "edit_file", Detail: "exec.go (new) · loop.go"},
 					{Kind: "toolresult", Tool: "edit_file", Status: "ok", Detail: "--- a/internal/agent/loop.go\n+++ b/internal/agent/exec.go\n@@ -141,6 +141,3 @@\n-\tswitch t := call.Tool.(type) {\n-\tcase ReadFileTool: out, err = l.readFile(ctx, t)\n+\tout, err := l.exec.Dispatch(call)"},
 					{Kind: "assistant", Text: "Done. Extracted a `ToolExecutor`:\n\n```go\nfunc (e *ToolExecutor) Dispatch(c Call) (Out, error) {\n\treturn e.route(c)\n}\n```\n\nThe switch in loop.go now delegates to one call. Tests pass."},
+					{Kind: "error", Text: "go test ./... failed (exit 1)"}, // PR5: exercise error state in timeline Ev at widths
 				},
 				Input: "❯ ",
 			}
@@ -83,6 +84,7 @@ func runZeroline(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// (with tool/perm/stream events at 80 cols). For hybrid, runtime uses startupView (zeroLogoLines V1) then
 		// Ev timeline; snapshot here exercises the Render paths + skin flag for verification (DoD).
 		// Cites: PR4 desc, "Extend cli/zeroline --snapshot", "V1 home -> timeline with tool/perm/stream events", "80-col snapshot clean".
+		// PR5 polish: now covers blocked/perm/error/tool/stream states + 80-col collapse (time hidden, glyphs+content, no rail) for hybrid timeline; copy/paste usable (simple │ text); manual narrow shows stable prompt + collapsed timeline. Cites Hybrid Target responsive/80-col/risks + PR5 DoD. --skin hybrid passed through.
 		// (prior PR1 comment retained for unified palette.)
 		if _, err := fmt.Fprintln(stdout, frame); err != nil {
 			return 1
