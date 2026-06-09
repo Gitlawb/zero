@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -198,7 +199,7 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 		info.Branch = strings.TrimSpace(branch)
 	}
 	if remote, err := run(ctx, dir, "remote", "get-url", "origin"); err == nil {
-		info.RemoteURL = strings.TrimSpace(remote)
+		info.RemoteURL = sanitizeRemoteURL(remote)
 	}
 	// Age = time since the FIRST commit. Use --max-parents=0 (root commits) — NOT
 	// `log --reverse -1`, where git applies the -1 limit BEFORE reversing and so
@@ -245,6 +246,29 @@ func topSubdir(filePath, prefix string) (string, bool) {
 		return "", false
 	}
 	return rest[:slash], true
+}
+
+// sanitizeRemoteURL strips any credentials (userinfo) from a git remote URL so
+// they never leak into the report. A remote can embed secrets, e.g.
+// "https://x-access-token:ghp_…@github.com/o/r.git". URL forms have their
+// user:password@ component removed; scp-like forms ("[user@]host:path") drop a
+// leading "user@".
+func sanitizeRemoteURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		u.User = nil
+		return u.String()
+	}
+	// scp-like form (no scheme): user@host:path -> host:path.
+	if at := strings.IndexByte(raw, '@'); at >= 0 && !strings.Contains(raw, "://") {
+		if rest := raw[at+1:]; strings.Contains(rest, ":") {
+			return rest
+		}
+	}
+	return raw
 }
 
 // countUnique counts distinct non-empty trimmed lines.

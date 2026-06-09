@@ -57,6 +57,28 @@ func TestRunRepoInfoJSON(t *testing.T) {
 	if info["primaryLanguage"] != "Go" {
 		t.Fatalf("expected primaryLanguage Go, got %v", info["primaryLanguage"])
 	}
+	if strings.Contains(stdout.String(), "ghp_TESTSECRET") {
+		t.Fatalf("credential leaked into --json output:\n%s", stdout.String())
+	}
+	if info["remoteURL"] != "https://github.com/o/r.git" {
+		t.Fatalf("remoteURL=%v want sanitized (no credentials)", info["remoteURL"])
+	}
+}
+
+func TestRunRepoInfoTextNoCredentials(t *testing.T) {
+	dir := initTempGitRepo(t)
+	var stdout, stderr bytes.Buffer
+	code := runRepoInfo([]string{"--cwd", dir}, &stdout, &stderr, testRepoInfoDeps())
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "ghp_TESTSECRET") {
+		t.Fatalf("credential leaked into text output:\n%s", out)
+	}
+	if !strings.Contains(out, "github.com/o/r.git") {
+		t.Fatalf("expected sanitized remote in text output:\n%s", out)
+	}
 }
 
 // initTempGitRepo creates a throwaway git repo with a single Go file committed,
@@ -85,6 +107,8 @@ func initTempGitRepo(t *testing.T) string {
 	}
 	git("add", ".")
 	git("commit", "-m", "init")
+	// A remote whose URL embeds a credential, to prove the report never leaks it.
+	git("remote", "add", "origin", "https://x-access-token:ghp_TESTSECRET@github.com/o/r.git")
 	return dir
 }
 

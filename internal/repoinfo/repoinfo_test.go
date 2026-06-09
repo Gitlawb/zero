@@ -3,6 +3,7 @@ package repoinfo
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -190,6 +191,54 @@ func TestCollectAgeFromOldestRootCommit(t *testing.T) {
 	}
 	if info.AgeDays == nil || *info.AgeDays != 10 {
 		t.Fatalf("AgeDays=%v want 10 (now - oldest root 100)", info.AgeDays)
+	}
+}
+
+func TestSanitizeRemoteURL(t *testing.T) {
+	cases := map[string]string{
+		"https://x-access-token:ghp_secret@github.com/o/r.git": "https://github.com/o/r.git",
+		"https://user:pass@gitlab.com/o/r.git":                 "https://gitlab.com/o/r.git",
+		"https://github.com/o/r.git":                           "https://github.com/o/r.git",
+		"ssh://git@github.com/o/r.git":                         "ssh://github.com/o/r.git",
+		"git@github.com:o/r.git":                               "github.com:o/r.git",
+		"":                                                     "",
+	}
+	for in, want := range cases {
+		got := sanitizeRemoteURL(in)
+		if got != want {
+			t.Fatalf("sanitizeRemoteURL(%q)=%q want %q", in, got, want)
+		}
+		if strings.Contains(got, "secret") || strings.Contains(got, "pass") || strings.Contains(got, "ghp_") {
+			t.Fatalf("credential leaked for %q: %q", in, got)
+		}
+	}
+}
+
+func TestCollectStripsRemoteCredentials(t *testing.T) {
+	run := func(_ context.Context, _ string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-tree":
+			return lsTree, nil
+		case "remote":
+			return "https://x-access-token:ghp_SECRET@github.com/o/r.git\n", nil
+		case "rev-parse":
+			return "main\n", nil
+		case "log":
+			return "0\n", nil
+		case "rev-list":
+			return "1\n", nil
+		}
+		return "", errors.New("unexpected " + args[0])
+	}
+	info, err := Collect(context.Background(), Options{Now: time.Unix(0, 0), RunGit: run})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if info.RemoteURL != "https://github.com/o/r.git" {
+		t.Fatalf("RemoteURL=%q want sanitized", info.RemoteURL)
+	}
+	if strings.Contains(info.RemoteURL, "ghp_SECRET") {
+		t.Fatal("credential leaked into RemoteURL")
 	}
 }
 
