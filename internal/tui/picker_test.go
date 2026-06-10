@@ -8,8 +8,125 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+func TestModelPickerDetectsOllamaCloudFromBaseURL(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "custom-openai-compatible",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "custom-openai-compatible",
+			CatalogID:    "custom-openai-compatible",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected model picker")
+	}
+	groups := pickerGroups(picker.items)
+	if !contains(groups, "Ollama Cloud catalog") {
+		t.Fatalf("picker groups = %#v, want Ollama Cloud catalog", groups)
+	}
+	got := pickerValues(picker.items)
+	if !contains(got, "qwen3-coder:480b") {
+		t.Fatalf("picker values = %#v, want Ollama Cloud models", got)
+	}
+	if contains(got, "custom-model") {
+		t.Fatalf("picker should not show custom-openai-compatible fallback when URL is Ollama Cloud: %#v", got)
+	}
+}
+
+func TestModelPickerRefreshesLiveModelsForActiveProvider(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKey:       "ollama-key",
+			Model:        "minimax-m3",
+		},
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			captured = profile
+			return []providermodeldiscovery.Model{
+				{ID: "live-cloud-a", Description: "Live Cloud A"},
+				{ID: "live-cloud-b", Description: "Live Cloud B"},
+			}, nil
+		},
+	})
+	m.input.SetValue("/model")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.picker == nil {
+		t.Fatal("expected model picker to open")
+	}
+	if cmd == nil {
+		t.Fatal("opening /model for an active provider should start model discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
+
+	if captured.CatalogID != "ollama-cloud" {
+		t.Fatalf("discovery profile catalog = %q, want ollama-cloud", captured.CatalogID)
+	}
+	got := pickerValues(next.picker.items)
+	if !contains(got, "live-cloud-a") || !contains(got, "live-cloud-b") {
+		t.Fatalf("picker values = %#v, want live cloud models", got)
+	}
+}
+
+func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+	m.picker = m.newModelPicker()
+	if m.picker == nil {
+		t.Fatal("expected model picker")
+	}
+	target := pickerIndex(m.picker.items, "qwen3-coder:480b")
+	if target < 0 {
+		t.Fatalf("expected qwen3-coder:480b in picker, got %#v", pickerValues(m.picker.items))
+	}
+	m.picker.selected = target
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	next := updated.(model)
+	if !next.favoriteModels["qwen3-coder:480b"] {
+		t.Fatalf("favorite map = %#v, want qwen3-coder:480b favorited", next.favoriteModels)
+	}
+	if next.picker.items[0].Group != "Favorites" || next.picker.items[0].Value != "qwen3-coder:480b" {
+		t.Fatalf("first picker item = %#v, want favorite group row", next.picker.items[0])
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	next = updated.(model)
+	if next.favoriteModels["qwen3-coder:480b"] {
+		t.Fatalf("favorite map = %#v, want qwen3-coder:480b unfavorited", next.favoriteModels)
+	}
+	if len(next.picker.items) > 0 && next.picker.items[0].Group == "Favorites" {
+		t.Fatalf("favorites group should be gone after unfavorite, got first item %#v", next.picker.items[0])
+	}
+}
 
 func TestModelPickerShowsRecentThenActiveProviderCatalog(t *testing.T) {
 	m := newModel(context.Background(), Options{
@@ -245,4 +362,26 @@ func pickerValues(items []pickerItem) []string {
 		values = append(values, item.Value)
 	}
 	return values
+}
+
+func pickerGroups(items []pickerItem) []string {
+	groups := []string{}
+	seen := map[string]bool{}
+	for _, item := range items {
+		if item.Group == "" || seen[item.Group] {
+			continue
+		}
+		seen[item.Group] = true
+		groups = append(groups, item.Group)
+	}
+	return groups
+}
+
+func pickerIndex(items []pickerItem, value string) int {
+	for index, item := range items {
+		if item.Value == value {
+			return index
+		}
+	}
+	return -1
 }

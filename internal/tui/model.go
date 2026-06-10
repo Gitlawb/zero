@@ -122,8 +122,11 @@ type model struct {
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
-	picker         *commandPicker
-	providerWizard *providerWizardState
+	picker                    *commandPicker
+	providerWizard            *providerWizardState
+	favoriteModels            map[string]bool
+	modelPickerLiveProviderID string
+	modelPickerLiveModels     []providermodeldiscovery.Model
 
 	// pendingImages holds image attachments staged by /image for the next user
 	// turn; pendingImageLabels are their display names (base(path)) for the chip
@@ -449,6 +452,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
+		case tea.KeyCtrlF:
+			if m.picker != nil && m.picker.kind == pickerModel {
+				return m.toggleModelFavorite(), nil
+			}
 		case tea.KeyTab:
 			if m.transcriptDetailed {
 				return m, nil
@@ -743,6 +750,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
+	case modelPickerModelsDiscoveredMsg:
+		return m.applyModelPickerModelsDiscovered(msg), nil
 	}
 
 	var cmd tea.Cmd
@@ -1096,7 +1105,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 			if picker := m.newModelPicker(); picker != nil {
 				m.picker = picker
-				return m, nil
+				return m, m.modelPickerDiscoveryCmd()
 			}
 		}
 		text := ""

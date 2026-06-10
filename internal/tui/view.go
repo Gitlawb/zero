@@ -330,7 +330,11 @@ func (m model) pickerOverlay(width int) string {
 	}
 	innerWidth := width - 4
 	lines := make([]string, 0, len(m.picker.items)+1)
-	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render("  ↑/↓ · ⏎ · esc"))
+	hint := "  ↑/↓ · ⏎ · esc"
+	if m.picker.kind == pickerModel {
+		hint += " · ctrl+f favorite"
+	}
+	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render(hint))
 	lastGroup := ""
 	for index, item := range m.picker.items {
 		if item.Group != "" && item.Group != lastGroup {
@@ -349,6 +353,9 @@ func (m model) pickerOverlay(width int) string {
 			left += surface(zeroTheme.blue).Render("● ")
 		case item.Remote:
 			left += surface(zeroTheme.accent).Render("● ")
+		}
+		if item.Favorite {
+			left += surface(zeroTheme.accent).Render("* ")
 		}
 		left += surface(zeroTheme.ink).Render(item.Label)
 		right := ""

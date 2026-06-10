@@ -1,11 +1,18 @@
 package tui
 
 import (
+	"context"
+	"os"
 	"strings"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
 
 // pickerKind identifies which command a picker selection feeds back into.
@@ -22,12 +29,13 @@ const (
 // readout (ctx window · key env); the dot flags mark provider locality for
 // model rows (accent = remote, blue = local).
 type pickerItem struct {
-	Group  string
-	Label  string
-	Value  string
-	Meta   string
-	Remote bool
-	Local  bool
+	Group    string
+	Label    string
+	Value    string
+	Meta     string
+	Remote   bool
+	Local    bool
+	Favorite bool
 }
 
 // commandPicker is a generic single-select overlay reused by /model, /effort,
@@ -64,25 +72,60 @@ func (m model) newModelPicker() *commandPicker {
 		return nil
 	}
 	activeModel := strings.TrimSpace(m.modelName)
-	items := []pickerItem{}
+	recent := []pickerItem{}
 	if activeModel != "" {
-		items = append(items, m.modelPickerRecentItem(registry, activeModel))
+		recent = append(recent, m.modelPickerRecentItem(registry, activeModel))
 	}
 
+	catalog := []pickerItem{}
 	if provider, ok := m.activeProviderDescriptor(); ok {
-		items = append(items, m.providerCatalogModelPickerItems(provider, activeModel)...)
+		catalog = append(catalog, m.providerCatalogModelPickerItems(provider, activeModel)...)
 	} else {
 		for _, entry := range registry.List(modelregistry.ListOptions{}) {
 			if entry.ID == activeModel {
 				continue
 			}
-			items = append(items, registryModelPickerItem(entry, "Catalog"))
+			catalog = append(catalog, registryModelPickerItem(entry, "Catalog"))
 		}
 	}
+	items := m.assembleModelPickerItems(recent, catalog)
 	if len(items) == 0 {
 		return nil
 	}
 	return &commandPicker{kind: pickerModel, title: "select model", items: items, selected: 0}
+}
+
+func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
+	result := []pickerItem{}
+	seen := map[string]bool{}
+	all := append(append([]pickerItem{}, recent...), catalog...)
+	for _, item := range all {
+		if item.Value == "" || !m.favoriteModels[item.Value] || seen[item.Value] {
+			continue
+		}
+		item.Group = "Favorites"
+		item.Favorite = true
+		result = append(result, item)
+		seen[item.Value] = true
+	}
+	for _, item := range recent {
+		if item.Value == "" || seen[item.Value] {
+			continue
+		}
+		item.Group = "Recent"
+		item.Favorite = m.favoriteModels[item.Value]
+		result = append(result, item)
+		seen[item.Value] = true
+	}
+	for _, item := range catalog {
+		if item.Value == "" || seen[item.Value] {
+			continue
+		}
+		item.Favorite = m.favoriteModels[item.Value]
+		result = append(result, item)
+		seen[item.Value] = true
+	}
+	return result
 }
 
 func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID string) pickerItem {
@@ -105,6 +148,9 @@ func (m model) modelPickerRecentItem(registry modelregistry.Registry, modelID st
 }
 
 func (m model) providerCatalogModelPickerItems(provider providercatalog.Descriptor, activeModel string) []pickerItem {
+	if m.modelPickerLiveProviderID == provider.ID && len(m.modelPickerLiveModels) > 0 {
+		return m.liveProviderModelPickerItems(provider, activeModel)
+	}
 	models := providermodelcatalog.Models(provider)
 	items := make([]pickerItem, 0, len(models))
 	group := provider.Name + " catalog"
@@ -113,6 +159,18 @@ func (m model) providerCatalogModelPickerItems(provider providercatalog.Descript
 			continue
 		}
 		items = append(items, providerModelPickerItem(provider, model, group))
+	}
+	return items
+}
+
+func (m model) liveProviderModelPickerItems(provider providercatalog.Descriptor, activeModel string) []pickerItem {
+	items := make([]pickerItem, 0, len(m.modelPickerLiveModels))
+	group := provider.Name + " catalog"
+	for _, model := range m.modelPickerLiveModels {
+		if strings.TrimSpace(model.ID) == "" || model.ID == activeModel {
+			continue
+		}
+		items = append(items, discoveredModelPickerItem(provider, model, group))
 	}
 	return items
 }
@@ -133,6 +191,19 @@ func registryModelPickerItem(entry modelregistry.ModelEntry, group string) picke
 }
 
 func providerModelPickerItem(provider providercatalog.Descriptor, model providermodelcatalog.Model, group string) pickerItem {
+	item := pickerItem{
+		Group: group,
+		Label: modelPickerDisplayName(model.ID, model.Description),
+		Value: model.ID,
+	}
+	if ctx := formatContextWindow(model.ContextWindow); ctx != "" {
+		item.Meta = ctx
+	}
+	applyProviderPickerMeta(&item, provider)
+	return item
+}
+
+func discoveredModelPickerItem(provider providercatalog.Descriptor, model providermodeldiscovery.Model, group string) pickerItem {
 	item := pickerItem{
 		Group: group,
 		Label: modelPickerDisplayName(model.ID, model.Description),
@@ -193,8 +264,13 @@ func modelPickerTitleWord(word string) string {
 }
 
 func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
+	if descriptor, ok := providercatalog.Get(m.providerProfile.CatalogID); ok && !genericProviderCatalogID(descriptor.ID) {
+		return descriptor, true
+	}
+	if descriptor, ok := providerDescriptorByBaseURL(m.providerProfile.BaseURL); ok {
+		return descriptor, true
+	}
 	for _, candidate := range []string{
-		m.providerProfile.CatalogID,
 		m.providerProfile.Name,
 		m.providerName,
 		m.providerProfile.Provider,
@@ -205,6 +281,137 @@ func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
 		}
 	}
 	return providercatalog.Descriptor{}, false
+}
+
+func providerDescriptorByBaseURL(baseURL string) (providercatalog.Descriptor, bool) {
+	normalized := normalizeProviderBaseURL(baseURL)
+	if normalized == "" {
+		return providercatalog.Descriptor{}, false
+	}
+	for _, descriptor := range providercatalog.All() {
+		if genericProviderCatalogID(descriptor.ID) {
+			continue
+		}
+		if normalizeProviderBaseURL(descriptor.DefaultBaseURL) == normalized {
+			return descriptor, true
+		}
+	}
+	return providercatalog.Descriptor{}, false
+}
+
+func normalizeProviderBaseURL(baseURL string) string {
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(baseURL)), "/")
+}
+
+func genericProviderCatalogID(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), "custom-")
+}
+
+type modelPickerModelsDiscoveredMsg struct {
+	providerID string
+	models     []providermodeldiscovery.Model
+	err        error
+}
+
+func (m model) modelPickerDiscoveryCmd() tea.Cmd {
+	provider, ok := m.activeProviderDescriptor()
+	if !ok {
+		return nil
+	}
+	profile := m.modelPickerDiscoveryProfile(provider)
+	discover := m.discoverProviderModels
+	if discover == nil {
+		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, providermodeldiscovery.Options{})
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+		defer cancel()
+		models, err := discover(ctx, profile)
+		return modelPickerModelsDiscoveredMsg{providerID: provider.ID, models: models, err: err}
+	}
+}
+
+func (m model) modelPickerDiscoveryProfile(provider providercatalog.Descriptor) config.ProviderProfile {
+	profile := m.providerProfile
+	if strings.TrimSpace(profile.Name) == "" || genericProviderCatalogID(profile.Name) {
+		profile.Name = provider.ID
+	}
+	if strings.TrimSpace(profile.CatalogID) == "" || genericProviderCatalogID(profile.CatalogID) {
+		profile.CatalogID = provider.ID
+	}
+	if strings.TrimSpace(profile.BaseURL) == "" {
+		profile.BaseURL = provider.DefaultBaseURL
+	}
+	if strings.TrimSpace(string(profile.ProviderKind)) == "" {
+		profile.ProviderKind = providerWizardProviderKind(provider)
+	}
+	if strings.TrimSpace(profile.APIFormat) == "" {
+		profile.APIFormat = providerWizardAPIFormat(provider)
+	}
+	if strings.TrimSpace(profile.APIKeyEnv) == "" && len(provider.AuthEnvVars) > 0 {
+		profile.APIKeyEnv = provider.AuthEnvVars[0]
+	}
+	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
+		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
+	}
+	if strings.TrimSpace(profile.Model) == "" {
+		profile.Model = provider.DefaultModel
+	}
+	return profile
+}
+
+func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
+	provider, ok := m.activeProviderDescriptor()
+	if !ok || provider.ID != msg.providerID || msg.err != nil || len(msg.models) == 0 {
+		return m
+	}
+	m.modelPickerLiveProviderID = msg.providerID
+	m.modelPickerLiveModels = append([]providermodeldiscovery.Model{}, msg.models...)
+	if m.picker != nil && m.picker.kind == pickerModel {
+		selectedValue := ""
+		if item, ok := m.picker.current(); ok {
+			selectedValue = item.Value
+		}
+		m.picker = m.newModelPicker()
+		m.selectPickerValue(selectedValue)
+	}
+	return m
+}
+
+func (m model) toggleModelFavorite() model {
+	if m.picker == nil || m.picker.kind != pickerModel {
+		return m
+	}
+	item, ok := m.picker.current()
+	if !ok || strings.TrimSpace(item.Value) == "" {
+		return m
+	}
+	if m.favoriteModels == nil {
+		m.favoriteModels = map[string]bool{}
+	}
+	if m.favoriteModels[item.Value] {
+		delete(m.favoriteModels, item.Value)
+	} else {
+		m.favoriteModels[item.Value] = true
+	}
+	selectedValue := item.Value
+	m.picker = m.newModelPicker()
+	m.selectPickerValue(selectedValue)
+	return m
+}
+
+func (m *model) selectPickerValue(value string) {
+	if m.picker == nil || value == "" {
+		return
+	}
+	for index, item := range m.picker.items {
+		if item.Value == value {
+			m.picker.selected = index
+			return
+		}
+	}
 }
 
 // newEffortPicker lists the reasoning efforts the active model supports plus an
