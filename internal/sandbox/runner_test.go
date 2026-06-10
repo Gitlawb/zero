@@ -218,3 +218,36 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 		t.Fatal("resolveCommandDir(outside all roots) = nil error, want violation")
 	}
 }
+
+func TestBubblewrapPlanChdirsToRealPathForExtraRootCwd(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+	})
+	resolvedExtra := scope.Roots()[1]
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.SandboxDir != filepath.ToSlash(resolvedExtra) {
+		t.Fatalf("SandboxDir=%q want real extra-root path %q", plan.SandboxDir, resolvedExtra)
+	}
+	joined := strings.Join(plan.Args, " ")
+	if !strings.Contains(joined, "--chdir "+filepath.ToSlash(resolvedExtra)) {
+		t.Fatalf("args missing --chdir to real extra-root path:\n%s", joined)
+	}
+	// The workspace must appear only at its /workspace remount, never
+	// double-bound at its real host path.
+	resolvedWorkspace := scope.Roots()[0]
+	if strings.Contains(joined, "--bind "+resolvedWorkspace+" "+resolvedWorkspace) {
+		t.Fatalf("workspace double-bound at real path:\n%s", joined)
+	}
+}

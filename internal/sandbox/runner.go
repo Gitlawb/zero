@@ -49,7 +49,9 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 }
 
 // writeRoots returns the full ordered write-root list for command plans:
-// the workspace root plus any granted extra roots.
+// the workspace root plus any granted extra roots. The single-root fallback
+// only applies to engines built without a workspace root (NewEngine always
+// builds a scope otherwise); it is kept as defense in depth.
 func (engine *Engine) writeRoots(workspaceRoot string) []string {
 	if engine.scope != nil {
 		return engine.scope.Roots()
@@ -171,6 +173,9 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 	}
 	// A cwd inside an extra write root is outside the /workspace remount; the
 	// extra root is bound at its real host path, so chdir there directly.
+	// (resolveCommandDir has already validated the cwd against the scope when
+	// EnforceWorkspace is on; an unvalidated out-of-scope cwd just makes
+	// bwrap's chdir fail closed.)
 	if relativeDir == ".." || strings.HasPrefix(relativeDir, ".."+string(filepath.Separator)) {
 		sandboxDir = filepath.ToSlash(spec.Dir)
 	}
@@ -185,6 +190,10 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 		"--bind", workspaceRoot, bubblewrapWorkspace,
 	}
 	for _, root := range writeRoots {
+		// writeRoots[0] is the scope's workspace root; it is normalized by the
+		// same Abs+EvalSymlinks pipeline resolveCommandDir applies to the
+		// workspaceRoot parameter, so this equality reliably skips the workspace
+		// (already remounted at /workspace) rather than double-binding it.
 		if root == workspaceRoot {
 			continue
 		}
