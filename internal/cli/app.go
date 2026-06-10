@@ -180,6 +180,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runDoctor(args[1:], stdout, stderr, deps)
 	case "context":
 		return runContext(args[1:], stdout, stderr, deps)
+	case "repo-map", "repomap":
+		return runRepoMap(args[1:], stdout, stderr, deps)
 	case "search", "find":
 		return runSearch(args[1:], stdout, stderr, deps)
 	case "sessions", "session":
@@ -469,6 +471,7 @@ Commands:
   providers  Inspect resolved provider profiles
   doctor     Run backend health checks for config and provider setup
   context    Report workspace context budget usage
+  repo-map   Build a deterministic repository map for agent context
   search     Search persisted local Zero session events
   find       Alias for search
   sessions   Inspect local Zero session lineage

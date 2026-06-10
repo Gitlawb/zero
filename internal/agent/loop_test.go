@@ -857,6 +857,40 @@ func TestBuildSystemPromptInjectsWorkspaceContext(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptInjectsRepoMap(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "go.mod"), []byte("module example.com/app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cwd, "internal", "service"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "internal", "service", "service.go"), []byte("package service\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cwd, "node_modules", "leftpad"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "node_modules", "leftpad", "index.js"), []byte("module.exports = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prompt := buildSystemPrompt(Options{Cwd: cwd})
+	for _, want := range []string{
+		"## Repo map",
+		"Important files: go.mod",
+		"Languages:",
+		"internal/service/service.go",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected repo map marker %q in prompt, got %q", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "node_modules/leftpad") {
+		t.Fatalf("repo map should omit ignored dependency dirs, got %q", prompt)
+	}
+}
+
 func TestBuildSystemPromptAllowsSpecModeOverride(t *testing.T) {
 	prompt := buildSystemPrompt(Options{SystemPrompt: specmode.DraftSystemPrompt})
 	if !strings.HasPrefix(prompt, "Specification drafting is active.") {
