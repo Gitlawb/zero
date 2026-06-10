@@ -950,22 +950,34 @@ git commit -m "tools: resolve paths against the shared write scope"
 
 - [ ] **Step 1: Write the failing test**
 
-Append next to the existing Sandbox.Network merge test (same file, same style):
+Append next to the existing Sandbox.Network merge test (same file, same style — note `mergeConfig` takes `*FileConfig`):
 
 ```go
-func TestResolveMergesSandboxAdditionalWriteRoots(t *testing.T) {
-	base := Config{}
-	overlay := Config{}
-	overlay.Sandbox.AdditionalWriteRoots = []string{"/extra/one", "/extra/two"}
-	merged := base
-	mergeConfig(&merged, overlay)
-	if len(merged.Sandbox.AdditionalWriteRoots) != 2 || merged.Sandbox.AdditionalWriteRoots[0] != "/extra/one" {
-		t.Fatalf("AdditionalWriteRoots=%v want overlay values", merged.Sandbox.AdditionalWriteRoots)
+func TestMergeConfigUnionsSandboxAdditionalWriteRoots(t *testing.T) {
+	dst := FileConfig{}
+	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}
+	src := FileConfig{}
+	src.Sandbox.AdditionalWriteRoots = []string{"/extra/one", "/global/one"}
+	mergeConfig(&dst, src)
+	want := []string{"/global/one", "/extra/one"}
+	if !reflect.DeepEqual(dst.Sandbox.AdditionalWriteRoots, want) {
+		t.Fatalf("AdditionalWriteRoots=%v want union %v (append + dedupe, not replace)", dst.Sandbox.AdditionalWriteRoots, want)
+	}
+}
+
+func TestMergeProjectConfigIgnoresAdditionalWriteRoots(t *testing.T) {
+	dst := FileConfig{}
+	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}
+	src := FileConfig{}
+	src.Sandbox.AdditionalWriteRoots = []string{"/repo/sneaky"}
+	if err := mergeProjectConfig(&dst, src); err != nil {
+		t.Fatalf("mergeProjectConfig: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Sandbox.AdditionalWriteRoots, []string{"/global/one"}) {
+		t.Fatalf("AdditionalWriteRoots=%v — project config must NOT be able to add write roots", dst.Sandbox.AdditionalWriteRoots)
 	}
 }
 ```
-
-Adapt the merge-function name to the actual one in `resolver.go` (the function containing the `src.Sandbox.MaxAutonomy` overlay at resolver.go:150 — read it first and mirror its test's calling convention exactly).
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -992,15 +1004,45 @@ type SandboxConfig struct {
 }
 ```
 
-In `internal/config/resolver.go`, inside the overlay function next to the `src.Sandbox.Network` block (~line 153):
+In `internal/config/resolver.go`, inside `mergeConfig` next to the `src.Sandbox.Network` block (~line 153), add a UNION merge (append + dedupe — a later config layer must add to, not replace, the global grants):
 
 ```go
-	if len(src.Sandbox.AdditionalWriteRoots) > 0 {
-		dst.Sandbox.AdditionalWriteRoots = append([]string(nil), src.Sandbox.AdditionalWriteRoots...)
-	}
+	dst.Sandbox.AdditionalWriteRoots = unionStrings(dst.Sandbox.AdditionalWriteRoots, src.Sandbox.AdditionalWriteRoots)
 ```
 
-Check whether `resolver.go` also copies Sandbox fields into the resolved view around line 103 (`Sandbox: cfg.Sandbox`) — it copies the whole struct, so no further change is needed there.
+with the helper (place near the other small helpers in resolver.go):
+
+```go
+// unionStrings appends the values of extra that are not already present in
+// base, preserving order. Used for additive config keys like
+// sandbox.additionalWriteRoots where a later layer must not erase earlier
+// grants.
+func unionStrings(base []string, extra []string) []string {
+	seen := make(map[string]struct{}, len(base))
+	for _, value := range base {
+		seen[value] = struct{}{}
+	}
+	for _, value := range extra {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		base = append(base, value)
+	}
+	return base
+}
+```
+
+Do NOT touch `mergeProjectConfig`: it is an explicit allowlist of project-settable keys, and `additionalWriteRoots` must stay off it — a repo-controlled `.zero/config.json` must not be able to widen write access outside the workspace. Add this comment above `mergeProjectConfig`'s Sandbox block so the omission reads as deliberate:
+
+```go
+	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
+	// config: a cloned repo's .zero/config.json must not be able to grant
+	// itself write access outside the workspace. Global config and CLI flags
+	// are the only config sources for write roots.
+```
+
+`Resolve` copies the whole Sandbox struct into the resolved view (`Sandbox: cfg.Sandbox` ~line 103), so no further change is needed there.
 
 - [ ] **Step 4: Run config tests**
 

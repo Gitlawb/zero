@@ -121,6 +121,12 @@ to all layers.
 
 - **Config:** `SandboxConfig` gains
   `AdditionalWriteRoots []string \`json:"additionalWriteRoots,omitempty"\``.
+  The key is honored from the **global user config**
+  (`os.UserConfigDir()/zero/config.json`) so a grant can apply to every
+  project, and from CLI flags/overrides. It is **deliberately excluded from
+  the project config allowlist** (`mergeProjectConfig`): a repo-controlled
+  `.zero/config.json` must not be able to widen write access outside the
+  workspace. Sources are merged as a union (append + dedupe), not replace.
 - **CLI:** repeatable `--add-dir <path>` flag on `zero` (TUI) and `zero exec`.
   Effective set = union(flag, config), normalized through `Scope` at startup;
   an invalid root fails fast with a clear error.
