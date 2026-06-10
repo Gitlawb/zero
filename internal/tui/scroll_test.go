@@ -18,7 +18,7 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
 
-	updated, cmd := m.Update(tea.MouseMsg{Type: tea.MouseWheelUp})
+	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel should not return a command")

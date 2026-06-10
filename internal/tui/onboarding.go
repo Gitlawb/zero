@@ -443,15 +443,6 @@ func setupProgressText(stage setupStage) string {
 	return zeroTheme.faint.Render(fmt.Sprintf("%d/%d", int(stage)+1, setupStageCount))
 }
 
-func firstNonEmptyTUI(values ...string) string {
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func padSetupLine(line string, width int) string {
 	if width <= 0 {
 		return line

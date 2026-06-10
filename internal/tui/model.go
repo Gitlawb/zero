@@ -361,10 +361,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.setup.visible {
 			return m, nil
 		}
-		switch msg.Type {
-		case tea.MouseWheelUp:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
 			return m.scrollChat(chatWheelScrollLines), nil
-		case tea.MouseWheelDown:
+		case tea.MouseButtonWheelDown:
 			return m.scrollChat(-chatWheelScrollLines), nil
 		default:
 			return m, nil
