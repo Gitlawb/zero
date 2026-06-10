@@ -179,6 +179,16 @@ func TestFileDepthHandlesNativeSeparators(t *testing.T) {
 			t.Fatalf("FileDepth(%q)=%d want %d", rel, got, want)
 		}
 	}
+	for rel, want := range map[string]int{
+		"pkg":                  1,
+		"pkg/nested":           2,
+		`pkg\nested`:           2,
+		`internal\app\service`: 3,
+	} {
+		if got := PathDepth(rel); got != want {
+			t.Fatalf("PathDepth(%q)=%d want %d", rel, got, want)
+		}
+	}
 }
 
 func TestHandleWalkErrorKeepsScanningAfterUnreadableSubdir(t *testing.T) {

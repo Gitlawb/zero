@@ -297,18 +297,23 @@ func ImportantPriority(file string) (int, bool) {
 }
 
 func PathDepth(rel string) int {
-	if rel == "" || rel == "." {
+	normalized := normalizeSeparators(rel)
+	if normalized == "" || normalized == "." {
 		return 0
 	}
-	return strings.Count(filepath.ToSlash(rel), "/") + 1
+	return strings.Count(normalized, "/") + 1
 }
 
 func FileDepth(rel string) int {
-	normalized := filepath.ToSlash(rel)
+	normalized := normalizeSeparators(rel)
 	if normalized == "" || !strings.Contains(normalized, "/") {
 		return 0
 	}
 	return strings.Count(normalized, "/")
+}
+
+func normalizeSeparators(rel string) string {
+	return strings.ReplaceAll(filepath.ToSlash(rel), "\\", "/")
 }
 
 func MaxFileDepth(files []File) int {
