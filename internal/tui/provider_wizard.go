@@ -38,6 +38,9 @@ type providerWizardState struct {
 	selectedModel    int
 	apiKey           string
 	err              string
+	modelSource      string
+	modelLoading     bool
+	modelLoadError   string
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -108,6 +111,9 @@ func (wizard *providerWizardState) move(delta int) {
 		wizard.selectedModel = 0
 		wizard.apiKey = ""
 		wizard.err = ""
+		wizard.modelSource = ""
+		wizard.modelLoading = false
+		wizard.modelLoadError = ""
 		wizard.refreshModels()
 	case providerWizardStepModel:
 		wizard.refreshModels()
@@ -147,6 +153,10 @@ func (wizard *providerWizardState) refreshModels() {
 		return
 	}
 	provider := wizard.currentProvider()
+	if wizard.modelSource == "live" {
+		wizard.selectedModel = clampInt(wizard.selectedModel, 0, maxInt(0, len(wizard.models)-1))
+		return
+	}
 	models := providerWizardModelOptions(provider)
 	if sameProviderWizardModels(wizard.models, models) {
 		wizard.selectedModel = clampInt(wizard.selectedModel, 0, maxInt(0, len(models)-1))
@@ -154,6 +164,7 @@ func (wizard *providerWizardState) refreshModels() {
 	}
 	wizard.models = models
 	wizard.selectedModel = 0
+	wizard.modelSource = "fallback"
 }
 
 func sameProviderWizardModels(a, b []providerWizardModel) bool {
@@ -191,8 +202,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.providerWizard.apiKey = ""
 			return m, nil
 		case tea.KeyEnter:
-			m.providerWizard.advance()
-			return m, nil
+			return m.advanceProviderWizard()
 		}
 		return m, nil
 	}
@@ -207,7 +217,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		if m.providerWizard.step == providerWizardStepDone {
 			return m.applyProviderWizard()
 		}
-		m.providerWizard.advance()
+		return m.advanceProviderWizard()
 	}
 	return m, nil
 }
@@ -368,11 +378,25 @@ func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 
 func (wizard *providerWizardState) renderModelStep(width int) []string {
 	lines := []string{zeroTheme.accent.Render("Choose model")}
+	lines = append(lines, zeroTheme.faint.Render(wizard.modelStatusText()))
 	wizard.refreshModels()
 	for index, model := range wizard.models {
 		lines = append(lines, wizard.renderSelectableModel(width, index, model))
 	}
 	return lines
+}
+
+func (wizard *providerWizardState) modelStatusText() string {
+	if wizard.modelLoading {
+		return "models: refreshing from /models"
+	}
+	if wizard.modelLoadError != "" {
+		return "models: fallback - " + wizard.modelLoadError
+	}
+	if wizard.modelSource == "live" {
+		return "models: live"
+	}
+	return "models: fallback"
 }
 
 func (wizard *providerWizardState) renderSelectableModel(width int, index int, model providerWizardModel) string {

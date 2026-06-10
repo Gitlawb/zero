@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -265,6 +267,65 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 	}
 }
 
+func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			captured = profile
+			return []providermodeldiscovery.Model{{ID: "live-b"}, {ID: "live-a"}}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.providerWizard.step != providerWizardStepModel {
+		t.Fatalf("wizard step = %v, want model", next.providerWizard.step)
+	}
+	if cmd == nil {
+		t.Fatal("entering model step should start live model discovery")
+	}
+	msg := cmd()
+	updated, _ = next.Update(msg)
+	next = updated.(model)
+
+	if captured.CatalogID != "ollama" {
+		t.Fatalf("discovery profile = %#v, want ollama", captured)
+	}
+	if got := providerWizardModelIDs(next.providerWizard.models); strings.Join(got, ",") != "live-b,live-a" {
+		t.Fatalf("wizard models = %#v, want live discovered models", got)
+	}
+	view := plainRender(t, next.View())
+	assertContains(t, view, "models: live")
+	assertNotContains(t, view, "gpt-4.1")
+}
+
+func TestProviderWizardKeepsFallbackModelsWhenLiveDiscoveryFails(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("entering model step should start live model discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
+
+	if got := providerWizardModelIDs(next.providerWizard.models); !containsString(got, "llama3.1") {
+		t.Fatalf("wizard models = %#v, want fallback model llama3.1", got)
+	}
+	view := plainRender(t, next.View())
+	assertContains(t, view, "models: fallback")
+	assertContains(t, view, "offline")
+}
+
 func openProviderWizardForTest(t *testing.T, m model) model {
 	t.Helper()
 	m.input.SetValue("/provider")
@@ -293,4 +354,13 @@ func providerWizardModelIDs(models []providerWizardModel) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

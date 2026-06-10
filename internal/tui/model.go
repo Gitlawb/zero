@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -28,34 +29,35 @@ const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
 
 type model struct {
-	ctx                context.Context
-	cwd                string
-	gitBranch          string
-	providerName       string
-	modelName          string
-	providerProfile    config.ProviderProfile
-	provider           zeroruntime.Provider
-	newProvider        func(config.ProviderProfile) (zeroruntime.Provider, error)
-	registry           *tools.Registry
-	sessionStore       *sessions.Store
-	sandboxStore       *sandbox.GrantStore
-	activeSession      sessions.Metadata
-	sessionEvents      []sessions.Event
-	usageTracker       *usage.Tracker
-	runtimeMessageSink func(tea.Msg)
-	agentOptions       agent.Options
-	notifier           *notify.Notifier
-	permissionMode     agent.PermissionMode
-	reasoningEffort    modelregistry.ReasoningEffort
-	responseStyle      string
-	compactRequests    int
-	unpricedRequests   int
-	unpricedTokens     int
-	transcript         []transcriptRow
-	transcriptDetailed bool
-	input              textinput.Model
-	composer           composerState
-	composerActive     bool
+	ctx                    context.Context
+	cwd                    string
+	gitBranch              string
+	providerName           string
+	modelName              string
+	providerProfile        config.ProviderProfile
+	provider               zeroruntime.Provider
+	newProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
+	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	registry               *tools.Registry
+	sessionStore           *sessions.Store
+	sandboxStore           *sandbox.GrantStore
+	activeSession          sessions.Metadata
+	sessionEvents          []sessions.Event
+	usageTracker           *usage.Tracker
+	runtimeMessageSink     func(tea.Msg)
+	agentOptions           agent.Options
+	notifier               *notify.Notifier
+	permissionMode         agent.PermissionMode
+	reasoningEffort        modelregistry.ReasoningEffort
+	responseStyle          string
+	compactRequests        int
+	unpricedRequests       int
+	unpricedTokens         int
+	transcript             []transcriptRow
+	transcriptDetailed     bool
+	input                  textinput.Model
+	composer               composerState
+	composerActive         bool
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
@@ -267,28 +269,29 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	return model{
-		ctx:                ctx,
-		cwd:                cwd,
-		gitBranch:          gitBranch(cwd),
-		providerName:       options.ProviderName,
-		modelName:          options.ModelName,
-		providerProfile:    options.ProviderProfile,
-		provider:           options.Provider,
-		newProvider:        options.NewProvider,
-		registry:           registry,
-		sessionStore:       sessionStore,
-		sandboxStore:       sandboxStore,
-		agentOptions:       options.AgentOptions,
-		runtimeMessageSink: options.RuntimeMessageSink,
-		permissionMode:     permissionMode,
-		reasoningEffort:    options.ReasoningEffort,
-		responseStyle:      defaultedResponseStyle(options.ResponseStyle),
-		usageTracker:       usageTracker,
-		transcript:         initialTranscript(),
-		input:              input,
-		spinner:            runSpinner,
-		now:                time.Now,
-		notifier:           notifier,
+		ctx:                    ctx,
+		cwd:                    cwd,
+		gitBranch:              gitBranch(cwd),
+		providerName:           options.ProviderName,
+		modelName:              options.ModelName,
+		providerProfile:        options.ProviderProfile,
+		provider:               options.Provider,
+		newProvider:            options.NewProvider,
+		discoverProviderModels: options.DiscoverProviderModels,
+		registry:               registry,
+		sessionStore:           sessionStore,
+		sandboxStore:           sandboxStore,
+		agentOptions:           options.AgentOptions,
+		runtimeMessageSink:     options.RuntimeMessageSink,
+		permissionMode:         permissionMode,
+		reasoningEffort:        options.ReasoningEffort,
+		responseStyle:          defaultedResponseStyle(options.ResponseStyle),
+		usageTracker:           usageTracker,
+		transcript:             initialTranscript(),
+		input:                  input,
+		spinner:                runSpinner,
+		now:                    time.Now,
+		notifier:               notifier,
 	}
 }
 
@@ -738,6 +741,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
 		return m, nil
+	case providerModelsDiscoveredMsg:
+		return m.applyProviderModelsDiscovered(msg), nil
 	}
 
 	var cmd tea.Cmd
