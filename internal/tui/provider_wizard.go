@@ -295,6 +295,12 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		}
 		m.provider = nextProvider
 	}
+	if strings.TrimSpace(m.userConfigPath) != "" {
+		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
+			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey}})
+			return m, nil
+		}
+	}
 	m.providerProfile = profile
 	m.providerName = profile.Name
 	m.modelName = profile.Model
@@ -409,7 +415,7 @@ func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 		zeroTheme.ink.Render("Paste your key here, then press Enter."),
 		zeroTheme.faint.Render("Leave empty to use " + env + " from your environment."),
 		zeroTheme.onPanel2(zeroTheme.ink).Render(input),
-		zeroTheme.faint.Render("Pasted keys are hidden and used for this session only."),
+		zeroTheme.faint.Render("Pasted keys are hidden. Ready saves the profile to Zero config."),
 		zeroTheme.onPanel2(zeroTheme.ink).Render(command),
 	}
 }
@@ -528,23 +534,21 @@ func providerWizardGenericModelDescription(description string) bool {
 func (wizard *providerWizardState) renderDoneStep(width int) []string {
 	provider := wizard.currentProvider()
 	model := wizard.currentModel()
-	addCommand := providerWizardAddCommand(provider, model.ID)
 	checkCommand := "zero providers check " + provider.ID + " --connectivity"
 	return []string{
 		zeroTheme.accent.Render("Ready to connect"),
 		zeroTheme.ink.Render("provider: " + provider.Name),
 		zeroTheme.ink.Render("model: " + model.ID),
 		zeroTheme.ink.Render("credential: " + providerWizardCredentialLabel(provider, wizard.apiKey)),
-		zeroTheme.faint.Render("Press Enter to use this provider for the current session."),
-		zeroTheme.faint.Render("Persist later with:"),
-		zeroTheme.onPanel2(zeroTheme.ink).Render(addCommand),
+		zeroTheme.faint.Render("Press Enter to save this provider and use it now."),
+		zeroTheme.faint.Render("Verify later with:"),
 		zeroTheme.onPanel2(zeroTheme.ink).Render(checkCommand),
 	}
 }
 
 func providerWizardCredentialLabel(provider providercatalog.Descriptor, apiKey string) string {
 	if strings.TrimSpace(apiKey) != "" {
-		return "pasted key (session only)"
+		return "pasted key"
 	}
 	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
 		return env + " env var"

@@ -2,8 +2,11 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -216,7 +219,7 @@ func TestProviderWizardAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T) {
 		t.Fatalf("wizard api key was not captured from paste")
 	}
 	view := plainRender(t, next.View())
-	for _, want := range []string{"Paste API key", "api key >", "pasted key", "session only"} {
+	for _, want := range []string{"Paste API key", "api key >", "pasted key", "saves the profile"} {
 		assertContains(t, view, want)
 	}
 	assertNotContains(t, view, secret)
@@ -265,6 +268,53 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 	}
 	if next.providerProfile.APIKey != secret || next.providerName != "google" {
 		t.Fatalf("model provider state was not updated: provider=%q profile=%#v", next.providerName, next.providerProfile)
+	}
+}
+
+func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
+	const secret = "ollama-secret-123"
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama-cloud")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+
+	if captured.APIKey != secret {
+		t.Fatalf("captured APIKey = %q, want pasted secret", captured.APIKey)
+	}
+	persisted := readProviderWizardConfigFixture(t, configPath)
+	if persisted.ActiveProvider != "ollama-cloud" {
+		t.Fatalf("active provider = %q, want ollama-cloud", persisted.ActiveProvider)
+	}
+	if len(persisted.Providers) != 1 {
+		t.Fatalf("providers length = %d, want 1", len(persisted.Providers))
+	}
+	profile := persisted.Providers[0]
+	if profile.Name != "ollama-cloud" || profile.CatalogID != "ollama-cloud" {
+		t.Fatalf("persisted provider identity = %#v, want ollama-cloud", profile)
+	}
+	if profile.APIKey != secret {
+		t.Fatalf("persisted APIKey = %q, want pasted secret", profile.APIKey)
+	}
+	if profile.APIKeyEnv != "" {
+		t.Fatalf("persisted APIKeyEnv = %q, want empty for pasted key", profile.APIKeyEnv)
 	}
 }
 
@@ -456,6 +506,20 @@ func providerWizardModelIDs(models []providerWizardModel) []string {
 		ids = append(ids, model.ID)
 	}
 	return ids
+}
+
+func readProviderWizardConfigFixture(t *testing.T, path string) config.FileConfig {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	return cfg
 }
 
 func containsString(values []string, want string) bool {

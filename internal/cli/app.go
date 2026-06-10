@@ -317,6 +317,10 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
+	userConfigPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config path: "+err.Error(), 1)
+	}
 
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {
@@ -367,6 +371,7 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 	})
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
+		UserConfigPath:  userConfigPath,
 		ProviderName:    resolved.Provider.Name,
 		ModelName:       resolved.Provider.Model,
 		ProviderProfile: resolved.Provider,

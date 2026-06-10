@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,7 @@ func TestRunNoArgsLaunchesTUIWithNilProviderWhenNoProviderConfigured(t *testing.
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	var launchedOptions tui.Options
 
 	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
@@ -75,6 +77,9 @@ func TestRunNoArgsLaunchesTUIWithNilProviderWhenNoProviderConfigured(t *testing.
 		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
 			t.Fatal("newProvider should not be called without a resolved provider")
 			return nil, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			launchedOptions = options
@@ -94,6 +99,9 @@ func TestRunNoArgsLaunchesTUIWithNilProviderWhenNoProviderConfigured(t *testing.
 	if launchedOptions.Cwd != cwd {
 		t.Fatalf("Cwd = %q, want %q", launchedOptions.Cwd, cwd)
 	}
+	if launchedOptions.UserConfigPath != userConfigPath {
+		t.Fatalf("UserConfigPath = %q, want %q", launchedOptions.UserConfigPath, userConfigPath)
+	}
 	if launchedOptions.Provider != nil {
 		t.Fatalf("Provider = %#v, want nil", launchedOptions.Provider)
 	}
@@ -108,6 +116,7 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	fake := &cliFakeProvider{}
 	var launchedOptions tui.Options
 	var providerProfile config.ProviderProfile
@@ -136,6 +145,9 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 			providerProfile = profile
 			return fake, nil
 		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			launchedOptions = options
 			return 0
@@ -150,6 +162,9 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 	}
 	if launchedOptions.Provider != fake {
 		t.Fatalf("Provider = %#v, want fake provider", launchedOptions.Provider)
+	}
+	if launchedOptions.UserConfigPath != userConfigPath {
+		t.Fatalf("UserConfigPath = %q, want %q", launchedOptions.UserConfigPath, userConfigPath)
 	}
 	if launchedOptions.ProviderName != "work" {
 		t.Fatalf("ProviderName = %q, want work", launchedOptions.ProviderName)

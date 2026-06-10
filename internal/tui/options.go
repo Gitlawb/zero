@@ -19,6 +19,7 @@ import (
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
 	Cwd                    string
+	UserConfigPath         string
 	ProviderName           string
 	ModelName              string
 	ProviderProfile        config.ProviderProfile

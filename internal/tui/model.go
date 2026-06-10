@@ -31,6 +31,7 @@ const defaultResponseStyle = "balanced"
 type model struct {
 	ctx                    context.Context
 	cwd                    string
+	userConfigPath         string
 	gitBranch              string
 	providerName           string
 	modelName              string
@@ -274,6 +275,7 @@ func newModel(ctx context.Context, options Options) model {
 	return model{
 		ctx:                    ctx,
 		cwd:                    cwd,
+		userConfigPath:         options.UserConfigPath,
 		gitBranch:              gitBranch(cwd),
 		providerName:           options.ProviderName,
 		modelName:              options.ModelName,
