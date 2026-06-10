@@ -202,6 +202,8 @@ func shouldSkipDirectory(name string) bool {
 
 // PathScope is the multi-root write scope shared with the sandbox engine.
 // *sandbox.Scope satisfies it; nil means workspace-only (today's behavior).
+// Roots()[0] must be the workspace root (sandbox.Scope guarantees this
+// ordering); relative paths and error messages key off it.
 type PathScope interface {
 	Roots() []string
 }
@@ -223,18 +225,31 @@ func scopedRoots(workspaceRoot string, scope PathScope) []string {
 // a root stay visible to the single-root checks, so a write target may resolve
 // through a symlink only when its final location lies inside a DIFFERENT
 // granted root — mirroring sandbox.Scope.validate's documented widening.
+// When the matched root is an extra (non-workspace) root the second return
+// value is the absolute path rather than a per-root-relative path; "relative
+// to which root" is ambiguous for downstream consumers (ChangedFiles, cwd
+// meta, display summaries) that document workspace-relative paths.
+// When all roots deny, the workspace root's error is returned; unlike
+// sandbox.Scope.validate this does not prefer traversal violations — the
+// engine layer reports those with full fidelity before tools run.
 func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspacePath(workspaceRoot, requestedPath)
 	}
 	var firstErr error
-	for _, root := range scopedRoots(workspaceRoot, scope) {
+	for index, root := range scopedRoots(workspaceRoot, scope) {
 		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
 		// in the prefix outside this root only, leaving in-root components
 		// verbatim for the single-root symlink checks.
 		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
 		absolute, relative, err := resolveWorkspacePath(root, candidate)
 		if err == nil {
+			if index > 0 {
+				// Extra-root matches report the absolute path: "relative to
+				// which root" is ambiguous downstream (ChangedFiles, cwd
+				// meta, display), and consumers document workspace-relative.
+				return absolute, absolute, nil
+			}
 			return absolute, relative, nil
 		}
 		if firstErr == nil {
@@ -245,19 +260,32 @@ func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath stri
 }
 
 // resolveScopedTargetPath mirrors resolveWorkspaceTargetPath for write targets
-// (the target may not exist yet) across all scope roots.
+// (the target may not exist yet) across all scope roots. When the matched root
+// is an extra (non-workspace) root the second return value is the absolute
+// path rather than a per-root-relative path; "relative to which root" is
+// ambiguous for downstream consumers (ChangedFiles, cwd meta, display
+// summaries) that document workspace-relative paths.
+// When all roots deny, the workspace root's error is returned; unlike
+// sandbox.Scope.validate this does not prefer traversal violations — the
+// engine layer reports those with full fidelity before tools run.
 func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspaceTargetPath(workspaceRoot, requestedPath)
 	}
 	var firstErr error
-	for _, root := range scopedRoots(workspaceRoot, scope) {
+	for index, root := range scopedRoots(workspaceRoot, scope) {
 		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
 		// in the prefix outside this root only; in-root components stay
 		// verbatim so the per-segment write-target symlink checks apply.
 		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
 		absolute, relative, err := resolveWorkspaceTargetPath(root, candidate)
 		if err == nil {
+			if index > 0 {
+				// Extra-root matches report the absolute path: "relative to
+				// which root" is ambiguous downstream (ChangedFiles, cwd
+				// meta, display), and consumers document workspace-relative.
+				return absolute, absolute, nil
+			}
 			return absolute, relative, nil
 		}
 		if firstErr == nil {

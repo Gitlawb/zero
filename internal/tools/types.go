@@ -75,7 +75,9 @@ type Result struct {
 	// Redacted is set when secret scrubbing altered Output before it left the
 	// tool-execution boundary.
 	Redacted bool
-	// ChangedFiles lists workspace-relative paths a mutating tool wrote.
+	// ChangedFiles lists workspace-relative paths a mutating tool wrote;
+	// entries under a granted extra write root are absolute, since
+	// workspace-relative would be ambiguous there.
 	ChangedFiles []string
 	// Display carries a short, structured summary for the TUI / stream.
 	Display Display

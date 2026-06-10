@@ -103,7 +103,10 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 // touches, reusing the same per-line parser used for validation. Patch paths are
 // relative to the apply cwd, so relativeRoot (the workspace-relative cwd, e.g.
 // "sub/dir", or "." for the workspace root) is prefixed so callers get true
-// workspace-relative paths regardless of cwd.
+// workspace-relative paths regardless of cwd. When the apply cwd resolves to an
+// extra write root, resolveScopedPath returns the absolute path as relativeRoot;
+// in that case the entries in the returned slice are absolute paths, since
+// workspace-relative would be ambiguous there.
 func changedFilesFromPatch(relativeRoot string, patch string) []string {
 	seen := map[string]bool{}
 	var paths []string

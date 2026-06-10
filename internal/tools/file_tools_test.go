@@ -389,3 +389,54 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 		t.Fatalf("expected keep.txt in results, got:\n%s", res.Output)
 	}
 }
+
+func TestScopedWriteRefusesSameRootSymlinkTraversal(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(extra, "subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(extra, "link")
+	if err := os.Symlink(filepath.Join(extra, "subdir"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(link, "x.txt"),
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("scoped write through same-root symlink must fail, got OK: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(extra, "subdir", "x.txt")); err == nil {
+		t.Fatal("file must not be created through the symlink")
+	}
+}
+
+func TestScopedWriteReportsAbsolutePathForExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	target := filepath.Join(extra, "abs.txt")
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    target,
+		"content": "x",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	for _, changed := range res.ChangedFiles {
+		if !filepath.IsAbs(changed) {
+			t.Fatalf("ChangedFiles=%v — extra-root entries must be absolute, got relative %q", res.ChangedFiles, changed)
+		}
+	}
+	if len(res.ChangedFiles) == 0 {
+		t.Fatal("expected ChangedFiles to record the extra-root write")
+	}
+}
