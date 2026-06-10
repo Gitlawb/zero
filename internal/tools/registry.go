@@ -187,7 +187,9 @@ func scrubResultSecrets(res Result) Result {
 	return res
 }
 
-func CoreReadOnlyTools(workspaceRoot string) []Tool { return CoreReadOnlyToolsScoped(workspaceRoot, nil) }
+func CoreReadOnlyTools(workspaceRoot string) []Tool {
+	return CoreReadOnlyToolsScoped(workspaceRoot, nil)
+}
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedReadFileTool(workspaceRoot, scope),

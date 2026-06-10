@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 var ignoredDirectories = map[string]bool{
@@ -216,17 +218,22 @@ func scopedRoots(workspaceRoot string, scope PathScope) []string {
 // resolveScopedPath is resolveWorkspacePath generalized to a scope: relative
 // paths resolve against the workspace root only; an absolute path resolves
 // against the first root that contains it. The workspace root's error is
-// returned when no root matches so messages stay stable.
+// returned when no root matches so messages stay stable. Prefix symlinks
+// outside a root are resolved per root (macOS /var aliasing); symlinks INSIDE
+// a root stay visible to the single-root checks, so a write target may resolve
+// through a symlink only when its final location lies inside a DIFFERENT
+// granted root — mirroring sandbox.Scope.validate's documented widening.
 func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
-	if requestedPath == "" || !filepath.IsAbs(requestedPath) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspacePath(workspaceRoot, requestedPath)
 	}
-	// Normalize platform-level symlinks (e.g. macOS /var -> /private/var) so
-	// the path can be compared against EvalSymlinks-resolved scope roots.
-	normalizedPath := normalizeScopedAbsPath(requestedPath)
 	var firstErr error
 	for _, root := range scopedRoots(workspaceRoot, scope) {
-		absolute, relative, err := resolveWorkspacePath(root, normalizedPath)
+		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
+		// in the prefix outside this root only, leaving in-root components
+		// verbatim for the single-root symlink checks.
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		absolute, relative, err := resolveWorkspacePath(root, candidate)
 		if err == nil {
 			return absolute, relative, nil
 		}
@@ -240,17 +247,16 @@ func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath stri
 // resolveScopedTargetPath mirrors resolveWorkspaceTargetPath for write targets
 // (the target may not exist yet) across all scope roots.
 func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
-	if requestedPath == "" || !filepath.IsAbs(requestedPath) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspaceTargetPath(workspaceRoot, requestedPath)
 	}
-	// Normalize the leading symlinks in the absolute path (e.g. macOS
-	// /var -> /private/var) so the path can be compared against the
-	// symlink-resolved scope roots. Walk up to the first existing ancestor,
-	// resolve it, and re-append the missing tail segments.
-	normalizedPath := normalizeScopedAbsPath(requestedPath)
 	var firstErr error
 	for _, root := range scopedRoots(workspaceRoot, scope) {
-		absolute, relative, err := resolveWorkspaceTargetPath(root, normalizedPath)
+		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
+		// in the prefix outside this root only; in-root components stay
+		// verbatim so the per-segment write-target symlink checks apply.
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		absolute, relative, err := resolveWorkspaceTargetPath(root, candidate)
 		if err == nil {
 			return absolute, relative, nil
 		}
@@ -261,48 +267,20 @@ func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPat
 	return "", "", firstErr
 }
 
-// normalizeScopedAbsPath resolves platform-level symlinks in the existing
-// prefix of an absolute path, leaving non-existent tail segments verbatim.
-// This handles macOS /var -> /private/var style redirects so that an
-// unresolved absolute path can be compared against EvalSymlinks-resolved roots.
-func normalizeScopedAbsPath(absPath string) string {
-	existing := absPath
-	missing := []string{}
-	for {
-		if _, err := os.Lstat(existing); err == nil {
-			break
-		} else if os.IsNotExist(err) {
-			parent := filepath.Dir(existing)
-			if parent == existing {
-				return absPath // safety: can't walk further up
-			}
-			missing = append([]string{filepath.Base(existing)}, missing...)
-			existing = parent
-		} else {
-			return absPath
-		}
-	}
-	resolved, err := filepath.EvalSymlinks(existing)
-	if err != nil {
-		return absPath
-	}
-	for _, seg := range missing {
-		resolved = filepath.Join(resolved, seg)
-	}
-	return resolved
-}
-
 // recheckScopedWriteTarget mirrors recheckWorkspaceWriteTarget across roots.
+// Prefix symlinks outside a root are resolved per root (macOS /var aliasing);
+// symlinks INSIDE a root stay visible to the single-root checks, so a write
+// target may resolve through a symlink only when its final location lies
+// inside a DIFFERENT granted root — mirroring sandbox.Scope.validate's
+// documented widening.
 func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) error {
-	if requestedPath == "" || !filepath.IsAbs(requestedPath) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return recheckWorkspaceWriteTarget(workspaceRoot, requestedPath)
 	}
-	// Normalize platform-level symlinks so the path can be compared against
-	// EvalSymlinks-resolved scope roots.
-	normalizedPath := normalizeScopedAbsPath(requestedPath)
 	var firstErr error
 	for _, root := range scopedRoots(workspaceRoot, scope) {
-		err := recheckWorkspaceWriteTarget(root, normalizedPath)
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		err := recheckWorkspaceWriteTarget(root, candidate)
 		if err == nil {
 			return nil
 		}

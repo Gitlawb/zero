@@ -282,6 +282,61 @@ func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
 	}
 }
 
+func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(workspace, "link")
+	if err := os.Symlink(filepath.Join(workspace, "subdir"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(link, "x.txt"),
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("write through in-root symlink must fail (fail-closed write targets), got OK: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "subdir", "x.txt")); err == nil {
+		t.Fatal("file must not be created through the symlink")
+	}
+}
+
+func TestScopedWriteThroughSymlinkIntoGrantedRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	link := filepath.Join(workspace, "into-extra")
+	if err := os.Symlink(extra, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Final target inside a granted root: allowed (matches sandbox.Scope's
+	// documented widening — the true write location is granted).
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(link, "ok.txt"),
+		"content": "granted",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("write through symlink into granted root: status=%s output=%s", res.Status, res.Output)
+	}
+	// A symlink escaping a granted root to ungated territory stays denied.
+	escape := filepath.Join(extra, "out")
+	if err := os.Symlink(t.TempDir(), escape); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	res = NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(escape, "leak.txt"),
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("write through escaping symlink must fail, got OK: %s", res.Output)
+	}
+}
+
 func TestUnscopedToolsStillRejectOutsideWrites(t *testing.T) {
 	workspace := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "escape.txt")

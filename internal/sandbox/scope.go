@@ -93,7 +93,7 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 	var outsideViolation *pathViolation
 	var traversalViolation *pathViolation
 	for _, root := range roots {
-		normalized := normalizePrefixForRoot(requestedPath, root)
+		normalized := NormalizePrefixForRoot(requestedPath, root)
 		violation := validateWorkspacePath(root, normalized)
 		if violation == nil {
 			return nil
@@ -126,10 +126,12 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 	}
 }
 
-// normalizePrefixForRoot resolves platform-level symlinks (e.g. macOS
+// NormalizePrefixForRoot resolves platform-level symlinks (e.g. macOS
 // /var -> /private/var) in the portion of absPath that lies outside
 // resolvedRoot, while leaving workspace-internal path components intact so
 // that validateWorkspacePath can detect symlink traversal violations there.
+// It is exported because the tools layer shares it to normalize absolute
+// paths per scope root before running its own single-root checks.
 //
 // Algorithm: walk absPath component-by-component, resolving each via
 // EvalSymlinks. Once the running resolved prefix equals resolvedRoot we are
@@ -141,7 +143,7 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 // Note: this helper assumes POSIX-style absolute paths and does not handle
 // filepath.VolumeName — that is fine while sandbox backends are seatbelt and
 // bubblewrap only (both Linux/macOS).
-func normalizePrefixForRoot(absPath, resolvedRoot string) string {
+func NormalizePrefixForRoot(absPath, resolvedRoot string) string {
 	parts := strings.Split(strings.TrimPrefix(filepath.Clean(absPath), string(filepath.Separator)), string(filepath.Separator))
 	current := string(filepath.Separator)
 	for i, part := range parts {
