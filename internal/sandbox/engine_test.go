@@ -489,6 +489,52 @@ func TestEngineInvalidAutonomyFailsClosedUnderDefaultCeilingGrant(t *testing.T) 
 	}
 }
 
+func TestEvaluateOverrideRootDoesNotInheritEngineScope(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+	})
+
+	// A request that overrides the workspace root must NOT see the engine's
+	// extra roots: scopeFor hands it a single-root scope, so a path inside
+	// the engine-level extra root is denied for the override request.
+	overrideRoot := t.TempDir()
+	denied := engine.Evaluate(context.Background(), Request{
+		ToolName:      "write_file",
+		SideEffect:    SideEffectWrite,
+		Permission:    PermissionAllow,
+		WorkspaceRoot: overrideRoot,
+		Args:          map[string]any{"path": filepath.Join(extra, "leak.txt")},
+	})
+	if denied.Action != ActionDeny || denied.Violation == nil {
+		t.Fatalf("override-root request into engine extra root: Action=%q want deny", denied.Action)
+	}
+
+	// An engine with no workspace root exposes no scope, and an override
+	// request still validates correctly against its own root.
+	rootless := NewEngine(EngineOptions{Policy: DefaultPolicy()})
+	if rootless.Scope() != nil {
+		t.Fatalf("Scope()=%v want nil for engine without workspace root", rootless.Scope())
+	}
+	allowed := rootless.Evaluate(context.Background(), Request{
+		ToolName:      "write_file",
+		SideEffect:    SideEffectWrite,
+		Permission:    PermissionAllow,
+		WorkspaceRoot: overrideRoot,
+		Args:          map[string]any{"path": filepath.Join(overrideRoot, "ok.txt")},
+	})
+	if allowed.Action != ActionAllow {
+		t.Fatalf("rootless engine, in-override-root write: Action=%q (%s) want allow", allowed.Action, allowed.Reason)
+	}
+}
+
 func fixedSandboxTime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

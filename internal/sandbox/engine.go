@@ -46,7 +46,8 @@ func NewEngine(options EngineOptions) *Engine {
 }
 
 // Scope returns the engine's shared write scope (nil when the engine was
-// built without a workspace root). The TUI uses it for /add-dir.
+// built without a workspace root and no explicit Scope option). The TUI uses
+// it for /add-dir.
 func (engine *Engine) Scope() *Scope {
 	if engine == nil {
 		return nil
@@ -57,7 +58,10 @@ func (engine *Engine) Scope() *Scope {
 // scopeFor returns the scope to validate request paths against. The engine's
 // shared scope applies only when the request targets the engine's own
 // workspace root; a per-request override root gets an ad-hoc single-root scope
-// so subagent-style overrides keep today's exact semantics.
+// (single-root semantics; it deliberately ignores the engine's extra roots so
+// an override can never inherit broader write access). The ad-hoc root is left
+// unnormalized on purpose: validateWorkspacePath re-resolves roots internally,
+// and skipping normalization avoids per-Evaluate EvalSymlinks syscalls.
 func (engine *Engine) scopeFor(requestRoot string) *Scope {
 	if engine.scope != nil && requestRoot == engine.workspaceRoot {
 		return engine.scope
@@ -105,7 +109,8 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		autonomy = AutonomyHigh
 	}
 	request.Autonomy = autonomy
-	risk := classifyWithScope(request, engine.scopeFor(request.WorkspaceRoot))
+	scope := engine.scopeFor(request.WorkspaceRoot)
+	risk := classifyWithScope(request, scope)
 
 	if policy.Mode == ModeDisabled {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "sandbox policy disabled"}
@@ -114,11 +119,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return deny(request, risk, ViolationDeniedPermission, "", permissionReason(request), false)
 	}
 	if policy.EnforceWorkspace && request.WorkspaceRoot != "" {
-		scope := engine.scopeFor(request.WorkspaceRoot)
 		for _, requested := range requestPaths(request) {
-			if requested == "" {
-				continue
-			}
 			if violation := scope.validate(requested); violation != nil {
 				return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 			}
