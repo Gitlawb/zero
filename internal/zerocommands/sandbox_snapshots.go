@@ -74,11 +74,11 @@ type SandboxBackendSnapshot struct {
 // the entire sandbox posture.
 //
 // WriteRoots lists every directory the sandbox allows writes in
-// (workspace root first, then user-granted extras) and is populated
-// by builders that can reach the live engine scope
-// (engine.Scope().Roots()). Builders that only see a
-// sandbox.BackendPlan leave it unset; omitempty keeps the JSON
-// shape stable for those consumers.
+// (workspace root first, then user-granted extras). No current
+// builder populates it — SandboxPlanSnapshotFromPlan leaves it
+// unset because a BackendPlan carries no engine scope. Callers
+// that hold the live engine can set it from engine.Scope().Roots();
+// omitempty keeps the JSON shape stable when unset.
 type SandboxPlanSnapshot struct {
 	Policy        SandboxPolicySnapshot  `json:"policy"`
 	Backend       SandboxBackendSnapshot `json:"backend"`

@@ -76,6 +76,12 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		var writeRootsErr error
 		if scope, scopeErr := zeroSandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots); scopeErr != nil {
 			writeRootsErr = scopeErr
+			// NewScope only fails on extras, so a workspace-only scope cannot
+			// fail; use it so the fallback renders the same symlink-resolved
+			// workspace root as the success path.
+			if fallback, fallbackErr := zeroSandbox.NewScope(workspaceRoot, nil); fallbackErr == nil {
+				writeRoots = fallback.Roots()
+			}
 		} else {
 			writeRoots = scope.Roots()
 		}
@@ -130,13 +136,18 @@ func runSandboxPolicyEffective(options sandboxCommandOptions, workspaceRoot stri
 	guards := resolveSandboxGuards(policy)
 	if options.json {
 		payload := struct {
-			WorkspaceRoot string                  `json:"workspaceRoot"`
-			WriteRoots    []string                `json:"writeRoots"`
-			Policy        zeroSandbox.Policy      `json:"policy"`
-			Backend       zeroSandbox.Backend     `json:"backend"`
-			Plan          zeroSandbox.BackendPlan `json:"plan"`
-			Guards        sandboxGuards           `json:"guards"`
-			GrantsPath    string                  `json:"grantsPath"`
+			WorkspaceRoot string   `json:"workspaceRoot"`
+			WriteRoots    []string `json:"writeRoots"`
+			// WriteRootsError carries the fail-soft scope construction error so
+			// JSON consumers see the same signal as the text write_roots_error
+			// line: a stale sandbox.additionalWriteRoots entry means the real
+			// entrypoints would refuse to launch, not run workspace-only.
+			WriteRootsError string                  `json:"writeRootsError,omitempty"`
+			Policy          zeroSandbox.Policy      `json:"policy"`
+			Backend         zeroSandbox.Backend     `json:"backend"`
+			Plan            zeroSandbox.BackendPlan `json:"plan"`
+			Guards          sandboxGuards           `json:"guards"`
+			GrantsPath      string                  `json:"grantsPath"`
 		}{
 			WorkspaceRoot: workspaceRoot,
 			WriteRoots:    writeRoots,
@@ -145,6 +156,9 @@ func runSandboxPolicyEffective(options sandboxCommandOptions, workspaceRoot stri
 			Plan:          plan,
 			Guards:        guards,
 			GrantsPath:    grantsPath,
+		}
+		if writeRootsErr != nil {
+			payload.WriteRootsError = writeRootsErr.Error()
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash

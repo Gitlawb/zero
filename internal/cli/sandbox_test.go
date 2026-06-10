@@ -344,6 +344,9 @@ func TestRunSandboxPolicyEffectiveListsConfiguredWriteRoots(t *testing.T) {
 	if payload.WriteRoots[1] != resolvedExtra {
 		t.Fatalf("writeRoots[1] = %q, want %q", payload.WriteRoots[1], resolvedExtra)
 	}
+	if strings.Contains(stdout.String(), "writeRootsError") {
+		t.Fatalf("unexpected writeRootsError key for valid roots:\n%s", stdout.String())
+	}
 }
 
 func TestRunSandboxPolicyEffectiveWriteRootsFailSoft(t *testing.T) {
@@ -367,6 +370,28 @@ func TestRunSandboxPolicyEffectiveWriteRootsFailSoft(t *testing.T) {
 	}
 	if !strings.Contains(output, "write_roots: ") {
 		t.Fatalf("expected workspace-only write_roots fallback line:\n%s", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"sandbox", "policy", "--effective", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("effective json exit = %d, want success (stale config must fail soft), stderr %q", code, stderr.String())
+	}
+	var payload struct {
+		WriteRoots      []string `json:"writeRoots"`
+		WriteRootsError string   `json:"writeRootsError"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode effective JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.WriteRootsError == "" {
+		t.Fatalf("expected writeRootsError in JSON for stale config entry:\n%s", stdout.String())
+	}
+	if !strings.Contains(payload.WriteRootsError, missing) {
+		t.Fatalf("writeRootsError = %q, want it to name the stale root %q", payload.WriteRootsError, missing)
+	}
+	if len(payload.WriteRoots) != 1 {
+		t.Fatalf("writeRoots = %#v, want workspace-only fallback", payload.WriteRoots)
 	}
 }
 
