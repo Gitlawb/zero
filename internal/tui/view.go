@@ -331,7 +331,12 @@ func (m model) pickerOverlay(width int) string {
 	innerWidth := width - 4
 	lines := make([]string, 0, len(m.picker.items)+1)
 	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render("  ↑/↓ · ⏎ · esc"))
+	lastGroup := ""
 	for index, item := range m.picker.items {
+		if item.Group != "" && item.Group != lastGroup {
+			lines = append(lines, zeroTheme.accent.Render(item.Group))
+			lastGroup = item.Group
+		}
 		surface := zeroTheme.onPanel2
 		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == m.picker.selected {

@@ -9,6 +9,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	zsearch "github.com/Gitlawb/zero/internal/search"
 )
@@ -157,7 +158,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Model\nFailed to load model catalog: " + err.Error()
 	}
-	entry, notice, ok := registry.ResolveWithFallback(args)
+	target, ok := m.resolveModelSwitchTarget(registry, args)
 	if !ok {
 		return m, "Model\nunknown Zero model " + strconv.Quote(args)
 	}
@@ -169,7 +170,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	}
 
 	nextProfile := m.providerProfile
-	nextProfile.Model = entry.ID
+	nextProfile.Model = target.modelID
 	metadata, err := providers.ResolveRuntimeMetadata(nextProfile, providers.Options{})
 	if err != nil {
 		return m, "Model\n" + err.Error()
@@ -183,9 +184,9 @@ func (m model) handleModelCommand(args string) (model, string) {
 	m.providerProfile = nextProfile
 	m.provider = nextProvider
 	m.providerName = displayValue(nextProfile.Name, string(metadata.ProviderKind))
-	m.modelName = entry.ID
+	m.modelName = target.modelID
 	resetEffort := false
-	if m.reasoningEffort != "" && !reasoningEffortAllowed(entry.ReasoningEfforts, m.reasoningEffort) {
+	if m.reasoningEffort != "" && !reasoningEffortAllowed(target.reasoningEfforts, m.reasoningEffort) {
 		// Drop an unsupported carry-over preference and fall back to the
 		// model's effective default for the new model.
 		m.reasoningEffort = ""
@@ -196,21 +197,50 @@ func (m model) handleModelCommand(args string) (model, string) {
 		// Preference was dropped: show "auto" (model default applies), not a
 		// concrete value that would read as an explicit setting.
 		effortLine += " (unsupported preference reset)"
-	} else if effective := modelregistry.EffectiveReasoningEffort(entry, m.reasoningEffort); effective != modelregistry.ReasoningEffortNone {
-		effortLine = "effort: " + string(effective)
+	} else if target.entry != nil {
+		if effective := modelregistry.EffectiveReasoningEffort(*target.entry, m.reasoningEffort); effective != modelregistry.ReasoningEffortNone {
+			effortLine = "effort: " + string(effective)
+		}
 	}
 	lines := []string{"Model"}
-	if notice != "" {
-		lines = append(lines, notice)
+	if target.notice != "" {
+		lines = append(lines, target.notice)
 	}
 	lines = append(lines,
 		"Switched model for this TUI session.",
-		"model: "+entry.ID,
+		"model: "+target.modelID,
 		"provider: "+string(metadata.ProviderKind),
 		"api model: "+metadata.APIModel,
 		effortLine,
 	)
 	return m, strings.Join(lines, "\n")
+}
+
+type modelSwitchTarget struct {
+	modelID          string
+	entry            *modelregistry.ModelEntry
+	notice           string
+	reasoningEfforts []modelregistry.ReasoningEffort
+}
+
+func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args string) (modelSwitchTarget, bool) {
+	entry, notice, ok := registry.ResolveWithFallback(args)
+	if ok {
+		return modelSwitchTarget{
+			modelID:          entry.ID,
+			entry:            &entry,
+			notice:           notice,
+			reasoningEfforts: entry.ReasoningEfforts,
+		}, true
+	}
+	if provider, ok := m.activeProviderDescriptor(); ok {
+		for _, model := range providermodelcatalog.Models(provider) {
+			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
+				return modelSwitchTarget{modelID: model.ID}, true
+			}
+		}
+	}
+	return modelSwitchTarget{}, false
 }
 
 // handleModeCommand applies a preset that bundles model, reasoning effort, and

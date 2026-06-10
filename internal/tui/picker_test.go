@@ -11,6 +11,81 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+func TestModelPickerShowsRecentThenActiveProviderCatalog(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "openrouter",
+		ModelName:    "google/gemini-2.5-pro",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+	})
+
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected a model picker")
+	}
+	if picker.items[0].Group != "Recent" {
+		t.Fatalf("first picker group = %q, want Recent", picker.items[0].Group)
+	}
+	if picker.items[0].Value != "google/gemini-2.5-pro" {
+		t.Fatalf("first picker value = %q, want active recent model", picker.items[0].Value)
+	}
+	if picker.items[1].Group != "OpenRouter catalog" {
+		t.Fatalf("second picker group = %q, want OpenRouter catalog", picker.items[1].Group)
+	}
+	got := pickerValues(picker.items)
+	if !contains(got, "anthropic/claude-sonnet-4.5") || !contains(got, "minimax/minimax-m2.1") {
+		t.Fatalf("active provider catalog missing expected OpenRouter models: %#v", got)
+	}
+	if contains(got, "claude-haiku-4.5") {
+		t.Fatalf("picker should not include unrelated global Anthropic registry model under OpenRouter: %#v", got)
+	}
+}
+
+func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "openrouter",
+		ModelName:    "google/gemini-2.5-pro",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openrouter",
+			CatalogID:    "openrouter",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			Model:        "google/gemini-2.5-pro",
+			APIKeyEnv:    "OPENROUTER_API_KEY",
+			BaseURL:      "https://openrouter.ai/api/v1",
+			APIFormat:    "chat-completions",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model openai/gpt-4.1")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting a run")
+	}
+	if captured.Model != "openai/gpt-4.1" {
+		t.Fatalf("captured model = %q, want raw OpenRouter model ID", captured.Model)
+	}
+	if next.modelName != "openai/gpt-4.1" {
+		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "model: openai/gpt-4.1") {
+		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	}
+}
+
 func TestModelPickerOpensAndCancels(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.input.SetValue("/model")
@@ -162,4 +237,12 @@ func TestPickerRenders(t *testing.T) {
 	if !strings.Contains(m.View(), "select model") {
 		t.Fatal("view should render the picker title")
 	}
+}
+
+func pickerValues(items []pickerItem) []string {
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		values = append(values, item.Value)
+	}
+	return values
 }
