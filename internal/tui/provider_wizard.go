@@ -438,11 +438,11 @@ func (wizard *providerWizardState) renderModelStep(width int) []string {
 
 func (wizard *providerWizardState) renderModelSearch(width int) string {
 	query := strings.TrimSpace(wizard.modelSearch)
-	value := zeroTheme.faint.Render("Search")
+	value := zeroTheme.faint.Render("Search model")
 	if query != "" {
 		value = zeroTheme.ink.Render(query)
 	}
-	input := zeroTheme.userPrompt.Render("search > ") + value + zeroTheme.accent.Render("â–Œ")
+	input := zeroTheme.userPrompt.Render("search > ") + value
 	return fitStyledLine(zeroTheme.onPanel2(zeroTheme.ink).Render(input), width)
 }
 

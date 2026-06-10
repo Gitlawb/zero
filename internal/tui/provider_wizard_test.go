@@ -368,7 +368,9 @@ func TestProviderWizardModelStepUsesFriendlyNamesAndStaysCompact(t *testing.T) {
 	}
 
 	view := plainRender(t, strings.Join(wizard.renderModelStep(84), "\n"))
-	assertContains(t, view, "Search")
+	assertContains(t, view, "search > Search model")
+	assertNotContains(t, view, "SearchÃ")
+	assertNotContains(t, view, "Searchâ")
 	assertContains(t, view, "Grok 4.3")
 	assertNotContains(t, view, "x-ai/grok-4.3")
 	assertContains(t, view, "8 more models")
