@@ -1437,6 +1437,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			options.SystemPrompt = runOptions.systemPrompt
 		}
 		options.SessionID = m.activeSession.SessionID
+		options.ProviderName = m.providerName
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.Cwd = m.cwd

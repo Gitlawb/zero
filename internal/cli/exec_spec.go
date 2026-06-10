@@ -98,6 +98,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		ContextWindow:   modelContextWindow(run.modelRegistry, run.resolved.Provider.Model),
 		SessionID:       draftSession.SessionID,
 		SessionTitle:    run.sessionTitle,
+		ProviderName:    run.resolved.Provider.Name,
 		Model:           run.resolved.Provider.Model,
 		ReasoningEffort: run.reasoningEffort,
 		Cwd:             run.workspaceRoot,

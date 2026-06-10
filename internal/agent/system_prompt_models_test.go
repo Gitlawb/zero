@@ -44,3 +44,22 @@ func TestBuildSystemPromptAppendsModelAddendum(t *testing.T) {
 		t.Fatalf("expected no <model_guidance> block without a model")
 	}
 }
+
+func TestBuildSystemPromptIncludesActiveSessionRuntime(t *testing.T) {
+	prompt := buildSystemPrompt(Options{
+		ProviderName: "ollama-cloud",
+		Model:        "glm-5.1",
+	})
+
+	for _, want := range []string{
+		"<session>",
+		"Active provider: ollama-cloud",
+		"Active model: glm-5.1",
+		"Persisted config commands may show saved defaults",
+		"</session>",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected prompt to contain %q, got:\n%s", want, prompt)
+		}
+	}
+}
