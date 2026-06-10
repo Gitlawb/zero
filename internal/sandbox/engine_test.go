@@ -496,3 +496,43 @@ func fixedSandboxTime(value string) func() time.Time {
 	}
 	return func() time.Time { return parsed }
 }
+
+func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+	})
+
+	inside := engine.Evaluate(context.Background(), Request{
+		ToolName:   "write_file",
+		SideEffect: SideEffectWrite,
+		Permission: PermissionAllow,
+		Args:       map[string]any{"path": filepath.Join(extra, "report.txt")},
+	})
+	if inside.Action != ActionAllow {
+		t.Fatalf("extra-root write Action=%q (%s), want allow", inside.Action, inside.Reason)
+	}
+	if HasRiskCategory(inside.Risk, "out_of_workspace") {
+		t.Fatalf("extra-root write risk=%v, must not be out_of_workspace", inside.Risk)
+	}
+
+	outside := engine.Evaluate(context.Background(), Request{
+		ToolName:   "write_file",
+		SideEffect: SideEffectWrite,
+		Permission: PermissionAllow,
+		Args:       map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
+	})
+	if outside.Action != ActionDeny || outside.Violation == nil {
+		t.Fatalf("outside write Action=%q, want deny with violation", outside.Action)
+	}
+	if !strings.Contains(outside.Violation.Reason, "--add-dir") {
+		t.Fatalf("outside violation reason=%q, want --add-dir hint", outside.Violation.Reason)
+	}
+}
