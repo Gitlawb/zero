@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -270,6 +271,103 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 			t.Fatalf("unexpected effective plan/grants: %#v %q", payload.Plan, payload.GrantsPath)
 		}
 	})
+}
+
+func TestEffectiveSandboxPolicyListsWriteRoots(t *testing.T) {
+	output := formatEffectiveSandboxPolicy("/ws", sandbox.DefaultPolicy(), sandbox.Backend{}, sandbox.BackendPlan{}, resolveSandboxGuards(sandbox.DefaultPolicy()), "/grants", []string{"/ws", "/extra"}, nil)
+	if !strings.Contains(output, "write_roots: /ws, /extra") {
+		t.Fatalf("expected write_roots line, got:\n%s", output)
+	}
+	if !strings.Contains(output, "enforce_workspace: true\nwrite_roots: /ws, /extra") {
+		t.Fatalf("write_roots should directly follow enforce_workspace, got:\n%s", output)
+	}
+	if strings.Contains(output, "write_roots_error") {
+		t.Fatalf("unexpected write_roots_error line without an error:\n%s", output)
+	}
+}
+
+func TestEffectiveSandboxPolicyShowsWriteRootsError(t *testing.T) {
+	scopeErr := errors.New(`write root "/gone": write root must exist`)
+	output := formatEffectiveSandboxPolicy("/ws", sandbox.DefaultPolicy(), sandbox.Backend{}, sandbox.BackendPlan{}, resolveSandboxGuards(sandbox.DefaultPolicy()), "/grants", []string{"/ws"}, scopeErr)
+	if !strings.Contains(output, "write_roots: /ws") {
+		t.Fatalf("expected fallback write_roots line, got:\n%s", output)
+	}
+	if !strings.Contains(output, `write_roots_error: write root "/gone": write root must exist`) {
+		t.Fatalf("expected write_roots_error line, got:\n%s", output)
+	}
+}
+
+func TestRunSandboxPolicyEffectiveListsConfiguredWriteRoots(t *testing.T) {
+	store := newSandboxTestStore(t)
+	extra := t.TempDir()
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) returned error: %v", extra, err)
+	}
+	deps := appDeps{
+		getwd:           func() (string, error) { return t.TempDir(), nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Sandbox: config.SandboxConfig{AdditionalWriteRoots: []string{extra}}}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"sandbox", "policy", "--effective"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("effective exit = %d, stderr %q", code, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "write_roots: ") {
+		t.Fatalf("effective text missing write_roots line:\n%s", output)
+	}
+	if !strings.Contains(output, resolvedExtra) {
+		t.Fatalf("write_roots should include the configured extra root %q:\n%s", resolvedExtra, output)
+	}
+	if strings.Contains(output, "write_roots_error") {
+		t.Fatalf("unexpected write_roots_error for valid roots:\n%s", output)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"sandbox", "policy", "--effective", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("effective json exit = %d, stderr %q", code, stderr.String())
+	}
+	var payload struct {
+		WriteRoots []string `json:"writeRoots"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode effective JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.WriteRoots) != 2 {
+		t.Fatalf("writeRoots = %#v, want workspace root + extra root", payload.WriteRoots)
+	}
+	if payload.WriteRoots[1] != resolvedExtra {
+		t.Fatalf("writeRoots[1] = %q, want %q", payload.WriteRoots[1], resolvedExtra)
+	}
+}
+
+func TestRunSandboxPolicyEffectiveWriteRootsFailSoft(t *testing.T) {
+	store := newSandboxTestStore(t)
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	deps := appDeps{
+		getwd:           func() (string, error) { return t.TempDir(), nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{Sandbox: config.SandboxConfig{AdditionalWriteRoots: []string{missing}}}, nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"sandbox", "policy", "--effective"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("effective exit = %d, want success (stale config must fail soft), stderr %q", code, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "write_roots_error: ") {
+		t.Fatalf("expected visible write_roots_error line for stale config entry:\n%s", output)
+	}
+	if !strings.Contains(output, "write_roots: ") {
+		t.Fatalf("expected workspace-only write_roots fallback line:\n%s", output)
+	}
 }
 
 func TestRunSandboxPolicyEffectiveHelpListed(t *testing.T) {
