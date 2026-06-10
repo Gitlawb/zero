@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,7 +51,9 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	}
 	var health *providerhealth.Result
 	if options.connectivity && config.HasProviderProfile(provider) {
-		probe := deps.probeProviderHealth(context.Background(), providerhealth.Options{
+		ctx, stop := signalContext()
+		defer stop()
+		probe := deps.probeProviderHealth(ctx, providerhealth.Options{
 			Profile:      provider,
 			Connectivity: true,
 			UserAgent:    userAgent(),

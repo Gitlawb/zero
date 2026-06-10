@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -32,15 +33,14 @@ const (
 type Category string
 
 const (
-	CategoryConfig        Category = "config"
-	CategoryUnsupported   Category = "unsupported"
-	CategoryAuth          Category = "auth"
-	CategoryRateLimit     Category = "rate_limit"
-	CategoryNetwork       Category = "network"
-	CategoryTimeout       Category = "timeout"
-	CategoryProvider      Category = "provider_error"
-	CategoryProviderError          = CategoryProvider
-	CategoryConnectivity  Category = "connectivity"
+	CategoryConfig       Category = "config"
+	CategoryUnsupported  Category = "unsupported"
+	CategoryAuth         Category = "auth"
+	CategoryRateLimit    Category = "rate_limit"
+	CategoryNetwork      Category = "network"
+	CategoryTimeout      Category = "timeout"
+	CategoryProvider     Category = "provider_error"
+	CategoryConnectivity Category = "connectivity"
 )
 
 const defaultTimeout = 5 * time.Second
@@ -49,8 +49,71 @@ type Options struct {
 	Profile      config.ProviderProfile
 	Connectivity bool
 	HTTPClient   *http.Client
+	Resolver     Resolver
 	Timeout      time.Duration
 	UserAgent    string
+}
+
+type Resolver interface {
+	LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error)
+}
+
+type defaultResolver struct{}
+
+func (defaultResolver) LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, network, host)
+}
+
+type blockedPrefix struct {
+	prefix netip.Prefix
+	reason string
+}
+
+type embeddedIPv4Prefix struct {
+	prefix     netip.Prefix
+	byteOffset int
+}
+
+var blockedAddrPrefixes = []blockedPrefix{
+	{prefix: netip.MustParsePrefix("0.0.0.0/8"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("10.0.0.0/8"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("100.64.0.0/10"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("127.0.0.0/8"), reason: "loopback hosts are blocked"},
+	{prefix: netip.MustParsePrefix("169.254.0.0/16"), reason: "link-local hosts are blocked"},
+	{prefix: netip.MustParsePrefix("172.16.0.0/12"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.0.0.0/24"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.0.2.0/24"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.88.99.0/24"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("192.168.0.0/16"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("198.18.0.0/15"), reason: "benchmark network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("198.51.100.0/24"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("203.0.113.0/24"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("224.0.0.0/4"), reason: "multicast hosts are blocked"},
+	{prefix: netip.MustParsePrefix("240.0.0.0/4"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("::/128"), reason: "unspecified hosts are blocked"},
+	{prefix: netip.MustParsePrefix("::1/128"), reason: "loopback hosts are blocked"},
+	{prefix: netip.MustParsePrefix("100::/64"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("2001::/23"), reason: "special-use hosts are blocked"},
+	{prefix: netip.MustParsePrefix("2001:2::/48"), reason: "benchmark network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("2001:db8::/32"), reason: "documentation hosts are blocked"},
+	{prefix: netip.MustParsePrefix("fc00::/7"), reason: "private network hosts are blocked"},
+	{prefix: netip.MustParsePrefix("fe80::/10"), reason: "link-local hosts are blocked"},
+	{prefix: netip.MustParsePrefix("ff00::/8"), reason: "multicast hosts are blocked"},
+}
+
+var embeddedIPv4Prefixes = []embeddedIPv4Prefix{
+	{prefix: netip.MustParsePrefix("::/96"), byteOffset: 12},
+	{prefix: netip.MustParsePrefix("64:ff9b::/96"), byteOffset: 12},
+	{prefix: netip.MustParsePrefix("64:ff9b:1::/48"), byteOffset: 6},
+	{prefix: netip.MustParsePrefix("2002::/16"), byteOffset: 2},
+}
+
+type endpointSafetyError struct {
+	message string
+}
+
+func (err endpointSafetyError) Error() string {
+	return err.message
 }
 
 type Result struct {
@@ -82,9 +145,6 @@ func (result Result) Check(id string) *Check {
 }
 
 func (result Result) PrimaryCheck() *Check {
-	if connectivity := result.Check("provider.connectivity"); connectivity != nil {
-		return connectivity
-	}
 	for index := range result.Checks {
 		if result.Checks[index].Status == StatusFail {
 			return &result.Checks[index]
@@ -94,6 +154,9 @@ func (result Result) PrimaryCheck() *Check {
 		if result.Checks[index].Status == StatusWarn {
 			return &result.Checks[index]
 		}
+	}
+	if connectivity := result.Check("provider.connectivity"); connectivity != nil {
+		return connectivity
 	}
 	if len(result.Checks) == 0 {
 		return nil
@@ -208,7 +271,12 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 
 	request, err := healthRequest(requestCtx, profile, kind, options)
 	if err != nil {
-		return check("provider.connectivity", "Provider connectivity", StatusFail, CategoryConfig, err.Error(), nil, profile)
+		category := CategoryConfig
+		var safety endpointSafetyError
+		if errors.As(err, &safety) {
+			category = CategoryNetwork
+		}
+		return check("provider.connectivity", "Provider connectivity", StatusFail, category, err.Error(), nil, profile)
 	}
 	client := options.HTTPClient
 	if client == nil {
@@ -222,7 +290,13 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 		_ = response.Body.Close()
 	}()
 
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if err != nil {
+		return check("provider.connectivity", "Provider connectivity", StatusFail, CategoryProvider, "Provider response body could not be read: "+err.Error(), map[string]any{
+			"statusCode": response.StatusCode,
+			"endpoint":   request.URL.String(),
+		}, profile)
+	}
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 		return check("provider.connectivity", "Provider connectivity", StatusPass, CategoryConnectivity, fmt.Sprintf("Provider endpoint reachable (%d).", response.StatusCode), map[string]any{
 			"statusCode": response.StatusCode,
@@ -235,7 +309,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	switch response.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		category = CategoryAuth
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable, 529:
+	case http.StatusTooManyRequests, 529:
 		category = CategoryRateLimit
 		status = StatusWarn
 	}
@@ -252,6 +326,9 @@ func healthRequest(ctx context.Context, profile config.ProviderProfile, kind con
 		return nil, err
 	}
 	endpoint := baseURL + healthPath(kind)
+	if err := validateEndpoint(ctx, endpoint, options.Resolver); err != nil {
+		return nil, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -280,6 +357,72 @@ func resolvedBaseURL(profile config.ProviderProfile, kind config.ProviderKind) (
 	default:
 		return "", fmt.Errorf("unsupported provider kind %q", kind)
 	}
+}
+
+func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("provider connectivity URL must use http or https")
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return fmt.Errorf("provider connectivity URL requires a host")
+	}
+	normalized := strings.TrimSuffix(strings.ToLower(host), ".")
+	if normalized == "localhost" || strings.HasSuffix(normalized, ".localhost") {
+		return endpointSafetyError{message: "provider connectivity URL is unsafe: localhost hosts are blocked"}
+	}
+	if addr, err := netip.ParseAddr(normalized); err == nil {
+		if reason := blockedAddrReason(addr); reason != "" {
+			return endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
+		}
+		return nil
+	}
+	if resolver == nil {
+		resolver = defaultResolver{}
+	}
+	addrs, err := resolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return endpointSafetyError{message: "provider connectivity host could not be resolved safely: " + err.Error()}
+	}
+	if len(addrs) == 0 {
+		return endpointSafetyError{message: "provider connectivity host resolved to no addresses"}
+	}
+	for _, addr := range addrs {
+		if reason := blockedAddrReason(addr); reason != "" {
+			return endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
+		}
+	}
+	return nil
+}
+
+func blockedAddrReason(addr netip.Addr) string {
+	addr = addr.Unmap()
+	for _, embedded := range embeddedIPv4Prefixes {
+		if !embedded.prefix.Contains(addr) {
+			continue
+		}
+		bytes := addr.As16()
+		if embedded.byteOffset+4 > len(bytes) {
+			continue
+		}
+		addr = netip.AddrFrom4([4]byte{
+			bytes[embedded.byteOffset],
+			bytes[embedded.byteOffset+1],
+			bytes[embedded.byteOffset+2],
+			bytes[embedded.byteOffset+3],
+		})
+		break
+	}
+	for _, blocked := range blockedAddrPrefixes {
+		if blocked.prefix.Contains(addr) {
+			return blocked.reason
+		}
+	}
+	return ""
 }
 
 func healthPath(kind config.ProviderKind) string {
@@ -329,7 +472,7 @@ func applyAuth(request *http.Request, profile config.ProviderProfile, kind confi
 
 func classifyTransportError(err error, profile config.ProviderProfile) Check {
 	category := CategoryNetwork
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.DeadlineExceeded) {
 		category = CategoryTimeout
 	} else {
 		var netErr net.Error
@@ -338,7 +481,7 @@ func classifyTransportError(err error, profile config.ProviderProfile) Check {
 		}
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
-			if errors.Is(urlErr.Err, context.DeadlineExceeded) || errors.Is(urlErr.Err, context.Canceled) {
+			if errors.Is(urlErr.Err, context.DeadlineExceeded) {
 				category = CategoryTimeout
 			}
 		}

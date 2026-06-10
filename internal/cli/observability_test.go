@@ -2,10 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
@@ -60,17 +60,10 @@ func TestRunDoctorFormatsRedactedProviderDiagnostics(t *testing.T) {
 }
 
 func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" {
-			t.Fatalf("path = %q, want /models", r.URL.Path)
-		}
-		_, _ = w.Write([]byte(`{"data":[{"id":"custom-model"}]}`))
-	}))
-	defer server.Close()
-
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
+	probed := false
 
 	exitCode := runWithDeps([]string{"doctor", "--connectivity"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
@@ -80,11 +73,23 @@ func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
 			profile := config.ProviderProfile{
 				Name:         "local",
 				ProviderKind: config.ProviderKindOpenAICompatible,
-				BaseURL:      server.URL,
+				BaseURL:      "https://api.example.com/v1",
 				APIKey:       "sk-test-secret",
 				Model:        "custom-model",
 			}
 			return config.ResolvedConfig{Provider: profile, Providers: []config.ProviderProfile{profile}, ActiveProvider: "local"}, nil
+		},
+		probeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			probed = true
+			if !options.Connectivity || options.Profile.Name != "local" {
+				t.Fatalf("unexpected health probe options: %#v", options)
+			}
+			return providerhealth.Result{
+				Status: providerhealth.StatusPass,
+				Checks: []providerhealth.Check{
+					{ID: "provider.connectivity", Status: providerhealth.StatusPass, Message: "reachable"},
+				},
+			}
 		},
 		now: fixedCLITime("2026-06-04T16:00:00Z"),
 	})
@@ -95,6 +100,9 @@ func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "[pass] provider.connectivity") {
 		t.Fatalf("expected provider.connectivity pass, got %q", output)
+	}
+	if !probed {
+		t.Fatal("doctor did not call probeProviderHealth")
 	}
 	if strings.Contains(output, "not wired") {
 		t.Fatalf("doctor still returned placeholder connectivity message: %q", output)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -98,6 +99,7 @@ func TestProbeConnectivityClassifiesRateLimitAsWarning(t *testing.T) {
 		},
 		Connectivity: true,
 		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 	})
 
 	check := result.Check("provider.connectivity")
@@ -121,6 +123,7 @@ func TestProbeConnectivityClassifiesNetworkError(t *testing.T) {
 		},
 		Connectivity: true,
 		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 	})
 
 	check := result.Check("provider.connectivity")
@@ -152,10 +155,11 @@ func TestProbeConnectivityRedactsProviderErrorDetails(t *testing.T) {
 		},
 		Connectivity: true,
 		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 	})
 
 	check := result.Check("provider.connectivity")
-	if check == nil || check.Category != CategoryProviderError {
+	if check == nil || check.Category != CategoryProvider {
 		t.Fatalf("connectivity check = %#v, want provider error", check)
 	}
 	rendered := check.Message + " " + fmt.Sprint(check.Details)

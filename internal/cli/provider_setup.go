@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -95,7 +94,9 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 	}
 	var health providerhealth.Result
 	if options.connectivity {
-		health = deps.probeProviderHealth(context.Background(), providerhealth.Options{
+		ctx, stop := signalContext()
+		defer stop()
+		health = deps.probeProviderHealth(ctx, providerhealth.Options{
 			Profile:      profile,
 			Connectivity: true,
 			UserAgent:    userAgent(),
@@ -114,9 +115,7 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 		payload := map[string]any{"provider": snapshot, "status": "ok"}
 		if options.connectivity {
 			payload["health"] = health
-			if health.Status == providerhealth.StatusFail {
-				payload["status"] = "fail"
-			}
+			payload["status"] = providerHealthStatusLabel(health.Status)
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
@@ -127,8 +126,8 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 		return exitSuccess
 	}
 	status := "ok"
-	if options.connectivity && health.Status == providerhealth.StatusFail {
-		status = "fail"
+	if options.connectivity {
+		status = providerHealthStatusLabel(health.Status)
 	}
 	if _, err := fmt.Fprintf(stdout, "Provider check\nname: %s\nstatus: %s\nkind: %s\nmodel: %s\napi model: %s\n", snapshot.Name, status, snapshot.ProviderKind, snapshot.Model, snapshot.APIModel); err != nil {
 		return exitCrash
@@ -147,6 +146,17 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 		}
 	}
 	return exitSuccess
+}
+
+func providerHealthStatusLabel(status providerhealth.Status) string {
+	switch status {
+	case providerhealth.StatusFail:
+		return "fail"
+	case providerhealth.StatusWarn:
+		return "warn"
+	default:
+		return "ok"
+	}
 }
 
 func parseProviderAddArgs(args []string) (providerAddOptions, bool, error) {

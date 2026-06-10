@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -419,18 +418,6 @@ func TestRunProvidersCheckConstructsProvider(t *testing.T) {
 }
 
 func TestRunProvidersCheckConnectivityJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" {
-			t.Fatalf("path = %q, want /models", r.URL.Path)
-		}
-		if got := r.Header.Get("Authorization"); got != "Bearer sk-test-secret" {
-			t.Fatalf("Authorization = %q", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"custom-model"}]}`))
-	}))
-	defer server.Close()
-
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	deps := commandCenterDeps(t)
@@ -438,11 +425,22 @@ func TestRunProvidersCheckConnectivityJSON(t *testing.T) {
 		profile := config.ProviderProfile{
 			Name:         "local",
 			ProviderKind: config.ProviderKindOpenAICompatible,
-			BaseURL:      server.URL,
+			BaseURL:      "https://api.example.com/v1",
 			APIKey:       "sk-test-secret",
 			Model:        "custom-model",
 		}
 		return config.ResolvedConfig{ActiveProvider: "local", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
+	}
+	deps.probeProviderHealth = func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+		if !options.Connectivity || options.Profile.Name != "local" {
+			t.Fatalf("unexpected health probe options: %#v", options)
+		}
+		return providerhealth.Result{
+			Status: providerhealth.StatusPass,
+			Checks: []providerhealth.Check{
+				{ID: "provider.connectivity", Status: providerhealth.StatusPass, Message: "reachable"},
+			},
+		}
 	}
 	deps.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
 		t.Fatal("newProvider should not run during connectivity health check")
@@ -475,6 +473,48 @@ func TestRunProvidersCheckConnectivityJSON(t *testing.T) {
 	}
 	if !providerHealthCheckStatus(payload.Health.Checks, "provider.connectivity", "pass") {
 		t.Fatalf("missing provider.connectivity pass: %#v", payload.Health.Checks)
+	}
+}
+
+func TestRunProvidersCheckConnectivityJSONSurfacesWarningStatus(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profile := config.ProviderProfile{
+			Name:         "local",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			APIKey:       "sk-test-secret",
+			Model:        "custom-model",
+		}
+		return config.ResolvedConfig{ActiveProvider: "local", Provider: profile, Providers: []config.ProviderProfile{profile}, MaxTurns: 7}, nil
+	}
+	deps.probeProviderHealth = func(context.Context, providerhealth.Options) providerhealth.Result {
+		return providerhealth.Result{
+			Status: providerhealth.StatusWarn,
+			Checks: []providerhealth.Check{
+				{ID: "provider.connectivity", Status: providerhealth.StatusWarn, Category: providerhealth.CategoryRateLimit, Message: "rate limited"},
+			},
+		}
+	}
+
+	exitCode := runWithDeps([]string{"providers", "check", "local", "--connectivity", "--json"}, &stdout, &stderr, deps)
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var payload struct {
+		Status string `json:"status"`
+		Health struct {
+			Status string `json:"status"`
+		} `json:"health"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("providers check JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if payload.Status != "warn" || payload.Health.Status != "warn" {
+		t.Fatalf("unexpected warning payload: %#v", payload)
 	}
 }
 

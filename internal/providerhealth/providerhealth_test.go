@@ -3,8 +3,9 @@ package providerhealth
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -27,31 +28,35 @@ func TestProbeConfigOnlyMissingProviderFails(t *testing.T) {
 func TestProbeConnectivityOpenAIModelsEndpointPasses(t *testing.T) {
 	var gotPath string
 	var gotAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"}]}`))
-	}))
-	defer server.Close()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-4.1"}]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
 
 	result := Probe(context.Background(), Options{
 		Profile: config.ProviderProfile{
 			Name:         "openai-test",
 			ProviderKind: config.ProviderKindOpenAICompatible,
-			BaseURL:      server.URL,
+			BaseURL:      "https://api.example.com/v1",
 			APIKey:       "sk-test-secret",
 			Model:        "gpt-4.1",
 		},
 		Connectivity: true,
-		HTTPClient:   server.Client(),
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 	})
 
 	if result.Status != StatusPass {
 		t.Fatalf("Status = %q, want pass: %#v", result.Status, result.Checks)
 	}
-	if gotPath != "/models" {
-		t.Fatalf("probe path = %q, want /models", gotPath)
+	if gotPath != "/v1/models" {
+		t.Fatalf("probe path = %q, want /v1/models", gotPath)
 	}
 	if gotAuth != "Bearer sk-test-secret" {
 		t.Fatalf("Authorization = %q", gotAuth)
@@ -63,22 +68,26 @@ func TestProbeConnectivityOpenAIModelsEndpointPasses(t *testing.T) {
 }
 
 func TestProbeConnectivityClassifiesAndRedactsAuthError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":{"message":"bad key sk-test-secret"}}`))
-	}))
-	defer server.Close()
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Status:     "401 Unauthorized",
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad key sk-test-secret"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
 
 	result := Probe(context.Background(), Options{
 		Profile: config.ProviderProfile{
 			Name:         "openai-test",
 			ProviderKind: config.ProviderKindOpenAICompatible,
-			BaseURL:      server.URL,
+			BaseURL:      "https://api.example.com/v1",
 			APIKey:       "sk-test-secret",
 			Model:        "custom-model",
 		},
 		Connectivity: true,
-		HTTPClient:   server.Client(),
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 	})
 
 	if result.Status != StatusFail {
@@ -126,25 +135,29 @@ func TestProbeResolvedKindRequiresAuthWhenUnset(t *testing.T) {
 
 func TestProbeResolvedKindConnectivityAuthErrorRedactsSecret(t *testing.T) {
 	authHeader := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		select {
 		case authHeader <- r.Header.Get("Authorization"):
 		default:
 		}
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":{"message":"bad key sk-test-secret"}}`))
-	}))
-	defer server.Close()
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Status:     "401 Unauthorized",
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad key sk-test-secret"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
 
 	result := Probe(context.Background(), Options{
 		Profile: config.ProviderProfile{
 			Name:    "openai-test",
-			BaseURL: server.URL,
+			BaseURL: "https://api.example.com/v1",
 			APIKey:  "sk-test-secret",
 			Model:   "custom-model",
 		},
 		Connectivity: true,
-		HTTPClient:   server.Client(),
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 	})
 
 	if result.Status != StatusFail {
@@ -182,12 +195,134 @@ func TestProbeConnectivityClassifiesTimeout(t *testing.T) {
 		},
 		Connectivity: true,
 		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
 		Timeout:      time.Millisecond,
 	})
 
 	check := result.Check("provider.connectivity")
 	if check == nil || check.Category != CategoryTimeout {
 		t.Fatalf("connectivity check = %#v, want timeout category", check)
+	}
+}
+
+func TestProbeConnectivityBlocksLocalhostBeforeNetwork(t *testing.T) {
+	called := false
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return nil, errors.New("network should not be reached")
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "local",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "http://localhost:11434/v1",
+			APIKey:       "sk-test-secret",
+			Model:        "local-model",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+	})
+
+	check := result.Check("provider.connectivity")
+	if check == nil || check.Status != StatusFail || check.Category != CategoryNetwork {
+		t.Fatalf("connectivity check = %#v, want blocked network failure", check)
+	}
+	if called {
+		t.Fatal("HTTP client was called for a blocked localhost URL")
+	}
+}
+
+func TestProbeConnectivityBlocksPrivateResolvedHostBeforeNetwork(t *testing.T) {
+	called := false
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return nil, errors.New("network should not be reached")
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "private",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://private.example/v1",
+			APIKey:       "sk-test-secret",
+			Model:        "custom-model",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("10.0.0.5")},
+	})
+
+	check := result.Check("provider.connectivity")
+	if check == nil || check.Status != StatusFail || check.Category != CategoryNetwork {
+		t.Fatalf("connectivity check = %#v, want blocked private-network failure", check)
+	}
+	if called {
+		t.Fatal("HTTP client was called for a blocked private resolved host")
+	}
+}
+
+func TestProbeConnectivityServiceUnavailableFails(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Status:     "503 Service Unavailable",
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"maintenance"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "custom",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			APIKey:       "sk-test-secret",
+			Model:        "custom-model",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
+	})
+
+	check := result.Check("provider.connectivity")
+	if result.Status != StatusFail || check == nil || check.Category != CategoryProvider {
+		t.Fatalf("result = %#v, connectivity = %#v, want provider failure", result, check)
+	}
+}
+
+func TestProbeConnectivityContextCanceledIsNetworkFailure(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})}
+
+	result := Probe(context.Background(), Options{
+		Profile: config.ProviderProfile{
+			Name:         "custom",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			APIKey:       "sk-test-secret",
+			Model:        "custom-model",
+		},
+		Connectivity: true,
+		HTTPClient:   client,
+		Resolver:     staticResolver{addr: netip.MustParseAddr("93.184.216.34")},
+	})
+
+	check := result.Check("provider.connectivity")
+	if check == nil || check.Category != CategoryNetwork {
+		t.Fatalf("connectivity check = %#v, want network category for context.Canceled", check)
+	}
+}
+
+func TestPrimaryCheckPrefersFailuresOverPassingConnectivity(t *testing.T) {
+	result := Result{Checks: []Check{
+		{ID: "provider.connectivity", Status: StatusPass, Message: "reachable"},
+		{ID: "provider.auth", Status: StatusFail, Message: "missing auth"},
+	}}
+
+	if got := result.PrimaryCheck(); got == nil || got.ID != "provider.auth" {
+		t.Fatalf("PrimaryCheck = %#v, want provider.auth failure", got)
 	}
 }
 
@@ -216,4 +351,16 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+type staticResolver struct {
+	addr netip.Addr
+	err  error
+}
+
+func (resolver staticResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	if resolver.err != nil {
+		return nil, resolver.err
+	}
+	return []netip.Addr{resolver.addr}, nil
 }
