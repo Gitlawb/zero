@@ -74,6 +74,28 @@ func TestProviderCommandShowsMissingCredentialAction(t *testing.T) {
 	}
 }
 
+func TestProviderCommandShowsMissingCredentialActionForCompatibleProvider(t *testing.T) {
+	text := renderProviderCommand(t, Options{
+		ProviderName: "manual-openai-compatible",
+		ModelName:    "custom-model",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "manual-openai-compatible",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://provider.example/v1",
+			Model:        "custom-model",
+		},
+	})
+
+	for _, want := range []string{
+		"provider: manual-openai-compatible",
+		"api key: not set",
+		"set OPENAI_API_KEY in your environment",
+		"zero providers add custom-openai-compatible --api-key-env OPENAI_API_KEY --set-active",
+	} {
+		assertContains(t, text, want)
+	}
+}
+
 func renderProviderCommand(t *testing.T, options Options) string {
 	t.Helper()
 

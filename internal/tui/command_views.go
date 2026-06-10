@@ -174,7 +174,7 @@ func providerCredentialRequired(profile config.ProviderProfile, providerKind str
 		return descriptor.RequiresAuth
 	}
 	switch config.ProviderKind(strings.TrimSpace(providerKind)) {
-	case config.ProviderKindOpenAI, config.ProviderKindAnthropic, config.ProviderKindGoogle:
+	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible, config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat, config.ProviderKindGoogle:
 		return true
 	default:
 		return false

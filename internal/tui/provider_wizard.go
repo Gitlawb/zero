@@ -94,8 +94,7 @@ func (wizard *providerWizardState) currentModel() providerWizardModel {
 	wizard.refreshModels()
 	models := wizard.filteredModels()
 	if len(models) == 0 {
-		provider := wizard.currentProvider()
-		return providerWizardModel{ID: provider.DefaultModel, Description: "catalog default"}
+		return providerWizardModel{Description: "no matching models"}
 	}
 	wizard.selectedModel = clampInt(wizard.selectedModel, 0, len(models)-1)
 	return models[wizard.selectedModel]
@@ -147,6 +146,11 @@ func (wizard *providerWizardState) advance() {
 		wizard.step = providerWizardStepModel
 	case providerWizardStepModel:
 		wizard.err = ""
+		wizard.refreshModels()
+		if len(wizard.filteredModels()) == 0 {
+			wizard.err = "choose a matching model before continuing"
+			return
+		}
 		wizard.step = providerWizardStepDone
 	case providerWizardStepDone:
 		wizard.step = providerWizardStepProvider
@@ -450,7 +454,7 @@ func (wizard *providerWizardState) renderModelSearch(width int) string {
 	if query != "" {
 		value = zeroTheme.ink.Render(query)
 	}
-	input := zeroTheme.userPrompt.Render("search > ") + value
+	input := zeroTheme.userPrompt.Render("search > ") + value + zeroTheme.accent.Render("\u258c")
 	return fitStyledLine(zeroTheme.onPanel2(zeroTheme.ink).Render(input), width)
 }
 

@@ -192,6 +192,9 @@ func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
 	if strings.Contains(view, "Add API key") {
 		t.Fatalf("local provider should skip API key step, got view:\n%s", view)
 	}
+	if strings.Contains(view, "Paste API key") {
+		t.Fatalf("local provider should skip API key step, got view:\n%s", view)
+	}
 	assertContains(t, view, "llama3.1")
 
 	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -421,6 +424,7 @@ func TestProviderWizardModelStepUsesFriendlyNamesAndStaysCompact(t *testing.T) {
 
 	view := plainRender(t, strings.Join(wizard.renderModelStep(84), "\n"))
 	assertContains(t, view, "search > Search model")
+	assertContains(t, view, "\u258c")
 	assertNotContains(t, view, "SearchÃ")
 	assertNotContains(t, view, "Searchâ")
 	assertContains(t, view, "Grok 4.3")
@@ -464,6 +468,45 @@ func TestProviderWizardModelSearchFiltersAndAppliesRawModelID(t *testing.T) {
 	assertContains(t, view, "DeepSeek Chat")
 	assertContains(t, view, "DeepSeek V3.2")
 	assertNotContains(t, view, "GPT-4.1")
+}
+
+func TestProviderWizardBlocksAdvanceWhenModelSearchHasNoMatches(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.providerWizard = &providerWizardState{
+		step: providerWizardStepModel,
+		providers: []providercatalog.Descriptor{{
+			ID:                  "openrouter",
+			Name:                "OpenRouter",
+			Transport:           providercatalog.TransportOpenAICompatible,
+			DefaultBaseURL:      "https://openrouter.ai/api/v1",
+			DefaultModel:        "openai/gpt-4.1",
+			AuthEnvVars:         []string{"OPENROUTER_API_KEY"},
+			RequiresAuth:        true,
+			SupportedAPIFormats: []providercatalog.APIFormat{providercatalog.APIFormatOpenAIChatCompletions},
+		}},
+		models: []providerWizardModel{
+			{ID: "openai/gpt-4.1", Description: "GPT-4.1"},
+			{ID: "deepseek/deepseek-chat", Description: "DeepSeek Chat"},
+		},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nomatch")})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+
+	if next.providerWizard.step != providerWizardStepModel {
+		t.Fatalf("wizard advanced to %v, want model step", next.providerWizard.step)
+	}
+	if next.providerWizard.err == "" {
+		t.Fatal("expected model search error")
+	}
+	if got := next.providerWizard.currentModel().ID; got != "" {
+		t.Fatalf("current model ID = %q, want empty when search has no matches", got)
+	}
+	view := plainRender(t, next.View())
+	assertContains(t, view, "no matching models")
+	assertContains(t, view, "choose a matching model")
 }
 
 func openProviderWizardForTest(t *testing.T, m model) model {
