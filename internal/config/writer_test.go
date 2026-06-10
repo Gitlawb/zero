@@ -1,11 +1,153 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "OpenAI",
+		Providers: []ProviderProfile{
+			{
+				Name:         "OpenAI",
+				ProviderKind: ProviderKindOpenAI,
+				Model:        "gpt-4.1",
+			},
+			{
+				Name:         "Anthropic",
+				ProviderKind: ProviderKindAnthropic,
+				Model:        "claude-3-5-sonnet-latest",
+			},
+		},
+	}, 0o600)
+
+	cfg, err := SetActiveProvider(path, "  anthropic  ")
+	if err != nil {
+		t.Fatalf("SetActiveProvider() error = %v", err)
+	}
+
+	if cfg.ActiveProvider != "Anthropic" {
+		t.Fatalf("ActiveProvider = %q, want Anthropic", cfg.ActiveProvider)
+	}
+
+	persisted := readConfigFixture(t, path)
+	if persisted.ActiveProvider != "Anthropic" {
+		t.Fatalf("persisted ActiveProvider = %q, want Anthropic", persisted.ActiveProvider)
+	}
+}
+
+func TestSetActiveProviderRejectsUnknownProviderWithoutRewriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "anthropic", ProviderKind: ProviderKindAnthropic, Model: "claude-3-5-sonnet-latest"},
+		},
+	}, 0o600)
+
+	_, err := SetActiveProvider(path, "google")
+	if err == nil {
+		t.Fatal("SetActiveProvider() error = nil, want error")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten for unknown provider\nbefore: %s\nafter: %s", before, after)
+	}
+
+	persisted := readConfigFixture(t, path)
+	if persisted.ActiveProvider != "openai" {
+		t.Fatalf("persisted ActiveProvider = %q, want openai", persisted.ActiveProvider)
+	}
+}
+
+func TestSetActiveProviderRejectsEmptyProviderName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	_, err := SetActiveProvider(path, " \t\n ")
+	if err == nil {
+		t.Fatal("SetActiveProvider() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "provider name is required") {
+		t.Fatalf("SetActiveProvider() error = %q, want provider name required", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten for empty provider name\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestSetActiveProviderRejectsEmptyConfigPath(t *testing.T) {
+	_, err := SetActiveProvider(" \t\n ", "openai")
+	if err == nil {
+		t.Fatal("SetActiveProvider() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "config path is required") {
+		t.Fatalf("SetActiveProvider() error = %q, want config path required", err)
+	}
+}
+
+func TestSetActiveProviderRejectsMissingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+
+	_, err := SetActiveProvider(path, "openai")
+	if err == nil {
+		t.Fatal("SetActiveProvider() error = nil, want error")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("SetActiveProvider() error = %v, want not-exist error", err)
+	}
+}
+
+func TestSetActiveProviderTightensExistingConfigFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX mode bits reliably")
+	}
+
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "anthropic", ProviderKind: ProviderKindAnthropic, Model: "claude-3-5-sonnet-latest"},
+		},
+	}, 0o644)
+
+	_, err := SetActiveProvider(path, "anthropic")
+	if err != nil {
+		t.Fatalf("SetActiveProvider() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode = %o, want 0600", got)
+	}
+}
 
 func TestUpsertProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -34,4 +176,31 @@ func TestUpsertProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("config mode = %o, want 0600", got)
 	}
+}
+
+func writeConfigFixture(t *testing.T, path string, cfg FileConfig, mode fs.FileMode) []byte {
+	t.Helper()
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode config: %v", err)
+	}
+	if err := os.WriteFile(path, data, mode); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return data
+}
+
+func readConfigFixture(t *testing.T, path string) FileConfig {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	return cfg
 }

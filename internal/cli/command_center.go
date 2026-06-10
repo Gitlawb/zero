@@ -72,6 +72,12 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if command == "check" {
 		return runProvidersCheck(args, stdout, stderr, deps)
 	}
+	if command == "use" {
+		return runProvidersUse(args, stdout, stderr, deps)
+	}
+	if command == "setup" {
+		return runProvidersSetup(args, stdout, stderr, deps)
+	}
 	if command != "list" && command != "current" && command != "catalog" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown providers command %q", command))
 	}
@@ -339,23 +345,37 @@ func formatProviderCatalogSummaries(providers []providerCatalogSummary) string {
 		return strings.Join(lines, "\n")
 	}
 	for _, provider := range providers {
-		lines = append(lines, "  "+formatProviderCatalogLine(provider))
+		lines = append(lines, formatProviderCatalogLine(provider))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func formatProviderCatalogLine(provider providerCatalogSummary) string {
-	return fmt.Sprintf("id=%s name=%s transport=%s defaultModel=%s defaultBaseURL=%s authEnvVars=%s requiresAuth=%t local=%t runtimeSupported=%t",
-		formatProviderCatalogValue(provider.ID, "unknown"),
-		formatProviderCatalogValue(provider.Name, "unknown"),
-		formatProviderCatalogValue(provider.Transport, "unknown"),
-		formatProviderCatalogValue(provider.DefaultModel, "none"),
-		formatProviderCatalogValue(provider.DefaultBaseURL, "none"),
-		formatProviderCatalogValue(strings.Join(provider.AuthEnvVars, ","), "none"),
+	lines := []string{
+		fmt.Sprintf("  id=%s name=%s",
+			formatProviderCatalogValue(provider.ID, "unknown"),
+			formatProviderCatalogValue(provider.Name, "unknown"),
+		),
+		fmt.Sprintf("    transport=%s defaultModel=%s",
+			formatProviderCatalogValue(provider.Transport, "unknown"),
+			formatProviderCatalogValue(provider.DefaultModel, "none"),
+		),
+		"    defaultBaseURL=" + formatProviderCatalogValue(provider.DefaultBaseURL, "none"),
+	}
+	if provider.RequiresAuth {
+		lines = append(lines, "    authEnvVars="+formatProviderCatalogValue(strings.Join(provider.AuthEnvVars, ","), "none"))
+	}
+	lines = append(lines, fmt.Sprintf("    requiresAuth=%t local=%t runtimeSupported=%t",
 		provider.RequiresAuth,
 		provider.Local,
 		provider.RuntimeSupported,
-	)
+	))
+	if provider.RuntimeSupported {
+		lines = append(lines, "    setup: zero providers setup "+displayCLIValue(provider.ID, "unknown")+" --set-active")
+	} else {
+		lines = append(lines, "    unsupported: "+displayCLIValue(provider.RuntimeUnsupportedReason, "unknown"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatModelSummaries(models []modelSummary) string {
@@ -429,6 +449,8 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers catalog [flags]
   zero providers add <catalog-id> [flags]
   zero providers check [name] [flags]
+  zero providers use <name> [flags]
+  zero providers setup <catalog-id> [flags]
 
 Inspects resolved provider profiles and provider catalog descriptors without printing secrets.
 
@@ -447,6 +469,13 @@ Add flags:
       --auth-header-value <v>   Exact auth header value; stored in config
       --header <key=value>      Custom provider header; repeatable
       --set-active              Make the added provider active
+
+Setup flags:
+      --name <name>             Planned provider profile name
+      --model <model>           Planned model override
+      --base-url <url>          Planned base URL override
+      --api-key-env <name>      Planned API key environment variable
+      --set-active              Include --set-active in the add command
   -h, --help                    Show this help
 `)
 	return err

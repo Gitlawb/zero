@@ -38,6 +38,39 @@ func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileC
 	return cfg, nil
 }
 
+func SetActiveProvider(path string, name string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return FileConfig{}, fmt.Errorf("provider name is required")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	cfg := FileConfig{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+
+	for _, provider := range cfg.Providers {
+		if strings.EqualFold(provider.Name, name) {
+			cfg.ActiveProvider = provider.Name
+			if err := writeConfigFile(path, cfg); err != nil {
+				return FileConfig{}, err
+			}
+			return cfg, nil
+		}
+	}
+
+	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+}
+
 func writeConfigFile(path string, cfg FileConfig) error {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {

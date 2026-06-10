@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 )
 
@@ -100,26 +101,146 @@ func (m model) providerText() string {
 		"provider: " + displayValue(m.providerName, "none"),
 		"model: " + displayValue(m.modelName, "none"),
 	}
-	if config.HasProviderProfile(m.providerProfile) {
-		snapshot := zerocommands.ProviderSnapshotFromProfile(m.providerProfile, true)
-		profileLines = append(profileLines,
-			"kind: "+displayValue(snapshot.ProviderKind, "unknown"),
-			"api model: "+displayValue(snapshot.APIModel, "unknown"),
-			"base url: "+displayValue(snapshot.BaseURL, "default"),
-			"api key: "+apiKeyState(snapshot.APIKeySet),
-		)
-		if snapshot.Message != "" {
-			profileLines = append(profileLines, "provider status: "+snapshot.Status+" - "+snapshot.Message)
-		}
+	if !config.HasProviderProfile(m.providerProfile) {
+		profileLines = append(profileLines, "profile: not configured")
+		return renderCommandOutput(commandOutput{
+			Title:  "Provider",
+			Status: commandStatusWarning,
+			Sections: []commandSection{
+				{Title: "Active", Lines: profileLines},
+				{Title: "Next actions", Lines: []string{
+					"zero providers catalog",
+					"zero providers setup openai --set-active",
+					"zero providers add openai --api-key-env OPENAI_API_KEY --set-active",
+				}},
+			},
+			Hints: []string{"run provider commands in your shell; the TUI does not write config"},
+		})
+	}
+
+	snapshot := zerocommands.ProviderSnapshotFromProfile(m.providerProfile, true)
+	profileLines = append(profileLines,
+		"active: "+boolText(snapshot.Active),
+		"kind: "+displayValue(snapshot.ProviderKind, "unknown"),
+		"api model: "+displayValue(snapshot.APIModel, "unknown"),
+		"base url: "+displayValue(snapshot.BaseURL, "default"),
+		"api key: "+apiKeyState(snapshot.APIKeySet),
+	)
+	if snapshot.Message != "" {
+		profileLines = append(profileLines, "provider status: "+snapshot.Status+" - "+snapshot.Message)
+	}
+
+	status := commandStatusOK
+	actionLines := providerNextActionLines(m.providerProfile, snapshot, m.providerName)
+	if providerCredentialRequired(m.providerProfile, snapshot.ProviderKind) && !providerProfileHasCredential(m.providerProfile) {
+		status = commandStatusWarning
 	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Provider",
-		Status: commandStatusOK,
-		Sections: []commandSection{{
-			Title: "Active",
-			Lines: profileLines,
-		}},
+		Status: status,
+		Sections: []commandSection{
+			{Title: "Active", Lines: profileLines},
+			{Title: "Next actions", Lines: actionLines},
+		},
 	})
+}
+
+func providerNextActionLines(profile config.ProviderProfile, snapshot zerocommands.ProviderSnapshot, activeName string) []string {
+	providerName := firstProviderDisplayValue(snapshot.Name, activeName, profile.Name, providerSetupCatalogID(profile, snapshot.ProviderKind), "openai")
+	setupID := providerSetupCatalogID(profile, snapshot.ProviderKind)
+	lines := []string{}
+	if providerCredentialRequired(profile, snapshot.ProviderKind) && !providerProfileHasCredential(profile) {
+		if envName := providerCredentialEnvName(profile, snapshot.ProviderKind); envName != "" {
+			lines = append(lines,
+				"set "+envName+" in your environment",
+				"zero providers add "+setupID+" --api-key-env "+envName+" --set-active",
+			)
+		} else {
+			lines = append(lines, "set provider credentials in your environment")
+		}
+	}
+	return append(lines,
+		"zero providers check "+providerName+" --connectivity",
+		"zero providers catalog",
+		"zero providers setup "+setupID+" --set-active",
+	)
+}
+
+func providerProfileHasCredential(profile config.ProviderProfile) bool {
+	return strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != ""
+}
+
+func providerCredentialRequired(profile config.ProviderProfile, providerKind string) bool {
+	if descriptor, ok := providerCatalogDescriptor(profile); ok {
+		return descriptor.RequiresAuth
+	}
+	switch config.ProviderKind(strings.TrimSpace(providerKind)) {
+	case config.ProviderKindOpenAI, config.ProviderKindAnthropic, config.ProviderKindGoogle:
+		return true
+	default:
+		return false
+	}
+}
+
+func providerCredentialEnvName(profile config.ProviderProfile, providerKind string) string {
+	if envName := strings.TrimSpace(profile.APIKeyEnv); envName != "" {
+		return envName
+	}
+	if descriptor, ok := providerCatalogDescriptor(profile); ok && len(descriptor.AuthEnvVars) > 0 {
+		return descriptor.AuthEnvVars[0]
+	}
+	switch config.ProviderKind(strings.TrimSpace(providerKind)) {
+	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
+		return "OPENAI_API_KEY"
+	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
+		return "ANTHROPIC_API_KEY"
+	case config.ProviderKindGoogle:
+		return "GEMINI_API_KEY"
+	default:
+		return ""
+	}
+}
+
+func providerSetupCatalogID(profile config.ProviderProfile, providerKind string) string {
+	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
+		return catalogID
+	}
+	switch config.ProviderKind(strings.TrimSpace(providerKind)) {
+	case config.ProviderKindOpenAI:
+		return "openai"
+	case config.ProviderKindAnthropic:
+		return "anthropic"
+	case config.ProviderKindGoogle:
+		return "google"
+	case config.ProviderKindOpenAICompatible:
+		return "custom-openai-compatible"
+	case config.ProviderKindAnthropicCompat:
+		return "custom-anthropic-compatible"
+	default:
+		return firstProviderDisplayValue(profile.Name, "openai")
+	}
+}
+
+func providerCatalogDescriptor(profile config.ProviderProfile) (providercatalog.Descriptor, bool) {
+	catalogID := strings.TrimSpace(profile.CatalogID)
+	if catalogID == "" {
+		return providercatalog.Descriptor{}, false
+	}
+	descriptor, err := providercatalog.Require(catalogID)
+	if err != nil {
+		return providercatalog.Descriptor{}, false
+	}
+	return descriptor, true
+}
+
+func firstProviderDisplayValue(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (m model) modelText(args string) string {
