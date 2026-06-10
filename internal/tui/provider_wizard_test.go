@@ -71,6 +71,54 @@ func TestProviderWizardUsesRuntimeProviderCatalog(t *testing.T) {
 	}
 }
 
+func TestProviderWizardModelsAreProviderScoped(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     []string
+		notWant  []string
+	}{
+		{
+			provider: "ollama",
+			want:     []string{"llama3.1", "qwen2.5-coder:32b"},
+			notWant:  []string{"gpt-4.1", "gpt-5", "openai/gpt-4.1"},
+		},
+		{
+			provider: "groq",
+			want:     []string{"llama-3.3-70b-versatile", "openai/gpt-oss-120b"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
+		},
+		{
+			provider: "mistral",
+			want:     []string{"mistral-large-latest", "codestral-latest"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			descriptor, ok := providercatalog.Get(tt.provider)
+			if !ok {
+				t.Fatalf("provider %q missing from catalog", tt.provider)
+			}
+			models := providerWizardModelOptions(descriptor)
+			got := map[string]bool{}
+			for _, model := range models {
+				got[model.ID] = true
+			}
+			for _, want := range tt.want {
+				if !got[want] {
+					t.Fatalf("%s models missing %q; got %#v", tt.provider, want, providerWizardModelIDs(models))
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if got[notWant] {
+					t.Fatalf("%s models should not include %q; got %#v", tt.provider, notWant, providerWizardModelIDs(models))
+				}
+			}
+		})
+	}
+}
+
 func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
@@ -237,4 +285,12 @@ func providerWizardProviderIndex(t *testing.T, wizard *providerWizardState, id s
 	}
 	t.Fatalf("provider %q not found in wizard providers", id)
 	return 0
+}
+
+func providerWizardModelIDs(models []providerWizardModel) []string {
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		ids = append(ids, model.ID)
+	}
+	return ids
 }

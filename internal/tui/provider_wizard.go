@@ -9,7 +9,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
@@ -167,55 +166,6 @@ func sameProviderWizardModels(a, b []providerWizardModel) bool {
 		}
 	}
 	return true
-}
-
-func providerWizardModelOptions(provider providercatalog.Descriptor) []providerWizardModel {
-	models := []providerWizardModel{}
-	seen := map[string]bool{}
-	add := func(id, description, meta string) {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		models = append(models, providerWizardModel{ID: id, Description: description, Meta: meta})
-	}
-
-	add(provider.DefaultModel, "catalog default", "")
-
-	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return models
-	}
-	for _, entry := range registry.List(modelregistry.ListOptions{}) {
-		if !providerWizardModelMatchesProvider(entry, provider) {
-			continue
-		}
-		meta := ""
-		if ctx := formatContextWindow(entry.ContextLimits.ContextWindow); ctx != "" {
-			meta = ctx + " ctx"
-		}
-		add(entry.ID, entry.DisplayName, meta)
-		if len(models) >= 8 {
-			break
-		}
-	}
-	return models
-}
-
-func providerWizardModelMatchesProvider(model modelregistry.ModelEntry, provider providercatalog.Descriptor) bool {
-	switch provider.Transport {
-	case providercatalog.TransportOpenAI:
-		return model.Provider == modelregistry.ProviderOpenAI
-	case providercatalog.TransportAnthropic, providercatalog.TransportAnthropicCompatible:
-		return model.Provider == modelregistry.ProviderAnthropic
-	case providercatalog.TransportGoogle:
-		return model.Provider == modelregistry.ProviderGoogle
-	case providercatalog.TransportOpenAICompatible:
-		return model.AllowsProvider(modelregistry.ProviderOpenAICompatible)
-	default:
-		return false
-	}
 }
 
 func providerWizardNeedsCredential(provider providercatalog.Descriptor) bool {
