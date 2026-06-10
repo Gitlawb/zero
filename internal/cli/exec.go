@@ -94,6 +94,10 @@ type execOptions struct {
 	notifyMode string
 	// noNotify forces ModeOff for this run. Mutually exclusive with notifyMode.
 	noNotify bool
+	// addDirs holds directories passed via --add-dir that should be allowed as
+	// additional write roots for this run. Unioned with
+	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
+	addDirs []string
 }
 
 type execUsageError struct {
@@ -265,7 +269,19 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		images = nil
 	}
-	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps)
+	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	// Re-register core tools with the fully resolved scope so that write-root
+	// enforcement in file tools reflects both config-sourced and CLI-sourced
+	// extra roots. The scoped tools overwrite the nil-scope ones registered
+	// earlier; all other registrations (specialist, MCP, escalate_model,
+	// spec-mode, tool_search) are unaffected.
+	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
+		registry.Register(tool)
+	}
+	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
@@ -574,7 +590,7 @@ func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, 
 	registry.Register(tools.NewToolSearchTool(registry))
 }
 
-func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps) (*sandbox.Engine, error) {
+func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps, scope *sandbox.Scope) (*sandbox.Engine, error) {
 	store, err := deps.newSandboxStore()
 	if err != nil {
 		return nil, err
@@ -586,6 +602,7 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 		Policy:        policy,
 		Store:         store,
 		Backend:       backend,
+		Scope:         scope,
 	}), nil
 }
 
