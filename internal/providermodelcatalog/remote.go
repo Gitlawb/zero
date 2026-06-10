@@ -230,8 +230,20 @@ func defaultedOpenGatewayURL(provider providercatalog.Descriptor, override strin
 
 func sortModels(models []Model) {
 	sort.SliceStable(models, func(i, j int) bool {
-		return models[i].ID < models[j].ID
+		left := modelSortLabel(models[i])
+		right := modelSortLabel(models[j])
+		if left == right {
+			return models[i].ID < models[j].ID
+		}
+		return left < right
 	})
+}
+
+func modelSortLabel(model Model) string {
+	if label := strings.ToLower(strings.TrimSpace(model.Description)); label != "" {
+		return label
+	}
+	return strings.ToLower(strings.TrimSpace(model.ID))
 }
 
 func firstNonEmpty(values ...string) string {
