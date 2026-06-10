@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,14 +18,19 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 	}{
 		{id: "openai", name: "OpenAI", transport: "openai", defaultModel: "gpt-4.1"},
 		{id: "groq", name: "Groq", transport: "openai-compatible", defaultModel: "llama-3.3-70b-versatile"},
-		{id: "ollama", name: "Ollama", transport: "openai-compatible", defaultModel: "llama3.1"},
+		{id: "ollama-cloud", name: "Ollama Cloud", transport: "openai-compatible", defaultModel: "qwen3-coder:480b"},
+		{id: "ollama", name: "Ollama Local", transport: "openai-compatible", defaultModel: "llama3.1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.id, func(t *testing.T) {
 			block := providerCatalogOnboardingBlock(t, output, tt.id)
+			nameLine := "name=" + tt.name
+			if strings.Contains(tt.name, " ") {
+				nameLine = "name=" + strconv.Quote(tt.name)
+			}
 			for _, want := range []string{
 				"id=" + tt.id,
-				"name=" + tt.name,
+				nameLine,
 				"transport=" + tt.transport,
 				"defaultModel=" + tt.defaultModel,
 				"setup: zero providers setup " + tt.id + " --set-active",
@@ -37,6 +43,21 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 				t.Fatalf("runtime-supported provider %s should not show unsupported reason, got:\n%s", tt.id, block)
 			}
 		})
+	}
+}
+
+func TestProviderCatalogOllamaCloudRequiresAPIKey(t *testing.T) {
+	output := runProviderCatalogOnboarding(t)
+	block := providerCatalogOnboardingBlock(t, output, "ollama-cloud")
+
+	for _, want := range []string{
+		"requiresAuth=true",
+		"authEnvVars=OLLAMA_API_KEY",
+		"setup: zero providers setup ollama-cloud --set-active",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("expected ollama-cloud catalog block to contain %q, got:\n%s", want, block)
+		}
 	}
 }
 

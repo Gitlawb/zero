@@ -112,11 +112,12 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 
 func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 	tests := map[string]string{
-		"github":      "github-models",
-		"moonshot":    "moonshotai",
-		"nvidia-nim":  "nvidia",
-		"xiaomi-mimo": "xiaomi",
-		"dashscope":   "alibaba",
+		"github":       "github-models",
+		"moonshot":     "moonshotai",
+		"nvidia-nim":   "nvidia",
+		"xiaomi-mimo":  "xiaomi",
+		"dashscope":    "alibaba",
+		"ollama-cloud": "ollama-cloud",
 	}
 	for zeroID, want := range tests {
 		provider, ok := providercatalog.Get(zeroID)

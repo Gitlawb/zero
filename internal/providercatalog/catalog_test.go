@@ -11,6 +11,7 @@ var expectedCatalogIDs = []string{
 	"openai",
 	"anthropic",
 	"google",
+	"ollama-cloud",
 	"ollama",
 	"lmstudio",
 	"openrouter",
@@ -127,10 +128,45 @@ func TestLocalProvidersDoNotRequireAuth(t *testing.T) {
 	}
 }
 
+func TestOllamaCloudAndLocalAreSeparateProviders(t *testing.T) {
+	cloud, err := Require("ollama-cloud")
+	if err != nil {
+		t.Fatalf("Require(ollama-cloud) error = %v", err)
+	}
+	if cloud.Name != "Ollama Cloud" {
+		t.Fatalf("ollama-cloud Name = %q, want Ollama Cloud", cloud.Name)
+	}
+	if cloud.DefaultBaseURL != "https://ollama.com/v1" {
+		t.Fatalf("ollama-cloud DefaultBaseURL = %q, want https://ollama.com/v1", cloud.DefaultBaseURL)
+	}
+	if !cloud.RequiresAuth || cloud.Local {
+		t.Fatalf("ollama-cloud auth/local flags = requiresAuth:%v local:%v, want remote auth provider", cloud.RequiresAuth, cloud.Local)
+	}
+	if len(cloud.AuthEnvVars) != 1 || cloud.AuthEnvVars[0] != "OLLAMA_API_KEY" {
+		t.Fatalf("ollama-cloud AuthEnvVars = %#v, want OLLAMA_API_KEY", cloud.AuthEnvVars)
+	}
+
+	local, err := Require("ollama")
+	if err != nil {
+		t.Fatalf("Require(ollama) error = %v", err)
+	}
+	if local.Name != "Ollama Local" {
+		t.Fatalf("ollama Name = %q, want Ollama Local", local.Name)
+	}
+	if local.DefaultBaseURL != "http://localhost:11434/v1" {
+		t.Fatalf("ollama DefaultBaseURL = %q, want local OpenAI-compatible endpoint", local.DefaultBaseURL)
+	}
+	if !local.Local || local.RequiresAuth {
+		t.Fatalf("ollama auth/local flags = requiresAuth:%v local:%v, want local no-auth provider", local.RequiresAuth, local.Local)
+	}
+}
+
 func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 	cases := map[string]string{
 		" OpenAI ":                     "openai",
 		"Gemini":                       "google",
+		"ollama cloud":                 "ollama-cloud",
+		"ollama local":                 "ollama",
 		"lm-studio":                    "lmstudio",
 		"mini_max":                     "minimax",
 		"Moonshot":                     "moonshot",
@@ -184,7 +220,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"ollama", "lmstudio", "openrouter", "groq", "deepseek", "together", "dashscope", "moonshot", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "gitlawb-opengateway", "atomic-chat", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"ollama-cloud", "ollama", "lmstudio", "openrouter", "groq", "deepseek", "together", "dashscope", "moonshot", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "gitlawb-opengateway", "atomic-chat", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

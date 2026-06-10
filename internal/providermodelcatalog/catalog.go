@@ -22,6 +22,14 @@ type Model struct {
 }
 
 var curatedModels = map[string][]Model{
+	"ollama-cloud": {
+		{ID: "qwen3-coder:480b", Description: "catalog default"},
+		{ID: "gpt-oss:120b", Description: "agentic coding model"},
+		{ID: "deepseek-v4-pro", Description: "coding model"},
+		{ID: "minimax-m3", Description: "agentic coding model"},
+		{ID: "kimi-k2.6", Description: "coding model"},
+		{ID: "devstral-2:123b", Description: "coding model"},
+	},
 	"ollama": {
 		{ID: "llama3.1", Description: "catalog default"},
 		{ID: "qwen2.5-coder:32b", Description: "local coding model"},

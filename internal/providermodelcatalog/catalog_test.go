@@ -13,9 +13,14 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		notWant  []string
 	}{
 		{
+			provider: "ollama-cloud",
+			want:     []string{"qwen3-coder:480b", "gpt-oss:120b"},
+			notWant:  []string{"llama3.1", "gpt-4.1", "openai/gpt-4.1"},
+		},
+		{
 			provider: "ollama",
 			want:     []string{"llama3.1", "qwen2.5-coder:32b"},
-			notWant:  []string{"gpt-4.1", "gpt-5", "openai/gpt-4.1"},
+			notWant:  []string{"qwen3-coder:480b", "gpt-4.1", "gpt-5", "openai/gpt-4.1"},
 		},
 		{
 			provider: "groq",
