@@ -58,8 +58,7 @@ func (m model) handleImageCommand(arg string) model {
 }
 
 func (m model) appendImageNotice(text string) model {
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-	return m
+	return m.appendSystemNotice(text)
 }
 
 // renderImageChips builds a one-line "[img: a.png] [img: b.png]" row for the

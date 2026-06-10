@@ -1096,6 +1096,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandImage:
 		m = m.handleImageCommand(command.text)
 		return m, nil
+	case commandAddDir:
+		m = m.handleAddDirCommand(command.text)
+		return m, nil
 	case commandUnknown:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,

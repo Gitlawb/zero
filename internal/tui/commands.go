@@ -33,6 +33,7 @@ const (
 	commandInputStyle
 	commandBash
 	commandImage
+	commandAddDir
 	commandUnknown
 )
 
@@ -117,6 +118,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Attach a local image to the next message (vision models). /image clear removes pending attachments.",
 		kind:        commandImage,
+	},
+	{
+		name:        "/add-dir",
+		usage:       "/add-dir [path]",
+		group:       commandGroupRuntime,
+		description: "Grant write access to a directory outside the workspace for this session; bare form lists current write roots.",
+		kind:        commandAddDir,
 	},
 	{
 		name:        "/clear",
