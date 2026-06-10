@@ -12,15 +12,50 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type Model struct {
-	ID string
+	ID               string
+	Description      string
+	ContextWindow    int
+	ToolCall         bool
+	Reasoning        bool
+	InputModalities  []string
+	OutputModalities []string
+	InputCost        float64
+	OutputCost       float64
+	Tags             []string
+	Source           string
 }
 
 type Options struct {
-	HTTPClient *http.Client
+	HTTPClient     *http.Client
+	ModelsDevURL   string
+	OpenGatewayURL string
+}
+
+func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
+	catalogModels, catalogErr := fetchCatalogModels(ctx, provider, options)
+	canProbeProvider := openAICompatibleDiscoveryAllowed(profile) && (!provider.RequiresAuth || strings.TrimSpace(profile.APIKey) != "")
+	if canProbeProvider {
+		liveModels, liveErr := Discover(ctx, profile, options)
+		if liveErr == nil {
+			return mergeLiveModels(liveModels, catalogModels), nil
+		}
+		if len(catalogModels) == 0 {
+			return nil, liveErr
+		}
+	}
+	if len(catalogModels) > 0 {
+		return catalogModels, nil
+	}
+	if catalogErr != nil {
+		return nil, catalogErr
+	}
+	return nil, fmt.Errorf("no provider models discovered")
 }
 
 func Discover(ctx context.Context, profile config.ProviderProfile, options Options) ([]Model, error) {
@@ -117,6 +152,65 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 		return nil, fmt.Errorf("models endpoint returned no model ids")
 	}
 	return models, nil
+}
+
+func fetchCatalogModels(ctx context.Context, provider providercatalog.Descriptor, options Options) ([]Model, error) {
+	models, err := providermodelcatalog.FetchRemote(ctx, provider, providermodelcatalog.FetchOptions{
+		HTTPClient:     options.HTTPClient,
+		ModelsDevURL:   options.ModelsDevURL,
+		OpenGatewayURL: options.OpenGatewayURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return modelsFromCatalog(models), nil
+}
+
+func modelsFromCatalog(models []providermodelcatalog.Model) []Model {
+	result := make([]Model, 0, len(models))
+	for _, model := range models {
+		result = append(result, Model{
+			ID:               model.ID,
+			Description:      model.Description,
+			ContextWindow:    model.ContextWindow,
+			ToolCall:         model.ToolCall,
+			Reasoning:        model.Reasoning,
+			InputModalities:  append([]string{}, model.InputModalities...),
+			OutputModalities: append([]string{}, model.OutputModalities...),
+			InputCost:        model.InputCost,
+			OutputCost:       model.OutputCost,
+			Tags:             append([]string{}, model.Tags...),
+			Source:           model.Source,
+		})
+	}
+	return result
+}
+
+func mergeLiveModels(liveModels []Model, catalogModels []Model) []Model {
+	byID := map[string]Model{}
+	for _, model := range catalogModels {
+		byID[model.ID] = model
+	}
+	result := make([]Model, 0, len(liveModels))
+	for _, live := range liveModels {
+		if catalog, ok := byID[live.ID]; ok {
+			catalog.Source = firstDiscoverySource(catalog.Source, "live")
+			result = append(result, catalog)
+			continue
+		}
+		live.Source = firstDiscoverySource(live.Source, "live")
+		result = append(result, live)
+	}
+	return result
+}
+
+func firstDiscoverySource(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func redactDiscoveryError(err error, profile config.ProviderProfile) error {

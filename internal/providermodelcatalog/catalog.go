@@ -8,9 +8,17 @@ import (
 )
 
 type Model struct {
-	ID            string
-	Description   string
-	ContextWindow int
+	ID               string
+	Description      string
+	ContextWindow    int
+	ToolCall         bool
+	Reasoning        bool
+	InputModalities  []string
+	OutputModalities []string
+	InputCost        float64
+	OutputCost       float64
+	Tags             []string
+	Source           string
 }
 
 var curatedModels = map[string][]Model{

@@ -153,7 +153,7 @@ func (wizard *providerWizardState) refreshModels() {
 		return
 	}
 	provider := wizard.currentProvider()
-	if wizard.modelSource == "live" {
+	if wizard.modelSource != "" && wizard.modelSource != "fallback" {
 		wizard.selectedModel = clampInt(wizard.selectedModel, 0, maxInt(0, len(wizard.models)-1))
 		return
 	}
@@ -388,10 +388,16 @@ func (wizard *providerWizardState) renderModelStep(width int) []string {
 
 func (wizard *providerWizardState) modelStatusText() string {
 	if wizard.modelLoading {
-		return "models: refreshing from /models"
+		return "models: refreshing catalog"
 	}
 	if wizard.modelLoadError != "" {
 		return "models: fallback - " + wizard.modelLoadError
+	}
+	if wizard.modelSource == "models.dev" {
+		return "models: models.dev"
+	}
+	if wizard.modelSource == "opengateway" {
+		return "models: OpenGateway"
 	}
 	if wizard.modelSource == "live" {
 		return "models: live"

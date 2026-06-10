@@ -326,6 +326,34 @@ func TestProviderWizardKeepsFallbackModelsWhenLiveDiscoveryFails(t *testing.T) {
 	assertContains(t, view, "offline")
 }
 
+func TestProviderWizardRendersDiscoveredModelMetadata(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "openai")
+	m.providerWizard.step = providerWizardStepModel
+
+	next := m.applyProviderModelsDiscovered(providerModelsDiscoveredMsg{
+		providerID: "openai",
+		models: []providermodeldiscovery.Model{{
+			ID:            "gpt-4.1",
+			Description:   "GPT-4.1",
+			ContextWindow: 1048576,
+			ToolCall:      true,
+			Reasoning:     true,
+			InputCost:     2,
+			OutputCost:    8,
+			Source:        "models.dev",
+		}},
+	})
+
+	view := plainRender(t, next.View())
+	assertContains(t, view, "models: models.dev")
+	assertContains(t, view, "gpt-4.1")
+	assertContains(t, view, "1M ctx")
+	assertContains(t, view, "tools")
+	assertContains(t, view, "reasoning")
+}
+
 func openProviderWizardForTest(t *testing.T, m model) model {
 	t.Helper()
 	m.input.SetValue("/provider")

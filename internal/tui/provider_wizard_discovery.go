@@ -38,17 +38,14 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 		return nil
 	}
 	provider := wizard.currentProvider()
-	if !providerWizardLiveDiscoveryAllowed(provider) {
+	if !providerWizardCatalogDiscoveryAllowed(provider) {
 		return nil
 	}
 	profile := providerWizardDiscoveryProfile(provider, wizard.apiKey)
-	if provider.RequiresAuth && strings.TrimSpace(profile.APIKey) == "" {
-		return nil
-	}
 	discover := m.discoverProviderModels
 	if discover == nil {
 		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-			return providermodeldiscovery.Discover(ctx, profile, providermodeldiscovery.Options{})
+			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, providermodeldiscovery.Options{})
 		}
 	}
 
@@ -84,7 +81,10 @@ func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) mo
 	}
 	wizard.models = models
 	wizard.selectedModel = 0
-	wizard.modelSource = "live"
+	wizard.modelSource = providerWizardModelsSource(msg.models)
+	if wizard.modelSource == "" {
+		wizard.modelSource = "live"
+	}
 	wizard.modelLoadError = ""
 	return m
 }
@@ -96,9 +96,22 @@ func providerWizardModelsFromDiscovery(models []providermodeldiscovery.Model) []
 		if id == "" {
 			continue
 		}
-		result = append(result, providerWizardModel{ID: id, Description: "live model"})
+		result = append(result, providerWizardModel{
+			ID:          id,
+			Description: firstProviderDisplayValue(model.Description, "live model"),
+			Meta:        providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags),
+		})
 	}
 	return result
+}
+
+func providerWizardModelsSource(models []providermodeldiscovery.Model) string {
+	for _, model := range models {
+		if source := strings.TrimSpace(model.Source); source != "" {
+			return source
+		}
+	}
+	return ""
 }
 
 func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey string) config.ProviderProfile {
@@ -109,11 +122,6 @@ func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey 
 	return profile
 }
 
-func providerWizardLiveDiscoveryAllowed(provider providercatalog.Descriptor) bool {
-	switch provider.Transport {
-	case providercatalog.TransportOpenAI, providercatalog.TransportOpenAICompatible:
-		return true
-	default:
-		return false
-	}
+func providerWizardCatalogDiscoveryAllowed(provider providercatalog.Descriptor) bool {
+	return providercatalog.RuntimeSupported(provider)
 }
