@@ -65,11 +65,20 @@ func NewStore(opts StoreOptions) *Store {
 // DefaultRoot mirrors sessions.DefaultRoot: <XDG_DATA_HOME|~/.local/share>/zero/cron.
 func DefaultRoot(env map[string]string) string {
 	dataHome := strings.TrimSpace(env["XDG_DATA_HOME"])
-	if dataHome == "" {
-		home := strings.TrimSpace(env["HOME"])
-		dataHome = filepath.Join(home, ".local", "share")
+	home := strings.TrimSpace(env["HOME"])
+	if home == "" {
+		// Mirror sessions.DefaultRoot: fall back to the OS user home so an unset
+		// HOME (Windows, restricted shells) doesn't yield a RELATIVE ".local/share"
+		// under the caller's cwd, which would scatter cron data per working dir.
+		if userHome, err := os.UserHomeDir(); err == nil {
+			home = userHome
+		}
 	}
-	return filepath.Join(dataHome, "zero", "cron")
+	base := dataHome
+	if base == "" {
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "zero", "cron")
 }
 
 func envMap() map[string]string {

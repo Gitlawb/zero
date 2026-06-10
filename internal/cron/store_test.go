@@ -3,6 +3,7 @@ package cron
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +67,21 @@ func TestDefaultRootHonorsXDG(t *testing.T) {
 	root := DefaultRoot(map[string]string{"XDG_DATA_HOME": "/tmp/xdg"})
 	if root != filepath.Join("/tmp/xdg", "zero", "cron") {
 		t.Fatalf("DefaultRoot=%q", root)
+	}
+}
+
+func TestDefaultRootEmptyHomeFallsBackToUserHome(t *testing.T) {
+	// No XDG_DATA_HOME and no HOME: must NOT produce a relative ".local/share"
+	// under the caller's cwd (the bug). It falls back to the OS user home.
+	root := DefaultRoot(map[string]string{})
+	if !filepath.IsAbs(root) {
+		t.Fatalf("DefaultRoot with empty env must be absolute, got %q", root)
+	}
+	if strings.HasPrefix(root, ".local") || strings.HasPrefix(root, filepath.Join(".local", "share")) {
+		t.Fatalf("DefaultRoot leaked a relative .local/share path: %q", root)
+	}
+	if filepath.Base(root) != "cron" || filepath.Base(filepath.Dir(root)) != "zero" {
+		t.Fatalf("DefaultRoot tail = %q, want .../zero/cron", root)
 	}
 }
 
