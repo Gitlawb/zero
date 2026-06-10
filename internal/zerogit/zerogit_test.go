@@ -274,11 +274,11 @@ func TestInspectBaseRefRealGitDiffsBranchAgainstBase(t *testing.T) {
 func TestInspectBaseRefUsesThreeDotDiff(t *testing.T) {
 	root := t.TempDir()
 	runner := &fakeRunner{results: []CommandResult{
-		{Stdout: root + "\n"},                                                   // rev-parse --show-toplevel
-		{Stdout: "feature/m5\n"},                                                // rev-parse --abbrev-ref HEAD
-		{Stdout: "abc1234\n"},                                                   // rev-parse --short HEAD
-		{Stdout: "M\ta.txt\nA\tb.txt\n"},                                        // diff --name-status main...HEAD
-		{Stdout: " a.txt | 1 +\n b.txt | 1 +\n 2 files changed, 2 insertions(+)\n"}, // diff --stat main...HEAD
+		{Stdout: root + "\n"},            // rev-parse --show-toplevel
+		{Stdout: "feature/m5\n"},         // rev-parse --abbrev-ref HEAD
+		{Stdout: "abc1234\n"},            // rev-parse --short HEAD
+		{Stdout: "M\ta.txt\nA\tb.txt\n"}, // diff --name-status main...HEAD
+		{Stdout: " a.txt | 1 +\n b.txt | 1 +\n 2 files changed, 2 insertions(+)\n"},                                                     // diff --stat main...HEAD
 		{Stdout: "diff --git a/internal/changes/changes.go b/internal/changes/changes.go\n+token sk-proj-abcdefghijklmnopqrstuvwxyz\n"}, // diff main...HEAD
 	}}
 

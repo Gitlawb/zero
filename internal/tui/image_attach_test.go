@@ -16,10 +16,10 @@ func TestModelSupportsVisionTUI(t *testing.T) {
 		modelName string
 		want      bool
 	}{
-		{modelName: "gpt-4.1", want: true},                  // vision model in the catalog
-		{modelName: "claude-sonnet-4.5", want: true},        // vision model in the catalog
-		{modelName: "claude-haiku-3.5", want: true},         // has vision capability
-		{modelName: "totally-unknown-custom", want: false},  // not in catalog -> can't confirm
+		{modelName: "gpt-4.1", want: true},                 // vision model in the catalog
+		{modelName: "claude-sonnet-4.5", want: true},       // vision model in the catalog
+		{modelName: "claude-haiku-3.5", want: false},       // claude-3-5-haiku has no image input support
+		{modelName: "totally-unknown-custom", want: false}, // not in catalog -> can't confirm
 		{modelName: "", want: false},
 	}
 	for _, tc := range cases {

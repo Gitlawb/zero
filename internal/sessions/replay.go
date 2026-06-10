@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 )
@@ -171,9 +172,9 @@ func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
 	prompt := strings.Join(lines, "\n")
 	if maxChars > 0 && len(prompt) > maxChars {
 		if maxChars <= len("\n[truncated]") {
-			return prompt[:maxChars], true
+			return cutPromptRuneBoundary(prompt, maxChars), true
 		}
-		return prompt[:maxChars-len("\n[truncated]")] + "\n[truncated]", true
+		return cutPromptRuneBoundary(prompt, maxChars-len("\n[truncated]")) + "\n[truncated]", true
 	}
 	return prompt, false
 }
@@ -234,9 +235,24 @@ func payloadPreview(payload json.RawMessage) string {
 	value := strings.Join(strings.Fields(string(payload)), " ")
 	value = redaction.RedactString(value, redaction.Options{})
 	if len(value) > 240 {
-		return value[:240] + "..."
+		return cutPromptRuneBoundary(value, 240) + "..."
 	}
 	return value
+}
+
+// cutPromptRuneBoundary truncates to at most n bytes on a rune boundary so
+// prompt and preview truncation can't emit invalid UTF-8.
+func cutPromptRuneBoundary(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func marshalPreview(value map[string]any) string {

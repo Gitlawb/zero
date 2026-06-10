@@ -270,7 +270,7 @@ func TestPluginSnapshotFromPluginCollapsesSlicesToCounts(t *testing.T) {
 		ID:           "  example  ",
 		Name:         "  Example Plugin  ",
 		Version:      "  1.2.3  ",
-		Description: "  A demo plugin.  ",
+		Description:  "  A demo plugin.  ",
 		Enabled:      true,
 		Source:       plugins.SourceCustom,
 		Root:         "  /home/user/.config/zero/plugins/example  ",

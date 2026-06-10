@@ -272,7 +272,7 @@ func formatCronTime(t time.Time) string {
 func promptExcerpt(p string) string {
 	p = strings.TrimSpace(strings.ReplaceAll(p, "\n", " "))
 	if len(p) > 48 {
-		return p[:47] + "…"
+		return cutRuneBoundary(p, 47) + "…"
 	}
 	return p
 }

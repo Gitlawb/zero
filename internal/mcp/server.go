@@ -126,6 +126,10 @@ func (server toolServer) handle(ctx context.Context, message rpcMessage) error {
 			return server.writeError(message.ID, jsonRPCInvalidParams, err.Error())
 		}
 		return server.writeResult(message.ID, result)
+	case "ping":
+		// MCP requires servers to answer ping with an empty result; replying
+		// method-not-found makes liveness-checking clients drop the session.
+		return server.writeResult(message.ID, map[string]any{})
 	default:
 		return server.writeError(message.ID, jsonRPCMethodNotFound, "method not found")
 	}

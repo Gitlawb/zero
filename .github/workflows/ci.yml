@@ -28,6 +28,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        if: matrix.os == 'ubuntu-latest'
+        run: go vet ./...
+
       - name: Test
         run: go test ./...
 

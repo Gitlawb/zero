@@ -131,7 +131,10 @@ func sanitizeMessage(s string) string {
 	var b strings.Builder
 	count := 0
 	for _, r := range s {
-		if r == 0x1b || r == 0x07 || r < 0x20 || r == 0x7f {
+		// C0 controls, DEL, and the C1 range (U+0080–U+009F) are all dropped:
+		// C1 includes the single-byte CSI/OSC/ST introducers, which would break
+		// or escape the OSC-9 sequence exactly like their ESC-prefixed forms.
+		if r == 0x1b || r == 0x07 || r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			continue
 		}
 		b.WriteRune(r)

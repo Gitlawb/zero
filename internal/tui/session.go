@@ -70,6 +70,25 @@ func (m model) appendSessionEvents(events []pendingSessionEvent) (model, []trans
 	return m, rows
 }
 
+// appendSessionEventsTo persists events into a specific (non-active) session —
+// the late flush of a run cancelled before a /resume switched sessions. The
+// active session's in-memory metadata is deliberately untouched.
+func (m model) appendSessionEventsTo(sessionID string, events []pendingSessionEvent) []transcriptRow {
+	rows := []transcriptRow{}
+	if m.sessionStore == nil || sessionID == "" {
+		return rows
+	}
+	for _, event := range events {
+		if _, err := m.sessionStore.AppendEvent(sessionID, sessions.AppendEventInput{
+			Type:    event.Type,
+			Payload: event.Payload,
+		}); err != nil {
+			rows = append(rows, transcriptRow{kind: rowError, text: "session record error: " + err.Error()})
+		}
+	}
+	return rows
+}
+
 // flushableSessionEvents selects the events worth persisting from a run that was
 // cancelled mid-flight. The cancel path already records a single "Run cancelled."
 // error, so the goroutine's trailing EventError (the ctx-cancellation error) is
@@ -88,10 +107,9 @@ func flushableSessionEvents(events []pendingSessionEvent) []pendingSessionEvent 
 }
 
 func tuiSessionTitle(prompt string) string {
-	title := strings.Join(strings.Fields(prompt), " ")
-	if len(title) > tuiSessionTitleLimit {
-		title = title[:tuiSessionTitleLimit]
-	}
+	// cutRunes keeps the cut on a rune boundary — a bare byte slice could split
+	// a multi-byte rune and persist invalid UTF-8 into the session metadata.
+	title := cutRunes(strings.Join(strings.Fields(prompt), " "), tuiSessionTitleLimit)
 	if title == "" {
 		return "Zero TUI session"
 	}
@@ -128,6 +146,10 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		rows = appendTranscriptRow(rows, row)
 	}
 	m.transcript = rows
+	// Every rehydrated row is settled by construction, so resetting the flush
+	// frontier sends the whole resumed history to native scrollback in one
+	// batch — scrollable, selectable, and O(1) for every later frame.
+	m.resetFlushFrontier("· resumed ·")
 	return m, ""
 }
 
@@ -183,15 +205,31 @@ func formatResumeSummary(session sessions.Metadata, eventCount int) string {
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 	rows := []transcriptRow{}
+	// Rehydrated rows all carry runID 0, so repeated provider tool-call ids
+	// (e.g. Gemini's per-turn gemini_tool_N) get the same per-occurrence
+	// disambiguation the live runner applies — without it, dedup would drop
+	// every tool card after the first occurrence of an id.
+	callSeq := map[string]int{}
 	for _, event := range events {
 		payload := sessionPayload(event)
 		switch event.Type {
 		case sessions.EventMessage:
+			role := strings.ToLower(payloadString(payload, "role"))
+			switch role {
+			case "ask_user":
+				rows = append(rows, askUserTranscriptRow(askUserRequestFromPayload(payload)))
+				continue
+			case "ask_user_answers":
+				if text := askUserAnswersText(payload); text != "" {
+					rows = append(rows, transcriptRow{kind: rowSystem, text: text})
+				}
+				continue
+			}
 			content := payloadString(payload, "content")
 			if content == "" {
 				continue
 			}
-			switch strings.ToLower(payloadString(payload, "role")) {
+			switch role {
 			case "user":
 				rows = append(rows, transcriptRow{kind: rowUser, text: content})
 			case "assistant":
@@ -207,9 +245,11 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if name == "" {
 				name = "unknown"
 			}
+			id := payloadString(payload, "id")
+			callSeq[id]++
 			rows = append(rows, transcriptRow{
 				kind:   rowToolCall,
-				id:     payloadString(payload, "id"),
+				id:     effectiveToolRowID(id, callSeq[id]),
 				text:   "tool call: " + name,
 				tool:   name,
 				detail: argHint(payloadString(payload, "arguments")),
@@ -227,9 +267,10 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
+			id := firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id"))
 			rows = append(rows, transcriptRow{
 				kind:   rowToolResult,
-				id:     firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id")),
+				id:     effectiveToolRowID(id, callSeq[id]),
 				text:   fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
 				tool:   name,
 				status: status,
@@ -300,6 +341,59 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 		}
 	}
 	return event
+}
+
+// askUserRequestFromPayload rebuilds the request persisted by
+// askUserSessionPayload, so ask_user exchanges survive /resume instead of
+// silently vanishing from rehydrated history.
+func askUserRequestFromPayload(payload map[string]any) agent.AskUserRequest {
+	request := agent.AskUserRequest{
+		ToolCallID: payloadString(payload, "toolCallId"),
+		Header:     payloadString(payload, "header"),
+	}
+	raw, ok := payload["questions"].([]any)
+	if !ok {
+		return request
+	}
+	for _, entry := range raw {
+		fields, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		question := agent.AskUserQuestion{
+			Question:    payloadString(fields, "question"),
+			MultiSelect: payloadBool(fields, "multiSelect"),
+		}
+		if options, ok := fields["options"].([]any); ok {
+			for _, option := range options {
+				if text, ok := option.(string); ok {
+					question.Options = append(question.Options, text)
+				}
+			}
+		}
+		request.Questions = append(request.Questions, question)
+	}
+	return request
+}
+
+// askUserAnswersText renders persisted ask_user answers for rehydration.
+func askUserAnswersText(payload map[string]any) string {
+	raw, ok := payload["answers"].([]any)
+	if !ok {
+		return ""
+	}
+	lines := make([]string, 0, len(raw))
+	for index, entry := range raw {
+		text, _ := entry.(string)
+		if strings.TrimSpace(text) == "" {
+			text = "(skipped)"
+		}
+		lines = append(lines, fmt.Sprintf("%d. %s", index+1, text))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "Answers\n" + strings.Join(lines, "\n")
 }
 
 func payloadString(payload map[string]any, key string) string {

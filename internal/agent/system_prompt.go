@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // coreSystemPrompt is the de-branded coding-craft instruction set: identity,
@@ -86,7 +87,11 @@ func workspaceContext(cwd string) string {
 			continue
 		}
 		if len(content) > maxProjectContextBytes {
-			content = content[:maxProjectContextBytes] + "\n… (truncated)"
+			cut := maxProjectContextBytes
+			for cut > 0 && !utf8.RuneStart(content[cut]) {
+				cut--
+			}
+			content = content[:cut] + "\n… (truncated)"
 		}
 		b.WriteString("\n\n## Project guidelines (" + name + ")\n\n" + content)
 		break // first match wins

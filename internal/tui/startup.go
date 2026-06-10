@@ -219,14 +219,21 @@ func truncateStyledLine(line string, width int) string {
 	targetWidth := width - ellipsisWidth
 	usedWidth := 0
 	sawANSI := false
+	openLink := false
 
 	var builder strings.Builder
 	for index := 0; index < len(line); {
 		if line[index] == '\x1b' {
 			end := ansiSequenceEnd(line, index)
 			if end > index {
-				builder.WriteString(line[index:end])
+				sequence := line[index:end]
+				builder.WriteString(sequence)
 				sawANSI = true
+				// Track OSC 8 hyperlink state: truncating between an open and
+				// its terminator would leak the link onto everything after.
+				if strings.HasPrefix(sequence, "\x1b]8;") {
+					openLink = sequence != "\x1b]8;;\x1b\\" && sequence != "\x1b]8;;\a"
+				}
 				index = end
 				continue
 			}
@@ -246,6 +253,9 @@ func truncateStyledLine(line string, width int) string {
 		index += size
 	}
 
+	if openLink {
+		builder.WriteString("\x1b]8;;\x1b\\")
+	}
 	builder.WriteString(ellipsis)
 	if sawANSI {
 		builder.WriteString(resetANSI)
@@ -262,16 +272,31 @@ func ansiSequenceEnd(value string, start int) int {
 		return index
 	}
 
-	if value[index] != '[' {
+	switch value[index] {
+	case '[':
+		// CSI: terminated by a final byte in 0x40–0x7e.
+		for index++; index < len(value); index++ {
+			if value[index] >= 0x40 && value[index] <= 0x7e {
+				return index + 1
+			}
+		}
+		return len(value)
+	case ']':
+		// OSC (e.g. the OSC 8 hyperlinks on tool-card paths): terminated by
+		// BEL or ST (ESC \). Without this branch the truncator treated the
+		// payload as printable text, wrecking the width math.
+		for index++; index < len(value); index++ {
+			if value[index] == '\a' {
+				return index + 1
+			}
+			if value[index] == '\x1b' && index+1 < len(value) && value[index+1] == '\\' {
+				return index + 2
+			}
+		}
+		return len(value)
+	default:
 		return minInt(start+2, len(value))
 	}
-
-	for index++; index < len(value); index++ {
-		if value[index] >= 0x40 && value[index] <= 0x7e {
-			return index + 1
-		}
-	}
-	return len(value)
 }
 
 // chatWidth resolves the render width for the chat surface. Unlike the old

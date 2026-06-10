@@ -55,13 +55,15 @@ func LoadFile(path string, workspaceRoot string) (zeroruntime.ImageBlock, error)
 	// FIFO) can never allocate a multi-gigabyte buffer just to be discarded.
 	file, err := os.Open(resolved)
 	if err != nil {
-		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
+		// Keep the real cause: a permission or I/O failure reported as "not
+		// found" sends users hunting for a file that exists.
+		return zeroruntime.ImageBlock{}, fmt.Errorf("cannot open image %s: %w", path, err)
 	}
 	defer file.Close()
 
 	data, err := io.ReadAll(io.LimitReader(file, MaxImageBytes+1))
 	if err != nil {
-		return zeroruntime.ImageBlock{}, fmt.Errorf("image file not found: %s", path)
+		return zeroruntime.ImageBlock{}, fmt.Errorf("cannot read image %s: %w", path, err)
 	}
 
 	// The LimitReader yields at most MaxImageBytes+1 bytes; more than the cap means

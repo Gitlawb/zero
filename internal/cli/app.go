@@ -359,7 +359,7 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 	}
 	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
-		Policy:        applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy),
+		Policy:        applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
 		Store:         sandboxStore,
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 	})

@@ -21,7 +21,6 @@ type tuiTheme struct {
 	amber    lipgloss.Style // permission surfaces, warnings, auto badge
 	blue     lipgloss.Style // grep file locations, local-model dot
 	line     lipgloss.Style // default borders, rules, status separators
-	line2    lipgloss.Style // emphasized borders
 
 	// Title bar.
 	badge lipgloss.Style // ` 0 ` brand chip: onAccent on accent, bold
@@ -63,15 +62,8 @@ type tuiTheme struct {
 	permBg     lipgloss.Style // permission card body tint
 	permBorder lipgloss.Style // permission card border (amber-mixed line)
 
-	// Overlays.
-	selRow lipgloss.Style // selected picker/suggestion row, on selBg
 	// Surfaces.
-	panel  lipgloss.Style // bare panel background (card padding, body fill)
-	panel2 lipgloss.Style // bare panel2 background (header/picker rows)
-
-	// Status line.
-	statusOk  lipgloss.Style // ✓ / healthy segments
-	statusErr lipgloss.Style // ✗ / failing segments
+	panel lipgloss.Style // bare panel background (card padding, body fill)
 
 	// Permission modes.
 	modeAuto   lipgloss.Style
@@ -123,7 +115,6 @@ var zeroTheme = tuiTheme{
 	amber:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
 	blue:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
 	line:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine)),
-	line2:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine2)),
 
 	badge: lipgloss.NewStyle().Background(lipgloss.Color(colorAccent)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
 
@@ -156,13 +147,7 @@ var zeroTheme = tuiTheme{
 	permBg:     lipgloss.NewStyle().Background(lipgloss.Color(colorPermBg)),
 	permBorder: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCardPerm)),
 
-	selRow: lipgloss.NewStyle().Background(lipgloss.Color(colorSelBg)),
-
-	panel:  lipgloss.NewStyle().Background(lipgloss.Color(colorPanel)),
-	panel2: lipgloss.NewStyle().Background(lipgloss.Color(colorPanel2)),
-
-	statusOk:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
-	statusErr: lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
+	panel: lipgloss.NewStyle().Background(lipgloss.Color(colorPanel)),
 
 	modeAuto:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true),
 	modeAsk:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)).Bold(true),

@@ -12,7 +12,9 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
-var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+// ansiPattern strips SGR styling and OSC sequences (hyperlinks) so
+// assertions run against the visible text.
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m|\x1b\][^\a\x1b]*(?:\a|\x1b\\)`)
 
 // plainRender strips styling so assertions run against text, not styled
 // bytes. (Without a TTY lipgloss already renders plain; this keeps the tests

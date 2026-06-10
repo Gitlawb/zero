@@ -7,9 +7,9 @@ import (
 
 func TestDetectInteractiveCommandBlocksEditors(t *testing.T) {
 	cases := []struct {
-		name       string
-		command    string
-		wantCmd    string
+		name         string
+		command      string
+		wantCmd      string
 		wantSuggHint string
 	}{
 		{name: "vim", command: "vim main.go", wantCmd: "vim", wantSuggHint: "non-interactive"},
@@ -189,12 +189,12 @@ func TestDetectInteractiveSegmentBoundary(t *testing.T) {
 
 func TestDetectInteractiveBypasses(t *testing.T) {
 	blocked := []string{
-		"/usr/bin/vim file.txt",       // absolute path
-		"\"vim\" file.txt",            // double-quoted program
-		"'vim' file.txt",              // single-quoted program
-		"echo $(vim file.txt)",        // command substitution
-		"echo `vim file.txt`",         // backtick substitution
-		"/bin/less /var/log/syslog",   // absolute pager
+		"/usr/bin/vim file.txt",     // absolute path
+		"\"vim\" file.txt",          // double-quoted program
+		"'vim' file.txt",            // single-quoted program
+		"echo $(vim file.txt)",      // command substitution
+		"echo `vim file.txt`",       // backtick substitution
+		"/bin/less /var/log/syslog", // absolute pager
 	}
 	for _, cmd := range blocked {
 		if got := DetectInteractiveCommand(cmd, "linux"); !got.Interactive {
@@ -203,9 +203,9 @@ func TestDetectInteractiveBypasses(t *testing.T) {
 	}
 	// must NOT over-block legitimate non-interactive commands
 	allowed := []string{
-		"python script.py",            // script, not REPL
-		"cat vim.txt",                 // file named vim, not the editor
-		"grep ssh config.go",          // 'ssh' as a search term
+		"python script.py",   // script, not REPL
+		"cat vim.txt",        // file named vim, not the editor
+		"grep ssh config.go", // 'ssh' as a search term
 		"echo hello",
 	}
 	for _, cmd := range allowed {
@@ -223,8 +223,8 @@ func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 		{"mongo --eval 'db.test.find()'", false},
 		{"mongosh --eval 'db.test.find()'", false},
 		{"mongo", true},
-		{"/usr/bin/python script.py", false},  // full-path program + script arg -> not a REPL
-		{"/bin/bash -c 'vim file'", true},      // full-path shell -c with nested interactive program
+		{"/usr/bin/python script.py", false}, // full-path program + script arg -> not a REPL
+		{"/bin/bash -c 'vim file'", true},    // full-path shell -c with nested interactive program
 	}
 	for _, tc := range cases {
 		got := DetectInteractiveCommand(tc.command, "linux").Interactive

@@ -121,8 +121,8 @@ func TestTranscriptReducer(t *testing.T) {
 	transcript := initialTranscript()
 	transcript = reduceTranscript(transcript, transcriptAction{kind: actionAppendUser, text: "hello"})
 	transcript = reduceTranscript(transcript, transcriptAction{kind: actionAppendAssistant, text: "hi"})
-	transcript = reduceTranscript(transcript, transcriptAction{kind: actionAppendToolCall, name: "read_file"})
-	transcript = reduceTranscript(transcript, transcriptAction{kind: actionAppendToolResult, name: "read_file", text: "ok"})
+	transcript = reduceTranscript(transcript, transcriptAction{kind: actionAppendSystem, text: "note"})
+	transcript = reduceTranscript(transcript, transcriptAction{kind: actionAppendError, text: "boom"})
 
 	if len(transcript) != 5 {
 		t.Fatalf("expected welcome plus four rows, got %#v", transcript)
@@ -130,8 +130,8 @@ func TestTranscriptReducer(t *testing.T) {
 	if transcript[1].kind != rowUser || transcript[1].text != "hello" {
 		t.Fatalf("expected user row, got %#v", transcript[1])
 	}
-	if transcript[3].kind != rowToolCall || !strings.Contains(transcript[3].text, "read_file") {
-		t.Fatalf("expected tool-call placeholder, got %#v", transcript[3])
+	if transcript[3].kind != rowSystem || transcript[3].text != "note" {
+		t.Fatalf("expected system row, got %#v", transcript[3])
 	}
 
 	cleared := reduceTranscript(transcript, transcriptAction{kind: actionClear})
@@ -168,17 +168,21 @@ func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	m.height = 30
 	m.input.SetValue("inspect the repo")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 	next.width = m.width
 	next.height = m.height
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected missing provider prompt not to start an agent run")
 	}
+	if !transcriptContains(next.transcript, "inspect the repo") || !transcriptContains(next.transcript, "No provider configured.") {
+		t.Fatalf("expected prompt and notice rows in transcript, got %#v", next.transcript)
+	}
+	if next.flushed != len(next.transcript) {
+		t.Fatalf("expected settled rows to flush to scrollback, flushed=%d rows=%d", next.flushed, len(next.transcript))
+	}
 	view := next.View()
-	assertContains(t, view, "❯ inspect the repo")
-	assertContains(t, view, "No provider configured.")
 	if strings.Contains(view, emptyStateTagline) {
 		t.Fatalf("empty state should collapse after first prompt, got %q", view)
 	}
@@ -201,38 +205,6 @@ func TestEmptyStateStaysVisibleOnEmptySubmit(t *testing.T) {
 	view := next.View()
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "❯ inspect")
-}
-
-func TestCommandFooterTextUsesRegistryEntries(t *testing.T) {
-	footer := commandFooterText()
-
-	for _, command := range []string{"/help", "/model", "/provider", "/context", "/compact", "/effort", "/style", "/tools", "/permissions", "/clear", "/exit"} {
-		assertContains(t, footer, command)
-	}
-	assertContains(t, footer, "Esc clear")
-	assertContains(t, footer, "Ctrl+C quit")
-}
-
-func TestCommandFooterTextFallsBackWhenRegistryIsEmpty(t *testing.T) {
-	footer := formatCommandFooterText(nil, false)
-
-	for _, command := range []string{"/help", "/model", "/provider", "/context", "/compact", "/effort", "/style", "/tools", "/permissions", "/clear", "/exit"} {
-		assertContains(t, footer, command)
-	}
-	assertContains(t, footer, "Esc clear")
-	assertContains(t, footer, "Ctrl+C quit")
-}
-
-func TestCommandFooterTextShowsCancelWhilePending(t *testing.T) {
-	m := newModel(context.Background(), Options{})
-	m.pending = true
-
-	footer := m.footerText()
-
-	assertContains(t, footer, "Esc cancel")
-	if strings.Contains(footer, "Esc clear") {
-		t.Fatalf("pending footer should not show clear hint, got %q", footer)
-	}
 }
 
 func TestHelpCommandAppendsHelpRow(t *testing.T) {

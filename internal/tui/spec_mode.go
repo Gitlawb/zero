@@ -19,7 +19,10 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Usage: /spec <task>"})
 		return m, nil
 	}
-	if m.pending {
+	// m.exiting guards the post-Ctrl+C flush window: starting a run there would
+	// let the deferred tea.Quit kill it mid-flight and orphan its checkpoints —
+	// the same gate handleSubmit applies to plain prompts.
+	if m.pending || m.exiting {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot start spec mode while a run is active."})
 		return m, nil
 	}
@@ -298,8 +301,6 @@ func specImplementationTitle(review pendingSpecReviewPrompt) string {
 	if title == "" {
 		return "Spec implementation"
 	}
-	if len(title) > tuiSessionTitleLimit {
-		title = title[:tuiSessionTitleLimit]
-	}
+	title = cutRunes(title, tuiSessionTitleLimit)
 	return title + " implementation"
 }

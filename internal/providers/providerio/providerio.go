@@ -59,13 +59,16 @@ func SendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event
 func ScanSSEData(reader io.Reader, handle func(data string) bool) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 4096), maxSSELineBytes)
-	return scanSSEPayloads(scanner, handle)
+	return scanSSEPayloads(scanner, handle, nil)
 }
 
 // scanSSEPayloads accumulates SSE "data:" lines into payloads (joined across
 // continuation lines, flushed on a blank line or EOF) and forwards each to
 // handle. It is the shared core of ScanSSEData and the idle-aware variant.
-func scanSSEPayloads(scanner *bufio.Scanner, handle func(data string) bool) error {
+// onComment (optional) fires for ":"-prefixed comment lines — SSE keep-alive
+// heartbeats (e.g. OpenRouter's ": OPENROUTER PROCESSING") that carry no data
+// but prove the upstream is alive; returning false stops the scan.
+func scanSSEPayloads(scanner *bufio.Scanner, handle func(data string) bool, onComment func() bool) error {
 	dataLines := []string{}
 	flush := func() bool {
 		if len(dataLines) == 0 {
@@ -88,6 +91,9 @@ func scanSSEPayloads(scanner *bufio.Scanner, handle func(data string) bool) erro
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
+			if onComment != nil && !onComment() {
+				return nil
+			}
 			continue
 		}
 		if strings.HasPrefix(line, "data:") {
@@ -119,7 +125,8 @@ func ScanSSEDataWithContext(
 	scanner.Buffer(make([]byte, 0, 4096), maxSSELineBytes)
 
 	type payload struct {
-		data string
+		data      string
+		keepAlive bool
 	}
 	payloads := make(chan payload)
 	scanDone := make(chan error, 1)
@@ -128,6 +135,18 @@ func ScanSSEDataWithContext(
 		scanDone <- scanSSEPayloads(scanner, func(data string) bool {
 			select {
 			case payloads <- payload{data: data}:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}, func() bool {
+			// Comment keep-alives carry no payload but must feed the idle
+			// watchdog: a heartbeating upstream is NOT idle, and aborting it
+			// killed healthy long-running requests. The marker is forwarded to
+			// the consumer goroutine because the timer is not safe to reset
+			// from this one.
+			select {
+			case payloads <- payload{keepAlive: true}:
 				return true
 			case <-ctx.Done():
 				return false
@@ -182,6 +201,9 @@ func ScanSSEDataWithContext(
 				return nil
 			}
 			resetIdle()
+			if item.keepAlive {
+				continue
+			}
 			if !handle(item.data) {
 				// The provider asked to stop (e.g. it already emitted an error
 				// for this payload). Abort the read and end like ScanSSEData:

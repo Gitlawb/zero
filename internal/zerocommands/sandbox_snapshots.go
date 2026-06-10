@@ -73,10 +73,10 @@ type SandboxBackendSnapshot struct {
 // restriction warnings so the operator gets one payload describing
 // the entire sandbox posture.
 type SandboxPlanSnapshot struct {
-	Policy       SandboxPolicySnapshot  `json:"policy"`
-	Backend      SandboxBackendSnapshot `json:"backend"`
-	Restrictions []string               `json:"restrictions"`
-	WorkspaceRoot string                `json:"workspaceRoot,omitempty"`
+	Policy        SandboxPolicySnapshot  `json:"policy"`
+	Backend       SandboxBackendSnapshot `json:"backend"`
+	Restrictions  []string               `json:"restrictions"`
+	WorkspaceRoot string                 `json:"workspaceRoot,omitempty"`
 }
 
 // SandboxDecisionSnapshot is the typed view of a live sandbox.Decision
@@ -87,12 +87,12 @@ type SandboxPlanSnapshot struct {
 // have to reach back into the sandbox package to render the
 // outcome.
 type SandboxDecisionSnapshot struct {
-	Action       string                      `json:"action"`
-	Reason       string                      `json:"reason,omitempty"`
-	Risk         SandboxRiskSnapshot         `json:"risk"`
-	GrantMatched bool                        `json:"grantMatched"`
-	Grant        *SandboxGrantSnapshot       `json:"grant,omitempty"`
-	Violation    *SandboxViolationSnapshot   `json:"violation,omitempty"`
+	Action       string                    `json:"action"`
+	Reason       string                    `json:"reason,omitempty"`
+	Risk         SandboxRiskSnapshot       `json:"risk"`
+	GrantMatched bool                      `json:"grantMatched"`
+	Grant        *SandboxGrantSnapshot     `json:"grant,omitempty"`
+	Violation    *SandboxViolationSnapshot `json:"violation,omitempty"`
 }
 
 // SandboxPolicySnapshotFromPolicy converts a sandbox.Policy into its

@@ -132,9 +132,13 @@ func ResolveTarget(target string) (Target, error) {
 }
 
 func Check(ctx context.Context, options Options) (Result, error) {
-	currentVersion, err := normalizeVersionTag(strings.TrimSpace(firstNonEmpty(options.CurrentVersion, "0.0.0")))
+	rawVersion := strings.TrimSpace(firstNonEmpty(options.CurrentVersion, "0.0.0"))
+	currentVersion, err := normalizeVersionTag(rawVersion)
 	if err != nil {
-		return Result{}, err
+		// Source/dev builds carry a non-semver version ("dev"); the check is
+		// still useful there — compare as 0.0.0 so the latest release is always
+		// reported as available instead of failing before the network call.
+		currentVersion = "0.0.0"
 	}
 	repository := strings.TrimSpace(firstNonEmpty(options.Repository, DefaultRepository))
 	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv("ZERO_UPDATE_RELEASE_URL")), repository)

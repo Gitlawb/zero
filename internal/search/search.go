@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -55,8 +56,11 @@ type Result struct {
 	NormalizedQuery  string `json:"normalizedQuery"`
 	RootDir          string `json:"rootDir"`
 	SearchedSessions int    `json:"searchedSessions"`
-	TotalHits        int    `json:"totalHits"`
-	Hits             []Hit  `json:"hits"`
+	// SkippedSessions counts sessions whose event log could not be read or
+	// indexed; they are skipped so one corrupt session can't abort the search.
+	SkippedSessions int   `json:"skippedSessions,omitempty"`
+	TotalHits       int   `json:"totalHits"`
+	Hits            []Hit `json:"hits"`
 }
 
 type Index struct {
@@ -107,7 +111,10 @@ func Sessions(query string, options Options) (Result, error) {
 	for _, session := range sessionList {
 		index, err := LoadIndex(store, session, LoadOptions{Reindex: options.Reindex, Now: now})
 		if err != nil {
-			return Result{}, err
+			// A single corrupt or unreadable session must not abort the whole
+			// search surface; skip it and report the count.
+			result.SkippedSessions++
+			continue
 		}
 		for _, entry := range index.Entries {
 			if options.Type != "" && entry.Type != options.Type {
@@ -305,8 +312,13 @@ func resolveSessions(store *sessions.Store, sessionID string) ([]sessions.Metada
 		return store.List()
 	}
 	session, err := store.Get(sessionID)
-	if err != nil || session == nil {
+	if err != nil {
 		return []sessions.Metadata{}, err
+	}
+	if session == nil {
+		// Surfacing the miss beats silently "succeeding" with zero results
+		// against a session that doesn't exist.
+		return []sessions.Metadata{}, fmt.Errorf("zero session not found: %s", sessionID)
 	}
 	return []sessions.Metadata{*session}, nil
 }
@@ -342,15 +354,24 @@ func redactedPayload(raw json.RawMessage) any {
 	return redaction.RedactValue(payload, redaction.Options{})
 }
 
+// findMatch locates the query (or all terms) case-insensitively and returns
+// byte offsets INTO THE ORIGINAL text. Matching happens on a lowered copy, but
+// Unicode lowering can change byte lengths (İ → i̇, K → k), so lowered offsets
+// are mapped back through a per-byte offset table — applying them to the
+// original directly mis-slices runes and could even run past the end of the
+// string (a panic in buildContext).
 func findMatch(text string, query string, terms []string) (Match, bool) {
-	normalizedText := strings.ToLower(text)
-	if index := strings.Index(normalizedText, query); index >= 0 {
-		return Match{Start: index, End: index + len(query)}, true
+	lowered, offsets := lowerWithOffsets(text)
+	mapBack := func(start, end int) Match {
+		return Match{Start: offsets[start], End: offsets[end]}
+	}
+	if index := strings.Index(lowered, query); index >= 0 {
+		return mapBack(index, index+len(query)), true
 	}
 	first := -1
 	last := -1
 	for _, term := range terms {
-		index := strings.Index(normalizedText, term)
+		index := strings.Index(lowered, term)
 		if index < 0 {
 			return Match{}, false
 		}
@@ -361,19 +382,49 @@ func findMatch(text string, query string, terms []string) (Match, bool) {
 			last = end
 		}
 	}
-	return Match{Start: first, End: last}, first >= 0
+	if first < 0 {
+		return Match{}, false
+	}
+	return mapBack(first, last), true
+}
+
+// lowerWithOffsets lowers text rune-by-rune and returns, for every byte offset
+// of the lowered string (inclusive of the end boundary), the corresponding
+// byte offset in the original.
+func lowerWithOffsets(text string) (string, []int) {
+	var lowered strings.Builder
+	lowered.Grow(len(text))
+	offsets := make([]int, 0, len(text)+1)
+	for index, glyph := range text {
+		lower := strings.ToLower(string(glyph))
+		for range len(lower) {
+			offsets = append(offsets, index)
+		}
+		lowered.WriteString(lower)
+	}
+	offsets = append(offsets, len(text))
+	return lowered.String(), offsets
 }
 
 func buildContext(text string, start int, end int, contextChars int) string {
-	left := start - contextChars
-	if left < 0 {
-		left = 0
-	}
-	right := end + contextChars
-	if right > len(text) {
-		right = len(text)
-	}
+	left := snapRuneStart(text, start-contextChars)
+	right := snapRuneStart(text, end+contextChars)
 	return strings.TrimSpace(text[left:right])
+}
+
+// snapRuneStart clamps index into [0, len(text)] and walks it back to the
+// nearest rune boundary so context slicing never emits invalid UTF-8.
+func snapRuneStart(text string, index int) int {
+	if index <= 0 {
+		return 0
+	}
+	if index >= len(text) {
+		return len(text)
+	}
+	for index > 0 && !utf8.RuneStart(text[index]) {
+		index--
+	}
+	return index
 }
 
 func splitTerms(query string) []string {

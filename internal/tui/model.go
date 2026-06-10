@@ -56,29 +56,50 @@ type model struct {
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
-	spinner            spinner.Model
-	pending            bool
-	exiting            bool
-	runCancel          context.CancelFunc
-	runID              int
-	activeRunID        int
-	// flushRunIDs holds the ids of runs cancelled while still in flight. Each
-	// cancelled agent goroutine keeps running to completion and returns its
-	// accumulated sessionEvents (including EventSessionCheckpoint payloads captured
-	// before each mutating tool) in a final agentResponseMsg. activeRunID is
-	// already zeroed by then, so without this the message would be dropped and the
+	spinner     spinner.Model
+	pending     bool
+	exiting     bool
+	runCancel   context.CancelFunc
+	runID       int
+	activeRunID int
+	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
+	// to the session they were recording into AT CANCEL TIME. Each cancelled
+	// agent goroutine keeps running to completion and returns its accumulated
+	// sessionEvents (including EventSessionCheckpoint payloads captured before
+	// each mutating tool) in a final agentResponseMsg. activeRunID is already
+	// zeroed by then, so without this the message would be dropped and the
 	// checkpoint blobs already written to disk would be orphaned (breaking
-	// /rewind). It is a SET (not a single id) so a second cancel before the first
-	// goroutine returns doesn't overwrite/lose the first run's pending flush. The
+	// /rewind). It is a MAP (not a single id) so a second cancel before the
+	// first goroutine returns doesn't overwrite/lose the first run's pending
+	// flush; the recorded session id keeps the late flush out of whatever
+	// session is active by then (e.g. after /resume), which would otherwise
+	// contaminate the new session's log with the old run's events. The
 	// agentResponseMsg handler persists each such run's session events (only) so
 	// the checkpoints stay referenced, then removes the id.
-	flushRunIDs       map[int]struct{}
+	flushRunIDs       map[int]string
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
 	pendingSpecReview *pendingSpecReviewPrompt
 	width             int
 	height            int
 	now               func() time.Time
+
+	// Flush-frontier state (see flush.go). transcript[:flushed] is already in
+	// native scrollback; flushedAny gates the first turn-separator blank line;
+	// flushQueue/printInFlight serialize the ordered scrollback prints;
+	// headerPrinted records the one-time title-bar print at startup.
+	flushed       int
+	flushedAny    bool
+	flushQueue    []string
+	printInFlight bool
+	headerPrinted bool
+
+	// Composer input history (shell-style ↑/↓ recall of submitted inputs).
+	// historyIdx == len(inputHistory) means "not navigating"; historyDraft
+	// preserves whatever was typed before recall started.
+	inputHistory []string
+	historyIdx   int
+	historyDraft string
 
 	streamingText string // live assistant text for the current segment
 
@@ -267,7 +288,7 @@ func newModel(ctx context.Context, options Options) model {
 }
 
 const (
-	composerPlaceholderIdle    = "describe a task for zero…"
+	composerPlaceholderIdle = "describe a task for zero…"
 	// Esc is the run-interrupt key; Ctrl+C quits the whole app (after the
 	// cancelled run's checkpoint flush). The spec mock said "ctrl+c to
 	// interrupt", but advertising a quit keystroke as an interrupt would teach
@@ -287,28 +308,49 @@ func (m model) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+// Update routes every message through updateModel, then advances the flush
+// frontier: any transcript rows the message settled are queued for native
+// scrollback before the next frame paints (see flush.go).
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(flushedMsg); ok {
+		m.printInFlight = false
+		return m.drainFlushQueue()
+	}
+	next, cmd := m.updateModel(msg)
+	nm, ok := next.(model)
+	if !ok {
+		return next, cmd
+	}
+	nm, flushCmd := nm.settleTranscript()
+	switch {
+	case flushCmd == nil:
+		return nm, cmd
+	case cmd == nil:
+		return nm, flushCmd
+	default:
+		return nm, tea.Batch(flushCmd, cmd)
+	}
+}
+
+func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			// cancelRun records the in-flight run into flushRunIDs and writes the
-			// "Run cancelled." marker, exactly like the Esc path. If a run was still
-			// in flight we must NOT quit yet: the cancelled goroutine returns its
-			// accumulated session events (including the EventSessionCheckpoint blobs it
-			// already wrote to disk before each mutating tool) in a final
-			// agentResponseMsg, and quitting now would drop that message, orphaning the
-			// checkpoints and breaking /rewind for Ctrl+C'd runs. Defer the quit until
-			// that flush lands; the agentResponseMsg handler fires tea.Quit once
-			// flushRunIDs drains. With no run in flight there is nothing to flush, so
-			// quit immediately as before.
-			pendingFlush := false
-			if m.pending && m.activeRunID != 0 {
-				pendingFlush = true
-			}
+			// "Run cancelled." marker, exactly like the Esc path. While ANY cancelled
+			// run is still flushing we must NOT quit yet: each cancelled goroutine
+			// returns its accumulated session events (including the
+			// EventSessionCheckpoint blobs it already wrote to disk before each
+			// mutating tool) in a final agentResponseMsg, and quitting now would drop
+			// that message, orphaning the checkpoints and breaking /rewind. This
+			// covers both a run cancelled BY this Ctrl+C and one cancelled by an
+			// earlier Esc whose flush hasn't landed (m.pending is already false then,
+			// but flushRunIDs is not empty). The agentResponseMsg handler fires
+			// tea.Quit once flushRunIDs drains.
 			m.cancelRun()
 			m.exiting = true
-			if pendingFlush && len(m.flushRunIDs) > 0 {
+			if len(m.flushRunIDs) > 0 {
 				return m, nil
 			}
 			return m, tea.Quit
@@ -381,6 +423,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSuggestion(1)
 				return m, nil
 			}
+			if m.historyRecallActive() {
+				return m.recallHistory(1), nil
+			}
 		case tea.KeyUp:
 			if m.picker != nil {
 				m.picker.move(-1)
@@ -389,6 +434,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.suggestionsActive() {
 				m.moveSuggestion(-1)
 				return m, nil
+			}
+			if m.historyRecallActive() {
+				return m.recallHistory(-1), nil
 			}
 		}
 		if m.pendingAskUser != nil {
@@ -456,6 +504,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Size the composer so long input scrolls horizontally with the cursor
+		// visible instead of being clipped invisibly past the right edge.
+		m.input.Width = maxInt(20, chatWidth(msg.Width)-14)
+		// The title bar prints once into native scrollback (so history scrolls
+		// above it naturally), at the first real width — never the 96-col
+		// default the pre-WindowSizeMsg frame uses.
+		if !m.headerPrinted && msg.Width > 0 {
+			m.headerPrinted = true
+			m.flushQueue = append(m.flushQueue, m.titleBar(chatWidth(msg.Width)))
+		}
 		return m, nil
 	case permissionRequestMsg:
 		if msg.runID != m.activeRunID {
@@ -503,13 +561,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// works; the cancel path already wrote the "Run cancelled." marker, so
 			// skip transcript rows, the trailing cancellation error, and any pending
 			// state changes.
-			if _, flushing := m.flushRunIDs[msg.runID]; flushing {
+			if flushSessionID, flushing := m.flushRunIDs[msg.runID]; flushing {
 				delete(m.flushRunIDs, msg.runID)
-				// appendSessionEvents only returns rows for persist FAILURES; surface
-				// them so a failed checkpoint/tool flush (which would silently degrade
-				// /rewind) is visible rather than swallowed.
+				// The cancelled run still consumed tokens; record them so the usage
+				// readout doesn't undercount interrupted turns.
+				for _, event := range msg.usageEvents {
+					var usageRows []transcriptRow
+					m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+					for _, row := range usageRows {
+						m.transcript = appendTranscriptRow(m.transcript, row)
+					}
+				}
+				// Events are persisted into the session the run was recording into AT
+				// CANCEL TIME — the active session may have changed since (/resume),
+				// and writing there would contaminate its log with checkpoint payloads
+				// whose blobs live under the original session. appendSessionEvents*
+				// only returns rows for persist FAILURES; surface them so a failed
+				// checkpoint/tool flush (which would silently degrade /rewind) is
+				// visible rather than swallowed.
 				var flushRows []transcriptRow
-				m, flushRows = m.appendSessionEvents(flushableSessionEvents(msg.sessionEvents))
+				events := flushableSessionEvents(msg.sessionEvents)
+				if flushSessionID == m.activeSession.SessionID {
+					m, flushRows = m.appendSessionEvents(events)
+				} else {
+					flushRows = m.appendSessionEventsTo(flushSessionID, events)
+				}
 				for _, row := range flushRows {
 					m.transcript = appendTranscriptRow(m.transcript, row)
 				}
@@ -523,11 +599,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pending = false
+		// The run is complete: release its context now instead of waiting for the
+		// parent context — every prompt leaked a CancelFunc (and its timer
+		// resources) until app exit otherwise.
+		if m.runCancel != nil {
+			m.runCancel()
+		}
 		m.runCancel = nil
 		m.activeRunID = 0
 		m.pendingPermission = nil
 		m.pendingAskUser = nil
-		m.streamingText = ""
 		for _, event := range msg.usageEvents {
 			var usageRows []transcriptRow
 			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
@@ -544,6 +625,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if msg.err != nil {
+			// A failed turn has no final answer row to supersede the streamed
+			// text the user already watched — keep the partial answer instead of
+			// letting it vanish from history.
+			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
+			}
 			// The error row terminates the turn, so it carries the done-line
 			// metadata a final assistant row would have carried.
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
@@ -554,6 +641,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				turnElapsed: msg.turnElapsed,
 			})
 		}
+		m.streamingText = ""
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
 		}
@@ -565,8 +653,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		// a tool call ends the current streamed text segment
+		// A tool call ends the current streamed text segment. The segment is the
+		// assistant's working narration ("Let me check X…") — append it as a
+		// non-final assistant row so it stays in history instead of silently
+		// vanishing when the tool card replaces the interim block.
 		if msg.row.kind == rowToolCall {
+			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
+			}
 			m.streamingText = ""
 		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
@@ -596,31 +690,44 @@ func (m model) transcriptEmpty() bool {
 	return true
 }
 
+// transcriptView renders the LIVE TAIL of the chat surface: only rows the
+// flush frontier hasn't settled into native scrollback yet (running tool
+// cards, undecided prompts), plus the streaming/modal blocks and composer
+// chrome. History lives above in the terminal's own scrollback (see flush.go),
+// so this stays O(live tail) per frame regardless of session length.
 func (m model) transcriptView() string {
 	width := chatWidth(m.width)
 
 	var builder strings.Builder
-	builder.WriteString(m.titleBar(width))
-	builder.WriteString("\n")
+	// The title bar prints once into scrollback on the first WindowSizeMsg;
+	// until then (the very first frame) it renders managed so the surface
+	// never appears headless.
+	if !m.headerPrinted {
+		builder.WriteString(m.titleBar(width))
+		builder.WriteString("\n")
+	}
 
 	if m.transcriptEmpty() && !m.pending {
 		builder.WriteString(m.emptyState(width))
 		builder.WriteString("\n")
 	} else {
 		rc := buildRowContext(m.transcript)
-		previousShown := -1
-		for index, row := range m.transcript {
+		shownAny := false
+		for index := m.flushed; index < len(m.transcript); index++ {
+			row := m.transcript[index]
 			// A welcome row carries no Lime visual (the empty state replaced it)
 			// and a resolved tool call collapses into its result's card.
 			if row.kind == rowWelcome || rc.skip(row) {
 				continue
 			}
-			if previousShown >= 0 && startsTurn(row.kind) {
+			// Blank-line separation before turns — including between the flushed
+			// history above and the first live row.
+			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
 				builder.WriteString("\n")
 			}
 			builder.WriteString(m.renderRow(row, width, rc))
 			builder.WriteString("\n")
-			previousShown = index
+			shownAny = true
 		}
 	}
 
@@ -837,6 +944,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	if command.kind == commandPrompt && (m.pending || m.exiting) {
 		return m, nil
 	}
+	m.rememberInput(m.input.Value())
 	m.input.SetValue("")
 	m.suggestions = nil
 	m.suggestionIdx = 0
@@ -849,9 +957,19 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case commandClear:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionClear})
+		// Scrollback above can't be un-printed; a faint divider marks where the
+		// cleared surface ended and the frontier restarts for the fresh transcript.
+		m.resetFlushFrontier("· cleared ·")
 		return m, nil
 	case commandExit:
+		// /exit gets the same protection as Ctrl+C: cancel any in-flight run and
+		// defer the quit until its checkpoint session events flush — quitting
+		// immediately would orphan the blobs and break /rewind.
+		m.cancelRun()
 		m.exiting = true
+		if len(m.flushRunIDs) > 0 {
+			return m, nil
+		}
 		return m, tea.Quit
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
@@ -1064,19 +1182,73 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	}
 }
 
+// historyRecallActive reports whether ↑/↓ should navigate previously submitted
+// inputs: history exists and no modal surface owns the arrow keys.
+func (m model) historyRecallActive() bool {
+	return len(m.inputHistory) > 0 &&
+		m.pendingAskUser == nil && m.pendingPermission == nil && m.pendingSpecReview == nil
+}
+
+// recallHistory steps through submitted inputs (-1 = older, +1 = newer),
+// stashing the in-progress draft so stepping back past the newest recalled
+// entry restores whatever was being typed.
+func (m model) recallHistory(direction int) model {
+	if m.historyIdx == len(m.inputHistory) {
+		if direction > 0 {
+			return m
+		}
+		m.historyDraft = m.input.Value()
+	}
+	next := clamp(m.historyIdx+direction, 0, len(m.inputHistory))
+	if next == m.historyIdx {
+		return m
+	}
+	m.historyIdx = next
+	if next == len(m.inputHistory) {
+		m.input.SetValue(m.historyDraft)
+	} else {
+		m.input.SetValue(m.inputHistory[next])
+	}
+	m.input.CursorEnd()
+	m.recomputeSuggestions()
+	return m
+}
+
+// rememberInput records a submitted composer value for ↑ recall and resets the
+// navigation cursor past the newest entry.
+func (m *model) rememberInput(value string) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed != "" && (len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != trimmed) {
+		m.inputHistory = append(m.inputHistory, trimmed)
+	}
+	m.historyIdx = len(m.inputHistory)
+	m.historyDraft = ""
+}
+
 func (m *model) cancelRun() {
 	if m.runCancel != nil {
 		m.runCancel()
 	}
-	// Remember the in-flight run so its final agentResponseMsg is still drained
-	// for session-event persistence after activeRunID is cleared — otherwise the
-	// checkpoint blobs it captured before each mutating tool are orphaned on disk
-	// and /rewind can't reference them.
+	// Remember the in-flight run — and the session it was recording into — so
+	// its final agentResponseMsg is still drained for session-event persistence
+	// after activeRunID is cleared. Otherwise the checkpoint blobs it captured
+	// before each mutating tool are orphaned on disk and /rewind can't reference
+	// them; without the session id, a /resume before the flush lands would
+	// append the old run's events into the newly active session.
 	if m.pending && m.activeRunID != 0 {
 		if m.flushRunIDs == nil {
-			m.flushRunIDs = make(map[int]struct{})
+			m.flushRunIDs = make(map[int]string)
 		}
-		m.flushRunIDs[m.activeRunID] = struct{}{}
+		m.flushRunIDs[m.activeRunID] = m.activeSession.SessionID
+	}
+	if m.pending {
+		// A cancelled run must terminate visibly in the transcript: first the
+		// partial streamed answer (if any), then the cancellation marker — the
+		// session log gets the same marker below.
+		if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, text: "Run cancelled."})
 	}
 	if m.pending && m.activeSession.SessionID != "" {
 		if next, err := (*m).appendSessionEvent(sessions.EventError, map[string]any{
@@ -1200,18 +1372,36 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			})
 			select {
 			case answers := <-answerCh:
+				// Persist the answers next to the question event so the exchange
+				// is complete on /resume; rehydration renders them as a system note.
+				sessionEvents = append(sessionEvents, pendingSessionEvent{
+					Type: sessions.EventMessage,
+					Payload: map[string]any{
+						"role":       "ask_user_answers",
+						"toolCallId": request.ToolCallID,
+						"answers":    answers,
+					},
+				})
 				return agent.AskUserResponse{Answers: answers}, nil
 			case <-ctx.Done():
 				return agent.AskUserResponse{}, ctx.Err()
 			}
 		}
 
+		// Some providers synthesize tool-call ids that repeat within a run (e.g.
+		// Gemini restarts its gemini_tool_N numbering on every provider turn).
+		// Transcript rows need distinct ids for dedup and call→result collapse,
+		// so repeats get an ordinal suffix; session payloads keep the provider's
+		// original ids.
+		callSeq := map[string]int{}
+
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
 			toolCalls++
+			callSeq[call.ID]++
 			row := transcriptRow{
 				kind:   rowToolCall,
-				id:     call.ID,
+				id:     effectiveToolRowID(call.ID, callSeq[call.ID]),
 				text:   "tool call: " + call.Name,
 				tool:   call.Name,
 				detail: argHint(call.Arguments),
@@ -1263,7 +1453,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			row := transcriptRow{
 				kind:   rowToolResult,
-				id:     result.ToolCallID,
+				id:     effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
 				text:   toolResultRowText(result),
 				tool:   result.Name,
 				status: result.Status,

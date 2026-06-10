@@ -224,7 +224,12 @@ func shortenPath(path string) string {
 		return "unknown"
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if strings.HasPrefix(path, home) {
+		// Match on a path boundary: a bare prefix check would mangle siblings
+		// like /Users/alice2 when home is /Users/alice.
+		if path == home {
+			return "~"
+		}
+		if strings.HasPrefix(path, home+string(os.PathSeparator)) {
 			return "~" + path[len(home):]
 		}
 	}
@@ -386,13 +391,25 @@ func indentText(text string, spaces int) string {
 	return strings.Join(lines, "\n")
 }
 
-// looksLikeDiff reports whether output should be rendered as a diff card.
+// looksLikeDiff reports whether output should be rendered as a diff card: a
+// real hunk header, or both old/new file headers. A single line starting with
+// "---" (a Markdown rule, YAML document marker, log separator…) must NOT
+// hijack ordinary bash/tool output into the diff renderer.
 func looksLikeDiff(text string) bool {
 	if !strings.Contains(text, "\n") {
 		return false
 	}
+	hasOld, hasNew := false, false
 	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---") {
+		switch {
+		case hunkHeaderPattern.MatchString(line):
+			return true
+		case strings.HasPrefix(line, "+++ "):
+			hasNew = true
+		case strings.HasPrefix(line, "--- "):
+			hasOld = true
+		}
+		if hasOld && hasNew {
 			return true
 		}
 	}

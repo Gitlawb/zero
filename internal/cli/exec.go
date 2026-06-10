@@ -579,7 +579,7 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 	if err != nil {
 		return nil, err
 	}
-	policy := applyConfiguredAutonomyCeiling(sandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy)
+	policy := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox)
 	backend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	return sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
@@ -598,6 +598,19 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 // config.Resolve already rejects invalid values, so this branch is defense in
 // depth — it guarantees that even a direct/programmatic caller passing a typo
 // can never WIDEN the ceiling back to the High default.
+// applyConfiguredSandboxPolicy overlays every config-sourced sandbox knob onto
+// the default policy: the autonomy ceiling and the network mode.
+func applyConfiguredSandboxPolicy(policy sandbox.Policy, cfg config.SandboxConfig) sandbox.Policy {
+	policy = applyConfiguredAutonomyCeiling(policy, cfg.MaxAutonomy)
+	if network := strings.TrimSpace(cfg.Network); network != "" {
+		switch sandbox.NetworkMode(network) {
+		case sandbox.NetworkAllow, sandbox.NetworkDeny:
+			policy.Network = sandbox.NetworkMode(network)
+		}
+	}
+	return policy
+}
+
 func applyConfiguredAutonomyCeiling(policy sandbox.Policy, maxAutonomy string) sandbox.Policy {
 	trimmed := strings.TrimSpace(maxAutonomy)
 	if trimmed == "" {

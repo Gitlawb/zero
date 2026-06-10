@@ -50,11 +50,27 @@ func writeConfigFile(path string, cfg FileConfig) error {
 		return fmt.Errorf("encode config JSON: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// Write-to-temp + rename: an in-place write interrupted mid-way (crash,
+	// disk full) would leave the user's only config truncated or corrupt.
+	tmp, err := os.CreateTemp(dir, ".zero-config-*.tmp")
+	if err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("secure config permissions %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
 	}
 	return nil
 }

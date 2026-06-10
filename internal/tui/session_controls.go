@@ -176,6 +176,12 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	if m.pending {
 		return m, "Rewind\ncannot rewind while a run is in progress."
 	}
+	// A cancelled run's late flush hasn't appended its checkpoint events yet:
+	// ApplyRewind would prune those checkpoint blobs as unreferenced, then the
+	// flush would re-append pre-rewind events after the rewind marker.
+	if len(m.flushRunIDs) > 0 {
+		return m, "Rewind\ncannot rewind while a cancelled run is still flushing — retry in a moment."
+	}
 	arg := strings.TrimSpace(strings.ToLower(args))
 	target, err := m.resolveRewindTarget(arg)
 	if err != nil {
@@ -207,6 +213,9 @@ func (m model) handleRewindCommand(args string) (model, string) {
 		rows = appendTranscriptRow(rows, row)
 	}
 	m.transcript = rows
+	// The rebuilt (post-rewind) transcript flushes fresh below a divider; the
+	// pre-rewind scrollback above it stays, as scrollback cannot be un-printed.
+	m.resetFlushFrontier("· rewound ·")
 
 	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
 		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))

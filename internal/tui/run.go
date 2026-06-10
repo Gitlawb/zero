@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
@@ -39,6 +40,9 @@ func Run(ctx context.Context, options Options) int {
 	program = tea.NewProgram(newModel(ctx, options), programOpts...)
 
 	if _, err := program.Run(); err != nil {
+		// Surface the failure: exiting 1 with zero diagnostics left users
+		// guessing why the default chat surface died.
+		fmt.Fprintln(os.Stderr, "zero: tui error:", err)
 		return 1
 	}
 	return 0

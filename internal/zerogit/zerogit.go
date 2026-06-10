@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 )
@@ -429,7 +430,7 @@ func truncateString(value string, maxBytes int) (string, bool) {
 	if maxBytes <= len(suffix) {
 		return suffix[:maxBytes], true
 	}
-	head := value[:maxBytes-len(suffix)]
+	head := cutGitRuneBoundary(value, maxBytes-len(suffix))
 	if strings.Contains(value, redaction.RedactedSecret) && !strings.Contains(head, redaction.RedactedSecret) {
 		marker := "\n" + redaction.RedactedSecret
 		budget := maxBytes - len(suffix) - len(marker)
@@ -440,16 +441,34 @@ func truncateString(value string, maxBytes int) (string, bool) {
 			}
 			return redaction.RedactedSecret[:allowed] + suffix, true
 		}
-		return value[:budget] + marker + suffix, true
+		return cutGitRuneBoundary(value, budget) + marker + suffix, true
 	}
 	return head + suffix, true
 }
 
+// cutGitRuneBoundary truncates to at most n bytes on a rune boundary so
+// truncated git output and subjects stay valid UTF-8.
+func cutGitRuneBoundary(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 func truncateSubject(value string) string {
-	if len(value) <= 72 {
+	// Count runes, not bytes: a 72-byte limit rejected valid non-ASCII
+	// subjects and the byte slice could cut a rune in half.
+	runes := []rune(value)
+	if len(runes) <= 72 {
 		return value
 	}
-	return strings.TrimSpace(value[:69]) + "..."
+	return strings.TrimSpace(string(runes[:69])) + "..."
 }
 
 func redactText(value string) string {

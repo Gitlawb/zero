@@ -182,9 +182,13 @@ func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		cfg.Servers = map[string]config.MCPServerConfig{}
 	}
 	if options.json {
+		// Env and header VALUES are credentials by construction (API keys,
+		// bearer tokens) and must never reach stdout: pattern-based redaction
+		// only catches recognizable token shapes, so the values are replaced
+		// structurally — keys stay visible for triage.
 		payload := struct {
 			Servers map[string]config.MCPServerConfig `json:"servers"`
-		}{Servers: cfg.Servers}
+		}{Servers: redactMCPServerConfigs(cfg.Servers)}
 		if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
 			return exitCrash
 		}
@@ -194,6 +198,29 @@ func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// redactMCPServerConfigs deep-copies the server map with every env and header
+// value replaced by a redaction marker.
+func redactMCPServerConfigs(servers map[string]config.MCPServerConfig) map[string]config.MCPServerConfig {
+	redacted := make(map[string]config.MCPServerConfig, len(servers))
+	for name, server := range servers {
+		clone := server
+		if len(server.Env) > 0 {
+			clone.Env = make(map[string]string, len(server.Env))
+			for key := range server.Env {
+				clone.Env[key] = "[REDACTED]"
+			}
+		}
+		if len(server.Headers) > 0 {
+			clone.Headers = make(map[string]string, len(server.Headers))
+			for key := range server.Headers {
+				clone.Headers[key] = "[REDACTED]"
+			}
+		}
+		redacted[name] = clone
+	}
+	return redacted
 }
 
 func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

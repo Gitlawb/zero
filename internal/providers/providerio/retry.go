@@ -97,15 +97,16 @@ func SendWithRetry(
 }
 
 // ShouldRetryStatus reports whether an HTTP status is safe to retry for a
-// non-idempotent completion POST: only 429 (Too Many Requests) and 503 (Service
-// Unavailable). Both mean the server explicitly did NOT accept the request — it
-// was rate-limited or the service was unavailable — so replaying it cannot
-// duplicate work. Other 5xx (500/502/504) are deliberately NOT retried: they do
-// not guarantee the request had no effect (e.g. a 504 gateway timeout may follow
-// an upstream that already produced a billable completion), so replaying them
-// risks duplicate work.
+// non-idempotent completion POST: 429 (Too Many Requests), 503 (Service
+// Unavailable), and 529 (Anthropic's "overloaded"). All mean the server
+// explicitly did NOT accept the request — it was rate-limited or the service
+// was unavailable — so replaying it cannot duplicate work. Other 5xx
+// (500/502/504) are deliberately NOT retried: they do not guarantee the
+// request had no effect (e.g. a 504 gateway timeout may follow an upstream
+// that already produced a billable completion), so replaying them risks
+// duplicate work.
 func ShouldRetryStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable
+	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable || code == 529
 }
 
 // Backoff waits before retry attempt N (1-based), returning false if the context

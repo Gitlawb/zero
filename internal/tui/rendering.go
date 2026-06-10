@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,13 +20,6 @@ func displayValue(value string, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func (m model) runState() string {
-	if m.pending {
-		return "running"
-	}
-	return "ready"
 }
 
 // pickerBusyText explains that a settings picker (/model, /mode, /effort)
@@ -57,64 +52,6 @@ func shellOnlyCommandText(name string) string {
 
 func helpText() string {
 	return formatGroupedCommandHelp()
-}
-
-const defaultCommandFooterText = "/help  /model  /provider  /context  /compact  /effort  /style  /tools  /permissions  /clear  /exit  Esc clear  Ctrl+C quit"
-
-func commandFooterText() string {
-	return formatCommandFooterText(commandDefinitions, false)
-}
-
-func (m model) footerText() string {
-	return strings.Join([]string{
-		m.runState(),
-		displayValue(m.modelName, "model:none"),
-		m.usageSummaryText(),
-		formatCommandFooterText(commandDefinitions, m.pending),
-	}, "  ")
-}
-
-func formatCommandFooterText(commands []commandDefinition, pending bool) string {
-	if len(commands) == 0 {
-		return defaultCommandFooterText
-	}
-
-	namesByKind := make(map[commandKind]string, len(commands))
-	for _, command := range commands {
-		namesByKind[command.kind] = command.name
-	}
-
-	featured := []commandKind{
-		commandHelp,
-		commandModel,
-		commandProvider,
-		commandContext,
-		commandCompact,
-		commandEffort,
-		commandStyle,
-		commandTools,
-		commandPermissions,
-		commandClear,
-		commandExit,
-	}
-	parts := make([]string, 0, len(featured)+2)
-	for _, kind := range featured {
-		name := namesByKind[kind]
-		if name != "" {
-			parts = append(parts, name)
-		}
-	}
-	if len(parts) == 0 {
-		return defaultCommandFooterText
-	}
-
-	if pending {
-		parts = append(parts, "Esc cancel")
-	} else {
-		parts = append(parts, "Esc clear")
-	}
-	parts = append(parts, "Ctrl+C quit")
-	return strings.Join(parts, "  ")
 }
 
 // rowContext carries the cross-row knowledge renderRow needs: which tool
@@ -206,7 +143,32 @@ func (rc rowContext) skip(row transcriptRow) bool {
 	return false
 }
 
+// cardRenderOptions carries per-render knobs for tool cards: the body-line cap
+// (small for the live region, generous for the permanent scrollback flush) and
+// the workspace root used to absolutize paths for OSC 8 file hyperlinks.
+type cardRenderOptions struct {
+	bodyCap int
+	cwd     string
+}
+
+// flushCardBodyMaxLines is the body cap for cards flushed to scrollback. The
+// small live cap exists only to keep the managed region tidy; history can hold
+// full output — most importantly the complete diffs of edited code, which the
+// user reviews by scrolling up.
+const flushCardBodyMaxLines = 400
+
 func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
+	return m.renderRowMode(row, width, rc, false)
+}
+
+// renderRowMode renders a transcript row either for the live region (flush ==
+// false: tight body caps, spinner-capable) or for its one-time scrollback
+// flush (flush == true: deep body caps so edited code stays reviewable).
+func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush bool) string {
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	if flush {
+		opts.bodyCap = flushCardBodyMaxLines
+	}
 	switch row.kind {
 	case rowUser:
 		return renderUserRow(row, width)
@@ -220,9 +182,9 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	case rowError:
 		return renderErrorRow(row, width)
 	case rowToolCall:
-		return m.renderRunningToolCard(row, width, rc)
+		return m.renderRunningToolCard(row, width, rc, opts)
 	case rowToolResult:
-		return renderToolResultCard(row, width, rc)
+		return renderToolResultCard(row, width, rc, opts)
 	case rowPermission:
 		return renderPermissionRow(row, width)
 	case rowAskUser:
@@ -230,6 +192,43 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	default:
 		return row.text
 	}
+}
+
+// hyperlink wraps already-styled text in an OSC 8 terminal hyperlink so
+// supporting terminals (iTerm2, WezTerm, kitty, Ghostty, …) make it clickable
+// — cmd/ctrl+click on an edited file opens it. The sequences are zero-width
+// for lipgloss/x-ansi width math, and truncateStyledLine skips and re-closes
+// them via ansiSequenceEnd.
+func hyperlink(url string, text string) string {
+	if url == "" || text == "" {
+		return text
+	}
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// fileURL builds the file:// link target for a workspace path. The path is
+// percent-encoded (spaces especially) — a raw space inside an OSC 8 URI makes
+// some terminals terminate the sequence early and print the remainder.
+func fileURL(cwd string, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	link := url.URL{Scheme: "file", Path: path}
+	return link.String()
+}
+
+// looksLikePath reports whether a tool-card target plausibly names a file —
+// the only targets worth turning into hyperlinks (bash commands and grep
+// patterns also flow through the target column).
+func looksLikePath(value string) bool {
+	if value == "" || strings.ContainsAny(value, " \t") {
+		return false
+	}
+	return strings.Contains(value, "/") || filepath.Ext(value) != ""
 }
 
 // sayMeasure is the prose wrap width for user/assistant text: min(width-4, 74).
@@ -245,7 +244,9 @@ func sayMeasure(width int) int {
 }
 
 // wrapPlainText word-wraps unstyled text to the measure, preserving explicit
-// newlines. Words longer than the measure are hard-split so no emitted line
+// newlines AND each line's leading indentation (wrapped continuations keep the
+// same indent), so code blocks and aligned lists in assistant answers survive.
+// Words longer than the available measure are hard-split so no emitted line
 // can exceed it.
 func wrapPlainText(text string, measure int) []string {
 	if measure < 1 {
@@ -257,29 +258,37 @@ func wrapPlainText(text string, measure int) []string {
 			out = append(out, "")
 			continue
 		}
+		body := strings.TrimLeft(paragraph, " \t")
+		// Tabs render unpredictably across terminals; a fixed 4-cell indent
+		// keeps the width math exact (same policy as the tool cards).
+		indent := strings.ReplaceAll(paragraph[:len(paragraph)-len(body)], "\t", "    ")
+		if len(indent) >= measure {
+			indent = strings.Repeat(" ", measure/2)
+		}
+		available := measure - len(indent)
 		line := ""
-		for _, word := range strings.Fields(paragraph) {
-			for lipgloss.Width(word) > measure {
+		for _, word := range strings.Fields(body) {
+			for lipgloss.Width(word) > available {
 				if line != "" {
-					out = append(out, line)
+					out = append(out, indent+line)
 					line = ""
 				}
-				head, tail := splitAtWidth(word, measure)
-				out = append(out, head)
+				head, tail := splitAtWidth(word, available)
+				out = append(out, indent+head)
 				word = tail
 			}
 			switch {
 			case line == "":
 				line = word
-			case lipgloss.Width(line)+1+lipgloss.Width(word) <= measure:
+			case lipgloss.Width(line)+1+lipgloss.Width(word) <= available:
 				line += " " + word
 			default:
-				out = append(out, line)
+				out = append(out, indent+line)
 				line = word
 			}
 		}
 		if line != "" {
-			out = append(out, line)
+			out = append(out, indent+line)
 		}
 	}
 	return out
@@ -431,7 +440,7 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	default:
 		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
 		if event.Risk.Level != "" {
-			line += "  " + zeroTheme.muted.Render("risk:" + string(event.Risk.Level))
+			line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
 		}
 		out := fitStyledLine(line, width)
 		if detail := strings.TrimSpace(row.detail); detail != "" {
@@ -479,7 +488,7 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) s
 		fill(zeroTheme.ink).Render(" ") +
 		fill(zeroTheme.accent).Render("[y]") + fill(zeroTheme.ink).Render(" always ") +
 		fill(zeroTheme.red).Render("[d]") + fill(zeroTheme.ink).Render(" deny ") +
-		fill(zeroTheme.faint).Render("[esc]")
+		fill(zeroTheme.faint).Render("[esc] cancel run")
 	lines = append(lines, actions)
 
 	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg)
@@ -513,6 +522,11 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width
 			lines = append(lines, fill(zeroTheme.muted).Render("options: "+strings.Join(question.Options, ", ")))
 		}
 	}
+	// Echo the in-progress answer inside the card so the user sees what they
+	// are typing where they are answering, cursor included.
+	answer := zeroTheme.userPrompt.Background(lipgloss.Color(colorPanel)).Render("❯ ") +
+		fill(zeroTheme.ink).Render(input) + fill(zeroTheme.accent).Render("▌")
+	lines = append(lines, answer)
 	lines = append(lines, fill(zeroTheme.faint).Render("type an answer, Enter to submit · Esc to skip"))
 
 	return styledBlockFill(width, lines, zeroTheme.line, zeroTheme.panel)
@@ -537,7 +551,7 @@ type cardBody struct {
 // result yet: spinner glyph while ITS run is live, a static placeholder for
 // orphans (cancelled/errored turns, rehydrated history) — keying off the
 // global pending flag alone would re-animate dead cards on every later run.
-func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext) string {
+func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	glyph := zeroTheme.faintest.Render("…")
 	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
 		glyph = m.spinner.View()
@@ -552,11 +566,11 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	if arg == "" {
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[rcKey(row.runID, row.id)], width)
+	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[rcKey(row.runID, row.id)], width, opts)
 	return toolCard(head, nil, "", zeroTheme.cardRun, width)
 }
 
-func renderToolResultCard(row transcriptRow, width int, rc rowContext) string {
+func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	name := toolRowName(row)
 	failed := row.status == tools.StatusError
 	glyph := zeroTheme.green.Render("✓")
@@ -566,8 +580,8 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext) string {
 		borderStyle = zeroTheme.cardErr
 	}
 	key := rcKey(row.runID, row.id)
-	body := toolCardBody(name, rc.hints[key], row.detail, width)
-	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width)
+	body := toolCardBody(name, rc.hints[key], row.detail, width, opts)
+	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width, opts)
 	return toolCard(head, body.lines, body.footer, borderStyle, width)
 }
 
@@ -580,12 +594,16 @@ func toolRowName(row transcriptRow) string {
 }
 
 // toolCardHead composes the border-embedded head: tool name, middle-truncated
-// target, the faintest arg column, optional extra tag, the auto marker, and
-// the status glyph.
-func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int) string {
+// target (hyperlinked when it names a file), the faintest arg column, optional
+// extra tag, the auto marker, and the status glyph.
+func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
 	head := zeroTheme.toolName.Render(name)
 	if target = strings.TrimSpace(target); target != "" {
-		head += " " + zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
+		styled := zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
+		if looksLikePath(target) {
+			styled = hyperlink(fileURL(opts.cwd, target), styled)
+		}
+		head += " " + styled
 	}
 	// The arg column is the first thing the width tiers drop (below 100 cols).
 	if arg = strings.TrimSpace(arg); arg != "" && widthTier(width) == tierFull {
@@ -651,7 +669,7 @@ func toolCard(head string, body []string, footer string, borderStyle lipgloss.St
 
 // toolCardBody picks the body renderer by result shape, reusing the existing
 // diff detection; the other shapes key off the core tool names.
-func toolCardBody(name string, hint string, detail string, width int) cardBody {
+func toolCardBody(name string, hint string, detail string, width int, opts cardRenderOptions) cardBody {
 	detail = strings.TrimRight(strings.ReplaceAll(detail, "\r\n", "\n"), "\n")
 	// Terminal tab stops are unknowable from here and break the width math
 	// (lipgloss measures \t as one cell, the terminal expands it further), so
@@ -662,43 +680,43 @@ func toolCardBody(name string, hint string, detail string, width int) cardBody {
 	}
 	switch {
 	case looksLikeDiff(detail):
-		return diffCardBody(detail, width)
+		return diffCardBody(detail, width, opts)
 	case name == "read_file":
-		return readCardBody(detail, width)
+		return readCardBody(detail, width, opts)
 	case name == "bash":
-		return bashCardBody(hint, detail, width)
+		return bashCardBody(hint, detail, width, opts)
 	case name == "grep":
-		return grepCardBody(detail, width)
+		return grepCardBody(detail, width, opts)
 	default:
-		return genericCardBody(detail)
+		return genericCardBody(detail, opts)
 	}
 }
 
-// capCardLines applies the shared body cap, appending the hidden-count
-// trailer when lines were dropped.
-func capCardLines(lines []string) []string {
-	if len(lines) <= cardBodyMaxLines {
+// capCardLines applies the body cap, appending the hidden-count trailer when
+// lines were dropped.
+func capCardLines(lines []string, cap int) []string {
+	if cap <= 0 || len(lines) <= cap {
 		return lines
 	}
-	hidden := len(lines) - cardBodyMaxLines
-	lines = lines[:cardBodyMaxLines]
+	hidden := len(lines) - cap
+	lines = lines[:cap]
 	return append(lines, zeroTheme.onPanel(zeroTheme.faint).Render(fmt.Sprintf("… %d more lines", hidden)))
 }
 
-func genericCardBody(detail string) cardBody {
+func genericCardBody(detail string, opts cardRenderOptions) cardBody {
 	raw := strings.Split(detail, "\n")
 	lines := make([]string, 0, len(raw))
 	for _, line := range raw {
 		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
 	}
-	return cardBody{lines: capCardLines(lines)}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap)}
 }
 
 // hunkHeaderPattern extracts the old/new start lines from a unified-diff hunk
 // header so the gutter can show real line numbers.
 var hunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 
-func diffCardBody(detail string, width int) cardBody {
+func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	rawLines := strings.Split(detail, "\n")
 
 	path := ""
@@ -720,7 +738,10 @@ func diffCardBody(detail string, width int) cardBody {
 	}
 
 	innerWidth := width - 4
-	headLeft := zeroTheme.onPanel(zeroTheme.ink).Render(middleTruncate(path, maxInt(16, innerWidth/2)))
+	// The edited file's path is a clickable OSC 8 link, so the edited place in
+	// history opens straight from the terminal.
+	headLeft := hyperlink(fileURL(opts.cwd, path),
+		zeroTheme.onPanel(zeroTheme.ink).Render(middleTruncate(path, maxInt(16, innerWidth/2))))
 	if newFile {
 		headLeft += zeroTheme.panel.Render("  ") + zeroTheme.addSign.Render(" NEW FILE ")
 	}
@@ -778,7 +799,7 @@ func diffCardBody(detail string, width int) cardBody {
 			newLine++
 		}
 	}
-	return cardBody{lines: capCardLines(lines)}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap)}
 }
 
 // diffBodyLine paints one changed row: optional gutter number, sign column,
@@ -807,7 +828,7 @@ func diffBodyLine(number int, sign string, text string, added bool, textBudget i
 // as "<right-aligned N> | <text>" (see internal/tools/read_file.go).
 var readNumberedLinePattern = regexp.MustCompile(`^\s*(\d+) \| (.*)$`)
 
-func readCardBody(detail string, width int) cardBody {
+func readCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	// The number gutter drops with the diff gutter below 80 cols.
 	gutter := widthTier(width) >= tierMedium
 	raw := strings.Split(detail, "\n")
@@ -836,10 +857,10 @@ func readCardBody(detail string, width int) cardBody {
 	if first > 0 && last >= first {
 		headTag = fmt.Sprintf("L%d–L%d", first, last)
 	}
-	return cardBody{lines: capCardLines(lines), headTag: headTag}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap), headTag: headTag}
 }
 
-func bashCardBody(command string, detail string, width int) cardBody {
+func bashCardBody(command string, detail string, width int, opts cardRenderOptions) cardBody {
 	innerWidth := width - 4
 	lines := []string{}
 	if command = strings.TrimSpace(command); command != "" {
@@ -870,7 +891,7 @@ func bashCardBody(command string, detail string, width int) cardBody {
 			lines = append(lines, zeroTheme.panel.Render("  ")+zeroTheme.onPanel(style).Render(line))
 		}
 	}
-	return cardBody{lines: capCardLines(lines), footer: footer}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }
 
 // renderSessionsCards draws the /resume list as stacked cards: id (accent) +
@@ -905,7 +926,7 @@ func renderSessionsCards(payload string, width int) string {
 // grepMatchPattern matches the grep tool's "path:line: text" content rows.
 var grepMatchPattern = regexp.MustCompile(`^(.+?:\d+):\s?(.*)$`)
 
-func grepCardBody(detail string, width int) cardBody {
+func grepCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	innerWidth := width - 4
 	raw := strings.Split(detail, "\n")
 	lines := make([]string, 0, len(raw))
@@ -914,6 +935,10 @@ func grepCardBody(detail string, width int) cardBody {
 		if match := grepMatchPattern.FindStringSubmatch(line); match != nil {
 			matches++
 			location := zeroTheme.onPanel(zeroTheme.grepLoc).Render(match[1])
+			// match[1] is "path:line" — link the file so a hit is one click away.
+			if path, _, ok := strings.Cut(match[1], ":"); ok && path != "" {
+				location = hyperlink(fileURL(opts.cwd, path), location)
+			}
 			budget := maxInt(8, innerWidth-lipgloss.Width(match[1])-2)
 			lines = append(lines, location+zeroTheme.panel.Render("  ")+zeroTheme.onPanel(zeroTheme.muted).Render(truncateRunes(match[2], budget)))
 			continue
@@ -924,5 +949,5 @@ func grepCardBody(detail string, width int) cardBody {
 	if matches > 0 {
 		footer = zeroTheme.faint.Render(fmt.Sprintf("%d matches", matches))
 	}
-	return cardBody{lines: capCardLines(lines), footer: footer}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }

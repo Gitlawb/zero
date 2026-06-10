@@ -21,17 +21,17 @@ import (
 // instead of being copied verbatim, so a token in MCP_AUTH_TOKEN
 // never reaches the headless JSON output.
 type MCPServerSnapshot struct {
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Identity     string   `json:"identity,omitempty"`
-	URL          string   `json:"url,omitempty"`
-	Command      string   `json:"command,omitempty"`
-	ArgCount     int      `json:"argCount"`
-	EnvKeyCount  int      `json:"envKeyCount"`
-	HeaderCount  int      `json:"headerCount"`
-	ToolCount    int      `json:"toolCount"`
-	AllowGranted int      `json:"allowGranted"`
-	DenyGranted  int      `json:"denyGranted"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`
+	Identity     string `json:"identity,omitempty"`
+	URL          string `json:"url,omitempty"`
+	Command      string `json:"command,omitempty"`
+	ArgCount     int    `json:"argCount"`
+	EnvKeyCount  int    `json:"envKeyCount"`
+	HeaderCount  int    `json:"headerCount"`
+	ToolCount    int    `json:"toolCount"`
+	AllowGranted int    `json:"allowGranted"`
+	DenyGranted  int    `json:"denyGranted"`
 }
 
 // HookSnapshot is the typed view of a single configured hook as it
@@ -42,14 +42,14 @@ type MCPServerSnapshot struct {
 // preserved because it is the operator's primary tool for
 // understanding when the hook will fire.
 type HookSnapshot struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name,omitempty"`
-	Event       string   `json:"event"`
-	Matcher     string   `json:"matcher,omitempty"`
-	Command     string   `json:"command"`
-	Args        []string `json:"args,omitempty"`
-	Enabled     bool     `json:"enabled"`
-	Source      string   `json:"source,omitempty"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name,omitempty"`
+	Event   string   `json:"event"`
+	Matcher string   `json:"matcher,omitempty"`
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	Enabled bool     `json:"enabled"`
+	Source  string   `json:"source,omitempty"`
 }
 
 // PluginSnapshot is the typed view of a single loaded plugin as it
@@ -60,19 +60,19 @@ type HookSnapshot struct {
 // tools, hooks, prompts, and skills so the headless JSON output
 // stays small even for plugins with many extensions.
 type PluginSnapshot struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Version       string `json:"version,omitempty"`
-	Description   string `json:"description,omitempty"`
-	Enabled       bool   `json:"enabled"`
-	Source        string `json:"source"`
-	Root          string `json:"root,omitempty"`
-	PluginDir     string `json:"pluginDir,omitempty"`
-	ManifestPath  string `json:"manifestPath,omitempty"`
-	ToolCount     int    `json:"toolCount"`
-	PromptCount   int    `json:"promptCount"`
-	SkillCount    int    `json:"skillCount"`
-	HookCount     int    `json:"hookCount"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Version      string `json:"version,omitempty"`
+	Description  string `json:"description,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	Source       string `json:"source"`
+	Root         string `json:"root,omitempty"`
+	PluginDir    string `json:"pluginDir,omitempty"`
+	ManifestPath string `json:"manifestPath,omitempty"`
+	ToolCount    int    `json:"toolCount"`
+	PromptCount  int    `json:"promptCount"`
+	SkillCount   int    `json:"skillCount"`
+	HookCount    int    `json:"hookCount"`
 }
 
 // BackendLifecycleSnapshot bundles the typed snapshots for the

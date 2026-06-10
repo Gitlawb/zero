@@ -67,6 +67,13 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			return ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q: expected low, medium, or high", maxAutonomy)
 		}
 	}
+	if network := strings.TrimSpace(cfg.Sandbox.Network); network != "" {
+		switch sandbox.NetworkMode(network) {
+		case sandbox.NetworkAllow, sandbox.NetworkDeny:
+		default:
+			return ResolvedConfig{}, fmt.Errorf("invalid sandbox.network %q: expected allow or deny", network)
+		}
+	}
 	if mode := strings.TrimSpace(cfg.Notify.Mode); mode != "" {
 		switch notify.Mode(mode) {
 		case notify.ModeOff, notify.ModeBell, notify.ModeNotify, notify.ModeBoth:
@@ -143,6 +150,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
 	}
+	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
+		dst.Sandbox.Network = network
+	}
 	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
 		dst.Notify.Mode = mode
 	}
@@ -172,6 +182,9 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	mergeMCPConfig(&dst.MCP, src.MCP)
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
+	}
+	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
+		dst.Sandbox.Network = network
 	}
 	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
 		dst.Notify.Mode = mode

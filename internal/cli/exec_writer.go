@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -400,7 +401,7 @@ func streamJSONSideEffect(name string, registry *tools.Registry) string {
 func truncateForStatus(value string) string {
 	compact := strings.Join(strings.Fields(value), " ")
 	if len(compact) > 200 {
-		return compact[:200] + "..."
+		return cutRuneBoundary(compact, 200) + "..."
 	}
 	return compact
 }
@@ -409,7 +410,24 @@ func truncateForStreamJSONOutput(value string) (string, bool) {
 	if len(value) <= streamJSONToolResultOutputLimit {
 		return value, false
 	}
-	return value[:streamJSONToolResultOutputLimit] + "\n[truncated]", true
+	// Rune-boundary cut: stream-json is a machine-readable protocol and a
+	// mid-rune byte slice would emit invalid UTF-8 into it.
+	return cutRuneBoundary(value, streamJSONToolResultOutputLimit) + "\n[truncated]", true
+}
+
+// cutRuneBoundary truncates s to at most n bytes without splitting a UTF-8
+// rune (the cut lands on the last rune boundary at or before n).
+func cutRuneBoundary(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func writeStreamJSONError(stdout io.Writer, code string, message string, recoverable bool, exitCode int) int {

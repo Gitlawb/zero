@@ -85,7 +85,9 @@ func preflightExecSession(options execOptions) error {
 func createSessionTitle(prompt string) string {
 	title := strings.Join(strings.Fields(prompt), " ")
 	if len(title) > 80 {
-		title = title[:80]
+		// Cut on a rune boundary so a multi-byte rune at the limit can't
+		// persist invalid UTF-8 into the session metadata.
+		title = cutRuneBoundary(title, 80)
 	}
 	if title == "" {
 		return "Zero exec session"

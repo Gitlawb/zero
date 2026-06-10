@@ -24,14 +24,16 @@ type usageOptions struct {
 // were read alongside, so cost reconstruction can resolve each event's owning
 // model id during aggregation.
 type usageEventSet struct {
-	events []sessions.Event
-	meta   []sessions.Metadata
+	events  []sessions.Event
+	meta    []sessions.Metadata
+	skipped int
 }
 
 // collectUsageData reads every persisted session's events (optionally limited to
 // a single session id) and returns them flattened alongside the matching session
 // metadata. It mirrors runSearch's persisted-event traversal over the injected
-// session store.
+// session store. Sessions whose event log cannot be read are skipped (and
+// counted) so one corrupt session can't abort the whole report.
 func collectUsageData(store *sessions.Store, sessionFilter string) (usageEventSet, error) {
 	metadata, err := store.List()
 	if err != nil {
@@ -42,11 +44,12 @@ func collectUsageData(store *sessions.Store, sessionFilter string) (usageEventSe
 		if sessionFilter != "" && meta.SessionID != sessionFilter {
 			continue
 		}
-		set.meta = append(set.meta, meta)
 		sessionEvents, err := store.ReadEvents(meta.SessionID)
 		if err != nil {
-			return usageEventSet{}, err
+			set.skipped++
+			continue
 		}
+		set.meta = append(set.meta, meta)
 		set.events = append(set.events, sessionEvents...)
 	}
 	return set, nil
@@ -114,18 +117,18 @@ func runUsage(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	since := usageSinceCutoff(options, deps)
 	events := filterEventsSince(set.events, since)
 
-	workspaceRoot, err := resolveWorkspaceRoot("", deps)
-	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+	// The net-LOC column is best-effort garnish on a token report: outside a
+	// git repository (or on any git failure) it degrades to zero instead of
+	// aborting the entire report.
+	diff := zerogit.DiffStat{}
+	if workspaceRoot, err := resolveWorkspaceRoot("", deps); err == nil {
+		if summary, err := deps.inspectChanges(context.Background(), zerogit.InspectOptions{Cwd: workspaceRoot}); err == nil {
+			// The --stat summary line ("N files changed, A insertions(+), B
+			// deletions(-)") carries no secret-bearing tokens, so parsing the
+			// already-redacted DiffStat returned by zerogit.Inspect is safe.
+			diff = zerogit.ParseDiffStat(summary.DiffStat)
+		}
 	}
-	summary, err := deps.inspectChanges(context.Background(), zerogit.InspectOptions{Cwd: workspaceRoot})
-	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
-	}
-	// The --stat summary line ("N files changed, A insertions(+), B deletions(-)")
-	// carries no secret-bearing tokens, so parsing the already-redacted DiffStat
-	// returned by zerogit.Inspect is safe.
-	diff := zerogit.ParseDiffStat(summary.DiffStat)
 
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {

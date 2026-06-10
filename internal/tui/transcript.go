@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -50,18 +51,14 @@ type transcriptActionKind int
 const (
 	actionAppendUser transcriptActionKind = iota
 	actionAppendAssistant
-	actionAppendToolCall
-	actionAppendToolResult
 	actionAppendSystem
 	actionAppendError
 	actionClear
 )
 
 type transcriptAction struct {
-	kind   transcriptActionKind
-	text   string
-	name   string
-	status tools.Status
+	kind transcriptActionKind
+	text string
 }
 
 func initialTranscript() []transcriptRow {
@@ -79,24 +76,6 @@ func reduceTranscript(rows []transcriptRow, action transcriptAction) []transcrip
 		return appendRow(rows, rowUser, action.text)
 	case actionAppendAssistant:
 		return appendRow(rows, rowAssistant, action.text)
-	case actionAppendToolCall:
-		return appendTranscriptRow(rows, transcriptRow{
-			kind: rowToolCall,
-			text: fmt.Sprintf("tool call: %s", action.name),
-			tool: action.name,
-		})
-	case actionAppendToolResult:
-		status := action.status
-		if status == "" {
-			status = tools.StatusOK
-		}
-		return appendTranscriptRow(rows, transcriptRow{
-			kind:   rowToolResult,
-			text:   fmt.Sprintf("tool result: %s %s %s", action.name, status, action.text),
-			tool:   action.name,
-			status: status,
-			detail: action.text,
-		})
 	case actionAppendSystem:
 		return appendRow(rows, rowSystem, action.text)
 	case actionAppendError:
@@ -114,9 +93,11 @@ func appendTranscriptRow(rows []transcriptRow, row transcriptRow) []transcriptRo
 	if hasTranscriptRow(rows, row) {
 		return rows
 	}
-	next := append([]transcriptRow{}, rows...)
-	next = append(next, row)
-	return next
+	// In-place append is safe: every transcript mutation happens on the Bubble
+	// Tea update goroutine (agent goroutines only Send messages), so no other
+	// model copy can append into the same backing array concurrently. The old
+	// full-slice copy made appends O(n) and rehydration O(n²).
+	return append(rows, row)
 }
 
 func hasTranscriptRow(rows []transcriptRow, row transcriptRow) bool {
@@ -132,27 +113,43 @@ func hasTranscriptRow(rows []transcriptRow, row transcriptRow) bool {
 	return false
 }
 
+// transcriptRowKey is run-scoped (runID baked into every key): some providers
+// synthesize ToolCallIDs that repeat across runs (e.g. Gemini's gemini_tool_N),
+// and a bare-id key silently dropped later runs' tool rows as "duplicates".
+// Repeats WITHIN one run are disambiguated upstream by the per-run ordinal
+// suffix the runner appends to row ids (see effectiveToolRowID).
 func transcriptRowKey(row transcriptRow) string {
 	switch row.kind {
 	case rowToolCall, rowToolResult:
 		if row.id != "" {
-			return fmt.Sprintf("%d:%s", row.kind, row.id)
+			return fmt.Sprintf("%d:%d:%s", row.kind, row.runID, row.id)
 		}
 	case rowPermission:
 		if row.permission != nil && row.permission.ToolCallID != "" {
-			return fmt.Sprintf("%d:%s:%s", row.kind, row.permission.ToolCallID, row.permission.Action)
+			return fmt.Sprintf("%d:%d:%s:%s", row.kind, row.runID, row.permission.ToolCallID, row.permission.Action)
 		}
 	case rowAskUser:
 		// Prefer row.id (set to the ToolCallID): it survives rehydration even when
 		// row.askUser is nil, so a reloaded ask_user row still dedupes correctly.
 		if row.id != "" {
-			return fmt.Sprintf("%d:%s", row.kind, row.id)
+			return fmt.Sprintf("%d:%d:%s", row.kind, row.runID, row.id)
 		}
 		if row.askUser != nil && row.askUser.ToolCallID != "" {
-			return fmt.Sprintf("%d:%s", row.kind, row.askUser.ToolCallID)
+			return fmt.Sprintf("%d:%d:%s", row.kind, row.runID, row.askUser.ToolCallID)
 		}
 	}
 	return ""
+}
+
+// effectiveToolRowID disambiguates a provider tool-call id that repeats within
+// a run: the first occurrence keeps the raw id (the common case), repeats get
+// an ordinal suffix. Session payloads are unaffected — they persist the
+// provider's original ids.
+func effectiveToolRowID(id string, seq int) string {
+	if id == "" || seq <= 1 {
+		return id
+	}
+	return fmt.Sprintf("%s#%d", id, seq)
 }
 
 func askUserTranscriptRow(request agent.AskUserRequest) transcriptRow {
@@ -300,5 +297,22 @@ func truncateTUIOutput(output string, limit int) string {
 	if limit <= 0 || len(output) <= limit {
 		return output
 	}
-	return output[:limit] + " [truncated]"
+	// Cut on a rune boundary: a bare byte slice can split a multi-byte UTF-8
+	// sequence and emit invalid UTF-8 into the transcript and session log.
+	return cutRunes(output, limit) + " [truncated]"
+}
+
+// cutRunes truncates text to at most limit bytes without splitting a UTF-8
+// rune (the cut lands on the last rune boundary at or before limit).
+func cutRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(text) <= limit {
+		return text
+	}
+	for limit > 0 && !utf8.RuneStart(text[limit]) {
+		limit--
+	}
+	return text[:limit]
 }

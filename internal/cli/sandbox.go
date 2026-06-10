@@ -63,7 +63,7 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
 	}
-	policy := applyConfiguredAutonomyCeiling(zeroSandbox.DefaultPolicy(), resolved.Sandbox.MaxAutonomy)
+	policy := applyConfiguredSandboxPolicy(zeroSandbox.DefaultPolicy(), resolved.Sandbox)
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
 	plan := backend.BuildPlan(workspaceRoot, policy)
 	if options.effective {

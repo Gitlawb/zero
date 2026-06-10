@@ -126,12 +126,19 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 	if emptyProviderProfile(profile) {
 		return check("provider.config", "Provider config", StatusFail, "No LLM provider is configured.", map[string]any{"help": "Set a provider in config or environment."})
 	}
+	// Report key PRESENCE, never the value: the raw key would only be redacted
+	// downstream anyway, and an unconditional [REDACTED] read as "configured"
+	// even when no key was set at all.
+	apiKey := "not set"
+	if profile.APIKey != "" {
+		apiKey = "set"
+	}
 	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), map[string]any{
 		"name":     profile.Name,
 		"provider": profile.ProviderKind,
 		"baseURL":  profile.BaseURL,
 		"model":    profile.Model,
-		"apiKey":   profile.APIKey,
+		"apiKey":   apiKey,
 	})
 }
 

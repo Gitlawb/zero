@@ -227,7 +227,7 @@ func TestFileSuggestionsMatchesAndSkipsVCSDirs(t *testing.T) {
 		}
 	}
 	mustWrite("cmd/server/main.go")
-	mustWrite(".git/config")             // hidden VCS dir: must be skipped
+	mustWrite(".git/config")               // hidden VCS dir: must be skipped
 	mustWrite("node_modules/dep/index.js") // dependency dir: must be skipped
 
 	got := suggestionTokens(fileSuggestions(root, "main"))
