@@ -46,10 +46,11 @@ func NewAskUserTool() *askUserTool {
 					"questions": {
 						Type:        "array",
 						Description: "One or more questions to ask the user.",
+						MinItems:    intPtr(1),
 						Items: &PropertySchema{
 							Type: "object",
 							Properties: map[string]PropertySchema{
-								"question": {Type: "string", Description: "The question to ask the user."},
+								"question": {Type: "string", Description: "The non-empty question to ask the user.", MinLength: intPtr(1)},
 								"options": {
 									Type:        "array",
 									Description: "Optional list of suggested answer choices.",

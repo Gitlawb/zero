@@ -184,6 +184,9 @@ func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush 
 	case rowToolCall:
 		return m.renderRunningToolCard(row, width, rc, opts)
 	case rowToolResult:
+		if isMalformedAskUserResult(row) {
+			return ""
+		}
 		return renderToolResultCard(row, width, rc, opts)
 	case rowPermission:
 		return renderPermissionRow(row, width)
@@ -192,6 +195,12 @@ func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush 
 	default:
 		return row.text
 	}
+}
+
+func isMalformedAskUserResult(row transcriptRow) bool {
+	return row.tool == "ask_user" &&
+		row.status == tools.StatusError &&
+		strings.HasPrefix(strings.TrimSpace(row.detail), "Error: Invalid arguments for ask_user:")
 }
 
 // hyperlink wraps already-styled text in an OSC 8 terminal hyperlink so

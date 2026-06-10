@@ -260,6 +260,21 @@ func TestComposerLineTracksRunState(t *testing.T) {
 	}
 }
 
+func TestMalformedAskUserToolResultIsHiddenFromChatSurface(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "call_bad",
+		tool:   "ask_user",
+		status: tools.StatusError,
+		text:   "tool result: ask_user error",
+		detail: "Error: Invalid arguments for ask_user: question 1 question is required",
+	}
+	if got := plainRender(t, m.renderRow(row, 96, buildRowContext([]transcriptRow{row}))); strings.TrimSpace(got) != "" {
+		t.Fatalf("malformed ask_user result should stay internal, rendered %q", got)
+	}
+}
+
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))

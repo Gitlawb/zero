@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,19 @@ func TestAskUserToolAdvertisesQuestionSchema(t *testing.T) {
 	}
 	if !requiredQuestions {
 		t.Fatalf("expected questions to be required, got %v", schema.Required)
+	}
+}
+
+func TestAskUserToolAdvertisesNonEmptyQuestionSchema(t *testing.T) {
+	data, err := json.Marshal(NewAskUserTool().Parameters())
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	schema := string(data)
+	for _, want := range []string{`"minItems":1`, `"minLength":1`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("ask_user schema missing %s: %s", want, schema)
+		}
 	}
 }
 

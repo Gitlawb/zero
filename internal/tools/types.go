@@ -58,6 +58,8 @@ type PropertySchema struct {
 	Items       *PropertySchema `json:"items,omitempty"`
 	Minimum     *int            `json:"minimum,omitempty"`
 	Maximum     *int            `json:"maximum,omitempty"`
+	MinLength   *int            `json:"minLength,omitempty"`
+	MinItems    *int            `json:"minItems,omitempty"`
 	// Properties/Required describe nested object fields (for Type "object" or an
 	// object-typed Items).
 	Properties map[string]PropertySchema `json:"properties,omitempty"`
