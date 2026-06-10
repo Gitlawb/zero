@@ -196,7 +196,7 @@ func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (sto
 	}
 	if hasToolCalls && !hasVisibleText {
 		state.toolOnlyTurns++
-	} else if hasVisibleText {
+	} else {
 		state.toolOnlyTurns = 0
 		state.toolOnlyReminderSent = false
 	}

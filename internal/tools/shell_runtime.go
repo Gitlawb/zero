@@ -17,7 +17,10 @@ type shellIssue struct {
 	Suggestion string
 }
 
-var windowsBashStyleCDPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)cd\s+/[a-z0-9_./~-]+`)
+var (
+	windowsBashStyleCDPattern = regexp.MustCompile(`(?i)(^|[&|;]\s*)cd\s+/(?:[a-ce-z0-9_./~-]|d[a-z0-9_./~-])[a-z0-9_./~-]*`)
+	windowsLSCommandPattern   = regexp.MustCompile(`(?i)(^|[&|;]\s*)ls\b(?:\s+|$)`)
+)
 
 func detectShellRuntime(goos string) shellRuntime {
 	if goos == "windows" {
@@ -39,11 +42,8 @@ func detectShellCommandIssue(command string, goos string) *shellIssue {
 		return nil
 	}
 	trimmed := strings.TrimSpace(command)
-	lower := strings.ToLower(trimmed)
 	if windowsBashStyleCDPattern.MatchString(trimmed) ||
-		strings.Contains(lower, " && ls ") ||
-		strings.HasSuffix(lower, " && ls") ||
-		strings.Contains(lower, " ls -") {
+		windowsLSCommandPattern.MatchString(trimmed) {
 		return &shellIssue{
 			Kind:       "windows_shell_syntax",
 			Message:    "Command looks like POSIX/Bash syntax, but Zero runs bash tool commands through Windows cmd.exe on this host.",

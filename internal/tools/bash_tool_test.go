@@ -97,6 +97,35 @@ func TestDetectShellCommandIssueFlagsWindowsBashisms(t *testing.T) {
 	}
 }
 
+func TestDetectShellCommandIssueAllowsWindowsCDSwitch(t *testing.T) {
+	issue := detectShellCommandIssue(`cd /d D:\tmp\zero-pr-158 && dir`, "windows")
+	if issue != nil {
+		t.Fatalf("expected valid Windows cd /d switch to pass, got %#v", issue)
+	}
+}
+
+func TestDetectShellCommandIssueRequiresActualLSCommand(t *testing.T) {
+	for _, command := range []string{
+		`echo false ls -la`,
+		`echo list -items`,
+		`powershell -NoProfile -Command "Write-Output ls -la"`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue != nil {
+			t.Fatalf("expected incidental ls text to pass for %q, got %#v", command, issue)
+		}
+	}
+
+	for _, command := range []string{
+		`ls -la`,
+		`cd C:\tmp && ls -la`,
+		`cd C:\tmp && ls`,
+	} {
+		if issue := detectShellCommandIssue(command, "windows"); issue == nil {
+			t.Fatalf("expected actual ls command to be flagged for %q", command)
+		}
+	}
+}
+
 func TestDetectShellOutputIssueAddsWindowsSyntaxHint(t *testing.T) {
 	issue := detectShellOutputIssue(`cd /d/tmp/zero-pr-158 && ls -la`, "The syntax of the command is incorrect.", "windows")
 	if issue == nil {

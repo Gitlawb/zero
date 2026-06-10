@@ -136,6 +136,26 @@ func TestRunResetsEmptyTurnCounterOnToolCall(t *testing.T) {
 	}
 }
 
+func TestGuardStateResetsToolOnlyStreakOnEmptyNonToolTurn(t *testing.T) {
+	var state guardState
+	toolOnly := zeroruntime.CollectedStream{
+		ToolCalls: []zeroruntime.ToolCall{{ID: "call", Name: "read_file", Arguments: `{}`}},
+	}
+
+	for range toolOnlyProgressReminderAt - 1 {
+		state.observeTurn(toolOnly)
+	}
+	state.observeTurn(zeroruntime.CollectedStream{})
+	state.observeTurn(toolOnly)
+
+	if reminder := state.progressReminder(); reminder != "" {
+		t.Fatalf("expected empty non-tool turn to reset tool-only progress reminder, got %q", reminder)
+	}
+	if state.toolOnlyTurns != 1 {
+		t.Fatalf("expected tool-only streak to restart at 1, got %d", state.toolOnlyTurns)
+	}
+}
+
 func TestRunDoesNotCountDroppedToolCallTurnsAsEmpty(t *testing.T) {
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
