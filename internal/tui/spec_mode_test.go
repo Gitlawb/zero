@@ -115,6 +115,65 @@ func TestSpecReviewBlocksShiftTabModeCycle(t *testing.T) {
 	}
 }
 
+func TestSpecReviewCancelLaunchesQueuedPrompt(t *testing.T) {
+	m := newSpecModeTestModel(t.TempDir(), &fakeProvider{
+		events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}},
+	}, testSessionStore(t))
+	m.pendingSpecReview = &pendingSpecReviewPrompt{SpecID: "spec", SpecFilePath: ".zero/specs/spec.md"}
+	m.queuedMessage = "continue after cancel"
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(model)
+
+	if cmd == nil {
+		t.Fatal("expected queued prompt to launch after spec review cancel")
+	}
+	if next.pendingSpecReview != nil {
+		t.Fatal("expected spec review to clear")
+	}
+	if next.hasQueuedMessage() {
+		t.Fatalf("expected queued prompt to be consumed, got %q", next.queuedMessage)
+	}
+	if !next.pending {
+		t.Fatal("expected queued prompt launch to mark model pending")
+	}
+}
+
+func TestSpecReviewRejectLaunchesQueuedPrompt(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+		textScript("queued after reject"),
+	}}
+	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	m.input.SetValue("/spec add review flow")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+	if next.pendingSpecReview == nil {
+		t.Fatal("expected pending review before rejection")
+	}
+	next.queuedMessage = "continue after reject"
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	next = updated.(model)
+
+	if cmd == nil {
+		t.Fatal("expected queued prompt to launch after spec review reject")
+	}
+	if next.pendingSpecReview != nil {
+		t.Fatal("expected spec review to clear")
+	}
+	if next.hasQueuedMessage() {
+		t.Fatalf("expected queued prompt to be consumed, got %q", next.queuedMessage)
+	}
+	if !next.pending {
+		t.Fatal("expected queued prompt launch to mark model pending")
+	}
+}
+
 func newSpecModeTestModel(root string, provider zeroruntime.Provider, store *sessions.Store) model {
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreTools(root) {

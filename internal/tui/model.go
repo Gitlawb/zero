@@ -52,16 +52,20 @@ type model struct {
 	unpricedRequests   int
 	unpricedTokens     int
 	transcript         []transcriptRow
+	transcriptDetailed bool
 	input              textinput.Model
+	composer           composerState
+	composerActive     bool
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
-	spinner     spinner.Model
-	pending     bool
-	exiting     bool
-	runCancel   context.CancelFunc
-	runID       int
-	activeRunID int
+	spinner       spinner.Model
+	pending       bool
+	queuedMessage string
+	exiting       bool
+	runCancel     context.CancelFunc
+	runID         int
+	activeRunID   int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -354,7 +358,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, tea.Quit
+		case tea.KeyCtrlO:
+			return m.toggleDetailedTranscript(), nil
 		case tea.KeyEsc:
+			if m.transcriptDetailed {
+				m.transcriptDetailed = false
+				return m, nil
+			}
 			// An active questionnaire is cancelled (not the whole run): deliver
 			// whatever answers were collected so the agent loop unblocks and
 			// degrades to its best-assumption path.
@@ -373,14 +383,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.suggestionsActive() {
 				return m.dismissSuggestions(), nil
 			}
-			m.input.SetValue("")
-			m.suggestions = nil
-			m.suggestionIdx = 0
+			if m.hasQueuedMessage() {
+				return m.clearQueuedMessage(), nil
+			}
+			m.clearComposer()
+			m.clearSuggestions()
 			if m.pending {
 				m.cancelRun()
 			}
 			return m, nil
 		case tea.KeyEnter:
+			if m.transcriptDetailed {
+				if command := parseCommand(m.input.Value()); command.kind == commandTranscript {
+					m.input.SetValue("")
+					return m.toggleDetailedTranscript(), nil
+				}
+				return m, nil
+			}
 			if m.pendingPermission != nil {
 				return m, nil
 			}
@@ -393,13 +412,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker != nil {
 				return m.choosePicker()
 			}
+			if msg.Alt {
+				if next, ok := m.applyComposerKey(msg); ok {
+					return next, nil
+				}
+			}
 			// Enter on a highlighted suggestion completes the input rather than
 			// submitting; Enter with no active suggestion submits as today.
 			if m.suggestionsActive() {
-				return m.completeSuggestion(), nil
+				next := m.completeSuggestion()
+				next.resetComposerFromInput()
+				return next, nil
 			}
 			return m.handleSubmit()
 		case tea.KeyShiftTab:
+			if m.transcriptDetailed {
+				return m, nil
+			}
 			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
 			// is intentionally not reachable by a casual keypress — see
 			// nextPermissionMode), but only when nothing modal is up: a permission
@@ -410,11 +439,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case tea.KeyTab:
+			if m.transcriptDetailed {
+				return m, nil
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
 			}
 		case tea.KeyDown:
+			if m.transcriptDetailed {
+				return m, nil
+			}
 			if m.picker != nil {
 				m.picker.move(1)
 				return m, nil
@@ -427,6 +462,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.recallHistory(1), nil
 			}
 		case tea.KeyUp:
+			if m.transcriptDetailed {
+				return m, nil
+			}
 			if m.picker != nil {
 				m.picker.move(-1)
 				return m, nil
@@ -438,6 +476,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.historyRecallActive() {
 				return m.recallHistory(-1), nil
 			}
+		}
+		if m.transcriptDetailed {
+			return m, nil
 		}
 		if m.pendingAskUser != nil {
 			// While a questionnaire is active, all other keys feed the text input
@@ -461,19 +502,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// inserts the matching starter suggestion instead of typing the digit.
 		// !pending mirrors the render condition exactly — the chips are off
 		// screen during a run (e.g. after /clear mid-run), so digits must type.
-		if m.transcriptEmpty() && !m.pending && strings.TrimSpace(m.input.Value()) == "" {
+		if m.transcriptEmpty() && !m.pending && strings.TrimSpace(m.composerValue()) == "" {
 			if k := msg.String(); len(k) == 1 && k >= "1" && k <= "3" {
 				if index := int(k[0] - '1'); index < len(emptyStateSuggestions) {
 					m.input.SetValue(emptyStateSuggestions[index])
 					m.input.CursorEnd()
+					m.resetComposerFromInput()
 					return m, nil
 				}
 			}
+		}
+		if next, ok := m.applyComposerKey(msg); ok {
+			return next, nil
+		}
+		if m.composerActive && strings.Contains(m.composer.text, "\n") {
+			return m, nil
 		}
 		// The key fell through to the text input: let it update, then refresh the
 		// autocomplete match list from the new value.
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		m.resetComposerFromInput()
 		m.recomputeSuggestions()
 		return m, cmd
 	case tea.FocusMsg:
@@ -550,7 +599,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			answer:  msg.answer,
 			answers: make([]string, 0, len(msg.request.Questions)),
 		}
-		m.input.SetValue("")
+		m.clearComposer()
+		m.clearSuggestions()
 		return m, nil
 	case agentResponseMsg:
 		if msg.runID != m.activeRunID {
@@ -648,7 +698,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.notifier != nil {
 			m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 		}
-		return m, nil
+		return m.launchQueuedMessageIfReady()
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -676,6 +726,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.transcriptDetailed {
+		return m.detailedTranscriptView()
+	}
 	return m.transcriptView()
 }
 
@@ -757,6 +810,10 @@ func (m model) transcriptView() string {
 	builder.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
 	builder.WriteString("\n")
 	builder.WriteString(m.composerLine(width))
+	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
+		builder.WriteString("\n")
+		builder.WriteString(queued)
+	}
 	if overlay := m.suggestionOverlay(width); overlay != "" {
 		builder.WriteString("\n")
 		builder.WriteString(overlay)
@@ -803,8 +860,17 @@ func (m model) composerLine(width int) string {
 	switch {
 	case m.pending:
 		hint = zeroTheme.faint.Render("esc stop")
-	case strings.TrimSpace(m.input.Value()) != "":
+	case strings.TrimSpace(m.composerValue()) != "":
 		hint = zeroTheme.faint.Render("run ↵")
+	}
+	if m.composerActive && strings.Contains(m.composer.text, "\n") {
+		line := renderComposerState(m.composer, m.input.Prompt, width)
+		if hint == "" {
+			return line
+		}
+		lines := strings.Split(line, "\n")
+		lines[len(lines)-1] = joinHeaderLine(fitStyledLine(lines[len(lines)-1], width-lipgloss.Width(hint)-2), hint, width)
+		return strings.Join(lines, "\n")
 	}
 	line := input.View()
 	if hint == "" {
@@ -889,6 +955,7 @@ func (m model) resolveAskUser(cancelled bool) (tea.Model, tea.Cmd) {
 		pending.answer(answers)
 	}
 	m.pendingAskUser = nil
+	m.clearSuggestions()
 	return m, nil
 }
 
@@ -937,17 +1004,20 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
-	command := parseCommand(m.input.Value())
+	input := m.composerValue()
+	command := parseCommand(input)
 	// While exiting (Ctrl+C waiting on the cancelled run's checkpoint flush) a
 	// new run must not start: the deferred tea.Quit would abort it mid-flight
 	// and orphan its checkpoint blobs — the exact loss flushRunIDs prevents.
-	if command.kind == commandPrompt && (m.pending || m.exiting) {
+	if command.kind == commandPrompt && m.exiting {
 		return m, nil
 	}
-	m.rememberInput(m.input.Value())
-	m.input.SetValue("")
-	m.suggestions = nil
-	m.suggestionIdx = 0
+	if command.kind == commandPrompt && m.pending {
+		return m.queueMessage(command.text), nil
+	}
+	m.rememberInput(input)
+	m.clearComposer()
+	m.clearSuggestions()
 
 	switch command.kind {
 	case commandEmpty:
@@ -1056,6 +1126,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m, text = m.handleCompactCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
+	case commandTranscript:
+		return m.toggleDetailedTranscript(), nil
 	case commandRewind:
 		text := ""
 		m, text = m.handleRewindCommand(command.text)
@@ -1122,64 +1194,80 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "$ " + cmdText})
 		return m, runBashEscape(m.cwd, cmdText)
 	case commandPrompt:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: command.text})
-		if m.provider == nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendAssistant,
-				text: "No provider configured.",
-			})
-			return m, nil
-		}
-		var err error
-		m, err = m.ensureActiveSession(command.text)
-		if err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendError,
-				text: "session create error: " + err.Error(),
-			})
-		} else {
-			agentPrompt := m.sessionPrompt(command.text)
-			m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
-				"role":    "user",
-				"content": command.text,
-			})
-			if err != nil {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{
-					kind: actionAppendError,
-					text: "session record error: " + err.Error(),
-				})
-			}
-			command.text = agentPrompt
-		}
-		// Re-check vision support against the CURRENT effective model at submit
-		// time, not just at /image attach time: the user may have attached on a
-		// vision model and then /model-switched to a non-vision one. If the active
-		// model can't accept images, drop them (with an inline notice mirroring
-		// exec's drop+warn wording) rather than sending them to a model that
-		// rejects them. Pending state is cleared either way below.
-		turnImages := m.pendingImages
-		if len(turnImages) > 0 && !modelSupportsVisionTUI(m.modelName) {
-			name := m.modelName
-			if name == "" {
-				name = "the active model"
-			}
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{
-				kind: actionAppendSystem,
-				text: fmt.Sprintf("Model %s does not support image input; ignoring %d image(s).", name, len(turnImages)),
-			})
-			turnImages = nil
-		}
-		m.pendingImages = nil
-		m.pendingImageLabels = nil
-		runCtx, cancel := context.WithCancel(m.ctx)
-		m.runID++
-		m.activeRunID = m.runID
-		m.runCancel = cancel
-		m.pending = true
-		return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, command.text, turnImages), m.spinner.Tick)
+		return m.launchPrompt(command.text)
 	default:
 		return m, nil
 	}
+}
+
+// launchPrompt starts a normal agent turn from text already accepted by the
+// composer. Queued prompts use this path too, so session and image behavior
+// stays identical to immediate submissions.
+func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: prompt})
+	if m.provider == nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendAssistant,
+			text: "No provider configured.",
+		})
+		return m, nil
+	}
+	var err error
+	m, err = m.ensureActiveSession(prompt)
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendError,
+			text: "session create error: " + err.Error(),
+		})
+	} else {
+		agentPrompt := m.sessionPrompt(prompt)
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+			"role":    "user",
+			"content": prompt,
+		})
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendError,
+				text: "session record error: " + err.Error(),
+			})
+		}
+		prompt = agentPrompt
+	}
+	// Re-check vision support against the CURRENT effective model at submit
+	// time, not just at /image attach time: the user may have attached on a
+	// vision model and then /model-switched to a non-vision one. If the active
+	// model can't accept images, drop them (with an inline notice mirroring
+	// exec's drop+warn wording) rather than sending them to a model that
+	// rejects them. Pending state is cleared either way below.
+	turnImages := m.pendingImages
+	if len(turnImages) > 0 && !modelSupportsVisionTUI(m.modelName) {
+		name := m.modelName
+		if name == "" {
+			name = "the active model"
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: fmt.Sprintf("Model %s does not support image input; ignoring %d image(s).", name, len(turnImages)),
+		})
+		turnImages = nil
+	}
+	m.pendingImages = nil
+	m.pendingImageLabels = nil
+	runCtx, cancel := context.WithCancel(m.ctx)
+	m.runID++
+	m.activeRunID = m.runID
+	m.runCancel = cancel
+	m.pending = true
+	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+}
+
+func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
+	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+		return m, nil
+	}
+	prompt := m.queuedMessage
+	m.queuedMessage = ""
+	return m.launchPrompt(prompt)
 }
 
 // historyRecallActive reports whether ↑/↓ should navigate previously submitted
@@ -1197,7 +1285,7 @@ func (m model) recallHistory(direction int) model {
 		if direction > 0 {
 			return m
 		}
-		m.historyDraft = m.input.Value()
+		m.historyDraft = m.composerValue()
 	}
 	next := clamp(m.historyIdx+direction, 0, len(m.inputHistory))
 	if next == m.historyIdx {
@@ -1210,6 +1298,7 @@ func (m model) recallHistory(direction int) model {
 		m.input.SetValue(m.inputHistory[next])
 	}
 	m.input.CursorEnd()
+	m.resetComposerFromInput()
 	m.recomputeSuggestions()
 	return m
 }

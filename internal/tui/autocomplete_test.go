@@ -203,6 +203,21 @@ func TestSuggestionsSuppressedDuringModals(t *testing.T) {
 	}
 }
 
+func TestSuggestionsSuppressedDuringSpecReview(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.suggestions = []commandSuggestion{{Name: "/model", Desc: "Pick a model."}}
+	m.pendingSpecReview = &pendingSpecReviewPrompt{SpecID: "spec-1", SpecFilePath: ".zero/specs/spec-1.md"}
+
+	if m.suggestionsActive() {
+		t.Fatal("stale suggestions must stay suppressed while spec review is active")
+	}
+
+	m = typeRunes(t, m, "/mo")
+	if m.suggestionsActive() {
+		t.Fatal("new suggestions must stay suppressed while spec review is active")
+	}
+}
+
 func TestSuggestionOverlayRenders(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 30
@@ -239,6 +254,33 @@ func TestFileSuggestionsMatchesAndSkipsVCSDirs(t *testing.T) {
 	for _, name := range all {
 		if strings.Contains(name, ".git/") || strings.Contains(name, "node_modules/") {
 			t.Fatalf("walk must skip VCS/dependency dirs, got %q", name)
+		}
+	}
+}
+
+func TestFileSuggestionsUseWorkspaceIndexSkipRules(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel string) {
+		t.Helper()
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("internal/keep.go")
+	mustWrite("build/generated.go") // workspaceindex.ShouldSkipDir skips build
+	mustWrite("assets/logo.png")    // workspaceindex.ShouldSkipFile skips binary assets
+
+	got := suggestionTokens(fileSuggestions(root, ""))
+	if !contains(got, "@internal/keep.go") {
+		t.Fatalf("expected normal source file in suggestions, got %v", got)
+	}
+	for _, skipped := range []string{"@build/generated.go", "@assets/logo.png"} {
+		if contains(got, skipped) {
+			t.Fatalf("file suggestions must use workspaceindex skip rules; found %s in %v", skipped, got)
 		}
 	}
 }

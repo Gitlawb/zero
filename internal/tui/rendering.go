@@ -161,6 +161,18 @@ func (m model) renderRow(row transcriptRow, width int, rc rowContext) string {
 	return m.renderRowMode(row, width, rc, false)
 }
 
+func (m model) renderRowDetailed(row transcriptRow, width int, rc rowContext) string {
+	opts := cardRenderOptions{bodyCap: 0, cwd: m.cwd}
+	if defaultRenderCache != nil {
+		if key, stable := m.renderRowCacheKey(row, width, rc, opts, false); key != "" {
+			return defaultRenderCache.render(key, stable, func() string {
+				return m.renderRowModeUncached(row, width, rc, opts)
+			})
+		}
+	}
+	return m.renderRowModeUncached(row, width, rc, opts)
+}
+
 // renderRowMode renders a transcript row either for the live region (flush ==
 // false: tight body caps, spinner-capable) or for its one-time scrollback
 // flush (flush == true: deep body caps so edited code stays reviewable).
@@ -169,6 +181,17 @@ func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush 
 	if flush {
 		opts.bodyCap = flushCardBodyMaxLines
 	}
+	if defaultRenderCache != nil {
+		if key, stable := m.renderRowCacheKey(row, width, rc, opts, flush); key != "" {
+			return defaultRenderCache.render(key, stable, func() string {
+				return m.renderRowModeUncached(row, width, rc, opts)
+			})
+		}
+	}
+	return m.renderRowModeUncached(row, width, rc, opts)
+}
+
+func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	switch row.kind {
 	case rowUser:
 		return renderUserRow(row, width)
@@ -559,29 +582,6 @@ type cardBody struct {
 	headTag string
 }
 
-type toolBodyRequest struct {
-	name   string
-	hint   string
-	detail string
-	width  int
-	opts   cardRenderOptions
-}
-
-type toolBodyRenderer func(toolBodyRequest) cardBody
-
-var registeredToolBodyRenderers = map[string]toolBodyRenderer{
-	"read_file": func(req toolBodyRequest) cardBody { return readCardBody(req.detail, req.width, req.opts) },
-	"bash":      func(req toolBodyRequest) cardBody { return bashCardBody(req.hint, req.detail, req.width, req.opts) },
-	"grep":      func(req toolBodyRequest) cardBody { return grepCardBody(req.detail, req.width, req.opts) },
-}
-
-func toolBodyRendererFor(name string) toolBodyRenderer {
-	if renderer, ok := registeredToolBodyRenderers[name]; ok {
-		return renderer
-	}
-	return func(req toolBodyRequest) cardBody { return genericCardBody(req.detail, req.opts) }
-}
-
 // renderRunningToolCard draws the head-only card for a tool call that has no
 // result yet: spinner glyph while ITS run is live, a static placeholder for
 // orphans (cancelled/errored turns, rehydrated history) — keying off the
@@ -702,21 +702,9 @@ func toolCard(head string, body []string, footer string, borderStyle lipgloss.St
 	return strings.Join(lines, "\n")
 }
 
-// toolCardBody picks the body renderer by result shape, reusing the existing
-// diff detection; the other shapes key off the core tool names.
+// toolCardBody delegates result-shape selection to the tool body registry.
 func toolCardBody(name string, hint string, detail string, width int, opts cardRenderOptions) cardBody {
-	detail = strings.TrimRight(strings.ReplaceAll(detail, "\r\n", "\n"), "\n")
-	// Terminal tab stops are unknowable from here and break the width math
-	// (lipgloss measures \t as one cell, the terminal expands it further), so
-	// card bodies render tabs as a fixed indent.
-	detail = strings.ReplaceAll(detail, "\t", "    ")
-	if strings.TrimSpace(detail) == "" {
-		return cardBody{}
-	}
-	if looksLikeDiff(detail) {
-		return diffCardBody(detail, width, opts)
-	}
-	return toolBodyRendererFor(name)(toolBodyRequest{
+	return defaultToolBodyRegistry.render(toolBodyRequest{
 		name:   name,
 		hint:   hint,
 		detail: detail,

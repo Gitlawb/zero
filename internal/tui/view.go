@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -285,25 +286,38 @@ func (m model) suggestionOverlay(width int) string {
 	if !m.suggestionsActive() {
 		return ""
 	}
-	nameWidth := 0
-	for _, s := range m.suggestions {
-		if w := lipgloss.Width(s.Name); w > nameWidth {
-			nameWidth = w
+	return renderSelectableList(selectableListOptions{
+		Items:      selectableItems(m.suggestions, m.suggestionsAreFiles),
+		Selected:   m.suggestionIdx,
+		Width:      width - 2,
+		MaxVisible: maxCommandSuggestions,
+	})
+}
+
+func selectableItems(suggestions []commandSuggestion, files bool) []selectableListItem {
+	items := make([]selectableListItem, 0, len(suggestions))
+	for _, suggestion := range suggestions {
+		item := selectableListItem{Label: suggestion.Name, Description: suggestion.Desc}
+		if files {
+			item = fileSelectableItem(suggestion.Name)
 		}
+		items = append(items, item)
 	}
-	lines := make([]string, 0, len(m.suggestions))
-	for index, s := range m.suggestions {
-		surface := zeroTheme.onPanel
-		marker := surface(zeroTheme.faintest).Render("  ")
-		if index == m.suggestionIdx {
-			surface = zeroTheme.onSel
-			marker = surface(zeroTheme.accent).Render("❯ ")
-		}
-		pad := surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(0, nameWidth-lipgloss.Width(s.Name))))
-		line := marker + surface(zeroTheme.ink).Render(s.Name) + pad + surface(zeroTheme.faint).Render("  "+s.Desc)
-		lines = append(lines, fitStyledLine(line, width-2))
+	return items
+}
+
+func fileSelectableItem(token string) selectableListItem {
+	rel := strings.TrimPrefix(token, "@")
+	rel = filepath.ToSlash(rel)
+	base := path.Base(rel)
+	if base == "." || base == "/" || base == "" {
+		return selectableListItem{Label: token, Description: "file"}
 	}
-	return strings.Join(lines, "\n")
+	dir := path.Dir(rel)
+	if dir == "." || dir == "" {
+		return selectableListItem{Label: "@" + base, Description: "file"}
+	}
+	return selectableListItem{Label: "@" + base, Description: dir}
 }
 
 // pickerOverlay renders an open interactive selector below the composer: a
