@@ -25,7 +25,7 @@ func TestScanBuildsDeterministicSnapshot(t *testing.T) {
 	writeFile(t, root, ".next/cache.js", "ignored")
 	writeFile(t, root, ".cache/blob", "ignored")
 
-	got, err := Scan(root, Options{})
+	got, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestScanDoesNotFollowSymlinkedDirectories(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	got, err := Scan(root, Options{})
+	got, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -114,13 +114,28 @@ func TestScanSkipsGitMetadataFile(t *testing.T) {
 	writeFile(t, root, ".git", "gitdir: ../.git/worktrees/zero\n")
 	writeFile(t, root, "main.go", "package main\n")
 
-	got, err := Scan(root, Options{})
+	got, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 	want := []string{"main.go"}
 	if !reflect.DeepEqual(pathsOf(got.Files), want) {
 		t.Fatalf("Files=%v want %v", pathsOf(got.Files), want)
+	}
+}
+
+func TestScanReturnsFilesystemErrorsWithTruncatedSnapshot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing")
+
+	got, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
+	if err == nil {
+		t.Fatal("Scan missing root error=nil, want error")
+	}
+	if got.Root != filepath.Clean(root) {
+		t.Fatalf("Root=%q want %q", got.Root, filepath.Clean(root))
+	}
+	if !got.Truncated {
+		t.Fatal("Truncated=false want true")
 	}
 }
 
@@ -160,6 +175,24 @@ func TestScanHonorsTraversalCaps(t *testing.T) {
 		}
 		if got.DirectoryCount != 1 {
 			t.Fatalf("DirectoryCount=%d want 1", got.DirectoryCount)
+		}
+		if !got.Truncated {
+			t.Fatal("Truncated=false want true")
+		}
+	})
+
+	t.Run("zero max depth includes root files only", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, root, "top.go", "package top\n")
+		writeFile(t, root, "pkg/one.go", "package pkg\n")
+
+		got, err := Scan(root, Options{MaxDepth: 0})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		want := []string{"top.go"}
+		if !reflect.DeepEqual(pathsOf(got.Files), want) {
+			t.Fatalf("Files=%v want %v", pathsOf(got.Files), want)
 		}
 		if !got.Truncated {
 			t.Fatal("Truncated=false want true")

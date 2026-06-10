@@ -104,6 +104,9 @@ func workspaceContext(cwd string) string {
 }
 
 func repoMapContext(cwd string) string {
+	// repomap.Scan is best-effort supplemental context for the prompt. If it
+	// fails, omit the repo map instead of failing the agent run; successful scans
+	// are still capped by repomap.RenderPrompt and maxRepoMapContextBytes.
 	snapshot, err := repomap.Scan(cwd, repomap.Options{
 		MaxFiles: 300,
 		MaxDepth: 5,

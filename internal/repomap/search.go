@@ -4,6 +4,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -182,7 +183,7 @@ func fuzzyMatch(filePath string, query string) bool {
 		if index < 0 {
 			return false
 		}
-		position += index + len(string(char))
+		position += index + utf8.RuneLen(char)
 	}
 	return true
 }

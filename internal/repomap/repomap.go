@@ -18,7 +18,9 @@ const (
 var errStopWalk = errors.New("repo map scan stopped")
 
 type Options struct {
-	MaxFiles            int
+	MaxFiles int
+	// MaxDepth is measured as path separators below the root. Zero means root
+	// files only; negative values use DefaultMaxDepth.
 	MaxDepth            int
 	MaxBytesPerFileName int
 }
@@ -64,24 +66,26 @@ func Scan(root string, options Options) (Snapshot, error) {
 		maxFiles = DefaultMaxFiles
 	}
 	maxDepth := options.MaxDepth
-	if maxDepth <= 0 {
+	if maxDepth < 0 {
 		maxDepth = DefaultMaxDepth
 	}
 
 	var files []File
 	dirs := map[string]struct{}{}
 	truncated := false
-	walkErr := filepath.WalkDir(cleanRoot, func(current string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	walkErr := filepath.WalkDir(cleanRoot, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			truncated = true
+			return walkErr
 		}
 		if current == cleanRoot {
 			return nil
 		}
 
-		rel, err := filepath.Rel(cleanRoot, current)
-		if err != nil {
-			return nil
+		rel, relErr := filepath.Rel(cleanRoot, current)
+		if relErr != nil {
+			truncated = true
+			return relErr
 		}
 		rel = filepath.ToSlash(rel)
 
@@ -129,10 +133,6 @@ func Scan(root string, options Options) (Snapshot, error) {
 		})
 		return nil
 	})
-	if walkErr != nil && !errors.Is(walkErr, errStopWalk) {
-		return Snapshot{}, walkErr
-	}
-
 	sortFiles(files)
 	snapshot := Snapshot{
 		Root:           cleanRoot,
@@ -146,6 +146,9 @@ func Scan(root string, options Options) (Snapshot, error) {
 	snapshot.ExtensionCounts = countExtensions(files)
 	snapshot.ImportantFiles = importantFilePaths(files)
 	snapshot.Tree = buildTree(files)
+	if walkErr != nil && !errors.Is(walkErr, errStopWalk) {
+		return snapshot, walkErr
+	}
 	return snapshot, nil
 }
 

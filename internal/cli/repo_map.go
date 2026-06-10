@@ -164,6 +164,10 @@ func buildRepoMapReport(snapshot repomap.Snapshot, options repoMapOptions) repoM
 	if options.query != "" {
 		matches = repomap.Search(snapshot, options.query, options.maxFiles)
 		files = files[:0]
+		// repomap.Search returns paths from snapshot.Files, so repoMapFileByPath
+		// should always find match.Path. If it does not, Search and the snapshot
+		// are inconsistent; skip the stale match instead of emitting a partial
+		// file record with fabricated metadata.
 		for _, match := range matches {
 			if file, ok := repoMapFileByPath(snapshot.Files, match.Path); ok {
 				files = append(files, file)
