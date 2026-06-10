@@ -33,6 +33,9 @@ func NewScope(workspaceRoot string, extras []string) (*Scope, error) {
 	return scope, nil
 }
 
+// WorkspaceRoot returns the resolved workspace root. It is safe to call
+// without acquiring the lock because workspaceRoot is immutable after
+// construction.
 func (s *Scope) WorkspaceRoot() string {
 	return s.workspaceRoot
 }
@@ -70,8 +73,14 @@ func (s *Scope) Add(path string) (string, error) {
 // validate reports whether requestedPath is allowed by any scope root.
 // Relative paths resolve against the workspace root only; absolute paths are
 // accepted if they validate (including per-segment symlink checks) under ANY
-// root. The returned violation is the workspace root's, with an actionable
-// hint appended for plain outside-workspace denials.
+// root. A symlink whose final target lies inside any granted root is allowed —
+// this is a deliberate semantic widening compared with single-root validation,
+// because the true write target is inside an allowed root.
+//
+// When all roots deny, a ViolationSymlinkTraversal result from any root is
+// preferred over ViolationOutsideWorkspace; the --add-dir hint is appended
+// only on outside_workspace results. The returned violation always carries
+// the caller's original requestedPath.
 func (s *Scope) validate(requestedPath string) *pathViolation {
 	roots := s.Roots()
 	if !filepath.IsAbs(requestedPath) {
@@ -81,21 +90,40 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 	// symlinks (e.g. macOS /var -> /private/var) are resolved before comparing
 	// against the symlink-resolved scope roots, while leaving workspace-internal
 	// symlinks intact so validateWorkspacePath can detect traversal violations.
-	var first *pathViolation
+	var outsideViolation *pathViolation
+	var traversalViolation *pathViolation
 	for _, root := range roots {
 		normalized := normalizePrefixForRoot(requestedPath, root)
 		violation := validateWorkspacePath(root, normalized)
 		if violation == nil {
 			return nil
 		}
-		if first == nil {
-			first = violation
+		switch violation.Code {
+		case ViolationSymlinkTraversal:
+			if traversalViolation == nil {
+				traversalViolation = violation
+			}
+		default:
+			if outsideViolation == nil {
+				outsideViolation = violation
+			}
 		}
 	}
-	if first != nil && first.Code == ViolationOutsideWorkspace {
-		first.Reason += " (use /add-dir or --add-dir to allow writes there)"
+	// Prefer symlink-traversal: the path was lexically inside a granted root
+	// but crossed an in-root symlink — the --add-dir hint would be misleading.
+	if traversalViolation != nil {
+		return &pathViolation{
+			Code:   ViolationSymlinkTraversal,
+			Path:   requestedPath,
+			Reason: traversalViolation.Reason,
+		}
 	}
-	return first
+	// Plain outside-workspace denial — rebuild with the original path and hint.
+	return &pathViolation{
+		Code:   ViolationOutsideWorkspace,
+		Path:   requestedPath,
+		Reason: fmt.Sprintf("%s is outside the workspace (use /add-dir or --add-dir to allow writes there)", requestedPath),
+	}
 }
 
 // normalizePrefixForRoot resolves platform-level symlinks (e.g. macOS
@@ -109,6 +137,10 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 // verbatim. If a component inside the root is a symlink, leave it for
 // validateWorkspacePath to handle. Non-existent tail components are always
 // appended verbatim.
+//
+// Note: this helper assumes POSIX-style absolute paths and does not handle
+// filepath.VolumeName — that is fine while sandbox backends are seatbelt and
+// bubblewrap only (both Linux/macOS).
 func normalizePrefixForRoot(absPath, resolvedRoot string) string {
 	parts := strings.Split(strings.TrimPrefix(filepath.Clean(absPath), string(filepath.Separator)), string(filepath.Separator))
 	current := string(filepath.Separator)
@@ -130,13 +162,11 @@ func normalizePrefixForRoot(absPath, resolvedRoot string) string {
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			// Symlink. Only resolve it if we're still outside the root.
-			rel, err := filepath.Rel(resolvedRoot, current)
-			insideRoot := err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
-			if insideRoot {
+			if pathWithinRoot(resolvedRoot, current) {
 				// Inside root — leave this symlink for validateWorkspacePath.
 				return filepath.Join(append([]string{current}, parts[i:]...)...)
 			}
-			// Outside root — resolve this platform-level symlink.
+			// Outside root (or a jump into the root) — resolve this platform-level symlink.
 			resolved, err := filepath.EvalSymlinks(next)
 			if err != nil {
 				return filepath.Join(append([]string{current}, parts[i:]...)...)
