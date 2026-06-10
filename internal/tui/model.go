@@ -511,7 +511,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePermissionKey(msg)
 		}
 		if m.providerWizard != nil {
-			return m, nil
+			return m.handleProviderWizardKey(msg)
 		}
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.

@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
@@ -59,7 +62,7 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	}
 	view := plainRender(t, next.View())
 	for _, want := range []string{
-		"Add API key",
+		"Paste API key",
 		"ANTHROPIC_API_KEY",
 		"zero providers add anthropic --api-key-env ANTHROPIC_API_KEY --set-active",
 	} {
@@ -115,6 +118,76 @@ func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
 	next = updated.(model)
 	if next.providerWizard != nil {
 		t.Fatal("Esc should close provider wizard")
+	}
+}
+
+func TestProviderWizardAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T) {
+	const secret = "AIza-secret-123"
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "google")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.providerWizard.step != providerWizardStepCredential {
+		t.Fatalf("wizard step = %v, want credential", next.providerWizard.step)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	next = updated.(model)
+	if next.providerWizard.apiKey != secret {
+		t.Fatalf("wizard api key was not captured from paste")
+	}
+	view := plainRender(t, next.View())
+	for _, want := range []string{"Paste API key", "api key >", "pasted key", "session only"} {
+		assertContains(t, view, want)
+	}
+	assertNotContains(t, view, secret)
+}
+
+func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
+	const secret = "AIza-secret-123"
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "google")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepModel {
+		t.Fatalf("wizard step = %v, want model", next.providerWizard.step)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepDone {
+		t.Fatalf("wizard step = %v, want done", next.providerWizard.step)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+
+	if next.providerWizard != nil {
+		t.Fatal("successful provider apply should close the wizard")
+	}
+	if captured.CatalogID != "google" || captured.ProviderKind != config.ProviderKindGoogle {
+		t.Fatalf("captured profile provider = %#v, want google", captured)
+	}
+	if captured.APIKey != secret {
+		t.Fatalf("captured API key = %q, want pasted secret", captured.APIKey)
+	}
+	if captured.APIKeyEnv != "" {
+		t.Fatalf("captured APIKeyEnv = %q, want empty when using pasted key", captured.APIKeyEnv)
+	}
+	if next.providerProfile.APIKey != secret || next.providerName != "google" {
+		t.Fatalf("model provider state was not updated: provider=%q profile=%#v", next.providerName, next.providerProfile)
 	}
 }
 

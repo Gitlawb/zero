@@ -2,12 +2,15 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type providerWizardStep int
@@ -31,6 +34,8 @@ type providerWizardState struct {
 	selectedProvider int
 	models           []providerWizardModel
 	selectedModel    int
+	apiKey           string
+	err              string
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -101,6 +106,8 @@ func (wizard *providerWizardState) move(delta int) {
 		}
 		wizard.selectedProvider = ((wizard.selectedProvider+delta)%len(wizard.providers) + len(wizard.providers)) % len(wizard.providers)
 		wizard.selectedModel = 0
+		wizard.apiKey = ""
+		wizard.err = ""
 		wizard.refreshModels()
 	case providerWizardStepModel:
 		wizard.refreshModels()
@@ -118,14 +125,17 @@ func (wizard *providerWizardState) advance() {
 	switch wizard.step {
 	case providerWizardStepProvider:
 		wizard.refreshModels()
+		wizard.err = ""
 		if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
 		} else {
 			wizard.step = providerWizardStepModel
 		}
 	case providerWizardStepCredential:
+		wizard.err = ""
 		wizard.step = providerWizardStepModel
 	case providerWizardStepModel:
+		wizard.err = ""
 		wizard.step = providerWizardStepDone
 	case providerWizardStepDone:
 		wizard.step = providerWizardStepProvider
@@ -215,6 +225,26 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
 	}
+	if m.providerWizard.step == providerWizardStepCredential {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.providerWizard = nil
+			return m, nil
+		case tea.KeyRunes:
+			m.providerWizard.appendAPIKey(msg.Runes)
+			return m, nil
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			m.providerWizard.deleteAPIKeyRune()
+			return m, nil
+		case tea.KeyCtrlU:
+			m.providerWizard.apiKey = ""
+			return m, nil
+		case tea.KeyEnter:
+			m.providerWizard.advance()
+			return m, nil
+		}
+		return m, nil
+	}
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.providerWizard = nil
@@ -224,11 +254,52 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.providerWizard.move(1)
 	case tea.KeyEnter:
 		if m.providerWizard.step == providerWizardStepDone {
-			m.providerWizard = nil
-			return m, nil
+			return m.applyProviderWizard()
 		}
 		m.providerWizard.advance()
 	}
+	return m, nil
+}
+
+func (wizard *providerWizardState) appendAPIKey(runes []rune) {
+	for _, r := range runes {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			continue
+		}
+		wizard.apiKey += string(r)
+	}
+	wizard.err = ""
+}
+
+func (wizard *providerWizardState) deleteAPIKeyRune() {
+	if wizard.apiKey == "" {
+		return
+	}
+	runes := []rune(wizard.apiKey)
+	wizard.apiKey = string(runes[:len(runes)-1])
+	wizard.err = ""
+}
+
+func (m model) applyProviderWizard() (model, tea.Cmd) {
+	wizard := m.providerWizard
+	if wizard == nil {
+		return m, nil
+	}
+	provider := wizard.currentProvider()
+	modelChoice := wizard.currentModel()
+	profile := providerWizardProfile(provider, modelChoice.ID, wizard.apiKey)
+	if m.newProvider != nil {
+		nextProvider, err := m.newProvider(profile)
+		if err != nil {
+			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey}})
+			return m, nil
+		}
+		m.provider = nextProvider
+	}
+	m.providerProfile = profile
+	m.providerName = profile.Name
+	m.modelName = profile.Model
+	m.providerWizard = nil
 	return m, nil
 }
 
@@ -250,6 +321,9 @@ func (wizard *providerWizardState) render(width int) string {
 		zeroTheme.badge.Render(" PROVIDER ") + " " + zeroTheme.ink.Bold(true).Render("Provider setup"),
 		zeroTheme.faint.Render(providerWizardStepLine(wizard.step)),
 		"",
+	}
+	if wizard.err != "" {
+		lines = append(lines, zeroTheme.red.Render("error: "+wizard.err), "")
 	}
 	switch wizard.step {
 	case providerWizardStepProvider:
@@ -321,10 +395,17 @@ func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 	provider := wizard.currentProvider()
 	env := firstProviderDisplayValue(provider.AuthEnvVars...)
 	command := providerWizardAddCommand(provider, "")
+	value := zeroTheme.faint.Render("paste key here")
+	if wizard.apiKey != "" {
+		value = zeroTheme.ink.Render(maskedProviderWizardKey(wizard.apiKey)) + zeroTheme.faint.Render("  pasted key")
+	}
+	input := zeroTheme.userPrompt.Render("api key > ") + value + zeroTheme.accent.Render("▌")
 	return []string{
-		zeroTheme.accent.Render("Add API key"),
-		zeroTheme.ink.Render("Set " + env + " in your environment, then keep going."),
-		zeroTheme.faint.Render("Zero stores an env-var reference, not the secret value."),
+		zeroTheme.accent.Render("Paste API key"),
+		zeroTheme.ink.Render("Paste your key here, then press Enter."),
+		zeroTheme.faint.Render("Leave empty to use " + env + " from your environment."),
+		zeroTheme.onPanel2(zeroTheme.ink).Render(input),
+		zeroTheme.faint.Render("Pasted keys are hidden and used for this session only."),
 		zeroTheme.onPanel2(zeroTheme.ink).Render(command),
 	}
 }
@@ -362,10 +443,77 @@ func (wizard *providerWizardState) renderDoneStep(width int) []string {
 		zeroTheme.accent.Render("Ready to connect"),
 		zeroTheme.ink.Render("provider: " + provider.Name),
 		zeroTheme.ink.Render("model: " + model.ID),
-		zeroTheme.faint.Render("Run these once, then reopen Zero or continue with the active provider."),
+		zeroTheme.ink.Render("credential: " + providerWizardCredentialLabel(provider, wizard.apiKey)),
+		zeroTheme.faint.Render("Press Enter to use this provider for the current session."),
+		zeroTheme.faint.Render("Persist later with:"),
 		zeroTheme.onPanel2(zeroTheme.ink).Render(addCommand),
 		zeroTheme.onPanel2(zeroTheme.ink).Render(checkCommand),
 	}
+}
+
+func providerWizardCredentialLabel(provider providercatalog.Descriptor, apiKey string) string {
+	if strings.TrimSpace(apiKey) != "" {
+		return "pasted key (session only)"
+	}
+	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
+		return env + " env var"
+	}
+	return "not required"
+}
+
+func maskedProviderWizardKey(value string) string {
+	count := len([]rune(value))
+	if count == 0 {
+		return ""
+	}
+	if count > 24 {
+		count = 24
+	}
+	return strings.Repeat("*", count)
+}
+
+func providerWizardProfile(provider providercatalog.Descriptor, model string, apiKey string) config.ProviderProfile {
+	profile := config.ProviderProfile{
+		Name:         provider.ID,
+		ProviderKind: providerWizardProviderKind(provider),
+		CatalogID:    provider.ID,
+		BaseURL:      provider.DefaultBaseURL,
+		APIFormat:    providerWizardAPIFormat(provider),
+		Model:        firstProviderDisplayValue(model, provider.DefaultModel),
+	}
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
+		profile.APIKey = apiKey
+	} else if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
+		profile.APIKeyEnv = env
+	}
+	return profile
+}
+
+func providerWizardProviderKind(provider providercatalog.Descriptor) config.ProviderKind {
+	switch provider.Transport {
+	case providercatalog.TransportOpenAI:
+		return config.ProviderKindOpenAI
+	case providercatalog.TransportAnthropic:
+		return config.ProviderKindAnthropic
+	case providercatalog.TransportAnthropicCompatible:
+		return config.ProviderKindAnthropicCompat
+	case providercatalog.TransportGoogle:
+		return config.ProviderKindGoogle
+	case providercatalog.TransportOpenAICompatible:
+		return config.ProviderKindOpenAICompatible
+	default:
+		return config.ProviderKind(strings.ToLower(string(provider.Transport)))
+	}
+}
+
+func providerWizardAPIFormat(provider providercatalog.Descriptor) string {
+	if provider.Transport == providercatalog.TransportOpenAI || provider.Transport == providercatalog.TransportOpenAICompatible {
+		return string(providercatalog.APIFormatOpenAIChatCompletions)
+	}
+	if len(provider.SupportedAPIFormats) == 0 {
+		return ""
+	}
+	return string(provider.SupportedAPIFormats[0])
 }
 
 func providerWizardAddCommand(provider providercatalog.Descriptor, model string) string {
