@@ -559,6 +559,29 @@ type cardBody struct {
 	headTag string
 }
 
+type toolBodyRequest struct {
+	name   string
+	hint   string
+	detail string
+	width  int
+	opts   cardRenderOptions
+}
+
+type toolBodyRenderer func(toolBodyRequest) cardBody
+
+var registeredToolBodyRenderers = map[string]toolBodyRenderer{
+	"read_file": func(req toolBodyRequest) cardBody { return readCardBody(req.detail, req.width, req.opts) },
+	"bash":      func(req toolBodyRequest) cardBody { return bashCardBody(req.hint, req.detail, req.width, req.opts) },
+	"grep":      func(req toolBodyRequest) cardBody { return grepCardBody(req.detail, req.width, req.opts) },
+}
+
+func toolBodyRendererFor(name string) toolBodyRenderer {
+	if renderer, ok := registeredToolBodyRenderers[name]; ok {
+		return renderer
+	}
+	return func(req toolBodyRequest) cardBody { return genericCardBody(req.detail, req.opts) }
+}
+
 // renderRunningToolCard draws the head-only card for a tool call that has no
 // result yet: spinner glyph while ITS run is live, a static placeholder for
 // orphans (cancelled/errored turns, rehydrated history) — keying off the
@@ -690,18 +713,16 @@ func toolCardBody(name string, hint string, detail string, width int, opts cardR
 	if strings.TrimSpace(detail) == "" {
 		return cardBody{}
 	}
-	switch {
-	case looksLikeDiff(detail):
+	if looksLikeDiff(detail) {
 		return diffCardBody(detail, width, opts)
-	case name == "read_file":
-		return readCardBody(detail, width, opts)
-	case name == "bash":
-		return bashCardBody(hint, detail, width, opts)
-	case name == "grep":
-		return grepCardBody(detail, width, opts)
-	default:
-		return genericCardBody(detail, opts)
 	}
+	return toolBodyRendererFor(name)(toolBodyRequest{
+		name:   name,
+		hint:   hint,
+		detail: detail,
+		width:  width,
+		opts:   opts,
+	})
 }
 
 // capCardLines applies the body cap, appending the hidden-count trailer when

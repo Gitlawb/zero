@@ -85,6 +85,31 @@ func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 	}
 }
 
+func TestDetectShellCommandIssueFlagsWindowsBashisms(t *testing.T) {
+	issue := detectShellCommandIssue(`cd /d/tmp/zero-pr-158 && ls -la`, "windows")
+	if issue == nil {
+		t.Fatal("expected Windows bash-style cd command to be flagged")
+	}
+	for _, want := range []string{"Windows cmd.exe", "cwd", "list_directory"} {
+		if !strings.Contains(issue.Message+" "+issue.Suggestion, want) {
+			t.Fatalf("expected issue to mention %q, got %#v", want, issue)
+		}
+	}
+}
+
+func TestDetectShellOutputIssueAddsWindowsSyntaxHint(t *testing.T) {
+	issue := detectShellOutputIssue(`cd /d/tmp/zero-pr-158 && ls -la`, "The syntax of the command is incorrect.", "windows")
+	if issue == nil {
+		t.Fatal("expected Windows syntax error to get shell guidance")
+	}
+	rendered := appendShellIssueHint("stderr:\nThe syntax of the command is incorrect.\nexit_code: 1", *issue)
+	for _, want := range []string{"[zero] shell issue:", "Windows cmd.exe", "Suggestion:"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected rendered hint to contain %q, got %q", want, rendered)
+		}
+	}
+}
+
 func TestRegistryBlocksBashWithoutGrant(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(NewBashTool(t.TempDir()))

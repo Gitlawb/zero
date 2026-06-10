@@ -360,6 +360,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Role:    zeroruntime.MessageRoleUser,
 				Content: failureHint,
 			})
+		} else if reminder := guards.progressReminder(); reminder != "" {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: reminder,
+			})
 		} else if reminder := guards.planReminder(result.Turns); reminder != "" {
 			messages = append(messages, zeroruntime.Message{
 				Role:    zeroruntime.MessageRoleUser,

@@ -210,6 +210,33 @@ func TestGrepCardBodyShowsLocationsAndMatchCount(t *testing.T) {
 	}
 }
 
+func TestToolBodyRendererRegistryCoversCoreCards(t *testing.T) {
+	for _, name := range []string{"read_file", "bash", "grep", "unknown_tool"} {
+		if toolBodyRendererFor(name) == nil {
+			t.Fatalf("expected renderer for %s", name)
+		}
+	}
+}
+
+func TestBashCardBodyShowsShellIssueHint(t *testing.T) {
+	m := limeTestModel()
+	detail := strings.Join([]string{
+		"stderr:",
+		"The syntax of the command is incorrect.",
+		"exit_code: 1",
+		"[zero] shell issue: Windows cmd.exe rejected the command syntax.",
+		"Suggestion: Use the cwd argument instead of cd.",
+	}, "\n")
+	row := transcriptRow{kind: rowToolResult, id: "call_1", tool: "bash", status: tools.StatusError, detail: detail}
+	rc := buildRowContext([]transcriptRow{{kind: rowToolCall, id: "call_1", tool: "bash", detail: "cd /d/tmp/zero-pr-158 && ls -la"}})
+	got := plainRender(t, m.renderRow(row, 96, rc))
+	for _, want := range []string{"shell issue", "Windows cmd.exe", "Suggestion:", "cwd"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("bash shell issue card = %q, missing %q", got, want)
+		}
+	}
+}
+
 func TestToolCardMarksAutoApprovedCalls(t *testing.T) {
 	m := limeTestModel()
 	rows := []transcriptRow{

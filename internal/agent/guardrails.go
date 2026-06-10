@@ -21,6 +21,12 @@ const (
 	// calls have executed since the last update_plan call.
 	staleToolCallThreshold = 10
 
+	// toolOnlyProgressReminderAt injects a one-shot progress nudge after this
+	// many consecutive turns contain tool calls but no visible assistant text.
+	// It does not stop the run; it tells the model to synthesize what it already
+	// knows before spending more tool turns.
+	toolOnlyProgressReminderAt = 6
+
 	// planReminderTurn is the turn (1-based) by the end of which a multi-step
 	// task should have called update_plan; if it hasn't, a one-time reminder is
 	// injected. Set to 3 (not 2) so short, legitimate two-step tasks finish
@@ -94,8 +100,9 @@ func noOutputStopAnswer(turns int) string {
 // Reminder markers are stable substrings used both to build the reminder text
 // and to assert in tests that the right reminder was injected exactly once.
 const (
-	planNotCalledReminderMarker = "you have not called update_plan"
-	planStaleReminderMarker     = "haven't updated the plan via update_plan"
+	planNotCalledReminderMarker    = "you have not called update_plan"
+	planStaleReminderMarker        = "haven't updated the plan via update_plan"
+	toolOnlyProgressReminderMarker = "consecutive tool-only turns"
 )
 
 // planNotCalledReminder nudges the model to track a multi-step task with
@@ -114,6 +121,11 @@ func planStaleReminder(callsSinceUpdate int) string {
 		" in a while. Update the plan to reflect completed and remaining steps, then continue."
 }
 
+func toolOnlyProgressReminder(turns int) string {
+	return "Reminder: you've made " + strconv.Itoa(turns) + " " + toolOnlyProgressReminderMarker +
+		" without visible progress. Before calling more tools, summarize what you already know, state the next concrete step, and finish if you have enough information."
+}
+
 // guardState tracks the per-run signals the guardrails need. It is observable
 // purely from tool-call names and per-turn output, matching what the loop holds.
 type guardState struct {
@@ -125,7 +137,9 @@ type guardState struct {
 	// staleReminderSent records whether the stale reminder has already fired for
 	// the current stale interval. It is cleared when a plan update opens a new
 	// interval, making the reminder one-shot per interval rather than per turn.
-	staleReminderSent bool
+	staleReminderSent    bool
+	toolOnlyTurns        int
+	toolOnlyReminderSent bool
 	// toolFailures tracks consecutive same-error failures per tool, keyed by tool
 	// name, so the loop can hint then halt instead of looping forever.
 	toolFailures map[string]*toolFailureRecord
@@ -180,6 +194,12 @@ func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (sto
 	} else {
 		state.emptyTurns++
 	}
+	if hasToolCalls && !hasVisibleText {
+		state.toolOnlyTurns++
+	} else if hasVisibleText {
+		state.toolOnlyTurns = 0
+		state.toolOnlyReminderSent = false
+	}
 
 	for _, call := range collected.ToolCalls {
 		state.totalToolCalls++
@@ -194,6 +214,14 @@ func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (sto
 	}
 
 	return state.emptyTurns >= maxEmptyTurns
+}
+
+func (state *guardState) progressReminder() string {
+	if state.toolOnlyReminderSent || state.toolOnlyTurns < toolOnlyProgressReminderAt {
+		return ""
+	}
+	state.toolOnlyReminderSent = true
+	return toolOnlyProgressReminder(state.toolOnlyTurns)
 }
 
 // planReminder returns a one-shot reminder message to inject before the next

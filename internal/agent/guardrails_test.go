@@ -330,6 +330,43 @@ func TestRunStalePlanReminderIsOneShotPerInterval(t *testing.T) {
 	}
 }
 
+func TestRunInjectsToolOnlyProgressReminder(t *testing.T) {
+	root := t.TempDir()
+	writeAgentTestFile(t, root+"/notes.txt", "alpha")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+
+	turns := make([][]zeroruntime.StreamEvent, 0, toolOnlyProgressReminderAt+1)
+	for i := 0; i < toolOnlyProgressReminderAt; i++ {
+		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
+	}
+	turns = append(turns, textTurn("done"))
+
+	provider := &mockProvider{turns: turns}
+	result, err := Run(context.Background(), "go", provider, Options{
+		Registry: registry,
+		MaxTurns: len(turns) + 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if count := countUserMessagesContaining(result.Messages, toolOnlyProgressReminderMarker); count != 1 {
+		t.Fatalf("expected one tool-only progress reminder, got %d", count)
+	}
+	found := false
+	for _, message := range provider.requests[toolOnlyProgressReminderAt].Messages {
+		if message.Role == zeroruntime.MessageRoleUser && strings.Contains(message.Content, toolOnlyProgressReminderMarker) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected reminder on request after tool-only streak, messages: %+v", provider.requests[toolOnlyProgressReminderAt].Messages)
+	}
+}
+
 type alwaysFailingTool struct{}
 
 func (alwaysFailingTool) Name() string        { return "flaky" }
