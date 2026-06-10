@@ -120,7 +120,8 @@ type model struct {
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
-	picker *commandPicker
+	picker         *commandPicker
+	providerWizard *providerWizardState
 
 	// pendingImages holds image attachments staged by /image for the next user
 	// turn; pendingImageLabels are their display names (base(path)) for the chip
@@ -374,6 +375,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingSpecReview != nil {
 				return m.cancelSpecReview()
 			}
+			if m.providerWizard != nil {
+				m.providerWizard = nil
+				return m, nil
+			}
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
 			if m.picker != nil {
@@ -409,6 +414,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingSpecReview != nil {
 				return m, nil
 			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
+			}
 			if m.picker != nil {
 				return m.choosePicker()
 			}
@@ -434,13 +442,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.picker == nil {
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.picker == nil {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
 		case tea.KeyTab:
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
@@ -449,6 +460,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyDown:
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
 				m.picker.move(1)
@@ -464,6 +478,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyUp:
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
 				m.picker.move(-1)
@@ -492,6 +509,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pendingPermission != nil {
 			return m.handlePermissionKey(msg)
+		}
+		if m.providerWizard != nil {
+			return m, nil
 		}
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
@@ -818,6 +838,10 @@ func (m model) transcriptView() string {
 		builder.WriteString("\n")
 		builder.WriteString(overlay)
 	}
+	if wizard := m.providerWizardOverlay(width); wizard != "" {
+		builder.WriteString("\n")
+		builder.WriteString(wizard)
+	}
 	if picker := m.pickerOverlay(width); picker != "" {
 		builder.WriteString("\n")
 		builder.WriteString(picker)
@@ -1048,6 +1072,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
 	case commandProvider:
+		if strings.TrimSpace(command.text) == "" {
+			if m.pending {
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+				return m, nil
+			}
+			m.providerWizard = m.newProviderWizard()
+			m.clearSuggestions()
+			return m, nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:

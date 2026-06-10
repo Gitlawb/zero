@@ -78,7 +78,7 @@ func renderProviderCommand(t *testing.T, options Options) string {
 	t.Helper()
 
 	m := newModel(context.Background(), options)
-	m.input.SetValue("/provider")
+	m.input.SetValue("/provider status")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)

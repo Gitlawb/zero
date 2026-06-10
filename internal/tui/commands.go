@@ -65,9 +65,9 @@ type parsedCommand struct {
 var commandDefinitions = []commandDefinition{
 	{
 		name:        "/provider",
-		usage:       "/provider",
+		usage:       "/provider [status]",
 		group:       commandGroupModel,
-		description: "Show the active provider.",
+		description: "Open provider setup.",
 		kind:        commandProvider,
 	},
 	{

@@ -114,7 +114,6 @@ func (m model) providerText() string {
 					"zero providers add openai --api-key-env OPENAI_API_KEY --set-active",
 				}},
 			},
-			Hints: []string{"run provider commands in your shell; the TUI does not write config"},
 		})
 	}
 
