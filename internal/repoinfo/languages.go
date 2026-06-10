@@ -1,5 +1,12 @@
 package repoinfo
 
+import (
+	"path"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/workspaceindex"
+)
+
 // extToLanguage maps a lowercase file extension (no dot) to a display language.
 var extToLanguage = map[string]string{
 	"go": "Go", "ts": "TypeScript", "tsx": "TypeScript", "js": "JavaScript",
@@ -22,4 +29,23 @@ var extToLanguage = map[string]string{
 func languageForExt(ext string) (string, bool) {
 	lang, ok := extToLanguage[ext]
 	return lang, ok
+}
+
+// languageForPath is the repoinfo adapter for path-based language detection.
+// It delegates shared overlap cases to workspaceindex while preserving
+// repoinfo's current rollup behavior for prose/data formats and legacy entries.
+func languageForPath(filePath string) (string, bool) {
+	if lang := workspaceindex.LanguageForPath(filePath); lang != "" {
+		switch lang {
+		case "JSON", "Markdown", "TOML", "YAML":
+			return "", false
+		default:
+			return lang, true
+		}
+	}
+	return languageForExt(extForPath(filePath))
+}
+
+func extForPath(filePath string) string {
+	return strings.ToLower(strings.TrimPrefix(path.Ext(path.Base(filePath)), "."))
 }

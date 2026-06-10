@@ -157,6 +157,33 @@ func TestBuildClampsFreeBudgetWhenOverContextWindow(t *testing.T) {
 	}
 }
 
+func TestBuildAccountsForWorkspaceMapContext(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.test/repo\n")
+	writeTestFile(t, root, "cmd/zero/main.go", "package main\n")
+	writeTestFile(t, root, "README.md", "# Example\n")
+
+	report, err := Build(Options{
+		WorkspaceRoot: root,
+		ContextWindow: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	cat := categoryByKey(report, CategoryWorkspaceMap)
+	if cat == nil {
+		t.Fatalf("missing workspace map category: %#v", report.Categories)
+	}
+	if cat.Tokens <= 0 {
+		t.Fatalf("workspace map tokens = %d, want > 0", cat.Tokens)
+	}
+	formatted := Format(report)
+	if !strings.Contains(formatted, "Workspace map") {
+		t.Fatalf("Format missing workspace map category:\n%s", formatted)
+	}
+}
+
 func TestBuildWithoutProviderStillReturnsReport(t *testing.T) {
 	root := t.TempDir()
 

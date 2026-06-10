@@ -263,7 +263,10 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 	}
 	mustWrite("keep.txt", "needle here")
 	mustWrite(".git/config", "needle here")
+	mustWrite(".zero/state.json", "needle here")
 	mustWrite("node_modules/pkg/index.js", "needle here")
+	mustWrite("vendor/pkg/lib.go", "needle here")
+	mustWrite(".worktrees/branch/main.go", "needle here")
 
 	res := NewGrepTool(root).Run(context.Background(), map[string]any{
 		"pattern":     "needle",
@@ -272,10 +275,69 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 	if res.Status != StatusOK {
 		t.Fatalf("status=%s output=%s", res.Status, res.Output)
 	}
-	if strings.Contains(res.Output, ".git") || strings.Contains(res.Output, "node_modules") {
-		t.Fatalf("grep must not descend into excluded dirs, got:\n%s", res.Output)
+	for _, forbidden := range []string{".git", ".zero", "node_modules", "vendor", ".worktrees"} {
+		if strings.Contains(res.Output, forbidden) {
+			t.Fatalf("grep must not descend into excluded dir %q, got:\n%s", forbidden, res.Output)
+		}
 	}
 	if !strings.Contains(res.Output, "keep.txt") {
 		t.Fatalf("expected keep.txt in results, got:\n%s", res.Output)
+	}
+}
+
+func TestGrepSkipsBinaryLikeFiles(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "keep.txt"), "needle here")
+	writeTestFile(t, filepath.Join(root, "image.png"), "needle hidden")
+	writeTestFile(t, filepath.Join(root, "archive.zip"), "needle hidden")
+
+	res := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"output_mode": "files_with_matches",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, "image.png") || strings.Contains(res.Output, "archive.zip") {
+		t.Fatalf("grep must skip binary-like files, got:\n%s", res.Output)
+	}
+	if strings.TrimSpace(res.Output) != "keep.txt" {
+		t.Fatalf("expected only keep.txt, got:\n%s", res.Output)
+	}
+
+	direct := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern": "needle",
+		"path":    "image.png",
+	})
+	if direct.Status != StatusOK {
+		t.Fatalf("direct status=%s output=%s", direct.Status, direct.Output)
+	}
+	if strings.Contains(direct.Output, "image.png") || strings.Contains(direct.Output, "needle hidden") {
+		t.Fatalf("direct binary-like grep should be skipped, got:\n%s", direct.Output)
+	}
+}
+
+func TestGlobSkipsWorkspaceExcludedDirectoriesAndBinaryFiles(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "keep.txt"), "keep")
+	writeTestFile(t, filepath.Join(root, ".zero", "state.json"), "{}")
+	writeTestFile(t, filepath.Join(root, "vendor", "pkg", "lib.go"), "package lib")
+	writeTestFile(t, filepath.Join(root, ".worktrees", "branch", "main.go"), "package main")
+	writeTestFile(t, filepath.Join(root, "image.png"), "binary")
+
+	res := NewGlobTool(root).Run(context.Background(), map[string]any{
+		"pattern": "**/*",
+		"limit":   20,
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	for _, forbidden := range []string{".zero", "vendor", ".worktrees", "image.png"} {
+		if strings.Contains(res.Output, forbidden) {
+			t.Fatalf("glob must skip %q, got:\n%s", forbidden, res.Output)
+		}
+	}
+	if strings.TrimSpace(res.Output) != "keep.txt" {
+		t.Fatalf("expected only keep.txt, got:\n%s", res.Output)
 	}
 }

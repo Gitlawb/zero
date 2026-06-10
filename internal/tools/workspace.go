@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/workspaceindex"
 )
 
 var ignoredDirectories = map[string]bool{
@@ -195,5 +197,9 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 }
 
 func shouldSkipDirectory(name string) bool {
-	return ignoredDirectories[name]
+	return ignoredDirectories[name] || workspaceindex.ShouldSkipDir(name)
+}
+
+func shouldSkipWorkspaceFile(path string) bool {
+	return workspaceindex.ShouldSkipFile(path)
 }
