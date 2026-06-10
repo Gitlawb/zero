@@ -22,7 +22,10 @@ func TestCronAddListRemove(t *testing.T) {
 	if code := runCronWith(store, now, []string{"add", "0 9 * * *", "--prompt", "daily"}, &out, &errb); code != 0 {
 		t.Fatalf("add exit=%d err=%s", code, errb.String())
 	}
-	jobs, _ := store.List()
+	jobs, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
 	if len(jobs) != 1 || jobs[0].Expr != "0 9 * * *" || jobs[0].Prompt != "daily" {
 		t.Fatalf("job not stored: %+v", jobs)
 	}
@@ -41,14 +44,22 @@ func TestCronAddListRemove(t *testing.T) {
 	if code := runCronWith(store, now, []string{"pause", jobs[0].ID}, &out, &errb); code != 0 {
 		t.Fatalf("pause exit=%d", code)
 	}
-	if j, _ := store.Get(jobs[0].ID); j.Status != cron.StatusPaused {
+	j, err := store.Get(jobs[0].ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if j.Status != cron.StatusPaused {
 		t.Fatalf("pause did not persist, status=%q", j.Status)
 	}
 
 	if code := runCronWith(store, now, []string{"rm", jobs[0].ID}, &out, &errb); code != 0 {
 		t.Fatalf("rm exit=%d", code)
 	}
-	if jobs, _ := store.List(); len(jobs) != 0 {
+	jobs, err = store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(jobs) != 0 {
 		t.Fatalf("expected removed, got %v", jobs)
 	}
 }
@@ -72,7 +83,10 @@ func TestCronAddRecipe(t *testing.T) {
 	if code := runCronWith(store, now, []string{"add", "--recipe", "git-recap"}, &out, &errb); code != 0 {
 		t.Fatalf("add --recipe exit=%d err=%s", code, errb.String())
 	}
-	jobs, _ := store.List()
+	jobs, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
 	if len(jobs) != 1 || jobs[0].Expr != "*/30 * * * *" {
 		t.Fatalf("recipe job not stored: %+v", jobs)
 	}
@@ -85,7 +99,11 @@ func TestCronAddRejectsExtraArgs(t *testing.T) {
 	if code := runCronWith(store, now, []string{"add", "0 9 * * *", "extra", "--prompt", "x"}, &out, &errb); code == 0 {
 		t.Fatal("expected non-zero exit for extra positional args")
 	}
-	if jobs, _ := store.List(); len(jobs) != 0 {
+	jobs, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(jobs) != 0 {
 		t.Fatalf("no job should be stored on a usage error, got %v", jobs)
 	}
 }
@@ -93,12 +111,19 @@ func TestCronAddRejectsExtraArgs(t *testing.T) {
 func TestCronResumeRejectsImpossibleSchedule(t *testing.T) {
 	store := testCronStore(t)
 	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }
-	job, _ := store.Add(cron.Job{Expr: "0 0 30 2 *", Prompt: "x", Status: cron.StatusPaused})
+	job, err := store.Add(cron.Job{Expr: "0 0 30 2 *", Prompt: "x", Status: cron.StatusPaused})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
 	var out, errb bytes.Buffer
 	if code := runCronWith(store, now, []string{"resume", job.ID}, &out, &errb); code == 0 {
 		t.Fatal("resume of an impossible schedule must be rejected")
 	}
-	if j, _ := store.Get(job.ID); j.Status != cron.StatusPaused {
+	j, err := store.Get(job.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if j.Status != cron.StatusPaused {
 		t.Fatalf("job must remain paused after a rejected resume, got %q", j.Status)
 	}
 }
