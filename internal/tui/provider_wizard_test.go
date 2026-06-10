@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -348,10 +349,67 @@ func TestProviderWizardRendersDiscoveredModelMetadata(t *testing.T) {
 
 	view := plainRender(t, next.View())
 	assertContains(t, view, "models: models.dev")
-	assertContains(t, view, "gpt-4.1")
+	assertContains(t, view, "GPT-4.1")
 	assertContains(t, view, "1M ctx")
 	assertContains(t, view, "tools")
 	assertContains(t, view, "reasoning")
+}
+
+func TestProviderWizardModelStepUsesFriendlyNamesAndStaysCompact(t *testing.T) {
+	wizard := &providerWizardState{
+		step:        providerWizardStepModel,
+		modelSource: "models.dev",
+		models:      providerWizardManyModelsForTest(18),
+	}
+	wizard.models[0] = providerWizardModel{
+		ID:          "x-ai/grok-4.3",
+		Description: "Grok 4.3",
+		Meta:        "1M ctx · tools · reasoning",
+	}
+
+	view := plainRender(t, strings.Join(wizard.renderModelStep(84), "\n"))
+	assertContains(t, view, "Search")
+	assertContains(t, view, "Grok 4.3")
+	assertNotContains(t, view, "x-ai/grok-4.3")
+	assertContains(t, view, "8 more models")
+	assertNotContains(t, view, "Model 17")
+}
+
+func TestProviderWizardModelSearchFiltersAndAppliesRawModelID(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.providerWizard = &providerWizardState{
+		step:        providerWizardStepModel,
+		modelSource: "models.dev",
+		providers: []providercatalog.Descriptor{{
+			ID:                  "openrouter",
+			Name:                "OpenRouter",
+			Transport:           providercatalog.TransportOpenAICompatible,
+			DefaultBaseURL:      "https://openrouter.ai/api/v1",
+			DefaultModel:        "openai/gpt-4.1",
+			AuthEnvVars:         []string{"OPENROUTER_API_KEY"},
+			RequiresAuth:        true,
+			SupportedAPIFormats: []providercatalog.APIFormat{providercatalog.APIFormatOpenAIChatCompletions},
+		}},
+		models: []providerWizardModel{
+			{ID: "openai/gpt-4.1", Description: "GPT-4.1", Meta: "1M ctx · tools"},
+			{ID: "deepseek/deepseek-chat", Description: "DeepSeek Chat", Meta: "64K ctx · tools"},
+			{ID: "deepseek/deepseek-v3.2", Description: "DeepSeek V3.2", Meta: "128K ctx · tools"},
+		},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("deep")})
+	next := updated.(model)
+
+	if next.providerWizard.modelSearch != "deep" {
+		t.Fatalf("model search = %q, want deep", next.providerWizard.modelSearch)
+	}
+	if got := next.providerWizard.currentModel().ID; got != "deepseek/deepseek-chat" {
+		t.Fatalf("current model ID = %q, want raw OpenRouter ID", got)
+	}
+	view := plainRender(t, next.View())
+	assertContains(t, view, "DeepSeek Chat")
+	assertContains(t, view, "DeepSeek V3.2")
+	assertNotContains(t, view, "GPT-4.1")
 }
 
 func openProviderWizardForTest(t *testing.T, m model) model {
@@ -363,6 +421,18 @@ func openProviderWizardForTest(t *testing.T, m model) model {
 		t.Fatal("expected provider wizard to be open")
 	}
 	return next
+}
+
+func providerWizardManyModelsForTest(count int) []providerWizardModel {
+	models := make([]providerWizardModel, 0, count)
+	for index := 0; index < count; index++ {
+		models = append(models, providerWizardModel{
+			ID:          fmt.Sprintf("provider/model-%02d", index),
+			Description: fmt.Sprintf("Model %02d", index),
+			Meta:        "tools",
+		})
+	}
+	return models
 }
 
 func providerWizardProviderIndex(t *testing.T, wizard *providerWizardState, id string) int {

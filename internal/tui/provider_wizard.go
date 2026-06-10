@@ -14,6 +14,7 @@ import (
 )
 
 const maxProviderWizardProvidersVisible = 10
+const maxProviderWizardModelsVisible = 10
 
 type providerWizardStep int
 
@@ -36,6 +37,7 @@ type providerWizardState struct {
 	selectedProvider int
 	models           []providerWizardModel
 	selectedModel    int
+	modelSearch      string
 	apiKey           string
 	err              string
 	modelSource      string
@@ -90,12 +92,13 @@ func (wizard *providerWizardState) currentModel() providerWizardModel {
 		return providerWizardModel{}
 	}
 	wizard.refreshModels()
-	if len(wizard.models) == 0 {
+	models := wizard.filteredModels()
+	if len(models) == 0 {
 		provider := wizard.currentProvider()
 		return providerWizardModel{ID: provider.DefaultModel, Description: "catalog default"}
 	}
-	wizard.selectedModel = clampInt(wizard.selectedModel, 0, len(wizard.models)-1)
-	return wizard.models[wizard.selectedModel]
+	wizard.selectedModel = clampInt(wizard.selectedModel, 0, len(models)-1)
+	return models[wizard.selectedModel]
 }
 
 func (wizard *providerWizardState) move(delta int) {
@@ -109,6 +112,7 @@ func (wizard *providerWizardState) move(delta int) {
 		}
 		wizard.selectedProvider = ((wizard.selectedProvider+delta)%len(wizard.providers) + len(wizard.providers)) % len(wizard.providers)
 		wizard.selectedModel = 0
+		wizard.modelSearch = ""
 		wizard.apiKey = ""
 		wizard.err = ""
 		wizard.modelSource = ""
@@ -117,10 +121,11 @@ func (wizard *providerWizardState) move(delta int) {
 		wizard.refreshModels()
 	case providerWizardStepModel:
 		wizard.refreshModels()
-		if len(wizard.models) == 0 {
+		models := wizard.filteredModels()
+		if len(models) == 0 {
 			return
 		}
-		wizard.selectedModel = ((wizard.selectedModel+delta)%len(wizard.models) + len(wizard.models)) % len(wizard.models)
+		wizard.selectedModel = ((wizard.selectedModel+delta)%len(models) + len(models)) % len(models)
 	}
 }
 
@@ -206,6 +211,20 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.providerWizard.step == providerWizardStepModel {
+		switch msg.Type {
+		case tea.KeyRunes:
+			m.providerWizard.appendModelSearch(msg.Runes)
+			return m, nil
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			m.providerWizard.deleteModelSearchRune()
+			return m, nil
+		case tea.KeyCtrlU:
+			m.providerWizard.modelSearch = ""
+			m.providerWizard.selectedModel = 0
+			return m, nil
+		}
+	}
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.providerWizard = nil
@@ -239,6 +258,25 @@ func (wizard *providerWizardState) deleteAPIKeyRune() {
 	runes := []rune(wizard.apiKey)
 	wizard.apiKey = string(runes[:len(runes)-1])
 	wizard.err = ""
+}
+
+func (wizard *providerWizardState) appendModelSearch(runes []rune) {
+	for _, r := range runes {
+		if unicode.IsControl(r) {
+			continue
+		}
+		wizard.modelSearch += string(r)
+	}
+	wizard.selectedModel = 0
+}
+
+func (wizard *providerWizardState) deleteModelSearchRune() {
+	if wizard.modelSearch == "" {
+		return
+	}
+	runes := []rune(wizard.modelSearch)
+	wizard.modelSearch = string(runes[:len(runes)-1])
+	wizard.selectedModel = 0
 }
 
 func (m model) applyProviderWizard() (model, tea.Cmd) {
@@ -379,11 +417,33 @@ func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 func (wizard *providerWizardState) renderModelStep(width int) []string {
 	lines := []string{zeroTheme.accent.Render("Choose model")}
 	lines = append(lines, zeroTheme.faint.Render(wizard.modelStatusText()))
+	lines = append(lines, wizard.renderModelSearch(width))
 	wizard.refreshModels()
-	for index, model := range wizard.models {
-		lines = append(lines, wizard.renderSelectableModel(width, index, model))
+	models := wizard.filteredModels()
+	if len(models) == 0 {
+		lines = append(lines, zeroTheme.faint.Render("  no matching models"))
+		return lines
+	}
+	maxVisible := minInt(maxProviderWizardModelsVisible, len(models))
+	wizard.selectedModel = clampInt(wizard.selectedModel, 0, len(models)-1)
+	start := selectableListStart(len(models), maxVisible, wizard.selectedModel)
+	for offset, model := range models[start : start+maxVisible] {
+		lines = append(lines, wizard.renderSelectableModel(width, start+offset, model))
+	}
+	if hidden := len(models) - maxVisible; hidden > 0 {
+		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  %d more models - type to search", hidden)))
 	}
 	return lines
+}
+
+func (wizard *providerWizardState) renderModelSearch(width int) string {
+	query := strings.TrimSpace(wizard.modelSearch)
+	value := zeroTheme.faint.Render("Search")
+	if query != "" {
+		value = zeroTheme.ink.Render(query)
+	}
+	input := zeroTheme.userPrompt.Render("search > ") + value + zeroTheme.accent.Render("â–Œ")
+	return fitStyledLine(zeroTheme.onPanel2(zeroTheme.ink).Render(input), width)
 }
 
 func (wizard *providerWizardState) modelStatusText() string {
@@ -413,11 +473,60 @@ func (wizard *providerWizardState) renderSelectableModel(width int, index int, m
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	left := marker + surface(zeroTheme.ink).Render(model.ID)
-	rightText := firstProviderDisplayValue(model.Meta, model.Description)
+	left := marker + surface(zeroTheme.ink).Render(model.displayLabel())
+	rightText := firstProviderDisplayValue(model.Meta, model.secondaryText())
 	right := surface(zeroTheme.faint).Render(rightText)
 	gap := width - lipglossWidth(left) - lipglossWidth(right)
 	return fitStyledLine(left+surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap)))+right, width)
+}
+
+func (wizard *providerWizardState) filteredModels() []providerWizardModel {
+	if wizard == nil {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(wizard.modelSearch))
+	if query == "" {
+		return append([]providerWizardModel{}, wizard.models...)
+	}
+	models := make([]providerWizardModel, 0, len(wizard.models))
+	for _, model := range wizard.models {
+		if model.matches(query) {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func (model providerWizardModel) displayLabel() string {
+	description := strings.TrimSpace(model.Description)
+	if description != "" && !providerWizardGenericModelDescription(description) {
+		return description
+	}
+	return model.ID
+}
+
+func (model providerWizardModel) secondaryText() string {
+	if model.displayLabel() != model.ID {
+		return model.ID
+	}
+	return model.Description
+}
+
+func (model providerWizardModel) matches(query string) bool {
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{model.ID, model.Description, model.Meta}, " "))
+	return strings.Contains(haystack, query)
+}
+
+func providerWizardGenericModelDescription(description string) bool {
+	switch strings.ToLower(strings.TrimSpace(description)) {
+	case "", "catalog default", "catalog model", "custom endpoint model", "live model":
+		return true
+	default:
+		return strings.HasSuffix(strings.ToLower(strings.TrimSpace(description)), " model")
+	}
 }
 
 func (wizard *providerWizardState) renderDoneStep(width int) []string {
