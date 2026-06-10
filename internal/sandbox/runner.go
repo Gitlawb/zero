@@ -48,6 +48,15 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 	return command, plan, nil
 }
 
+// writeRoots returns the full ordered write-root list for command plans:
+// the workspace root plus any granted extra roots.
+func (engine *Engine) writeRoots(workspaceRoot string) []string {
+	if engine.scope != nil {
+		return engine.scope.Roots()
+	}
+	return []string{workspaceRoot}
+}
+
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if engine == nil {
 		return directCommandPlan(spec, Backend{Name: BackendPolicyOnly, Message: "sandbox disabled"}, Policy{}, ""), nil
@@ -76,11 +85,11 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	switch backend.Name {
 	case BackendBubblewrap:
 		if backend.Available && backend.Executable != "" {
-			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, policy, backend), nil
+			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend), nil
 		}
 	case BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
-			return sandboxExecCommandPlan(spec, workspaceRoot, policy, backend), nil
+			return sandboxExecCommandPlan(spec, workspaceRoot, engine.writeRoots(workspaceRoot), policy, backend), nil
 		}
 	}
 	if !policy.AllowPolicyOnlyRunner {
@@ -130,7 +139,7 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 		commandDir = resolved
 	}
 	if policy.EnforceWorkspace {
-		if violation := validateWorkspacePath(workspaceRoot, commandDir); violation != nil {
+		if violation := engine.scopeFor(engine.workspaceRoot).validate(commandDir); violation != nil {
 			return "", "", "", Violation{
 				Code:     violation.Code,
 				ToolName: "sandbox_command",
@@ -155,10 +164,15 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 	return workspaceRoot, commandDir, relativeDir, nil
 }
 
-func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir string, policy Policy, backend Backend) CommandPlan {
+func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir string, writeRoots []string, policy Policy, backend Backend) CommandPlan {
 	sandboxDir := bubblewrapWorkspace
 	if relativeDir != "" {
 		sandboxDir = filepath.ToSlash(filepath.Join(bubblewrapWorkspace, relativeDir))
+	}
+	// A cwd inside an extra write root is outside the /workspace remount; the
+	// extra root is bound at its real host path, so chdir there directly.
+	if relativeDir == ".." || strings.HasPrefix(relativeDir, ".."+string(filepath.Separator)) {
+		sandboxDir = filepath.ToSlash(spec.Dir)
 	}
 	args := []string{
 		"--die-with-parent",
@@ -169,8 +183,14 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 		"--dev", "/dev",
 		"--tmpfs", "/tmp",
 		"--bind", workspaceRoot, bubblewrapWorkspace,
-		"--chdir", sandboxDir,
 	}
+	for _, root := range writeRoots {
+		if root == workspaceRoot {
+			continue
+		}
+		args = append(args, "--bind", root, root)
+	}
+	args = append(args, "--chdir", sandboxDir)
 	if policy.Network == NetworkDeny {
 		args = append(args, "--unshare-net")
 	}
@@ -197,8 +217,8 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 	}
 }
 
-func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend) CommandPlan {
-	args := []string{"-p", sandboxExecProfile(workspaceRoot, policy), spec.Name}
+func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots []string, policy Policy, backend Backend) CommandPlan {
+	args := []string{"-p", sandboxExecProfile(writeRoots, policy), spec.Name}
 	args = append(args, spec.Args...)
 	return CommandPlan{
 		Backend:       backend,
@@ -259,14 +279,18 @@ func defaultPath() string {
 	return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
-func sandboxExecProfile(workspaceRoot string, policy Policy) string {
+func sandboxExecProfile(writeRoots []string, policy Policy) string {
 	networkRule := "(deny network*)"
 	if policy.Network == NetworkAllow {
 		networkRule = "(allow network*)"
 	}
 	writeRule := "(allow file-write*)"
 	if policy.EnforceWorkspace {
-		writeRule = `(allow file-write* (subpath "` + sandboxProfileString(workspaceRoot) + `"))`
+		subpaths := make([]string, 0, len(writeRoots))
+		for _, root := range writeRoots {
+			subpaths = append(subpaths, `(subpath "`+sandboxProfileString(root)+`")`)
+		}
+		writeRule = "(allow file-write* " + strings.Join(subpaths, " ") + ")"
 	}
 	return strings.Join([]string{
 		"(version 1)",

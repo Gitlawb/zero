@@ -171,3 +171,50 @@ func resolvedTestPath(t *testing.T, path string) string {
 	}
 	return resolved
 }
+
+func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
+	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true})
+	if !strings.Contains(profile, `(allow file-write* (subpath "/ws") (subpath "/extra root"))`) {
+		t.Fatalf("profile missing multi-root write rule:\n%s", profile)
+	}
+}
+
+func TestBubblewrapPlanBindsExtraWriteRoots(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true"})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	joined := strings.Join(plan.Args, " ")
+	resolvedExtra := scope.Roots()[1]
+	if !strings.Contains(joined, "--bind "+resolvedExtra+" "+resolvedExtra) {
+		t.Fatalf("bubblewrap args missing rw bind for extra root %q:\n%s", resolvedExtra, joined)
+	}
+}
+
+func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: DefaultPolicy(), Scope: scope})
+	if _, _, _, err := engine.resolveCommandDir(extra, engine.policy); err != nil {
+		t.Fatalf("resolveCommandDir(extra root) = %v, want nil", err)
+	}
+	if _, _, _, err := engine.resolveCommandDir(t.TempDir(), engine.policy); err == nil {
+		t.Fatal("resolveCommandDir(outside all roots) = nil error, want violation")
+	}
+}
