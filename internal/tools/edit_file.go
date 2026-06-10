@@ -10,9 +10,14 @@ import (
 type editFileTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewEditFileTool(workspaceRoot string) Tool {
+	return NewScopedEditFileTool(workspaceRoot, nil)
+}
+
+func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 	return editFileTool{
 		baseTool: baseTool{
 			name:        "edit_file",
@@ -31,6 +36,7 @@ func NewEditFileTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectWrite, "Edits files in place."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -52,7 +58,7 @@ func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveWorkspacePath(tool.workspaceRoot, requestedPath)
+	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
@@ -79,7 +85,7 @@ func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
 	if updated == content {
 		return okResult("No changes: new_string is identical to old_string.")
 	}
-	if err := recheckWorkspaceWriteTarget(tool.workspaceRoot, requestedPath); err != nil {
+	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {

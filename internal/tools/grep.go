@@ -13,6 +13,7 @@ import (
 type grepTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 type grepMatch struct {
@@ -23,6 +24,10 @@ type grepMatch struct {
 }
 
 func NewGrepTool(workspaceRoot string) Tool {
+	return NewScopedGrepTool(workspaceRoot, nil)
+}
+
+func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 	return grepTool{
 		baseTool: baseTool{
 			name:        "grep",
@@ -44,6 +49,7 @@ func NewGrepTool(workspaceRoot string) Tool {
 			safety: readOnlySafety("Searches file paths and matching lines without modifying files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -93,7 +99,7 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running grep: " + err.Error())
 	}
 
-	target, _, err := resolveWorkspacePath(tool.workspaceRoot, targetPath)
+	target, _, err := resolveScopedPath(tool.workspaceRoot, tool.scope, targetPath)
 	if err != nil {
 		return errorResult("Error running grep: " + err.Error())
 	}
@@ -103,7 +109,9 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 	// only Abs-normalized (no EvalSymlinks); using it directly would produce
 	// "../"-laden relative paths when the root itself lives under a symlink (e.g.
 	// macOS /tmp -> /private/tmp) and would not catch files that resolve outside.
-	resolvedRoot, err := filepath.EvalSymlinks(tool.workspaceRoot)
+	// When a scope is present, pick the scope root that contains the resolved
+	// target so that confineGrepFile computes correct relative paths.
+	resolvedRoot, err := resolveGrepRoot(tool.workspaceRoot, tool.scope, target)
 	if err != nil {
 		return errorResult("Error running grep: " + err.Error())
 	}
@@ -161,6 +169,29 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 			Truncated: len(matches) > headLimit,
 		}
 	}
+}
+
+// resolveGrepRoot picks the scope root whose EvalSymlinks-resolved path contains
+// the already-resolved target, so that confineGrepFile computes correct
+// workspace-relative paths even when the target lives in an extra root.
+// Falls back to EvalSymlinks(workspaceRoot) when no scoped root matches.
+func resolveGrepRoot(workspaceRoot string, scope PathScope, resolvedTarget string) (string, error) {
+	roots := scopedRoots(workspaceRoot, scope)
+	for _, root := range roots {
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(resolved, resolvedTarget)
+		if err != nil {
+			continue
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)) {
+			return resolved, nil
+		}
+	}
+	// Fall back to the workspace root.
+	return filepath.EvalSymlinks(workspaceRoot)
 }
 
 // confineGrepFile resolves a candidate file through symlinks and returns its

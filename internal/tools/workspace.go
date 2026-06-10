@@ -197,3 +197,118 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 func shouldSkipDirectory(name string) bool {
 	return ignoredDirectories[name]
 }
+
+// PathScope is the multi-root write scope shared with the sandbox engine.
+// *sandbox.Scope satisfies it; nil means workspace-only (today's behavior).
+type PathScope interface {
+	Roots() []string
+}
+
+// scopedRoots returns the ordered roots to try for an absolute path:
+// the scope's roots when present, else just the workspace root.
+func scopedRoots(workspaceRoot string, scope PathScope) []string {
+	if scope == nil {
+		return []string{workspaceRoot}
+	}
+	return scope.Roots()
+}
+
+// resolveScopedPath is resolveWorkspacePath generalized to a scope: relative
+// paths resolve against the workspace root only; an absolute path resolves
+// against the first root that contains it. The workspace root's error is
+// returned when no root matches so messages stay stable.
+func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) {
+		return resolveWorkspacePath(workspaceRoot, requestedPath)
+	}
+	// Normalize platform-level symlinks (e.g. macOS /var -> /private/var) so
+	// the path can be compared against EvalSymlinks-resolved scope roots.
+	normalizedPath := normalizeScopedAbsPath(requestedPath)
+	var firstErr error
+	for _, root := range scopedRoots(workspaceRoot, scope) {
+		absolute, relative, err := resolveWorkspacePath(root, normalizedPath)
+		if err == nil {
+			return absolute, relative, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return "", "", firstErr
+}
+
+// resolveScopedTargetPath mirrors resolveWorkspaceTargetPath for write targets
+// (the target may not exist yet) across all scope roots.
+func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) {
+		return resolveWorkspaceTargetPath(workspaceRoot, requestedPath)
+	}
+	// Normalize the leading symlinks in the absolute path (e.g. macOS
+	// /var -> /private/var) so the path can be compared against the
+	// symlink-resolved scope roots. Walk up to the first existing ancestor,
+	// resolve it, and re-append the missing tail segments.
+	normalizedPath := normalizeScopedAbsPath(requestedPath)
+	var firstErr error
+	for _, root := range scopedRoots(workspaceRoot, scope) {
+		absolute, relative, err := resolveWorkspaceTargetPath(root, normalizedPath)
+		if err == nil {
+			return absolute, relative, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return "", "", firstErr
+}
+
+// normalizeScopedAbsPath resolves platform-level symlinks in the existing
+// prefix of an absolute path, leaving non-existent tail segments verbatim.
+// This handles macOS /var -> /private/var style redirects so that an
+// unresolved absolute path can be compared against EvalSymlinks-resolved roots.
+func normalizeScopedAbsPath(absPath string) string {
+	existing := absPath
+	missing := []string{}
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		} else if os.IsNotExist(err) {
+			parent := filepath.Dir(existing)
+			if parent == existing {
+				return absPath // safety: can't walk further up
+			}
+			missing = append([]string{filepath.Base(existing)}, missing...)
+			existing = parent
+		} else {
+			return absPath
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return absPath
+	}
+	for _, seg := range missing {
+		resolved = filepath.Join(resolved, seg)
+	}
+	return resolved
+}
+
+// recheckScopedWriteTarget mirrors recheckWorkspaceWriteTarget across roots.
+func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) error {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) {
+		return recheckWorkspaceWriteTarget(workspaceRoot, requestedPath)
+	}
+	// Normalize platform-level symlinks so the path can be compared against
+	// EvalSymlinks-resolved scope roots.
+	normalizedPath := normalizeScopedAbsPath(requestedPath)
+	var firstErr error
+	for _, root := range scopedRoots(workspaceRoot, scope) {
+		err := recheckWorkspaceWriteTarget(root, normalizedPath)
+		if err == nil {
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}

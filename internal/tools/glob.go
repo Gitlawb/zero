@@ -13,9 +13,14 @@ import (
 type globTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewGlobTool(workspaceRoot string) Tool {
+	return NewScopedGlobTool(workspaceRoot, nil)
+}
+
+func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 	return globTool{
 		baseTool: baseTool{
 			name:        "glob",
@@ -34,6 +39,7 @@ func NewGlobTool(workspaceRoot string) Tool {
 			safety: readOnlySafety("Finds matching paths without reading contents or modifying files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -60,7 +66,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
 	}
 
-	root, _, err := resolveWorkspacePath(tool.workspaceRoot, cwd)
+	root, _, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}

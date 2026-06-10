@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestReadFileToolReadsLineRanges(t *testing.T) {
@@ -236,6 +238,59 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 	})
 	if strings.TrimSpace(res.Output) != "pkg/main.go" {
 		t.Fatalf("expected pkg/main.go, got %q", res.Output)
+	}
+}
+
+func TestScopedToolsAllowExtraRootWrites(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	target := filepath.Join(extra, "saved.txt")
+
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    target,
+		"content": "hello",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("scoped write_file status=%s output=%s", res.Status, res.Output)
+	}
+	read := NewScopedReadFileTool(workspace, scope).Run(context.Background(), map[string]any{"path": target})
+	if read.Status != StatusOK || !strings.Contains(read.Output, "hello") {
+		t.Fatalf("scoped read_file status=%s output=%s", read.Status, read.Output)
+	}
+}
+
+func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    "rel.txt",
+		"content": "workspace",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("relative write status=%s output=%s", res.Status, res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "rel.txt")); err != nil {
+		t.Fatalf("relative path must land in workspace: %v", err)
+	}
+}
+
+func TestUnscopedToolsStillRejectOutsideWrites(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+		"path":    outside,
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("unscoped write outside workspace must fail, got OK: %s", res.Output)
 	}
 }
 

@@ -12,9 +12,14 @@ import (
 type applyPatchTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewApplyPatchTool(workspaceRoot string) Tool {
+	return NewScopedApplyPatchTool(workspaceRoot, nil)
+}
+
+func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
 			name:        "apply_patch",
@@ -31,6 +36,7 @@ func NewApplyPatchTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectWrite, "Applies patch hunks that can create, edit, or delete files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -44,7 +50,7 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 		return errorResult("Error: Invalid arguments for apply_patch: " + err.Error())
 	}
 
-	applyRoot, relativeRoot, err := resolveWorkspacePath(tool.workspaceRoot, cwd)
+	applyRoot, relativeRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}

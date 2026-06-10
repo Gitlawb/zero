@@ -11,9 +11,14 @@ import (
 type readFileTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewReadFileTool(workspaceRoot string) Tool {
+	return NewScopedReadFileTool(workspaceRoot, nil)
+}
+
+func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readFileTool{
 		baseTool: baseTool{
 			name:        "read_file",
@@ -32,6 +37,7 @@ func NewReadFileTool(workspaceRoot string) Tool {
 			safety: readOnlySafety("Reads file contents without modifying files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -53,7 +59,7 @@ func (tool readFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveWorkspacePath(tool.workspaceRoot, requestedPath)
+	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading file " + requestedPath + ": " + err.Error())
 	}

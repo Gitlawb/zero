@@ -21,9 +21,14 @@ const maxBashTimeoutMS = 600000
 type bashTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewBashTool(workspaceRoot string) Tool {
+	return NewScopedBashTool(workspaceRoot, nil)
+}
+
+func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 	shellGuidance := shellGuidanceForGOOS(runtime.GOOS)
 	return bashTool{
 		baseTool: baseTool{
@@ -42,6 +47,7 @@ func NewBashTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectShell, "Shell commands can read, write, or execute programs."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -77,7 +83,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		return interactiveBlockResult(interactive)
 	}
 
-	absoluteCwd, relativeCwd, err := resolveWorkspacePath(tool.workspaceRoot, cwd)
+	absoluteCwd, relativeCwd, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error running bash: " + err.Error())
 	}
