@@ -848,8 +848,8 @@ func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
 	if HasProviderProfile(resolved.Provider) {
 		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
 	}
-	if resolved.MaxTurns != defaultMaxTurns {
-		t.Fatalf("MaxTurns = %d, want %d", resolved.MaxTurns, defaultMaxTurns)
+	if resolved.MaxTurns != 30 {
+		t.Fatalf("MaxTurns = %d, want 30", resolved.MaxTurns)
 	}
 }
 

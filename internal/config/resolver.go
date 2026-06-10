@@ -13,7 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
-const defaultMaxTurns = 12
+const defaultMaxTurns = 30
 
 const defaultDeferThreshold = 10
 

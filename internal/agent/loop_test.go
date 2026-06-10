@@ -804,6 +804,53 @@ func TestRunStopsAfterMaxTurns(t *testing.T) {
 	}
 }
 
+func TestRunRequestsFinalAnswerAfterMaxTurns(t *testing.T) {
+	root := t.TempDir()
+	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "I read notes.txt and found alpha."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	result, err := Run(context.Background(), "loop", provider, Options{
+		Registry: registry,
+		MaxTurns: 1,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "I read notes.txt and found alpha." {
+		t.Fatalf("expected final answer from finalization turn, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("expected final no-tools request after max turns, got %d requests", len(provider.requests))
+	}
+	finalRequest := provider.requests[1]
+	if len(finalRequest.Tools) != 0 {
+		t.Fatalf("finalization request must not advertise tools, got %#v", finalRequest.Tools)
+	}
+	lastMessage := finalRequest.Messages[len(finalRequest.Messages)-1]
+	if lastMessage.Role != zeroruntime.MessageRoleUser || !strings.Contains(lastMessage.Content, "tool-turn limit") {
+		t.Fatalf("expected max-turns finalization prompt, got %#v", lastMessage)
+	}
+	if result.Turns != 1 {
+		t.Fatalf("expected tool turns to remain 1, got %d", result.Turns)
+	}
+}
+
 func providerCallingWriteFileThenAnswer(answer string) *mockProvider {
 	return providerCallingWritePathThenAnswer("notes.txt", answer)
 }
