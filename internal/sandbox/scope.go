@@ -140,22 +140,23 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 // validateWorkspacePath to handle. Non-existent tail components are always
 // appended verbatim.
 //
-// The component walk below only understands POSIX-style roots: it starts at
-// "/" and cannot represent a volume root like `C:\`. Running it on a
-// volume-qualified path mangles it into a drive-relative form (`C:\Users` ->
-// `C:Users`) that the downstream single-root checks treat as RELATIVE and
-// join under the workspace — making the policy gate fail OPEN on Windows.
-// Volume-qualified paths (every absolute Windows path: drive letter or UNC)
-// are therefore returned verbatim; validateWorkspacePath fully handles them,
-// and the prefix-alias problem this helper exists for (macOS /var ->
-// /private/var) has no Windows equivalent. On POSIX VolumeName is always
-// empty, so this guard never fires there.
+// The walk is volume-aware so it works on Windows as well as POSIX. On
+// Windows the same alias problem appears in a different guise — a workspace
+// created under an 8.3 short path (C:\Users\RUNNER~1\...) is resolved by
+// EvalSymlinks to its long form (C:\Users\runneradmin\...), so a raw
+// short-form request would escape the long-form root unless its prefix is
+// resolved here first. The component walk must therefore start from the
+// volume root (C:\ or \\host\share\), not "/", or it would mangle a drive
+// path into a drive-relative form (C:\Users -> C:Users) that the single-root
+// checks treat as RELATIVE — failing the policy gate OPEN. On POSIX
+// VolumeName is empty and the volume root reduces to "/", so behavior there
+// is byte-identical to a plain "/"-rooted walk.
 func NormalizePrefixForRoot(absPath, resolvedRoot string) string {
-	if filepath.VolumeName(absPath) != "" || filepath.VolumeName(resolvedRoot) != "" {
-		return absPath
-	}
-	parts := strings.Split(strings.TrimPrefix(filepath.Clean(absPath), string(filepath.Separator)), string(filepath.Separator))
-	current := string(filepath.Separator)
+	volume := filepath.VolumeName(absPath)
+	volumeRoot := volume + string(filepath.Separator)
+	tail := strings.TrimPrefix(filepath.Clean(absPath), volume)
+	parts := strings.Split(strings.TrimPrefix(tail, string(filepath.Separator)), string(filepath.Separator))
+	current := volumeRoot
 	for i, part := range parts {
 		if part == "" {
 			continue
