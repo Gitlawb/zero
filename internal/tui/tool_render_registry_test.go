@@ -111,3 +111,21 @@ func TestToolBodyRegistryReplacementIsScopedToOneTool(t *testing.T) {
 		t.Fatalf("bash body = %q, want original bash renderer", got)
 	}
 }
+
+func TestToolBodyRegistryTrimsRegisteredNames(t *testing.T) {
+	registry := newToolBodyRegistry(unknownToolBodyRenderer{})
+	registry.register(" grep ", toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
+		return cardBody{lines: []string{zeroTheme.onPanel(zeroTheme.ink).Render("trimmed grep body")}}
+	}))
+
+	body := registry.render(toolBodyRequest{
+		name:   "grep",
+		detail: "internal/tui/rendering.go:41: func render()",
+		width:  96,
+		opts:   cardRenderOptions{bodyCap: cardBodyMaxLines},
+	})
+
+	if got := plainRender(t, strings.Join(body.lines, "\n")); !strings.Contains(got, "trimmed grep body") {
+		t.Fatalf("grep body = %q, want trimmed registered renderer", got)
+	}
+}

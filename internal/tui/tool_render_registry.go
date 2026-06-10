@@ -58,7 +58,8 @@ func newToolBodyRegistry(fallback toolBodyRenderer) *toolBodyRegistry {
 }
 
 func (registry *toolBodyRegistry) register(name string, renderer toolBodyRenderer) {
-	if registry == nil || strings.TrimSpace(name) == "" || renderer == nil {
+	name = strings.TrimSpace(name)
+	if registry == nil || name == "" || renderer == nil {
 		return
 	}
 	if registry.renderers == nil {

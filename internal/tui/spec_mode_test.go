@@ -116,9 +116,10 @@ func TestSpecReviewBlocksShiftTabModeCycle(t *testing.T) {
 }
 
 func TestSpecReviewCancelLaunchesQueuedPrompt(t *testing.T) {
-	m := newSpecModeTestModel(t.TempDir(), &fakeProvider{
-		events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}},
-	}, testSessionStore(t))
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	m := newSpecModeTestModel(t.TempDir(), provider, testSessionStore(t))
 	m.pendingSpecReview = &pendingSpecReviewPrompt{SpecID: "spec", SpecFilePath: ".zero/specs/spec.md"}
 	m.queuedMessage = "continue after cancel"
 
@@ -136,6 +137,14 @@ func TestSpecReviewCancelLaunchesQueuedPrompt(t *testing.T) {
 	}
 	if !next.pending {
 		t.Fatal("expected queued prompt launch to mark model pending")
+	}
+	beforeRequests := len(provider.requests)
+	_ = execCmd(cmd)
+	if len(provider.requests) <= beforeRequests {
+		t.Fatalf("expected queued prompt to issue a provider request, before=%d after=%d", beforeRequests, len(provider.requests))
+	}
+	if !providerRequestsContain(provider.requests[beforeRequests:], "continue after cancel") {
+		t.Fatalf("expected queued prompt in launched request, got %#v", provider.requests[beforeRequests:])
 	}
 }
 
@@ -172,6 +181,14 @@ func TestSpecReviewRejectLaunchesQueuedPrompt(t *testing.T) {
 	if !next.pending {
 		t.Fatal("expected queued prompt launch to mark model pending")
 	}
+	beforeRequests := len(provider.requests)
+	_ = execCmd(cmd)
+	if len(provider.requests) <= beforeRequests {
+		t.Fatalf("expected queued reject follow-up to issue a provider request, before=%d after=%d", beforeRequests, len(provider.requests))
+	}
+	if !providerRequestsContain(provider.requests[beforeRequests:], "continue after reject") {
+		t.Fatalf("expected queued prompt in launched request, got %#v", provider.requests[beforeRequests:])
+	}
 }
 
 func newSpecModeTestModel(root string, provider zeroruntime.Provider, store *sessions.Store) model {
@@ -207,6 +224,17 @@ func providerRequestIncludesTool(request zeroruntime.CompletionRequest, name str
 	for _, tool := range request.Tools {
 		if tool.Name == name {
 			return true
+		}
+	}
+	return false
+}
+
+func providerRequestsContain(requests []zeroruntime.CompletionRequest, text string) bool {
+	for _, request := range requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, text) {
+				return true
+			}
 		}
 	}
 	return false

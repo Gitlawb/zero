@@ -134,7 +134,11 @@ func (m *model) syncInputFromComposer() {
 
 func composerDisplayCursor(state composerState) int {
 	state = normalizeComposerState(state)
-	return len([]rune(strings.ReplaceAll(string([]rune(state.text)[:state.cursor]), "\n", " ")))
+	count := 0
+	for range []rune(state.text)[:state.cursor] {
+		count++
+	}
+	return count
 }
 
 func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {

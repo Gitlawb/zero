@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -65,7 +66,7 @@ func TestModifiedEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newModel(nil, Options{Provider: &fakeProvider{}, ProviderName: "test", ModelName: "test-model"})
+			m := newModel(context.Background(), Options{Provider: &fakeProvider{}, ProviderName: "test", ModelName: "test-model"})
 			m.input.SetValue("first")
 			m.input.CursorEnd()
 
@@ -86,7 +87,7 @@ func TestModifiedEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 }
 
 func TestMultilineComposerEditingDoesNotFallBackToFlatInput(t *testing.T) {
-	m := newModel(nil, Options{})
+	m := newModel(context.Background(), Options{})
 	m.setComposerState(composerState{text: "alpha\nbeta gamma", cursor: len([]rune("alpha\nbeta"))})
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
@@ -109,7 +110,7 @@ func TestMultilineComposerEditingDoesNotFallBackToFlatInput(t *testing.T) {
 }
 
 func TestMultilineComposerAcceptsSpaceKey(t *testing.T) {
-	m := newModel(nil, Options{})
+	m := newModel(context.Background(), Options{})
 	m.setComposerState(composerState{text: "alpha\nbetagamma", cursor: len([]rune("alpha\nbeta"))})
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
