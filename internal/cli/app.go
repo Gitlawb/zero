@@ -153,15 +153,14 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
 	// exec dispatch paths consume one. Fail loud everywhere else rather than
-	// silently discarding an explicit grant. The allowlist names the cases
-	// below that forward addDirs, plus help/version, which run no agent and
-	// write nothing, so a stray grant is harmless there. A future subcommand
-	// is rejected by default until it opts in here.
+	// silently discarding an explicit grant — including help/version, which
+	// run no agent and could only ignore it. The allowlist names exactly the
+	// cases below that forward addDirs; a future subcommand is rejected by
+	// default until it opts in here.
 	if len(addDirs) > 0 {
 		switch args[0] {
-		case "--skip-permissions-unsafe", "-p", "--prompt", "exec",
-			"-h", "--help", "help", "-v", "--version", "version":
-			// Forwarded (or harmlessly ignored) by the matching case below.
+		case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
+			// Forwarded by the matching case below.
 		default:
 			return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
 		}
@@ -177,10 +176,16 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// --add-dir may legally appear on either side of the flag, so re-split
 		// the remaining args and merge with the dirs already collected. Any
 		// trailing non-flag args were ignored on this path before --add-dir
-		// existed and still are.
-		moreDirs, _, err := splitLeadingAddDirFlags(args[1:])
+		// existed and still are — but an --add-dir hidden BEHIND one would be
+		// silently dropped with them, so reject that misplacement loudly.
+		moreDirs, rest, err := splitLeadingAddDirFlags(args[1:])
 		if err != nil {
 			return writeAppError(stderr, err.Error(), 1)
+		}
+		for _, arg := range rest {
+			if arg == "--add-dir" || strings.HasPrefix(arg, "--add-dir=") {
+				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --skip-permissions-unsafe)", 1)
+			}
 		}
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...))
 	case "-h", "--help", "help":
@@ -573,6 +578,12 @@ func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
 		case strings.HasPrefix(args[0], "--add-dir="):
 			value := strings.TrimSpace(strings.TrimPrefix(args[0], "--add-dir="))
 			if value == "" {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			// Match the space form: a flag-like value is almost certainly a
+			// mistyped option, not a directory. A directory literally named
+			// "-foo" is still reachable as --add-dir=./-foo.
+			if strings.HasPrefix(value, "-") {
 				return nil, nil, errors.New("--add-dir requires a directory path")
 			}
 			addDirs = append(addDirs, value)

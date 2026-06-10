@@ -343,14 +343,53 @@ func TestRunSkipPermissionsUnsafeMergesAddDirGrants(t *testing.T) {
 	}
 }
 
+func TestRunSkipPermissionsUnsafeRejectsAddDirHiddenBehindStrayArg(t *testing.T) {
+	// splitLeadingAddDirFlags stops at the first non-flag token, so a grant
+	// placed after a stray arg would otherwise be discarded with the ignored
+	// trailing args. An explicit grant must never be silently dropped.
+	for _, args := range [][]string{
+		{"--skip-permissions-unsafe", "stray", "--add-dir", "/tmp"},
+		{"--skip-permissions-unsafe", "stray", "--add-dir=/tmp"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				runTUI: func(context.Context, tui.Options) int {
+					t.Fatal("TUI launcher should not be called when a misplaced --add-dir is rejected")
+					return 0
+				},
+			})
+
+			if exitCode != 1 {
+				t.Fatalf("expected exit code 1, got %d", exitCode)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, "--add-dir must come before any other arguments") {
+				t.Fatalf("expected misplaced --add-dir rejection on stderr, got %q", got)
+			}
+		})
+	}
+}
+
 func TestRunAddDirRejectedForNonAgentCommands(t *testing.T) {
 	// --add-dir grants a write root that only the TUI and exec consume; every
-	// other subcommand must fail loud rather than silently drop the grant.
+	// other subcommand — including help/version, which run no agent — must
+	// fail loud rather than silently drop the grant.
 	for _, args := range [][]string{
 		{"--add-dir", "/tmp", "config"},
 		{"--add-dir=/tmp", "doctor"},
 		{"--add-dir", "/tmp", "models"},
 		{"--add-dir", "/tmp", "sandbox"},
+		{"--add-dir", "/tmp", "help"},
+		{"--add-dir", "/tmp", "--help"},
+		{"--add-dir", "/tmp", "-h"},
+		{"--add-dir", "/tmp", "version"},
+		{"--add-dir", "/tmp", "--version"},
+		{"--add-dir", "/tmp", "-v"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout bytes.Buffer
