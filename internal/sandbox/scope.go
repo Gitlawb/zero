@@ -140,10 +140,20 @@ func (s *Scope) validate(requestedPath string) *pathViolation {
 // validateWorkspacePath to handle. Non-existent tail components are always
 // appended verbatim.
 //
-// Note: this helper assumes POSIX-style absolute paths and does not handle
-// filepath.VolumeName — that is fine while sandbox backends are seatbelt and
-// bubblewrap only (both Linux/macOS).
+// The component walk below only understands POSIX-style roots: it starts at
+// "/" and cannot represent a volume root like `C:\`. Running it on a
+// volume-qualified path mangles it into a drive-relative form (`C:\Users` ->
+// `C:Users`) that the downstream single-root checks treat as RELATIVE and
+// join under the workspace — making the policy gate fail OPEN on Windows.
+// Volume-qualified paths (every absolute Windows path: drive letter or UNC)
+// are therefore returned verbatim; validateWorkspacePath fully handles them,
+// and the prefix-alias problem this helper exists for (macOS /var ->
+// /private/var) has no Windows equivalent. On POSIX VolumeName is always
+// empty, so this guard never fires there.
 func NormalizePrefixForRoot(absPath, resolvedRoot string) string {
+	if filepath.VolumeName(absPath) != "" || filepath.VolumeName(resolvedRoot) != "" {
+		return absPath
+	}
 	parts := strings.Split(strings.TrimPrefix(filepath.Clean(absPath), string(filepath.Separator)), string(filepath.Separator))
 	current := string(filepath.Separator)
 	for i, part := range parts {
