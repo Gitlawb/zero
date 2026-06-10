@@ -23,20 +23,23 @@ func Run(ctx context.Context, options Options) int {
 			program.Send(msg)
 		}
 	}
+	options.AltScreen = useAltScreen(options)
 
 	programOpts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
 	}
+	if options.AltScreen {
+		programOpts = append(programOpts, tea.WithAltScreen())
+		programOpts = append(programOpts, tea.WithMouseCellMotion())
+	}
 	if notify.Enabled(notify.Mode(strings.TrimSpace(options.Notify.Mode))) {
 		programOpts = append(programOpts, tea.WithReportFocus())
 	}
-	// NOTE: we intentionally do NOT enable mouse capture. Mouse cell-motion
-	// reporting routes clicks/drags to the program, which breaks the terminal's
-	// native text selection + copy and surprises users who expect normal
-	// click/select/copy/paste. The permission modal is fully keyboard-driven
-	// (a/y/d/Esc), so capturing the mouse buys little and costs core UX.
+	// Mouse capture is scoped to the alt-screen app so wheel events scroll the
+	// managed transcript instead of being translated into ↑/↓ keypresses by the
+	// terminal, which would recall composer history.
 	program = tea.NewProgram(newModel(ctx, options), programOpts...)
 
 	if _, err := program.Run(); err != nil {
@@ -46,4 +49,8 @@ func Run(ctx context.Context, options Options) int {
 		return 1
 	}
 	return 0
+}
+
+func useAltScreen(_ Options) bool {
+	return true
 }

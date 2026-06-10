@@ -36,6 +36,26 @@ func TestSettledRowsAdvanceFrontierAndLeaveLiveView(t *testing.T) {
 	}
 }
 
+func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	m = updated.(model)
+	m.transcript = appendRow(m.transcript, rowUser, "hello there")
+	m.transcript = appendRow(m.transcript, rowSystem, "noted")
+
+	next, cmd := m.settleTranscript()
+	if cmd != nil {
+		t.Fatal("alt-screen mode should not print rows into native scrollback")
+	}
+	if next.flushed != 0 {
+		t.Fatalf("alt-screen mode should keep the flush frontier unchanged, got %d", next.flushed)
+	}
+	view := next.View()
+	if !strings.Contains(view, "hello there") || !strings.Contains(view, "noted") {
+		t.Fatalf("settled rows should remain in the managed alt-screen view, got %q", view)
+	}
+}
+
 func TestRunningToolCallBlocksFrontierUntilResult(t *testing.T) {
 	m := sizedTestModel(80)
 	m.pending = true

@@ -39,4 +39,45 @@ type Options struct {
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
+
+	// AltScreen tells the model it is running inside Bubble Tea's alternate
+	// screen. Run sets this for the interactive app; tests can leave it false
+	// to exercise the native scrollback renderer.
+	AltScreen bool
+
+	// Setup configures the first-run/setup takeover. It is shown before the
+	// normal chat surface when Visible is true.
+	Setup SetupOptions
+}
+
+// SetupOptions configures the guided first-run provider setup takeover.
+type SetupOptions struct {
+	Visible    bool
+	Required   bool
+	ConfigPath string
+	Providers  []SetupProviderOption
+	Save       func(SetupSelection) (SetupResult, error)
+}
+
+// SetupProviderOption is one provider choice offered by the setup takeover.
+type SetupProviderOption struct {
+	ID           string
+	Name         string
+	DefaultModel string
+	EnvVar       string
+	RequiresAuth bool
+	Local        bool
+}
+
+// SetupSelection is the user's setup choice.
+type SetupSelection struct {
+	CatalogID string
+	Model     string
+	APIKey    string
+}
+
+// SetupResult describes a completed setup write.
+type SetupResult struct {
+	ConfigPath string
+	Provider   config.ProviderProfile
 }

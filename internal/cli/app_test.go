@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,7 +58,7 @@ func TestRunPrintsHelp(t *testing.T) {
 	}
 }
 
-func TestRunNoArgsLaunchesTUIWithNilProviderWhenNoProviderConfigured(t *testing.T) {
+func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
@@ -107,6 +108,12 @@ func TestRunNoArgsLaunchesTUIWithNilProviderWhenNoProviderConfigured(t *testing.
 	}
 	if launchedOptions.ProviderName != "" || launchedOptions.ModelName != "" {
 		t.Fatalf("provider metadata = %q/%q, want empty", launchedOptions.ProviderName, launchedOptions.ModelName)
+	}
+	if !launchedOptions.Setup.Visible || !launchedOptions.Setup.Required {
+		t.Fatalf("Setup = %#v, want visible required setup", launchedOptions.Setup)
+	}
+	if launchedOptions.Setup.ConfigPath != userConfigPath {
+		t.Fatalf("Setup.ConfigPath = %q, want %q", launchedOptions.Setup.ConfigPath, userConfigPath)
 	}
 	assertCoreRegistry(t, launchedOptions.Registry)
 	assertAgentOptions(t, launchedOptions, 12, agent.PermissionModeAsk)
@@ -171,6 +178,9 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 	}
 	if launchedOptions.ModelName != "gpt-test" {
 		t.Fatalf("ModelName = %q, want gpt-test", launchedOptions.ModelName)
+	}
+	if launchedOptions.Setup.Visible {
+		t.Fatalf("Setup.Visible = true, want false for credentialed provider")
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("expected empty stdout, got %q", stdout.String())
@@ -294,6 +304,7 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 		{"version"},
 		{"wat"},
 		{"exec"},
+		{"setup", "--help"},
 		{"config"},
 		{"models"},
 		{"providers"},
@@ -331,6 +342,92 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 				t.Fatalf("TUI launcher should not be called for args %#v", args)
 			}
 		})
+	}
+}
+
+func TestRunSetupNoArgsForcesSetupTUI(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	var launchedOptions tui.Options
+
+	exitCode := runWithDeps([]string{"setup"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				ActiveProvider: "work",
+				Provider: config.ProviderProfile{
+					Name:         "work",
+					ProviderKind: config.ProviderKindOpenAI,
+					BaseURL:      config.OpenAIBaseURL,
+					APIKey:       "sk-test",
+					Model:        "gpt-test",
+				},
+				MaxTurns: 3,
+			}, nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &cliFakeProvider{}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !launchedOptions.Setup.Visible {
+		t.Fatalf("Setup.Visible = false, want forced setup")
+	}
+	if launchedOptions.Setup.Required {
+		t.Fatalf("Setup.Required = true, want false for credentialed provider")
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("expected no output, stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunSetupProviderWritesActiveConfig(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	configPath := filepath.Join(t.TempDir(), "config.json")
+
+	exitCode := runWithDeps([]string{"setup", "ollama"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v\n%s", err, string(data))
+	}
+	if cfg.ActiveProvider != "ollama" {
+		t.Fatalf("ActiveProvider = %q, want ollama", cfg.ActiveProvider)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].CatalogID != "ollama" || cfg.Providers[0].Model == "" {
+		t.Fatalf("Providers = %#v, want ollama provider with model", cfg.Providers)
+	}
+	if !strings.Contains(stdout.String(), "Zero setup complete") || !strings.Contains(stdout.String(), "next: zero") {
+		t.Fatalf("unexpected setup output: %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
 	}
 }
 

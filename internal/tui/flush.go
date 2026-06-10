@@ -69,6 +69,13 @@ func (m model) settledRow(row transcriptRow, rc rowContext) bool {
 // of the unflushed tail is rendered once and queued for scrollback. It returns
 // the (possibly nil) print command for the queued batch.
 func (m model) settleTranscript() (model, tea.Cmd) {
+	// In alt-screen mode there is no native scrollback surface for tea.Println:
+	// Bubble Tea drops that output by design. Keep rows in the managed view so
+	// the chat behaves like a fullscreen app and cannot reveal prior shell
+	// history by scrolling.
+	if m.altScreen {
+		return m, nil
+	}
 	// Never freeze history at the pre-WindowSizeMsg default width: the first
 	// real WindowSizeMsg arrives before any user-visible content settles, and
 	// flushing earlier would hard-wrap startup rows at 96 cols forever.
