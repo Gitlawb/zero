@@ -153,6 +153,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
+	dst.Sandbox.AdditionalWriteRoots = unionStrings(dst.Sandbox.AdditionalWriteRoots, src.Sandbox.AdditionalWriteRoots)
 	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
 		dst.Notify.Mode = mode
 	}
@@ -180,6 +181,10 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
+	// Sandbox.AdditionalWriteRoots is intentionally NOT merged from project
+	// config: a cloned repo's .zero/config.json must not be able to grant
+	// itself write access outside the workspace. Global config and CLI flags
+	// are the only config sources for write roots.
 	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		dst.Sandbox.MaxAutonomy = maxAutonomy
 	}
@@ -569,6 +574,25 @@ func copyMCPStringMap(values map[string]string) map[string]string {
 
 func hasProviderFields(profile ProviderProfile) bool {
 	return HasProviderProfile(profile)
+}
+
+// unionStrings appends the values of extra that are not already present in
+// base, preserving order. Used for additive config keys like
+// sandbox.additionalWriteRoots where a later layer must not erase earlier
+// grants.
+func unionStrings(base []string, extra []string) []string {
+	seen := make(map[string]struct{}, len(base))
+	for _, value := range base {
+		seen[value] = struct{}{}
+	}
+	for _, value := range extra {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		base = append(base, value)
+	}
+	return base
 }
 
 type normalizeOptions struct {
