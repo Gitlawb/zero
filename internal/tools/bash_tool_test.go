@@ -67,6 +67,24 @@ func TestCoreToolsExposeBashTool(t *testing.T) {
 	}
 }
 
+func TestBashToolDescribesHostShellSyntax(t *testing.T) {
+	tool := NewBashTool(t.TempDir())
+	schema := tool.Parameters()
+	description := strings.ToLower(tool.Description() + " " +
+		schema.Properties["command"].Description + " " +
+		schema.Properties["cwd"].Description)
+
+	if runtime.GOOS == "windows" {
+		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
+			t.Fatalf("expected Windows cmd.exe and cwd guidance in bash description, got %q", description)
+		}
+		return
+	}
+	if !strings.Contains(description, "/bin/sh") {
+		t.Fatalf("expected /bin/sh guidance in bash description, got %q", description)
+	}
+}
+
 func TestRegistryBlocksBashWithoutGrant(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(NewBashTool(t.TempDir()))

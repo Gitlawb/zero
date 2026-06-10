@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 )
@@ -72,6 +73,12 @@ func workspaceContext(cwd string) string {
 	var b strings.Builder
 	b.WriteString("<environment>\n")
 	b.WriteString("Working directory: " + cwd + "\n")
+	b.WriteString("Operating system: " + runtime.GOOS + "\n")
+	if runtime.GOOS == "windows" {
+		b.WriteString("Shell syntax: Windows cmd.exe syntax for bash tool; prefer the cwd argument instead of cd when changing directories.\n")
+	} else {
+		b.WriteString("Shell syntax: /bin/sh syntax for bash tool; prefer the cwd argument instead of cd when changing directories.\n")
+	}
 	if branch := gitBranchForPrompt(cwd); branch != "" {
 		b.WriteString("Git branch: " + branch + "\n")
 	}

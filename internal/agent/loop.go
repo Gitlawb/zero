@@ -197,7 +197,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		messages = append(messages, zeroruntime.Message{
 			Role:      zeroruntime.MessageRoleAssistant,
 			Content:   collected.Text,
-			ToolCalls: collected.ToolCalls,
+			ToolCalls: historySafeToolCalls(collected.ToolCalls),
 		})
 
 		if len(collected.ToolCalls) == 0 {
@@ -370,6 +370,21 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	result.FinalAnswer = maxTurnsAnswer
 	result.Messages = copyMessages(messages)
 	return result, nil
+}
+
+func historySafeToolCalls(calls []ToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	safe := make([]ToolCall, len(calls))
+	for i, call := range calls {
+		safe[i] = call
+		args := strings.TrimSpace(call.Arguments)
+		if args == "" || !json.Valid([]byte(args)) {
+			safe[i].Arguments = "{}"
+		}
+	}
+	return safe
 }
 
 // toolSchemaJSON renders a tool's parameter schema as readable JSON for the

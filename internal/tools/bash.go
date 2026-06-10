@@ -24,15 +24,16 @@ type bashTool struct {
 }
 
 func NewBashTool(workspaceRoot string) Tool {
+	shellGuidance := bashShellGuidance()
 	return bashTool{
 		baseTool: baseTool{
 			name:        "bash",
-			description: "Execute a shell command inside the workspace after permission is granted.",
+			description: "Execute a shell command inside the workspace after permission is granted. " + shellGuidance,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"command":    {Type: "string", Description: "Shell command to execute."},
-					"cwd":        {Type: "string", Description: "Workspace directory to run the command in. Defaults to workspace root.", Default: "."},
+					"command":    {Type: "string", Description: "Shell command to execute using the host shell. " + shellGuidance},
+					"cwd":        {Type: "string", Description: "Workspace directory to run the command in. Defaults to workspace root. Prefer cwd over cd when changing directories.", Default: "."},
 					"timeout_ms": {Type: "integer", Description: "Command timeout in milliseconds.", Default: defaultBashTimeoutMS, Minimum: intPtr(1), Maximum: intPtr(maxBashTimeoutMS)},
 				},
 				Required:             []string{"command"},
@@ -42,6 +43,13 @@ func NewBashTool(workspaceRoot string) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 	}
+}
+
+func bashShellGuidance() string {
+	if runtime.GOOS == "windows" {
+		return "Uses Windows cmd.exe syntax on Windows; prefer cwd over cd when changing directories."
+	}
+	return "Uses /bin/sh syntax."
 }
 
 func (tool bashTool) Run(ctx context.Context, args map[string]any) Result {

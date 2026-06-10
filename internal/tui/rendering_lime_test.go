@@ -275,6 +275,21 @@ func TestMalformedAskUserToolResultIsHiddenFromChatSurface(t *testing.T) {
 	}
 }
 
+func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "call_bad",
+		tool:   "read_file",
+		status: tools.StatusError,
+		text:   "tool result: read_file error",
+		detail: "Error: Failed to parse arguments for read_file: invalid character '{' after top-level value",
+	}
+	if got := plainRender(t, m.renderRow(row, 96, buildRowContext([]transcriptRow{row}))); strings.TrimSpace(got) != "" {
+		t.Fatalf("malformed tool argument result should stay internal, rendered %q", got)
+	}
+}
+
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))

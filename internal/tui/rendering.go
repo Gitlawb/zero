@@ -184,7 +184,7 @@ func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush 
 	case rowToolCall:
 		return m.renderRunningToolCard(row, width, rc, opts)
 	case rowToolResult:
-		if isMalformedAskUserResult(row) {
+		if isInternalToolArgumentError(row) {
 			return ""
 		}
 		return renderToolResultCard(row, width, rc, opts)
@@ -197,10 +197,13 @@ func (m model) renderRowMode(row transcriptRow, width int, rc rowContext, flush 
 	}
 }
 
-func isMalformedAskUserResult(row transcriptRow) bool {
-	return row.tool == "ask_user" &&
-		row.status == tools.StatusError &&
-		strings.HasPrefix(strings.TrimSpace(row.detail), "Error: Invalid arguments for ask_user:")
+func isInternalToolArgumentError(row transcriptRow) bool {
+	if row.status != tools.StatusError {
+		return false
+	}
+	detail := strings.TrimSpace(row.detail)
+	return strings.HasPrefix(detail, "Error: Failed to parse arguments for ") ||
+		row.tool == "ask_user" && strings.HasPrefix(detail, "Error: Invalid arguments for ask_user:")
 }
 
 // hyperlink wraps already-styled text in an OSC 8 terminal hyperlink so
