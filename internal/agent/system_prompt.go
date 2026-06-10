@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Gitlawb/zero/internal/repomap"
 )
 
 // coreSystemPrompt is the de-branded coding-craft instruction set: identity,
@@ -35,6 +37,10 @@ var projectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.md"}
 // maxProjectContextBytes caps how much of a project doc is injected so a large
 // guidelines file can't blow the context budget.
 const maxProjectContextBytes = 8 << 10 // 8 KiB
+
+// maxRepoMapContextBytes keeps the repository map useful but compact enough to
+// remain stable across normal agent turns.
+const maxRepoMapContextBytes = 4 << 10 // 4 KiB
 
 // buildSystemPrompt assembles the full system prompt for a run: the core
 // coding-craft instructions, dynamic workspace context (cwd, git branch, project
@@ -103,7 +109,24 @@ func workspaceContext(cwd string) string {
 		b.WriteString("\n\n## Project guidelines (" + name + ")\n\n" + content)
 		break // first match wins
 	}
+	if repoMap := repoMapContext(cwd); repoMap != "" {
+		b.WriteString("\n\n## Repo map\n\n" + repoMap)
+	}
 	return b.String()
+}
+
+func repoMapContext(cwd string) string {
+	// repomap.Scan is best-effort supplemental context for the prompt. If it
+	// fails, omit the repo map instead of failing the agent run; successful scans
+	// are still capped by repomap.RenderPrompt and maxRepoMapContextBytes.
+	snapshot, err := repomap.Scan(cwd, repomap.Options{
+		MaxFiles: 300,
+		MaxDepth: 5,
+	})
+	if err != nil {
+		return ""
+	}
+	return repomap.RenderPrompt(snapshot, maxRepoMapContextBytes)
 }
 
 // gitBranchForPrompt reads the current branch (or short SHA when detached) for
