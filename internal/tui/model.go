@@ -456,6 +456,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker != nil && m.picker.kind == pickerModel {
 				return m.toggleModelFavorite(), nil
 			}
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			if m.picker != nil {
+				m.picker.deleteQueryRune()
+				return m, nil
+			}
 		case tea.KeyTab:
 			if m.transcriptDetailed {
 				return m, nil
@@ -526,6 +531,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
 		if m.picker != nil {
+			if msg.Type == tea.KeyRunes {
+				m.picker.appendQuery(msg.Runes)
+			}
 			return m, nil
 		}
 		// On the empty chat surface a bare 1–3 keypress (composer empty, no modal)

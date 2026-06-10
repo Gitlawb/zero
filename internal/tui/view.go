@@ -335,6 +335,14 @@ func (m model) pickerOverlay(width int) string {
 		hint += " · ctrl+f favorite"
 	}
 	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render(hint))
+	if m.picker.kind == pickerModel {
+		query := strings.TrimSpace(m.picker.query)
+		value := zeroTheme.faint.Render("Search model")
+		if query != "" {
+			value = zeroTheme.ink.Render(query)
+		}
+		lines = append(lines, zeroTheme.userPrompt.Render("search > ")+value)
+	}
 	lastGroup := ""
 	for index, item := range m.picker.items {
 		if item.Group != "" && item.Group != lastGroup {

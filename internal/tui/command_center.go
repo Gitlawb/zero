@@ -234,6 +234,13 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}, true
 	}
 	if provider, ok := m.activeProviderDescriptor(); ok {
+		if m.modelPickerLiveProviderID == provider.ID {
+			for _, model := range m.modelPickerLiveModels {
+				if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
+					return modelSwitchTarget{modelID: model.ID}, true
+				}
+			}
+		}
 		for _, model := range providermodelcatalog.Models(provider) {
 			if strings.EqualFold(model.ID, strings.TrimSpace(args)) {
 				return modelSwitchTarget{modelID: model.ID}, true

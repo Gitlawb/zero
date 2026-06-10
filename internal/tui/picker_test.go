@@ -86,6 +86,66 @@ func TestModelPickerRefreshesLiveModelsForActiveProvider(t *testing.T) {
 	}
 }
 
+func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKey:       "ollama-key",
+			Model:        "minimax-m3",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.modelPickerLiveProviderID = "ollama-cloud"
+	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
+	m.picker = m.newModelPicker()
+	m.picker.selected = pickerIndex(m.picker.items, "glm-5.1")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if captured.Model != "glm-5.1" {
+		t.Fatalf("captured model = %q, want glm-5.1", captured.Model)
+	}
+	if next.modelName != "glm-5.1" {
+		t.Fatalf("active model = %q, want glm-5.1", next.modelName)
+	}
+}
+
+func TestModelPickerSearchFiltersModels(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+	m.picker = m.newModelPicker()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("qwen")})
+	next := updated.(model)
+	if next.picker.query != "qwen" {
+		t.Fatalf("picker query = %q, want qwen", next.picker.query)
+	}
+	view := plainRender(t, next.pickerOverlay(100))
+	assertContains(t, view, "search > qwen")
+	assertContains(t, view, "Qwen")
+	assertNotContains(t, view, "Minimax M3")
+}
+
 func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName: "ollama-cloud",

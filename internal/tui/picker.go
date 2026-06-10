@@ -45,6 +45,8 @@ type commandPicker struct {
 	kind     pickerKind
 	title    string
 	items    []pickerItem
+	allItems []pickerItem
+	query    string
 	selected int
 }
 
@@ -61,6 +63,51 @@ func (p *commandPicker) current() (pickerItem, bool) {
 		return pickerItem{}, false
 	}
 	return p.items[p.selected], true
+}
+
+func (p *commandPicker) appendQuery(runes []rune) {
+	for _, r := range runes {
+		if r < 32 {
+			continue
+		}
+		p.query += string(r)
+	}
+	p.applyQuery()
+}
+
+func (p *commandPicker) deleteQueryRune() {
+	if p.query == "" {
+		return
+	}
+	runes := []rune(p.query)
+	p.query = string(runes[:len(runes)-1])
+	p.applyQuery()
+}
+
+func (p *commandPicker) clearQuery() {
+	p.query = ""
+	p.applyQuery()
+}
+
+func (p *commandPicker) applyQuery() {
+	source := p.allItems
+	if len(source) == 0 {
+		source = p.items
+	}
+	query := strings.ToLower(strings.TrimSpace(p.query))
+	if query == "" {
+		p.items = append([]pickerItem{}, source...)
+		p.selected = clampInt(p.selected, 0, maxInt(0, len(p.items)-1))
+		return
+	}
+	filtered := make([]pickerItem, 0, len(source))
+	for _, item := range source {
+		if strings.Contains(strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta}, " ")), query) {
+			filtered = append(filtered, item)
+		}
+	}
+	p.items = filtered
+	p.selected = 0
 }
 
 // newModelPicker lists active (non-deprecated) models, preselecting the active
@@ -92,7 +139,7 @@ func (m model) newModelPicker() *commandPicker {
 	if len(items) == 0 {
 		return nil
 	}
-	return &commandPicker{kind: pickerModel, title: "select model", items: items, selected: 0}
+	return &commandPicker{kind: pickerModel, title: "select model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
 }
 
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
@@ -371,10 +418,13 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 	m.modelPickerLiveModels = append([]providermodeldiscovery.Model{}, msg.models...)
 	if m.picker != nil && m.picker.kind == pickerModel {
 		selectedValue := ""
+		query := m.picker.query
 		if item, ok := m.picker.current(); ok {
 			selectedValue = item.Value
 		}
 		m.picker = m.newModelPicker()
+		m.picker.query = query
+		m.picker.applyQuery()
 		m.selectPickerValue(selectedValue)
 	}
 	return m
@@ -397,7 +447,10 @@ func (m model) toggleModelFavorite() model {
 		m.favoriteModels[item.Value] = true
 	}
 	selectedValue := item.Value
+	query := m.picker.query
 	m.picker = m.newModelPicker()
+	m.picker.query = query
+	m.picker.applyQuery()
 	m.selectPickerValue(selectedValue)
 	return m
 }
