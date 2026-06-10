@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +236,143 @@ func TestRunSkipPermissionsUnsafeLaunchesTUIInUnsafeMode(t *testing.T) {
 	}
 	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeUnsafe {
 		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeUnsafe)
+	}
+}
+
+func TestRunAddDirWiresExtraWriteRootIntoTUISandboxScope(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	extra := t.TempDir()
+	launched := false
+	var launchedOptions tui.Options
+
+	exitCode := runWithDeps([]string{"--add-dir", extra}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(_ context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("expected the interactive TUI to launch, but runTUI was never called")
+	}
+	if launchedOptions.AgentOptions.Sandbox == nil {
+		t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")
+	}
+	roots := launchedOptions.AgentOptions.Sandbox.Scope().Roots()
+	if len(roots) != 2 {
+		t.Fatalf("scope roots = %v, want exactly workspace + extra", roots)
+	}
+	// The scope stores symlink-resolved roots (e.g. macOS /var -> /private/var),
+	// so compare against the resolved extra dir.
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", extra, err)
+	}
+	found := false
+	for _, root := range roots {
+		if root == resolvedExtra {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("scope roots = %v, want to contain %q", roots, resolvedExtra)
+	}
+}
+
+func TestRunSkipPermissionsUnsafeMergesAddDirGrants(t *testing.T) {
+	cwd := t.TempDir()
+	extra := t.TempDir()
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", extra, err)
+	}
+
+	// --add-dir is accepted on either side of --skip-permissions-unsafe; both
+	// orders must reach the unsafe TUI with the extra root in scope.
+	for _, args := range [][]string{
+		{"--skip-permissions-unsafe", "--add-dir", extra},
+		{"--add-dir", extra, "--skip-permissions-unsafe"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			var launchedOptions tui.Options
+
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) {
+					return cwd, nil
+				},
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return config.ResolvedConfig{MaxTurns: 3}, nil
+				},
+				runTUI: func(_ context.Context, options tui.Options) int {
+					launchedOptions = options
+					return 0
+				},
+			})
+
+			if exitCode != 0 {
+				t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
+			}
+			if launchedOptions.PermissionMode != agent.PermissionModeUnsafe {
+				t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeUnsafe)
+			}
+			if launchedOptions.AgentOptions.Sandbox == nil {
+				t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")
+			}
+			roots := launchedOptions.AgentOptions.Sandbox.Scope().Roots()
+			if len(roots) != 2 {
+				t.Fatalf("scope roots = %v, want exactly workspace + extra", roots)
+			}
+			if roots[1] != resolvedExtra {
+				t.Fatalf("scope roots = %v, want extra root %q", roots, resolvedExtra)
+			}
+		})
+	}
+}
+
+func TestRunAddDirRejectedForNonAgentCommands(t *testing.T) {
+	// --add-dir grants a write root that only the TUI and exec consume; every
+	// other subcommand must fail loud rather than silently drop the grant.
+	for _, args := range [][]string{
+		{"--add-dir", "/tmp", "config"},
+		{"--add-dir=/tmp", "doctor"},
+		{"--add-dir", "/tmp", "models"},
+		{"--add-dir", "/tmp", "sandbox"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithDeps(args, &stdout, &stderr, appDeps{
+				runTUI: func(context.Context, tui.Options) int {
+					t.Fatal("TUI launcher should not be called when --add-dir is rejected")
+					return 0
+				},
+			})
+
+			if exitCode != 1 {
+				t.Fatalf("expected exit code 1, got %d", exitCode)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("expected empty stdout, got %q", stdout.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, "--add-dir is only supported for the interactive TUI and exec") {
+				t.Fatalf("expected --add-dir rejection on stderr, got %q", got)
+			}
+		})
 	}
 }
 

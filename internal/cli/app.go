@@ -151,13 +151,38 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs)
 	}
 
+	// --add-dir grants an extra write root, and only the interactive TUI and
+	// exec dispatch paths consume one. Fail loud everywhere else rather than
+	// silently discarding an explicit grant. The allowlist names the cases
+	// below that forward addDirs, plus help/version, which run no agent and
+	// write nothing, so a stray grant is harmless there. A future subcommand
+	// is rejected by default until it opts in here.
+	if len(addDirs) > 0 {
+		switch args[0] {
+		case "--skip-permissions-unsafe", "-p", "--prompt", "exec",
+			"-h", "--help", "help", "-v", "--version", "version":
+			// Forwarded (or harmlessly ignored) by the matching case below.
+		default:
+			return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
+		}
+	}
+
 	switch args[0] {
 	case "--skip-permissions-unsafe":
 		// Launch the interactive TUI directly in unsafe mode. Without this, the
 		// flag fell through to the unknown-command path, so a user could never
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
 		// gated behind unsafe) was therefore unreachable.
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, addDirs)
+		//
+		// --add-dir may legally appear on either side of the flag, so re-split
+		// the remaining args and merge with the dirs already collected. Any
+		// trailing non-flag args were ignored on this path before --add-dir
+		// existed and still are.
+		moreDirs, _, err := splitLeadingAddDirFlags(args[1:])
+		if err != nil {
+			return writeAppError(stderr, err.Error(), 1)
+		}
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...))
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -172,10 +197,13 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if len(args) < 2 {
 			return writePromptRequired(stderr)
 		}
-		execArgs := append([]string{"--prompt", args[1]}, args[2:]...)
+		// Forward leading --add-dir occurrences so exec's own parser collects them.
+		execArgs := append(addDirFlagArgs(addDirs), "--prompt", args[1])
+		execArgs = append(execArgs, args[2:]...)
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
-		return runExec(args[1:], stdout, stderr, deps)
+		// Forward leading --add-dir occurrences so exec's own parser collects them.
+		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
 	case "config":
 		return runConfig(args[1:], stdout, stderr, deps)
 	case "models":
@@ -511,6 +539,17 @@ Flags:
 	return err
 }
 
+// addDirFlagArgs rebuilds "--add-dir <dir>" flag pairs so dirs collected by
+// splitLeadingAddDirFlags can be forwarded into exec's own argument parser
+// (which accepts --add-dir anywhere) instead of being silently dropped.
+func addDirFlagArgs(addDirs []string) []string {
+	flags := make([]string, 0, 2*len(addDirs))
+	for _, dir := range addDirs {
+		flags = append(flags, "--add-dir", dir)
+	}
+	return flags
+}
+
 // splitLeadingAddDirFlags strips leading --add-dir flags from the root
 // argument list (zero --add-dir <path> [--add-dir <path>] [subcommand …]).
 // Subcommands like exec parse their own --add-dir occurrences.
@@ -519,10 +558,17 @@ func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
 	for len(args) > 0 {
 		switch {
 		case args[0] == "--add-dir":
-			if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
+			if len(args) < 2 {
 				return nil, nil, errors.New("--add-dir requires a directory path")
 			}
-			addDirs = append(addDirs, args[1])
+			value := strings.TrimSpace(args[1])
+			if value == "" {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			if strings.HasPrefix(value, "-") {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			addDirs = append(addDirs, value)
 			args = args[2:]
 		case strings.HasPrefix(args[0], "--add-dir="):
 			value := strings.TrimSpace(strings.TrimPrefix(args[0], "--add-dir="))

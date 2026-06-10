@@ -273,11 +273,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
-	// Re-register core tools with the fully resolved scope so that write-root
-	// enforcement in file tools reflects both config-sourced and CLI-sourced
-	// extra roots. The scoped tools overwrite the nil-scope ones registered
-	// earlier; all other registrations (specialist, MCP, escalate_model,
-	// spec-mode, tool_search) are unaffected.
+	// Re-register the core tools with the run scope, OVERWRITING the nil-scope
+	// instances registered before config resolve (the registry must exist that
+	// early for --list-tools and tool-filter validation, which run without a
+	// provider). This is safe only while two invariants hold:
+	//   1. Registry.Register replaces by NAME, so every path-confining core
+	//      tool is swapped wholesale; and
+	//   2. nothing between the initial registration and this point captures a
+	//      core-tool INSTANCE (tool_search holds the *Registry* and resolves
+	//      names lazily; --list-tools and filter validation use names only).
+	// A new wrapper that snapshots a core tool before this line would silently
+	// ship nil-scope enforcement — add it below this re-registration instead.
 	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
 		registry.Register(tool)
 	}
