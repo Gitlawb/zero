@@ -34,7 +34,7 @@ the Go runtime is the default app path.
 - 🖥️ **Lime TUI** — a near-black, lime-accent chat surface (Bubble Tea/Lip Gloss) with live tool cards, inline diffs, and an adaptive layout from 58 to 120+ columns.
 - 🤖 **Headless & scriptable** — `zero exec` with clean `text` / `json` / `stream-json` I/O and meaningful exit codes for CI and automation.
 - 🧰 **Real tools** — read / write / edit files, `apply_patch`, `grep`, `glob`, `bash`, directory listing, and a live plan/todo.
-- 🛡️ **Safe by default** — mutating tools are permission-gated; `--skip-permissions-unsafe` is an explicit, clearly-labeled opt-out.
+- 🛡️ **Safe by default** — mutating tools are permission-gated and writes stay inside the workspace unless you grant extra directories (`--add-dir` / `/add-dir`); `--skip-permissions-unsafe` is an explicit, clearly-labeled opt-out.
 - 💾 **Durable sessions** — local, append-only session event store with full-text `search`.
 - 🩺 **Operable** — built-in `doctor`, `config` inspection, secret redaction everywhere, and `update --check`.
 
@@ -90,7 +90,7 @@ zero exec --input-format stream-json --output-format stream-json < turns.jsonl
 ```
 
 `exec` flags: `-f, --file` · `-m, --model` · `-C, --cwd` · `-i, --input-format <text|stream-json>` ·
-`-o, --output-format <text|json|stream-json>` · `--skip-permissions-unsafe`.
+`-o, --output-format <text|json|stream-json>` · `--add-dir <path>` (repeatable) · `--skip-permissions-unsafe`.
 stdout carries **only** program output; logs go to stderr. See
 [`docs/STREAM_JSON_PROTOCOL.md`](docs/STREAM_JSON_PROTOCOL.md).
 
@@ -107,6 +107,31 @@ zero serve --mcp [-C <path>]                  # expose Zero read-only tools over
 zero specialist list|show|create|edit|delete  # manage local specialist sub-agents
 zero update --check [--json --target windows-x64] # check for a newer release
 ```
+
+### Extra write directories (`--add-dir`)
+
+Zero confines writes to the workspace by default. To let the agent write somewhere
+else, pass the repeatable `--add-dir` flag — it works for both the interactive TUI
+and `zero exec`:
+
+```bash
+zero --add-dir ~/Desktop/scratch                       # launch the TUI with an extra write root
+zero exec --add-dir ../sibling-repo "update both repos"
+```
+
+In the TUI, `/add-dir <path>` grants a directory mid-session (session-only), and a
+bare `/add-dir` lists the current write roots. To persist extra roots across
+sessions, set `sandbox.additionalWriteRoots` in the **global** user config
+(`~/.config/zero/config.json`); the key is deliberately ignored in project config
+so a checked-out repo can't widen its own sandbox. Flag and config sources merge
+as a union.
+
+Granted roots must already exist (the filesystem root is rejected), symlinks are
+resolved when the grant is made, and the same per-root symlink-traversal checks
+that protect the workspace apply to each extra root. Relative paths in tool calls
+still resolve against the workspace only, and network and destructive-shell policy
+are unchanged. A write denied outside all roots returns an error that suggests
+`/add-dir`.
 
 ## Providers & models
 

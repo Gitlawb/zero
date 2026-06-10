@@ -262,8 +262,8 @@ type ModelEntry struct {
 
 ### F17 — Slash Commands (P0)
 
-**Built-in (20):**
-- Session: `/clear`, `/compact`, `/context`, `/rewind`, `/resume`, `/exit`
+**Built-in (21):**
+- Session: `/clear`, `/compact`, `/context`, `/add-dir`, `/rewind`, `/resume`, `/exit`
 - Model: `/model`, `/effort`, `/style`, `/permissions`
 - Project: `/init`, `/memory`, `/skills`
 - Extensibility: `/mcp`, `/hooks`, `/agents`
@@ -298,7 +298,7 @@ type ModelEntry struct {
 - Linux: bubblewrap
 - macOS: sandbox-exec
 - Windows: AppContainer
-- Filesystem policies
+- Filesystem policies (workspace write confinement + user-granted extra roots via `--add-dir`)
 - Network policies
 - Unix socket controls
 
