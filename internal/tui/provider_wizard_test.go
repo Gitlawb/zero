@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -42,6 +43,31 @@ func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
 		"Ollama",
 	} {
 		assertContains(t, view, want)
+	}
+}
+
+func TestProviderWizardUsesRuntimeProviderCatalog(t *testing.T) {
+	wizard := newModel(context.Background(), Options{}).newProviderWizard()
+	got := map[string]bool{}
+	for _, provider := range wizard.providers {
+		got[provider.ID] = true
+		if !providercatalog.RuntimeSupported(provider) {
+			t.Fatalf("wizard included unsupported provider %q", provider.ID)
+		}
+	}
+
+	for _, provider := range providercatalog.All() {
+		if !providercatalog.RuntimeSupported(provider) {
+			continue
+		}
+		if !got[provider.ID] {
+			t.Fatalf("wizard omitted runtime catalog provider %q", provider.ID)
+		}
+	}
+	for _, unsupported := range []string{"bedrock", "vertex"} {
+		if got[unsupported] {
+			t.Fatalf("wizard should not include unsupported provider %q", unsupported)
+		}
 	}
 }
 

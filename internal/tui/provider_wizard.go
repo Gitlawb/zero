@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
+
+const maxProviderWizardProvidersVisible = 10
 
 type providerWizardStep int
 
@@ -62,11 +65,9 @@ func (m model) newProviderWizard() *providerWizardState {
 }
 
 func providerWizardProviders() []providercatalog.Descriptor {
-	ids := []string{"openai", "anthropic", "google", "groq", "openrouter", "ollama"}
-	providers := make([]providercatalog.Descriptor, 0, len(ids))
-	for _, id := range ids {
-		descriptor, ok := providercatalog.Get(id)
-		if !ok || !providercatalog.RuntimeSupported(descriptor) {
+	providers := []providercatalog.Descriptor{}
+	for _, descriptor := range providercatalog.All() {
+		if !providercatalog.RuntimeSupported(descriptor) {
 			continue
 		}
 		providers = append(providers, descriptor)
@@ -367,8 +368,13 @@ func providerWizardStepLine(step providerWizardStep) string {
 
 func (wizard *providerWizardState) renderProviderStep(width int) []string {
 	lines := []string{zeroTheme.accent.Render("Choose provider")}
-	for index, provider := range wizard.providers {
-		lines = append(lines, wizard.renderSelectableProvider(width, index, provider))
+	maxVisible := minInt(maxProviderWizardProvidersVisible, len(wizard.providers))
+	start := selectableListStart(len(wizard.providers), maxVisible, wizard.selectedProvider)
+	for offset, provider := range wizard.providers[start : start+maxVisible] {
+		lines = append(lines, wizard.renderSelectableProvider(width, start+offset, provider))
+	}
+	if hidden := len(wizard.providers) - maxVisible; hidden > 0 {
+		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  %d more providers in catalog", hidden)))
 	}
 	return lines
 }
