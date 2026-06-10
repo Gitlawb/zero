@@ -230,6 +230,9 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 		if !ok {
 			return []string{}, nil
 		}
+		if shouldSkipWorkspaceFile(relative) {
+			return []string{}, nil
+		}
 		if globMatcher == nil || globMatcher.MatchString(relative) {
 			return []string{target}, nil
 		}
@@ -239,7 +242,13 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 	files := []string{}
 	err = filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			if path == target {
+				return walkErr
+			}
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if path == target {
 			return nil
@@ -254,6 +263,9 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 		// pointing to a file OUTSIDE the root must be skipped, not searched.
 		relative, _, ok := confineGrepFile(resolvedRoot, path)
 		if !ok {
+			return nil
+		}
+		if shouldSkipWorkspaceFile(relative) {
 			return nil
 		}
 		if globMatcher == nil || globMatcher.MatchString(relative) {
@@ -275,6 +287,9 @@ func collectGrepMatches(resolvedRoot string, files []string, compiled *regexp.Re
 		// workspace-relative path used in output.
 		relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
 		if !ok {
+			continue
+		}
+		if shouldSkipWorkspaceFile(relative) {
 			continue
 		}
 		// Read the symlink-RESOLVED path that confineGrepFile validated, not the

@@ -133,8 +133,7 @@ func Collect(ctx context.Context, opts Options) (Info, error) {
 		}
 
 		base := path.Base(filePath)
-		ext := strings.ToLower(strings.TrimPrefix(path.Ext(base), "."))
-		if lang, ok := languageForExt(ext); ok {
+		if lang, ok := languageForPath(filePath); ok {
 			langBytes[lang] += size
 			langFiles[lang]++
 		}

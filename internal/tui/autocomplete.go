@@ -4,6 +4,8 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/workspaceindex"
 )
 
 // commandSuggestion is one row in the slash-command autocomplete overlay: the
@@ -21,10 +23,16 @@ const maxCommandSuggestions = 8
 // handling: the input is a slash-command fragment, there is at least one match,
 // and no modal (permission / questionnaire) is competing for keys.
 func (m model) suggestionsActive() bool {
-	if m.pendingPermission != nil || m.pendingAskUser != nil {
+	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
 		return false
 	}
 	return len(m.suggestions) > 0
+}
+
+func (m *model) clearSuggestions() {
+	m.suggestions = nil
+	m.suggestionIdx = 0
+	m.suggestionsAreFiles = false
 }
 
 // recomputeSuggestions rebuilds the autocomplete match list from the current
@@ -32,9 +40,8 @@ func (m model) suggestionsActive() bool {
 // disappear once the user starts typing arguments. Modals suppress matching
 // entirely. The selected index is preserved when still in range, otherwise reset.
 func (m *model) recomputeSuggestions() {
-	if m.pendingPermission != nil || m.pendingAskUser != nil {
-		m.suggestions = nil
-		m.suggestionIdx = 0
+	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+		m.clearSuggestions()
 		return
 	}
 
@@ -202,8 +209,7 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 		// could be traversed in full on each keystroke and stall the TUI.
 		visited++
 		if d.IsDir() {
-			name := d.Name()
-			if path != cwd && (name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" || strings.HasPrefix(name, ".")) {
+			if path != cwd && workspaceindex.ShouldSkipDir(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil
@@ -215,6 +221,9 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 		// Emit forward-slash paths on every platform (filepath.Rel uses "\" on
 		// Windows) so the inserted "@path" token is portable and matchable.
 		rel = filepath.ToSlash(rel)
+		if workspaceindex.ShouldSkipFile(rel) {
+			return nil
+		}
 		if needle == "" || strings.Contains(strings.ToLower(rel), needle) {
 			out = append(out, commandSuggestion{Name: "@" + rel, Desc: "file"})
 		}

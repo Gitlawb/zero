@@ -115,6 +115,82 @@ func TestSpecReviewBlocksShiftTabModeCycle(t *testing.T) {
 	}
 }
 
+func TestSpecReviewCancelLaunchesQueuedPrompt(t *testing.T) {
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{{
+		{Type: zeroruntime.StreamEventDone},
+	}}}
+	m := newSpecModeTestModel(t.TempDir(), provider, testSessionStore(t))
+	m.pendingSpecReview = &pendingSpecReviewPrompt{SpecID: "spec", SpecFilePath: ".zero/specs/spec.md"}
+	m.queuedMessage = "continue after cancel"
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(model)
+
+	if cmd == nil {
+		t.Fatal("expected queued prompt to launch after spec review cancel")
+	}
+	if next.pendingSpecReview != nil {
+		t.Fatal("expected spec review to clear")
+	}
+	if next.hasQueuedMessage() {
+		t.Fatalf("expected queued prompt to be consumed, got %q", next.queuedMessage)
+	}
+	if !next.pending {
+		t.Fatal("expected queued prompt launch to mark model pending")
+	}
+	beforeRequests := len(provider.requests)
+	_ = execCmd(cmd)
+	if len(provider.requests) <= beforeRequests {
+		t.Fatalf("expected queued prompt to issue a provider request, before=%d after=%d", beforeRequests, len(provider.requests))
+	}
+	if !providerRequestsContain(provider.requests[beforeRequests:], "continue after cancel") {
+		t.Fatalf("expected queued prompt in launched request, got %#v", provider.requests[beforeRequests:])
+	}
+}
+
+func TestSpecReviewRejectLaunchesQueuedPrompt(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+		textScript("queued after reject"),
+	}}
+	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	m.input.SetValue("/spec add review flow")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+	if next.pendingSpecReview == nil {
+		t.Fatal("expected pending review before rejection")
+	}
+	next.queuedMessage = "continue after reject"
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	next = updated.(model)
+
+	if cmd == nil {
+		t.Fatal("expected queued prompt to launch after spec review reject")
+	}
+	if next.pendingSpecReview != nil {
+		t.Fatal("expected spec review to clear")
+	}
+	if next.hasQueuedMessage() {
+		t.Fatalf("expected queued prompt to be consumed, got %q", next.queuedMessage)
+	}
+	if !next.pending {
+		t.Fatal("expected queued prompt launch to mark model pending")
+	}
+	beforeRequests := len(provider.requests)
+	_ = execCmd(cmd)
+	if len(provider.requests) <= beforeRequests {
+		t.Fatalf("expected queued reject follow-up to issue a provider request, before=%d after=%d", beforeRequests, len(provider.requests))
+	}
+	if !providerRequestsContain(provider.requests[beforeRequests:], "continue after reject") {
+		t.Fatalf("expected queued prompt in launched request, got %#v", provider.requests[beforeRequests:])
+	}
+}
+
 func newSpecModeTestModel(root string, provider zeroruntime.Provider, store *sessions.Store) model {
 	registry := tools.NewRegistry()
 	for _, tool := range tools.CoreTools(root) {
@@ -148,6 +224,17 @@ func providerRequestIncludesTool(request zeroruntime.CompletionRequest, name str
 	for _, tool := range request.Tools {
 		if tool.Name == name {
 			return true
+		}
+	}
+	return false
+}
+
+func providerRequestsContain(requests []zeroruntime.CompletionRequest, text string) bool {
+	for _, request := range requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, text) {
+				return true
+			}
 		}
 	}
 	return false

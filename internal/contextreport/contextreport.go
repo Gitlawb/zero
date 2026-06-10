@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/repomap"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -21,6 +22,7 @@ const RuntimeGo = "go"
 const (
 	CategorySystemPrompt      = "system_prompt"
 	CategoryProjectGuidelines = "project_guidelines"
+	CategoryWorkspaceMap      = "workspace_map"
 	CategoryTools             = "tools"
 	CategoryFree              = "free"
 )
@@ -28,6 +30,7 @@ const (
 var defaultProjectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.md"}
 
 const maxProjectContextBytes = 8 << 10
+const maxWorkspaceMapContextBytes = 4 << 10
 
 // toolDefinitionOverheadTokens approximates per-tool JSON/message framing.
 const toolDefinitionOverheadTokens = 4
@@ -104,6 +107,12 @@ func Build(options Options) (Report, error) {
 		categories = append(categories, category(CategoryProjectGuidelines, "Project guidelines", estimateTextTokens(projectGuidelines), report.ContextWindow))
 	}
 
+	if workspaceMap, err := workspaceMapFootprint(root); err != nil {
+		categories = append(categories, category(CategoryWorkspaceMap, "Workspace map (error: "+err.Error()+")", 0, report.ContextWindow))
+	} else if workspaceMap != "" {
+		categories = append(categories, category(CategoryWorkspaceMap, "Workspace map", estimateTextTokens(workspaceMap), report.ContextWindow))
+	}
+
 	toolCount, toolTokens := estimateRegistryTools(options.Registry)
 	report.ToolCount = toolCount
 	if toolTokens > 0 {
@@ -125,6 +134,14 @@ func Build(options Options) (Report, error) {
 	categories = append(categories, category(CategoryFree, "Free", report.FreeTokens, report.ContextWindow))
 	report.Categories = categories
 	return report, nil
+}
+
+func workspaceMapFootprint(root string) (string, error) {
+	snapshot, err := repomap.Scan(root, repomap.Options{MaxFiles: 300, MaxDepth: 5})
+	if err != nil {
+		return "", err
+	}
+	return repomap.RenderPrompt(snapshot, maxWorkspaceMapContextBytes), nil
 }
 
 func systemPromptFootprint(root string, modelID string) string {

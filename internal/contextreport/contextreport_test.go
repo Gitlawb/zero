@@ -157,6 +157,82 @@ func TestBuildClampsFreeBudgetWhenOverContextWindow(t *testing.T) {
 	}
 }
 
+func TestBuildAccountsForWorkspaceMapContext(t *testing.T) {
+	root := t.TempDir()
+
+	baseline, err := Build(Options{
+		WorkspaceRoot: root,
+		ContextWindow: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("Build baseline returned error: %v", err)
+	}
+	baselineCat := categoryByKey(baseline, CategoryWorkspaceMap)
+	if baselineCat == nil {
+		t.Fatalf("baseline missing workspace map category: %#v", baseline.Categories)
+	}
+
+	writeTestFile(t, root, "go.mod", "module example.test/repo\n")
+	writeTestFile(t, root, "cmd/zero/main.go", "package main\n")
+	writeTestFile(t, root, "README.md", "# Example\n")
+
+	report, err := Build(Options{
+		WorkspaceRoot: root,
+		ContextWindow: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	cat := categoryByKey(report, CategoryWorkspaceMap)
+	if cat == nil {
+		t.Fatalf("missing workspace map category: %#v", report.Categories)
+	}
+	if cat.Tokens <= 0 {
+		t.Fatalf("workspace map tokens = %d, want > 0", cat.Tokens)
+	}
+	workspaceDelta := cat.Tokens - baselineCat.Tokens
+	if workspaceDelta <= 0 {
+		t.Fatalf("workspace map token delta = %d, want > 0 (baseline=%d final=%d)", workspaceDelta, baselineCat.Tokens, cat.Tokens)
+	}
+	if usedDelta := report.UsedTokens - baseline.UsedTokens; usedDelta != workspaceDelta {
+		t.Fatalf("used token delta = %d, want workspace map delta %d", usedDelta, workspaceDelta)
+	}
+	if freeDelta := baseline.FreeTokens - report.FreeTokens; freeDelta != workspaceDelta {
+		t.Fatalf("free token delta = %d, want workspace map delta %d", freeDelta, workspaceDelta)
+	}
+	formatted := Format(report)
+	if !strings.Contains(formatted, "Workspace map") {
+		t.Fatalf("Format missing workspace map category:\n%s", formatted)
+	}
+}
+
+func TestBuildShowsWorkspaceMapScanErrors(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing")
+
+	report, err := Build(Options{
+		WorkspaceRoot: root,
+		ContextWindow: 10_000,
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	cat := categoryByKey(report, CategoryWorkspaceMap)
+	if cat == nil {
+		t.Fatalf("missing workspace map error category: %#v", report.Categories)
+	}
+	if cat.Tokens != 0 {
+		t.Fatalf("workspace map error tokens = %d, want 0", cat.Tokens)
+	}
+	if !strings.Contains(cat.Name, "Workspace map (error:") {
+		t.Fatalf("workspace map category name = %q, want visible error", cat.Name)
+	}
+	if formatted := Format(report); !strings.Contains(formatted, "Workspace map (error:") {
+		t.Fatalf("Format missing workspace map error:\n%s", formatted)
+	}
+}
+
 func TestBuildWithoutProviderStillReturnsReport(t *testing.T) {
 	root := t.TempDir()
 

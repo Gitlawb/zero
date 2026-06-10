@@ -17,6 +17,35 @@ func TestLanguageForExt(t *testing.T) {
 	}
 }
 
+func TestLanguageForPathOverlapExtensions(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+		ok   bool
+	}{
+		{"cmd/zero/main.go", "Go", true},
+		{"web/app.ts", "TypeScript", true},
+		{"web/component.tsx", "TypeScript", true},
+		{"web/app.js", "JavaScript", true},
+		{"web/component.jsx", "JavaScript", true},
+		{"README.md", "", false},
+		{"package.json", "", false},
+		{".github/workflows/ci.yml", "", false},
+		{"config.yaml", "", false},
+		{"scripts/install.sh", "Shell", true},
+		{"scripts/install.bash", "Shell", true},
+		{"tools/report.py", "Python", true},
+		{"crates/zero/src/lib.rs", "Rust", true},
+		{"LICENSE", "", false},
+	}
+	for _, tt := range cases {
+		got, ok := languageForPath(tt.path)
+		if got != tt.want || ok != tt.ok {
+			t.Fatalf("languageForPath(%q)=%q,%v want %q,%v", tt.path, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
 func TestCicdForPath(t *testing.T) {
 	cases := map[string]string{
 		".github/workflows/ci.yml": "GitHub Actions",

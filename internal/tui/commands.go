@@ -31,6 +31,7 @@ const (
 	commandStyle
 	commandTheme
 	commandInputStyle
+	commandTranscript
 	commandBash
 	commandImage
 	commandAddDir
@@ -162,6 +163,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show or request transcript compaction state.",
 		kind:        commandCompact,
+	},
+	{
+		name:        "/transcript",
+		usage:       "/transcript",
+		group:       commandGroupSession,
+		description: "Toggle the detailed transcript view.",
+		kind:        commandTranscript,
 	},
 	{
 		name:        "/rewind",

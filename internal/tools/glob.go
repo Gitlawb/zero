@@ -103,7 +103,13 @@ func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, 
 	matches := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			if path == root {
+				return walkErr
+			}
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if path == root {
 			return nil
@@ -120,6 +126,9 @@ func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, 
 			return err
 		}
 		normalized := filepath.ToSlash(relative)
+		if !entry.IsDir() && shouldSkipWorkspaceFile(normalized) {
+			return nil
+		}
 		if matcher.MatchString(normalized) {
 			matches = append(matches, normalized)
 		}

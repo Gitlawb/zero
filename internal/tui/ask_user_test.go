@@ -147,3 +147,67 @@ func TestAskUserPromptBlocksNormalSubmit(t *testing.T) {
 		t.Fatal("expected ask_user prompt to remain pending after answering one question")
 	}
 }
+
+func TestAskUserRequestClearsComposerDraft(t *testing.T) {
+	var answers [][]string
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m = typeRunes(t, m, "hidden followup")
+	if !m.composerActive || m.composerValue() == "" {
+		t.Fatalf("test setup expected active composer draft, got active=%v value=%q", m.composerActive, m.composerValue())
+	}
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID: 7,
+		request: agent.AskUserRequest{
+			ToolCallID: "call_1",
+			Questions:  []agent.AskUserQuestion{{Question: "Proceed?"}},
+		},
+		answer: func(values []string) {
+			answers = append(answers, values)
+		},
+	})
+	next := updated.(model)
+
+	if next.composerActive || next.composerValue() != "" {
+		t.Fatalf("ask_user should clear composer draft, active=%v value=%q", next.composerActive, next.composerValue())
+	}
+	next.input.SetValue("yes")
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if len(answers) != 1 || answers[0][0] != "yes" {
+		t.Fatalf("expected answer to use ask_user input only, got %#v", answers)
+	}
+	if transcriptContains(next.transcript, "hidden followup") {
+		t.Fatalf("hidden composer draft leaked into transcript: %#v", next.transcript)
+	}
+}
+
+func TestAskUserRequestClearsStaleSuggestions(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	m.activeRunID = 7
+	m.suggestions = []commandSuggestion{{Name: "/model", Desc: "Pick a model."}}
+	m.suggestionIdx = 0
+	m.suggestionsAreFiles = true
+
+	updated, _ := m.Update(askUserRequestMsg{
+		runID: 7,
+		request: agent.AskUserRequest{
+			ToolCallID: "call_1",
+			Questions:  []agent.AskUserQuestion{{Question: "Proceed?"}},
+		},
+		answer: func([]string) {},
+	})
+	next := updated.(model)
+
+	if len(next.suggestions) != 0 || next.suggestionsAreFiles {
+		t.Fatalf("ask_user should clear stale suggestions, got suggestions=%#v files=%v", next.suggestions, next.suggestionsAreFiles)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if len(next.suggestions) != 0 || next.suggestionsAreFiles {
+		t.Fatalf("ask_user resolve should keep suggestions clear, got suggestions=%#v files=%v", next.suggestions, next.suggestionsAreFiles)
+	}
+}
