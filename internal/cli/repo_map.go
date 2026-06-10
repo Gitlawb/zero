@@ -13,10 +13,11 @@ import (
 const defaultRepoMapOutputFiles = 40
 
 type repoMapOptions struct {
-	json     bool
-	query    string
-	maxFiles int
-	maxDepth int
+	json         bool
+	query        string
+	outputFiles  int
+	scanMaxFiles int
+	maxDepth     int
 }
 
 type repoMapReport struct {
@@ -52,7 +53,10 @@ func runRepoMap(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
-	snapshot, err := repomap.Scan(workspaceRoot, repomap.Options{MaxDepth: options.maxDepth})
+	snapshot, err := repomap.Scan(workspaceRoot, repomap.Options{
+		MaxFiles: options.scanMaxFiles,
+		MaxDepth: options.maxDepth,
+	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -80,8 +84,9 @@ func runRepoMap(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 
 func parseRepoMapArgs(args []string) (repoMapOptions, bool, error) {
 	options := repoMapOptions{
-		maxFiles: defaultRepoMapOutputFiles,
-		maxDepth: repomap.DefaultMaxDepth,
+		outputFiles:  defaultRepoMapOutputFiles,
+		scanMaxFiles: repomap.DefaultMaxFiles,
+		maxDepth:     repomap.DefaultMaxDepth,
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -108,14 +113,31 @@ func parseRepoMapArgs(args []string) (repoMapOptions, bool, error) {
 			if err != nil {
 				return options, false, err
 			}
-			options.maxFiles = parsed
+			options.outputFiles = parsed
 			index = next
 		case strings.HasPrefix(arg, "--max-files="):
 			parsed, err := parsePositiveRepoMapInt("--max-files", strings.TrimPrefix(arg, "--max-files="))
 			if err != nil {
 				return options, false, err
 			}
-			options.maxFiles = parsed
+			options.outputFiles = parsed
+		case arg == "--scan-max-files":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			parsed, err := parsePositiveRepoMapInt("--scan-max-files", value)
+			if err != nil {
+				return options, false, err
+			}
+			options.scanMaxFiles = parsed
+			index = next
+		case strings.HasPrefix(arg, "--scan-max-files="):
+			parsed, err := parsePositiveRepoMapInt("--scan-max-files", strings.TrimPrefix(arg, "--scan-max-files="))
+			if err != nil {
+				return options, false, err
+			}
+			options.scanMaxFiles = parsed
 		case arg == "--max-depth":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -159,10 +181,10 @@ func parseNonNegativeRepoMapInt(name string, value string) (int, error) {
 }
 
 func buildRepoMapReport(snapshot repomap.Snapshot, options repoMapOptions) repoMapReport {
-	files := limitedRepoMapFiles(snapshot.Files, options.maxFiles)
+	files := limitedRepoMapFiles(snapshot.Files, options.outputFiles)
 	var matches []repomap.SearchResult
 	if options.query != "" {
-		matches = repomap.Search(snapshot, options.query, options.maxFiles)
+		matches = repomap.Search(snapshot, options.query, options.outputFiles)
 		files = files[:0]
 		// repomap.Search returns paths from snapshot.Files, so repoMapFileByPath
 		// should always find match.Path. If it does not, Search and the snapshot
@@ -268,6 +290,7 @@ Flags:
       --json                Print JSON report
       --query <text>        Print ranked file matches for a query
       --max-files <number>  Limit files or query matches shown
+      --scan-max-files <n>  Limit files scanned before truncation
       --max-depth <number>  Limit scan depth
   -h, --help                Show this help
 `)

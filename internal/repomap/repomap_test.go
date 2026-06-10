@@ -1,6 +1,7 @@
 package repomap
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -139,6 +140,34 @@ func TestScanReturnsFilesystemErrorsWithTruncatedSnapshot(t *testing.T) {
 	}
 }
 
+func TestHandleWalkErrorKeepsScanningAfterUnreadableSubdir(t *testing.T) {
+	truncated := false
+	handled, err := handleWalkError("root", "root/blocked", fakeDirEntry{dir: true}, os.ErrPermission, &truncated)
+	if !handled {
+		t.Fatal("handled=false want true")
+	}
+	if err != filepath.SkipDir {
+		t.Fatalf("err=%v want filepath.SkipDir", err)
+	}
+	if !truncated {
+		t.Fatal("truncated=false want true")
+	}
+}
+
+func TestHandleWalkErrorReturnsRootErrors(t *testing.T) {
+	truncated := false
+	handled, err := handleWalkError("root", "root", nil, os.ErrNotExist, &truncated)
+	if !handled {
+		t.Fatal("handled=false want true")
+	}
+	if err == nil {
+		t.Fatal("err=nil want root error")
+	}
+	if !truncated {
+		t.Fatal("truncated=false want true")
+	}
+}
+
 func TestScanHonorsTraversalCaps(t *testing.T) {
 	t.Run("max files keeps the first deterministic files", func(t *testing.T) {
 		root := t.TempDir()
@@ -251,4 +280,27 @@ func contains(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+type fakeDirEntry struct {
+	dir bool
+}
+
+func (entry fakeDirEntry) Name() string {
+	return "fake"
+}
+
+func (entry fakeDirEntry) IsDir() bool {
+	return entry.dir
+}
+
+func (entry fakeDirEntry) Type() fs.FileMode {
+	if entry.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+
+func (entry fakeDirEntry) Info() (fs.FileInfo, error) {
+	return nil, os.ErrInvalid
 }

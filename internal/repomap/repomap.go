@@ -74,9 +74,8 @@ func Scan(root string, options Options) (Snapshot, error) {
 	dirs := map[string]struct{}{}
 	truncated := false
 	walkErr := filepath.WalkDir(cleanRoot, func(current string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			truncated = true
-			return walkErr
+		if handled, err := handleWalkError(cleanRoot, current, entry, walkErr, &truncated); handled {
+			return err
 		}
 		if current == cleanRoot {
 			return nil
@@ -150,6 +149,20 @@ func Scan(root string, options Options) (Snapshot, error) {
 		return snapshot, walkErr
 	}
 	return snapshot, nil
+}
+
+func handleWalkError(cleanRoot string, current string, entry fs.DirEntry, walkErr error, truncated *bool) (bool, error) {
+	if walkErr == nil {
+		return false, nil
+	}
+	*truncated = true
+	if current == cleanRoot {
+		return true, walkErr
+	}
+	if entry != nil && entry.IsDir() {
+		return true, filepath.SkipDir
+	}
+	return true, nil
 }
 
 func shouldSkipDir(name string) bool {

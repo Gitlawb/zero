@@ -18,7 +18,7 @@ func TestRunRepoMapHelpDocumentsFlags(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	for _, want := range []string{"Usage:", "zero repo-map [flags]", "--json", "--query", "--max-files", "--max-depth"} {
+	for _, want := range []string{"Usage:", "zero repo-map [flags]", "--json", "--query", "--max-files", "--scan-max-files", "--max-depth"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected repo-map help to contain %q, got %q", want, stdout.String())
 		}
@@ -140,6 +140,46 @@ func TestRunRepoMapQueryPrintsRankedMatches(t *testing.T) {
 	}
 }
 
+func TestRunRepoMapScanMaxFilesBoundsSummary(t *testing.T) {
+	cwd := newRepoMapFixture(t)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"repo-map", "--json", "--scan-max-files", "1", "--max-files", "5"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	var report struct {
+		Summary struct {
+			FileCount int  `json:"fileCount"`
+			Truncated bool `json:"truncated"`
+		} `json:"summary"`
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("repo-map JSON did not decode: %v\n%s", err, stdout.String())
+	}
+	if report.Summary.FileCount != 1 {
+		t.Fatalf("Summary.FileCount = %d, want 1", report.Summary.FileCount)
+	}
+	if !report.Summary.Truncated {
+		t.Fatal("Summary.Truncated=false want true")
+	}
+	if len(report.Files) != 1 {
+		t.Fatalf("Files length = %d, want 1", len(report.Files))
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+}
+
 func TestRunRepoMapRejectsInvalidLimits(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -147,6 +187,7 @@ func TestRunRepoMapRejectsInvalidLimits(t *testing.T) {
 		want string
 	}{
 		{name: "max files", args: []string{"repo-map", "--max-files", "0"}, want: "invalid --max-files"},
+		{name: "scan max files", args: []string{"repo-map", "--scan-max-files", "0"}, want: "invalid --scan-max-files"},
 		{name: "max depth", args: []string{"repo-map", "--max-depth", "-1"}, want: "invalid --max-depth"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
