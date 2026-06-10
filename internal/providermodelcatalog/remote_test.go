@@ -19,6 +19,19 @@ func TestParseModelsDevProviderScopesAndMapsMetadata(t *testing.T) {
 					"limit": {"context": 1048576, "output": 32768},
 					"cost": {"input": 2, "output": 8},
 					"modalities": {"input": ["text", "image"], "output": ["text"]}
+				},
+				"gpt-image-1": {
+					"id": "gpt-image-1",
+					"name": "GPT Image",
+					"modalities": {"input": ["text", "image"], "output": ["image"]}
+				},
+				"text-embedding-3-large": {
+					"id": "text-embedding-3-large",
+					"name": "Embedding model"
+				},
+				"whisper-1": {
+					"id": "whisper-1",
+					"name": "Whisper"
 				}
 			}
 		},
@@ -33,8 +46,8 @@ func TestParseModelsDevProviderScopesAndMapsMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseModelsDevProvider returned error: %v", err)
 	}
-	if len(models) != 1 {
-		t.Fatalf("models = %#v, want one openai model", models)
+	if got := strings.Join(modelIDs(models), ","); got != "gpt-4.1" {
+		t.Fatalf("models = %#v, want only coding-capable OpenAI model", got)
 	}
 	model := models[0]
 	if model.ID != "gpt-4.1" || model.Description != "GPT-4.1" {
@@ -66,6 +79,11 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 				"reasoning": true,
 				"tags": ["coding", "free"],
 				"cost": {"input": 0, "output": 0}
+			},
+			{
+				"id": "image-route",
+				"name": "Image Route",
+				"modalities": {"input": ["text"], "output": ["image"]}
 			}
 		]
 	}`)
@@ -74,8 +92,8 @@ func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOpenGatewayCatalog returned error: %v", err)
 	}
-	if len(models) != 1 {
-		t.Fatalf("models = %#v, want one gateway model", models)
+	if got := strings.Join(modelIDs(models), ","); got != "minimax-m3" {
+		t.Fatalf("models = %#v, want one gateway coding model", got)
 	}
 	model := models[0]
 	if model.ID != "minimax-m3" || model.Description != "agentic coding route" {

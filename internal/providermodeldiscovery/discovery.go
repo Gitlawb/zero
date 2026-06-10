@@ -43,7 +43,7 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
-			return mergeLiveModels(liveModels, catalogModels), nil
+			return mergeLiveModels(provider, liveModels, catalogModels), nil
 		}
 		if len(catalogModels) == 0 {
 			return nil, liveErr
@@ -186,22 +186,58 @@ func modelsFromCatalog(models []providermodelcatalog.Model) []Model {
 	return result
 }
 
-func mergeLiveModels(liveModels []Model, catalogModels []Model) []Model {
+func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, catalogModels []Model) []Model {
 	byID := map[string]Model{}
 	for _, model := range catalogModels {
 		byID[model.ID] = model
 	}
+	hasCatalog := len(byID) > 0
 	result := make([]Model, 0, len(liveModels))
 	for _, live := range liveModels {
 		if catalog, ok := byID[live.ID]; ok {
+			if !providermodelcatalog.IsCodingModel(catalogModelFromDiscovery(catalog)) {
+				continue
+			}
 			catalog.Source = firstDiscoverySource(catalog.Source, "live")
 			result = append(result, catalog)
+			continue
+		}
+		if hasCatalog {
+			continue
+		}
+		if !liveModelAllowedWithoutCatalog(provider, live.ID) {
 			continue
 		}
 		live.Source = firstDiscoverySource(live.Source, "live")
 		result = append(result, live)
 	}
 	return result
+}
+
+func liveModelAllowedWithoutCatalog(provider providercatalog.Descriptor, id string) bool {
+	if providermodelcatalog.IsKnownNonCodingModelID(id) {
+		return false
+	}
+	if provider.Local || strings.HasPrefix(provider.ID, "custom-") {
+		return true
+	}
+	return providermodelcatalog.LooksLikeCodingModelID(id)
+}
+
+func catalogModelFromDiscovery(model Model) providermodelcatalog.Model {
+	return providermodelcatalog.Model{
+		ID:               model.ID,
+		Description:      model.Description,
+		ContextWindow:    model.ContextWindow,
+		ToolCall:         model.ToolCall,
+		Reasoning:        model.Reasoning,
+		InputModalities:  append([]string{}, model.InputModalities...),
+		OutputModalities: append([]string{}, model.OutputModalities...),
+		InputCost:        model.InputCost,
+		OutputCost:       model.OutputCost,
+		Tags:             append([]string{}, model.Tags...),
+		Source:           model.Source,
+	}
 }
 
 func firstDiscoverySource(values ...string) string {

@@ -77,7 +77,7 @@ func ParseModelsDevProvider(body []byte, providerID string) ([]Model, error) {
 	models := make([]Model, 0, len(provider.Models))
 	for key, item := range provider.Models {
 		model := item.toModel(key, modelsDevSource)
-		if model.ID == "" {
+		if model.ID == "" || !IsCodingModel(model) {
 			continue
 		}
 		models = append(models, model)
@@ -104,7 +104,7 @@ func ParseOpenGatewayCatalog(body []byte) ([]Model, error) {
 	models := make([]Model, 0, len(items))
 	for _, item := range items {
 		model := item.toModel("", openGatewaySource)
-		if model.ID == "" {
+		if model.ID == "" || !IsCodingModel(model) {
 			continue
 		}
 		models = append(models, model)

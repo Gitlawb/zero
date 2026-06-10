@@ -129,7 +129,12 @@ func TestDiscoverCatalogMergesLiveModelsWithModelsDevMetadata(t *testing.T) {
 				}
 			}`))
 		case "/v1/models":
-			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"custom-live"}]}`))
+			_, _ = w.Write([]byte(`{"data":[
+				{"id":"gpt-4.1"},
+				{"id":"gpt-image-1"},
+				{"id":"text-embedding-3-large"},
+				{"id":"not-enabled"}
+			]}`))
 		default:
 			t.Fatalf("unexpected request path %q", r.URL.Path)
 		}
@@ -151,8 +156,8 @@ func TestDiscoverCatalogMergesLiveModelsWithModelsDevMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverCatalog returned error: %v", err)
 	}
-	if got := strings.Join(modelIDs(models), ","); got != "custom-live,gpt-4.1" {
-		t.Fatalf("models = %s, want live model IDs only", got)
+	if got := strings.Join(modelIDs(models), ","); got != "gpt-4.1" {
+		t.Fatalf("models = %s, want live coding model IDs only", got)
 	}
 	for _, model := range models {
 		if model.ID == "gpt-4.1" {
