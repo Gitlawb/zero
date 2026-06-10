@@ -321,6 +321,55 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	}
 }
 
+func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *testing.T) {
+	const secret = "ollama-env-secret"
+	t.Setenv("OLLAMA_API_KEY", secret)
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama-cloud")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+
+	if captured.APIKey != secret {
+		t.Fatalf("runtime APIKey = %q, want env secret", captured.APIKey)
+	}
+	if captured.APIKeyEnv != "OLLAMA_API_KEY" {
+		t.Fatalf("runtime APIKeyEnv = %q, want OLLAMA_API_KEY", captured.APIKeyEnv)
+	}
+	if next.providerProfile.APIKey != "" {
+		t.Fatalf("session providerProfile persisted APIKey = %q, want empty", next.providerProfile.APIKey)
+	}
+	if next.providerProfile.APIKeyEnv != "OLLAMA_API_KEY" {
+		t.Fatalf("session providerProfile APIKeyEnv = %q, want OLLAMA_API_KEY", next.providerProfile.APIKeyEnv)
+	}
+	persisted := readProviderWizardConfigFixture(t, configPath)
+	if len(persisted.Providers) != 1 {
+		t.Fatalf("providers length = %d, want 1", len(persisted.Providers))
+	}
+	profile := persisted.Providers[0]
+	if profile.APIKey != "" {
+		t.Fatalf("persisted APIKey = %q, want empty", profile.APIKey)
+	}
+	if profile.APIKeyEnv != "OLLAMA_API_KEY" {
+		t.Fatalf("persisted APIKeyEnv = %q, want OLLAMA_API_KEY", profile.APIKeyEnv)
+	}
+}
+
 func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	var captured config.ProviderProfile
 	m := newModel(context.Background(), Options{

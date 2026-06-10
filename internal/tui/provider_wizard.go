@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"unicode"
 
@@ -291,10 +292,11 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	provider := wizard.currentProvider()
 	modelChoice := wizard.currentModel()
 	profile := providerWizardProfile(provider, modelChoice.ID, wizard.apiKey)
+	runtimeProfile := providerWizardRuntimeProfile(profile)
 	if m.newProvider != nil {
-		nextProvider, err := m.newProvider(profile)
+		nextProvider, err := m.newProvider(runtimeProfile)
 		if err != nil {
-			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey}})
+			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{profile.APIKey, runtimeProfile.APIKey}})
 			return m, nil
 		}
 		m.provider = nextProvider
@@ -310,6 +312,14 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	m.modelName = profile.Model
 	m.providerWizard = nil
 	return m, nil
+}
+
+func providerWizardRuntimeProfile(profile config.ProviderProfile) config.ProviderProfile {
+	runtimeProfile := profile
+	if strings.TrimSpace(runtimeProfile.APIKey) == "" && strings.TrimSpace(runtimeProfile.APIKeyEnv) != "" {
+		runtimeProfile.APIKey = strings.TrimSpace(os.Getenv(runtimeProfile.APIKeyEnv))
+	}
+	return runtimeProfile
 }
 
 func (m model) providerWizardOverlay(width int) string {
