@@ -86,36 +86,12 @@ func handleWalkError(cleanRoot string, current string, entry fs.DirEntry, walkEr
 	return workspaceindex.HandleWalkError(cleanRoot, current, entry, walkErr, truncated)
 }
 
-func shouldSkipDir(name string) bool {
-	return workspaceindex.ShouldSkipDir(name)
-}
-
-func shouldSkipFile(rel string) bool {
-	return workspaceindex.ShouldSkipFile(rel)
-}
-
-func isSymlink(entry fs.DirEntry) bool {
-	return entry.Type()&fs.ModeSymlink != 0
-}
-
-func pathDepth(rel string) int {
-	return workspaceindex.PathDepth(rel)
-}
-
 func fileDepth(rel string) int {
 	return workspaceindex.FileDepth(rel)
 }
 
 func languageForExt(ext string) string {
 	return workspaceindex.LanguageForPath("file" + ext)
-}
-
-func maxFileDepth(files []File) int {
-	indexFiles := make([]workspaceindex.File, 0, len(files))
-	for _, file := range files {
-		indexFiles = append(indexFiles, workspaceindex.File{Depth: file.Depth})
-	}
-	return workspaceindex.MaxFileDepth(indexFiles)
 }
 
 func countLanguages(files []File) []Count {

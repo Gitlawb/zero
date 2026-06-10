@@ -98,6 +98,24 @@ func TestScanHonorsTraversalCaps(t *testing.T) {
 		}
 	})
 
+	t.Run("max depth includes retained directories without files", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "a", "b", "c"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+
+		got, err := Scan(root, Options{MaxDepth: 3})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if got.DirectoryCount != 3 {
+			t.Fatalf("DirectoryCount=%d want 3", got.DirectoryCount)
+		}
+		if got.MaxDepth != 3 {
+			t.Fatalf("MaxDepth=%d want deepest retained directory depth 3", got.MaxDepth)
+		}
+	})
+
 	t.Run("max bytes per file name skips overlong entries", func(t *testing.T) {
 		root := t.TempDir()
 		writeFile(t, root, "short.go", "package short\n")
@@ -145,6 +163,21 @@ func TestHelpersClassifySharedWorkspaceRules(t *testing.T) {
 	}
 	if !IsImportantPath("docs/AGENTS.md") || !IsImportantPath("go.mod") {
 		t.Fatal("expected AGENTS.md and go.mod to be important")
+	}
+}
+
+func TestFileDepthHandlesNativeSeparators(t *testing.T) {
+	for rel, want := range map[string]int{
+		"main.go":               0,
+		"pkg/one.go":            1,
+		`pkg\one.go`:            1,
+		`internal\app\app.go`:   2,
+		"internal/app/app.go":   2,
+		`internal/app\mixed.go`: 2,
+	} {
+		if got := FileDepth(rel); got != want {
+			t.Fatalf("FileDepth(%q)=%d want %d", rel, got, want)
+		}
 	}
 }
 

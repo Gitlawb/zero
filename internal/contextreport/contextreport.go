@@ -107,7 +107,9 @@ func Build(options Options) (Report, error) {
 		categories = append(categories, category(CategoryProjectGuidelines, "Project guidelines", estimateTextTokens(projectGuidelines), report.ContextWindow))
 	}
 
-	if workspaceMap := workspaceMapFootprint(root); workspaceMap != "" {
+	if workspaceMap, err := workspaceMapFootprint(root); err != nil {
+		categories = append(categories, category(CategoryWorkspaceMap, "Workspace map (error: "+err.Error()+")", 0, report.ContextWindow))
+	} else if workspaceMap != "" {
 		categories = append(categories, category(CategoryWorkspaceMap, "Workspace map", estimateTextTokens(workspaceMap), report.ContextWindow))
 	}
 
@@ -134,12 +136,12 @@ func Build(options Options) (Report, error) {
 	return report, nil
 }
 
-func workspaceMapFootprint(root string) string {
+func workspaceMapFootprint(root string) (string, error) {
 	snapshot, err := repomap.Scan(root, repomap.Options{MaxFiles: 300, MaxDepth: 5})
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return repomap.RenderPrompt(snapshot, maxWorkspaceMapContextBytes)
+	return repomap.RenderPrompt(snapshot, maxWorkspaceMapContextBytes), nil
 }
 
 func systemPromptFootprint(root string, modelID string) string {

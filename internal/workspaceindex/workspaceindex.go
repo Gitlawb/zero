@@ -65,6 +65,7 @@ func Scan(root string, options Options) (Summary, error) {
 
 	files := []File{}
 	dirs := map[string]struct{}{}
+	maxDepthSeen := 0
 	truncated := false
 	walkErr := filepath.WalkDir(cleanRoot, func(current string, entry fs.DirEntry, walkErr error) error {
 		if handled, err := HandleWalkError(cleanRoot, current, entry, walkErr, &truncated); handled {
@@ -85,9 +86,13 @@ func Scan(root string, options Options) (Summary, error) {
 			if ShouldSkipDir(entry.Name()) || isSymlink(entry) {
 				return filepath.SkipDir
 			}
-			if pathDepth(rel) > maxDepth {
+			depth := pathDepth(rel)
+			if depth > maxDepth {
 				truncated = true
 				return filepath.SkipDir
+			}
+			if depth > maxDepthSeen {
+				maxDepthSeen = depth
 			}
 			dirs[rel] = struct{}{}
 			return nil
@@ -100,6 +105,9 @@ func Scan(root string, options Options) (Summary, error) {
 		if depth > maxDepth {
 			truncated = true
 			return nil
+		}
+		if depth > maxDepthSeen {
+			maxDepthSeen = depth
 		}
 		if options.MaxBytesPerFileName > 0 && len(rel) > options.MaxBytesPerFileName {
 			truncated = true
@@ -135,7 +143,7 @@ func Scan(root string, options Options) (Summary, error) {
 		ExtensionCounts: extensionCounts(files),
 		TotalFiles:      len(files),
 		DirectoryCount:  len(dirs),
-		MaxDepth:        MaxFileDepth(files),
+		MaxDepth:        maxDepthSeen,
 		Truncated:       truncated,
 	}
 	if walkErr != nil && !errors.Is(walkErr, errStopWalk) {
@@ -296,10 +304,11 @@ func PathDepth(rel string) int {
 }
 
 func FileDepth(rel string) int {
-	if rel == "" || !strings.Contains(rel, "/") {
+	normalized := filepath.ToSlash(rel)
+	if normalized == "" || !strings.Contains(normalized, "/") {
 		return 0
 	}
-	return strings.Count(filepath.ToSlash(rel), "/")
+	return strings.Count(normalized, "/")
 }
 
 func MaxFileDepth(files []File) int {
