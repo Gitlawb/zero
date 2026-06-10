@@ -170,6 +170,9 @@ func (m model) handleModelCommand(args string) (model, string) {
 	}
 
 	nextProfile := m.providerProfile
+	if provider, ok := m.activeProviderDescriptor(); ok {
+		nextProfile = m.normalizeProfileForProvider(provider)
+	}
 	nextProfile.Model = target.modelID
 	metadata, err := providers.ResolveRuntimeMetadata(nextProfile, providers.Options{})
 	if err != nil {

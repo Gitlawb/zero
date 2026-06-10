@@ -120,6 +120,46 @@ func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
 	}
 }
 
+func TestModelSwitchNormalizesDetectedOllamaCloudProfile(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "custom-openai-compatible",
+		ModelName:    "minimax-m3",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "custom-openai-compatible",
+			CatalogID:    "custom-openai-compatible",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OPENAI_API_KEY",
+			Model:        "minimax-m3",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.modelPickerLiveProviderID = "ollama-cloud"
+	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
+	m.input.SetValue("/model glm-5.1")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if captured.Name != "ollama-cloud" || captured.CatalogID != "ollama-cloud" {
+		t.Fatalf("captured provider identity = %#v, want ollama-cloud", captured)
+	}
+	if captured.APIKeyEnv != "OLLAMA_API_KEY" {
+		t.Fatalf("captured APIKeyEnv = %q, want OLLAMA_API_KEY", captured.APIKeyEnv)
+	}
+	if captured.Model != "glm-5.1" {
+		t.Fatalf("captured model = %q, want glm-5.1", captured.Model)
+	}
+	if next.providerName != "ollama-cloud" {
+		t.Fatalf("providerName = %q, want ollama-cloud", next.providerName)
+	}
+}
+
 func TestModelPickerSearchFiltersModels(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName: "ollama-cloud",

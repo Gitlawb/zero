@@ -381,11 +381,22 @@ func (m model) modelPickerDiscoveryCmd() tea.Cmd {
 }
 
 func (m model) modelPickerDiscoveryProfile(provider providercatalog.Descriptor) config.ProviderProfile {
-	profile := m.providerProfile
-	if strings.TrimSpace(profile.Name) == "" || genericProviderCatalogID(profile.Name) {
-		profile.Name = provider.ID
+	profile := m.normalizeProfileForProvider(provider)
+	if strings.TrimSpace(profile.Model) == "" {
+		profile.Model = provider.DefaultModel
 	}
-	if strings.TrimSpace(profile.CatalogID) == "" || genericProviderCatalogID(profile.CatalogID) {
+	return profile
+}
+
+func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) config.ProviderProfile {
+	profile := m.providerProfile
+	normalizeIdentity := profileMatchesProviderBaseURL(profile, provider) ||
+		genericProviderCatalogID(profile.Name) ||
+		genericProviderCatalogID(profile.CatalogID) ||
+		strings.TrimSpace(profile.Name) == "" ||
+		strings.TrimSpace(profile.CatalogID) == ""
+	if normalizeIdentity {
+		profile.Name = provider.ID
 		profile.CatalogID = provider.ID
 	}
 	if strings.TrimSpace(profile.BaseURL) == "" {
@@ -397,16 +408,18 @@ func (m model) modelPickerDiscoveryProfile(provider providercatalog.Descriptor) 
 	if strings.TrimSpace(profile.APIFormat) == "" {
 		profile.APIFormat = providerWizardAPIFormat(provider)
 	}
-	if strings.TrimSpace(profile.APIKeyEnv) == "" && len(provider.AuthEnvVars) > 0 {
+	if len(provider.AuthEnvVars) > 0 && (strings.TrimSpace(profile.APIKeyEnv) == "" || normalizeIdentity) {
 		profile.APIKeyEnv = provider.AuthEnvVars[0]
 	}
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}
-	if strings.TrimSpace(profile.Model) == "" {
-		profile.Model = provider.DefaultModel
-	}
 	return profile
+}
+
+func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider providercatalog.Descriptor) bool {
+	baseURL := normalizeProviderBaseURL(profile.BaseURL)
+	return baseURL != "" && baseURL == normalizeProviderBaseURL(provider.DefaultBaseURL)
 }
 
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
