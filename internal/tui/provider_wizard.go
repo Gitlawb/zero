@@ -416,7 +416,9 @@ func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 
 func (wizard *providerWizardState) renderModelStep(width int) []string {
 	lines := []string{zeroTheme.accent.Render("Choose model")}
-	lines = append(lines, zeroTheme.faint.Render(wizard.modelStatusText()))
+	if status := wizard.modelStatusText(); status != "" {
+		lines = append(lines, zeroTheme.faint.Render(status))
+	}
 	lines = append(lines, wizard.renderModelSearch(width))
 	wizard.refreshModels()
 	models := wizard.filteredModels()
@@ -453,16 +455,10 @@ func (wizard *providerWizardState) modelStatusText() string {
 	if wizard.modelLoadError != "" {
 		return "models: fallback - " + wizard.modelLoadError
 	}
-	if wizard.modelSource == "models.dev" {
-		return "models: models.dev"
+	if wizard.modelSource == "fallback" {
+		return "models: fallback"
 	}
-	if wizard.modelSource == "opengateway" {
-		return "models: OpenGateway"
-	}
-	if wizard.modelSource == "live" {
-		return "models: live"
-	}
-	return "models: fallback"
+	return ""
 }
 
 func (wizard *providerWizardState) renderSelectableModel(width int, index int, model providerWizardModel) string {

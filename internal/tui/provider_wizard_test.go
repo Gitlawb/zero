@@ -298,7 +298,8 @@ func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 		t.Fatalf("wizard models = %#v, want live discovered models", got)
 	}
 	view := plainRender(t, next.View())
-	assertContains(t, view, "models: live")
+	assertNotContains(t, view, "models: live")
+	assertContains(t, view, "search > Search model")
 	assertNotContains(t, view, "gpt-4.1")
 }
 
@@ -348,7 +349,8 @@ func TestProviderWizardRendersDiscoveredModelMetadata(t *testing.T) {
 	})
 
 	view := plainRender(t, next.View())
-	assertContains(t, view, "models: models.dev")
+	assertNotContains(t, view, "models: models.dev")
+	assertNotContains(t, view, "models: OpenGateway")
 	assertContains(t, view, "GPT-4.1")
 	assertContains(t, view, "1M ctx")
 	assertContains(t, view, "tools")
