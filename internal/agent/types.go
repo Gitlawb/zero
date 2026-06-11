@@ -196,4 +196,33 @@ type Result struct {
 	Turns       int
 	Messages    []Message
 	StopReason  StopReason
+	// FinishReason is the provider's normalized terminal stop reason for the turn
+	// that produced FinalAnswer: zeroruntime.FinishReasonLength when the output
+	// hit the token cap, FinishReasonContentFilter when it was filtered. Empty for
+	// a normal completion.
+	FinishReason string
+}
+
+// Truncated reports whether the final response ended abnormally (cut off at the
+// output token cap or withheld by a content filter) rather than completing
+// naturally. Callers can use it to warn the user that FinalAnswer is incomplete.
+func (result Result) Truncated() bool {
+	return result.FinishReason != ""
+}
+
+// TruncationNotice returns a user-facing warning when the final response was
+// truncated, or "" for a normal completion. Shared by the CLI and TUI so the
+// wording stays consistent.
+func (result Result) TruncationNotice() string {
+	switch result.FinishReason {
+	case zeroruntime.FinishReasonLength:
+		return "Response was cut off at the output token limit and may be incomplete. " +
+			"Raise the model's max output tokens or ask zero to continue."
+	case zeroruntime.FinishReasonContentFilter:
+		return "Response was withheld or cut off by the provider's content filter and may be incomplete."
+	case "":
+		return ""
+	default:
+		return "Response ended early (" + result.FinishReason + ") and may be incomplete."
+	}
 }

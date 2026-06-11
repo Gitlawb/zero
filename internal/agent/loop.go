@@ -195,6 +195,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			return result, ctx.Err()
 		}
 
+		// Carry the turn's terminal stop reason so a final answer cut off at the
+		// output token cap (or by a content filter) is reported as truncated. A
+		// tool-call turn normalizes to "" and clears any prior reason.
+		result.FinishReason = collected.FinishReason
+
 		messages = append(messages, zeroruntime.Message{
 			Role:      zeroruntime.MessageRoleAssistant,
 			Content:   collected.Text,
@@ -377,8 +382,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		result.Messages = copyMessages(messages)
 		return result, ctx.Err()
 	}
-	if answer, finalMessages := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
+		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
 		return result, nil
 	}
@@ -388,7 +394,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	return result, nil
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message) {
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
@@ -398,20 +404,20 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 		Messages: copyMessages(finalMessages),
 	})
 	if err != nil {
-		return "", messages
+		return "", messages, ""
 	}
 	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
 		OnText:  options.OnText,
 		OnUsage: options.OnUsage,
 	})
 	if ctx.Err() != nil || collected.Error != "" || strings.TrimSpace(collected.Text) == "" {
-		return "", messages
+		return "", messages, ""
 	}
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleAssistant,
 		Content: collected.Text,
 	})
-	return collected.Text, finalMessages
+	return collected.Text, finalMessages, collected.FinishReason
 }
 
 func historySafeToolCalls(calls []ToolCall) []ToolCall {

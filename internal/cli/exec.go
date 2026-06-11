@@ -527,6 +527,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		"content": result.FinalAnswer,
 	})
 
+	if notice := result.TruncationNotice(); notice != "" {
+		writer.warning(notice)
+	}
 	writer.final(result.FinalAnswer)
 	writer.runEnd("success", exitSuccess)
 	if writer.err != nil {
