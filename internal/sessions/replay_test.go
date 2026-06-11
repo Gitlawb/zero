@@ -334,6 +334,40 @@ func TestStoreReadRehydratedEventsReplacesCompactedPrefixWithSummary(t *testing.
 	}
 }
 
+func TestPrepareExecFallsBackToRawEventsWhenLatestCompactionIsMalformed(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "malformed_compaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "before compaction"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventCompaction, Payload: json.RawMessage(`{"summary":""}`)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ReadRehydratedEvents(session.SessionID); err == nil {
+		t.Fatal("expected malformed latest compaction to fail direct rehydration")
+	}
+
+	resumed, err := PrepareExec(PrepareExecOptions{Store: store, Resume: session.SessionID})
+	if err != nil {
+		t.Fatalf("PrepareExec resume should fall back to raw events, got error: %v", err)
+	}
+	if got := eventIDs(resumed.ContextEvents); strings.Join(got, ",") != "malformed_compaction:1,malformed_compaction:2" {
+		t.Fatalf("resume context ids = %#v, want raw event ids", got)
+	}
+
+	forked, err := PrepareExec(PrepareExecOptions{Store: store, Fork: session.SessionID, SessionID: "malformed_compaction_fork"})
+	if err != nil {
+		t.Fatalf("PrepareExec fork should fall back to raw events, got error: %v", err)
+	}
+	if got := eventIDs(forked.ContextEvents); strings.Join(got, ",") != "malformed_compaction:1,malformed_compaction:2" {
+		t.Fatalf("fork context ids = %#v, want raw parent event ids", got)
+	}
+}
+
 func TestRehydrateEventsDecodesOnlyLatestCompactionPayload(t *testing.T) {
 	events := []Event{
 		{ID: "rehydratelatest:1", SessionID: "rehydratelatest", Sequence: 1, Type: EventMessage, CreatedAt: "2026-06-11T10:00:00Z", Payload: json.RawMessage(`{"content":"first"}`)},
