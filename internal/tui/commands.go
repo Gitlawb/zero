@@ -345,6 +345,30 @@ func formatCommandHelpLine(command commandDefinition) string {
 	return label + " - " + command.description
 }
 
+func commandSelectionRequiresInput(name string) bool {
+	command, ok := resolveCommand(name)
+	return ok && commandUsageRequiresInput(command.usage)
+}
+
+func commandUsageRequiresInput(usage string) bool {
+	optionalDepth := 0
+	for _, char := range usage {
+		switch char {
+		case '[':
+			optionalDepth++
+		case ']':
+			if optionalDepth > 0 {
+				optionalDepth--
+			}
+		case '<':
+			if optionalDepth == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func commandGroupOrder() []commandGroup {
 	return []commandGroup{
 		commandGroupModel,

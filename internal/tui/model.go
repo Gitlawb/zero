@@ -472,14 +472,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Enter on file suggestions inserts the @file token for continued
-			// composing. Enter on command suggestions executes the selected slash
-			// command immediately instead of echoing it into the composer.
+			// composing. Command suggestions execute only when the selected command
+			// is self-contained; commands that require a value are inserted so the
+			// user can finish the argument first.
 			if m.suggestionsActive() {
 				if len(m.suggestions) == 0 {
 					return m, nil
 				}
 				wasFiles := m.suggestionsAreFiles
 				wasDirectory := m.selectedSuggestionIsDirectory()
+				requiresInput := m.selectedCommandSuggestionRequiresInput()
 				next := m.completeSuggestion()
 				next.resetComposerFromInput()
 				if wasFiles && wasDirectory {
@@ -487,6 +489,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return next, nil
 				}
 				if !wasFiles {
+					if requiresInput {
+						return next, nil
+					}
 					return next.handleSubmit()
 				}
 				return next, nil

@@ -156,6 +156,41 @@ func TestEnterRunsCommandSuggestion(t *testing.T) {
 	}
 }
 
+func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = typeRunes(t, m, "/sp") // selects /spec
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("Enter on an argument command suggestion should not start an agent run")
+	}
+	if got := m.input.Value(); got != "/spec " {
+		t.Fatalf("Enter should prefill command for arguments, got %q", got)
+	}
+	if m.suggestionsActive() {
+		t.Fatal("prefilling a command suggestion should dismiss the overlay")
+	}
+	if transcriptContains(m.transcript, "usage: /spec") {
+		t.Fatal("prefilling /spec should not run the command without a task")
+	}
+}
+
+func TestCommandSuggestionFooterReflectsInsertAction(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "/sp")
+
+	plain := plainRender(t, m.View())
+	if !strings.Contains(plain, "Enter insert") {
+		t.Fatalf("required-argument command footer should say Enter insert, got %q", plain)
+	}
+	if strings.Contains(plain, "Enter run") {
+		t.Fatalf("required-argument command footer should not say Enter run, got %q", plain)
+	}
+}
+
 func TestTabCompletesAfterSelection(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/mo")

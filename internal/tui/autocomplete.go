@@ -249,6 +249,14 @@ func (m model) selectedSuggestionIsDirectory() bool {
 	return fileSuggestionIsDirectory(m.suggestions[idx])
 }
 
+func (m model) selectedCommandSuggestionRequiresInput() bool {
+	if m.suggestionsAreFiles || len(m.suggestions) == 0 {
+		return false
+	}
+	idx := clampInt(m.suggestionIdx, 0, len(m.suggestions)-1)
+	return commandSelectionRequiresInput(m.suggestions[idx].Name)
+}
+
 func fileSuggestionIsDirectory(suggestion commandSuggestion) bool {
 	return suggestion.Desc == "directory" || strings.HasSuffix(suggestion.Name, "/")
 }

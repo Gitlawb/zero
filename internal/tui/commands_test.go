@@ -71,6 +71,26 @@ func TestParseImageCommand(t *testing.T) {
 	}
 }
 
+func TestCommandSelectionRequiresInputFromUsage(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{name: "/spec", want: true},
+		{name: "/search", want: true},
+		{name: "/find", want: true},
+		{name: "/image", want: true},
+		{name: "/rewind", want: false},
+		{name: "/model", want: false},
+		{name: "/help", want: false},
+	}
+	for _, tc := range cases {
+		if got := commandSelectionRequiresInput(tc.name); got != tc.want {
+			t.Fatalf("commandSelectionRequiresInput(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestImageCommandIsDiscoverable(t *testing.T) {
 	found := false
 	for _, name := range listCommandNames() {

@@ -300,6 +300,9 @@ func (m model) suggestionOverlay(width int) string {
 	title := "Commands"
 	query := commandSuggestionQuery(m.input.Value())
 	footer := "↑/↓ move   Enter run   Esc close"
+	if m.selectedCommandSuggestionRequiresInput() {
+		footer = "↑/↓ move   Enter insert   Esc close"
+	}
 	if m.suggestionsAreFiles {
 		title = "Files"
 		query = fileSuggestionQuery(m.input.Value())
