@@ -41,7 +41,7 @@ showed: that file, or that directory subtree — nothing else.
 
 ## Design
 
-### Scope derivation — single source of truth (`internal/sandbox/scope.go`)
+### Scope derivation — single source of truth (`internal/sandbox/grant_scope.go`)
 
 `DeriveScope(toolName, args) (raw string, kind ScopeKind)` is the one place that
 knows which args are path-like, reusing Phase 0's key priority (most specific
@@ -92,7 +92,7 @@ grants and returns the count. Per-scope revoke is out of scope.
 
 ## Testing
 
-- `scope_test` / `grants_test`: `DeriveScope` kinds; `resolveScopeAbs` (relative
+- `grant_scope_test` / `grants_test`: `DeriveScope` kinds; `resolveScopeAbs` (relative
   anchored, `./` equivalence, absolute passthrough, cross-project non-match);
   `grantCovers` matrix (tool-wide/file/dir × equal/descendant/sibling/parent/
   empty-request); deny-precedence; per-grant + policy autonomy; v1→v2 migration
