@@ -84,6 +84,61 @@ func TestStoreCreatesAppendsListsAndReadsEvents(t *testing.T) {
 	}
 }
 
+func TestReadEventsToleratesTornTail(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T10:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "zero_torn_1", Title: "t", Cwd: "/repo", ModelID: "m", Provider: "p"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "ok"}}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+	// Simulate a crash mid-append: a truncated final JSON line.
+	file, err := os.OpenFile(store.eventsPath(session.SessionID), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	if _, err := file.WriteString(`{"type":"message","payload":{"content":"tru`); err != nil {
+		t.Fatalf("write torn line: %v", err)
+	}
+	file.Close()
+
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents must tolerate a torn tail, got error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 complete events (torn tail dropped), got %d", len(events))
+	}
+}
+
+func TestReadEventsFailsOnMidFileCorruption(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T10:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "zero_corrupt_1", Title: "t", Cwd: "/repo", ModelID: "m", Provider: "p"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "ok"}}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	// A corrupt line BEFORE a later valid line is real corruption, not a torn
+	// tail, and must still fail loudly.
+	file, err := os.OpenFile(store.eventsPath(session.SessionID), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	if _, err := file.WriteString("not json\n" + `{"type":"message","payload":{}}` + "\n"); err != nil {
+		t.Fatalf("write corruption: %v", err)
+	}
+	file.Close()
+
+	if _, err := store.ReadEvents(session.SessionID); err == nil {
+		t.Fatal("expected error on mid-file corruption")
+	}
+}
+
 func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
 	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
