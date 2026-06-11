@@ -204,7 +204,9 @@ func ValidateMessage(message string) error {
 		return fmt.Errorf("commit message is required")
 	}
 	firstLine := strings.Split(trimmed, "\n")[0]
-	if len(firstLine) > 72 {
+	// Count runes, not bytes, so a valid non-ASCII subject under the limit is not
+	// rejected for spilling past 72 bytes.
+	if utf8.RuneCountInString(firstLine) > 72 {
 		return fmt.Errorf("commit message subject must be 72 characters or fewer")
 	}
 	return nil

@@ -199,5 +199,7 @@ func cronTruncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	// Cut on a UTF-8 rune boundary so a persisted run-error excerpt can't end in
+	// a split multi-byte rune (invalid UTF-8 in the cron record).
+	return cutRuneBoundary(s, max) + "…"
 }

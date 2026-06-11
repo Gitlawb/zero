@@ -470,3 +470,16 @@ func writeTestFile(t *testing.T, path string, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+func TestValidateMessageCountsRunesNotBytes(t *testing.T) {
+	// 72 multi-byte runes (é = 2 bytes = 144 bytes) is a valid subject; the old
+	// byte-length check wrongly rejected it.
+	subject := strings.Repeat("é", 72)
+	if err := ValidateMessage(subject); err != nil {
+		t.Fatalf("72-rune non-ASCII subject should be valid, got %v", err)
+	}
+	// 73 runes must still be rejected.
+	if err := ValidateMessage(strings.Repeat("é", 73)); err == nil {
+		t.Fatal("73-rune subject should be rejected")
+	}
+}
