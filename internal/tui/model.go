@@ -132,6 +132,7 @@ type model struct {
 	// rather than "/command" matches, so completion inserts a path token instead
 	// of replacing the whole input.
 	suggestionsAreFiles bool
+	lastMouseSelection  mouseSelectionTarget
 
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
@@ -363,40 +364,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
 		}
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			if m.picker != nil {
-				if m.modelPickerIsLoading() {
-					return m, nil
-				}
-				m.picker.move(-1)
-				return m, nil
-			}
-			if m.suggestionsActive() {
-				m.moveSuggestion(-1)
-				return m, nil
-			}
-			return m.scrollChat(chatWheelScrollLines), nil
-		case tea.MouseButtonWheelDown:
-			if m.picker != nil {
-				if m.modelPickerIsLoading() {
-					return m, nil
-				}
-				m.picker.move(1)
-				return m, nil
-			}
-			if m.suggestionsActive() {
-				m.moveSuggestion(1)
-				return m, nil
-			}
-			return m.scrollChat(-chatWheelScrollLines), nil
-		default:
-			return m, nil
-		}
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
+		m.clearMouseSelection()
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			// cancelRun records the in-flight run into flushRunIDs and writes the
@@ -490,25 +463,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// is self-contained; commands that require a value are inserted so the
 			// user can finish the argument first.
 			if m.suggestionsActive() {
-				if len(m.suggestions) == 0 {
-					return m, nil
-				}
-				wasFiles := m.suggestionsAreFiles
-				wasDirectory := m.selectedSuggestionIsDirectory()
-				requiresInput := m.selectedCommandSuggestionRequiresInput()
-				next := m.completeSuggestion()
-				next.resetComposerFromInput()
-				if wasFiles && wasDirectory {
-					next.recomputeSuggestions()
-					return next, nil
-				}
-				if !wasFiles {
-					if requiresInput {
-						return next, nil
-					}
-					return next.handleSubmit()
-				}
-				return next, nil
+				return m.chooseSuggestion()
 			}
 			return m.handleSubmit()
 		case tea.KeyShiftTab:
@@ -947,6 +902,26 @@ func (m model) transcriptView() string {
 		body.WriteString("\n")
 	}
 
+	footer := m.footerView(width)
+
+	overlayForViewport := viewportOverlay
+	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
+		overlayForViewport = ""
+	}
+
+	if m.altScreen && m.height > 0 {
+		return m.scrollableTranscriptView(body.String(), footer, width, overlayForViewport)
+	}
+
+	if overlayForViewport != "" {
+		body.WriteString("\n")
+		body.WriteString(overlayForViewport)
+		body.WriteString("\n")
+	}
+	return body.String() + footer
+}
+
+func (m model) footerView(width int) string {
 	var footer strings.Builder
 	footer.WriteString("\n")
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
@@ -960,22 +935,7 @@ func (m model) transcriptView() string {
 	}
 	footer.WriteString("\n")
 	footer.WriteString(m.statusLine(width))
-
-	overlayForViewport := viewportOverlay
-	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
-		overlayForViewport = ""
-	}
-
-	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptView(body.String(), footer.String(), width, overlayForViewport)
-	}
-
-	if overlayForViewport != "" {
-		body.WriteString("\n")
-		body.WriteString(overlayForViewport)
-		body.WriteString("\n")
-	}
-	return body.String() + footer.String()
+	return footer.String()
 }
 
 func (m model) scrollableTranscriptView(body string, footer string, width int, overlay string) string {
@@ -1347,6 +1307,28 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, nil
+}
+
+func (m model) chooseSuggestion() (tea.Model, tea.Cmd) {
+	if !m.suggestionsActive() || len(m.suggestions) == 0 {
+		return m, nil
+	}
+	wasFiles := m.suggestionsAreFiles
+	wasDirectory := m.selectedSuggestionIsDirectory()
+	requiresInput := m.selectedCommandSuggestionRequiresInput()
+	next := m.completeSuggestion()
+	next.resetComposerFromInput()
+	if wasFiles && wasDirectory {
+		next.recomputeSuggestions()
+		return next, nil
+	}
+	if !wasFiles {
+		if requiresInput {
+			return next, nil
+		}
+		return next.handleSubmit()
+	}
+	return next, nil
 }
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
