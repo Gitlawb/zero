@@ -482,13 +482,18 @@ func selectableItems(suggestions []commandSuggestion, files bool) []selectableLi
 func fileSelectableItem(token string) selectableListItem {
 	rel := strings.TrimPrefix(token, "@")
 	rel = filepath.ToSlash(rel)
-	base := path.Base(rel)
+	isDir := strings.HasSuffix(rel, "/")
+	cleanRel := strings.TrimSuffix(rel, "/")
+	base := path.Base(cleanRel)
 	if base == "." || base == "/" || base == "" {
 		return selectableListItem{Label: strings.TrimPrefix(token, "@"), Description: "file"}
 	}
-	dir := path.Dir(rel)
+	if isDir {
+		base += "/"
+	}
+	dir := path.Dir(cleanRel)
 	if dir == "." || dir == "" {
-		return selectableListItem{Label: base, Description: "file"}
+		return selectableListItem{Label: base}
 	}
 	return selectableListItem{Label: base, Description: dir}
 }

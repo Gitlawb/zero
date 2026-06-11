@@ -367,6 +367,118 @@ func TestEscDismissesFilePaletteAndRemovesTrailingToken(t *testing.T) {
 	}
 }
 
+func TestExtractPathQueryUsesCursorPosition(t *testing.T) {
+	query := extractPathQuery("read @internal/file.go after", len([]rune("read @internal/file")))
+	if query == nil {
+		t.Fatal("expected path query at cursor")
+	}
+	if query.Query != "internal/file.go" || query.StartIndex != len([]rune("read ")) || query.EndIndex != len([]rune("read @internal/file.go")) {
+		t.Fatalf("query = %#v", query)
+	}
+	if got := extractPathQuery("read @internal/file.go after", len([]rune("read @internal/file.go after"))); got != nil {
+		t.Fatalf("cursor after mention should not be in path context, got %#v", got)
+	}
+}
+
+func TestCompletePathQueryReplacesActiveMentionOnly(t *testing.T) {
+	text := "compare @old and @ne"
+	cursor := len([]rune(text))
+	got, gotCursor := completePathQuery(text, cursor, "@new/file.go")
+	want := "compare @old and @new/file.go "
+	if got != want {
+		t.Fatalf("completePathQuery text = %q, want %q", got, want)
+	}
+	if gotCursor != len([]rune(want)) {
+		t.Fatalf("completePathQuery cursor = %d, want %d", gotCursor, len([]rune(want)))
+	}
+}
+
+func TestFilePaletteDisplaysFilenamesAndPaths(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "cmd/server/main.go")
+	mustWriteFile(t, root, "main.go")
+
+	m := newModel(context.Background(), Options{Cwd: root})
+	m.width, m.height = 96, 30
+	m = typeRunes(t, m, "@main")
+
+	plain := plainRender(t, m.View())
+	if strings.Contains(plain, "@main") {
+		t.Fatalf("file palette should not render @ prefixes, got %q", plain)
+	}
+	if !strings.Contains(plain, "main.go") || !strings.Contains(plain, "cmd/server") {
+		t.Fatalf("file palette should show filename plus parent path, got %q", plain)
+	}
+	if got := suggestionNames(m)[0]; got != "@main.go" {
+		t.Fatalf("basename prefix match should rank before nested path match, got first suggestion %q from %v", got, suggestionNames(m))
+	}
+}
+
+func TestFileSuggestionsIncludeDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "tui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, root, "internal/tui/model.go")
+
+	got := suggestionTokens(fileSuggestions(root, "internal"))
+	if !contains(got, "@internal/") {
+		t.Fatalf("expected directory suggestion, got %v", got)
+	}
+}
+
+func TestEnterOnDirectorySuggestionKeepsFilePaletteOpen(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "internal/tui/model.go")
+	mustWriteFile(t, root, "internal/agent/loop.go")
+
+	m := newModel(context.Background(), Options{Cwd: root})
+	m = typeRunes(t, m, "@int")
+	if got := suggestionNames(m)[0]; got != "@internal/" {
+		t.Fatalf("expected internal directory first, got %q from %v", got, suggestionNames(m))
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("directory completion should not submit a prompt")
+	}
+	if got := m.input.Value(); got != "@internal/" {
+		t.Fatalf("directory completion should keep path active without trailing space, got %q", got)
+	}
+	if !m.suggestionsActive() || !m.suggestionsAreFiles {
+		t.Fatal("directory completion should keep the file palette open")
+	}
+	if names := suggestionNames(m); !contains(names, "@internal/tui/") || !contains(names, "@internal/agent/") {
+		t.Fatalf("directory completion should drill into that path, got %v", names)
+	}
+}
+
+func TestEnterOnFileSuggestionClosesFilePalette(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "internal/tui/model.go")
+
+	m := newModel(context.Background(), Options{Cwd: root})
+	m = typeRunes(t, m, "@model")
+	if got := suggestionNames(m)[0]; got != "@internal/tui/model.go" {
+		t.Fatalf("expected file suggestion first, got %q from %v", got, suggestionNames(m))
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("file completion should not submit a prompt")
+	}
+	if got := m.input.Value(); got != "@internal/tui/model.go " {
+		t.Fatalf("file completion should add trailing space, got %q", got)
+	}
+	if m.suggestionsActive() {
+		t.Fatal("file completion should close the file palette")
+	}
+}
+
 func TestFileSuggestionsMatchesAndSkipsVCSDirs(t *testing.T) {
 	root := t.TempDir()
 	mustWrite := func(rel string) {
@@ -460,4 +572,15 @@ func suggestionTokens(s []commandSuggestion) []string {
 		names = append(names, c.Name)
 	}
 	return names
+}
+
+func mustWriteFile(t *testing.T, root, rel string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

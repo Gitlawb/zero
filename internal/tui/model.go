@@ -478,8 +478,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				wasFiles := m.suggestionsAreFiles
+				wasDirectory := m.selectedSuggestionIsDirectory()
 				next := m.completeSuggestion()
 				next.resetComposerFromInput()
+				if wasFiles && wasDirectory {
+					next.recomputeSuggestions()
+					return next, nil
+				}
 				if !wasFiles {
 					return next.handleSubmit()
 				}

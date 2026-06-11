@@ -224,7 +224,11 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	case msg.Alt && msg.Type == tea.KeyDelete:
 		m.setComposerState(deleteComposerWordAfter(state))
 	case msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH:
-		m.setComposerState(deleteComposerRange(state, state.cursor-1, state.cursor))
+		if nextState, ok := deleteCompletedFileMentionBefore(state); ok && !m.suggestionsActive() {
+			m.setComposerState(nextState)
+		} else {
+			m.setComposerState(deleteComposerRange(state, state.cursor-1, state.cursor))
+		}
 	case msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlD:
 		m.setComposerState(deleteComposerRange(state, state.cursor, state.cursor+1))
 	default:
@@ -250,6 +254,26 @@ func renderComposerState(state composerState, prompt string, width int) string {
 		lines[index] = fitStyledLine(prefix+line, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func deleteCompletedFileMentionBefore(state composerState) (composerState, bool) {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	if state.cursor <= 0 || state.cursor > len(runes) || !isPathQueryBoundary(runes[state.cursor-1]) {
+		return state, false
+	}
+	tokenEnd := state.cursor
+	for tokenEnd > 0 && isPathQueryBoundary(runes[tokenEnd-1]) {
+		tokenEnd--
+	}
+	tokenStart := tokenEnd
+	for tokenStart > 0 && !isPathQueryBoundary(runes[tokenStart-1]) {
+		tokenStart--
+	}
+	if tokenStart >= tokenEnd || runes[tokenStart] != '@' || tokenEnd-tokenStart <= 1 {
+		return state, false
+	}
+	return deleteComposerRange(state, tokenStart, state.cursor), true
 }
 
 func deleteComposerRange(state composerState, start int, end int) composerState {

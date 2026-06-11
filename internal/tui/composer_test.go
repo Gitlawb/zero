@@ -59,6 +59,66 @@ func TestComposerDeleteWordAfterCursor(t *testing.T) {
 	}
 }
 
+func TestBackspaceAfterCompletedFileMentionRemovesWholeMention(t *testing.T) {
+	tests := []struct {
+		name       string
+		start      string
+		want       string
+		wantCursor int
+	}{
+		{
+			name:       "only mention",
+			start:      "@docs/NPM_WRAPPER_SMOKE.md ",
+			want:       "",
+			wantCursor: 0,
+		},
+		{
+			name:       "mention after prompt text",
+			start:      "read @docs/NPM_WRAPPER_SMOKE.md ",
+			want:       "read ",
+			wantCursor: len([]rune("read ")),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModel(context.Background(), Options{})
+			m.input.SetValue(tc.start)
+			m.input.CursorEnd()
+
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+			next := updated.(model)
+
+			if got := next.composerValue(); got != tc.want {
+				t.Fatalf("composer value = %q, want %q", got, tc.want)
+			}
+			if got := next.currentComposerState().cursor; got != tc.wantCursor {
+				t.Fatalf("cursor = %d, want %d", got, tc.wantCursor)
+			}
+			if next.suggestionsActive() {
+				t.Fatal("completed mention deletion should not reopen the file picker")
+			}
+		})
+	}
+}
+
+func TestBackspaceInsideActiveFileMentionStillEditsQuery(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "docs/NPM_WRAPPER_SMOKE.md")
+	m := newModel(context.Background(), Options{Cwd: root})
+	m = typeRunes(t, m, "@docs")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	next := updated.(model)
+
+	if got := next.composerValue(); got != "@doc" {
+		t.Fatalf("composer value = %q, want active query edited", got)
+	}
+	if !next.suggestionsActive() || !next.suggestionsAreFiles {
+		t.Fatal("active file query backspace should keep the file picker open")
+	}
+}
+
 func TestSanitizeComposerPastePreservesNewlines(t *testing.T) {
 	got := sanitizeComposerPaste("alpha\tbeta\x00\nsecond\r\nthird\x1b[31m")
 	want := "alpha    beta\nsecond\nthird[31m"
