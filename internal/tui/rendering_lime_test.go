@@ -581,16 +581,23 @@ func TestUnpromptedAllowRowsCollapseIntoAutoTag(t *testing.T) {
 	}
 }
 
-func TestModelPickerRowsCarryContextAndKeyEnvMeta(t *testing.T) {
+func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 	m := limeTestModel()
 	picker := m.newModelPicker()
 	if picker == nil {
 		t.Fatal("expected a model picker")
 	}
 	withMeta := 0
+	withCapability := 0
 	for _, item := range picker.items {
 		if strings.Contains(item.Meta, "K") || strings.Contains(item.Meta, "M") {
 			withMeta++
+		}
+		if strings.Contains(item.Meta, "tools") || strings.Contains(item.Meta, "reasoning") || strings.Contains(item.Meta, "vision") {
+			withCapability++
+		}
+		if strings.Contains(item.Meta, "API_KEY") {
+			t.Fatalf("picker item %q leaked credential env metadata: %q", item.Value, item.Meta)
 		}
 		if !item.Remote && !item.Local {
 			continue
@@ -599,13 +606,19 @@ func TestModelPickerRowsCarryContextAndKeyEnvMeta(t *testing.T) {
 	if withMeta == 0 {
 		t.Fatalf("expected catalog models to expose ctx metadata, got %#v", picker.items[:minInt(3, len(picker.items))])
 	}
+	if withCapability == 0 {
+		t.Fatalf("expected catalog models to expose capability metadata, got %#v", picker.items[:minInt(3, len(picker.items))])
+	}
 
 	m.picker = picker
 	got := plainRender(t, m.pickerOverlay(100))
-	for _, want := range []string{"select model", "↑/↓ · ⏎ · esc", "❯"} {
+	for _, want := range []string{"Choose a model", "Enter select", "Ctrl+F favorite", "❯"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("picker overlay = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "API_KEY") {
+		t.Fatalf("picker overlay leaked credential env metadata: %q", got)
 	}
 }
 

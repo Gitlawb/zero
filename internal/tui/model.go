@@ -136,11 +136,14 @@ type model struct {
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
-	picker                    *commandPicker
-	providerWizard            *providerWizardState
-	favoriteModels            map[string]bool
-	modelPickerLiveProviderID string
-	modelPickerLiveModels     []providermodeldiscovery.Model
+	picker                       *commandPicker
+	providerWizard               *providerWizardState
+	favoriteModels               map[string]bool
+	modelPickerLoading           bool
+	modelPickerLoadingProviderID string
+	modelPickerLoadError         string
+	modelPickerLiveProviderID    string
+	modelPickerLiveModels        []providermodeldiscovery.Model
 
 	// pendingImages holds image attachments staged by /image for the next user
 	// turn; pendingImageLabels are their display names (base(path)) for the chip
@@ -293,6 +296,7 @@ func newModel(ctx context.Context, options Options) model {
 		providerName:           options.ProviderName,
 		modelName:              options.ModelName,
 		providerProfile:        options.ProviderProfile,
+		favoriteModels:         favoriteModelSet(options.FavoriteModels),
 		provider:               options.Provider,
 		newProvider:            options.NewProvider,
 		discoverProviderModels: options.DiscoverProviderModels,
@@ -362,6 +366,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.move(-1)
 				return m, nil
 			}
@@ -372,6 +379,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.scrollChat(chatWheelScrollLines), nil
 		case tea.MouseButtonWheelDown:
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.move(1)
 				return m, nil
 			}
@@ -429,6 +439,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
 			if m.picker != nil {
+				if m.picker.kind == pickerModel {
+					m.clearModelPickerLoadState()
+				}
 				m.picker = nil
 				return m, nil
 			}
@@ -513,10 +526,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.KeyCtrlF:
 			if m.picker != nil && m.picker.kind == pickerModel {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				return m.toggleModelFavorite(), nil
 			}
 		case tea.KeyBackspace, tea.KeyCtrlH:
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.deleteQueryRune()
 				return m, nil
 			}
@@ -549,6 +568,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.move(1)
 				return m, nil
 			}
@@ -567,6 +589,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
+				if m.modelPickerIsLoading() {
+					return m, nil
+				}
 				m.picker.move(-1)
 				return m, nil
 			}
@@ -600,6 +625,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
 		if m.picker != nil {
+			if m.modelPickerIsLoading() {
+				return m, nil
+			}
 			if msg.Type == tea.KeyRunes {
 				m.picker.appendQuery(msg.Runes)
 			}
@@ -1289,7 +1317,13 @@ func permissionDecisionReason(decision permissionDecision) string {
 // the picker. Behavior is identical to running "/model <id>", "/effort <v>",
 // or "/mode <name>".
 func (m model) choosePicker() (tea.Model, tea.Cmd) {
+	if m.modelPickerIsLoading() {
+		return m, nil
+	}
 	picker := m.picker
+	if picker != nil && picker.kind == pickerModel {
+		m.clearModelPickerLoadState()
+	}
 	m.picker = nil
 	if picker == nil {
 		return m, nil
@@ -1378,9 +1412,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
 				return m, nil
 			}
-			if picker := m.newModelPicker(); picker != nil {
-				m.picker = picker
-				return m, m.modelPickerDiscoveryCmd()
+			next, cmd := m.openModelPicker()
+			if next.picker != nil {
+				return next, cmd
 			}
 		}
 		text := ""

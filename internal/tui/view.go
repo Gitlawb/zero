@@ -21,6 +21,8 @@ const (
 	pickerOverlayMaxVisible     = 10
 	pickerOverlayMaxWidth       = 92
 	pickerOverlayMinWidth       = 56
+	modelPickerOverlayMaxWidth  = 76
+	modelPickerOverlayMinWidth  = 58
 )
 
 // layoutTier buckets the terminal width into the spec's adaptive tiers. It
@@ -117,7 +119,7 @@ func (m model) titleModelSegment() string {
 func (m model) composerDividerLine(width int) string {
 	model := displayValue(strings.TrimSpace(m.modelName), "no model")
 	label, style := m.modeLabel()
-	meta := zeroTheme.muted.Render(model) + zeroTheme.line.Render(" · ") + style.Render(label)
+	meta := zeroTheme.muted.Render(model) + zeroTheme.muted.Render(" · ") + style.Render(label)
 	metaWidth := lipgloss.Width(meta)
 	if width < 8 {
 		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
@@ -512,6 +514,9 @@ func (m model) pickerOverlay(width int) string {
 	if m.picker == nil {
 		return ""
 	}
+	if m.picker.kind == pickerModel {
+		return m.modelPickerOverlay(width)
+	}
 	overlayWidth := minInt(width, pickerOverlayMaxWidth)
 	if overlayWidth < pickerOverlayMinWidth {
 		overlayWidth = width
@@ -529,18 +534,7 @@ func (m model) pickerOverlay(width int) string {
 	lines := make([]string, 0, len(visible)+5)
 	title := strings.TrimSpace(m.picker.title)
 	hint := "↑/↓ · ⏎ · esc"
-	if m.picker.kind == pickerModel {
-		hint += " · ctrl+f favorite"
-	}
 	lines = append(lines, zeroTheme.faint.Render(hint))
-	if m.picker.kind == pickerModel {
-		query := strings.TrimSpace(m.picker.query)
-		value := zeroTheme.faint.Render("Search model")
-		if query != "" {
-			value = zeroTheme.ink.Render(query)
-		}
-		lines = append(lines, zeroTheme.userPrompt.Render("search > ")+value)
-	}
 	lastGroup := ""
 	for index, item := range visible {
 		absoluteIndex := start + index
@@ -579,6 +573,155 @@ func (m model) pickerOverlay(width int) string {
 		lines = append(lines, zeroTheme.faint.Render("  no matching items"))
 	}
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+func (m model) modelPickerOverlay(width int) string {
+	if m.picker == nil {
+		return ""
+	}
+	if m.modelPickerLoading {
+		return m.modelPickerLoadingOverlay(width)
+	}
+	overlayWidth := modelPickerOverlayWidth(width, m.picker)
+	innerWidth := maxInt(1, overlayWidth-4)
+	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	start := 0
+	visible := []pickerItem{}
+	if len(m.picker.items) > 0 {
+		m.picker.selected = clampInt(m.picker.selected, 0, len(m.picker.items)-1)
+		start = selectableListStart(len(m.picker.items), maxVisible, m.picker.selected)
+		visible = m.picker.items[start : start+maxVisible]
+	}
+
+	lines := make([]string, 0, len(visible)+6)
+	searchInset := lipgloss.Width("❯ ")
+	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
+	lines = append(lines, fillPaletteLine(searchPrefix+renderModelPickerSearchLine(m.picker.query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
+	if status := strings.TrimSpace(m.modelPickerLoadError); status != "" {
+		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(status), innerWidth, transparentSurface))
+	}
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	for index, item := range visible {
+		lines = append(lines, renderModelPickerRow(innerWidth, start+index == m.picker.selected, item))
+	}
+	if len(visible) == 0 {
+		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render("no matching models"), innerWidth, transparentSurface))
+	}
+	if item, ok := m.picker.current(); ok {
+		if detail := modelPickerItemDetail(item); detail != "" {
+			lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(detail), innerWidth, transparentSurface))
+		}
+	}
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	footer := "↑/↓ move   Enter select   Ctrl+F favorite   Esc close"
+	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render(footer), innerWidth, transparentSurface))
+	title := strings.TrimSpace(m.picker.title)
+	if title == "" {
+		title = "Choose a model"
+	}
+	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+func (m model) modelPickerLoadingOverlay(width int) string {
+	overlayWidth := modelPickerLoadingOverlayWidth(width)
+	innerWidth := maxInt(1, overlayWidth-4)
+	lines := []string{
+		fillPaletteLine(zeroTheme.faint.Render("Checking available models..."), innerWidth, transparentSurface),
+		fillPaletteLine(zeroTheme.faint.Render("Built-in models will be used if discovery fails."), innerWidth, transparentSurface),
+		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
+		fillPaletteLine(zeroTheme.faint.Render("Esc close"), innerWidth, transparentSurface),
+	}
+	title := strings.TrimSpace(m.picker.title)
+	if title == "" {
+		title = "Choose a model"
+	}
+	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+func modelPickerLoadingOverlayWidth(terminalWidth int) int {
+	if terminalWidth <= 0 {
+		terminalWidth = defaultStartupWidth
+	}
+	available := minInt(terminalWidth, modelPickerOverlayMaxWidth)
+	if terminalWidth < modelPickerOverlayMinWidth {
+		available = terminalWidth
+	}
+	target := lipgloss.Width("Built-in models will be used if discovery fails.")
+	target = maxInt(target, lipgloss.Width("Choose a model"))
+	target = maxInt(target, lipgloss.Width("Esc close"))
+	overlayWidth := maxInt(modelPickerOverlayMinWidth, target+4)
+	return minInt(overlayWidth, maxInt(4, available))
+}
+
+func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
+	if terminalWidth <= 0 {
+		terminalWidth = defaultStartupWidth
+	}
+	available := minInt(terminalWidth, modelPickerOverlayMaxWidth)
+	if terminalWidth < modelPickerOverlayMinWidth {
+		available = terminalWidth
+	}
+	target := lipgloss.Width("Choose a model")
+	target = maxInt(target, lipgloss.Width("  search > model name..."))
+	target = maxInt(target, lipgloss.Width("↑/↓ move   Enter select   Ctrl+F favorite   Esc close"))
+	target = maxInt(target, lipgloss.Width("  Using built-in model list"))
+	if picker != nil {
+		for _, item := range picker.items {
+			labelWidth := lipgloss.Width(item.Label)
+			if item.Favorite {
+				labelWidth += lipgloss.Width("* ")
+			}
+			target = maxInt(target, lipgloss.Width("❯ ")+labelWidth)
+			if detail := modelPickerItemDetail(item); detail != "" {
+				target = maxInt(target, lipgloss.Width("  "+detail))
+			}
+		}
+	}
+	overlayWidth := maxInt(modelPickerOverlayMinWidth, target+4)
+	return minInt(overlayWidth, maxInt(4, available))
+}
+
+func renderModelPickerSearchLine(query string, width int) string {
+	query = strings.TrimSpace(query)
+	prompt := zeroTheme.userPrompt.Render("search > ")
+	cursor := zeroTheme.accent.Render("▌")
+	if query == "" {
+		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render("model name..."), width)
+	}
+	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
+}
+
+func renderModelPickerRow(width int, selected bool, item pickerItem) string {
+	surface := transparentSurface
+	marker := surface(zeroTheme.faintest).Render("  ")
+	if selected {
+		surface = zeroTheme.onSel
+		marker = surface(zeroTheme.accent).Render("❯ ")
+	}
+	label := strings.TrimSpace(item.Label)
+	if label == "" {
+		label = strings.TrimSpace(item.Value)
+	}
+	prefix := ""
+	if item.Favorite {
+		prefix = "* "
+	}
+	line := marker + surface(zeroTheme.ink).Render(prefix+label)
+	return fillPaletteLine(line, width, surface)
+}
+
+func modelPickerItemDetail(item pickerItem) string {
+	parts := []string{}
+	value := strings.TrimSpace(item.Value)
+	label := strings.TrimSpace(item.Label)
+	if value != "" && value != label {
+		parts = append(parts, value)
+	}
+	if meta := strings.TrimSpace(item.Meta); meta != "" {
+		parts = append(parts, meta)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // argHint extracts the most representative argument from a tool call's raw JSON

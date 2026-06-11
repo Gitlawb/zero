@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -175,6 +176,49 @@ func TestUpsertProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("config mode = %o, want 0600", got)
+	}
+}
+
+func TestSetFavoriteModelsPersistsUserPreferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	cfg, err := SetFavoriteModels(path, []string{" qwen3-coder:480b ", "", "rnj-1:8b", "qwen3-coder:480b"})
+	if err != nil {
+		t.Fatalf("SetFavoriteModels() error = %v", err)
+	}
+
+	want := []string{"qwen3-coder:480b", "rnj-1:8b"}
+	if !reflect.DeepEqual(cfg.Preferences.FavoriteModels, want) {
+		t.Fatalf("FavoriteModels = %#v, want %#v", cfg.Preferences.FavoriteModels, want)
+	}
+	persisted := readConfigFixture(t, path)
+	if !reflect.DeepEqual(persisted.Preferences.FavoriteModels, want) {
+		t.Fatalf("persisted FavoriteModels = %#v, want %#v", persisted.Preferences.FavoriteModels, want)
+	}
+	if persisted.ActiveProvider != "openai" || len(persisted.Providers) != 1 {
+		t.Fatalf("provider config was not preserved: %#v", persisted)
+	}
+}
+
+func TestSetFavoriteModelsCreatesMissingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	cfg, err := SetFavoriteModels(path, []string{"glm-5.1"})
+	if err != nil {
+		t.Fatalf("SetFavoriteModels() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(cfg.Preferences.FavoriteModels, []string{"glm-5.1"}) {
+		t.Fatalf("FavoriteModels = %#v, want glm-5.1", cfg.Preferences.FavoriteModels)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected config file to be created: %v", err)
 	}
 }
 

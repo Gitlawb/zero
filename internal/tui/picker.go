@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,8 +27,8 @@ const (
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
 // underlying command handler when chosen. Meta is the optional right-aligned
-// readout (ctx window · key env); the dot flags mark provider locality for
-// model rows (accent = remote, blue = local).
+// readout (ctx window · capabilities); the dot flags mark provider locality
+// for model rows (accent = remote, blue = local).
 type pickerItem struct {
 	Group    string
 	Label    string
@@ -139,7 +140,37 @@ func (m model) newModelPicker() *commandPicker {
 	if len(items) == 0 {
 		return nil
 	}
-	return &commandPicker{kind: pickerModel, title: "select model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
+	return &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: append([]pickerItem{}, items...), selected: 0}
+}
+
+func (m model) openModelPicker() (model, tea.Cmd) {
+	picker := m.newModelPicker()
+	if picker == nil {
+		return m, nil
+	}
+	m.picker = picker
+	m.clearModelPickerLoadState()
+	provider, ok := m.activeProviderDescriptor()
+	if !ok || (m.modelPickerLiveProviderID == provider.ID && len(m.modelPickerLiveModels) > 0) {
+		return m, nil
+	}
+	cmd := m.modelPickerDiscoveryCmd()
+	if cmd == nil {
+		return m, nil
+	}
+	m.modelPickerLoading = true
+	m.modelPickerLoadingProviderID = provider.ID
+	return m, cmd
+}
+
+func (m model) modelPickerIsLoading() bool {
+	return m.picker != nil && m.picker.kind == pickerModel && m.modelPickerLoading
+}
+
+func (m *model) clearModelPickerLoadState() {
+	m.modelPickerLoading = false
+	m.modelPickerLoadingProviderID = ""
+	m.modelPickerLoadError = ""
 }
 
 func (m model) assembleModelPickerItems(recent []pickerItem, catalog []pickerItem) []pickerItem {
@@ -228,9 +259,7 @@ func registryModelPickerItem(entry modelregistry.ModelEntry, group string) picke
 		Label: firstProviderDisplayValue(entry.DisplayName, entry.ID),
 		Value: entry.ID,
 	}
-	if window := entry.ContextLimits.ContextWindow; window > 0 {
-		item.Meta = formatContextWindow(window)
-	}
+	item.Meta = registryModelPickerMeta(entry)
 	if descriptor, ok := providercatalog.Get(string(entry.Provider)); ok {
 		applyProviderPickerMeta(&item, descriptor)
 	}
@@ -243,9 +272,7 @@ func providerModelPickerItem(provider providercatalog.Descriptor, model provider
 		Label: modelPickerDisplayName(model.ID, model.Description),
 		Value: model.ID,
 	}
-	if ctx := formatContextWindow(model.ContextWindow); ctx != "" {
-		item.Meta = ctx
-	}
+	item.Meta = providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags)
 	applyProviderPickerMeta(&item, provider)
 	return item
 }
@@ -256,9 +283,7 @@ func discoveredModelPickerItem(provider providercatalog.Descriptor, model provid
 		Label: modelPickerDisplayName(model.ID, model.Description),
 		Value: model.ID,
 	}
-	if ctx := formatContextWindow(model.ContextWindow); ctx != "" {
-		item.Meta = ctx
-	}
+	item.Meta = providerWizardModelMeta(model.ContextWindow, model.ToolCall, model.Reasoning, model.InputCost, model.OutputCost, model.Tags)
 	applyProviderPickerMeta(&item, provider)
 	return item
 }
@@ -266,12 +291,23 @@ func discoveredModelPickerItem(provider providercatalog.Descriptor, model provid
 func applyProviderPickerMeta(item *pickerItem, provider providercatalog.Descriptor) {
 	item.Remote = !provider.Local
 	item.Local = provider.Local
-	if len(provider.AuthEnvVars) > 0 {
-		if item.Meta != "" {
-			item.Meta += " · "
-		}
-		item.Meta += provider.AuthEnvVars[0]
+}
+
+func registryModelPickerMeta(entry modelregistry.ModelEntry) string {
+	parts := []string{}
+	if ctx := formatContextWindow(entry.ContextLimits.ContextWindow); ctx != "" {
+		parts = append(parts, ctx+" ctx")
 	}
+	if entry.Supports(modelregistry.ModelCapabilityToolCalling) {
+		parts = append(parts, "tools")
+	}
+	if entry.Supports(modelregistry.ModelCapabilityReasoning) {
+		parts = append(parts, "reasoning")
+	}
+	if entry.Supports(modelregistry.ModelCapabilityVision) {
+		parts = append(parts, "vision")
+	}
+	return strings.Join(parts, " · ")
 }
 
 func modelPickerDisplayName(id string, description string) string {
@@ -424,21 +460,35 @@ func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider prov
 
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
 	provider, ok := m.activeProviderDescriptor()
-	if !ok || provider.ID != msg.providerID || msg.err != nil || len(msg.models) == 0 {
+	if !ok || provider.ID != msg.providerID {
 		return m
 	}
+	wasLoading := m.modelPickerLoadingProviderID == msg.providerID
+	if wasLoading {
+		m.modelPickerLoading = false
+		m.modelPickerLoadingProviderID = ""
+	}
+	if msg.err != nil || len(msg.models) == 0 {
+		if m.picker != nil && m.picker.kind == pickerModel && wasLoading {
+			m.modelPickerLoadError = "Using built-in model list"
+		}
+		return m
+	}
+	m.modelPickerLoadError = ""
 	m.modelPickerLiveProviderID = msg.providerID
 	m.modelPickerLiveModels = append([]providermodeldiscovery.Model{}, msg.models...)
-	if m.picker != nil && m.picker.kind == pickerModel {
+	if m.picker != nil && m.picker.kind == pickerModel && wasLoading {
 		selectedValue := ""
 		query := m.picker.query
 		if item, ok := m.picker.current(); ok {
 			selectedValue = item.Value
 		}
 		m.picker = m.newModelPicker()
-		m.picker.query = query
-		m.picker.applyQuery()
-		m.selectPickerValue(selectedValue)
+		if m.picker != nil {
+			m.picker.query = query
+			m.picker.applyQuery()
+			m.selectPickerValue(selectedValue)
+		}
 	}
 	return m
 }
@@ -459,6 +509,9 @@ func (m model) toggleModelFavorite() model {
 	} else {
 		m.favoriteModels[item.Value] = true
 	}
+	if err := m.persistFavoriteModels(); err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "favorite save error: " + err.Error()})
+	}
 	selectedValue := item.Value
 	query := m.picker.query
 	m.picker = m.newModelPicker()
@@ -466,6 +519,45 @@ func (m model) toggleModelFavorite() model {
 	m.picker.applyQuery()
 	m.selectPickerValue(selectedValue)
 	return m
+}
+
+func (m model) persistFavoriteModels() error {
+	if strings.TrimSpace(m.userConfigPath) == "" {
+		return nil
+	}
+	_, err := config.SetFavoriteModels(m.userConfigPath, favoriteModelValues(m.favoriteModels))
+	return err
+}
+
+func favoriteModelSet(models []string) map[string]bool {
+	if len(models) == 0 {
+		return nil
+	}
+	favorites := map[string]bool{}
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		favorites[model] = true
+	}
+	if len(favorites) == 0 {
+		return nil
+	}
+	return favorites
+}
+
+func favoriteModelValues(favorites map[string]bool) []string {
+	values := make([]string, 0, len(favorites))
+	for model, favorite := range favorites {
+		model = strings.TrimSpace(model)
+		if !favorite || model == "" {
+			continue
+		}
+		values = append(values, model)
+	}
+	sort.Strings(values)
+	return values
 }
 
 func (m *model) selectPickerValue(value string) {

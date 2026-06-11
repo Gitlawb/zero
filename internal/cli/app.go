@@ -391,6 +391,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		ProviderName:    resolved.Provider.Name,
 		ModelName:       resolved.Provider.Model,
 		ProviderProfile: resolved.Provider,
+		FavoriteModels:  resolved.Preferences.FavoriteModels,
 		Provider:        provider,
 		NewProvider:     deps.newProvider,
 		Registry:        registry,

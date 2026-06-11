@@ -145,7 +145,8 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 					APIKey:       "sk-test",
 					Model:        "gpt-test",
 				},
-				MaxTurns: 5,
+				Preferences: config.PreferencesConfig{FavoriteModels: []string{"qwen3-coder:480b"}},
+				MaxTurns:    5,
 			}, nil
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -178,6 +179,9 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 	}
 	if launchedOptions.ModelName != "gpt-test" {
 		t.Fatalf("ModelName = %q, want gpt-test", launchedOptions.ModelName)
+	}
+	if len(launchedOptions.FavoriteModels) != 1 || launchedOptions.FavoriteModels[0] != "qwen3-coder:480b" {
+		t.Fatalf("FavoriteModels = %#v, want qwen3-coder:480b", launchedOptions.FavoriteModels)
 	}
 	if launchedOptions.Setup.Visible {
 		t.Fatalf("Setup.Visible = true, want false for credentialed provider")

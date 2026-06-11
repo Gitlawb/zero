@@ -23,6 +23,7 @@ type Options struct {
 	ProviderName           string
 	ModelName              string
 	ProviderProfile        config.ProviderProfile
+	FavoriteModels         []string
 	Provider               zeroruntime.Provider
 	NewProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
 	DiscoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)

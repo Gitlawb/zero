@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"os"
 	"strings"
 	"unicode"
@@ -557,9 +556,6 @@ func (wizard *providerWizardState) renderModelStep(width int) []string {
 	start := selectableListStart(len(models), maxVisible, wizard.selectedModel)
 	for offset, model := range models[start : start+maxVisible] {
 		lines = append(lines, wizard.renderSelectableModel(width, start+offset, model))
-	}
-	if hidden := len(models) - maxVisible; hidden > 0 {
-		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  %d more models", hidden)))
 	}
 	if detail := providerWizardModelDetail(wizard.currentModel()); detail != "" {
 		lines = append(lines, fitStyledLine(zeroTheme.faint.Render("  "+detail), width))

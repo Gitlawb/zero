@@ -73,6 +73,10 @@ type ToolsConfig struct {
 	deferThresholdSet bool
 }
 
+type PreferencesConfig struct {
+	FavoriteModels []string `json:"favoriteModels,omitempty"`
+}
+
 // ToolsOverride builds a ToolsConfig that explicitly overrides the deferred-tool
 // threshold (including to 0, which disables deferral). Use this for programmatic
 // Overrides — a bare ToolsConfig{DeferThreshold: 0} is indistinguishable from
@@ -106,6 +110,7 @@ type FileConfig struct {
 	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
 	Notify         NotifyConfig      `json:"notify,omitempty"`
 	Tools          ToolsConfig       `json:"tools,omitempty"`
+	Preferences    PreferencesConfig `json:"preferences,omitempty"`
 }
 
 type ResolveOptions struct {
@@ -136,6 +141,7 @@ type ResolvedConfig struct {
 	Sandbox        SandboxConfig
 	Notify         NotifyConfig
 	Tools          ToolsConfig
+	Preferences    PreferencesConfig
 }
 
 type MCPConfig struct {
@@ -162,6 +168,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Sandbox         SandboxConfig              `json:"sandbox"`
 		Notify          NotifyConfig               `json:"notify"`
 		Tools           ToolsConfig                `json:"tools"`
+		Preferences     PreferencesConfig          `json:"preferences"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -177,6 +184,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Sandbox = raw.Sandbox
 	cfg.Notify = raw.Notify
 	cfg.Tools = raw.Tools
+	cfg.Preferences = raw.Preferences
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}

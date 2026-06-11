@@ -103,6 +103,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Sandbox:        cfg.Sandbox,
 		Notify:         cfg.Notify,
 		Tools:          cfg.Tools,
+		Preferences:    cfg.Preferences,
 	}, nil
 }
 
@@ -162,6 +163,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Tools.deferThresholdSet {
 		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
 		dst.Tools.deferThresholdSet = true
+	}
+	if src.Preferences.FavoriteModels != nil {
+		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
 }
 

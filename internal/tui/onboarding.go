@@ -604,9 +604,6 @@ func (m model) setupModelLines(width int, height int) []string {
 	for offset, model := range visibleModels {
 		lines = append(lines, m.setupModelRow(rowWidth, start+offset, model))
 	}
-	if hidden := len(models) - maxVisible; hidden > 0 {
-		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(fmt.Sprintf("%d more models", hidden)), rowWidth))
-	}
 	if detail := setupModelSelectedDetail(m.setupCurrentModel()); detail != "" {
 		lines = append(lines,
 			blankSetupBlockLine(rowWidth),

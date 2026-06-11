@@ -640,7 +640,7 @@ func TestProviderWizardModelStepUsesFriendlyNamesAndStaysCompact(t *testing.T) {
 	assertContains(t, view, "Grok 4.3")
 	assertContains(t, view, "x-ai/grok-4.3 · 1M ctx · tools · reasoning")
 	assertNotContains(t, view, "❯ x-ai/grok-4.3")
-	assertContains(t, view, "8 more models")
+	assertNotContains(t, view, "more models")
 	assertNotContains(t, view, "Model 17")
 }
 

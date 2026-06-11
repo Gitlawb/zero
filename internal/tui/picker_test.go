@@ -2,7 +2,11 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,6 +89,119 @@ func TestModelPickerRefreshesLiveModelsForActiveProvider(t *testing.T) {
 	if !contains(got, "live-cloud-a") || !contains(got, "live-cloud-b") {
 		t.Fatalf("picker values = %#v, want live cloud models", got)
 	}
+}
+
+func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKey:       "ollama-key",
+			Model:        "minimax-m3",
+		},
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return []providermodeldiscovery.Model{
+				{ID: "live-cloud-a", Description: "Live Cloud A"},
+				{ID: "live-cloud-b", Description: "Live Cloud B"},
+			}, nil
+		},
+	})
+	m.input.SetValue("/model")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("expected opening the model picker to start discovery")
+	}
+	loading := plainRender(t, m.pickerOverlay(100))
+	assertContains(t, loading, "Checking available models...")
+	assertNotContains(t, loading, "Live Cloud A")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.picker == nil {
+		t.Fatal("Enter while loading should not choose the fallback list")
+	}
+
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+	loaded := plainRender(t, m.pickerOverlay(100))
+	assertContains(t, loaded, "Live Cloud A")
+	assertNotContains(t, loaded, "Checking available models...")
+}
+
+func TestModelPickerMetadataOmitsCredentialEnv(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+	m.modelPickerLiveProviderID = "ollama-cloud"
+	m.modelPickerLiveModels = []providermodeldiscovery.Model{
+		{
+			ID:            "cogito-2.1:671b",
+			ContextWindow: 163840,
+			ToolCall:      true,
+			Reasoning:     true,
+		},
+	}
+	m.picker = m.newModelPicker()
+	if m.picker == nil {
+		t.Fatal("expected model picker")
+	}
+	target := pickerIndex(m.picker.items, "cogito-2.1:671b")
+	if target < 0 {
+		t.Fatalf("expected cogito model in picker, got %#v", pickerValues(m.picker.items))
+	}
+	m.picker.selected = target
+
+	view := plainRender(t, m.pickerOverlay(100))
+	assertContains(t, view, "163K ctx")
+	assertContains(t, view, "tools")
+	assertContains(t, view, "reasoning")
+	assertNotContains(t, view, "OLLAMA_API_KEY")
+	for _, item := range m.picker.items {
+		assertNotContains(t, item.Meta, "API_KEY")
+	}
+}
+
+func TestModelPickerFallsBackWhenDiscoveryFails(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKey:       "ollama-key",
+			Model:        "minimax-m3",
+		},
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
+	})
+	m.input.SetValue("/model")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("expected opening the model picker to start discovery")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+	view := plainRender(t, m.pickerOverlay(100))
+	assertContains(t, view, "Using built-in model list")
+	assertNotContains(t, view, "Checking available models...")
 }
 
 func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
@@ -188,9 +305,11 @@ func TestModelPickerSearchFiltersModels(t *testing.T) {
 }
 
 func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	m := newModel(context.Background(), Options{
-		ProviderName: "ollama-cloud",
-		ModelName:    "minimax-m3",
+		UserConfigPath: configPath,
+		ProviderName:   "ollama-cloud",
+		ModelName:      "minimax-m3",
 		ProviderProfile: config.ProviderProfile{
 			Name:         "ollama-cloud",
 			CatalogID:    "ollama-cloud",
@@ -218,6 +337,10 @@ func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
 	if next.picker.items[0].Group != "Favorites" || next.picker.items[0].Value != "qwen3-coder:480b" {
 		t.Fatalf("first picker item = %#v, want favorite group row", next.picker.items[0])
 	}
+	persisted := readTUIConfigFixture(t, configPath)
+	if len(persisted.Preferences.FavoriteModels) != 1 || persisted.Preferences.FavoriteModels[0] != "qwen3-coder:480b" {
+		t.Fatalf("persisted FavoriteModels = %#v, want qwen3-coder:480b", persisted.Preferences.FavoriteModels)
+	}
 
 	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
 	next = updated.(model)
@@ -226,6 +349,26 @@ func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
 	}
 	if len(next.picker.items) > 0 && next.picker.items[0].Group == "Favorites" {
 		t.Fatalf("favorites group should be gone after unfavorite, got first item %#v", next.picker.items[0])
+	}
+	persisted = readTUIConfigFixture(t, configPath)
+	if len(persisted.Preferences.FavoriteModels) != 0 {
+		t.Fatalf("persisted FavoriteModels = %#v, want empty after unfavorite", persisted.Preferences.FavoriteModels)
+	}
+}
+
+func TestModelPickerLoadsFavoriteModelsFromOptions(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName:    "ollama-cloud",
+		ModelName:       "minimax-m3",
+		FavoriteModels:  []string{"qwen3-coder:480b"},
+		ProviderProfile: config.ProviderProfile{Name: "ollama-cloud", CatalogID: "ollama-cloud", Model: "minimax-m3"},
+	})
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected model picker")
+	}
+	if picker.items[0].Group != "Favorites" || picker.items[0].Value != "qwen3-coder:480b" {
+		t.Fatalf("first picker item = %#v, want persisted favorite first", picker.items[0])
 	}
 }
 
@@ -335,13 +478,23 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			return next, nil
 		},
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return []providermodeldiscovery.Model{
+				{ID: "claude-haiku-4.5", Description: "Claude Haiku 4.5"},
+			}, nil
+		},
 	})
 	m.input.SetValue("/model")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if m.picker == nil {
 		t.Fatal("expected model picker open")
 	}
+	if cmd == nil {
+		t.Fatal("expected opening the model picker to start discovery")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
 
 	// Point the picker at a concrete, different model in the same provider family
 	// and choose it (cross-provider switches require a matching profile).
@@ -452,7 +605,7 @@ func TestPickerRenders(t *testing.T) {
 	m.input.SetValue("/model")
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
-	if !strings.Contains(m.View(), "select model") {
+	if !strings.Contains(m.View(), "Choose a model") {
 		t.Fatal("view should render the picker title")
 	}
 }
@@ -465,14 +618,14 @@ func TestPickerOverlayCapsVisibleRows(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.picker = &commandPicker{
 		kind:     pickerModel,
-		title:    "select model",
+		title:    "Choose a model",
 		items:    items,
 		allItems: append([]pickerItem{}, items...),
 		selected: 15,
 	}
 
 	got := plainRender(t, m.pickerOverlay(120))
-	if !strings.Contains(got, "select model") || !strings.Contains(got, "model-15") {
+	if !strings.Contains(got, "Choose a model") || !strings.Contains(got, "model-15") {
 		t.Fatalf("picker overlay should render selected window, got %q", got)
 	}
 	if strings.Contains(got, "model-00") || strings.Contains(got, "model-09") {
@@ -508,4 +661,18 @@ func pickerIndex(items []pickerItem, value string) int {
 		}
 	}
 	return -1
+}
+
+func readTUIConfigFixture(t *testing.T, path string) config.FileConfig {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg config.FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	return cfg
 }

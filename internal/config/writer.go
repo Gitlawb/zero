@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -69,6 +70,43 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	}
 
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+}
+
+func SetFavoriteModels(path string, models []string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+
+	cfg := FileConfig{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	cfg.Preferences.FavoriteModels = normalizeFavoriteModels(models)
+	if err := writeConfigFile(path, cfg); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
+func normalizeFavoriteModels(models []string) []string {
+	seen := map[string]bool{}
+	favorites := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			continue
+		}
+		seen[model] = true
+		favorites = append(favorites, model)
+	}
+	sort.Strings(favorites)
+	return favorites
 }
 
 func writeConfigFile(path string, cfg FileConfig) error {
