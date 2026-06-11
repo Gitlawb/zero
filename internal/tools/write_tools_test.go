@@ -326,6 +326,36 @@ func TestApplyPatchToolAppliesUnifiedDiff(t *testing.T) {
 	}
 }
 
+// A hunk-body line that removes content beginning with "-- " appears in the diff
+// as "--- ..."; it must NOT be mistaken for a file header (which previously made
+// apply_patch reject a valid patch as targeting an outside path).
+func TestApplyPatchToolHandlesHunkBodyLookingLikeHeader(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.md"), "keep\n-- /etc/old\n")
+	patch := strings.Join([]string{
+		"diff --git a/notes.md b/notes.md",
+		"--- a/notes.md",
+		"+++ b/notes.md",
+		"@@ -1,2 +1,1 @@",
+		" keep",
+		"--- /etc/old",
+		"",
+	}, "\n")
+
+	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected patch ok (hunk body must not be parsed as a header), got %s: %s", result.Status, result.Output)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ReplaceAll(string(content), "\r\n", "\n") != "keep\n" {
+		t.Fatalf("unexpected patched content: %q", string(content))
+	}
+}
+
 func TestApplyPatchToolRejectsSymlinkPath(t *testing.T) {
 	root := t.TempDir()
 	realDirectory := filepath.Join(root, "real")

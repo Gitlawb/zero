@@ -144,6 +144,28 @@ func TestGrepToolSearchesContent(t *testing.T) {
 	}
 }
 
+// A glob is matched relative to the search directory, not the workspace root, so
+// `path=subdir glob=*.go` finds subdir/a.go (as "a.go"). Previously the glob was
+// matched against the workspace-relative "subdir/a.go", so a non-recursive "*.go"
+// found nothing.
+func TestGrepGlobMatchesRelativeToSearchDir(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "subdir", "a.go"), "package sub\nfunc target() {}\n")
+
+	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern": "func target",
+		"path":    "subdir",
+		"glob":    "*.go",
+	})
+
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "subdir/a.go:2: func target() {}") {
+		t.Fatalf("expected subdir match with non-recursive glob, got %q", result.Output)
+	}
+}
+
 func TestGrepToolSupportsFilesAndCountModes(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "a.txt"), "needle\nneedle\n")

@@ -202,7 +202,9 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 		if shouldSkipWorkspaceFile(relative) {
 			return []string{}, nil
 		}
-		if globMatcher == nil || globMatcher.MatchString(relative) {
+		// A single explicit file is matched by its base name so a pattern like
+		// "*.go" applies regardless of how deep the file sits under the workspace.
+		if globMatcher == nil || globMatcher.MatchString(filepath.Base(target)) {
 			return []string{target}, nil
 		}
 		return []string{}, nil
@@ -237,7 +239,15 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 		if shouldSkipWorkspaceFile(relative) {
 			return nil
 		}
-		if globMatcher == nil || globMatcher.MatchString(relative) {
+		// Match the glob against the path relative to the SEARCH directory, not the
+		// workspace root, so "*.go" with path="subdir" matches subdir/a.go (as
+		// "a.go") — matching ripgrep's --glob semantics. Falls back to the
+		// workspace-relative path if Rel fails.
+		globPath := relative
+		if rel, relErr := filepath.Rel(target, path); relErr == nil {
+			globPath = filepath.ToSlash(rel)
+		}
+		if globMatcher == nil || globMatcher.MatchString(globPath) {
 			files = append(files, path)
 		}
 		return nil
