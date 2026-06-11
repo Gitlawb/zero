@@ -32,15 +32,18 @@ func Run(ctx context.Context, options Options) int {
 	}
 	if options.AltScreen {
 		programOpts = append(programOpts, tea.WithAltScreen())
-		programOpts = append(programOpts, tea.WithMouseCellMotion())
 	}
 	if notify.Enabled(notify.Mode(strings.TrimSpace(options.Notify.Mode))) {
 		programOpts = append(programOpts, tea.WithReportFocus())
 	}
-	// Mouse capture is scoped to the alt-screen app so wheel events scroll the
-	// managed transcript instead of being translated into ↑/↓ keypresses by the
-	// terminal, which would recall composer history.
-	program = tea.NewProgram(newModel(ctx, options), programOpts...)
+	initialModel := newModel(ctx, options)
+	if initialModel.wantsMouseCapture() {
+		programOpts = append(programOpts, tea.WithMouseCellMotion())
+		initialModel.mouseCapture = true
+	}
+	// Mouse capture starts enabled only when the initial surface needs it; later
+	// surfaces enable/disable it through syncMouseCapture after each update.
+	program = tea.NewProgram(initialModel, programOpts...)
 
 	if _, err := program.Run(); err != nil {
 		// Surface the failure: exiting 1 with zero diagnostics left users

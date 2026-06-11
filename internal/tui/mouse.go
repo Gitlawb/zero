@@ -45,6 +45,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	if next, cmd, ok := m.handleTranscriptSelectionMouse(msg); ok {
+		return next, cmd
+	}
 
 	switch {
 	case mouseWheelUp(msg):
@@ -96,8 +99,44 @@ func (m *model) clearMouseSelection() {
 	m.lastMouseSelection = mouseSelectionTarget{}
 }
 
+func (m model) wantsMouseCapture() bool {
+	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.picker != nil || m.suggestionsActive())
+}
+
+func (m model) setupWantsMouseCapture() bool {
+	if !m.setup.visible {
+		return false
+	}
+	return m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel
+}
+
+func (m model) chatWantsMouseCapture() bool {
+	return !m.setup.visible
+}
+
+func (m model) syncMouseCapture() (model, tea.Cmd) {
+	want := m.wantsMouseCapture()
+	if m.mouseCapture == want {
+		return m, nil
+	}
+	m.mouseCapture = want
+	if want {
+		return m, tea.EnableMouseCellMotion
+	}
+	return m, tea.DisableMouse
+}
+
 func mouseLeftPress(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress || msg.Type == tea.MouseLeft
+	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress ||
+		msg.Type == tea.MouseLeft && msg.Action == tea.MouseActionPress
+}
+
+func mouseMotion(msg tea.MouseMsg) bool {
+	return msg.Action == tea.MouseActionMotion || msg.Type == tea.MouseMotion
+}
+
+func mouseRelease(msg tea.MouseMsg) bool {
+	return msg.Action == tea.MouseActionRelease || msg.Type == tea.MouseRelease
 }
 
 func mouseWheelUp(msg tea.MouseMsg) bool {

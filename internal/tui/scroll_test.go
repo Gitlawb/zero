@@ -12,6 +12,7 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 14
+	m.mouseCapture = true
 	m.inputHistory = []string{"old prompt"}
 	m.historyIdx = len(m.inputHistory)
 	for index := 0; index < 12; index++ {

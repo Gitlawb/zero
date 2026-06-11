@@ -86,6 +86,7 @@ func newSetupState(options SetupOptions) setupState {
 }
 
 func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.clearMouseSelection()
 	if m.setupCredentialInputActive() {
 		return m.handleSetupCredentialKey(msg)
 	}
@@ -187,14 +188,39 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSetupMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
+	if mouseLeftPress(msg) {
+		switch m.setup.stage {
+		case setupStageProvider:
+			if target, ok := m.selectSetupProviderAtMouse(msg); ok {
+				if m.repeatMouseSelection(target) {
+					m.clearMouseSelection()
+					return m.advanceSetup()
+				}
+				m.lastMouseSelection = target
+				return m, nil
+			}
+		case setupStageModel:
+			if target, ok := m.selectSetupModelAtMouse(msg); ok {
+				if m.repeatMouseSelection(target) {
+					m.clearMouseSelection()
+					return m.advanceSetup()
+				}
+				m.lastMouseSelection = target
+				return m, nil
+			}
+		}
+	}
+
+	switch {
+	case mouseWheelUp(msg):
+		m.clearMouseSelection()
 		if m.setup.stage == setupStageProvider {
 			m.moveSetupProvider(-1)
 		} else if m.setup.stage == setupStageModel {
 			m.moveSetupModel(-1)
 		}
-	case tea.MouseButtonWheelDown:
+	case mouseWheelDown(msg):
+		m.clearMouseSelection()
 		if m.setup.stage == setupStageProvider {
 			m.moveSetupProvider(1)
 		} else if m.setup.stage == setupStageModel {
@@ -202,6 +228,92 @@ func (m model) handleSetupMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *model) selectSetupProviderAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
+	if len(m.setup.providers) == 0 {
+		return mouseSelectionTarget{}, false
+	}
+	width := chatWidth(m.width)
+	height := normalizedStartupHeight(m.height)
+	rowWidth := setupProviderBlockWidth(width, m.setup.providers)
+	if !setupBlockContainsMouseX(msg.X, width, rowWidth) {
+		return mouseSelectionTarget{}, false
+	}
+	maxVisible := setupProviderMaxVisible(height, len(m.setup.providers))
+	if maxVisible == 0 {
+		return mouseSelectionTarget{}, false
+	}
+	content := m.setupProviderLines(width, height)
+	top := setupContentTop(height, len(content), m.setup.err != "")
+	row := msg.Y - top - 2
+	if row < 0 || row >= maxVisible {
+		return mouseSelectionTarget{}, false
+	}
+	start := selectableListStart(len(m.setup.providers), maxVisible, m.setup.selected)
+	index := start + row
+	if index < 0 || index >= len(m.setup.providers) {
+		return mouseSelectionTarget{}, false
+	}
+	m.setup.selected = index
+	m.setup.apiKey.SetValue("")
+	m.setup.modelGen++
+	m.resetSetupModels()
+	return mouseSelectionTarget{Scope: "first-run-provider", Value: m.setup.providers[index].ID, Index: index}, true
+}
+
+func (m *model) selectSetupModelAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
+	if m.setup.modelLoad {
+		return mouseSelectionTarget{}, false
+	}
+	m.ensureSetupModels()
+	models := m.setupFilteredModels()
+	if len(models) == 0 {
+		return mouseSelectionTarget{}, false
+	}
+	width := chatWidth(m.width)
+	height := normalizedStartupHeight(m.height)
+	rowWidth := setupModelBlockWidth(width, m.setup.models)
+	if !setupBlockContainsMouseX(msg.X, width, rowWidth) {
+		return mouseSelectionTarget{}, false
+	}
+	maxVisible := setupModelMaxVisible(height, len(models))
+	if maxVisible == 0 {
+		return mouseSelectionTarget{}, false
+	}
+	m.setup.modelIndex = clampInt(m.setup.modelIndex, 0, len(models)-1)
+	content := m.setupModelLines(width, height)
+	top := setupContentTop(height, len(content), m.setup.err != "")
+	rowStart := 4
+	if m.setupModelStatus() != "" {
+		rowStart++
+	}
+	row := msg.Y - top - rowStart
+	if row < 0 || row >= maxVisible {
+		return mouseSelectionTarget{}, false
+	}
+	start := selectableListStart(len(models), maxVisible, m.setup.modelIndex)
+	index := start + row
+	if index < 0 || index >= len(models) {
+		return mouseSelectionTarget{}, false
+	}
+	m.setup.modelIndex = index
+	return mouseSelectionTarget{Scope: "first-run-model", Value: models[index].ID, Index: index}, true
+}
+
+func setupContentTop(height int, contentLines int, hasError bool) int {
+	if hasError {
+		contentLines += 2
+	}
+	return maxInt(0, (height-contentLines-3)/2)
+}
+
+func setupBlockContainsMouseX(x int, width int, blockWidth int) bool {
+	if blockWidth <= 0 {
+		return false
+	}
+	left := maxInt(0, (width-blockWidth)/2)
+	return x >= left && x < left+blockWidth
 }
 
 func (m model) advanceSetup() (tea.Model, tea.Cmd) {
@@ -604,12 +716,11 @@ func (m model) setupModelLines(width int, height int) []string {
 	for offset, model := range visibleModels {
 		lines = append(lines, m.setupModelRow(rowWidth, start+offset, model))
 	}
-	if detail := setupModelSelectedDetail(m.setupCurrentModel()); detail != "" {
-		lines = append(lines,
-			blankSetupBlockLine(rowWidth),
-			padSetupLine("  "+zeroTheme.faint.Render(detail), rowWidth),
-		)
-	}
+	detail := setupModelSelectedDetail(m.setupCurrentModel())
+	lines = append(lines,
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+zeroTheme.faint.Render(detail), rowWidth),
+	)
 	return lines
 }
 

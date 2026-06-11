@@ -133,6 +133,10 @@ type model struct {
 	// of replacing the whole input.
 	suggestionsAreFiles bool
 	lastMouseSelection  mouseSelectionTarget
+	mouseCapture        bool
+	transcriptSelection transcriptSelectionState
+	copyStatus          string
+	copyStatusSeq       int
 
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
@@ -347,14 +351,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
+	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
-	switch {
-	case flushCmd == nil:
-		return nm, cmd
-	case cmd == nil:
-		return nm, flushCmd
+	return nm, batchCommands(cmd, mouseCmd, flushCmd)
+}
+
+func batchCommands(cmds ...tea.Cmd) tea.Cmd {
+	filtered := make([]tea.Cmd, 0, len(cmds))
+	for _, cmd := range cmds {
+		if cmd != nil {
+			filtered = append(filtered, cmd)
+		}
+	}
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
 	default:
-		return nm, tea.Batch(flushCmd, cmd)
+		return tea.Batch(filtered...)
 	}
 }
 
@@ -365,10 +380,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSetupMouse(msg)
 		}
 		return m.handleMouse(msg)
+	case transcriptCopiedMsg:
+		m.transcriptSelection = transcriptSelectionState{}
+		m.copyStatusSeq++
+		m.copyStatus = "Copied!"
+		seq := m.copyStatusSeq
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return transcriptCopyStatusExpiredMsg{seq: seq}
+		})
+	case transcriptCopyStatusExpiredMsg:
+		if msg.seq == m.copyStatusSeq {
+			m.copyStatus = ""
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
+		m.transcriptSelection = transcriptSelectionState{}
 		m.clearMouseSelection()
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -835,15 +864,6 @@ func (m model) transcriptEmpty() bool {
 func (m model) transcriptView() string {
 	width := chatWidth(m.width)
 
-	var body strings.Builder
-	// The title bar prints once into scrollback on the first WindowSizeMsg;
-	// until then (the very first frame) it renders managed so the surface
-	// never appears headless.
-	if !m.headerPrinted {
-		body.WriteString(m.titleBar(width))
-		body.WriteString("\n")
-	}
-
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
@@ -856,51 +876,11 @@ func (m model) transcriptView() string {
 	case suggestionOverlay != "":
 		viewportOverlay = suggestionOverlay
 	}
-	if m.transcriptEmpty() && !m.pending {
-		if viewportOverlay != "" {
-			body.WriteString(m.emptyStateWithOverlay(width, viewportOverlay))
-		} else {
-			body.WriteString(m.emptyState(width))
-		}
-		body.WriteString("\n")
-	} else {
-		rc := buildRowContext(m.transcript)
-		shownAny := false
-		for index := m.flushed; index < len(m.transcript); index++ {
-			row := m.transcript[index]
-			// A welcome row carries no Lime visual (the empty state replaced it)
-			// and a resolved tool call collapses into its result's card.
-			if row.kind == rowWelcome || rc.skip(row) {
-				continue
-			}
-			// Blank-line separation before turns — including between the flushed
-			// history above and the first live row.
-			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
-				body.WriteString("\n")
-			}
-			body.WriteString(m.renderRow(row, width, rc))
-			body.WriteString("\n")
-			shownAny = true
-		}
+	emptyOverlay := ""
+	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
+		emptyOverlay = viewportOverlay
 	}
-
-	if m.pending {
-		body.WriteString("\n")
-		switch {
-		case m.pendingPermission != nil:
-			body.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
-		case m.pendingAskUser != nil:
-			body.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
-		default:
-			body.WriteString(m.interimBlock(width))
-		}
-		body.WriteString("\n")
-	}
-	if m.pendingSpecReview != nil {
-		body.WriteString("\n")
-		body.WriteString(renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width))
-		body.WriteString("\n")
-	}
+	body, _ := m.transcriptBody(width, emptyOverlay)
 
 	footer := m.footerView(width)
 
@@ -910,15 +890,13 @@ func (m model) transcriptView() string {
 	}
 
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptView(body.String(), footer, width, overlayForViewport)
+		return m.scrollableTranscriptView(body, footer, width, overlayForViewport)
 	}
 
 	if overlayForViewport != "" {
-		body.WriteString("\n")
-		body.WriteString(overlayForViewport)
-		body.WriteString("\n")
+		body += "\n" + overlayForViewport + "\n"
 	}
-	return body.String() + footer
+	return body + footer
 }
 
 func (m model) footerView(width int) string {
@@ -926,6 +904,10 @@ func (m model) footerView(width int) string {
 	footer.WriteString("\n")
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
 		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
+		footer.WriteString("\n")
+	}
+	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
+		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))

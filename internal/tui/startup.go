@@ -187,6 +187,14 @@ func centerLine(line string, width int) string {
 	return strings.Repeat(" ", padding) + line
 }
 
+func rightAlignedLine(line string, width int) string {
+	padding := width - lipgloss.Width(line)
+	if padding < 0 {
+		padding = 0
+	}
+	return strings.Repeat(" ", padding) + line
+}
+
 func indentBlock(block string, spaces int) string {
 	if spaces <= 0 {
 		return block

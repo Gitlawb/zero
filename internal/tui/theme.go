@@ -22,6 +22,7 @@ type tuiTheme struct {
 	blue       lipgloss.Style // grep file locations, local-model dot
 	line       lipgloss.Style // default borders, rules, status separators
 	lineStrong lipgloss.Style // emphasized borders
+	selection  lipgloss.Style // transcript selection highlight
 
 	// Title bar.
 	badge lipgloss.Style // ` 0 ` brand chip: onAccent on accent, bold
@@ -117,6 +118,7 @@ var zeroTheme = tuiTheme{
 	blue:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
 	line:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine)),
 	lineStrong: lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine2)),
+	selection:  lipgloss.NewStyle().Background(lipgloss.Color(colorAccent)).Foreground(lipgloss.Color(colorOnAccent)),
 
 	badge: lipgloss.NewStyle().Background(lipgloss.Color(colorAccent)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
 
