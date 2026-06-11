@@ -13,9 +13,18 @@ const (
 	minStartupWidth      = 58
 )
 
-// zeroGlyphLines is the block-art `0` shown on the empty chat surface,
-// derived from the O columns of the old ANSI Shadow wordmark.
-var zeroGlyphLines = []string{
+// zeroWordmarkPrefixLines is the white `ZER` part of the empty-state ANSI
+// Shadow-style wordmark. zeroWordmarkOLines keeps the old lime `O` glyph.
+var zeroWordmarkPrefixLines = []string{
+	`███████╗███████╗██████╗ `,
+	`╚══███╔╝██╔════╝██╔══██╗`,
+	`  ███╔╝ █████╗  ██████╔╝`,
+	` ███╔╝  ██╔══╝  ██╔══██╗`,
+	`███████╗███████╗██║  ██║`,
+	`╚══════╝╚══════╝╚═╝  ╚═╝`,
+}
+
+var zeroWordmarkOLines = []string{
 	` ██████╗ `,
 	`██╔═══██╗`,
 	`██║   ██║`,
@@ -31,8 +40,8 @@ const emptyStateTagline = "a std-lib-first coding agent · bring your own key ·
 // hint, and the three starter-suggestion chips (inserted by keys 1–3).
 func (m model) emptyState(width int) string {
 	lines := []string{}
-	for _, glyph := range zeroGlyphLines {
-		lines = append(lines, centerLine(zeroTheme.accent.Render(glyph), width))
+	for _, glyph := range zeroWordmarkLines() {
+		lines = append(lines, centerLine(glyph, width))
 	}
 	lines = append(lines, "")
 	lines = append(lines, centerLine(zeroTheme.muted.Render(emptyStateTagline), width))
@@ -50,6 +59,14 @@ func (m model) emptyState(width int) string {
 	height := normalizedStartupHeight(m.height)
 	gap := clamp((height-6-len(lines))/2, 0, 12)
 	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+}
+
+func zeroWordmarkLines() []string {
+	lines := make([]string, 0, minInt(len(zeroWordmarkPrefixLines), len(zeroWordmarkOLines)))
+	for index := 0; index < len(zeroWordmarkPrefixLines) && index < len(zeroWordmarkOLines); index++ {
+		lines = append(lines, zeroTheme.ink.Render(zeroWordmarkPrefixLines[index])+zeroTheme.accent.Render(zeroWordmarkOLines[index]))
+	}
+	return lines
 }
 
 func (m model) emptyStateModelHint() string {

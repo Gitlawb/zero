@@ -448,6 +448,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Tag:              options.tag,
 		Depth:            options.depth,
 		SessionTitle:     sessionTitle,
+		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
 		ModelSwitcher:    modelSwitcher,
 		ReasoningEffort:  runReasoningEffort,

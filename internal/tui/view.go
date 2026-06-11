@@ -330,8 +330,25 @@ func (m model) pickerOverlay(width int) string {
 	}
 	innerWidth := width - 4
 	lines := make([]string, 0, len(m.picker.items)+1)
-	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render("  ↑/↓ · ⏎ · esc"))
+	hint := "  ↑/↓ · ⏎ · esc"
+	if m.picker.kind == pickerModel {
+		hint += " · ctrl+f favorite"
+	}
+	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render(hint))
+	if m.picker.kind == pickerModel {
+		query := strings.TrimSpace(m.picker.query)
+		value := zeroTheme.faint.Render("Search model")
+		if query != "" {
+			value = zeroTheme.ink.Render(query)
+		}
+		lines = append(lines, zeroTheme.userPrompt.Render("search > ")+value)
+	}
+	lastGroup := ""
 	for index, item := range m.picker.items {
+		if item.Group != "" && item.Group != lastGroup {
+			lines = append(lines, zeroTheme.accent.Render(item.Group))
+			lastGroup = item.Group
+		}
 		surface := zeroTheme.onPanel2
 		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == m.picker.selected {
@@ -344,6 +361,9 @@ func (m model) pickerOverlay(width int) string {
 			left += surface(zeroTheme.blue).Render("● ")
 		case item.Remote:
 			left += surface(zeroTheme.accent).Render("● ")
+		}
+		if item.Favorite {
+			left += surface(zeroTheme.accent).Render("* ")
 		}
 		left += surface(zeroTheme.ink).Render(item.Label)
 		right := ""

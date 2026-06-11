@@ -217,6 +217,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runProviders(args[1:], stdout, stderr, deps)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr, deps)
+	case "setup":
+		return runSetup(args[1:], stdout, stderr, deps)
 	case "context":
 		return runContext(args[1:], stdout, stderr, deps)
 	case "repo-map", "repomap":
@@ -347,6 +349,10 @@ func fillAppDeps(deps appDeps) appDeps {
 }
 
 func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string) int {
+	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, false)
+}
+
+func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, forceSetup bool) int {
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
@@ -355,6 +361,20 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
+	}
+	userConfigPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config path: "+err.Error(), 1)
+	}
+
+	needsSetup := setupRequired(resolved)
+	setupVisible := forceSetup || needsSetup
+	configPath := ""
+	if setupVisible {
+		configPath, err = deps.userConfigPath()
+		if err != nil {
+			return writeAppError(stderr, err.Error(), 1)
+		}
 	}
 
 	scope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), addDirs...))
@@ -412,6 +432,7 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 	})
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
+		UserConfigPath:  userConfigPath,
 		ProviderName:    resolved.Provider.Name,
 		ModelName:       resolved.Provider.Model,
 		ProviderProfile: resolved.Provider,
@@ -430,6 +451,15 @@ func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.Perm
 		},
 		PermissionMode: permissionMode,
 		Notify:         resolved.Notify,
+		Setup: tui.SetupOptions{
+			Visible:    setupVisible,
+			Required:   needsSetup,
+			ConfigPath: configPath,
+			Providers:  setupProviderOptions(),
+			Save: func(selection tui.SetupSelection) (tui.SetupResult, error) {
+				return saveSetupProvider(deps, selection, setupSaveOptions{})
+			},
+		},
 	})
 }
 
@@ -507,6 +537,7 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets
   models     List Zero model registry entries
   providers  Inspect resolved provider profiles

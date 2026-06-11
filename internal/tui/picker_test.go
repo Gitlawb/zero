@@ -8,8 +8,300 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
+
+func TestModelPickerDetectsOllamaCloudFromBaseURL(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "custom-openai-compatible",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "custom-openai-compatible",
+			CatalogID:    "custom-openai-compatible",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected model picker")
+	}
+	groups := pickerGroups(picker.items)
+	if !contains(groups, "Ollama Cloud catalog") {
+		t.Fatalf("picker groups = %#v, want Ollama Cloud catalog", groups)
+	}
+	got := pickerValues(picker.items)
+	if !contains(got, "qwen3-coder:480b") {
+		t.Fatalf("picker values = %#v, want Ollama Cloud models", got)
+	}
+	if contains(got, "custom-model") {
+		t.Fatalf("picker should not show custom-openai-compatible fallback when URL is Ollama Cloud: %#v", got)
+	}
+}
+
+func TestModelPickerRefreshesLiveModelsForActiveProvider(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKey:       "ollama-key",
+			Model:        "minimax-m3",
+		},
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			captured = profile
+			return []providermodeldiscovery.Model{
+				{ID: "live-cloud-a", Description: "Live Cloud A"},
+				{ID: "live-cloud-b", Description: "Live Cloud B"},
+			}, nil
+		},
+	})
+	m.input.SetValue("/model")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.picker == nil {
+		t.Fatal("expected model picker to open")
+	}
+	if cmd == nil {
+		t.Fatal("opening /model for an active provider should start model discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
+
+	if captured.CatalogID != "ollama-cloud" {
+		t.Fatalf("discovery profile catalog = %q, want ollama-cloud", captured.CatalogID)
+	}
+	got := pickerValues(next.picker.items)
+	if !contains(got, "live-cloud-a") || !contains(got, "live-cloud-b") {
+		t.Fatalf("picker values = %#v, want live cloud models", got)
+	}
+}
+
+func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKey:       "ollama-key",
+			Model:        "minimax-m3",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.modelPickerLiveProviderID = "ollama-cloud"
+	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
+	m.picker = m.newModelPicker()
+	m.picker.selected = pickerIndex(m.picker.items, "glm-5.1")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if captured.Model != "glm-5.1" {
+		t.Fatalf("captured model = %q, want glm-5.1", captured.Model)
+	}
+	if next.modelName != "glm-5.1" {
+		t.Fatalf("active model = %q, want glm-5.1", next.modelName)
+	}
+}
+
+func TestModelSwitchNormalizesDetectedOllamaCloudProfile(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "custom-openai-compatible",
+		ModelName:    "minimax-m3",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "custom-openai-compatible",
+			CatalogID:    "custom-openai-compatible",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OPENAI_API_KEY",
+			Model:        "minimax-m3",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.modelPickerLiveProviderID = "ollama-cloud"
+	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
+	m.input.SetValue("/model glm-5.1")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if captured.Name != "ollama-cloud" || captured.CatalogID != "ollama-cloud" {
+		t.Fatalf("captured provider identity = %#v, want ollama-cloud", captured)
+	}
+	if captured.APIKeyEnv != "OLLAMA_API_KEY" {
+		t.Fatalf("captured APIKeyEnv = %q, want OLLAMA_API_KEY", captured.APIKeyEnv)
+	}
+	if captured.Model != "glm-5.1" {
+		t.Fatalf("captured model = %q, want glm-5.1", captured.Model)
+	}
+	if next.providerName != "ollama-cloud" {
+		t.Fatalf("providerName = %q, want ollama-cloud", next.providerName)
+	}
+}
+
+func TestModelPickerSearchFiltersModels(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+	m.picker = m.newModelPicker()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("qwen")})
+	next := updated.(model)
+	if next.picker.query != "qwen" {
+		t.Fatalf("picker query = %q, want qwen", next.picker.query)
+	}
+	view := plainRender(t, next.pickerOverlay(100))
+	assertContains(t, view, "search > qwen")
+	assertContains(t, view, "Qwen")
+	assertNotContains(t, view, "Minimax M3")
+}
+
+func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "ollama-cloud",
+		ModelName:    "minimax-m3",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			CatalogID:    "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			APIKeyEnv:    "OLLAMA_API_KEY",
+			Model:        "minimax-m3",
+		},
+	})
+	m.picker = m.newModelPicker()
+	if m.picker == nil {
+		t.Fatal("expected model picker")
+	}
+	target := pickerIndex(m.picker.items, "qwen3-coder:480b")
+	if target < 0 {
+		t.Fatalf("expected qwen3-coder:480b in picker, got %#v", pickerValues(m.picker.items))
+	}
+	m.picker.selected = target
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	next := updated.(model)
+	if !next.favoriteModels["qwen3-coder:480b"] {
+		t.Fatalf("favorite map = %#v, want qwen3-coder:480b favorited", next.favoriteModels)
+	}
+	if next.picker.items[0].Group != "Favorites" || next.picker.items[0].Value != "qwen3-coder:480b" {
+		t.Fatalf("first picker item = %#v, want favorite group row", next.picker.items[0])
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	next = updated.(model)
+	if next.favoriteModels["qwen3-coder:480b"] {
+		t.Fatalf("favorite map = %#v, want qwen3-coder:480b unfavorited", next.favoriteModels)
+	}
+	if len(next.picker.items) > 0 && next.picker.items[0].Group == "Favorites" {
+		t.Fatalf("favorites group should be gone after unfavorite, got first item %#v", next.picker.items[0])
+	}
+}
+
+func TestModelPickerShowsRecentThenActiveProviderCatalog(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "openrouter",
+		ModelName:    "google/gemini-2.5-pro",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+	})
+
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected a model picker")
+	}
+	if picker.items[0].Group != "Recent" {
+		t.Fatalf("first picker group = %q, want Recent", picker.items[0].Group)
+	}
+	if picker.items[0].Value != "google/gemini-2.5-pro" {
+		t.Fatalf("first picker value = %q, want active recent model", picker.items[0].Value)
+	}
+	if picker.items[1].Group != "OpenRouter catalog" {
+		t.Fatalf("second picker group = %q, want OpenRouter catalog", picker.items[1].Group)
+	}
+	got := pickerValues(picker.items)
+	if !contains(got, "anthropic/claude-sonnet-4.5") || !contains(got, "minimax/minimax-m2.1") {
+		t.Fatalf("active provider catalog missing expected OpenRouter models: %#v", got)
+	}
+	if contains(got, "claude-haiku-4.5") {
+		t.Fatalf("picker should not include unrelated global Anthropic registry model under OpenRouter: %#v", got)
+	}
+}
+
+func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "openrouter",
+		ModelName:    "google/gemini-2.5-pro",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openrouter",
+			CatalogID:    "openrouter",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			Model:        "google/gemini-2.5-pro",
+			APIKeyEnv:    "OPENROUTER_API_KEY",
+			BaseURL:      "https://openrouter.ai/api/v1",
+			APIFormat:    "chat-completions",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model openai/gpt-4.1")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting a run")
+	}
+	if captured.Model != "openai/gpt-4.1" {
+		t.Fatalf("captured model = %q, want raw OpenRouter model ID", captured.Model)
+	}
+	if next.modelName != "openai/gpt-4.1" {
+		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
+	}
+	if !transcriptContains(next.transcript, "model: openai/gpt-4.1") {
+		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	}
+}
 
 func TestModelPickerOpensAndCancels(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
@@ -162,4 +454,34 @@ func TestPickerRenders(t *testing.T) {
 	if !strings.Contains(m.View(), "select model") {
 		t.Fatal("view should render the picker title")
 	}
+}
+
+func pickerValues(items []pickerItem) []string {
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		values = append(values, item.Value)
+	}
+	return values
+}
+
+func pickerGroups(items []pickerItem) []string {
+	groups := []string{}
+	seen := map[string]bool{}
+	for _, item := range items {
+		if item.Group == "" || seen[item.Group] {
+			continue
+		}
+		seen[item.Group] = true
+		groups = append(groups, item.Group)
+	}
+	return groups
+}
+
+func pickerIndex(items []pickerItem, value string) int {
+	for index, item := range items {
+		if item.Value == value {
+			return index
+		}
+	}
+	return -1
 }

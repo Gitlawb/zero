@@ -148,6 +148,7 @@ type Options struct {
 	Tag              string
 	Depth            int
 	SessionTitle     string
+	ProviderName     string
 	Model            string
 	ReasoningEffort  string
 	Cwd              string

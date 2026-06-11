@@ -12,7 +12,8 @@ func TestEmptyStateShowsBrandTaglineAndSuggestions(t *testing.T) {
 	m := newModel(context.Background(), Options{ProviderName: "anthropic", ModelName: "claude-sonnet-4.5"})
 	m.width, m.height = 100, 30
 
-	view := m.View()
+	view := plainRender(t, m.View())
+	assertContains(t, view, "███████╗███████╗██████╗  ██████╗")
 	assertContains(t, view, emptyStateTagline)
 	assertContains(t, view, "running zero against ")
 	assertContains(t, view, "anthropic/claude-sonnet-4.5")

@@ -44,19 +44,62 @@ func execCmd(cmd tea.Cmd) tea.Msg {
 }
 
 type fakeProvider struct {
-	events []zeroruntime.StreamEvent
+	events   []zeroruntime.StreamEvent
+	requests []zeroruntime.CompletionRequest
 }
 
 func (provider *fakeProvider) StreamCompletion(
 	ctx context.Context,
 	request zeroruntime.CompletionRequest,
 ) (<-chan zeroruntime.StreamEvent, error) {
+	provider.requests = append(provider.requests, request)
 	ch := make(chan zeroruntime.StreamEvent, len(provider.events))
 	for _, event := range provider.events {
 		ch <- event
 	}
 	close(ch)
 	return ch, nil
+}
+
+func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "I am using the active session model."},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		Cwd:          t.TempDir(),
+		ProviderName: "ollama-cloud",
+		ModelName:    "glm-5.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+	})
+	m.input.SetValue("which model are you")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	_ = updated.(model)
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Messages) == 0 {
+		t.Fatal("expected provider request to include a system message")
+	}
+	systemPrompt := provider.requests[0].Messages[0].Content
+	for _, want := range []string{
+		"Active provider: ollama-cloud",
+		"Active model: glm-5.1",
+		"Persisted config",
+	} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Fatalf("expected system prompt to contain %q, got:\n%s", want, systemPrompt)
+		}
+	}
 }
 
 func TestParseCommand(t *testing.T) {

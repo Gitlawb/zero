@@ -55,7 +55,7 @@ func TestProviderAndConfigCommandsUseStableStatusOutput(t *testing.T) {
 		AgentOptions: agent.Options{MaxTurns: 42},
 	})
 
-	m.input.SetValue("/provider")
+	m.input.SetValue("/provider status")
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 	if cmd != nil {
@@ -92,7 +92,7 @@ func TestProviderCommandRedactsCredentialBearingBaseURL(t *testing.T) {
 			Model:        "gpt-4.1",
 		},
 	})
-	m.input.SetValue("/provider")
+	m.input.SetValue("/provider status")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)

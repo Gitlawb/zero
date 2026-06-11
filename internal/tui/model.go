@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -26,36 +27,42 @@ import (
 
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
+const chatWheelScrollLines = 3
 
 type model struct {
-	ctx                context.Context
-	cwd                string
-	gitBranch          string
-	providerName       string
-	modelName          string
-	providerProfile    config.ProviderProfile
-	provider           zeroruntime.Provider
-	newProvider        func(config.ProviderProfile) (zeroruntime.Provider, error)
-	registry           *tools.Registry
-	sessionStore       *sessions.Store
-	sandboxStore       *sandbox.GrantStore
-	activeSession      sessions.Metadata
-	sessionEvents      []sessions.Event
-	usageTracker       *usage.Tracker
-	runtimeMessageSink func(tea.Msg)
-	agentOptions       agent.Options
-	notifier           *notify.Notifier
-	permissionMode     agent.PermissionMode
-	reasoningEffort    modelregistry.ReasoningEffort
-	responseStyle      string
-	compactRequests    int
-	unpricedRequests   int
-	unpricedTokens     int
-	transcript         []transcriptRow
-	transcriptDetailed bool
-	input              textinput.Model
-	composer           composerState
-	composerActive     bool
+	ctx                    context.Context
+	cwd                    string
+	userConfigPath         string
+	gitBranch              string
+	providerName           string
+	modelName              string
+	providerProfile        config.ProviderProfile
+	provider               zeroruntime.Provider
+	newProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
+	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	registry               *tools.Registry
+	sessionStore           *sessions.Store
+	sandboxStore           *sandbox.GrantStore
+	activeSession          sessions.Metadata
+	sessionEvents          []sessions.Event
+	usageTracker           *usage.Tracker
+	runtimeMessageSink     func(tea.Msg)
+	agentOptions           agent.Options
+	notifier               *notify.Notifier
+	permissionMode         agent.PermissionMode
+	reasoningEffort        modelregistry.ReasoningEffort
+	responseStyle          string
+	compactRequests        int
+	unpricedRequests       int
+	unpricedTokens         int
+	transcript             []transcriptRow
+	transcriptDetailed     bool
+	input                  textinput.Model
+	composer               composerState
+	composerActive         bool
+	altScreen              bool
+	setup                  setupState
+	setupSave              func(SetupSelection) (SetupResult, error)
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
@@ -87,11 +94,14 @@ type model struct {
 	width             int
 	height            int
 	now               func() time.Time
+	chatScrollOffset  int
 
-	// Flush-frontier state (see flush.go). transcript[:flushed] is already in
-	// native scrollback; flushedAny gates the first turn-separator blank line;
-	// flushQueue/printInFlight serialize the ordered scrollback prints;
-	// headerPrinted records the one-time title-bar print at startup.
+	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
+	// is already in native scrollback; in alt-screen mode this frontier stays
+	// idle so history cannot reveal prior shell output.
+	// flushedAny gates the first turn-separator blank line; flushQueue/
+	// printInFlight serialize ordered scrollback prints; headerPrinted records
+	// the one-time title-bar print at startup.
 	flushed       int
 	flushedAny    bool
 	flushQueue    []string
@@ -120,7 +130,11 @@ type model struct {
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
 	// the chosen value through the existing command handlers.
-	picker *commandPicker
+	picker                    *commandPicker
+	providerWizard            *providerWizardState
+	favoriteModels            map[string]bool
+	modelPickerLiveProviderID string
+	modelPickerLiveModels     []providermodeldiscovery.Model
 
 	// pendingImages holds image attachments staged by /image for the next user
 	// turn; pendingImageLabels are their display names (base(path)) for the chip
@@ -266,28 +280,33 @@ func newModel(ctx context.Context, options Options) model {
 	notifier.SetFocused(true)
 
 	return model{
-		ctx:                ctx,
-		cwd:                cwd,
-		gitBranch:          gitBranch(cwd),
-		providerName:       options.ProviderName,
-		modelName:          options.ModelName,
-		providerProfile:    options.ProviderProfile,
-		provider:           options.Provider,
-		newProvider:        options.NewProvider,
-		registry:           registry,
-		sessionStore:       sessionStore,
-		sandboxStore:       sandboxStore,
-		agentOptions:       options.AgentOptions,
-		runtimeMessageSink: options.RuntimeMessageSink,
-		permissionMode:     permissionMode,
-		reasoningEffort:    options.ReasoningEffort,
-		responseStyle:      defaultedResponseStyle(options.ResponseStyle),
-		usageTracker:       usageTracker,
-		transcript:         initialTranscript(),
-		input:              input,
-		spinner:            runSpinner,
-		now:                time.Now,
-		notifier:           notifier,
+		ctx:                    ctx,
+		cwd:                    cwd,
+		userConfigPath:         options.UserConfigPath,
+		gitBranch:              gitBranch(cwd),
+		providerName:           options.ProviderName,
+		modelName:              options.ModelName,
+		providerProfile:        options.ProviderProfile,
+		provider:               options.Provider,
+		newProvider:            options.NewProvider,
+		discoverProviderModels: options.DiscoverProviderModels,
+		registry:               registry,
+		sessionStore:           sessionStore,
+		sandboxStore:           sandboxStore,
+		agentOptions:           options.AgentOptions,
+		runtimeMessageSink:     options.RuntimeMessageSink,
+		permissionMode:         permissionMode,
+		reasoningEffort:        options.ReasoningEffort,
+		responseStyle:          defaultedResponseStyle(options.ResponseStyle),
+		usageTracker:           usageTracker,
+		transcript:             initialTranscript(),
+		input:                  input,
+		spinner:                runSpinner,
+		now:                    time.Now,
+		notifier:               notifier,
+		altScreen:              options.AltScreen,
+		setup:                  newSetupState(options.Setup),
+		setupSave:              options.Setup.Save,
 	}
 }
 
@@ -313,8 +332,8 @@ func (m model) Init() tea.Cmd {
 }
 
 // Update routes every message through updateModel, then advances the flush
-// frontier: any transcript rows the message settled are queued for native
-// scrollback before the next frame paints (see flush.go).
+// frontier for inline rendering. Alt-screen runs keep rows in the managed view
+// instead of printing into terminal scrollback (see flush.go).
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(flushedMsg); ok {
 		m.printInFlight = false
@@ -338,7 +357,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if m.setup.visible {
+			return m, nil
+		}
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			return m.scrollChat(chatWheelScrollLines), nil
+		case tea.MouseButtonWheelDown:
+			return m.scrollChat(-chatWheelScrollLines), nil
+		default:
+			return m, nil
+		}
 	case tea.KeyMsg:
+		if m.setup.visible {
+			return m.handleSetupKey(msg)
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			// cancelRun records the in-flight run into flushRunIDs and writes the
@@ -373,6 +407,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.pendingSpecReview != nil {
 				return m.cancelSpecReview()
+			}
+			if m.providerWizard != nil {
+				m.providerWizard = nil
+				return m, nil
 			}
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
@@ -409,6 +447,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingSpecReview != nil {
 				return m, nil
 			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
+			}
 			if m.picker != nil {
 				return m.choosePicker()
 			}
@@ -434,21 +475,46 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.picker == nil {
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.picker == nil {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
+				return m, nil
+			}
+		case tea.KeyCtrlF:
+			if m.picker != nil && m.picker.kind == pickerModel {
+				return m.toggleModelFavorite(), nil
+			}
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			if m.picker != nil {
+				m.picker.deleteQueryRune()
 				return m, nil
 			}
 		case tea.KeyTab:
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
 			}
+		case tea.KeyPgUp:
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			return m.scrollChat(m.chatPageScrollLines()), nil
+		case tea.KeyPgDown:
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			return m.scrollChat(-m.chatPageScrollLines()), nil
 		case tea.KeyDown:
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
 				m.picker.move(1)
@@ -464,6 +530,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyUp:
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.providerWizard != nil {
+				return m.handleProviderWizardKey(msg)
 			}
 			if m.picker != nil {
 				m.picker.move(-1)
@@ -493,9 +562,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingPermission != nil {
 			return m.handlePermissionKey(msg)
 		}
+		if m.providerWizard != nil {
+			return m.handleProviderWizardKey(msg)
+		}
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
 		if m.picker != nil {
+			if msg.Type == tea.KeyRunes {
+				m.picker.appendQuery(msg.Runes)
+			}
 			return m, nil
 		}
 		// On the empty chat surface a bare 1–3 keypress (composer empty, no modal)
@@ -556,10 +631,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
 		m.input.Width = maxInt(20, chatWidth(msg.Width)-14)
-		// The title bar prints once into native scrollback (so history scrolls
-		// above it naturally), at the first real width — never the 96-col
-		// default the pre-WindowSizeMsg frame uses.
-		if !m.headerPrinted && msg.Width > 0 {
+		// The title bar prints once into native scrollback when the inline
+		// renderer is active. In alt-screen mode tea.Println is ignored, so the
+		// title stays managed inside View.
+		if !m.altScreen && !m.headerPrinted && msg.Width > 0 {
 			m.headerPrinted = true
 			m.flushQueue = append(m.flushQueue, m.titleBar(chatWidth(msg.Width)))
 		}
@@ -718,6 +793,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
 		return m, nil
+	case providerModelsDiscoveredMsg:
+		return m.applyProviderModelsDiscovered(msg), nil
+	case modelPickerModelsDiscoveredMsg:
+		return m.applyModelPickerModelsDiscovered(msg), nil
 	}
 
 	var cmd tea.Cmd
@@ -726,6 +805,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.setup.visible {
+		return m.setupView(chatWidth(m.width))
+	}
 	if m.transcriptDetailed {
 		return m.detailedTranscriptView()
 	}
@@ -743,26 +825,25 @@ func (m model) transcriptEmpty() bool {
 	return true
 }
 
-// transcriptView renders the LIVE TAIL of the chat surface: only rows the
-// flush frontier hasn't settled into native scrollback yet (running tool
-// cards, undecided prompts), plus the streaming/modal blocks and composer
-// chrome. History lives above in the terminal's own scrollback (see flush.go),
-// so this stays O(live tail) per frame regardless of session length.
+// transcriptView renders the visible chat surface: in inline mode this is the
+// live tail not yet settled into native scrollback; in alt-screen mode it is
+// the managed conversation view. Streaming/modal blocks and composer chrome are
+// always rendered here.
 func (m model) transcriptView() string {
 	width := chatWidth(m.width)
 
-	var builder strings.Builder
+	var body strings.Builder
 	// The title bar prints once into scrollback on the first WindowSizeMsg;
 	// until then (the very first frame) it renders managed so the surface
 	// never appears headless.
 	if !m.headerPrinted {
-		builder.WriteString(m.titleBar(width))
-		builder.WriteString("\n")
+		body.WriteString(m.titleBar(width))
+		body.WriteString("\n")
 	}
 
 	if m.transcriptEmpty() && !m.pending {
-		builder.WriteString(m.emptyState(width))
-		builder.WriteString("\n")
+		body.WriteString(m.emptyState(width))
+		body.WriteString("\n")
 	} else {
 		rc := buildRowContext(m.transcript)
 		shownAny := false
@@ -776,58 +857,115 @@ func (m model) transcriptView() string {
 			// Blank-line separation before turns — including between the flushed
 			// history above and the first live row.
 			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
-				builder.WriteString("\n")
+				body.WriteString("\n")
 			}
-			builder.WriteString(m.renderRow(row, width, rc))
-			builder.WriteString("\n")
+			body.WriteString(m.renderRow(row, width, rc))
+			body.WriteString("\n")
 			shownAny = true
 		}
 	}
 
 	if m.pending {
-		builder.WriteString("\n")
+		body.WriteString("\n")
 		switch {
 		case m.pendingPermission != nil:
-			builder.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
+			body.WriteString(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
 		case m.pendingAskUser != nil:
-			builder.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
+			body.WriteString(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
 		default:
-			builder.WriteString(m.interimBlock(width))
+			body.WriteString(m.interimBlock(width))
 		}
-		builder.WriteString("\n")
+		body.WriteString("\n")
 	}
 	if m.pendingSpecReview != nil {
-		builder.WriteString("\n")
-		builder.WriteString(renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width))
-		builder.WriteString("\n")
+		body.WriteString("\n")
+		body.WriteString(renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width))
+		body.WriteString("\n")
 	}
 
-	builder.WriteString("\n")
+	var footer strings.Builder
+	footer.WriteString("\n")
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
-		builder.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
-		builder.WriteString("\n")
+		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
+		footer.WriteString("\n")
 	}
-	builder.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
-	builder.WriteString("\n")
-	builder.WriteString(m.composerLine(width))
+	footer.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
+	footer.WriteString("\n")
+	footer.WriteString(m.composerLine(width))
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
-		builder.WriteString("\n")
-		builder.WriteString(queued)
+		footer.WriteString("\n")
+		footer.WriteString(queued)
 	}
 	if overlay := m.suggestionOverlay(width); overlay != "" {
-		builder.WriteString("\n")
-		builder.WriteString(overlay)
+		footer.WriteString("\n")
+		footer.WriteString(overlay)
+	}
+	if wizard := m.providerWizardOverlay(width); wizard != "" {
+		footer.WriteString("\n")
+		footer.WriteString(wizard)
 	}
 	if picker := m.pickerOverlay(width); picker != "" {
-		builder.WriteString("\n")
-		builder.WriteString(picker)
+		footer.WriteString("\n")
+		footer.WriteString(picker)
 	}
-	builder.WriteString("\n")
-	builder.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
-	builder.WriteString("\n")
-	builder.WriteString(m.statusLine(width))
+	footer.WriteString("\n")
+	footer.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
+	footer.WriteString("\n")
+	footer.WriteString(m.statusLine(width))
 
-	return builder.String()
+	if m.altScreen && m.height > 0 {
+		return m.scrollableTranscriptView(body.String(), footer.String(), width)
+	}
+
+	return body.String() + footer.String()
+}
+
+func (m model) scrollableTranscriptView(body string, footer string, width int) string {
+	bodyLines := viewLines(body)
+	footerLines := viewLines(footer)
+	available := m.height - len(footerLines)
+	if available < 1 {
+		available = 1
+	}
+	maxOffset := maxInt(0, len(bodyLines)-available)
+	offset := clamp(m.chatScrollOffset, 0, maxOffset)
+	start := maxInt(0, len(bodyLines)-available-offset)
+	end := minInt(len(bodyLines), start+available)
+
+	lines := make([]string, 0, available+len(footerLines))
+	if start < end {
+		lines = append(lines, bodyLines[start:end]...)
+	}
+	for len(lines) < available {
+		lines = append(lines, "")
+	}
+	lines = append(lines, footerLines...)
+	for index, line := range lines {
+		lines[index] = fitStyledLine(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func viewLines(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(value, "\n"), "\n")
+}
+
+func (m model) scrollChat(delta int) model {
+	if !m.altScreen || delta == 0 {
+		return m
+	}
+	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+delta)
+	return m
+}
+
+func (m model) chatPageScrollLines() int {
+	if m.height <= 0 {
+		return 10
+	}
+	return maxInt(3, m.height-8)
 }
 
 // interimBlock renders the live assistant text while a turn streams: muted
@@ -1018,6 +1156,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.rememberInput(input)
 	m.clearComposer()
 	m.clearSuggestions()
+	m.chatScrollOffset = 0
 
 	switch command.kind {
 	case commandEmpty:
@@ -1048,6 +1187,15 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
 	case commandProvider:
+		if strings.TrimSpace(command.text) == "" {
+			if m.pending {
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
+				return m, nil
+			}
+			m.providerWizard = m.newProviderWizard()
+			m.clearSuggestions()
+			return m, nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
@@ -1058,7 +1206,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			}
 			if picker := m.newModelPicker(); picker != nil {
 				m.picker = picker
-				return m, nil
+				return m, m.modelPickerDiscoveryCmd()
 			}
 		}
 		text := ""
@@ -1385,6 +1533,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			options.SystemPrompt = runOptions.systemPrompt
 		}
 		options.SessionID = m.activeSession.SessionID
+		options.ProviderName = m.providerName
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.Cwd = m.cwd

@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -15,17 +18,19 @@ import (
 
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
-	Cwd                string
-	ProviderName       string
-	ModelName          string
-	ProviderProfile    config.ProviderProfile
-	Provider           zeroruntime.Provider
-	NewProvider        func(config.ProviderProfile) (zeroruntime.Provider, error)
-	RuntimeMessageSink func(tea.Msg)
-	Registry           *tools.Registry
-	SessionStore       *sessions.Store
-	SandboxStore       *sandbox.GrantStore
-	UsageTracker       *usage.Tracker
+	Cwd                    string
+	UserConfigPath         string
+	ProviderName           string
+	ModelName              string
+	ProviderProfile        config.ProviderProfile
+	Provider               zeroruntime.Provider
+	NewProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
+	DiscoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
+	RuntimeMessageSink     func(tea.Msg)
+	Registry               *tools.Registry
+	SessionStore           *sessions.Store
+	SandboxStore           *sandbox.GrantStore
+	UsageTracker           *usage.Tracker
 
 	AgentOptions    agent.Options
 	PermissionMode  agent.PermissionMode
@@ -34,4 +39,45 @@ type Options struct {
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
+
+	// AltScreen tells the model it is running inside Bubble Tea's alternate
+	// screen. Run sets this for the interactive app; tests can leave it false
+	// to exercise the native scrollback renderer.
+	AltScreen bool
+
+	// Setup configures the first-run/setup takeover. It is shown before the
+	// normal chat surface when Visible is true.
+	Setup SetupOptions
+}
+
+// SetupOptions configures the guided first-run provider setup takeover.
+type SetupOptions struct {
+	Visible    bool
+	Required   bool
+	ConfigPath string
+	Providers  []SetupProviderOption
+	Save       func(SetupSelection) (SetupResult, error)
+}
+
+// SetupProviderOption is one provider choice offered by the setup takeover.
+type SetupProviderOption struct {
+	ID           string
+	Name         string
+	DefaultModel string
+	EnvVar       string
+	RequiresAuth bool
+	Local        bool
+}
+
+// SetupSelection is the user's setup choice.
+type SetupSelection struct {
+	CatalogID string
+	Model     string
+	APIKey    string
+}
+
+// SetupResult describes a completed setup write.
+type SetupResult struct {
+	ConfigPath string
+	Provider   config.ProviderProfile
 }

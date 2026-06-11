@@ -23,7 +23,7 @@ const maxCommandSuggestions = 8
 // handling: the input is a slash-command fragment, there is at least one match,
 // and no modal (permission / questionnaire) is competing for keys.
 func (m model) suggestionsActive() bool {
-	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil || m.providerWizard != nil {
 		return false
 	}
 	return len(m.suggestions) > 0
@@ -40,7 +40,7 @@ func (m *model) clearSuggestions() {
 // disappear once the user starts typing arguments. Modals suppress matching
 // entirely. The selected index is preserved when still in range, otherwise reset.
 func (m *model) recomputeSuggestions() {
-	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil || m.providerWizard != nil {
 		m.clearSuggestions()
 		return
 	}

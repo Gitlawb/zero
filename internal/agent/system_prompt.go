@@ -58,6 +58,9 @@ func buildSystemPrompt(options Options) string {
 	if addendum := modelPromptAddendum(options.Model); addendum != "" {
 		sections = append(sections, addendum)
 	}
+	if session := sessionRuntimeContext(options); session != "" {
+		sections = append(sections, session)
+	}
 	if ws := workspaceContext(options.Cwd); ws != "" {
 		sections = append(sections, ws)
 	}
@@ -65,6 +68,25 @@ func buildSystemPrompt(options Options) string {
 		sections = append(sections, policy)
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+func sessionRuntimeContext(options Options) string {
+	provider := strings.TrimSpace(options.ProviderName)
+	model := strings.TrimSpace(options.Model)
+	if provider == "" && model == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<session>\n")
+	if provider != "" {
+		b.WriteString("Active provider: " + provider + "\n")
+	}
+	if model != "" {
+		b.WriteString("Active model: " + model + "\n")
+	}
+	b.WriteString("Use the active provider/model above when answering questions about what is currently running. Persisted config commands may show saved defaults that differ from this live run/session.\n")
+	b.WriteString("</session>")
+	return b.String()
 }
 
 // workspaceContext returns an <environment> block describing the working

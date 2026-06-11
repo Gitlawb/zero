@@ -103,7 +103,7 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 		})
 	} else {
 		if err := validateProviderRuntimeReady(profile); err != nil {
-			return writeAppError(stderr, err.Error(), exitProvider)
+			return writeAppError(stderr, providerCheckErrorMessage(err, profile), exitProvider)
 		}
 		if _, err := deps.newProvider(profile); err != nil {
 			return writeAppError(stderr, err.Error(), exitProvider)
@@ -116,6 +116,9 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 		if options.connectivity {
 			payload["health"] = health
 			payload["status"] = providerHealthStatusLabel(health.Status)
+		}
+		if nextActions := providerCheckNextActions(profile, options.connectivity, health); len(nextActions) > 0 {
+			payload["nextActions"] = nextActions
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
@@ -141,9 +144,14 @@ func runProvidersCheck(args []string, stdout io.Writer, stderr io.Writer, deps a
 				return exitCrash
 			}
 		}
-		if health.Status == providerhealth.StatusFail {
-			return exitProvider
+	}
+	for _, nextAction := range providerCheckNextActions(profile, options.connectivity, health) {
+		if _, err := fmt.Fprintf(stdout, "next: %s\n", nextAction); err != nil {
+			return exitCrash
 		}
+	}
+	if options.connectivity && health.Status == providerhealth.StatusFail {
+		return exitProvider
 	}
 	return exitSuccess
 }
@@ -157,6 +165,79 @@ func providerHealthStatusLabel(status providerhealth.Status) string {
 	default:
 		return "ok"
 	}
+}
+
+func providerCheckErrorMessage(err error, profile config.ProviderProfile) string {
+	message := err.Error()
+	if nextAction := providerCheckMissingKeyNextAction(profile); nextAction != "" {
+		message += "\nnext: " + nextAction
+	}
+	return message
+}
+
+func providerCheckNextActions(profile config.ProviderProfile, connectivity bool, health providerhealth.Result) []string {
+	name := providerCheckName(profile)
+	if !connectivity {
+		return []string{fmt.Sprintf("run zero providers check %s --connectivity", name)}
+	}
+	switch health.Status {
+	case providerhealth.StatusFail:
+		return []string{fmt.Sprintf("verify the API key, base URL, and model, then rerun zero providers check %s --connectivity", name)}
+	case providerhealth.StatusWarn:
+		return []string{fmt.Sprintf("review the warning, then rerun zero providers check %s --connectivity", name)}
+	default:
+		model := strings.TrimSpace(profile.Model)
+		if model == "" {
+			return []string{"provider is ready"}
+		}
+		return []string{fmt.Sprintf("run zero exec %q --model %s", "hello", model)}
+	}
+}
+
+func providerCheckMissingKeyNextAction(profile config.ProviderProfile) string {
+	if providerProfileHasCredential(profile) {
+		return ""
+	}
+	apiKeyEnv := providerCheckAPIKeyEnv(profile)
+	if apiKeyEnv == "" {
+		return ""
+	}
+	return fmt.Sprintf("set %s and rerun zero providers check %s", apiKeyEnv, providerCheckName(profile))
+}
+
+func providerCheckAPIKeyEnv(profile config.ProviderProfile) string {
+	if apiKeyEnv := strings.TrimSpace(profile.APIKeyEnv); apiKeyEnv != "" {
+		return apiKeyEnv
+	}
+	if strings.TrimSpace(profile.CatalogID) == "" {
+		return ""
+	}
+	descriptor, err := providercatalog.Require(profile.CatalogID)
+	if err != nil || !descriptor.RequiresAuth || !providercatalog.RuntimeSupported(descriptor) {
+		return ""
+	}
+	for _, envVar := range descriptor.AuthEnvVars {
+		if envVar = strings.TrimSpace(envVar); envVar != "" {
+			return envVar
+		}
+	}
+	return ""
+}
+
+func providerCheckName(profile config.ProviderProfile) string {
+	if name := strings.TrimSpace(profile.Name); name != "" {
+		return name
+	}
+	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
+		return catalogID
+	}
+	if provider := strings.TrimSpace(profile.Provider); provider != "" {
+		return provider
+	}
+	if kind := strings.TrimSpace(string(profile.ProviderKind)); kind != "" {
+		return kind
+	}
+	return "provider"
 }
 
 func parseProviderAddArgs(args []string) (providerAddOptions, bool, error) {
