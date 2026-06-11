@@ -1,112 +1,182 @@
+<div align="center">
+
 ```
- ███████████ ██████████ ███████████      ███████
-▒█▒▒▒▒▒▒███ ▒▒███▒▒▒▒▒█▒▒███▒▒▒▒▒███   ███▒▒▒▒▒███
-▒     ███▒   ▒███  █ ▒  ▒███    ▒███  ███     ▒▒███
-     ███     ▒██████    ▒██████████  ▒███      ▒███
-    ███      ▒███▒▒█    ▒███▒▒▒▒▒███ ▒███      ▒███
-  ████     █ ▒███ ▒   █ ▒███    ▒███ ▒▒███     ███
- ███████████ ██████████ █████   █████ ▒▒▒███████▒
-▒▒▒▒▒▒▒▒▒▒▒ ▒▒▒▒▒▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒    ▒▒▒▒▒▒▒
+███████╗ ███████╗ ██████╗   ██████╗
+╚══███╔╝ ██╔════╝ ██╔══██╗ ██╔═══██╗
+  ███╔╝  █████╗   ██████╔╝ ██║   ██║
+ ███╔╝   ██╔══╝   ██╔══██╗ ██║   ██║
+███████╗ ███████╗ ██║  ██║ ╚██████╔╝
+╚══════╝ ╚══════╝ ╚═╝  ╚═╝  ╚═════╝
 ```
 
-# Zero
+### The terminal coding agent you fully own.
 
-**A clean, terminal-first AI coding agent you fully own — multi-provider, scriptable, and safe by default.**
+**Any model. Any provider. Your rules.**
 
-![core](https://img.shields.io/badge/core-Go--native-00ADD8?logo=go&logoColor=white)
-![distribution](https://img.shields.io/badge/distribution-npm%20wrapper-cb3837?logo=npm&logoColor=white)
-![transition](https://img.shields.io/badge/Go%20runtime-default-14151a?logo=go&logoColor=white)
-![status](https://img.shields.io/badge/status-active%20development-67e8f9)
+![go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
+![providers](https://img.shields.io/badge/providers-25%2B-34E2EA)
+![tests](https://img.shields.io/badge/test%20files-200%2B-43D17A)
+![status](https://img.shields.io/badge/status-active%20development-E8B84B)
 
-Zero is a coding agent that lives in your terminal. It runs an agentic tool loop —
-reading, editing, searching, and running commands in your repo — against **whatever
-model you choose**. Zero has a **Go-native core** with an npm distribution wrapper;
-the Go runtime is the default app path.
-
-> Zero treats the **model as a swappable, per-task choice** — no single-vendor lock-in —
-> and never mutates your system without a permission decision.
+</div>
 
 ---
 
-## Highlights
+Zero is an AI coding agent that lives in your terminal. It runs a full agentic loop — reading, searching, editing, and executing in your repo — against **whatever model you choose**: frontier APIs, fast cloud inference, or a local model on your own machine. One interface, no vendor lock-in, no telemetry phoning home.
 
-- 🔌 **Multi-provider** — OpenAI-compatible, Anthropic, and Gemini behind one interface, with a model registry (capabilities, context limits, cost). Bring your own key and endpoint.
-- 🖥️ **Lime TUI** — a near-black, lime-accent chat surface (Bubble Tea/Lip Gloss) with live tool cards, inline diffs, and an adaptive layout from 58 to 120+ columns.
-- 🤖 **Headless & scriptable** — `zero exec` with clean `text` / `json` / `stream-json` I/O and meaningful exit codes for CI and automation.
-- 🧰 **Real tools** — read / write / edit files, `apply_patch`, `grep`, `glob`, `bash`, directory listing, and a live plan/todo.
-- 🛡️ **Safe by default** — mutating tools are permission-gated and writes stay inside the workspace unless you grant extra directories (`--add-dir` / `/add-dir`); `--skip-permissions-unsafe` is an explicit, clearly-labeled opt-out.
-- 💾 **Durable sessions** — local, append-only session event store with full-text `search`.
-- 🩺 **Operable** — built-in `doctor`, `config` inspection, secret redaction everywhere, and `update --check`.
+```bash
+zero                                          # interactive TUI
+zero exec "fix the failing test in ./pkg"     # headless one-shot
+zero exec -o stream-json < turns.jsonl        # programmatic, for scripts & CI
+```
+
+> Zero treats the **model as a swappable, per-task choice** and **never mutates your system without a permission decision**.
+
+## Why Zero
+
+- 🔌 **25+ providers, one interface** — OpenAI, Anthropic, Gemini, Ollama (local & cloud), LM Studio, OpenRouter, Groq, DeepSeek, Mistral, xAI, Qwen, Kimi, GitHub Models, and any OpenAI- or Anthropic-compatible endpoint. Switch mid-session with `/model`.
+- 🖥️ **A TUI that feels premium** — truecolor Bubble Tea interface with a first-run setup wizard, searchable live model picker, scrollback, themes, image input, and slash commands for everything.
+- 🤖 **Headless & scriptable** — `zero exec` with `text` / `json` / `stream-json` I/O, session resume & fork, isolated `--worktree` runs, and meaningful exit codes. Built for CI.
+- 🧠 **Subagents** — delegate to built-in `worker`, `explorer`, and `code-review` specialists (or generate your own) that run as real background tasks, even out-of-process.
+- 📋 **Spec mode** — have the agent draft a spec first, review and approve it, *then* let it build. No more runaway sessions.
+- 📈 **Mid-run model escalation** — start cheap, and let the agent request a stronger model only when it hits a wall (`--allow-escalation`).
+- 🗺️ **Repo intelligence** — deterministic repo maps, workspace indexing, and context-budget reports keep the agent grounded in *your* codebase, not hallucinations.
+- ⏰ **Scheduled agents** — `zero cron` runs file-backed, dependency-free agent jobs on a schedule.
+- 🛡️ **Safe by default** — permission-gated mutations, autonomy ceilings, sandbox policy (writes stay inside the workspace unless you grant extra directories with `--add-dir` / `/add-dir`), and secret redaction everywhere. Unsafe mode is an explicit, loudly-labeled opt-in.
+- 💾 **Durable sessions** — append-only local event store with full-text search, resume, fork, and rewind. Your history never leaves your disk.
+- 🧩 **Extensible** — skills, plugins, hooks, and MCP (Zero is both an MCP client *and* an MCP server).
 
 ## Quick start
 
-> Requires [Go](https://go.dev/) for local development and release tooling.
-> The npm wrapper uses Node when Zero is installed as an npm package.
-
 ```bash
-go run ./cmd/zero    # launch the interactive TUI
+# run from source (requires Go 1.24+)
+go run ./cmd/zero
+
+# or install a release binary
+scripts/install.sh                                          # Linux / macOS
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # Windows
 ```
 
-Point Zero at a model — either set environment variables:
+First launch opens a **guided setup wizard** — pick a provider, paste a key, choose a model, done. Or do it non-interactively:
 
 ```bash
-export OPENAI_API_KEY=sk-...
-# optional: any OpenAI-compatible endpoint / model
-export OPENAI_BASE_URL=https://api.openai.com/v1
-export OPENAI_MODEL=gpt-4.1
+export OPENAI_API_KEY=sk-...      # or ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, ...
+zero setup                        # guided first-run provider setup
+zero doctor                       # verify config, keys, and connectivity
 ```
 
-…or save reusable provider profiles in `~/.config/zero/config.json` and manage them with
-`zero providers`. Run `zero doctor` anytime to verify your setup.
-
-## Usage
-
-### Interactive (TUI)
+Local models need no key at all:
 
 ```bash
-go run ./cmd/zero    # or: zero after installation
+# Ollama or LM Studio running locally? Zero finds them.
+zero providers list
 ```
 
-Zero boots straight into the Lime chat surface. On the empty screen, keys **1–3**
-insert a starter prompt. Type to chat and press **Enter** to send; `/` opens command
-suggestions (**Tab**/**↑↓** move the highlight, **Enter** accepts). Tool calls render
-as live cards — diffs, reads, shell output, and grep matches each get their own
-body — and the turn ends with a `● done` line. **Esc** interrupts a running turn,
-**shift+tab** cycles the permission mode, and **Ctrl+C** exits (the transcript stays
-in your terminal's scrollback). The layout adapts down to narrow terminals, dropping
-metadata columns before content.
+## The TUI
 
-### Headless (`exec`)
+Type to chat, **Enter** to send. `/` opens command suggestions, **Shift+Tab** cycles permission modes, **Ctrl+C** exits.
+
+| | |
+|---|---|
+| `/model` `/provider` | switch model or provider mid-session (searchable picker) |
+| `/spec` `/plan` | spec-mode drafting and live plan view |
+| `/image` | attach images for vision models |
+| `/resume` `/rewind` | time-travel across sessions |
+| `/compact` `/context` | manage the context window |
+| `/permissions` `/tools` | inspect what the agent can touch |
+| `/theme` `/style` | make it yours |
+| `/doctor` `/usage` `/config` | health, cost, and config without leaving the chat |
+
+Turn-completion notifications (terminal bell / OSC-9) ping you when the agent finishes or needs input — go make coffee.
+
+## Headless `exec`
 
 ```bash
 # one-shot
 zero exec "explain internal/agent/loop.go and suggest one improvement"
 
-# from a file, with a specific model, as JSON for scripts
-zero exec --file task.md --model claude-sonnet-4.5 --output-format json
+# pick a model and mode preset per task
+zero exec --model claude-sonnet-4.5 --mode deep "refactor the session store"
 
-# multi-turn / programmatic over stdio
+# spec-first: draft → review → approve → build
+zero exec --use-spec "add rate limiting to the API client"
+
+# run in an isolated git worktree, escalate model only if needed
+zero exec -w --allow-escalation "migrate the config loader to v2"
+
+# multi-turn programmatic I/O over stdio
 zero exec --input-format stream-json --output-format stream-json < turns.jsonl
+
+# resume or fork any previous session
+zero exec --resume            # latest
+zero exec --fork <session-id> "now try the other approach"
 ```
 
-`exec` flags: `-f, --file` · `-m, --model` · `-C, --cwd` · `-i, --input-format <text|stream-json>` ·
-`-o, --output-format <text|json|stream-json>` · `--add-dir <path>` (repeatable) · `--skip-permissions-unsafe`.
-stdout carries **only** program output; logs go to stderr. See
-[`docs/STREAM_JSON_PROTOCOL.md`](docs/STREAM_JSON_PROTOCOL.md).
+Key flags: `-m/--model` · `--mode <smart|deep|fast|large|precise>` · `--image` · `--use-spec` · `--auto <low|medium|high>` · `--enabled-tools/--disabled-tools` · `-w/--worktree` · `--add-dir <path>` (repeatable) · `--resume/--fork` · `--allow-escalation` · `--notify` · `-o <text|json|stream-json>`.
 
-### Other commands
+stdout carries **only** program output; logs go to stderr. Full contract in [`docs/STREAM_JSON_PROTOCOL.md`](docs/STREAM_JSON_PROTOCOL.md).
 
-```bash
-zero providers list|current                 # inspect resolved provider profiles
-zero models list [--provider anthropic]     # inspect the model registry
-zero search "<query>" [--json --session <id> --type <event>]   # search local sessions
-zero doctor [--connectivity] [--json]        # health checks
-zero config [--json]                          # inspect resolved configuration
-zero sandbox policy [--json]                 # inspect sandbox backend support
-zero serve --mcp [-C <path>]                  # expose Zero read-only tools over MCP stdio
-zero specialist list|show|create|edit|delete  # manage local specialist sub-agents
-zero update --check [--json --target windows-x64] # check for a newer release
+## Commands
+
 ```
+zero                  interactive TUI
+zero exec             one-shot / scripted agent runs
+zero setup            guided first-run provider setup
+zero models           model registry (capabilities, context, cost)
+zero providers        provider profiles + 25-provider catalog
+zero doctor           config, key, and connectivity health checks
+zero context          workspace context-budget report
+zero repo-map         deterministic repository map for agent context
+zero repo-info        local (network-free) repository characterizer
+zero search | find    full-text search over local session history
+zero sessions         session lineage inspection
+zero spec             review & approve saved spec-mode drafts
+zero specialist       manage subagent profiles
+zero skills           markdown instruction skills
+zero plugins          plugin manifests
+zero hooks            lifecycle hook configuration
+zero mcp              MCP client settings
+zero serve --mcp      expose Zero's tools over MCP stdio
+zero sandbox          sandbox policy & persistent grants
+zero worktrees        isolated git worktrees for agent runs
+zero verify           detect & run local verification checks
+zero changes          inspect & commit local git changes
+zero usage            token usage and estimated cost
+zero cron             scheduled agent jobs (file-backed, dep-free)
+zero update           check for newer releases
+```
+
+## Providers
+
+Bring your own key — or no key at all for local runtimes.
+
+| Tier | Providers |
+|---|---|
+| **Frontier APIs** | OpenAI · Anthropic · Google Gemini |
+| **Fast cloud inference** | Groq · OpenRouter · Together AI · DeepSeek · Mistral · xAI · NVIDIA NIM |
+| **Local — no key, no cloud** | Ollama · LM Studio |
+| **More clouds** | Ollama Cloud · DashScope (Qwen) · Moonshot (Kimi) · MiniMax · Z.ai · Venice · GitHub Models · and more |
+| **Enterprise (catalog)** | Amazon Bedrock · Vertex AI *(adapters in progress)* |
+| **Anything else** | any OpenAI-compatible or Anthropic-compatible endpoint |
+
+The model registry tracks each model's capabilities, context window, and cost — and the live model picker discovers what your provider actually serves.
+
+## Tools
+
+| Tool | Purpose | Side effect |
+|---|---|---|
+| `read_file` · `list_directory` · `grep` · `glob` | explore & search | read |
+| `web_fetch` | fetch docs & references | network |
+| `update_plan` · `ask_user` | plan & clarify | none |
+| `write_file` · `edit_file` · `apply_patch` | create & modify | write (gated) |
+| `bash` | run shell commands | shell (gated) |
+| `Task` · `TaskOutput` · `TaskStop` | delegate to specialist subagents | per-tool gating |
+| `GenerateSpecialist` | create new subagent manifests | write (gated) |
+| `skill` | load markdown instruction skills | read |
+| `tool_search` | lazily load deferred tools (large MCP sets stay cheap) | none |
+| `escalate_model` | request a stronger model mid-run | gated by `--allow-escalation` |
+
+Every mutating tool routes through the permission policy **before** any side effect.
 
 ### Extra write directories (`--add-dir`)
 
@@ -133,119 +203,79 @@ still resolve against the workspace only, and network and destructive-shell poli
 are unchanged. A write denied outside all roots returns an error that suggests
 `/add-dir`.
 
-## Providers & models
-
-Selectable per task and per session. The model registry knows each model's provider,
-capabilities, context window, and cost.
-
-| Provider | Example models |
-|---|---|
-| OpenAI-compatible | `gpt-4.1`, `gpt-4.1-mini`, `gpt-4o`, `gpt-4o-mini` |
-| Anthropic | `claude-opus-4.1`, `claude-sonnet-4.5`, `claude-haiku-4.5` |
-| Google Gemini | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
-
-Any OpenAI-compatible endpoint works with just a base URL, key, and model — so local
-runtimes (Ollama, gateways, etc.) plug in the same way.
-
-## Tools
-
-| Tool | Purpose | Side effect |
-|---|---|---|
-| `read_file` · `list_directory` · `grep` · `glob` | explore & search | read |
-| `update_plan` | maintain a live task plan | plan |
-| `write_file` · `edit_file` · `apply_patch` | create & modify files | write (gated) |
-| `bash` | run shell commands | shell (gated) |
-| `Task` · `TaskOutput` · `TaskStop` | delegate to specialist sub-agents | shell/read (gated by tool) |
-| `GenerateSpecialist` | create project-local specialist manifests | write (gated) |
-
-Write/shell tools route through the permission policy before any side effect.
-
 ## Architecture
 
 ```
- Terminal (Bubble Tea target)   headless `exec`      (future) editor ext
-            └───────────────────┬───────────────────────┘
-                    Go-native core target (loop, events, tools)
-   ┌──────────┬───────────┬──────────┬──────────┬───────────┬──────────┐
- providers   tools     sessions    usage     redaction    doctor /   stream-json
- + registry  registry  + search   + cost                  config
+   TUI (Bubble Tea)      headless exec       MCP server      cron runner
+        └──────────────────────┬──────────────────────┘
+                  surface-agnostic agent core
+            (loop · typed event stream · tool registry)
+   ┌──────────┬──────────┬───────────┬───────────┬────────────┬──────────┐
+ providers   tools     sessions    specialist   repo intel   permissions
+ + catalog   registry  + search    + background + workspace  + sandbox
+ + registry            + rewind      tasks        index      + redaction
 ```
 
-- **Go-native target**: `cmd/zero` is the default production runtime; the npm package delegates to the built Go binary.
-- **Surface-agnostic core**: the agent loop streams text + tool calls, executes tools, and emits a typed event stream consumed identically by every surface.
-- **Edges are interfaces**: `Provider`, `Tool`, `SessionStore`, and the permission policy are swappable.
-- **Model is data**: capabilities, cost, and routing live in the registry — never hard-coded.
+- **Surface-agnostic core** — the agent loop streams text + tool calls and emits one typed event stream consumed identically by the TUI, `exec`, the MCP server, and cron.
+- **Edges are interfaces** — `Provider`, `Tool`, `SessionStore`, and the permission policy are swappable.
+- **Model is data** — capabilities, cost, and routing live in the registry, never hard-coded.
+- **Pure Go** — one static binary per platform; the npm wrapper just delegates to it.
 
 ## Project layout
 
 ```
 cmd/
-  zero/                  # production Go CLI entrypoint
-  zero-pr-review/        # deterministic PR review helper
+  zero/                 production CLI entrypoint
+  zero-release/         release builder + smoke tests
+  zero-perf-bench/      performance benchmarks
+  zero-pr-review/       deterministic PR review helper
 internal/
-  agent/                 # Go agent loop and tool-call orchestration
-  cli/                   # interactive/headless command surface
-  config/                # layered configuration and provider profiles
-  providers/             # OpenAI-compatible, Anthropic, Gemini adapters
-  tools/                 # read/write/edit/bash/grep/glob/apply_patch tools
-  tui/                   # Bubble Tea terminal interface
-  sessions/ search/      # append-only sessions and local search
-  usage/ modelregistry/  # token usage and model metadata/costs
-  doctor/ verify/        # diagnostics and self-verification
-  streamjson/            # headless stream-json protocol
-  mcp/ plugins/ hooks/   # extension-facing runtime surfaces
-bin/                     # npm wrapper entrypoint
-scripts/                 # installers
-docs/                    # PRD + protocol/install/perf docs
+  agent/ zeroruntime/   agent loop & runtime orchestration
+  cli/                  command surface (exec, doctor, cron, ...)
+  tui/                  Bubble Tea terminal interface
+  providers/ providercatalog/ providermodelcatalog/
+  modelregistry/        capabilities, context windows, cost
+  tools/                read/write/edit/bash/grep/glob/patch/...
+  specialist/ background/  subagents + out-of-process tasks
+  sessions/ search/     append-only store, full-text search
+  repomap/ repoinfo/ workspaceindex/ contextreport/
+  specmode/ cron/ skills/ plugins/ hooks/ mcp/
+  sandbox/ redaction/ secrets/   safety surfaces
+  doctor/ providerhealth/ verify/ selfverify/
+docs/                   PRD, protocols, install/update/perf
+scripts/                installers
 ```
 
 ## Development
 
 ```bash
-go test ./...                     # run the test suite
-go run ./cmd/zero-release build   # compile the release-facing Go binary
-go run ./cmd/zero-release smoke   # verify the release-facing Go binary
-go run ./cmd/zero-perf-bench      # performance benchmarks (see docs/PERFORMANCE.md)
-```
+go test ./...                     # full test suite (200+ test files)
+go run ./cmd/zero-release build   # compile the release binary
+go run ./cmd/zero-release smoke   # smoke-test it
+go run ./cmd/zero-perf-bench      # perf benchmarks (docs/PERFORMANCE.md)
 
-Cross-compile by passing Go targets to the builder:
-
-```bash
+# cross-compile
 go run ./cmd/zero-release build --goos linux --goarch amd64
 go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero.exe
 ```
 
-### Install from a release
-
-```bash
-# Linux / macOS
-scripts/install.sh
-
-# Windows
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1
-```
-
-See [`docs/INSTALL.md`](docs/INSTALL.md) for version, repository, and install-path overrides,
-and [`docs/UPDATE.md`](docs/UPDATE.md) for the update flow.
-
 ## Documentation
 
-- [Product Requirements (PRD)](docs/PRD.md) — vision, goals, full feature spec, roadmap
+- [Product Requirements (PRD)](docs/PRD.md) — vision, full feature spec, roadmap
 - [Stream-JSON protocol](docs/STREAM_JSON_PROTOCOL.md) — headless I/O contract
-- [Specialists](docs/SPECIALISTS.md) — sub-agent manifests, Task tools, and background task state
-- [Headless exec PRD](docs/M1_HEADLESS_EXEC_PRD.md)
-- [npm wrapper smoke checklist](docs/NPM_WRAPPER_SMOKE.md)
-- [Performance](docs/PERFORMANCE.md) · [Install](docs/INSTALL.md) · [Update](docs/UPDATE.md)
+- [Specialists](docs/SPECIALISTS.md) — subagent manifests, Task tools, background state
+- [Install](docs/INSTALL.md) · [Update](docs/UPDATE.md) · [Performance](docs/PERFORMANCE.md)
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Please run
-`go test ./...` and the relevant build or smoke command before opening a PR.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Run `go test ./...` and the relevant build or smoke command before opening a PR.
 
 ## License
 
-License is being finalized; a `LICENSE` file will be added before a public release.
+License is being finalized; a `LICENSE` file will be added before the public release.
 
 ---
 
-<sub>Go-native core with an npm distribution wrapper.</sub>
+<div align="center">
+<sub><b>Zero</b> — one terminal · every model</sub>
+</div>
