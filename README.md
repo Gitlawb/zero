@@ -84,6 +84,7 @@ Type to chat, **Enter** to send. `/` opens command suggestions, **Shift+Tab** cy
 | `/resume` `/rewind` | time-travel across sessions |
 | `/compact` `/context` | manage the context window |
 | `/permissions` `/tools` | inspect what the agent can touch |
+| `/add-dir` | grant an extra write directory for the session, or list current write roots |
 | `/theme` `/style` | make it yours |
 | `/doctor` `/usage` `/config` | health, cost, and config without leaving the chat |
 
