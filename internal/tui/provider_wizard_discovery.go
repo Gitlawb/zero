@@ -62,7 +62,7 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 
 func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) model {
 	wizard := m.providerWizard
-	if wizard == nil || wizard.currentProvider().ID != msg.providerID {
+	if wizard == nil || wizard.step != providerWizardStepModel || wizard.currentProvider().ID != msg.providerID {
 		return m
 	}
 	wizard.modelLoading = false

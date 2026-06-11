@@ -18,6 +18,9 @@ const (
 	suggestionPaletteMaxVisible = 7
 	suggestionPaletteMaxWidth   = 76
 	suggestionPaletteMinWidth   = 44
+	pickerOverlayMaxVisible     = 10
+	pickerOverlayMaxWidth       = 92
+	pickerOverlayMinWidth       = 56
 )
 
 // layoutTier buckets the terminal width into the spec's adaptive tiers. It
@@ -357,7 +360,8 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 
 	lines := make([]string, 0, len(visible)+5)
 	searchInset := lipgloss.Width("❯ ")
-	lines = append(lines, fillPaletteLine(strings.Repeat(" ", searchInset)+renderSuggestionSearchLine(query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
+	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
+	lines = append(lines, fillPaletteLine(searchPrefix+renderSuggestionSearchLine(query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 
 	for index, item := range visible {
@@ -386,7 +390,7 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 		if strings.EqualFold(strings.TrimSpace(title), "Files") {
 			message = "no matching files"
 		}
-		lines = append(lines, fillPaletteLine(strings.Repeat(" ", searchInset)+zeroTheme.faint.Render(message), innerWidth, transparentSurface))
+		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(message), innerWidth, transparentSurface))
 	}
 
 	if footer = strings.TrimSpace(footer); footer != "" {
@@ -500,7 +504,7 @@ func fileSelectableItem(token string) selectableListItem {
 	return selectableListItem{Label: base, Description: dir}
 }
 
-// pickerOverlay renders an open interactive selector below the composer: a
+// pickerOverlay renders an open interactive selector as a centered modal: a
 // bordered panel with a title-and-hints row, rows carrying a provider dot and
 // right metadata when the catalog exposes them, and the selected row on the
 // selection tint.
@@ -508,13 +512,27 @@ func (m model) pickerOverlay(width int) string {
 	if m.picker == nil {
 		return ""
 	}
-	innerWidth := width - 4
-	lines := make([]string, 0, len(m.picker.items)+1)
-	hint := "  ↑/↓ · ⏎ · esc"
+	overlayWidth := minInt(width, pickerOverlayMaxWidth)
+	if overlayWidth < pickerOverlayMinWidth {
+		overlayWidth = width
+	}
+	innerWidth := maxInt(1, overlayWidth-4)
+	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	start := 0
+	visible := []pickerItem{}
+	if len(m.picker.items) > 0 {
+		m.picker.selected = clampInt(m.picker.selected, 0, len(m.picker.items)-1)
+		start = selectableListStart(len(m.picker.items), maxVisible, m.picker.selected)
+		visible = m.picker.items[start : start+maxVisible]
+	}
+
+	lines := make([]string, 0, len(visible)+5)
+	title := strings.TrimSpace(m.picker.title)
+	hint := "↑/↓ · ⏎ · esc"
 	if m.picker.kind == pickerModel {
 		hint += " · ctrl+f favorite"
 	}
-	lines = append(lines, zeroTheme.ink.Render(m.picker.title)+zeroTheme.faint.Render(hint))
+	lines = append(lines, zeroTheme.faint.Render(hint))
 	if m.picker.kind == pickerModel {
 		query := strings.TrimSpace(m.picker.query)
 		value := zeroTheme.faint.Render("Search model")
@@ -524,14 +542,15 @@ func (m model) pickerOverlay(width int) string {
 		lines = append(lines, zeroTheme.userPrompt.Render("search > ")+value)
 	}
 	lastGroup := ""
-	for index, item := range m.picker.items {
+	for index, item := range visible {
+		absoluteIndex := start + index
 		if item.Group != "" && item.Group != lastGroup {
 			lines = append(lines, zeroTheme.accent.Render(item.Group))
 			lastGroup = item.Group
 		}
-		surface := zeroTheme.onPanel2
+		surface := transparentSurface
 		marker := surface(zeroTheme.faintest).Render("  ")
-		if index == m.picker.selected {
+		if absoluteIndex == m.picker.selected {
 			surface = zeroTheme.onSel
 			marker = surface(zeroTheme.accent).Render("❯ ")
 		}
@@ -556,7 +575,10 @@ func (m model) pickerOverlay(width int) string {
 		line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap))) + right
 		lines = append(lines, fitStyledLine(line, innerWidth))
 	}
-	return borderedBlock(width, lines)
+	if len(visible) == 0 {
+		lines = append(lines, zeroTheme.faint.Render("  no matching items"))
+	}
+	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
 }
 
 // argHint extracts the most representative argument from a tool call's raw JSON

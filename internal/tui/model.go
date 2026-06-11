@@ -862,10 +862,20 @@ func (m model) transcriptView() string {
 	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
-	suggestionInViewport := suggestionOverlay != "" && !(m.transcriptEmpty() && !m.pending)
+	providerOverlay := m.providerWizardOverlay(width)
+	pickerOverlay := m.pickerOverlay(width)
+	viewportOverlay := ""
+	switch {
+	case providerOverlay != "":
+		viewportOverlay = providerOverlay
+	case pickerOverlay != "":
+		viewportOverlay = pickerOverlay
+	case suggestionOverlay != "":
+		viewportOverlay = suggestionOverlay
+	}
 	if m.transcriptEmpty() && !m.pending {
-		if suggestionOverlay != "" {
-			body.WriteString(m.emptyStateWithOverlay(width, suggestionOverlay))
+		if viewportOverlay != "" {
+			body.WriteString(m.emptyStateWithOverlay(width, viewportOverlay))
 		} else {
 			body.WriteString(m.emptyState(width))
 		}
@@ -920,28 +930,21 @@ func (m model) transcriptView() string {
 		footer.WriteString("\n")
 		footer.WriteString(queued)
 	}
-	if wizard := m.providerWizardOverlay(width); wizard != "" {
-		footer.WriteString("\n")
-		footer.WriteString(wizard)
-	}
-	if picker := m.pickerOverlay(width); picker != "" {
-		footer.WriteString("\n")
-		footer.WriteString(picker)
-	}
 	footer.WriteString("\n")
 	footer.WriteString(m.statusLine(width))
 
-	if m.altScreen && m.height > 0 {
-		overlay := ""
-		if suggestionInViewport {
-			overlay = suggestionOverlay
-		}
-		return m.scrollableTranscriptView(body.String(), footer.String(), width, overlay)
+	overlayForViewport := viewportOverlay
+	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
+		overlayForViewport = ""
 	}
 
-	if suggestionInViewport {
+	if m.altScreen && m.height > 0 {
+		return m.scrollableTranscriptView(body.String(), footer.String(), width, overlayForViewport)
+	}
+
+	if overlayForViewport != "" {
 		body.WriteString("\n")
-		body.WriteString(suggestionOverlay)
+		body.WriteString(overlayForViewport)
 		body.WriteString("\n")
 	}
 	return body.String() + footer.String()

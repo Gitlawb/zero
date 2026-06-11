@@ -652,7 +652,7 @@ func setupModelLoadingBlockWidth(terminalWidth int) int {
 func setupModelBlockWidth(terminalWidth int, models []providerWizardModel) int {
 	available := maxInt(34, minInt(terminalWidth-8, 72))
 	target := lipgloss.Width("  Choose a model")
-	target = maxInt(target, lipgloss.Width("  search > Search model"))
+	target = maxInt(target, lipgloss.Width("  search > model name..."))
 	for _, model := range models {
 		target = maxInt(target, 4+lipgloss.Width(model.displayLabel()))
 		if detail := setupModelSelectedDetail(model); detail != "" {

@@ -14,8 +14,12 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
-const maxProviderWizardProvidersVisible = 10
+const maxProviderWizardProvidersVisible = 8
 const maxProviderWizardModelsVisible = 10
+const providerWizardMinWidth = 48
+const providerWizardProviderWidth = 64
+const providerWizardMediumWidth = 86
+const providerWizardModelWidth = 92
 
 type providerWizardStep int
 
@@ -48,22 +52,10 @@ type providerWizardState struct {
 
 func (m model) newProviderWizard() *providerWizardState {
 	providers := providerWizardProviders()
-	selected := 0
-	activeID := strings.TrimSpace(m.providerProfile.CatalogID)
-	if activeID == "" {
-		activeID = strings.TrimSpace(m.providerName)
-	}
-	for index, provider := range providers {
-		if provider.ID == activeID {
-			selected = index
-			break
-		}
-	}
-
 	wizard := &providerWizardState{
 		step:             providerWizardStepProvider,
 		providers:        providers,
-		selectedProvider: selected,
+		selectedProvider: 0,
 	}
 	wizard.refreshModels()
 	return wizard
@@ -147,6 +139,10 @@ func (wizard *providerWizardState) advance() {
 		wizard.step = providerWizardStepModel
 	case providerWizardStepModel:
 		wizard.err = ""
+		if wizard.modelLoading {
+			wizard.err = "Models are still loading."
+			return
+		}
 		wizard.refreshModels()
 		if len(wizard.filteredModels()) == 0 {
 			wizard.err = "choose a matching model before continuing"
@@ -155,6 +151,25 @@ func (wizard *providerWizardState) advance() {
 		wizard.step = providerWizardStepDone
 	case providerWizardStepDone:
 		wizard.step = providerWizardStepProvider
+	}
+}
+
+func (wizard *providerWizardState) retreat() {
+	if wizard == nil {
+		return
+	}
+	wizard.err = ""
+	switch wizard.step {
+	case providerWizardStepCredential:
+		wizard.step = providerWizardStepProvider
+	case providerWizardStepModel:
+		if providerWizardNeedsCredential(wizard.currentProvider()) {
+			wizard.step = providerWizardStepCredential
+		} else {
+			wizard.step = providerWizardStepProvider
+		}
+	case providerWizardStepDone:
+		wizard.step = providerWizardStepModel
 	}
 }
 
@@ -211,6 +226,14 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		case tea.KeyCtrlU:
 			m.providerWizard.apiKey = ""
 			return m, nil
+		case tea.KeyLeft:
+			m.providerWizard.retreat()
+			return m, nil
+		case tea.KeyRight:
+			if m.providerWizard.canAdvanceWithRight() {
+				return m.advanceProviderWizard()
+			}
+			return m, nil
 		case tea.KeyEnter:
 			return m.advanceProviderWizard()
 		}
@@ -237,6 +260,12 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.providerWizard.move(-1)
 	case tea.KeyDown, tea.KeyTab:
 		m.providerWizard.move(1)
+	case tea.KeyLeft:
+		m.providerWizard.retreat()
+	case tea.KeyRight:
+		if m.providerWizard.canAdvanceWithRight() {
+			return m.advanceProviderWizard()
+		}
 	case tea.KeyEnter:
 		if m.providerWizard.step == providerWizardStepDone {
 			return m.applyProviderWizard()
@@ -244,6 +273,42 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m.advanceProviderWizard()
 	}
 	return m, nil
+}
+
+func (wizard *providerWizardState) canAdvanceWithRight() bool {
+	if wizard == nil {
+		return false
+	}
+	switch wizard.step {
+	case providerWizardStepProvider:
+		return strings.TrimSpace(wizard.currentProvider().ID) != ""
+	case providerWizardStepCredential:
+		return wizard.credentialReadyForRight()
+	case providerWizardStepModel:
+		if wizard.modelLoading {
+			return false
+		}
+		wizard.refreshModels()
+		return len(wizard.filteredModels()) > 0
+	default:
+		return false
+	}
+}
+
+func (wizard *providerWizardState) credentialReadyForRight() bool {
+	if strings.TrimSpace(wizard.apiKey) != "" {
+		return true
+	}
+	provider := wizard.currentProvider()
+	if !providerWizardNeedsCredential(provider) {
+		return true
+	}
+	for _, env := range provider.AuthEnvVars {
+		if strings.TrimSpace(os.Getenv(strings.TrimSpace(env))) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (wizard *providerWizardState) appendAPIKey(runes []rune) {
@@ -333,13 +398,12 @@ func (wizard *providerWizardState) render(width int) string {
 	if wizard == nil {
 		return ""
 	}
-	overlayWidth := minInt(maxInt(56, width-10), minInt(width, 92))
+	overlayWidth := providerWizardOverlayWidth(width, wizard.step)
 	innerWidth := maxInt(20, overlayWidth-4)
 
 	lines := []string{
-		zeroTheme.badge.Render(" PROVIDER ") + " " + zeroTheme.ink.Bold(true).Render("Provider setup"),
 		zeroTheme.faint.Render(providerWizardStepLine(wizard.step)),
-		"",
+		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
 	}
 	if wizard.err != "" {
 		lines = append(lines, zeroTheme.red.Render("error: "+wizard.err), "")
@@ -354,13 +418,57 @@ func (wizard *providerWizardState) render(width int) string {
 	case providerWizardStepDone:
 		lines = append(lines, wizard.renderDoneStep(innerWidth)...)
 	}
-	lines = append(lines, "", zeroTheme.faint.Render("↑/↓ select  ·  Enter continue  ·  Esc close"))
+	lines = append(lines,
+		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
+		zeroTheme.faint.Render(wizard.footer()),
+	)
 
-	block := styledBlockFill(overlayWidth, lines, zeroTheme.line, zeroTheme.panel)
+	block := styledBlockFillTitle(overlayWidth, "Provider setup", lines, zeroTheme.lineStrong, lipgloss.NewStyle())
 	if width > overlayWidth {
 		return indentBlock(block, (width-overlayWidth)/2)
 	}
 	return block
+}
+
+func (wizard *providerWizardState) footer() string {
+	canRight := wizard.canAdvanceWithRight()
+	switch wizard.step {
+	case providerWizardStepProvider:
+		if canRight {
+			return "↑/↓ move   Enter/→ continue   Esc close"
+		}
+		return "↑/↓ move   Enter continue   Esc close"
+	case providerWizardStepModel:
+		if canRight {
+			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
+		}
+		return "↑/↓ move   Enter continue   ← back   Esc close"
+	case providerWizardStepDone:
+		return "Enter save   ← back   Esc close"
+	default:
+		if canRight {
+			return "Enter/→ continue   ← back   Esc close"
+		}
+		return "Enter continue   ← back   Esc close"
+	}
+}
+
+func providerWizardOverlayWidth(width int, step providerWizardStep) int {
+	if width <= 0 {
+		return providerWizardProviderWidth
+	}
+	target := providerWizardMediumWidth
+	switch step {
+	case providerWizardStepProvider:
+		target = providerWizardProviderWidth
+	case providerWizardStepModel:
+		target = providerWizardModelWidth
+	}
+	target = minInt(target, width)
+	if target < providerWizardMinWidth {
+		return width
+	}
+	return target
 }
 
 func providerWizardStepLine(step providerWizardStep) string {
@@ -391,51 +499,49 @@ func (wizard *providerWizardState) renderProviderStep(width int) []string {
 	for offset, provider := range wizard.providers[start : start+maxVisible] {
 		lines = append(lines, wizard.renderSelectableProvider(width, start+offset, provider))
 	}
-	if hidden := len(wizard.providers) - maxVisible; hidden > 0 {
-		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  %d more providers in catalog", hidden)))
-	}
 	return lines
 }
 
 func (wizard *providerWizardState) renderSelectableProvider(width int, index int, provider providercatalog.Descriptor) string {
 	selected := index == wizard.selectedProvider
-	surface := zeroTheme.onPanel
+	surface := transparentSurface
 	marker := surface(zeroTheme.faintest).Render("  ")
 	if selected {
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
-	auth := "local"
-	if provider.RequiresAuth {
-		auth = firstProviderDisplayValue(strings.Join(provider.AuthEnvVars, ","), "api key")
-	}
 	left := marker + surface(zeroTheme.ink).Render(provider.Name)
-	right := surface(zeroTheme.faint).Render(provider.ID + " · " + auth)
-	gap := width - lipglossWidth(left) - lipglossWidth(right)
-	return fitStyledLine(left+surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap)))+right, width)
+	return fitStyledLine(left, width)
 }
 
 func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 	provider := wizard.currentProvider()
 	env := firstProviderDisplayValue(provider.AuthEnvVars...)
-	command := providerWizardAddCommand(provider, "")
-	value := zeroTheme.faint.Render("paste key here")
+	value := zeroTheme.accent.Render("▌") + zeroTheme.faint.Render("paste key here")
 	if wizard.apiKey != "" {
-		value = zeroTheme.ink.Render(maskedProviderWizardKey(wizard.apiKey)) + zeroTheme.faint.Render("  pasted key")
+		value = zeroTheme.ink.Render(maskedProviderWizardKey(wizard.apiKey)) + zeroTheme.accent.Render("▌")
 	}
-	input := zeroTheme.userPrompt.Render("api key > ") + value + zeroTheme.accent.Render("▌")
+	input := zeroTheme.userPrompt.Render("api key > ") + value
 	return []string{
 		zeroTheme.accent.Render("Paste API key"),
-		zeroTheme.ink.Render("Paste your key here, then press Enter."),
-		zeroTheme.faint.Render("Leave empty to use " + env + " from your environment."),
-		zeroTheme.onPanel2(zeroTheme.ink).Render(input),
-		zeroTheme.faint.Render("Pasted keys are hidden. Ready saves the profile to Zero config."),
-		zeroTheme.onPanel2(zeroTheme.ink).Render(command),
+		zeroTheme.ink.Render(providerWizardCredentialInstruction(env)),
+		input,
+		zeroTheme.faint.Render("Pasted keys are hidden and saved in your user config."),
 	}
 }
 
+func providerWizardCredentialInstruction(env string) string {
+	if env = strings.TrimSpace(env); env != "" {
+		return "Paste a key, or leave blank to use " + env + "."
+	}
+	return "Paste a key, or leave blank to use your shell env."
+}
+
 func (wizard *providerWizardState) renderModelStep(width int) []string {
-	lines := []string{zeroTheme.accent.Render("Choose model")}
+	if wizard.modelLoading {
+		return wizard.renderModelLoadingStep(width)
+	}
+	lines := []string{zeroTheme.accent.Render("Choose a model")}
 	if status := wizard.modelStatusText(); status != "" {
 		lines = append(lines, zeroTheme.faint.Render(status))
 	}
@@ -453,47 +559,61 @@ func (wizard *providerWizardState) renderModelStep(width int) []string {
 		lines = append(lines, wizard.renderSelectableModel(width, start+offset, model))
 	}
 	if hidden := len(models) - maxVisible; hidden > 0 {
-		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  %d more models - type to search", hidden)))
+		lines = append(lines, zeroTheme.faint.Render(fmt.Sprintf("  %d more models", hidden)))
+	}
+	if detail := providerWizardModelDetail(wizard.currentModel()); detail != "" {
+		lines = append(lines, fitStyledLine(zeroTheme.faint.Render("  "+detail), width))
 	}
 	return lines
 }
 
+func (wizard *providerWizardState) renderModelLoadingStep(width int) []string {
+	return []string{
+		zeroTheme.accent.Render("Choose a model"),
+		"",
+		fitStyledLine(zeroTheme.faint.Render("Checking available models..."), width),
+		fitStyledLine(zeroTheme.faint.Render("Built-in models will be used if discovery fails."), width),
+	}
+}
+
 func (wizard *providerWizardState) renderModelSearch(width int) string {
 	query := strings.TrimSpace(wizard.modelSearch)
-	value := zeroTheme.faint.Render("Search model")
-	if query != "" {
-		value = zeroTheme.ink.Render(query)
+	prompt := zeroTheme.userPrompt.Render("search > ")
+	cursor := zeroTheme.accent.Render("▌")
+	if query == "" {
+		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render("model name..."), width)
 	}
-	input := zeroTheme.userPrompt.Render("search > ") + value + zeroTheme.accent.Render("\u258c")
-	return fitStyledLine(zeroTheme.onPanel2(zeroTheme.ink).Render(input), width)
+	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
 }
 
 func (wizard *providerWizardState) modelStatusText() string {
-	if wizard.modelLoading {
-		return "models: refreshing catalog"
-	}
 	if wizard.modelLoadError != "" {
-		return "models: fallback - " + wizard.modelLoadError
-	}
-	if wizard.modelSource == "fallback" {
-		return "models: fallback"
+		return "Using built-in model list"
 	}
 	return ""
 }
 
 func (wizard *providerWizardState) renderSelectableModel(width int, index int, model providerWizardModel) string {
 	selected := index == wizard.selectedModel
-	surface := zeroTheme.onPanel
+	surface := transparentSurface
 	marker := surface(zeroTheme.faintest).Render("  ")
 	if selected {
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
 	left := marker + surface(zeroTheme.ink).Render(model.displayLabel())
-	rightText := firstProviderDisplayValue(model.Meta, model.secondaryText())
-	right := surface(zeroTheme.faint).Render(rightText)
-	gap := width - lipglossWidth(left) - lipglossWidth(right)
-	return fitStyledLine(left+surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap)))+right, width)
+	return fitStyledLine(left, width)
+}
+
+func providerWizardModelDetail(model providerWizardModel) string {
+	parts := []string{}
+	if secondary := strings.TrimSpace(model.secondaryText()); secondary != "" && !providerWizardGenericModelDescription(secondary) {
+		parts = append(parts, secondary)
+	}
+	if meta := strings.TrimSpace(model.Meta); meta != "" {
+		parts = append(parts, meta)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (wizard *providerWizardState) filteredModels() []providerWizardModel {
@@ -548,15 +668,14 @@ func providerWizardGenericModelDescription(description string) bool {
 func (wizard *providerWizardState) renderDoneStep(width int) []string {
 	provider := wizard.currentProvider()
 	model := wizard.currentModel()
-	checkCommand := "zero providers check " + provider.ID + " --connectivity"
 	return []string{
 		zeroTheme.accent.Render("Ready to connect"),
-		zeroTheme.ink.Render("provider: " + provider.Name),
-		zeroTheme.ink.Render("model: " + model.ID),
-		zeroTheme.ink.Render("credential: " + providerWizardCredentialLabel(provider, wizard.apiKey)),
-		zeroTheme.faint.Render("Press Enter to save this provider and use it now."),
-		zeroTheme.faint.Render("Verify later with:"),
-		zeroTheme.onPanel2(zeroTheme.ink).Render(checkCommand),
+		"",
+		zeroTheme.ink.Render("Provider    " + provider.Name),
+		zeroTheme.ink.Render("Model       " + model.ID),
+		zeroTheme.ink.Render("Credential  " + providerWizardCredentialLabel(provider, wizard.apiKey)),
+		"",
+		zeroTheme.faint.Render("Press Enter to save and start using this provider."),
 	}
 }
 
@@ -623,20 +742,4 @@ func providerWizardAPIFormat(provider providercatalog.Descriptor) string {
 		return ""
 	}
 	return string(provider.SupportedAPIFormats[0])
-}
-
-func providerWizardAddCommand(provider providercatalog.Descriptor, model string) string {
-	parts := []string{"zero", "providers", "add", provider.ID}
-	if env := firstProviderDisplayValue(provider.AuthEnvVars...); provider.RequiresAuth && env != "" {
-		parts = append(parts, "--api-key-env", env)
-	}
-	if model = strings.TrimSpace(model); model != "" && model != provider.DefaultModel {
-		parts = append(parts, "--model", model)
-	}
-	parts = append(parts, "--set-active")
-	return strings.Join(parts, " ")
-}
-
-func lipglossWidth(value string) int {
-	return lipgloss.Width(value)
 }

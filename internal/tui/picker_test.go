@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -453,6 +454,29 @@ func TestPickerRenders(t *testing.T) {
 	m = updated.(model)
 	if !strings.Contains(m.View(), "select model") {
 		t.Fatal("view should render the picker title")
+	}
+}
+
+func TestPickerOverlayCapsVisibleRows(t *testing.T) {
+	items := make([]pickerItem, 0, 20)
+	for i := range 20 {
+		items = append(items, pickerItem{Label: fmt.Sprintf("model-%02d", i), Value: fmt.Sprintf("model-%02d", i)})
+	}
+	m := newModel(context.Background(), Options{})
+	m.picker = &commandPicker{
+		kind:     pickerModel,
+		title:    "select model",
+		items:    items,
+		allItems: append([]pickerItem{}, items...),
+		selected: 15,
+	}
+
+	got := plainRender(t, m.pickerOverlay(120))
+	if !strings.Contains(got, "select model") || !strings.Contains(got, "model-15") {
+		t.Fatalf("picker overlay should render selected window, got %q", got)
+	}
+	if strings.Contains(got, "model-00") || strings.Contains(got, "model-09") {
+		t.Fatalf("picker overlay should cap visible rows around selection, got %q", got)
 	}
 }
 
