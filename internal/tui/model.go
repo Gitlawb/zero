@@ -855,6 +855,7 @@ func (m model) transcriptView() string {
 	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
+	suggestionInFooter := suggestionOverlay != "" && !(m.transcriptEmpty() && !m.pending)
 	if m.transcriptEmpty() && !m.pending {
 		if suggestionOverlay != "" {
 			body.WriteString(m.emptyStateWithOverlay(width, suggestionOverlay))
@@ -882,11 +883,6 @@ func (m model) transcriptView() string {
 			shownAny = true
 		}
 	}
-	if suggestionOverlay != "" && !(m.transcriptEmpty() && !m.pending) {
-		body.WriteString("\n")
-		body.WriteString(suggestionOverlay)
-		body.WriteString("\n")
-	}
 
 	if m.pending {
 		body.WriteString("\n")
@@ -908,6 +904,12 @@ func (m model) transcriptView() string {
 
 	var footer strings.Builder
 	footer.WriteString("\n")
+	if suggestionInFooter {
+		// Once real chat content exists, keep autocomplete anchored to the
+		// composer instead of appending it into the scrollable transcript.
+		footer.WriteString(suggestionOverlay)
+		footer.WriteString("\n")
+	}
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
 		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")

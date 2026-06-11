@@ -258,6 +258,26 @@ func TestSuggestionOverlayRenders(t *testing.T) {
 	}
 }
 
+func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width, m.height = 96, 32
+	m.altScreen = true
+	m.headerPrinted = true
+	for i := 0; i < 20; i++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+i)))
+	}
+	m.chatScrollOffset = 12
+	m = typeRunes(t, m, "/")
+
+	plain := plainRender(t, m.View())
+	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "search >") {
+		t.Fatalf("suggestion overlay should stay visible above composer while transcript is scrolled, got %q", plain)
+	}
+	if got := len(strings.Split(plain, "\n")); got != m.height {
+		t.Fatalf("alt-screen view should keep terminal height, got %d lines want %d", got, m.height)
+	}
+}
+
 func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 30
@@ -282,7 +302,8 @@ func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
 	if strings.Contains(plain, "more") {
 		t.Fatalf("scrolled palette should not render a more-count row, got %q", plain)
 	}
-	if !strings.Contains(plain, "│ ❯ clear") || strings.Contains(plain, "│ ❯ provider") || strings.Contains(plain, "│   provider") {
+	selected := strings.TrimPrefix(m.suggestions[m.suggestionIdx].Name, "/")
+	if !strings.Contains(plain, "│ ❯ "+selected) || strings.Contains(plain, "│ ❯ provider") || strings.Contains(plain, "│   provider") {
 		t.Fatalf("scrolled palette should move the visible command window, got %q", plain)
 	}
 }
