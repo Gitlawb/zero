@@ -92,6 +92,27 @@ func TestCronAddRecipe(t *testing.T) {
 	}
 }
 
+func TestCronAddExplicitExprOverridesRecipe(t *testing.T) {
+	store := testCronStore(t)
+	var out, errb bytes.Buffer
+	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }
+	// An explicit positional schedule must win over the recipe's default expr
+	// instead of being silently dropped.
+	if code := runCronWith(store, now, []string{"add", "0 9 * * *", "--recipe", "git-recap"}, &out, &errb); code != 0 {
+		t.Fatalf("add exit=%d err=%s", code, errb.String())
+	}
+	jobs, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Expr != "0 9 * * *" {
+		t.Fatalf("explicit expr should win over recipe, got: %+v", jobs)
+	}
+	if jobs[0].Prompt == "" {
+		t.Fatalf("recipe prompt should still fill in, got empty: %+v", jobs)
+	}
+}
+
 func TestCronAddRejectsExtraArgs(t *testing.T) {
 	store := testCronStore(t)
 	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }

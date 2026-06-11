@@ -167,6 +167,17 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 	} else {
 		job.NextRunAt = nxt
 	}
+	// Re-read before persisting: the job may have been paused or removed while it
+	// was executing, and this in-memory copy is stale from tick start. Without
+	// this, store.Update would clobber an external pause back to active. (A single
+	// scheduler is the supported model; this narrows but does not fully close the
+	// read-modify-write window — full atomicity needs file locking.)
+	if current, err := store.Get(job.ID); err != nil {
+		fmt.Fprintf(stdout, "fired %s -> exit %d (job removed during run)\n", job.ID, code)
+		return
+	} else if current.Status == cron.StatusPaused {
+		job.Status = cron.StatusPaused
+	}
 	if err := store.AppendRun(job.ID, rec); err != nil {
 		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, err)
 	}
