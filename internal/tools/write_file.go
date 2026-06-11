@@ -39,7 +39,11 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 	}
 }
 
-func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
+func (tool writeFileTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.RunWithOptions(ctx, args, RunOptions{})
+}
+
+func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
@@ -68,6 +72,20 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 
+	// On overwrite, refuse to clobber a tracked file that changed on disk outside
+	// Zero since it was last read — the new content was likely composed against a
+	// stale view. Only read current bytes when there is a baseline to compare,
+	// so a first-touch create/overwrite stays a single write with no extra read.
+	if existed {
+		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
+			if current, rerr := os.ReadFile(absolutePath); rerr == nil {
+				if cerr := options.FileTracker.CheckConflict(absolutePath, current); cerr != nil {
+					return errorResult(fileConflictMessage(relativePath))
+				}
+			}
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
@@ -77,6 +95,10 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	// Baseline the freshly written content so a later edit/overwrite in this
+	// session compares against what is now on disk.
+	newInfo, _ := os.Stat(absolutePath)
+	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
 
 	verb := "Created"
 	if existed {

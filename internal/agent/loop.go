@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -548,6 +550,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
+	// beforeTool hooks may veto the call before it runs (a non-zero exit blocks).
+	if toolFound {
+		if outcome, blocked := dispatchBeforeTool(ctx, options, call, args); blocked {
+			return blockedByHookResult(call, outcome), nil
+		}
+	}
+
 	result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
 		PermissionGranted: permissionGranted,
 		PermissionMode:    string(permissionMode),
@@ -559,6 +568,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ReasoningEffort:   options.ReasoningEffort,
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
+		// Per-session file version tracker so write_file/edit_file refuse to clobber
+		// a file that changed on disk outside Zero since it was last read.
+		FileTracker: options.FileTracker,
 		// Forward the run's operator tool filters so a filter-aware tool
 		// (tool_search) never discloses or loads an operator-hidden deferred tool.
 		EnabledTools:  options.EnabledTools,
@@ -571,6 +583,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		if event, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, sandboxDecision); ok {
 			event.DecisionReason = decisionReason
 			options.OnPermission(event)
+		}
+	}
+	// afterTool hooks run once the tool has executed; their output (e.g. a
+	// formatter or vet result) is surfaced back to the model on the result.
+	if toolFound {
+		if feedback := dispatchAfterTool(ctx, options, call, args, result); feedback != "" {
+			result.Output = appendHookFeedback(result.Output, feedback)
 		}
 	}
 	// Secret scrubbing happens at the registry boundary (the single point both
@@ -592,6 +611,82 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
 	}, nil
+}
+
+// dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
+// that exits non-zero vetoes the call: the returned bool is true and the tool
+// must not run. A nil dispatcher (no hooks wired) is a no-op.
+func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
+	if options.Hooks == nil {
+		return hooks.DispatchOutcome{}, false
+	}
+	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event:      hooks.EventBeforeTool,
+		ToolName:   call.Name,
+		ToolCallID: call.ID,
+		Payload: map[string]any{
+			"event":      string(hooks.EventBeforeTool),
+			"tool":       call.Name,
+			"toolCallId": call.ID,
+			"sessionId":  options.SessionID,
+			"cwd":        options.Cwd,
+			"args":       args,
+		},
+	})
+	return outcome, outcome.Blocked
+}
+
+// dispatchAfterTool runs configured afterTool hooks once a tool has executed and
+// returns any advisory output (e.g. a formatter or vet result) to surface back
+// to the model. afterTool hooks never block. A nil dispatcher is a no-op.
+func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
+	if options.Hooks == nil {
+		return ""
+	}
+	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event:      hooks.EventAfterTool,
+		ToolName:   call.Name,
+		ToolCallID: call.ID,
+		Payload: map[string]any{
+			"event":        string(hooks.EventAfterTool),
+			"tool":         call.Name,
+			"toolCallId":   call.ID,
+			"sessionId":    options.SessionID,
+			"cwd":          options.Cwd,
+			"status":       string(result.Status),
+			"changedFiles": result.ChangedFiles,
+		},
+	})
+	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+}
+
+// blockedByHookResult is the tool result for a call vetoed by a beforeTool hook.
+func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResult {
+	reason := strings.TrimSpace(outcome.Reason)
+	if reason == "" {
+		reason = "blocked by a beforeTool hook"
+	}
+	message := fmt.Sprintf("Error: %q was blocked by hook %q: %s", call.Name, outcome.BlockedBy, reason)
+	return ToolResult{
+		ToolCallID:   call.ID,
+		Name:         call.Name,
+		Status:       tools.StatusError,
+		Output:       message,
+		DenialReason: DenialHookBlocked,
+	}
+}
+
+// appendHookFeedback appends afterTool hook output to a tool result's output,
+// scrubbed for secrets like every other string crossing the tool boundary.
+func appendHookFeedback(output string, feedback string) string {
+	feedback = redaction.RedactString(feedback, redaction.Options{})
+	if strings.TrimSpace(feedback) == "" {
+		return output
+	}
+	if strings.TrimSpace(output) == "" {
+		return "Hook output:\n" + feedback
+	}
+	return output + "\n\nHook output:\n" + feedback
 }
 
 // isRetriableToolError reports whether a failed tool result is one the model can

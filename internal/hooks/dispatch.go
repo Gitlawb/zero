@@ -31,6 +31,10 @@ type DispatchOutcome struct {
 	Blocked   bool   // a blocking-event hook exited non-zero, vetoing the action
 	BlockedBy string // ID of the hook that blocked (empty unless Blocked)
 	Reason    string // the blocking hook's stderr/stdout, for surfacing to the model
+	// Messages collects the output (stdout, else stderr) of each hook that
+	// produced any, in run order. afterTool validators use this to feed results
+	// (e.g. a formatter diff or vet warning) back to the model on the tool result.
+	Messages []string
 }
 
 type commandResult struct {
@@ -132,6 +136,10 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 		status, blocked := classifyResult(input.Event, result)
 		dispatcher.recordCompleted(hook, input, status, result, durationMs)
 
+		if message := hookMessage(result); message != "" {
+			outcome.Messages = append(outcome.Messages, message)
+		}
+
 		if blocked {
 			outcome.Blocked = true
 			outcome.BlockedBy = hook.ID
@@ -186,6 +194,15 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 		return AuditError, false
 	}
 	return AuditCompleted, false
+}
+
+// hookMessage returns the output worth surfacing from a hook run: stdout when
+// present, else stderr. Empty when the hook produced no output.
+func hookMessage(result commandResult) string {
+	if trimmed := strings.TrimSpace(result.Stdout); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(result.Stderr)
 }
 
 func blockReason(result commandResult) string {

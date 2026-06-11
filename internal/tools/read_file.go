@@ -41,7 +41,11 @@ func NewScopedReadFileTool(workspaceRoot string, scope PathScope) Tool {
 	}
 }
 
-func (tool readFileTool) Run(_ context.Context, args map[string]any) Result {
+func (tool readFileTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.RunWithOptions(ctx, args, RunOptions{})
+}
+
+func (tool readFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filepath", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
@@ -68,6 +72,12 @@ func (tool readFileTool) Run(_ context.Context, args map[string]any) Result {
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
+	// Record the whole-file baseline (the raw bytes, matching what edit_file and
+	// write_file read) so a later write can detect an out-of-Zero modification.
+	// Stat is best-effort: a missing FileInfo only drops the diagnostic size/mtime,
+	// not the authoritative content hash.
+	info, _ := os.Stat(absolutePath)
+	options.FileTracker.Record(absolutePath, content, info)
 
 	normalizedContent := strings.ReplaceAll(string(content), "\r\n", "\n")
 	normalizedContent = strings.TrimSuffix(normalizedContent, "\n")

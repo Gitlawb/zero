@@ -461,6 +461,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,
 		Sandbox:          sandboxEngine,
+		FileTracker:      tools.NewFileTracker(),
+		Hooks:            newHookDispatcher(workspaceRoot),
 		EnabledTools:     options.enabledTools,
 		DisabledTools:    options.disabledTools,
 		OnText:           writer.text,

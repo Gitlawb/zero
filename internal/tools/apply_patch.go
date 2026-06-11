@@ -42,6 +42,10 @@ func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.RunWithOptions(ctx, args, RunOptions{})
+}
+
+func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
 	patch, err := aliasedStringArg(args, []string{"patch", "diff"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for apply_patch: " + err.Error())
@@ -97,6 +101,15 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
 	result.Display = Display{Summary: summary, Kind: "diff"}
+	// git apply already rejects a patch whose context drifted, so it has its own
+	// staleness guard. Drop any tracked baseline for the files it rewrote so a
+	// subsequent edit_file/write_file re-reads instead of false-flagging the
+	// patch's own change as an external modification.
+	for _, changed := range result.ChangedFiles {
+		if absolute, _, rerr := resolveScopedPath(tool.workspaceRoot, tool.scope, changed); rerr == nil {
+			options.FileTracker.Forget(absolute)
+		}
+	}
 	return result
 }
 

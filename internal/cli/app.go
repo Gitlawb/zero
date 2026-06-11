@@ -447,6 +447,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			PermissionMode: permissionMode,
 			Autonomy:       string(sandbox.AutonomyLow),
 			Sandbox:        sandboxEngine,
+			FileTracker:    tools.NewFileTracker(),
+			Hooks:          newHookDispatcher(workspaceRoot),
 			DeferThreshold: resolved.Tools.DeferThreshold,
 		},
 		PermissionMode: permissionMode,

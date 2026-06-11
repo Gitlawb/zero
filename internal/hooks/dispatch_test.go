@@ -103,6 +103,38 @@ func TestDispatchNonBlockingEventDoesNotVetoOnNonZero(t *testing.T) {
 	}
 }
 
+func TestDispatchCollectsHookOutputMessages(t *testing.T) {
+	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+		switch command {
+		case "fmt":
+			return commandResult{ExitCode: 0, Stdout: "  reformatted main.go  "}
+		case "vet":
+			return commandResult{ExitCode: 1, Stderr: "vet: suspicious construct"} // stdout empty → stderr surfaces
+		case "quiet":
+			return commandResult{ExitCode: 0} // no output → omitted
+		}
+		return commandResult{}
+	}
+	config := Config{Enabled: true, Hooks: []Definition{
+		{ID: "fmt", Event: EventAfterTool, Command: "fmt", Enabled: true},
+		{ID: "vet", Event: EventAfterTool, Command: "vet", Enabled: true},
+		{ID: "quiet", Event: EventAfterTool, Command: "quiet", Enabled: true},
+	}}
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner})
+
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventAfterTool, ToolName: "write_file"})
+	if outcome.Blocked {
+		t.Fatalf("afterTool must not block: %#v", outcome)
+	}
+	if outcome.Ran != 3 {
+		t.Fatalf("Ran = %d, want 3", outcome.Ran)
+	}
+	want := []string{"reformatted main.go", "vet: suspicious construct"}
+	if strings.Join(outcome.Messages, "|") != strings.Join(want, "|") {
+		t.Fatalf("Messages = %#v, want trimmed stdout then stderr-fallback, quiet omitted: %#v", outcome.Messages, want)
+	}
+}
+
 func TestDispatchSkipsWhenDisabledOrUnmatched(t *testing.T) {
 	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
 		t.Fatal("runner must not be called")

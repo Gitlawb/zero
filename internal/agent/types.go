@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -73,6 +74,7 @@ const (
 	DenialFiltered         DenialCategory = "filtered"          // tool not enabled for this run
 	DenialPermissionDenied DenialCategory = "permission_denied" // approval declined
 	DenialSandboxViolation DenialCategory = "sandbox_violation" // blocked by the sandbox
+	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
 )
 
 type PermissionRequest struct {
@@ -169,15 +171,23 @@ type Options struct {
 	PermissionMode         PermissionMode
 	Autonomy               string
 	Sandbox                *sandbox.Engine
-	EnabledTools           []string
-	DisabledTools          []string
-	OnText                 func(string)
-	OnToolCall             func(ToolCall)
-	OnPermissionRequest    func(context.Context, PermissionRequest) (PermissionDecision, error)
-	OnPermission           func(PermissionEvent)
-	OnAskUser              func(context.Context, AskUserRequest) (AskUserResponse, error)
-	OnToolResult           func(ToolResult)
-	OnUsage                func(Usage)
+	// FileTracker records per-session file read/write versions so the write tools
+	// can detect a file changed on disk outside Zero since it was last read. nil
+	// disables the check. Created once per session and threaded into every tool run.
+	FileTracker *tools.FileTracker
+	// Hooks, when set, runs configured beforeTool (blocking) and afterTool
+	// (advisory) commands around each tool call. nil disables hooks entirely; a
+	// dispatcher built from an empty config is also a safe no-op.
+	Hooks               *hooks.Dispatcher
+	EnabledTools        []string
+	DisabledTools       []string
+	OnText              func(string)
+	OnToolCall          func(ToolCall)
+	OnPermissionRequest func(context.Context, PermissionRequest) (PermissionDecision, error)
+	OnPermission        func(PermissionEvent)
+	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
+	OnToolResult        func(ToolResult)
+	OnUsage             func(Usage)
 	// OnContext, when set, is called once per turn with the per-category context
 	// budget of the request about to be sent, so a surface (TUI/CLI) can show
 	// context utilization. Opt-in like the other callbacks; nil is a no-op.

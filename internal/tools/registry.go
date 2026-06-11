@@ -23,6 +23,11 @@ type RunOptions struct {
 	ReasoningEffort   string
 	Depth             int
 	Cwd               string
+	// FileTracker, when set, records the version of each file read or written this
+	// session so write_file/edit_file can refuse to clobber a file that changed on
+	// disk outside Zero since it was last read. nil disables the feature entirely
+	// (the read/write tools behave exactly as before).
+	FileTracker *FileTracker
 	// EnabledTools / DisabledTools carry the run's operator tool filters so a
 	// filter-aware tool (tool_search) never discloses or loads an operator-hidden
 	// tool. They use the same allow/deny semantics as the agent's filter gate:
