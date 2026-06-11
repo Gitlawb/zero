@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -89,7 +90,220 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	}
 }
 
-func TestCompactCommandRecordsShellRequest(t *testing.T) {
+func TestCompactStatusShowsManualFlowState(t *testing.T) {
+	called := false
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		SessionCompactor: compactSessionFunc(func(context.Context, CompactRequest) (CompactResult, error) {
+			called = true
+			return CompactResult{}, nil
+		}),
+	})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("abcd ", 80)})
+	m.input.SetValue("/compact status")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /compact status to be handled without starting an agent run")
+	}
+	if called {
+		t.Fatal("status should not invoke the manual compactor")
+	}
+	if next.compactRequests != 0 {
+		t.Fatalf("status should not add compact requests, got %d", next.compactRequests)
+	}
+	for _, want := range []string{
+		"Compact",
+		"status: info",
+		"model: gpt-4.1",
+		"context window: 1M tokens",
+		"estimated transcript:",
+		"compactable: yes",
+	} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected compact status transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
+	var request CompactRequest
+	calls := 0
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		SessionCompactor: compactSessionFunc(func(_ context.Context, req CompactRequest) (CompactResult, error) {
+			calls++
+			request = req
+			return CompactResult{
+				Compacted:    true,
+				BeforeTokens: req.EstimatedTokens,
+				AfterTokens:  42,
+				Summary:      "summarized earlier turns",
+			}, nil
+		}),
+	})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
+	m.input.SetValue("/compact")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /compact to be handled without starting an agent run")
+	}
+	if calls != 1 {
+		t.Fatalf("expected one manual compaction call, got %d", calls)
+	}
+	if request.ModelName != "gpt-4.1" {
+		t.Fatalf("expected request model gpt-4.1, got %q", request.ModelName)
+	}
+	if request.ContextWindow != modelContextWindow("gpt-4.1") {
+		t.Fatalf("expected request context window %d, got %d", modelContextWindow("gpt-4.1"), request.ContextWindow)
+	}
+	if request.EstimatedTokens <= 0 || request.VisibleTranscriptRows != len(m.transcript) {
+		t.Fatalf("expected request estimate and transcript count, got %#v", request)
+	}
+	if next.compactRequests != 1 {
+		t.Fatalf("expected one compact request, got %d", next.compactRequests)
+	}
+	for _, want := range []string{
+		"Compact",
+		"status: ok",
+		"compacted: yes",
+		"after: 42 tokens",
+		"summarized earlier turns",
+	} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected compact transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	if got := next.compactionStatus(); !strings.Contains(got, "compacted manually") {
+		t.Fatalf("expected compacted status after manual compaction, got %q", got)
+	}
+}
+
+func TestCompactCommandRecordsSessionCompactionAndShrinksReplayContext(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	m := newModel(context.Background(), Options{
+		ModelName:    "gpt-4.1",
+		SessionStore: store,
+	})
+	var err error
+	m, err = m.ensureActiveSession("compact this session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		"alpha old user intent",
+		"beta old assistant answer",
+		"gamma old tool result",
+		"delta old follow-up",
+		"epsilon recent",
+		"zeta recent",
+		"eta recent",
+		"theta recent",
+		"iota recent",
+		"kappa recent",
+		"lambda recent",
+		"mu recent",
+	} {
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+			"role":    "user",
+			"content": content,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: content})
+	}
+	eventsBefore := len(m.sessionEvents)
+	m.input.SetValue("/compact")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /compact to be handled without starting an agent run")
+	}
+	if next.lastCompactResult == nil || !next.lastCompactResult.Compacted {
+		t.Fatalf("expected session-backed compaction result, got %#v", next.lastCompactResult)
+	}
+	if len(next.sessionEvents) >= eventsBefore {
+		t.Fatalf("expected in-memory context to shrink after compaction, before=%d after=%d", eventsBefore, len(next.sessionEvents))
+	}
+	if !transcriptContains(next.transcript, "Compacted earlier session context") {
+		t.Fatalf("expected transcript to render compaction summary, got %#v", next.transcript)
+	}
+	prompt := next.sessionPrompt("next task")
+	for _, dropped := range []string{"alpha old user intent", "beta old assistant answer", "gamma old tool result", "delta old follow-up"} {
+		if strings.Contains(prompt, dropped) {
+			t.Fatalf("compacted-away event %q reached the next prompt:\n%s", dropped, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "Compacted earlier session context") || !strings.Contains(prompt, "mu recent") {
+		t.Fatalf("prompt missing compacted summary or preserved recent event:\n%s", prompt)
+	}
+}
+
+func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "Provider summary keeps the actual old decisions."},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		SessionStore: store,
+	})
+	var err error
+	m, err = m.ensureActiveSession("compact with provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		"old decision A",
+		"old decision B",
+		"old file note",
+		"old blocker",
+		"recent one",
+		"recent two",
+		"recent three",
+		"recent four",
+		"recent five",
+		"recent six",
+		"recent seven",
+		"recent eight",
+	} {
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{"role": "user", "content": content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: content})
+	}
+	m.input.SetValue("/compact")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider summarization request, got %d", len(provider.requests))
+	}
+	if next.lastCompactResult == nil || next.lastCompactResult.Summary != "Provider summary keeps the actual old decisions." {
+		t.Fatalf("expected provider summary result, got %#v", next.lastCompactResult)
+	}
+	prompt := next.sessionPrompt("continue")
+	if !strings.Contains(prompt, "Provider summary keeps the actual old decisions.") {
+		t.Fatalf("next prompt missing provider summary:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "old decision A") {
+		t.Fatalf("next prompt should not include raw compacted event:\n%s", prompt)
+	}
+}
+
+func TestCompactCommandRecordsRequestWhenNoCompactorIsAvailable(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/compact")
 
@@ -102,12 +316,12 @@ func TestCompactCommandRecordsShellRequest(t *testing.T) {
 	if next.compactRequests != 1 {
 		t.Fatalf("expected one compact request, got %d", next.compactRequests)
 	}
-	for _, want := range []string{"Compact", "requested, not yet compacted", "state: pending integration"} {
+	for _, want := range []string{"Compact", "requested, awaiting manual compactor", "compactable: no", "manual compactor unavailable"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected compact transcript to contain %q, got %#v", want, next.transcript)
 		}
 	}
-	if transcriptContains(next.transcript, "future compaction backend") || transcriptContains(next.transcript, "not wired") {
+	if transcriptContains(next.transcript, "pending integration") || transcriptContains(next.transcript, "future compaction backend") || transcriptContains(next.transcript, "not wired") {
 		t.Fatalf("compact transcript should avoid shell-only placeholder text, got %#v", next.transcript)
 	}
 
@@ -124,6 +338,12 @@ func TestCompactCommandRecordsShellRequest(t *testing.T) {
 	if got := next.transcript[len(next.transcript)-1].text; !strings.Contains(got, "status: info") {
 		t.Fatalf("expected /compact status to render info status, got %q", got)
 	}
+}
+
+type compactSessionFunc func(context.Context, CompactRequest) (CompactResult, error)
+
+func (f compactSessionFunc) CompactSession(ctx context.Context, request CompactRequest) (CompactResult, error) {
+	return f(ctx, request)
 }
 
 func TestUsageEventsUpdateFooterAndContext(t *testing.T) {

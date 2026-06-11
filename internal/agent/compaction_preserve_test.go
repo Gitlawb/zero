@@ -69,6 +69,56 @@ func TestCompactPreservesLoadedSkills(t *testing.T) {
 	}
 }
 
+func TestCompactPreservesLoadedToolSearchSchemas(t *testing.T) {
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		{Role: zeroruntime.MessageRoleUser, Content: "load weather tool"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "loading", ToolCalls: []zeroruntime.ToolCall{
+			{ID: "t1", Name: "tool_search", Arguments: `{"query":"select:weather_lookup"}`},
+		}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "t1", Content: "Loaded 1 tool. Full schemas follow; call them on the next turn.\n\n## weather_lookup\nLook up weather.\ninput schema:\n{\n  \"type\": \"object\"\n}"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "ready"},
+		{Role: zeroruntime.MessageRoleUser, Content: "continue"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+	}
+	summary := compactStateConversation(t, messages)
+	if !strings.Contains(summary, `"name":"weather_lookup"`) || !strings.Contains(summary, "input schema") {
+		t.Fatalf("loaded tool schema not preserved in %q", summary)
+	}
+}
+
+func TestCompactPreservesProjectInstructions(t *testing.T) {
+	projectInstructions := "# AGENTS.md instructions for D:\\repo\n\n<INSTRUCTIONS>\nUse `go test ./internal/agent` for agent changes.\nDo not touch TUI code.\n</INSTRUCTIONS>\n\n<environment_context>\nignored runtime context\n</environment_context>"
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		{Role: zeroruntime.MessageRoleUser, Content: projectInstructions},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "ack"},
+		{Role: zeroruntime.MessageRoleUser, Content: "work on compaction"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "working"},
+		{Role: zeroruntime.MessageRoleUser, Content: "continue"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+	}
+	summary := compactStateConversation(t, messages)
+	state := parsePreservedStateBlock(summary)
+	if len(state.ProjectInstructions) != 1 {
+		t.Fatalf("expected one preserved project instruction block, got %#v", state.ProjectInstructions)
+	}
+	body := state.ProjectInstructions[0].Body
+	if state.ProjectInstructions[0].Source != "AGENTS.md instructions for D:\\repo" ||
+		!strings.Contains(body, "# AGENTS.md instructions for D:\\repo") ||
+		!strings.Contains(body, "Do not touch TUI code.") ||
+		strings.Contains(body, "ignored runtime context") {
+		t.Fatalf("project instructions not preserved cleanly in %#v", state.ProjectInstructions[0])
+	}
+}
+
+func TestProjectInstructionBlockAcceptsProjectGuidelineFilename(t *testing.T) {
+	source, body := projectInstructionBlock("# ZERO.md instructions for /repo\n\n<INSTRUCTIONS>\nPrefer Go commands.\n</INSTRUCTIONS>")
+	if source != "ZERO.md instructions for /repo" || !strings.Contains(body, "Prefer Go commands.") {
+		t.Fatalf("expected ZERO.md instruction block to parse, got source=%q body=%q", source, body)
+	}
+}
+
 func TestCompactWithoutStateHasNoPreserveSections(t *testing.T) {
 	messages := []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
@@ -123,6 +173,51 @@ func TestCompactCarriesPreservedStateAcrossRepeatedCompaction(t *testing.T) {
 	}
 	if !strings.Contains(newSummary, `"name":"deploy"`) || !strings.Contains(newSummary, "make deploy") {
 		t.Fatalf("loaded skill lost on the second compaction: %q", newSummary)
+	}
+}
+
+func TestCompactCarriesLoadedToolsAndProjectInstructionsAcrossRepeatedCompaction(t *testing.T) {
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "system"},
+		{Role: zeroruntime.MessageRoleUser, Content: "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nStay in internal/agent.\n</INSTRUCTIONS>"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "loading", ToolCalls: []zeroruntime.ToolCall{
+			{ID: "t1", Name: "tool_search", Arguments: `{"query":"select:weather_lookup"}`},
+		}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "t1", Content: "Loaded 1 tool. Full schemas follow; call them on the next turn.\n\n## weather_lookup\nLook up weather.\ninput schema:\n{\n  \"type\": \"object\"\n}"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "ready"},
+		{Role: zeroruntime.MessageRoleUser, Content: "continue"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "continuing"},
+	}
+
+	first, err := Compact(messages, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "FIRST SUMMARY", nil },
+	})
+	if err != nil {
+		t.Fatalf("first Compact: %v", err)
+	}
+	second := append(append([]zeroruntime.Message{}, first...),
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "more"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "ok"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "again"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "fine"},
+	)
+
+	out, err := Compact(second, CompactionOptions{
+		PreserveLast: 2,
+		Summarize:    func([]zeroruntime.Message) (string, error) { return "SECOND SUMMARY", nil },
+	})
+	if err != nil {
+		t.Fatalf("second Compact: %v", err)
+	}
+	state := parsePreservedStateBlock(out[1].Content)
+	if len(state.Tools) != 1 || state.Tools[0].Name != "weather_lookup" || !strings.Contains(state.Tools[0].Body, "input schema") {
+		t.Fatalf("loaded tool state was not carried forward: %#v", state.Tools)
+	}
+	if len(state.ProjectInstructions) != 1 ||
+		state.ProjectInstructions[0].Source != "AGENTS.md instructions for /repo" ||
+		!strings.Contains(state.ProjectInstructions[0].Body, "Stay in internal/agent.") {
+		t.Fatalf("project instructions were not carried forward: %#v", state.ProjectInstructions)
 	}
 }
 
@@ -188,6 +283,22 @@ func TestExtractLatestPlanReturnsMostRecent(t *testing.T) {
 	}
 }
 
+func TestFormatPlanArgumentsAcceptsStepAlias(t *testing.T) {
+	got := formatPlanArguments(`{"plan":[{"step":"write failing test","status":"in_progress"},{"content":"keep existing shape","status":"pending"}]}`)
+	for _, want := range []string{"- [in_progress] write failing test", "- [pending] keep existing shape"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in formatted plan, got %q", want, got)
+		}
+	}
+}
+
+func TestFormatPlanArgumentsPreservesNotes(t *testing.T) {
+	got := formatPlanArguments(`{"plan":[{"content":"finish preservation","status":"in_progress","notes":"keep TUI untouched"}]}`)
+	if !strings.Contains(got, "- [in_progress] finish preservation") || !strings.Contains(got, "Notes: keep TUI untouched") {
+		t.Fatalf("expected plan content and notes to be preserved, got %q", got)
+	}
+}
+
 func TestCapBodyShortBodyUnchanged(t *testing.T) {
 	body := "short skill body"
 	if got := capBody(body); got != body {
@@ -237,5 +348,18 @@ func TestLoadedSkillsSkipsCallsWithoutResult(t *testing.T) {
 	}
 	if got := loadedSkills(messages); len(got) != 0 {
 		t.Fatalf("expected no skills without a result body, got %#v", got)
+	}
+}
+
+func TestLoadedSkillsAcceptsSkillArgumentAlias(t *testing.T) {
+	messages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{
+			{ID: "s1", Name: "skill", Arguments: `{"skill":"deploy"}`},
+		}},
+		{Role: zeroruntime.MessageRoleTool, ToolCallID: "s1", Content: "deploy instructions"},
+	}
+	got := loadedSkills(messages)
+	if len(got) != 1 || got[0].name != "deploy" || got[0].body != "deploy instructions" {
+		t.Fatalf("loadedSkills should honor skill alias, got %#v", got)
 	}
 }

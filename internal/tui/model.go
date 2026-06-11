@@ -46,6 +46,7 @@ type model struct {
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
+	sessionCompactor       SessionCompactor
 	runtimeMessageSink     func(tea.Msg)
 	agentOptions           agent.Options
 	notifier               *notify.Notifier
@@ -53,6 +54,8 @@ type model struct {
 	reasoningEffort        modelregistry.ReasoningEffort
 	responseStyle          string
 	compactRequests        int
+	lastCompactResult      *CompactResult
+	lastCompactError       string
 	unpricedRequests       int
 	unpricedTokens         int
 	transcript             []transcriptRow
@@ -294,6 +297,7 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore:           sessionStore,
 		sandboxStore:           sandboxStore,
 		agentOptions:           options.AgentOptions,
+		sessionCompactor:       options.SessionCompactor,
 		runtimeMessageSink:     options.RuntimeMessageSink,
 		permissionMode:         permissionMode,
 		reasoningEffort:        options.ReasoningEffort,

@@ -112,6 +112,54 @@ const (
 	sessionsCardFieldSep = "\x1f"
 )
 
+type modelSwitchCompactionRequest struct {
+	CurrentModel         string
+	TargetModel          string
+	CurrentProvider      string
+	TargetProvider       string
+	CurrentContextWindow int
+	TargetContextWindow  int
+	EstimatedTokens      int
+	SessionEventCount    int
+	CompactRequests      int
+}
+
+type modelSwitchCompactionDecision struct {
+	RequestCompaction bool
+	Reason            string
+}
+
+type modelSwitchCompactionPolicy interface {
+	BeforeModelSwitch(modelSwitchCompactionRequest) modelSwitchCompactionDecision
+}
+
+type defaultModelSwitchCompactionPolicy struct{}
+
+func (defaultModelSwitchCompactionPolicy) BeforeModelSwitch(request modelSwitchCompactionRequest) modelSwitchCompactionDecision {
+	if request.CompactRequests > 0 || request.SessionEventCount <= tuiCompactionPreserveLast {
+		return modelSwitchCompactionDecision{}
+	}
+	if request.TargetContextWindow <= 0 || request.EstimatedTokens <= 0 {
+		return modelSwitchCompactionDecision{}
+	}
+	threshold := int(float64(request.TargetContextWindow) * 0.8)
+	if request.EstimatedTokens < threshold {
+		return modelSwitchCompactionDecision{}
+	}
+	return modelSwitchCompactionDecision{
+		RequestCompaction: true,
+		Reason:            fmt.Sprintf("estimated context %s tokens is near target context %s tokens", formatContextWindow(request.EstimatedTokens), formatContextWindow(request.TargetContextWindow)),
+	}
+}
+
+type noopModelSwitchCompactionPolicy struct{}
+
+func (noopModelSwitchCompactionPolicy) BeforeModelSwitch(modelSwitchCompactionRequest) modelSwitchCompactionDecision {
+	return modelSwitchCompactionDecision{}
+}
+
+var modelSwitchCompactionGuard modelSwitchCompactionPolicy = defaultModelSwitchCompactionPolicy{}
+
 // sanitizeCardField strips the card protocol's separator bytes from
 // user-controlled values (titles can legally contain anything --session-title
 // was given), so a hostile or accidental \x1f / newline cannot shift fields
@@ -177,6 +225,14 @@ func (m model) handleModelCommand(args string) (model, string) {
 	metadata, err := providers.ResolveRuntimeMetadata(nextProfile, providers.Options{})
 	if err != nil {
 		return m, "Model\n" + err.Error()
+	}
+
+	if guarded, text, requested := m.requestCompactionBeforeModelSwitch(modelSwitchCompactionRequest{
+		TargetModel:         target.modelID,
+		TargetProvider:      string(metadata.ProviderKind),
+		TargetContextWindow: modelContextWindow(target.modelID),
+	}, "Model"); requested {
+		return guarded, text
 	}
 
 	nextProvider, err := m.newProvider(nextProfile)
@@ -297,6 +353,13 @@ func (m model) handleModeCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Mode\n" + err.Error()
 	}
+	if guarded, text, requested := m.requestCompactionBeforeModelSwitch(modelSwitchCompactionRequest{
+		TargetModel:         entry.ID,
+		TargetProvider:      string(metadata.ProviderKind),
+		TargetContextWindow: modelContextWindow(entry.ID),
+	}, "Mode"); requested {
+		return guarded, text
+	}
 	nextProvider, err := m.newProvider(nextProfile)
 	if err != nil {
 		return m, "Mode\n" + err.Error()
@@ -340,6 +403,40 @@ func (m model) handleModeCommand(args string) (model, string) {
 		turnsLine,
 	)
 	return m, strings.Join(lines, "\n")
+}
+
+func (m model) requestCompactionBeforeModelSwitch(request modelSwitchCompactionRequest, title string) (model, string, bool) {
+	if modelSwitchCompactionGuard == nil {
+		return m, "", false
+	}
+	request.CurrentModel = m.modelName
+	request.CurrentProvider = m.providerName
+	request.CurrentContextWindow = modelContextWindow(m.modelName)
+	request.EstimatedTokens = estimateTranscriptTokens(m.transcript)
+	request.SessionEventCount = len(m.sessionEvents)
+	request.CompactRequests = m.compactRequests
+
+	decision := modelSwitchCompactionGuard.BeforeModelSwitch(request)
+	if !decision.RequestCompaction {
+		return m, "", false
+	}
+
+	m.compactRequests++
+	lines := []string{
+		title,
+		"Context compaction requested before switching models.",
+		"The active model/provider is unchanged until compaction can run.",
+		"from model: " + displayValue(request.CurrentModel, "none"),
+		"to model: " + displayValue(request.TargetModel, "none"),
+	}
+	if request.TargetProvider != "" {
+		lines = append(lines, "target provider: "+request.TargetProvider)
+	}
+	if reason := strings.TrimSpace(decision.Reason); reason != "" {
+		lines = append(lines, "reason: "+reason)
+	}
+	lines = append(lines, "compaction: "+m.compactionStatus())
+	return m, strings.Join(lines, "\n"), true
 }
 
 func (m model) modeListText() string {

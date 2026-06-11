@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,6 +13,30 @@ import (
 )
 
 var responseStyles = []string{"balanced", "concise", "explanatory", "review"}
+
+const tuiCompactionPreserveLast = 8
+const tuiCompactionMaxPromptChars = 8000
+
+type SessionCompactor interface {
+	CompactSession(context.Context, CompactRequest) (CompactResult, error)
+}
+
+type CompactRequest struct {
+	SessionID             string
+	ModelName             string
+	ContextWindow         int
+	SessionEventCount     int
+	EstimatedTokens       int
+	VisibleTranscriptRows int
+	CompactRequests       int
+}
+
+type CompactResult struct {
+	Compacted    bool
+	BeforeTokens int
+	AfterTokens  int
+	Summary      string
+}
 
 func (m model) handleEffortCommand(args string) (model, string) {
 	args = strings.TrimSpace(strings.ToLower(args))
@@ -163,6 +188,25 @@ func (m model) handleCompactCommand(args string) (model, string) {
 		return m, "Compact\nusage: /compact [status]"
 	}
 	m.compactRequests++
+	m.lastCompactError = ""
+	if m.sessionCompactor != nil {
+		result, err := m.sessionCompactor.CompactSession(m.ctx, m.compactRequest())
+		if err != nil {
+			m.lastCompactResult = nil
+			m.lastCompactError = err.Error()
+			return m, m.compactText(true)
+		}
+		m.lastCompactResult = &result
+	} else if m.hasSessionBackedCompactor() {
+		next, result, err := m.compactActiveSession()
+		if err != nil {
+			m.lastCompactResult = nil
+			m.lastCompactError = err.Error()
+			return m, m.compactText(true)
+		}
+		m = next
+		m.lastCompactResult = &result
+	}
 	return m, m.compactText(true)
 }
 
@@ -254,33 +298,237 @@ func (m model) compactText(requested bool) string {
 	status := commandStatusInfo
 	if requested {
 		status = commandStatusWarning
+		if m.lastCompactResult != nil {
+			status = commandStatusOK
+		}
+		if m.lastCompactError != "" {
+			status = commandStatusBlocked
+		}
 	}
-	return renderCommandOutput(commandOutput{
-		Title:  "Compact",
-		Status: status,
-		Sections: []commandSection{
-			{
-				Title: "State",
-				Lines: []string{
-					"summary: " + m.compactionStatus(),
-					"requested: " + boolText(m.compactRequests > 0),
-					fmt.Sprintf("visible transcript rows: %d", len(m.transcript)),
-				},
-			},
-			{
-				Title: "Backend",
-				Lines: []string{"state: pending integration"},
+	request := m.compactRequest()
+	sections := []commandSection{
+		{
+			Title: "State",
+			Lines: []string{
+				"summary: " + m.compactionStatus(),
+				"requested: " + boolText(m.compactRequests > 0),
+				"model: " + displayValue(request.ModelName, "none"),
+				"context window: " + compactContextWindowText(request.ContextWindow),
+				fmt.Sprintf("estimated transcript: %d tokens", request.EstimatedTokens),
+				fmt.Sprintf("visible transcript rows: %d", request.VisibleTranscriptRows),
+				m.compactabilityText(request),
 			},
 		},
-		Hints: []string{"compaction request is tracked for this TUI session"},
+	}
+	if m.lastCompactResult != nil {
+		sections = append(sections, commandSection{
+			Title: "Result",
+			Lines: compactResultLines(*m.lastCompactResult),
+		})
+	} else if m.lastCompactError != "" {
+		sections = append(sections, commandSection{
+			Title: "Result",
+			Lines: []string{
+				"compacted: no",
+				"error: " + m.lastCompactError,
+			},
+		})
+	} else if requested && m.sessionCompactor == nil {
+		sections = append(sections, commandSection{
+			Title: "Result",
+			Lines: []string{
+				"compacted: no",
+				"reason: manual compactor unavailable",
+			},
+		})
+	}
+	return renderCommandOutput(commandOutput{
+		Title:    "Compact",
+		Status:   status,
+		Sections: sections,
+		Hints:    []string{"manual compaction affects this TUI session when a compactor is available"},
 	})
 }
 
 func (m model) compactionStatus() string {
+	if m.lastCompactResult != nil {
+		if m.lastCompactResult.Compacted {
+			return "compacted manually"
+		}
+		return "manual compactor completed without changes"
+	}
+	if m.lastCompactError != "" {
+		return "manual compaction failed"
+	}
 	if m.compactRequests > 0 {
-		return "requested, not yet compacted"
+		return "requested, awaiting manual compactor"
 	}
 	return "not compacted"
+}
+
+func (m model) compactRequest() CompactRequest {
+	return CompactRequest{
+		SessionID:             strings.TrimSpace(m.activeSession.SessionID),
+		ModelName:             strings.TrimSpace(m.modelName),
+		ContextWindow:         modelContextWindow(m.modelName),
+		SessionEventCount:     len(m.sessionEvents),
+		EstimatedTokens:       estimateTranscriptTokens(m.transcript),
+		VisibleTranscriptRows: len(m.transcript),
+		CompactRequests:       m.compactRequests,
+	}
+}
+
+func (m model) compactabilityText(request CompactRequest) string {
+	if m.sessionCompactor == nil && !m.hasSessionBackedCompactor() {
+		return "compactable: no (manual compactor unavailable)"
+	}
+	if m.sessionCompactor == nil && request.SessionEventCount <= tuiCompactionPreserveLast {
+		return "compactable: no (not enough session history yet)"
+	}
+	if request.ContextWindow <= 0 {
+		return "compactable: no (unknown model context window)"
+	}
+	if request.EstimatedTokens <= 0 {
+		return "compactable: no (empty transcript)"
+	}
+	return "compactable: yes"
+}
+
+func (m model) hasSessionBackedCompactor() bool {
+	return m.sessionStore != nil && strings.TrimSpace(m.activeSession.SessionID) != ""
+}
+
+func (m model) compactActiveSession() (model, CompactResult, error) {
+	if m.sessionStore == nil || strings.TrimSpace(m.activeSession.SessionID) == "" {
+		return m, CompactResult{}, fmt.Errorf("no active session to compact")
+	}
+	beforeEvents := append([]sessions.Event{}, m.sessionEvents...)
+	beforeTokens := estimateTranscriptTokens(m.transcript)
+	plan, err := m.sessionStore.PlanCompaction(m.activeSession.SessionID, sessions.CompactionOptions{
+		PreserveLast:   tuiCompactionPreserveLast,
+		MaxPromptChars: tuiCompactionMaxPromptChars,
+	})
+	if err != nil {
+		return m, CompactResult{}, err
+	}
+	if plan.CompactableCount == 0 {
+		return m, CompactResult{
+			Compacted:    false,
+			BeforeTokens: beforeTokens,
+			AfterTokens:  beforeTokens,
+			Summary:      "not enough session history to compact yet",
+		}, nil
+	}
+
+	summary, err := m.summarizeCompactionPlan(plan)
+	if err != nil {
+		return m, CompactResult{}, err
+	}
+	if _, err := m.sessionStore.RecordCompaction(m.activeSession.SessionID, sessions.RecordCompactionInput{
+		Plan:    plan,
+		Summary: summary,
+	}); err != nil {
+		return m, CompactResult{}, err
+	}
+	if meta, err := m.sessionStore.Get(m.activeSession.SessionID); err == nil && meta != nil {
+		m.activeSession = *meta
+	}
+	events, err := m.sessionStore.ReadRehydratedEvents(m.activeSession.SessionID)
+	if err != nil {
+		m.sessionEvents = nil
+		return m, CompactResult{}, fmt.Errorf("reload compacted session: %w", err)
+	}
+	m.sessionEvents = append([]sessions.Event{}, events...)
+	rows := initialTranscript()
+	for _, row := range transcriptRowsFromSessionEvents(events) {
+		rows = appendTranscriptRow(rows, row)
+	}
+	m.transcript = rows
+	m.resetFlushFrontier("· compacted ·")
+
+	return m, CompactResult{
+		Compacted:    len(events) < len(beforeEvents)+1,
+		BeforeTokens: beforeTokens,
+		AfterTokens:  estimateTranscriptTokens(m.transcript),
+		Summary:      summary,
+	}, nil
+}
+
+func (m model) summarizeCompactionPlan(plan sessions.CompactionPlan) (string, error) {
+	if m.provider == nil {
+		return deterministicCompactionSummary(plan), nil
+	}
+	stream, err := m.provider.StreamCompletion(m.ctx, zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleSystem, Content: "Summarize compacted Zero session events for future coding context. Preserve user goals, decisions, files, tool outcomes, blockers, and exact next steps. Omit secrets and do not invent details."},
+			{Role: zeroruntime.MessageRoleUser, Content: plan.SummaryPrompt},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("summarize compacted session: %w", err)
+	}
+	collected := zeroruntime.CollectStream(m.ctx, stream)
+	if collected.Error != "" {
+		return "", fmt.Errorf("summarize compacted session: %s", collected.Error)
+	}
+	summary := strings.TrimSpace(collected.Text)
+	if summary == "" {
+		return "", fmt.Errorf("summarize compacted session: empty summary")
+	}
+	return summary, nil
+}
+
+func deterministicCompactionSummary(plan sessions.CompactionPlan) string {
+	lines := []string{
+		fmt.Sprintf("Compacted earlier session context: %d event(s) summarized, %d recent event(s) preserved.", plan.CompactableCount, plan.PreservedCount),
+	}
+	if len(plan.CompactableEvents) > 0 {
+		first := plan.CompactableEvents[0]
+		last := plan.CompactableEvents[len(plan.CompactableEvents)-1]
+		lines = append(lines, fmt.Sprintf("Compacted range: #%d %s through #%d %s.", first.Sequence, first.Type, last.Sequence, last.Type))
+	}
+	if len(plan.PreservedEvents) > 0 {
+		first := plan.PreservedEvents[0]
+		last := plan.PreservedEvents[len(plan.PreservedEvents)-1]
+		lines = append(lines, fmt.Sprintf("Preserved recent range: #%d %s through #%d %s.", first.Sequence, first.Type, last.Sequence, last.Type))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func compactContextWindowText(window int) string {
+	if window <= 0 {
+		return "unknown"
+	}
+	return formatContextWindow(window) + " tokens"
+}
+
+func estimateTranscriptTokens(rows []transcriptRow) int {
+	total := 0
+	for _, row := range rows {
+		text := row.text + "\n" + row.detail + "\n" + row.tool + "\n" + row.arg
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		total += len(text)/4 + 4
+	}
+	return total
+}
+
+func compactResultLines(result CompactResult) []string {
+	lines := []string{
+		"compacted: " + boolText(result.Compacted),
+	}
+	if result.BeforeTokens > 0 {
+		lines = append(lines, fmt.Sprintf("before: %d tokens", result.BeforeTokens))
+	}
+	if result.AfterTokens > 0 {
+		lines = append(lines, fmt.Sprintf("after: %d tokens", result.AfterTokens))
+	}
+	if summary := strings.TrimSpace(result.Summary); summary != "" {
+		lines = append(lines, "summary: "+summary)
+	}
+	return lines
 }
 
 func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model, []transcriptRow) {

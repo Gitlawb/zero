@@ -10,23 +10,32 @@ import (
 
 // Compaction preservation.
 //
-// A plain prose summary loses two things the model needs to keep working: the
-// active plan (issued via the update_plan tool) and any skill instructions it
-// loaded (via the skill tool). When those turns fall into the elided middle,
-// the plan and skill bodies vanish from context. To prevent that, Compact
-// appends them VERBATIM to the injected summary so structured state survives a
-// compaction exactly rather than being paraphrased away.
+// A plain prose summary loses structured state the model needs to keep working:
+// the active plan, loaded deferred-tool schemas, loaded skills, and project
+// instruction blocks. When those turns fall into the elided middle, Compact
+// appends that state to the injected summary as JSON so it survives exactly
+// rather than being paraphrased away.
 
 const (
 	toolNameUpdatePlan = "update_plan"
+	toolNameToolSearch = "tool_search"
 	toolNameSkill      = "skill"
 )
 
-// preservedStateLabel heads the preserved-state block. The block body is a
-// single line of JSON (see formatPreservedState): JSON escapes everything, so a
-// skill body containing markdown headings (## / ###), code fences, or quotes
-// round-trips losslessly across repeated compactions — unlike a markdown-
-// delimited format, which would be truncated or mis-split when re-parsed.
+const (
+	projectInstructionsHeadingPrefix = "# "
+	projectInstructionsHeadingMarker = " instructions for "
+	projectInstructionsOpenTag       = "<INSTRUCTIONS>"
+	projectInstructionsCloseTag      = "</INSTRUCTIONS>"
+)
+
+// preservedStateLabel heads the preserved-state block. Keep this label stable so
+// summaries created by earlier builds remain parseable; the JSON body may carry
+// more fields than the historical label names.
+//
+// The block body is a single line of JSON (see formatPreservedState): JSON
+// escapes everything, so markdown headings, code fences, or quotes round-trip
+// losslessly across repeated compactions.
 const preservedStateLabel = "## Preserved state (active plan + loaded skills; carried across compaction)"
 
 // maxPreservedSkillBytes caps how much of each loaded skill body is carried
@@ -60,7 +69,9 @@ func formatPlanArguments(arguments string) string {
 	var parsed struct {
 		Plan []struct {
 			Content string `json:"content"`
+			Step    string `json:"step"`
 			Status  string `json:"status"`
+			Notes   string `json:"notes"`
 		} `json:"plan"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(arguments)), &parsed); err != nil {
@@ -70,18 +81,26 @@ func formatPlanArguments(arguments string) string {
 	for _, item := range parsed.Plan {
 		content := strings.TrimSpace(item.Content)
 		if content == "" {
+			content = strings.TrimSpace(item.Step)
+		}
+		if content == "" {
 			continue
 		}
 		status := strings.TrimSpace(item.Status)
 		if status == "" {
 			status = "pending"
 		}
-		lines = append(lines, "- ["+status+"] "+content)
+		line := "- [" + status + "] " + content
+		if notes := strings.TrimSpace(item.Notes); notes != "" {
+			line += "\n  Notes: " + notes
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }
 
-// skillEntry is one loaded skill: its name and (capped) body.
+// skillEntry is a named preserved body. It began as loaded-skill state and is
+// reused for loaded tools and project instruction blocks.
 type skillEntry struct {
 	name string
 	body string
@@ -133,16 +152,136 @@ func loadedSkills(messages []zeroruntime.Message) []skillEntry {
 	return entries
 }
 
+// loadedToolSchemas returns tool_search-loaded schemas from their normal tool
+// result text. ToolResult.Meta is not part of zeroruntime.Message history, so the
+// rendered "Loaded N tools" output is the durable transcript format.
+func loadedToolSchemas(messages []zeroruntime.Message) []skillEntry {
+	toolSearchIDs := map[string]bool{}
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			if call.Name == toolNameToolSearch && call.ID != "" {
+				toolSearchIDs[call.ID] = true
+			}
+		}
+	}
+	if len(toolSearchIDs) == 0 {
+		return nil
+	}
+
+	bodyByName := map[string]string{}
+	nameOrder := make([]string, 0)
+	for _, message := range messages {
+		if message.Role != zeroruntime.MessageRoleTool || !toolSearchIDs[message.ToolCallID] {
+			continue
+		}
+		for _, entry := range loadedToolEntriesFromOutput(message.Content) {
+			if _, seen := bodyByName[entry.name]; !seen {
+				nameOrder = append(nameOrder, entry.name)
+			}
+			bodyByName[entry.name] = entry.body
+		}
+	}
+
+	entries := make([]skillEntry, 0, len(nameOrder))
+	for _, name := range nameOrder {
+		entries = append(entries, skillEntry{name: name, body: bodyByName[name]})
+	}
+	return entries
+}
+
+func loadedToolEntriesFromOutput(output string) []skillEntry {
+	output = strings.TrimSpace(output)
+	if !strings.HasPrefix(output, "Loaded ") || !strings.Contains(output, "Full schemas follow") {
+		return nil
+	}
+	lines := strings.Split(output, "\n")
+	var entries []skillEntry
+	for i := 0; i < len(lines); i++ {
+		name, ok := strings.CutPrefix(strings.TrimSpace(lines[i]), "## ")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		start := i
+		end := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			if strings.HasPrefix(strings.TrimSpace(lines[j]), "## ") {
+				end = j
+				break
+			}
+		}
+		entries = append(entries, skillEntry{name: name, body: capBody(strings.TrimSpace(strings.Join(lines[start:end], "\n")))})
+		i = end - 1
+	}
+	return entries
+}
+
+func projectInstructionEntries(messages []zeroruntime.Message) []skillEntry {
+	bodyBySource := map[string]string{}
+	sourceOrder := make([]string, 0)
+	for _, message := range messages {
+		if message.Role != zeroruntime.MessageRoleUser {
+			continue
+		}
+		source, body := projectInstructionBlock(message.Content)
+		if body == "" {
+			continue
+		}
+		if _, seen := bodyBySource[source]; !seen {
+			sourceOrder = append(sourceOrder, source)
+		}
+		bodyBySource[source] = body
+	}
+
+	entries := make([]skillEntry, 0, len(sourceOrder))
+	for _, source := range sourceOrder {
+		entries = append(entries, skillEntry{name: source, body: bodyBySource[source]})
+	}
+	return entries
+}
+
+func projectInstructionBlock(content string) (string, string) {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, projectInstructionsHeadingPrefix) {
+		return "", ""
+	}
+	firstLineEnd := strings.IndexByte(content, '\n')
+	if firstLineEnd < 0 {
+		return "", ""
+	}
+	heading := strings.TrimSpace(content[:firstLineEnd])
+	if !strings.Contains(heading, projectInstructionsHeadingMarker) {
+		return "", ""
+	}
+	open := strings.Index(content, projectInstructionsOpenTag)
+	close := strings.Index(content, projectInstructionsCloseTag)
+	if open < 0 || close < open {
+		return "", ""
+	}
+	close += len(projectInstructionsCloseTag)
+
+	source := strings.TrimPrefix(heading, "# ")
+	body := strings.TrimSpace(heading + "\n\n" + strings.TrimSpace(content[open:close]))
+	return source, body
+}
+
 // skillNameFromArguments pulls the "name" field from a skill tool call's JSON
 // arguments ({"name":"..."}). Returns "" on malformed arguments.
 func skillNameFromArguments(arguments string) string {
 	var parsed struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Skill string `json:"skill"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(arguments)), &parsed); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(parsed.Name)
+	if name := strings.TrimSpace(parsed.Name); name != "" {
+		return name
+	}
+	return strings.TrimSpace(parsed.Skill)
 }
 
 // truncationNote is appended to a capped skill body. Its length is reserved
@@ -170,8 +309,15 @@ func capBody(body string) string {
 
 // preservedState is the JSON shape of the carried-across-compaction block.
 type preservedState struct {
-	Plan   string           `json:"plan,omitempty"`
-	Skills []preservedSkill `json:"skills,omitempty"`
+	Plan                string                 `json:"plan,omitempty"`
+	Tools               []preservedTool        `json:"tools,omitempty"`
+	Skills              []preservedSkill       `json:"skills,omitempty"`
+	ProjectInstructions []preservedInstruction `json:"project_instructions,omitempty"`
+}
+
+type preservedTool struct {
+	Name string `json:"name"`
+	Body string `json:"body"`
 }
 
 type preservedSkill struct {
@@ -179,45 +325,62 @@ type preservedSkill struct {
 	Body string `json:"body"`
 }
 
-// appendPreservedState appends the active plan and loaded skills to a compaction
-// summary as a single JSON block, so structured state survives verbatim. middle
-// is the slice being summarized away.
+type preservedInstruction struct {
+	Source string `json:"source"`
+	Body   string `json:"body"`
+}
+
+// appendPreservedState appends active structured state to a compaction summary
+// as a single JSON block. middle is the slice being summarized away.
 //
-// It is robust across REPEATED compactions: after the first compaction the plan
-// and skills live only inside the injected summary message, which on a later
-// compaction lands in middle with no real tool calls left to extract. So when
-// middle has no fresh update_plan / skill tool calls, the preserved state is
-// carried forward by re-parsing the prior block (JSON → lossless for arbitrary
-// markdown bodies). Fresh tool calls always override the carried-forward copy.
+// It is robust across repeated compactions: after the first compaction the state
+// may live only inside the injected summary message, which on a later compaction
+// lands in middle with no real tool calls left to extract. Fresh tool calls and
+// instruction blocks override the carried-forward copy by name/source.
 func appendPreservedState(summary string, middle []zeroruntime.Message) string {
-	priorPlan, priorSkills := parsePreservedState(latestSummaryContent(middle))
+	priorState := parsePreservedStateBlock(latestSummaryContent(middle))
 
 	// Plan: a fresh update_plan in middle is authoritative; otherwise carry the
 	// plan preserved by an earlier compaction.
 	plan := extractLatestPlan(middle)
 	if plan == "" {
-		plan = priorPlan
+		plan = priorState.Plan
 	}
+
+	// Tools: preserve deferred tool_search schemas from the transcript. Fresh
+	// loads override older carried copies by name.
+	tools := mergeSkillEntries(preservedToolsToEntries(priorState.Tools), loadedToolSchemas(middle))
 
 	// Skills: merge skills preserved earlier (older) with fresh loads (newer wins
 	// per name), so a loaded skill survives repeated compactions.
-	skills := mergeSkillEntries(priorSkills, loadedSkills(middle))
+	skills := mergeSkillEntries(preservedSkillsToEntries(priorState.Skills), loadedSkills(middle))
 
-	if block := formatPreservedState(plan, skills); block != "" {
+	instructions := mergeSkillEntries(
+		preservedInstructionsToEntries(priorState.ProjectInstructions),
+		projectInstructionEntries(middle),
+	)
+
+	if block := formatPreservedState(plan, tools, skills, instructions); block != "" {
 		summary += "\n\n" + block
 	}
 	return summary
 }
 
-// formatPreservedState renders the plan + skills as the labelled, single-line
+// formatPreservedState renders state as the labelled, single-line
 // JSON block. Returns "" when there is nothing to preserve.
-func formatPreservedState(plan string, skills []skillEntry) string {
-	if plan == "" && len(skills) == 0 {
+func formatPreservedState(plan string, tools, skills, instructions []skillEntry) string {
+	if plan == "" && len(tools) == 0 && len(skills) == 0 && len(instructions) == 0 {
 		return ""
 	}
 	state := preservedState{Plan: plan}
+	for _, t := range tools {
+		state.Tools = append(state.Tools, preservedTool{Name: t.name, Body: t.body})
+	}
 	for _, s := range skills {
 		state.Skills = append(state.Skills, preservedSkill{Name: s.name, Body: s.body})
+	}
+	for _, i := range instructions {
+		state.ProjectInstructions = append(state.ProjectInstructions, preservedInstruction{Source: i.name, Body: i.body})
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -231,9 +394,14 @@ func formatPreservedState(plan string, skills []skillEntry) string {
 // markdown headings, code fences, or quotes. Returns ("", nil) when absent or
 // malformed.
 func parsePreservedState(summaryContent string) (string, []skillEntry) {
+	state := parsePreservedStateBlock(summaryContent)
+	return state.Plan, preservedSkillsToEntries(state.Skills)
+}
+
+func parsePreservedStateBlock(summaryContent string) preservedState {
 	idx := strings.LastIndex(summaryContent, preservedStateLabel)
 	if idx < 0 {
-		return "", nil
+		return preservedState{}
 	}
 	rest := strings.TrimPrefix(summaryContent[idx+len(preservedStateLabel):], "\n")
 	// The JSON is a single line (json.Marshal escapes newlines).
@@ -242,20 +410,46 @@ func parsePreservedState(summaryContent string) (string, []skillEntry) {
 	}
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
-		return "", nil
+		return preservedState{}
 	}
 	var state preservedState
 	if err := json.Unmarshal([]byte(rest), &state); err != nil {
-		return "", nil
+		return preservedState{}
 	}
-	entries := make([]skillEntry, 0, len(state.Skills))
-	for _, s := range state.Skills {
+	return state
+}
+
+func preservedToolsToEntries(tools []preservedTool) []skillEntry {
+	entries := make([]skillEntry, 0, len(tools))
+	for _, t := range tools {
+		if t.Name == "" {
+			continue
+		}
+		entries = append(entries, skillEntry{name: t.Name, body: t.Body})
+	}
+	return entries
+}
+
+func preservedSkillsToEntries(skills []preservedSkill) []skillEntry {
+	entries := make([]skillEntry, 0, len(skills))
+	for _, s := range skills {
 		if s.Name == "" {
 			continue
 		}
 		entries = append(entries, skillEntry{name: s.Name, body: s.Body})
 	}
-	return state.Plan, entries
+	return entries
+}
+
+func preservedInstructionsToEntries(instructions []preservedInstruction) []skillEntry {
+	entries := make([]skillEntry, 0, len(instructions))
+	for _, i := range instructions {
+		if i.Source == "" {
+			continue
+		}
+		entries = append(entries, skillEntry{name: i.Source, body: i.Body})
+	}
+	return entries
 }
 
 // latestSummaryContent returns the content of the most recent injected summary

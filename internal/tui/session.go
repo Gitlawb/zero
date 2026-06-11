@@ -280,6 +280,10 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if message := payloadString(payload, "message"); message != "" {
 				rows = append(rows, transcriptRow{kind: rowError, text: message})
 			}
+		case sessions.EventCompaction:
+			if summary := payloadString(payload, "summary"); summary != "" {
+				rows = append(rows, transcriptRow{kind: rowSystem, text: summary})
+			}
 		case sessions.EventSessionFork:
 			parentID := payloadString(payload, "parentSessionId")
 			if parentID != "" {

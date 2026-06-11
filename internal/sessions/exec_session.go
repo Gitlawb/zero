@@ -67,7 +67,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		if parent == nil {
 			return PreparedExec{}, ExecError{"Zero session not found: " + forkID}
 		}
-		contextEvents, err := store.ReadEvents(parent.SessionID)
+		contextEvents, err := store.ReadRehydratedEvents(parent.SessionID)
 		if err != nil {
 			return PreparedExec{}, err
 		}
@@ -103,7 +103,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		if session == nil {
 			return PreparedExec{}, ExecError{"Zero session not found: " + sessionID}
 		}
-		contextEvents, err := store.ReadEvents(session.SessionID)
+		contextEvents, err := store.ReadRehydratedEvents(session.SessionID)
 		if err != nil {
 			return PreparedExec{}, err
 		}
@@ -217,6 +217,9 @@ func extractText(value any) string {
 		}
 		return strings.Join(parts, " ")
 	case map[string]any:
+		if summary, ok := typed["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+			return summary
+		}
 		parts := []string{}
 		for _, item := range typed {
 			if text := extractText(item); text != "" {

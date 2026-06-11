@@ -51,6 +51,23 @@ type CompactionOptions struct {
 	Summarize func(toSummarize []zeroruntime.Message) (string, error)
 }
 
+// CompactionResult is the metadata-bearing result returned by CompactMessages.
+type CompactionResult struct {
+	// Messages is the original conversation or the compacted replacement.
+	Messages []zeroruntime.Message
+	// RemovedCount is the number of original messages summarized away.
+	RemovedCount int
+	// PreservedCount is the number of original messages kept verbatim, including
+	// leading system messages and the preserved suffix.
+	PreservedCount int
+	// SummaryText is the trimmed text returned by the summarizer. The injected
+	// summary message also includes summaryLabel and any preserved structured
+	// state needed by later compactions.
+	SummaryText string
+	// Compacted reports whether Messages contains an injected summary.
+	Compacted bool
+}
+
 // estimateTokens is a cheap, dependency-free token estimate (~4 chars/token)
 // across message content plus tool call names/arguments. It deliberately uses no
 // real tokenizer; it only needs to be monotonic and roughly proportional so the
@@ -96,12 +113,23 @@ func compactionThreshold(contextWindow int) int {
 // Compact is pure: it performs no provider I/O. A Summarize error is returned to
 // the caller, which decides how to recover.
 func Compact(messages []zeroruntime.Message, opts CompactionOptions) ([]zeroruntime.Message, error) {
+	result, err := CompactMessages(messages, opts)
+	if err != nil {
+		return nil, err
+	}
+	return result.Messages, nil
+}
+
+// CompactMessages summarizes the oldest middle of a conversation and returns
+// both the replacement messages and UI/session-friendly metadata about what
+// changed. It uses the same compaction rules as Compact.
+func CompactMessages(messages []zeroruntime.Message, opts CompactionOptions) (CompactionResult, error) {
 	preserveLast := opts.PreserveLast
 	if preserveLast <= 0 {
 		preserveLast = defaultCompactionPreserveLast
 	}
 	if opts.Summarize == nil {
-		return nil, errors.New("compaction requires a Summarize function")
+		return CompactionResult{}, errors.New("compaction requires a Summarize function")
 	}
 
 	// Leading system messages are kept verbatim at the head.
@@ -121,12 +149,15 @@ func Compact(messages []zeroruntime.Message, opts CompactionOptions) ([]zerorunt
 	middle := messages[systemEnd:boundary]
 	if len(middle) == 0 {
 		// Nothing to summarize once system + preserved suffix are removed.
-		return messages, nil
+		return CompactionResult{
+			Messages:       messages,
+			PreservedCount: len(messages),
+		}, nil
 	}
 
 	summary, err := opts.Summarize(middle)
 	if err != nil {
-		return nil, err
+		return CompactionResult{}, err
 	}
 	summary = strings.TrimSpace(summary)
 
@@ -141,7 +172,13 @@ func Compact(messages []zeroruntime.Message, opts CompactionOptions) ([]zerorunt
 		Content: content,
 	})
 	compacted = append(compacted, messages[boundary:]...)
-	return compacted, nil
+	return CompactionResult{
+		Messages:       compacted,
+		RemovedCount:   len(middle),
+		PreservedCount: len(messages) - len(middle),
+		SummaryText:    summary,
+		Compacted:      true,
+	}, nil
 }
 
 // safeSuffixBoundary walks the preserve boundary backward (toward systemEnd) so
