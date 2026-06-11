@@ -36,11 +36,27 @@ func TestDialValidatedAddrsFallsBackPastDeadAddress(t *testing.T) {
 
 func TestDialValidatedAddrsReturnsLastErrorWhenAllFail(t *testing.T) {
 	addrs := []netip.Addr{netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")}
+	firstErr := errors.New("first unreachable")
+	lastErr := errors.New("last unreachable")
+	attempts := 0
 	dial := func(_ context.Context, _ string) (net.Conn, error) {
-		return nil, errors.New("unreachable")
+		attempts++
+		if attempts == 1 {
+			return nil, firstErr
+		}
+		return nil, lastErr
 	}
-	if _, err := dialValidatedAddrs(context.Background(), addrs, "443", dial); err == nil {
+	_, err := dialValidatedAddrs(context.Background(), addrs, "443", dial)
+	if err == nil {
 		t.Fatal("expected an error when every address fails to dial")
+	}
+	// Distinct per-attempt errors lock in the "last error wins" contract — a
+	// regression that returned the first failure would otherwise pass.
+	if !errors.Is(err, lastErr) {
+		t.Fatalf("err = %v, want the last attempt's error", err)
+	}
+	if attempts != len(addrs) {
+		t.Fatalf("dialed %d addresses, want %d (every address tried)", attempts, len(addrs))
 	}
 }
 
