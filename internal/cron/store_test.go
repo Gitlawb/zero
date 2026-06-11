@@ -1,12 +1,37 @@
 package cron
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestStoreGetDistinguishesNotFoundFromReadError(t *testing.T) {
+	s := newTestStore(t)
+
+	// A genuinely absent job → ErrJobNotFound.
+	if _, err := s.Get("job_missing"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("missing job Get err = %v, want ErrJobNotFound", err)
+	}
+
+	// A job whose metadata.json can't be read (here it's a directory, so ReadFile
+	// fails with a non-ENOENT error) must NOT be reported as not-found — otherwise
+	// cron_run mislabels a transient IO failure as "job removed during run".
+	id := "job_unreadable"
+	if err := os.MkdirAll(filepath.Join(s.jobDir(id), "metadata.json"), 0o755); err != nil {
+		t.Fatalf("mkdir metadata.json-as-dir: %v", err)
+	}
+	_, err := s.Get(id)
+	if err == nil {
+		t.Fatal("expected an error reading a directory as metadata.json")
+	}
+	if errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("a read error must not be reported as ErrJobNotFound: %v", err)
+	}
+}
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()

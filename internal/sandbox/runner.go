@@ -288,6 +288,36 @@ func defaultPath() string {
 	return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
+// sandboxWritableDevices are the standard character devices that virtually every
+// command needs to write to (e.g. `> /dev/null`). The bubblewrap backend exposes
+// these via `--dev /dev`; the sandbox-exec profile must allow them explicitly or
+// the equivalent operations fail with "Operation not permitted".
+var sandboxWritableDevices = []string{
+	"/dev/null",
+	"/dev/zero",
+	"/dev/random",
+	"/dev/urandom",
+	"/dev/stdin",
+	"/dev/stdout",
+	"/dev/stderr",
+	"/dev/tty",
+	"/dev/dtracehelper",
+}
+
+// sandboxWritableSubpaths are non-workspace trees the sandbox-exec profile must
+// keep writable for parity with the bubblewrap backend's writable /tmp tmpfs.
+// macOS resolves /tmp and /var to their /private counterparts before the sandbox
+// check, so both forms are listed. /dev/fd covers process-substitution writes.
+var sandboxWritableSubpaths = []string{
+	"/tmp",
+	"/private/tmp",
+	"/var/tmp",
+	"/private/var/tmp",
+	"/var/folders",
+	"/private/var/folders",
+	"/dev/fd",
+}
+
 func sandboxExecProfile(writeRoots []string, policy Policy) string {
 	networkRule := "(deny network*)"
 	if policy.Network == NetworkAllow {
@@ -295,11 +325,20 @@ func sandboxExecProfile(writeRoots []string, policy Policy) string {
 	}
 	writeRule := "(allow file-write*)"
 	if policy.EnforceWorkspace {
-		subpaths := make([]string, 0, len(writeRoots))
+		// The granted write roots are the only writable *project* locations. Temp
+		// trees and the standard device nodes are the only additions, matching what
+		// the bubblewrap backend already grants (--tmpfs /tmp, --dev /dev).
+		filters := make([]string, 0, len(writeRoots)+len(sandboxWritableSubpaths)+len(sandboxWritableDevices))
 		for _, root := range writeRoots {
-			subpaths = append(subpaths, `(subpath "`+sandboxProfileString(root)+`")`)
+			filters = append(filters, `(subpath "`+sandboxProfileString(root)+`")`)
 		}
-		writeRule = "(allow file-write* " + strings.Join(subpaths, " ") + ")"
+		for _, subpath := range sandboxWritableSubpaths {
+			filters = append(filters, `(subpath "`+subpath+`")`)
+		}
+		for _, device := range sandboxWritableDevices {
+			filters = append(filters, `(literal "`+device+`")`)
+		}
+		writeRule = "(allow file-write*\n  " + strings.Join(filters, "\n  ") + ")"
 	}
 	return strings.Join([]string{
 		"(version 1)",

@@ -536,14 +536,34 @@ func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 		}
 		return nil, fmt.Errorf("read zero session events: %w", err)
 	}
+	// A genuine torn tail is an INCOMPLETE final write — a crash mid-append leaves
+	// the last line without its terminating newline. If the file ends with a
+	// newline, every record was fully flushed, so a malformed final line is real
+	// corruption and must still fail loudly.
+	tornTailPossible := len(data) > 0 && data[len(data)-1] != '\n'
+	lines := bytes.Split(data, []byte{'\n'})
+	lastNonEmpty := -1
+	for index, line := range lines {
+		if len(bytes.TrimSpace(line)) > 0 {
+			lastNonEmpty = index
+		}
+	}
 	events := []Event{}
-	for index, line := range bytes.Split(data, []byte{'\n'}) {
+	for index, line := range lines {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
 		var event Event
 		if err := json.Unmarshal(line, &event); err != nil {
+			// Tolerate a torn tail: a crash mid-append leaves the final line
+			// truncated (and thus without a trailing newline). Drop that partial
+			// record so resume still recovers every complete event. A malformed
+			// line anywhere earlier — or a complete-but-corrupt final line — is real
+			// corruption and still fails loudly.
+			if index == lastNonEmpty && tornTailPossible {
+				break
+			}
 			return nil, fmt.Errorf("invalid json in zero session %s %s at line %d: %w", sessionID, EventsFile, index+1, err)
 		}
 		events = append(events, event)

@@ -552,6 +552,66 @@ func TestStreamCompletionSendsMaxCompletionTokens(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `[DONE]`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "o3"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if got := gotBody["reasoning_effort"]; got != "high" {
+		t.Fatalf("reasoning_effort = %#v, want \"high\"", got)
+	}
+}
+
+func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
+	for _, effort := range []string{"", "none", "bogus"} {
+		var gotBody map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			writeSSE(w, `[DONE]`)
+		}))
+
+		provider, err := New(Options{BaseURL: server.URL + "/", Model: "gpt-test"})
+		if err != nil {
+			server.Close()
+			t.Fatalf("New returned error: %v", err)
+		}
+		stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+			Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+			ReasoningEffort: effort,
+		})
+		if err != nil {
+			server.Close()
+			t.Fatalf("StreamCompletion returned error: %v", err)
+		}
+		drain(stream)
+		server.Close()
+
+		if _, ok := gotBody["reasoning_effort"]; ok {
+			t.Fatalf("reasoning_effort should be omitted for %q: %#v", effort, gotBody["reasoning_effort"])
+		}
+	}
+}
+
 func TestStreamCompletionOmitsMaxCompletionTokensWhenUnset(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

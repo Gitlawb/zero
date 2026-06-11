@@ -84,8 +84,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
 		request := zeroruntime.CompletionRequest{
-			Messages: copyMessages(messages),
-			Tools:    exposed,
+			Messages:        copyMessages(messages),
+			Tools:           exposed,
+			ReasoningEffort: options.ReasoningEffort,
 		}
 		if reminder != "" {
 			// Append to the per-turn request copy only — NEVER to persistent
@@ -120,8 +121,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// empty-loaded partition, re-hiding every already-loaded deferred tool
 				// and dropping the reminder when deferral is active.
 				request = zeroruntime.CompletionRequest{
-					Messages: copyMessages(messages),
-					Tools:    exposed,
+					Messages:        copyMessages(messages),
+					Tools:           exposed,
+					ReasoningEffort: options.ReasoningEffort,
 				}
 				if reminder != "" {
 					// Append to the per-turn retry copy only — NEVER to persistent
@@ -159,8 +161,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// Routing through an empty-loaded partition here would re-hide every
 				// already-loaded deferred tool and drop the reminder when deferral is active.
 				retryRequest := zeroruntime.CompletionRequest{
-					Messages: copyMessages(messages),
-					Tools:    exposed,
+					Messages:        copyMessages(messages),
+					Tools:           exposed,
+					ReasoningEffort: options.ReasoningEffort,
 				}
 				if reminder != "" {
 					// Append to the per-turn retry copy only — NEVER to persistent
@@ -195,10 +198,18 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			return result, ctx.Err()
 		}
 
+		// Carry the turn's terminal stop reason so a final answer cut off at the
+		// output token cap (or by a content filter) is reported as truncated. A
+		// tool-call turn normalizes to "" and clears any prior reason.
+		result.FinishReason = collected.FinishReason
+
 		messages = append(messages, zeroruntime.Message{
 			Role:      zeroruntime.MessageRoleAssistant,
 			Content:   collected.Text,
 			ToolCalls: historySafeToolCalls(collected.ToolCalls),
+			// Preserve thinking blocks so the next turn can replay them; providers
+			// that use extended thinking reject tool conversations that drop them.
+			Reasoning: collected.ReasoningBlocks,
 		})
 
 		if len(collected.ToolCalls) == 0 {
@@ -377,8 +388,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		result.Messages = copyMessages(messages)
 		return result, ctx.Err()
 	}
-	if answer, finalMessages := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
+		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
 		return result, nil
 	}
@@ -388,30 +400,31 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	return result, nil
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message) {
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: maxTurnsFinalAnswerPrompt,
 	})
 	stream, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{
-		Messages: copyMessages(finalMessages),
+		Messages:        copyMessages(finalMessages),
+		ReasoningEffort: options.ReasoningEffort,
 	})
 	if err != nil {
-		return "", messages
+		return "", messages, ""
 	}
 	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
 		OnText:  options.OnText,
 		OnUsage: options.OnUsage,
 	})
 	if ctx.Err() != nil || collected.Error != "" || strings.TrimSpace(collected.Text) == "" {
-		return "", messages
+		return "", messages, ""
 	}
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleAssistant,
 		Content: collected.Text,
 	})
-	return collected.Text, finalMessages
+	return collected.Text, finalMessages, collected.FinishReason
 }
 
 func historySafeToolCalls(calls []ToolCall) []ToolCall {
@@ -1215,6 +1228,9 @@ func copyMessages(messages []Message) []Message {
 		copied[index] = message
 		if message.ToolCalls != nil {
 			copied[index].ToolCalls = append([]ToolCall{}, message.ToolCalls...)
+		}
+		if message.Reasoning != nil {
+			copied[index].Reasoning = append([]zeroruntime.ReasoningBlock{}, message.Reasoning...)
 		}
 		// Deep-copy image attachments (slice AND each Data byte slice) so the
 		// raw image bytes are never aliased across history/request/result copies.

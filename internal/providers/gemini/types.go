@@ -8,7 +8,17 @@ type generateContentRequest struct {
 }
 
 type generationConfig struct {
-	MaxOutputTokens int `json:"maxOutputTokens"`
+	MaxOutputTokens int             `json:"maxOutputTokens"`
+	ThinkingConfig  *thinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// thinkingConfig requests a thinking token budget. It is omitted (nil) for
+// normal requests so behavior is unchanged, and is only set when the effort maps
+// to a positive budget — so Gemini is never sent {"thinkingBudget":0}. There is
+// no IncludeThoughts request field here; thought summaries are suppressed on the
+// response side by skipping streamed parts whose part.Thought is true.
+type thinkingConfig struct {
+	ThinkingBudget int `json:"thinkingBudget"`
 }
 
 type geminiContent struct {
@@ -21,6 +31,9 @@ type geminiPart struct {
 	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+	// ThoughtSignature replays the reasoning signature Gemini bound to a
+	// functionCall, required for multi-turn function calling with thinking.
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -69,8 +82,10 @@ type candidateContent struct {
 }
 
 type streamPart struct {
-	Text         string        `json:"text"`
-	FunctionCall *functionCall `json:"functionCall"`
+	Text             string        `json:"text"`
+	FunctionCall     *functionCall `json:"functionCall"`
+	ThoughtSignature string        `json:"thoughtSignature"`
+	Thought          bool          `json:"thought"`
 }
 
 type functionCall struct {

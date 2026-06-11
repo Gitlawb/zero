@@ -1791,6 +1791,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			turnTools:   toolCalls,
 			turnElapsed: m.now().Sub(started),
 		})
+		if notice := result.TruncationNotice(); notice != "" {
+			rows = append(rows, transcriptRow{kind: rowSystem, text: notice})
+		}
 		sessionEvents = append(sessionEvents, pendingSessionEvent{
 			Type: sessions.EventMessage,
 			Payload: map[string]any{

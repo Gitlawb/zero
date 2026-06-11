@@ -280,7 +280,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	}
 	client := options.HTTPClient
 	if client == nil {
-		client = http.DefaultClient
+		client = newConnectivityClient(timeout, options.Resolver)
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -397,6 +397,96 @@ func validateEndpoint(ctx context.Context, endpoint string, resolver Resolver) e
 		}
 	}
 	return nil
+}
+
+// maxConnectivityRedirects bounds redirect following so a chain of redirects
+// cannot be used to amplify probing or stall the check.
+const maxConnectivityRedirects = 5
+
+// newConnectivityClient builds the HTTP client used for the default (no
+// caller-supplied client) connectivity probe. It is hardened against SSRF:
+//
+//   - CheckRedirect re-validates every redirect target with the same address
+//     rules as the initial endpoint, so a 3xx pointing at an internal address
+//     (e.g. 169.254.169.254) is refused rather than followed blindly.
+//   - the transport's DialContext re-resolves and validates the host at dial
+//     time and then dials the validated IP literal, closing the TOCTOU window
+//     between the pre-flight validateEndpoint check and the actual connection
+//     (DNS rebinding).
+func newConnectivityClient(timeout time.Duration, resolver Resolver) *http.Client {
+	if resolver == nil {
+		resolver = defaultResolver{}
+	}
+	transport, _ := http.DefaultTransport.(*http.Transport)
+	if transport != nil {
+		transport = transport.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	transport.DialContext = safeDialContext(resolver)
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxConnectivityRedirects {
+				return fmt.Errorf("provider connectivity exceeded %d redirects", maxConnectivityRedirects)
+			}
+			return validateEndpoint(req.Context(), req.URL.String(), resolver)
+		},
+	}
+}
+
+// safeDialContext returns a dial function that resolves the target host, refuses
+// the connection if any resolved address is blocked, then dials the validated IP
+// literal so the kernel cannot re-resolve to a different address after the check.
+func safeDialContext(resolver Resolver) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
+			if reason := blockedAddrReason(addr); reason != "" {
+				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
+			}
+			return dialer.DialContext(ctx, network, address)
+		}
+		addrs, err := resolver.LookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, endpointSafetyError{message: "provider connectivity host could not be resolved safely: " + err.Error()}
+		}
+		if len(addrs) == 0 {
+			return nil, endpointSafetyError{message: "provider connectivity host resolved to no addresses"}
+		}
+		for _, addr := range addrs {
+			if reason := blockedAddrReason(addr); reason != "" {
+				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
+			}
+		}
+		// Every resolved address passed validation; dial them in order until one
+		// connects so a dual-stack or multi-record provider isn't failed by a
+		// single dead/unroutable address (e.g. an unreachable IPv6 first record).
+		return dialValidatedAddrs(ctx, addrs, port, func(ctx context.Context, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		})
+	}
+}
+
+// dialValidatedAddrs dials the already-validated addresses in order and returns
+// the first connection that succeeds, so one dead address among a dual-stack or
+// multi-record answer doesn't fail the whole probe. The last dial error is
+// returned when every address fails.
+func dialValidatedAddrs(ctx context.Context, addrs []netip.Addr, port string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+	var dialErr error
+	for _, addr := range addrs {
+		conn, err := dial(ctx, net.JoinHostPort(addr.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		dialErr = err
+	}
+	return nil, dialErr
 }
 
 func blockedAddrReason(addr netip.Addr) string {

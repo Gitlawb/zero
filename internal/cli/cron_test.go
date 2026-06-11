@@ -92,6 +92,33 @@ func TestCronAddRecipe(t *testing.T) {
 	}
 }
 
+func TestCronAddExplicitExprOverridesRecipe(t *testing.T) {
+	store := testCronStore(t)
+	var out, errb bytes.Buffer
+	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }
+	// An explicit positional schedule must win over the recipe's default expr
+	// instead of being silently dropped.
+	if code := runCronWith(store, now, []string{"add", "0 9 * * *", "--recipe", "git-recap"}, &out, &errb); code != 0 {
+		t.Fatalf("add exit=%d err=%s", code, errb.String())
+	}
+	jobs, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Expr != "0 9 * * *" {
+		t.Fatalf("explicit expr should win over recipe, got: %+v", jobs)
+	}
+	// The recipe's prompt must actually propagate — assert the exact recipe text,
+	// not just non-empty (which a default prompt would also satisfy).
+	recipe, ok := cron.Recipe("git-recap")
+	if !ok {
+		t.Fatal("git-recap recipe missing")
+	}
+	if jobs[0].Prompt != recipe.Prompt {
+		t.Fatalf("recipe prompt not propagated: got %q want %q", jobs[0].Prompt, recipe.Prompt)
+	}
+}
+
 func TestCronAddRejectsExtraArgs(t *testing.T) {
 	store := testCronStore(t)
 	now := func() time.Time { return time.Date(2026, 6, 9, 8, 0, 0, 0, time.UTC) }

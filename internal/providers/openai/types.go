@@ -5,6 +5,7 @@ type chatCompletionRequest struct {
 	Messages            []chatMessage    `json:"messages"`
 	Tools               []toolDefinition `json:"tools,omitempty"`
 	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
 	Stream              bool             `json:"stream"`
 	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
 }

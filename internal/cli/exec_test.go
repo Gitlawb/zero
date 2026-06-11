@@ -847,6 +847,32 @@ func TestReasoningEffortNoticeCoercesUnsupportedEffort(t *testing.T) {
 	}
 }
 
+func TestForwardedReasoningEffortGating(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	cases := []struct {
+		name      string
+		model     string
+		requested string
+		want      string
+	}{
+		{"empty request", "claude-sonnet-4.5", "", ""},
+		{"supported reasoning model", "claude-sonnet-4.5", "high", "high"},
+		{"unsupported effort coerced to default", "claude-sonnet-4.5", "xhigh", "medium"},
+		{"known non-reasoning model suppressed", "gpt-4.1", "high", ""},
+		{"unknown model forwards as-is", "custom-endpoint-model", "high", "high"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := forwardedReasoningEffort(registry, tc.model, tc.requested); got != tc.want {
+				t.Fatalf("forwardedReasoningEffort(%q, %q) = %q, want %q", tc.model, tc.requested, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunExecJSONUnsafeOutputsWarningEvent(t *testing.T) {
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{"exec", "--skip-permissions-unsafe", "-o", "json", "hello"})
 

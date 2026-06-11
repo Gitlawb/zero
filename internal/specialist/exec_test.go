@@ -64,6 +64,36 @@ func TestBuildArgsCreatesFreshSpecialistExecInvocation(t *testing.T) {
 	}
 }
 
+func TestBuildArgsSessionTitleFallsBackToNameWithoutDescription(t *testing.T) {
+	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
+	manifest := Manifest{
+		Metadata:      Metadata{Name: "reviewer", Description: "Reviews code"},
+		SystemPrompt:  "Review carefully.",
+		ResolvedTools: []string{"read_file"},
+	}
+
+	// Description is optional. When omitted, the session title must still carry
+	// the specialist name so AgentName (derived from the title) is non-empty and
+	// the session remains resumable.
+	result, err := executor.BuildArgs(BuildArgsInput{
+		Manifest: manifest,
+		Prompt:   "Do the thing",
+	})
+	if err != nil {
+		t.Fatalf("BuildArgs returned error: %v", err)
+	}
+	if !containsSequence(result.Args, []string{"--session-title", "reviewer"}) {
+		t.Fatalf("args missing name-only session title: %#v", result.Args)
+	}
+	for index, arg := range result.Args {
+		if arg == "--session-title" && index+1 < len(result.Args) {
+			if got := result.Args[index+1]; got != "reviewer" {
+				t.Fatalf("session title = %q, want %q", got, "reviewer")
+			}
+		}
+	}
+}
+
 func TestBuildArgsInheritsParentModelAndReasoning(t *testing.T) {
 	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
 	manifest := Manifest{

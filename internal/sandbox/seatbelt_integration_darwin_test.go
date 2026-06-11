@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,7 +30,21 @@ func TestSeatbeltEnforcesExtraWriteRoots(t *testing.T) {
 
 	workspace := t.TempDir()
 	extra := t.TempDir()
-	outside := t.TempDir()
+	// The "outside" target must live OUTSIDE the sandbox's baseline-writable temp
+	// trees: the profile now allows /tmp and /var/folders for parity with the
+	// bubblewrap backend (--tmpfs /tmp, --dev /dev). t.TempDir() lives under
+	// $TMPDIR (/var/folders on macOS), which is writable, so a write there would no
+	// longer be denied. Use a directory under $HOME to prove the kernel denies a
+	// write to an ungranted, non-temp location.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir for an out-of-allowlist write target: %v", err)
+	}
+	outside, err := os.MkdirTemp(home, ".zero-seatbelt-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp under home: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outside) })
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -58,6 +73,14 @@ func TestSeatbeltEnforcesExtraWriteRoots(t *testing.T) {
 	})
 
 	t.Run("WriteOutsideAllRootsIsDenied", func(t *testing.T) {
+		// Denial only holds if the target isn't under a baseline-writable subpath.
+		// Some environments set $HOME under $TMPDIR; skip there since the sandbox
+		// legitimately allows temp writes and denial can't be demonstrated.
+		for _, sub := range sandboxWritableSubpaths {
+			if resolvedOutside == sub || strings.HasPrefix(resolvedOutside, sub+string(os.PathSeparator)) {
+				t.Skipf("outside path %s is under writable subpath %s; cannot demonstrate denial", resolvedOutside, sub)
+			}
+		}
 		target := filepath.Join(resolvedOutside, "denied.txt")
 		output, runErr := runSeatbeltShellWrite(t, engine, target, "must-not-exist")
 		if runErr == nil {
