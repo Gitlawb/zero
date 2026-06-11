@@ -216,6 +216,154 @@ func TestStreamCompletionReportsCacheTokens(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionEnablesThinkingWhenEffortRequested(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "claude-test", MaxTokens: 64_000})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	thinking, ok := gotBody["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking missing from request: %#v", gotBody)
+	}
+	if thinking["type"] != "enabled" {
+		t.Fatalf("thinking.type = %#v, want enabled", thinking["type"])
+	}
+	budget, _ := thinking["budget_tokens"].(float64)
+	if int(budget) != 24000 {
+		t.Fatalf("thinking.budget_tokens = %#v, want 24000", thinking["budget_tokens"])
+	}
+	// max_tokens must stay above the budget so the response has room.
+	if mt, _ := gotBody["max_tokens"].(float64); int(mt) <= int(budget) {
+		t.Fatalf("max_tokens %#v must exceed thinking budget %v", gotBody["max_tokens"], budget)
+	}
+}
+
+func TestStreamCompletionOmitsThinkingWithoutEffort(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "claude-test", MaxTokens: 64_000})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	if _, ok := gotBody["thinking"]; ok {
+		t.Fatalf("thinking should be omitted without effort: %#v", gotBody["thinking"])
+	}
+	if mt, _ := gotBody["max_tokens"].(float64); int(mt) != 64_000 {
+		t.Fatalf("max_tokens = %#v, want unchanged 64000", gotBody["max_tokens"])
+	}
+}
+
+func TestStreamCompletionCapturesThinkingBlocksForReplay(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSEEvent(w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}`)
+		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-abc"}}`)
+		writeSSEEvent(w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
+		writeSSEEvent(w, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"grep","input":{}}}`)
+		writeSSEEvent(w, "content_block_stop", `{"type":"content_block_stop","index":1}`)
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	done := eventsOfType(events, zeroruntime.StreamEventDone)
+	if len(done) != 1 {
+		t.Fatalf("want exactly one done event, got %#v", events)
+	}
+	blocks := done[0].ReasoningBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("reasoning blocks = %#v, want one", blocks)
+	}
+	if blocks[0].Provider != providerName || blocks[0].Type != "thinking" || blocks[0].Text != "Let me think" || blocks[0].Signature != "sig-abc" {
+		t.Fatalf("reasoning block = %#v", blocks[0])
+	}
+}
+
+func TestAnthropicRequestReplaysThinkingBlocksFirst(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{BaseURL: server.URL + "/", Model: "claude-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: "go"},
+			{
+				Role:      zeroruntime.MessageRoleAssistant,
+				Content:   "I will grep.",
+				ToolCalls: []zeroruntime.ToolCall{{ID: "toolu_1", Name: "grep", Arguments: `{"pattern":"x"}`}},
+				Reasoning: []zeroruntime.ReasoningBlock{{Provider: providerName, Type: "thinking", Text: "reasoning", Signature: "sig-abc"}},
+			},
+			{Role: zeroruntime.MessageRoleTool, Content: "result", ToolCallID: "toolu_1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	messages := gotBody["messages"].([]any)
+	var assistant map[string]any
+	for _, raw := range messages {
+		m := raw.(map[string]any)
+		if m["role"] == "assistant" {
+			assistant = m
+			break
+		}
+	}
+	if assistant == nil {
+		t.Fatalf("no assistant message in %#v", messages)
+	}
+	blocks, ok := assistant["content"].([]any)
+	if !ok || len(blocks) == 0 {
+		t.Fatalf("assistant content = %#v, want block array", assistant["content"])
+	}
+	first := blocks[0].(map[string]any)
+	if first["type"] != "thinking" || first["thinking"] != "reasoning" || first["signature"] != "sig-abc" {
+		t.Fatalf("first block = %#v, want thinking block replayed first", first)
+	}
+}
+
 func TestStreamCompletionEmitsToolUseBlocks(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}`)

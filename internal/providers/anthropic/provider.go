@@ -19,6 +19,54 @@ const defaultBaseURL = "https://api.anthropic.com"
 const defaultVersion = "2023-06-01"
 const defaultMaxTokens = 4096
 
+// providerName tags reasoning blocks this adapter produces so only it replays
+// them (a mid-run switch to another provider ignores foreign blocks).
+const providerName = "anthropic"
+
+// Extended-thinking budget bounds. Anthropic counts thinking tokens against
+// max_tokens and requires a budget of at least 1024, so we reserve room for the
+// actual response on top of the budget.
+const (
+	minThinkingBudget = 1024
+	minResponseTokens = 4096
+)
+
+// thinkingBudgetForEffort maps a requested reasoning effort to a thinking token
+// budget. 0 means "no extended thinking".
+func thinkingBudgetForEffort(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return minThinkingBudget
+	case "low":
+		return 4096
+	case "medium":
+		return 10000
+	case "high":
+		return 24000
+	default:
+		return 0
+	}
+}
+
+// resolveThinking returns the thinking budget and the max_tokens to send. When a
+// budget is requested, max_tokens is raised if needed so the budget plus a
+// minimum response both fit (Anthropic rejects budget >= max_tokens). enabled is
+// false when no thinking was requested, leaving the request unchanged.
+func resolveThinking(effort string, maxTokens int) (budget int, effectiveMax int, enabled bool) {
+	budget = thinkingBudgetForEffort(effort)
+	if budget <= 0 {
+		return 0, maxTokens, false
+	}
+	effectiveMax = maxTokens
+	if effectiveMax <= 0 {
+		effectiveMax = defaultMaxTokens
+	}
+	if effectiveMax < budget+minResponseTokens {
+		effectiveMax = budget + minResponseTokens
+	}
+	return budget, effectiveMax, true
+}
+
 // defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
 // without closing the connection, so a stalled-but-open upstream cannot hang the
 // agent forever.
@@ -203,6 +251,10 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 			state.recordUsage(payload.Message.Usage)
 		}
 	case "content_block_start":
+		if payload.ContentBlock != nil && (payload.ContentBlock.Type == "thinking" || payload.ContentBlock.Type == "redacted_thinking") {
+			state.startThinking(payload.Index, payload.ContentBlock)
+			return true
+		}
 		if payload.ContentBlock != nil && payload.ContentBlock.Type == "tool_use" {
 			if payload.ContentBlock.ID == "" || payload.ContentBlock.Name == "" {
 				// A tool_use block without a usable id/name can't be dispatched.
@@ -232,8 +284,11 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 			if payload.Delta.PartialJSON != "" {
 				state.deltaTool(ctx, payload.Index, payload.Delta.PartialJSON, events)
 			}
+		case "thinking_delta", "signature_delta":
+			state.deltaThinking(payload.Index, payload.Delta)
 		}
 	case "content_block_stop":
+		state.stopThinking(payload.Index)
 		state.stopTool(ctx, payload.Index, events)
 	case "message_delta":
 		if payload.Usage != nil {
@@ -278,7 +333,11 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
 		}
 	}
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:            zeroruntime.StreamEventDone,
+		FinishReason:    state.finishReason,
+		ReasoningBlocks: state.reasoningBlocks,
+	})
 	state.done = true
 }
 
@@ -310,6 +369,14 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		MaxTokens: provider.maxTokens,
 		Messages:  messages,
 		Stream:    true,
+	}
+	// Extended thinking: enable when a reasoning effort was requested. The budget
+	// is counted against max_tokens, so raise max_tokens to leave room for the
+	// response. Temperature is intentionally left unset (Anthropic requires the
+	// default when thinking is on).
+	if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, provider.maxTokens); enabled {
+		mapped.MaxTokens = effectiveMax
+		mapped.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
 	}
 	// Prompt caching: send the (stable, per-run) system prompt as a cacheable text
 	// block so the system instructions + tool definitions are not re-billed on
@@ -360,6 +427,20 @@ func mapMessages(messages []zeroruntime.Message) (string, []anthropicMessage, er
 			}})
 		case zeroruntime.MessageRoleAssistant:
 			blocks := []map[string]any{}
+			// Replay preserved thinking blocks first: Anthropic requires them at the
+			// start of the assistant turn and rejects tool conversations that drop
+			// them. Blocks from other providers are ignored.
+			for _, block := range message.Reasoning {
+				if block.Provider != providerName {
+					continue
+				}
+				switch block.Type {
+				case "thinking":
+					blocks = append(blocks, map[string]any{"type": "thinking", "thinking": block.Text, "signature": block.Signature})
+				case "redacted_thinking":
+					blocks = append(blocks, map[string]any{"type": "redacted_thinking", "data": block.Data})
+				}
+			}
 			if hasContent {
 				blocks = append(blocks, map[string]any{"type": "text", "text": content})
 			}
@@ -479,6 +560,8 @@ type toolBlock struct {
 
 type streamState struct {
 	tools               map[int]toolBlock
+	thinking            map[int]*thinkingBuf // open thinking/redacted_thinking blocks by index
+	reasoningBlocks     []zeroruntime.ReasoningBlock
 	inputTokens         int
 	outputTokens        int
 	cacheReadTokens     int // prompt-cache hits (cheap, re-billed reads)
@@ -487,6 +570,14 @@ type streamState struct {
 	hasOutputUsage      bool
 	finishReason        string // normalized terminal stop reason (empty for normal stop)
 	done                bool
+}
+
+// thinkingBuf accumulates one extended-thinking content block as it streams.
+type thinkingBuf struct {
+	kind      string // "thinking" or "redacted_thinking"
+	text      strings.Builder
+	signature string
+	data      string
 }
 
 // mapStopReason maps Anthropic's message_delta stop_reason onto the runtime's
@@ -500,7 +591,48 @@ func mapStopReason(reason string) string {
 }
 
 func newStreamState() *streamState {
-	return &streamState{tools: make(map[int]toolBlock)}
+	return &streamState{tools: make(map[int]toolBlock), thinking: make(map[int]*thinkingBuf)}
+}
+
+// startThinking opens a thinking/redacted_thinking block at the given index.
+// redacted_thinking arrives whole (its opaque data is on content_block_start).
+func (state *streamState) startThinking(index int, block *contentBlock) {
+	buf := &thinkingBuf{kind: block.Type}
+	if block.Type == "redacted_thinking" {
+		buf.data = block.Data
+	}
+	state.thinking[index] = buf
+}
+
+// deltaThinking applies a thinking_delta (reasoning text) or signature_delta to
+// the open block at the index.
+func (state *streamState) deltaThinking(index int, delta *streamDelta) {
+	buf, ok := state.thinking[index]
+	if !ok {
+		return
+	}
+	if delta.Thinking != "" {
+		buf.text.WriteString(delta.Thinking)
+	}
+	if delta.Signature != "" {
+		buf.signature = delta.Signature
+	}
+}
+
+// stopThinking finalizes the block at the index into a preserved ReasoningBlock.
+func (state *streamState) stopThinking(index int) {
+	buf, ok := state.thinking[index]
+	if !ok {
+		return
+	}
+	state.reasoningBlocks = append(state.reasoningBlocks, zeroruntime.ReasoningBlock{
+		Provider:  providerName,
+		Type:      buf.kind,
+		Text:      buf.text.String(),
+		Signature: buf.signature,
+		Data:      buf.data,
+	})
+	delete(state.thinking, index)
 }
 
 func (state *streamState) recordUsage(usage usage) {

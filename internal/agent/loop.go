@@ -207,6 +207,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			Role:      zeroruntime.MessageRoleAssistant,
 			Content:   collected.Text,
 			ToolCalls: historySafeToolCalls(collected.ToolCalls),
+			// Preserve thinking blocks so the next turn can replay them; providers
+			// that use extended thinking reject tool conversations that drop them.
+			Reasoning: collected.ReasoningBlocks,
 		})
 
 		if len(collected.ToolCalls) == 0 {
@@ -1225,6 +1228,9 @@ func copyMessages(messages []Message) []Message {
 		copied[index] = message
 		if message.ToolCalls != nil {
 			copied[index].ToolCalls = append([]ToolCall{}, message.ToolCalls...)
+		}
+		if message.Reasoning != nil {
+			copied[index].Reasoning = append([]zeroruntime.ReasoningBlock{}, message.Reasoning...)
 		}
 		// Deep-copy image attachments (slice AND each Data byte slice) so the
 		// raw image bytes are never aliased across history/request/result copies.

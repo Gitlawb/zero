@@ -16,6 +16,10 @@ type CollectedStream struct {
 	// response did not end normally (FinishReasonLength / FinishReasonContentFilter).
 	// It is empty for a normal completion. Truncated reports whether it is set.
 	FinishReason string
+	// ReasoningBlocks are the response's preserved reasoning artifacts (Anthropic
+	// thinking blocks) that must be replayed on the next turn. Empty for providers
+	// or runs without extended thinking.
+	ReasoningBlocks []ReasoningBlock
 }
 
 // Truncated reports whether the response ended for a non-normal reason (the
@@ -97,6 +101,11 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			// normal completion.
 			if event.FinishReason != "" {
 				collected.FinishReason = event.FinishReason
+			}
+			// Reasoning blocks (Anthropic thinking) can ride on any terminal event;
+			// accumulate them regardless of type so they survive for replay.
+			if len(event.ReasoningBlocks) > 0 {
+				collected.ReasoningBlocks = append(collected.ReasoningBlocks, event.ReasoningBlocks...)
 			}
 
 			switch event.Type {

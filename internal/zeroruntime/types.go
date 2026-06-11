@@ -67,6 +67,25 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments string
+	// Signature carries a provider's opaque reasoning signature bound to this call
+	// (Gemini attaches a thoughtSignature to a functionCall part). It must be
+	// echoed back with the call on later turns or the provider may reject the
+	// multi-turn function-calling conversation. Empty for providers that do not
+	// use it. Only the originating adapter interprets it.
+	Signature string
+}
+
+// ReasoningBlock is a provider-emitted reasoning artifact that must be replayed
+// verbatim on later turns or the provider rejects the (tool-using) conversation:
+// Anthropic requires thinking / redacted_thinking blocks be passed back with
+// their signatures. Only the adapter named by Provider interprets a block; other
+// adapters ignore foreign blocks, so a mid-run provider switch is safe.
+type ReasoningBlock struct {
+	Provider  string // adapter that produced and can replay this block ("anthropic", "gemini")
+	Type      string // provider block type ("thinking", "redacted_thinking")
+	Text      string // human-readable reasoning text (empty for redacted/opaque blocks)
+	Signature string // cryptographic signature the provider requires on replay
+	Data      string // opaque provider payload (e.g. Anthropic redacted_thinking data)
 }
 
 // Message is a normalized conversation turn passed to providers.
@@ -75,7 +94,8 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
-	Images     []ImageBlock // optional; nil for text-only messages
+	Images     []ImageBlock     // optional; nil for text-only messages
+	Reasoning  []ReasoningBlock // optional; preserved thinking blocks to replay
 }
 
 // ToolDefinition describes a model-visible tool and its JSON-schema parameters.
@@ -142,6 +162,10 @@ type StreamEvent struct {
 	// the token cap, or FinishReasonContentFilter when it was filtered). It is
 	// empty for a normal completion. Providers set it on the terminal/done event.
 	FinishReason string
+	// ReasoningBlocks carries completed reasoning artifacts (Anthropic thinking /
+	// redacted_thinking blocks) that must be preserved for replay. Providers attach
+	// them to the terminal/done event; the collector accumulates them.
+	ReasoningBlocks []ReasoningBlock
 }
 
 // CompletionRequest groups provider input messages and available tools.
