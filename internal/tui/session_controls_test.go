@@ -150,8 +150,30 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
+	if cmd == nil {
+		t.Fatal("expected /compact to start an async compaction command")
+	}
+	if !next.compactInFlight {
+		t.Fatal("expected compaction to be marked in flight")
+	}
+	for _, want := range []string{
+		"status: warning",
+		"compacting context for Gitlawb",
+		"model adaptive",
+	} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected compact start transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	msg := execCmd(cmd)
+	if msg == nil {
+		t.Fatal("expected async compact command to return a completion message")
+	}
+	updated, cmd = next.Update(msg)
+	next = updated.(model)
+
 	if cmd != nil {
-		t.Fatal("expected /compact to be handled without starting an agent run")
+		t.Fatal("expected compact completion to be handled without starting another command")
 	}
 	if calls != 1 {
 		t.Fatalf("expected one manual compaction call, got %d", calls)
@@ -171,6 +193,7 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 	for _, want := range []string{
 		"Compact",
 		"status: ok",
+		"compact complete",
 		"compacted: yes",
 		"after: 42 tokens",
 		"summarized earlier turns",
@@ -181,6 +204,37 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 	}
 	if got := next.compactionStatus(); !strings.Contains(got, "compacted manually") {
 		t.Fatalf("expected compacted status after manual compaction, got %q", got)
+	}
+}
+
+func TestCompactSpinnerTickRefreshesProgressFrame(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		SessionCompactor: compactSessionFunc(func(context.Context, CompactRequest) (CompactResult, error) {
+			return CompactResult{Compacted: true, Summary: "done"}, nil
+		}),
+	})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
+	m.input.SetValue("/compact")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd == nil || !next.compactInFlight {
+		t.Fatal("expected /compact to start an in-flight animated compaction")
+	}
+	before := compactStatusText(next.transcript)
+	updated, _ = next.Update(next.spinner.Tick())
+	next = updated.(model)
+	after := compactStatusText(next.transcript)
+	if before == "" || after == "" {
+		t.Fatalf("expected compact status row before=%q after=%q", before, after)
+	}
+	if before == after {
+		t.Fatalf("expected spinner tick to refresh compact status, still %q", after)
+	}
+	if !strings.Contains(after, "compacting context for Gitlawb") {
+		t.Fatalf("expected animated compact copy, got %q", after)
 	}
 }
 
@@ -224,8 +278,17 @@ func TestCompactCommandRecordsSessionCompactionAndShrinksReplayContext(t *testin
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
+	if cmd == nil {
+		t.Fatal("expected /compact to start an async session-backed compaction command")
+	}
+	msg := execCmd(cmd)
+	if msg == nil {
+		t.Fatal("expected async compact command to return a completion message")
+	}
+	updated, cmd = next.Update(msg)
+	next = updated.(model)
 	if cmd != nil {
-		t.Fatal("expected /compact to be handled without starting an agent run")
+		t.Fatal("expected compact completion to be handled without starting another command")
 	}
 	if next.lastCompactResult == nil || !next.lastCompactResult.Compacted {
 		t.Fatalf("expected session-backed compaction result, got %#v", next.lastCompactResult)
@@ -285,8 +348,20 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	}
 	m.input.SetValue("/compact")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /compact to start an async provider-backed compaction command")
+	}
+	msg := execCmd(cmd)
+	if msg == nil {
+		t.Fatal("expected async compact command to return a completion message")
+	}
+	updated, cmd = next.Update(msg)
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected compact completion to be handled without starting another command")
+	}
 
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected one provider summarization request, got %d", len(provider.requests))
@@ -344,6 +419,15 @@ type compactSessionFunc func(context.Context, CompactRequest) (CompactResult, er
 
 func (f compactSessionFunc) CompactSession(ctx context.Context, request CompactRequest) (CompactResult, error) {
 	return f(ctx, request)
+}
+
+func compactStatusText(rows []transcriptRow) string {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].id == compactStatusRowID {
+			return rows[i].text
+		}
+	}
+	return ""
 }
 
 func TestUsageEventsUpdateFooterAndContext(t *testing.T) {

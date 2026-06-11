@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -16,6 +18,14 @@ var responseStyles = []string{"balanced", "concise", "explanatory", "review"}
 
 const tuiCompactionPreserveLast = 8
 const tuiCompactionMaxPromptChars = 8000
+const compactStatusRowID = "compact/status"
+
+var compactFrames = []string{"[=   ]", "[==  ]", "[=== ]", "[====]"}
+var compactQuotes = []string{
+	"compress the noise, keep the intent",
+	"small context, sharp memory",
+	"fold the scrollback, keep the thread",
+}
 
 type SessionCompactor interface {
 	CompactSession(context.Context, CompactRequest) (CompactResult, error)
@@ -36,6 +46,15 @@ type CompactResult struct {
 	BeforeTokens int
 	AfterTokens  int
 	Summary      string
+}
+
+type compactResultMsg struct {
+	result             CompactResult
+	err                error
+	activeSession      sessions.Metadata
+	sessionEvents      []sessions.Event
+	transcript         []transcriptRow
+	hasSessionSnapshot bool
 }
 
 func (m model) handleEffortCommand(args string) (model, string) {
@@ -179,35 +198,51 @@ func responseStyleAllowed(value string) bool {
 	return false
 }
 
-func (m model) handleCompactCommand(args string) (model, string) {
+func (m model) handleCompactCommand(args string) (model, string, tea.Cmd) {
 	args = strings.TrimSpace(strings.ToLower(args))
 	if args == "status" {
-		return m, m.compactText(false)
+		return m, m.compactText(false), nil
 	}
 	if args != "" {
-		return m, "Compact\nusage: /compact [status]"
+		return m, "Compact\nusage: /compact [status]", nil
+	}
+	if m.compactInFlight {
+		return m, m.compactText(true), nil
 	}
 	m.compactRequests++
 	m.lastCompactError = ""
+	m.lastCompactResult = nil
+	if m.sessionCompactor == nil && !m.hasSessionBackedCompactor() {
+		return m, m.compactText(true), nil
+	}
+	m.compactInFlight = true
+	m.compactFrame = 0
+	return m, m.compactText(true), tea.Batch(m.runCompact(), m.spinner.Tick)
+}
+
+func (m model) runCompact() tea.Cmd {
+	request := m.compactRequest()
 	if m.sessionCompactor != nil {
-		result, err := m.sessionCompactor.CompactSession(m.ctx, m.compactRequest())
-		if err != nil {
-			m.lastCompactResult = nil
-			m.lastCompactError = err.Error()
-			return m, m.compactText(true)
+		compactor := m.sessionCompactor
+		ctx := m.ctx
+		return func() tea.Msg {
+			result, err := compactor.CompactSession(ctx, request)
+			return compactResultMsg{result: result, err: err}
 		}
-		m.lastCompactResult = &result
-	} else if m.hasSessionBackedCompactor() {
+	}
+	return func() tea.Msg {
 		next, result, err := m.compactActiveSession()
 		if err != nil {
-			m.lastCompactResult = nil
-			m.lastCompactError = err.Error()
-			return m, m.compactText(true)
+			return compactResultMsg{err: err}
 		}
-		m = next
-		m.lastCompactResult = &result
+		return compactResultMsg{
+			result:             result,
+			activeSession:      next.activeSession,
+			sessionEvents:      append([]sessions.Event{}, next.sessionEvents...),
+			transcript:         append([]transcriptRow{}, next.transcript...),
+			hasSessionSnapshot: true,
+		}
 	}
-	return m, m.compactText(true)
 }
 
 // handleRewindCommand restores workspace files to a checkpoint and truncates the
@@ -298,7 +333,9 @@ func (m model) compactText(requested bool) string {
 	status := commandStatusInfo
 	if requested {
 		status = commandStatusWarning
-		if m.lastCompactResult != nil {
+		if m.compactInFlight {
+			status = commandStatusWarning
+		} else if m.lastCompactResult != nil {
 			status = commandStatusOK
 		}
 		if m.lastCompactError != "" {
@@ -314,13 +351,23 @@ func (m model) compactText(requested bool) string {
 				"requested: " + boolText(m.compactRequests > 0),
 				"model: " + displayValue(request.ModelName, "none"),
 				"context window: " + compactContextWindowText(request.ContextWindow),
+				"auto compaction: model adaptive at ~80% of context window",
 				fmt.Sprintf("estimated transcript: %d tokens", request.EstimatedTokens),
 				fmt.Sprintf("visible transcript rows: %d", request.VisibleTranscriptRows),
 				m.compactabilityText(request),
 			},
 		},
 	}
-	if m.lastCompactResult != nil {
+	if m.compactInFlight {
+		sections = append(sections, commandSection{
+			Title: "Progress",
+			Lines: []string{
+				m.compactAnimationLine(),
+				"quote: " + compactQuote(m.compactRequests),
+				"model adaptive: " + compactModelAdaptationLine(request),
+			},
+		})
+	} else if m.lastCompactResult != nil {
 		sections = append(sections, commandSection{
 			Title: "Result",
 			Lines: compactResultLines(*m.lastCompactResult),
@@ -351,6 +398,9 @@ func (m model) compactText(requested bool) string {
 }
 
 func (m model) compactionStatus() string {
+	if m.compactInFlight {
+		return "compacting context"
+	}
 	if m.lastCompactResult != nil {
 		if m.lastCompactResult.Compacted {
 			return "compacted manually"
@@ -517,6 +567,7 @@ func estimateTranscriptTokens(rows []transcriptRow) int {
 
 func compactResultLines(result CompactResult) []string {
 	lines := []string{
+		"phase: compact complete",
 		"compacted: " + boolText(result.Compacted),
 	}
 	if result.BeforeTokens > 0 {
@@ -529,6 +580,38 @@ func compactResultLines(result CompactResult) []string {
 		lines = append(lines, "summary: "+summary)
 	}
 	return lines
+}
+
+func (m model) compactAnimationLine() string {
+	frame := compactFrames[m.compactFrame%len(compactFrames)]
+	return frame + " compacting context for Gitlawb..."
+}
+
+func compactQuote(requests int) string {
+	if requests <= 0 {
+		requests = 1
+	}
+	return compactQuotes[(requests-1)%len(compactQuotes)]
+}
+
+func compactModelAdaptationLine(request CompactRequest) string {
+	window := compactContextWindowText(request.ContextWindow)
+	if strings.TrimSpace(request.ModelName) == "" {
+		return "using the active model context window"
+	}
+	return fmt.Sprintf("%s uses %s; preserving the latest %d session events", request.ModelName, window, tuiCompactionPreserveLast)
+}
+
+func (m model) setCompactStatusRow(text string) model {
+	row := transcriptRow{kind: rowSystem, id: compactStatusRowID, text: text}
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		if m.transcript[i].id == compactStatusRowID {
+			m.transcript[i] = row
+			return m
+		}
+	}
+	m.transcript = appendTranscriptRow(m.transcript, row)
+	return m
 }
 
 func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model, []transcriptRow) {
