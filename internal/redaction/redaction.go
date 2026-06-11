@@ -223,7 +223,12 @@ func redactReflect(value reflect.Value, context redactionContext, depth int) any
 			return CircularReference
 		}
 		context.seen[ptr] = struct{}{}
-		return redactReflect(value.Elem(), context, depth+1)
+		// Track only the current DFS path: drop the pointer after recursing so a
+		// shared (non-cyclic) reference reached again via a SIBLING branch is not
+		// mistaken for a cycle. Only an ancestor still on the path triggers it.
+		out := redactReflect(value.Elem(), context, depth+1)
+		delete(context.seen, ptr)
+		return out
 	case reflect.Map:
 		if value.IsNil() {
 			return nil
@@ -243,6 +248,7 @@ func redactReflect(value reflect.Value, context redactionContext, depth int) any
 			}
 			out[key] = redactReflect(iter.Value(), context, depth+1)
 		}
+		delete(context.seen, ptr)
 		return out
 	case reflect.Slice, reflect.Array:
 		out := make([]any, value.Len())
@@ -358,8 +364,10 @@ func normalizeKey(key string) string {
 	return strings.Trim(builder.String(), "_")
 }
 
+var urlWithCredsPattern = regexp.MustCompile(`\b(?:https?|wss?|ftp)://[^\s]+`)
+
 func redactURLPasswords(value string, replacement string) string {
-	return regexp.MustCompile(`\b(?:https?|wss?|ftp)://[^\s]+`).ReplaceAllStringFunc(value, func(candidate string) string {
+	return urlWithCredsPattern.ReplaceAllStringFunc(value, func(candidate string) string {
 		parsed, err := url.Parse(candidate)
 		if err != nil || parsed.User == nil {
 			return candidate

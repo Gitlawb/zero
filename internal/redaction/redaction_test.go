@@ -83,3 +83,61 @@ type withFieldsError struct {
 func (err withFieldsError) Error() string {
 	return err.err.Error()
 }
+
+func TestRedactValueSharedPointerIsNotMistakenForCycle(t *testing.T) {
+	// Two sibling fields referencing the SAME object form a DAG, not a cycle.
+	// Both must redact normally; the second must not collapse to CircularReference.
+	type leaf struct{ Name string }
+	type root struct {
+		A *leaf
+		B *leaf
+	}
+	shared := &leaf{Name: "shared"}
+	out := RedactValue(root{A: shared, B: shared}, Options{})
+	m, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map, got %T", out)
+	}
+	for _, field := range []string{"A", "B"} {
+		sub, ok := m[field].(map[string]any)
+		if !ok {
+			t.Fatalf("field %s = %#v, want a redacted leaf (sibling DAG must not be %q)", field, m[field], CircularReference)
+		}
+		if sub["Name"] != "shared" {
+			t.Fatalf("field %s Name = %v, want \"shared\"", field, sub["Name"])
+		}
+	}
+}
+
+func TestRedactValueTrueCycleStillDetected(t *testing.T) {
+	type node struct {
+		Name string
+		Next *node
+	}
+	a := &node{Name: "a"}
+	a.Next = a // genuine self-cycle
+	out := RedactValue(a, Options{})
+	if !containsCircular(out) {
+		t.Fatalf("expected a CircularReference marker somewhere in %#v", out)
+	}
+}
+
+func containsCircular(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return t == CircularReference
+	case map[string]any:
+		for _, val := range t {
+			if containsCircular(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range t {
+			if containsCircular(val) {
+				return true
+			}
+		}
+	}
+	return false
+}

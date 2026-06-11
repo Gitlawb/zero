@@ -81,3 +81,20 @@ func TestRedactNoMatchReturnsInputUnchanged(t *testing.T) {
 		t.Fatalf("expected unchanged input and nil findings, got %q / %#v", redacted, findings)
 	}
 }
+
+func TestScanDetectsModernPrefixedOpenAIKeys(t *testing.T) {
+	// Modern keys carry sk-proj-/sk-svcacct- prefixes and use - and _ in the body;
+	// the legacy sk-<alnum> pattern would have missed them.
+	for _, key := range []string{
+		"sk-proj-abcDEF123_ghiJKL456-mnoPQR789stu",
+		"sk-svcacct-abcDEF123_ghiJKL456-mnoPQR789",
+	} {
+		redacted, findings := Redact("token=" + key)
+		if len(findings) != 1 || findings[0].Type != "openai_key" {
+			t.Fatalf("expected one openai_key finding for %q, got %#v", key, findings)
+		}
+		if strings.Contains(redacted, key) {
+			t.Fatalf("key leaked after redaction: %q", redacted)
+		}
+	}
+}
