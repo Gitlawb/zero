@@ -119,9 +119,13 @@ type model struct {
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
-	// row. Active only when suggestionsActive() (no modal, non-empty matches).
-	suggestions   []commandSuggestion
-	suggestionIdx int
+	// row. commandPaletteOpen keeps a zero-match command search active so invalid
+	// query text stays in the palette instead of leaking into the composer.
+	// filePaletteOpen does the same for a trailing "@token" file search.
+	suggestions        []commandSuggestion
+	suggestionIdx      int
+	commandPaletteOpen bool
+	filePaletteOpen    bool
 	// suggestionsAreFiles is true when the overlay is showing "@file" matches
 	// rather than "/command" matches, so completion inserts a path token instead
 	// of replacing the whole input.
@@ -355,8 +359,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
+			if m.picker != nil {
+				m.picker.move(-1)
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				m.moveSuggestion(-1)
+				return m, nil
+			}
 			return m.scrollChat(chatWheelScrollLines), nil
 		case tea.MouseButtonWheelDown:
+			if m.picker != nil {
+				m.picker.move(1)
+				return m, nil
+			}
+			if m.suggestionsActive() {
+				m.moveSuggestion(1)
+				return m, nil
+			}
 			return m.scrollChat(-chatWheelScrollLines), nil
 		default:
 			return m, nil
@@ -450,11 +470,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return next, nil
 				}
 			}
-			// Enter on a highlighted suggestion completes the input rather than
-			// submitting; Enter with no active suggestion submits as today.
+			// Enter on file suggestions inserts the @file token for continued
+			// composing. Enter on command suggestions executes the selected slash
+			// command immediately instead of echoing it into the composer.
 			if m.suggestionsActive() {
+				if len(m.suggestions) == 0 {
+					return m, nil
+				}
+				wasFiles := m.suggestionsAreFiles
 				next := m.completeSuggestion()
 				next.resetComposerFromInput()
+				if !wasFiles {
+					return next.handleSubmit()
+				}
 				return next, nil
 			}
 			return m.handleSubmit()
@@ -821,8 +849,13 @@ func (m model) transcriptView() string {
 		body.WriteString("\n")
 	}
 
+	suggestionOverlay := m.suggestionOverlay(width)
 	if m.transcriptEmpty() && !m.pending {
-		body.WriteString(m.emptyState(width))
+		if suggestionOverlay != "" {
+			body.WriteString(m.emptyStateWithOverlay(width, suggestionOverlay))
+		} else {
+			body.WriteString(m.emptyState(width))
+		}
 		body.WriteString("\n")
 	} else {
 		rc := buildRowContext(m.transcript)
@@ -843,6 +876,11 @@ func (m model) transcriptView() string {
 			body.WriteString("\n")
 			shownAny = true
 		}
+	}
+	if suggestionOverlay != "" && !(m.transcriptEmpty() && !m.pending) {
+		body.WriteString("\n")
+		body.WriteString(suggestionOverlay)
+		body.WriteString("\n")
 	}
 
 	if m.pending {
@@ -873,10 +911,6 @@ func (m model) transcriptView() string {
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
 		footer.WriteString("\n")
 		footer.WriteString(queued)
-	}
-	if overlay := m.suggestionOverlay(width); overlay != "" {
-		footer.WriteString("\n")
-		footer.WriteString(overlay)
 	}
 	if wizard := m.providerWizardOverlay(width); wizard != "" {
 		footer.WriteString("\n")
@@ -969,6 +1003,11 @@ func (m model) composerLine(width int) string {
 	input := m.input
 	if m.pending {
 		input.Placeholder = composerPlaceholderRunning
+	}
+	if m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value())) {
+		input.SetValue("")
+		input.Placeholder = ""
+		input.CursorEnd()
 	}
 	hint := ""
 	switch {

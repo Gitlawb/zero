@@ -19,7 +19,7 @@ type selectableListOptions struct {
 	MaxVisible int
 }
 
-const selectableListAnchorRow = 2
+const selectableListAnchorRow = 3
 
 func renderSelectableList(options selectableListOptions) string {
 	if len(options.Items) == 0 {

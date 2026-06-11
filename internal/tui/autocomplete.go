@@ -15,24 +15,32 @@ type commandSuggestion struct {
 	Desc string
 }
 
-// maxCommandSuggestions caps how many rows the autocomplete overlay shows so a
-// short prefix can't flood the screen.
-const maxCommandSuggestions = 8
+const (
+	// maxCommandSuggestions caps command matches kept in memory; rendering still
+	// shows a smaller window so a bare "/" can report the remaining commands.
+	maxCommandSuggestions = 32
+	maxFileSuggestions    = 16
+)
 
 // suggestionsActive reports whether the autocomplete overlay should drive key
-// handling: the input is a slash-command fragment, there is at least one match,
-// and no modal (permission / questionnaire) is competing for keys.
+// handling. A slash-command palette stays active even with zero matches so the
+// query remains in the palette instead of leaking back into the composer.
 func (m model) suggestionsActive() bool {
 	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil || m.providerWizard != nil {
 		return false
 	}
-	return len(m.suggestions) > 0
+	if len(m.suggestions) > 0 {
+		return true
+	}
+	return m.commandPaletteOpen || m.filePaletteOpen
 }
 
 func (m *model) clearSuggestions() {
 	m.suggestions = nil
 	m.suggestionIdx = 0
 	m.suggestionsAreFiles = false
+	m.commandPaletteOpen = false
+	m.filePaletteOpen = false
 }
 
 // recomputeSuggestions rebuilds the autocomplete match list from the current
@@ -50,6 +58,8 @@ func (m *model) recomputeSuggestions() {
 	// File reference: a trailing "@token" (even mid-prompt) drives a workspace
 	// file picker. Checked before the slash path so "@" is handled distinctly.
 	if token, ok := trailingAtToken(value); ok {
+		m.commandPaletteOpen = false
+		m.filePaletteOpen = true
 		m.suggestionsAreFiles = true
 		m.suggestions = fileSuggestions(m.cwd, token)
 		if m.suggestionIdx >= len(m.suggestions) || m.suggestionIdx < 0 {
@@ -59,21 +69,17 @@ func (m *model) recomputeSuggestions() {
 	}
 	m.suggestionsAreFiles = false
 
+	if !commandSuggestionsOpen(value) {
+		m.suggestions = nil
+		m.suggestionIdx = 0
+		m.commandPaletteOpen = false
+		m.filePaletteOpen = false
+		return
+	}
 	trimmed := strings.TrimLeft(value, " ")
-	// A leading slash token (no whitespace yet) drives the command palette. A bare
-	// "/" now lists the full palette (the footer advertises "/ commands").
-	if !strings.HasPrefix(trimmed, "/") || strings.ContainsAny(trimmed, " \t") {
-		m.suggestions = nil
-		m.suggestionIdx = 0
-		return
-	}
 	token := strings.TrimSpace(trimmed)
-	if token == "" {
-		m.suggestions = nil
-		m.suggestionIdx = 0
-		return
-	}
 
+	m.commandPaletteOpen = true
 	matches := matchCommandSuggestions(token)
 	m.suggestions = matches
 	if m.suggestionIdx >= len(matches) {
@@ -82,6 +88,16 @@ func (m *model) recomputeSuggestions() {
 	if m.suggestionIdx < 0 {
 		m.suggestionIdx = 0
 	}
+}
+
+func commandSuggestionsOpen(value string) bool {
+	trimmed := strings.TrimLeft(value, " ")
+	return strings.HasPrefix(trimmed, "/") && strings.TrimSpace(trimmed) != "" && !strings.ContainsAny(trimmed, " \t")
+}
+
+func fileSuggestionOnlyInput(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return strings.HasPrefix(trimmed, "@") && !strings.ContainsAny(trimmed, " \t\n")
 }
 
 // matchCommandSuggestions returns commands whose canonical name or any alias has
@@ -93,7 +109,7 @@ func matchCommandSuggestions(token string) []commandSuggestion {
 	if prefix == "" {
 		return nil
 	}
-	out := make([]commandSuggestion, 0, maxCommandSuggestions)
+	out := make([]commandSuggestion, 0, minInt(maxCommandSuggestions, len(commandDefinitions)))
 	for _, command := range commandDefinitions {
 		if !commandHasPrefix(command, prefix) {
 			continue
@@ -131,7 +147,7 @@ func (m *model) moveSuggestion(delta int) {
 // completeSuggestion replaces the input with the selected command name plus a
 // trailing space (ready for arguments) and dismisses the overlay.
 func (m model) completeSuggestion() model {
-	if !m.suggestionsActive() {
+	if !m.suggestionsActive() || len(m.suggestions) == 0 {
 		return m
 	}
 	idx := m.suggestionIdx
@@ -150,6 +166,8 @@ func (m model) completeSuggestion() model {
 	m.suggestions = nil
 	m.suggestionIdx = 0
 	m.suggestionsAreFiles = false
+	m.commandPaletteOpen = false
+	m.filePaletteOpen = false
 	return m
 }
 
@@ -175,6 +193,16 @@ func replaceTrailingAtToken(value, path string) string {
 	return path
 }
 
+func removeTrailingAtToken(value string) string {
+	if _, ok := trailingAtToken(value); !ok {
+		return value
+	}
+	if i := strings.LastIndexAny(value, " \t\n"); i >= 0 {
+		return value[:i+1]
+	}
+	return ""
+}
+
 // maxFileWalk bounds how many filesystem entries the "@file" picker visits per
 // keystroke so a large workspace tree can't stall the TUI.
 const maxFileWalk = 4000
@@ -195,13 +223,13 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 		return nil
 	}
 	needle := strings.ToLower(strings.TrimSpace(partial))
-	out := make([]commandSuggestion, 0, maxCommandSuggestions)
+	out := make([]commandSuggestion, 0, maxFileSuggestions)
 	visited := 0
 	_ = filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if visited >= maxVisited || len(out) >= maxCommandSuggestions {
+		if visited >= maxVisited || len(out) >= maxFileSuggestions {
 			return fs.SkipAll
 		}
 		// Count every entry (directories included) so the walk is bounded even in
@@ -232,9 +260,20 @@ func fileSuggestionsBounded(cwd, partial string, maxVisited int) []commandSugges
 	return out
 }
 
-// dismissSuggestions clears the overlay without touching the input or the run.
+// dismissSuggestions clears the overlay without touching the run. Command
+// palette dismissal also clears the leading slash fragment because the palette
+// owns that search text while it is open.
 func (m model) dismissSuggestions() model {
+	if m.suggestionsAreFiles {
+		m.input.SetValue(removeTrailingAtToken(m.input.Value()))
+		m.input.CursorEnd()
+	} else {
+		m.clearComposer()
+	}
 	m.suggestions = nil
 	m.suggestionIdx = 0
+	m.suggestionsAreFiles = false
+	m.commandPaletteOpen = false
+	m.filePaletteOpen = false
 	return m
 }

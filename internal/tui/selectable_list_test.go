@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-func TestSelectableListAnchorsSelectionAroundThirdVisibleRow(t *testing.T) {
+func TestSelectableListAnchorsSelectionAroundFourthVisibleRow(t *testing.T) {
 	items := make([]selectableListItem, 10)
 	for i := range items {
 		items[i] = selectableListItem{Label: fmt.Sprintf("/cmd%d", i), Description: "command"}
@@ -25,18 +25,18 @@ func TestSelectableListAnchorsSelectionAroundThirdVisibleRow(t *testing.T) {
 	if len(lines) != 6 {
 		t.Fatalf("rendered %d lines, want 5 rows plus count line: %q", len(lines), lines)
 	}
-	for _, hidden := range []string{"/cmd0", "/cmd1", "/cmd2", "/cmd8", "/cmd9"} {
+	for _, hidden := range []string{"/cmd0", "/cmd1", "/cmd7", "/cmd8", "/cmd9"} {
 		if strings.Contains(rendered, hidden) {
 			t.Fatalf("visible window should hide %s, got %q", hidden, plainRender(t, rendered))
 		}
 	}
-	for _, visible := range []string{"/cmd3", "/cmd4", "/cmd5", "/cmd6", "/cmd7"} {
+	for _, visible := range []string{"/cmd2", "/cmd3", "/cmd4", "/cmd5", "/cmd6"} {
 		if !strings.Contains(rendered, visible) {
 			t.Fatalf("visible window should include %s, got %q", visible, plainRender(t, rendered))
 		}
 	}
-	if !strings.Contains(lines[2], "❯ /cmd5") {
-		t.Fatalf("selected item should be anchored on third visible row, got %q", lines[2])
+	if !strings.Contains(lines[3], "❯ /cmd5") {
+		t.Fatalf("selected item should be anchored on fourth visible row, got %q", lines[3])
 	}
 	if !strings.Contains(lines[5], "5 more") {
 		t.Fatalf("count line should summarize hidden rows, got %q", lines[5])

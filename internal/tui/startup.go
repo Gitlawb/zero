@@ -38,6 +38,32 @@ const emptyStateTagline = "Any model. Every tool. Zero limits."
 // emptyState renders the centered stream-area block shown while the
 // transcript has no real content: the brand glyph and tagline.
 func (m model) emptyState(width int) string {
+	lines := emptyStateLines(width)
+
+	// Vertically center within the stream area: the frame around it (title bar,
+	// rules, composer, status line) occupies ~6 terminal rows.
+	height := normalizedStartupHeight(m.height)
+	gap := clamp((height-6-len(lines))/2, 0, 12)
+	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+}
+
+func (m model) emptyStateWithOverlay(width int, overlay string) string {
+	lines := viewLines(overlay)
+	for index := range lines {
+		lines[index] = fitStyledLine(lines[index], width)
+	}
+
+	// Center the palette in the visible chat area. While the command palette is
+	// open it replaces the empty-state wordmark instead of sitting below it.
+	available := normalizedStartupHeight(m.height) - 5
+	if !m.headerPrinted {
+		available -= 2
+	}
+	gap := maxInt(0, (available-len(lines))/2)
+	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+}
+
+func emptyStateLines(width int) []string {
 	lines := []string{}
 	for _, glyph := range zeroWordmarkLines() {
 		lines = append(lines, centerLine(glyph, width))
@@ -49,12 +75,7 @@ func (m model) emptyState(width int) string {
 	for index := range lines {
 		lines[index] = fitStyledLine(lines[index], width)
 	}
-
-	// Vertically center within the stream area: the frame around it (title bar,
-	// rules, composer, status line) occupies ~6 terminal rows.
-	height := normalizedStartupHeight(m.height)
-	gap := clamp((height-6-len(lines))/2, 0, 12)
-	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
+	return lines
 }
 
 func zeroWordmarkLines() []string {

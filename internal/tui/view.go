@@ -14,6 +14,12 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 )
 
+const (
+	suggestionPaletteMaxVisible = 7
+	suggestionPaletteMaxWidth   = 76
+	suggestionPaletteMinWidth   = 44
+)
+
 // layoutTier buckets the terminal width into the spec's adaptive tiers. It
 // is derived from the live width at every render, so a WindowSizeMsg
 // re-evaluates it implicitly.
@@ -285,20 +291,178 @@ func gitBranch(cwd string) string {
 	return ref
 }
 
-// suggestionOverlay renders the slash-command autocomplete list below the
-// composer: one row per match on the panel surface, the selected row on the
-// selection tint with an accent ❯ marker. Returns "" when no overlay should
-// show.
+// suggestionOverlay renders the slash-command/file autocomplete palette below
+// the composer: compact, bordered, and capped so short prefixes cannot flood
+// the chat surface. Returns "" when no overlay should show.
 func (m model) suggestionOverlay(width int) string {
 	if !m.suggestionsActive() {
 		return ""
 	}
-	return renderSelectableList(selectableListOptions{
-		Items:      selectableItems(m.suggestions, m.suggestionsAreFiles),
-		Selected:   m.suggestionIdx,
-		Width:      width - 2,
-		MaxVisible: maxCommandSuggestions,
-	})
+	title := "Commands"
+	query := commandSuggestionQuery(m.input.Value())
+	footer := "↑/↓ move   Enter run   Esc close"
+	if m.suggestionsAreFiles {
+		title = "Files"
+		query = fileSuggestionQuery(m.input.Value())
+		footer = "↑/↓ move   Enter insert   Esc close"
+	}
+	return centerRenderedBlock(renderSuggestionPalette(selectableItems(m.suggestions, m.suggestionsAreFiles), m.suggestionIdx, width, title, query, footer), width)
+}
+
+func commandSuggestionQuery(value string) string {
+	trimmed := strings.TrimLeft(value, " ")
+	if trimmed == "" {
+		return ""
+	}
+	if fields := strings.Fields(trimmed); len(fields) > 0 {
+		return strings.TrimPrefix(fields[0], "/")
+	}
+	return strings.TrimPrefix(strings.TrimSpace(trimmed), "/")
+}
+
+func fileSuggestionQuery(value string) string {
+	if token, ok := trailingAtToken(value); ok {
+		return token
+	}
+	return ""
+}
+
+func renderSuggestionPalette(items []selectableListItem, selected, width int, title, query, footer string) string {
+	if width <= 0 {
+		width = defaultStartupWidth
+	}
+	paletteWidth := minInt(width, suggestionPaletteMaxWidth)
+	if paletteWidth < suggestionPaletteMinWidth {
+		paletteWidth = width
+	}
+	innerWidth := maxInt(1, paletteWidth-4)
+	maxVisible := minInt(suggestionPaletteMaxVisible, len(items))
+	visible := []selectableListItem{}
+	start := 0
+	if len(items) > 0 {
+		selected = clampInt(selected, 0, len(items)-1)
+		start = selectableListStart(len(items), maxVisible, selected)
+		visible = items[start : start+maxVisible]
+	}
+
+	labelWidth := 0
+	for _, item := range visible {
+		if w := lipgloss.Width(item.Label); w > labelWidth {
+			labelWidth = w
+		}
+	}
+	labelWidth = minInt(labelWidth, maxInt(8, innerWidth/2))
+
+	lines := make([]string, 0, len(visible)+5)
+	searchInset := lipgloss.Width("❯ ")
+	lines = append(lines, fillPaletteLine(strings.Repeat(" ", searchInset)+renderSuggestionSearchLine(query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+
+	for index, item := range visible {
+		absoluteIndex := start + index
+		surface := transparentSurface
+		marker := surface(zeroTheme.faintest).Render("  ")
+		if absoluteIndex == selected {
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
+		}
+
+		labelText := truncateRunes(item.Label, labelWidth)
+		label := surface(zeroTheme.ink).Render(labelText)
+		pad := surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(0, labelWidth-lipgloss.Width(labelText))))
+		line := marker + label + pad
+		if desc := strings.TrimSpace(item.Description); desc != "" {
+			descWidth := innerWidth - lipgloss.Width(marker) - labelWidth - 2
+			if truncated := truncateRunes(desc, maxInt(0, descWidth)); truncated != "" {
+				line += surface(zeroTheme.faint).Render("  " + truncated)
+			}
+		}
+		lines = append(lines, fillPaletteLine(line, innerWidth, surface))
+	}
+	if len(visible) == 0 {
+		message := "no matching commands"
+		if strings.EqualFold(strings.TrimSpace(title), "Files") {
+			message = "no matching files"
+		}
+		lines = append(lines, fillPaletteLine(strings.Repeat(" ", searchInset)+zeroTheme.faint.Render(message), innerWidth, transparentSurface))
+	}
+
+	if footer = strings.TrimSpace(footer); footer != "" {
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+		line := zeroTheme.faint.Render(footer)
+		lines = append(lines, fillPaletteLine(line, innerWidth, transparentSurface))
+	}
+	return styledBlockFillTitle(paletteWidth, strings.TrimSpace(title), lines, zeroTheme.lineStrong, lipgloss.NewStyle())
+}
+
+func styledBlockFillTitle(width int, title string, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style) string {
+	if width < 4 {
+		width = 4
+	}
+	if title = strings.TrimSpace(title); title == "" || widthTier(width) == tierTiny {
+		return styledBlockFill(width, lines, borderStyle, fill)
+	}
+	ruleWidth := width - 2
+	titleText := " " + title + " "
+	titleWidth := lipgloss.Width(titleText)
+	if titleWidth >= ruleWidth {
+		return styledBlockFill(width, lines, borderStyle, fill)
+	}
+
+	leftRule := "──"
+	rightRule := strings.Repeat("─", maxInt(0, ruleWidth-lipgloss.Width(leftRule)-titleWidth))
+	top := borderStyle.Render("╭"+leftRule) + zeroTheme.ink.Bold(true).Render(titleText) + borderStyle.Render(rightRule+"╮")
+	bottom := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
+
+	body := make([]string, 0, len(lines)+2)
+	body = append(body, top)
+	for _, line := range lines {
+		available := width - 4
+		fitted := fitStyledLine(line, available)
+		pad := fill.Render(strings.Repeat(" ", maxInt(0, available-lipgloss.Width(fitted))))
+		body = append(body, borderStyle.Render("│ ")+fitted+pad+borderStyle.Render(" │"))
+	}
+	body = append(body, bottom)
+	return strings.Join(body, "\n")
+}
+
+func renderSuggestionSearchLine(query string, width int) string {
+	query = strings.TrimSpace(query)
+	label := zeroTheme.userPrompt.Render("search > ")
+	valueWidth := maxInt(1, width-lipgloss.Width(label))
+	value := zeroTheme.ink.Render(truncateRunes(query, valueWidth))
+	return fitStyledLine(label+value, width)
+}
+
+func transparentSurface(style lipgloss.Style) lipgloss.Style {
+	return style
+}
+
+func fillPaletteLine(line string, width int, surface func(lipgloss.Style) lipgloss.Style) string {
+	line = fitStyledLine(line, width)
+	pad := maxInt(0, width-lipgloss.Width(line))
+	if pad > 0 {
+		line += surface(zeroTheme.ink).Render(strings.Repeat(" ", pad))
+	}
+	return line
+}
+
+func centerRenderedBlock(block string, width int) string {
+	if block == "" || width <= 0 {
+		return block
+	}
+	lines := strings.Split(block, "\n")
+	blockWidth := 0
+	for _, line := range lines {
+		if w := lipgloss.Width(line); w > blockWidth {
+			blockWidth = w
+		}
+	}
+	pad := maxInt(0, (width-blockWidth)/2)
+	if pad == 0 {
+		return block
+	}
+	return indentBlock(block, pad)
 }
 
 func selectableItems(suggestions []commandSuggestion, files bool) []selectableListItem {
@@ -307,6 +471,8 @@ func selectableItems(suggestions []commandSuggestion, files bool) []selectableLi
 		item := selectableListItem{Label: suggestion.Name, Description: suggestion.Desc}
 		if files {
 			item = fileSelectableItem(suggestion.Name)
+		} else {
+			item.Label = strings.TrimPrefix(item.Label, "/")
 		}
 		items = append(items, item)
 	}
@@ -318,13 +484,13 @@ func fileSelectableItem(token string) selectableListItem {
 	rel = filepath.ToSlash(rel)
 	base := path.Base(rel)
 	if base == "." || base == "/" || base == "" {
-		return selectableListItem{Label: token, Description: "file"}
+		return selectableListItem{Label: strings.TrimPrefix(token, "@"), Description: "file"}
 	}
 	dir := path.Dir(rel)
 	if dir == "." || dir == "" {
-		return selectableListItem{Label: "@" + base, Description: "file"}
+		return selectableListItem{Label: base, Description: "file"}
 	}
-	return selectableListItem{Label: "@" + base, Description: dir}
+	return selectableListItem{Label: base, Description: dir}
 }
 
 // pickerOverlay renders an open interactive selector below the composer: a
