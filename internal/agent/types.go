@@ -84,6 +84,7 @@ type PermissionRequest struct {
 	Autonomy       string             `json:"autonomy,omitempty"`
 	SideEffect     string             `json:"sideEffect"`
 	Reason         string             `json:"reason,omitempty"`
+	Scope          string             `json:"scope,omitempty"`
 	Risk           sandbox.Risk       `json:"risk"`
 	Args           map[string]any     `json:"args,omitempty"`
 	Violation      *sandbox.Violation `json:"violation,omitempty"`
@@ -106,6 +107,7 @@ type PermissionEvent struct {
 	Autonomy          string             `json:"autonomy,omitempty"`
 	SideEffect        string             `json:"sideEffect"`
 	Reason            string             `json:"reason,omitempty"`
+	Scope             string             `json:"scope,omitempty"`
 	DecisionReason    string             `json:"decisionReason,omitempty"`
 	Risk              sandbox.Risk       `json:"risk"`
 	Violation         *sandbox.Violation `json:"violation,omitempty"`

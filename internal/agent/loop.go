@@ -859,6 +859,36 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 	}
 }
 
+// permissionScope returns a concise, human-readable description of what a tool
+// call will actually touch — the file path, directory, or working dir lifted
+// from its arguments — so the permission card and the persisted decision can
+// show the user exactly what "allow" covers. It is empty when the tool exposes
+// no path-like argument (the grant is then plainly tool-wide). The first
+// matching key wins, ordered most-specific (a concrete file) first.
+func permissionScope(toolName string, args map[string]any) string {
+	for _, key := range []string{"path", "file", "directory", "dir", "cwd"} {
+		value, ok := args[key].(string)
+		if !ok {
+			continue
+		}
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || trimmed == "." {
+			continue // workspace root — no extra scope to surface
+		}
+		return truncateScope(trimmed)
+	}
+	return ""
+}
+
+func truncateScope(value string) string {
+	const maxScopeRunes = 80
+	runes := []rune(value)
+	if len(runes) <= maxScopeRunes {
+		return value
+	}
+	return string(runes[:maxScopeRunes-1]) + "…"
+}
+
 func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options, decision *sandbox.Decision) (PermissionEvent, bool) {
 	safety := tool.Safety()
 	var action PermissionAction
@@ -921,6 +951,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Autonomy:          autonomy,
 		SideEffect:        string(safety.SideEffect),
 		Reason:            reason,
+		Scope:             permissionScope(call.Name, args),
 		Risk:              risk,
 		Violation:         violation,
 		GrantMatched:      grantMatched,
@@ -943,6 +974,7 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any) Perm
 		Autonomy:       event.Autonomy,
 		SideEffect:     event.SideEffect,
 		Reason:         event.Reason,
+		Scope:          event.Scope,
 		Risk:           event.Risk,
 		Args:           cloneArgs(args),
 		Violation:      event.Violation,

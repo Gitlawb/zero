@@ -458,9 +458,16 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		if event.Grant != nil || event.GrantMatched {
 			label = "always"
 		}
-		return zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
+		line := zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
+		if scope := strings.TrimSpace(event.Scope); scope != "" {
+			line += dot + zeroTheme.muted.Render(scope)
+		}
+		return line
 	case agent.PermissionActionDeny:
 		line := zeroTheme.red.Render("denied") + dot + zeroTheme.red.Render(name)
+		if scope := strings.TrimSpace(event.Scope); scope != "" {
+			line += dot + zeroTheme.muted.Render(scope)
+		}
 		if event.Risk.Level != "" {
 			line += dot + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
 		}
@@ -474,6 +481,9 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		return out
 	default:
 		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
+		if scope := strings.TrimSpace(event.Scope); scope != "" {
+			line += "  " + zeroTheme.muted.Render(scope)
+		}
 		if event.Risk.Level != "" {
 			line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
 		}
@@ -517,6 +527,11 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) s
 	lines := []string{top, body}
 	if reason := strings.TrimSpace(request.Reason); reason != "" {
 		lines = append(lines, fill(zeroTheme.muted).Render(reason))
+	}
+	// Surface exactly what the grant covers (the file/dir the call touches) so
+	// "always" is a clear, bounded choice rather than a blind tool-wide yes.
+	if scope := strings.TrimSpace(request.Scope); scope != "" {
+		lines = append(lines, fill(zeroTheme.muted).Render("scope: "+scope))
 	}
 
 	actions := zeroTheme.badge.Render(" [a] allow once ") +
