@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -73,6 +74,7 @@ const (
 	DenialFiltered         DenialCategory = "filtered"          // tool not enabled for this run
 	DenialPermissionDenied DenialCategory = "permission_denied" // approval declined
 	DenialSandboxViolation DenialCategory = "sandbox_violation" // blocked by the sandbox
+	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
 )
 
 type PermissionRequest struct {
@@ -84,6 +86,7 @@ type PermissionRequest struct {
 	Autonomy       string             `json:"autonomy,omitempty"`
 	SideEffect     string             `json:"sideEffect"`
 	Reason         string             `json:"reason,omitempty"`
+	Scope          string             `json:"scope,omitempty"`
 	Risk           sandbox.Risk       `json:"risk"`
 	Args           map[string]any     `json:"args,omitempty"`
 	Violation      *sandbox.Violation `json:"violation,omitempty"`
@@ -106,6 +109,7 @@ type PermissionEvent struct {
 	Autonomy          string             `json:"autonomy,omitempty"`
 	SideEffect        string             `json:"sideEffect"`
 	Reason            string             `json:"reason,omitempty"`
+	Scope             string             `json:"scope,omitempty"`
 	DecisionReason    string             `json:"decisionReason,omitempty"`
 	Risk              sandbox.Risk       `json:"risk"`
 	Violation         *sandbox.Violation `json:"violation,omitempty"`
@@ -169,15 +173,23 @@ type Options struct {
 	PermissionMode         PermissionMode
 	Autonomy               string
 	Sandbox                *sandbox.Engine
-	EnabledTools           []string
-	DisabledTools          []string
-	OnText                 func(string)
-	OnToolCall             func(ToolCall)
-	OnPermissionRequest    func(context.Context, PermissionRequest) (PermissionDecision, error)
-	OnPermission           func(PermissionEvent)
-	OnAskUser              func(context.Context, AskUserRequest) (AskUserResponse, error)
-	OnToolResult           func(ToolResult)
-	OnUsage                func(Usage)
+	// FileTracker records per-session file read/write versions so the write tools
+	// can detect a file changed on disk outside Zero since it was last read. nil
+	// disables the check. Created once per session and threaded into every tool run.
+	FileTracker *tools.FileTracker
+	// Hooks, when set, runs configured beforeTool (blocking) and afterTool
+	// (advisory) commands around each tool call. nil disables hooks entirely; a
+	// dispatcher built from an empty config is also a safe no-op.
+	Hooks               *hooks.Dispatcher
+	EnabledTools        []string
+	DisabledTools       []string
+	OnText              func(string)
+	OnToolCall          func(ToolCall)
+	OnPermissionRequest func(context.Context, PermissionRequest) (PermissionDecision, error)
+	OnPermission        func(PermissionEvent)
+	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)
+	OnToolResult        func(ToolResult)
+	OnUsage             func(Usage)
 	// OnContext, when set, is called once per turn with the per-category context
 	// budget of the request about to be sent, so a surface (TUI/CLI) can show
 	// context utilization. Opt-in like the other callbacks; nil is a no-op.
@@ -196,4 +208,33 @@ type Result struct {
 	Turns       int
 	Messages    []Message
 	StopReason  StopReason
+	// FinishReason is the provider's normalized terminal stop reason for the turn
+	// that produced FinalAnswer: zeroruntime.FinishReasonLength when the output
+	// hit the token cap, FinishReasonContentFilter when it was filtered. Empty for
+	// a normal completion.
+	FinishReason string
+}
+
+// Truncated reports whether the final response ended abnormally (cut off at the
+// output token cap or withheld by a content filter) rather than completing
+// naturally. Callers can use it to warn the user that FinalAnswer is incomplete.
+func (result Result) Truncated() bool {
+	return result.FinishReason != ""
+}
+
+// TruncationNotice returns a user-facing warning when the final response was
+// truncated, or "" for a normal completion. Shared by the CLI and TUI so the
+// wording stays consistent.
+func (result Result) TruncationNotice() string {
+	switch result.FinishReason {
+	case zeroruntime.FinishReasonLength:
+		return "Response was cut off at the output token limit and may be incomplete. " +
+			"Raise the model's max output tokens or ask zero to continue."
+	case zeroruntime.FinishReasonContentFilter:
+		return "Response was withheld or cut off by the provider's content filter and may be incomplete."
+	case "":
+		return ""
+	default:
+		return "Response ended early (" + result.FinishReason + ") and may be incomplete."
+	}
 }

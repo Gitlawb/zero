@@ -88,6 +88,71 @@ func TestRunReturnsProviderText(t *testing.T) {
 	assertMessage(t, provider.requests[0].Messages[1], zeroruntime.MessageRoleUser, "say hi")
 }
 
+func TestRunReportsTruncationFinishReason(t *testing.T) {
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "partial answer"},
+			{Type: zeroruntime.StreamEventDone, FinishReason: zeroruntime.FinishReasonLength},
+		}},
+	}
+
+	result, err := Run(context.Background(), "write a long thing", provider, Options{
+		Registry: tools.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "partial answer" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if result.FinishReason != zeroruntime.FinishReasonLength {
+		t.Fatalf("FinishReason = %q, want %q", result.FinishReason, zeroruntime.FinishReasonLength)
+	}
+	if !result.Truncated() {
+		t.Fatal("Truncated() = false, want true for a length-capped response")
+	}
+	if result.TruncationNotice() == "" {
+		t.Fatal("TruncationNotice() empty for a truncated response")
+	}
+}
+
+func TestRunNormalCompletionIsNotTruncated(t *testing.T) {
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	result, err := Run(context.Background(), "hi", provider, Options{Registry: tools.NewRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Truncated() || result.TruncationNotice() != "" {
+		t.Fatalf("normal completion reported as truncated: reason=%q", result.FinishReason)
+	}
+}
+
+func TestResultTruncationNotice(t *testing.T) {
+	cases := map[string]struct {
+		reason     string
+		wantNotice bool
+	}{
+		"length":         {zeroruntime.FinishReasonLength, true},
+		"content_filter": {zeroruntime.FinishReasonContentFilter, true},
+		"unknown":        {"weird_reason", true},
+		"normal":         {"", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			notice := Result{FinishReason: tc.reason}.TruncationNotice()
+			if (notice != "") != tc.wantNotice {
+				t.Fatalf("notice = %q, wantNotice = %v", notice, tc.wantNotice)
+			}
+		})
+	}
+}
+
 func TestRunEmitsTextDeltas(t *testing.T) {
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{
@@ -607,12 +672,26 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	if result.FinalAnswer != "write approved" {
 		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
 	}
-	lookup, err := store.Lookup("write_file", sandbox.AutonomyMedium)
+	// The grant is scoped to exactly the file the call wrote, anchored to the
+	// workspace — not a blanket tool-wide allow.
+	notesPath := filepath.Join(root, "notes.txt")
+	lookup, err := store.Lookup("write_file", notesPath, sandbox.AutonomyMedium)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !lookup.Matched || lookup.Grant.Decision != sandbox.GrantAllow {
 		t.Fatalf("expected persistent allow grant, got %#v", lookup)
+	}
+	if lookup.Grant.ScopeKind != sandbox.ScopeFile || lookup.Grant.Scope != notesPath {
+		t.Fatalf("expected file-scoped grant for %q, got %#v", notesPath, lookup.Grant)
+	}
+	// A different file in the same workspace is NOT covered by that grant.
+	other, err := store.Lookup("write_file", filepath.Join(root, "other.txt"), sandbox.AutonomyMedium)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Matched {
+		t.Fatalf("a sibling file must not be covered by a file-scoped grant: %#v", other)
 	}
 	if len(permissionEvents) != 1 {
 		t.Fatalf("expected one final permission event, got %#v", permissionEvents)

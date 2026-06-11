@@ -108,6 +108,8 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		PermissionMode:  agent.PermissionModeSpecDraft,
 		Autonomy:        "low",
 		Sandbox:         run.sandboxEngine,
+		FileTracker:     tools.NewFileTracker(),
+		Hooks:           newHookDispatcher(run.workspaceRoot),
 		EnabledTools:    run.options.enabledTools,
 		DisabledTools:   run.options.disabledTools,
 		OnText:          writer.text,

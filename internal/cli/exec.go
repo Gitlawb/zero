@@ -94,6 +94,10 @@ type execOptions struct {
 	notifyMode string
 	// noNotify forces ModeOff for this run. Mutually exclusive with notifyMode.
 	noNotify bool
+	// addDirs holds directories passed via --add-dir that should be allowed as
+	// additional write roots for this run. Unioned with
+	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
+	addDirs []string
 }
 
 type execUsageError struct {
@@ -265,7 +269,25 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		images = nil
 	}
-	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps)
+	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	// Re-register the core tools with the run scope, OVERWRITING the nil-scope
+	// instances registered before config resolve (the registry must exist that
+	// early for --list-tools and tool-filter validation, which run without a
+	// provider). This is safe only while two invariants hold:
+	//   1. Registry.Register replaces by NAME, so every path-confining core
+	//      tool is swapped wholesale; and
+	//   2. nothing between the initial registration and this point captures a
+	//      core-tool INSTANCE (tool_search holds the *Registry* and resolves
+	//      names lazily; --list-tools and filter validation use names only).
+	// A new wrapper that snapshots a core tool before this line would silently
+	// ship nil-scope enforcement — add it below this re-registration instead.
+	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
+		registry.Register(tool)
+	}
+	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
@@ -284,6 +306,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 		}
 	}
+	// Effort to forward on the provider request, gated to the resolved model's
+	// supported levels (empty for non-reasoning models).
+	forwardEffort := forwardedReasoningEffort(modelRegistry, resolved.Provider.Model, runReasoningEffort)
 
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {
@@ -341,7 +366,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			prompt:             prompt,
 			sessionTitle:       sessionTitle,
 			images:             images,
-			reasoningEffort:    runReasoningEffort,
+			reasoningEffort:    forwardEffort,
 			specPermissionMode: permissionMode,
 			notifier:           notifier,
 		})
@@ -429,13 +454,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
 		ModelSwitcher:    modelSwitcher,
-		ReasoningEffort:  runReasoningEffort,
+		ReasoningEffort:  forwardEffort,
 		Cwd:              workspaceRoot,
 		Images:           images,
 		Registry:         registry,
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,
 		Sandbox:          sandboxEngine,
+		FileTracker:      tools.NewFileTracker(),
+		Hooks:            newHookDispatcher(workspaceRoot),
 		EnabledTools:     options.enabledTools,
 		DisabledTools:    options.disabledTools,
 		OnText:           writer.text,
@@ -527,6 +554,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		"content": result.FinalAnswer,
 	})
 
+	if notice := result.TruncationNotice(); notice != "" {
+		writer.warning(notice)
+	}
 	writer.final(result.FinalAnswer)
 	writer.runEnd("success", exitSuccess)
 	if writer.err != nil {
@@ -575,7 +605,7 @@ func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, 
 	registry.Register(tools.NewToolSearchTool(registry))
 }
 
-func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps) (*sandbox.Engine, error) {
+func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps, scope *sandbox.Scope) (*sandbox.Engine, error) {
 	store, err := deps.newSandboxStore()
 	if err != nil {
 		return nil, err
@@ -587,6 +617,7 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 		Policy:        policy,
 		Store:         store,
 		Backend:       backend,
+		Scope:         scope,
 	}), nil
 }
 
@@ -862,6 +893,28 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 // NOTE: the effective effort is not yet forwarded to the provider request — the
 // zeroruntime.CompletionRequest / provider wire schemas carry no effort field.
 // Full provider-request propagation is deferred (see slice-3 report).
+// forwardedReasoningEffort returns the effort to send on the provider request.
+// It mirrors reasoningEffortNotice: a known model that does not support reasoning
+// yields "" (matching the "ignoring" advisory, so the request never carries an
+// unsupported parameter); a known reasoning model yields its effective level; an
+// unknown model (e.g. a custom OpenAI-compatible endpoint) forwards the requested
+// value as-is, since no support claim can be made for it.
+func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return ""
+	}
+	entry, ok := registry.Get(strings.TrimSpace(modelID))
+	if !ok {
+		return requested
+	}
+	effective := modelregistry.EffectiveReasoningEffort(entry, modelregistry.ReasoningEffort(strings.ToLower(requested)))
+	if effective == modelregistry.ReasoningEffortNone {
+		return ""
+	}
+	return string(effective)
+}
+
 func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {

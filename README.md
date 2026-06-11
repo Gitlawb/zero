@@ -42,7 +42,7 @@ zero exec -o stream-json < turns.jsonl        # programmatic, for scripts & CI
 - 📈 **Mid-run model escalation** — start cheap, and let the agent request a stronger model only when it hits a wall (`--allow-escalation`).
 - 🗺️ **Repo intelligence** — deterministic repo maps, workspace indexing, and context-budget reports keep the agent grounded in *your* codebase, not hallucinations.
 - ⏰ **Scheduled agents** — `zero cron` runs file-backed, dependency-free agent jobs on a schedule.
-- 🛡️ **Safe by default** — permission-gated mutations, autonomy ceilings, sandbox policy, and secret redaction everywhere. Unsafe mode is an explicit, loudly-labeled opt-in.
+- 🛡️ **Safe by default** — permission-gated mutations, autonomy ceilings, sandbox policy (writes stay inside the workspace unless you grant extra directories with `--add-dir` / `/add-dir`), and secret redaction everywhere. Unsafe mode is an explicit, loudly-labeled opt-in.
 - 💾 **Durable sessions** — append-only local event store with full-text search, resume, fork, and rewind. Your history never leaves your disk.
 - 🧩 **Extensible** — skills, plugins, hooks, and MCP (Zero is both an MCP client *and* an MCP server).
 
@@ -84,6 +84,7 @@ Type to chat, **Enter** to send. `/` opens command suggestions, **Shift+Tab** cy
 | `/resume` `/rewind` | time-travel across sessions |
 | `/compact` `/context` | manage the context window |
 | `/permissions` `/tools` | inspect what the agent can touch |
+| `/add-dir` | grant an extra write directory for the session, or list current write roots |
 | `/theme` `/style` | make it yours |
 | `/doctor` `/usage` `/config` | health, cost, and config without leaving the chat |
 
@@ -112,7 +113,7 @@ zero exec --resume            # latest
 zero exec --fork <session-id> "now try the other approach"
 ```
 
-Key flags: `-m/--model` · `--mode <smart|deep|fast|large|precise>` · `--image` · `--use-spec` · `--auto <low|medium|high>` · `--enabled-tools/--disabled-tools` · `-w/--worktree` · `--resume/--fork` · `--allow-escalation` · `--notify` · `-o <text|json|stream-json>`.
+Key flags: `-m/--model` · `--mode <smart|deep|fast|large|precise>` · `--image` · `--use-spec` · `--auto <low|medium|high>` · `--enabled-tools/--disabled-tools` · `-w/--worktree` · `--add-dir <path>` (repeatable) · `--resume/--fork` · `--allow-escalation` · `--notify` · `-o <text|json|stream-json>`.
 
 stdout carries **only** program output; logs go to stderr. Full contract in [`docs/STREAM_JSON_PROTOCOL.md`](docs/STREAM_JSON_PROTOCOL.md).
 
@@ -177,6 +178,31 @@ The model registry tracks each model's capabilities, context window, and cost �
 | `escalate_model` | request a stronger model mid-run | gated by `--allow-escalation` |
 
 Every mutating tool routes through the permission policy **before** any side effect.
+
+### Extra write directories (`--add-dir`)
+
+Zero confines writes to the workspace by default. To let the agent write somewhere
+else, pass the repeatable `--add-dir` flag — it works for both the interactive TUI
+and `zero exec`:
+
+```bash
+zero --add-dir ~/Desktop/scratch                       # launch the TUI with an extra write root
+zero exec --add-dir ../sibling-repo "update both repos"
+```
+
+In the TUI, `/add-dir <path>` grants a directory mid-session (session-only), and a
+bare `/add-dir` lists the current write roots. To persist extra roots across
+sessions, set `sandbox.additionalWriteRoots` in the **global** user config
+(`~/.config/zero/config.json`); the key is deliberately ignored in project config
+so a checked-out repo can't widen its own sandbox. Flag and config sources merge
+as a union.
+
+Granted roots must already exist (the filesystem root is rejected), symlinks are
+resolved when the grant is made, and the same per-root symlink-traversal checks
+that protect the workspace apply to each extra root. Relative paths in tool calls
+still resolve against the workspace only, and network and destructive-shell policy
+are unchanged. A write denied outside all roots returns an error that suggests
+`/add-dir`.
 
 ## Architecture
 

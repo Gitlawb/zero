@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/workspaceindex"
 )
 
@@ -202,4 +203,144 @@ func shouldSkipDirectory(name string) bool {
 
 func shouldSkipWorkspaceFile(path string) bool {
 	return workspaceindex.ShouldSkipFile(path)
+}
+
+// PathScope is the multi-root write scope shared with the sandbox engine.
+// *sandbox.Scope satisfies it; nil means workspace-only (today's behavior).
+// Roots()[0] must be the workspace root (sandbox.Scope guarantees this
+// ordering); relative paths and error messages key off it.
+type PathScope interface {
+	Roots() []string
+}
+
+// scopedRoots returns the ordered roots to try for an absolute path: the
+// scope's roots when present, else just the workspace root. A non-nil scope
+// must expose at least one root (the workspace root first, per PathScope); an
+// empty Roots() is a contract violation that fails closed with an error so the
+// scoped helpers never silently accept a path with no root to validate against.
+// Returning success there would resolve to an empty path and, e.g., run bash
+// with Cmd.Dir == "" (the process cwd) instead of an allowed root.
+func scopedRoots(workspaceRoot string, scope PathScope) ([]string, error) {
+	if scope == nil {
+		return []string{workspaceRoot}, nil
+	}
+	roots := scope.Roots()
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("invalid path scope: no write roots configured")
+	}
+	return roots, nil
+}
+
+// resolveScopedPath is resolveWorkspacePath generalized to a scope: relative
+// paths resolve against the workspace root only; an absolute path resolves
+// against the first root that contains it. The workspace root's error is
+// returned when no root matches so messages stay stable. Prefix symlinks
+// outside a root are resolved per root (macOS /var aliasing); symlinks INSIDE
+// a root stay visible to the single-root checks, so a write target may resolve
+// through a symlink only when its final location lies inside a DIFFERENT
+// granted root — mirroring sandbox.Scope.validate's documented widening.
+// When the matched root is an extra (non-workspace) root the second return
+// value is the absolute path rather than a per-root-relative path; "relative
+// to which root" is ambiguous for downstream consumers (ChangedFiles, cwd
+// meta, display summaries) that document workspace-relative paths.
+// When all roots deny, the workspace root's error is returned; unlike
+// sandbox.Scope.validate this does not prefer traversal violations — the
+// engine layer reports those with full fidelity before tools run.
+func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
+		return resolveWorkspacePath(workspaceRoot, requestedPath)
+	}
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return "", "", err
+	}
+	var firstErr error
+	for index, root := range roots {
+		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
+		// in the prefix outside this root only, leaving in-root components
+		// verbatim for the single-root symlink checks.
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		absolute, relative, err := resolveWorkspacePath(root, candidate)
+		if err == nil {
+			if index > 0 {
+				// Extra-root matches report the absolute path: "relative to
+				// which root" is ambiguous downstream (ChangedFiles, cwd
+				// meta, display), and consumers document workspace-relative.
+				return absolute, absolute, nil
+			}
+			return absolute, relative, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return "", "", firstErr
+}
+
+// resolveScopedTargetPath mirrors resolveWorkspaceTargetPath for write targets
+// (the target may not exist yet) across all scope roots. When the matched root
+// is an extra (non-workspace) root the second return value is the absolute
+// path rather than a per-root-relative path; "relative to which root" is
+// ambiguous for downstream consumers (ChangedFiles, cwd meta, display
+// summaries) that document workspace-relative paths.
+// When all roots deny, the workspace root's error is returned; unlike
+// sandbox.Scope.validate this does not prefer traversal violations — the
+// engine layer reports those with full fidelity before tools run.
+func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
+		return resolveWorkspaceTargetPath(workspaceRoot, requestedPath)
+	}
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return "", "", err
+	}
+	var firstErr error
+	for index, root := range roots {
+		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
+		// in the prefix outside this root only; in-root components stay
+		// verbatim so the per-segment write-target symlink checks apply.
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		absolute, relative, err := resolveWorkspaceTargetPath(root, candidate)
+		if err == nil {
+			if index > 0 {
+				// Extra-root matches report the absolute path: "relative to
+				// which root" is ambiguous downstream (ChangedFiles, cwd
+				// meta, display), and consumers document workspace-relative.
+				return absolute, absolute, nil
+			}
+			return absolute, relative, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return "", "", firstErr
+}
+
+// recheckScopedWriteTarget mirrors recheckWorkspaceWriteTarget across roots.
+// Prefix symlinks outside a root are resolved per root (macOS /var aliasing);
+// symlinks INSIDE a root stay visible to the single-root checks, so a write
+// target may resolve through a symlink only when its final location lies
+// inside a DIFFERENT granted root — mirroring sandbox.Scope.validate's
+// documented widening.
+func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) error {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
+		return recheckWorkspaceWriteTarget(workspaceRoot, requestedPath)
+	}
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, root := range roots {
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		err := recheckWorkspaceWriteTarget(root, candidate)
+		if err == nil {
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

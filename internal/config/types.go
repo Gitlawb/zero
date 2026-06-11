@@ -61,6 +61,13 @@ type SandboxConfig struct {
 	// Empty keeps the built-in default (deny). Without this knob the engine's
 	// hard-coded NetworkDeny was unreachable from any config surface.
 	Network string `json:"network,omitempty"`
+	// AdditionalWriteRoots lists directories outside the workspace the sandbox
+	// allows writes in. Each entry must be an existing directory; entries are
+	// normalized (~-expanded, absolutized, symlink-resolved) at startup and an
+	// invalid entry fails the run. Honored from the GLOBAL user config and CLI
+	// flags only — deliberately not project config, so a cloned repo cannot
+	// grant itself write access. Session-only grants use /add-dir instead.
+	AdditionalWriteRoots []string `json:"additionalWriteRoots,omitempty"`
 }
 
 type NotifyConfig struct {

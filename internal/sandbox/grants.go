@@ -15,10 +15,12 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
-const grantSchemaVersion = 1
+const grantSchemaVersion = 2
 
 type Grant struct {
 	ToolName    string        `json:"toolName"`
+	Scope       string        `json:"scope,omitempty"`     // absolute, cleaned path; "" = tool-wide
+	ScopeKind   ScopeKind     `json:"scopeKind,omitempty"` // file | dir | "" (tool-wide)
 	Decision    GrantDecision `json:"decision"`
 	MaxAutonomy Autonomy      `json:"maxAutonomy"`
 	ApprovedAt  string        `json:"approvedAt"`
@@ -36,6 +38,11 @@ type GrantInput struct {
 	Decision    GrantDecision
 	MaxAutonomy Autonomy
 	Reason      string
+	// Scope is the raw (possibly relative) path the grant covers; ScopeKind
+	// classifies it. engine.Grant resolves Scope to an absolute path before
+	// persisting. Both empty means a tool-wide grant.
+	Scope     string
+	ScopeKind ScopeKind
 }
 
 type GrantLookup struct {
@@ -44,8 +51,8 @@ type GrantLookup struct {
 }
 
 type grantFile struct {
-	SchemaVersion int              `json:"schemaVersion"`
-	Grants        map[string]Grant `json:"grants"`
+	SchemaVersion int                `json:"schemaVersion"`
+	Grants        map[string][]Grant `json:"grants"`
 }
 
 type GrantStore struct {
@@ -122,14 +129,33 @@ func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	if err != nil {
 		return Grant{}, err
 	}
-	state.Grants[grant.ToolName] = grant
+	bucket := state.Grants[grant.ToolName]
+	replaced := false
+	for i := range bucket {
+		// A re-grant of the same (scope, kind) updates the existing record rather
+		// than accumulating duplicates.
+		if bucket[i].Scope == grant.Scope && bucket[i].ScopeKind == grant.ScopeKind {
+			bucket[i] = grant
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		bucket = append(bucket, grant)
+	}
+	state.Grants[grant.ToolName] = bucket
 	if err := store.writeState(state); err != nil {
 		return Grant{}, err
 	}
 	return grant, nil
 }
 
-func (store *GrantStore) Lookup(toolName string, requestedAutonomy Autonomy) (GrantLookup, error) {
+// Lookup returns the grant that governs a tool call whose absolute scope is
+// reqScopeAbs (empty for a tool-wide request, e.g. a shell command with no cwd).
+// Among the tool's grants that cover the request, a covering deny wins outright
+// (regardless of autonomy); otherwise the most-specific covering allow whose
+// recorded MaxAutonomy admits the requested autonomy is returned.
+func (store *GrantStore) Lookup(toolName string, reqScopeAbs string, requestedAutonomy Autonomy) (GrantLookup, error) {
 	if err := ValidateToolName(toolName); err != nil {
 		return GrantLookup{}, err
 	}
@@ -143,11 +169,29 @@ func (store *GrantStore) Lookup(toolName string, requestedAutonomy Autonomy) (Gr
 	if err != nil {
 		return GrantLookup{}, err
 	}
-	grant, ok := state.Grants[strings.TrimSpace(toolName)]
-	if !ok || !autonomyAllowed(requested, grant.MaxAutonomy) {
-		return GrantLookup{}, nil
+	bucket := state.Grants[strings.TrimSpace(toolName)]
+	var bestAllow *Grant
+	for i := range bucket {
+		grant := bucket[i]
+		if !grantCovers(grant, reqScopeAbs) {
+			continue
+		}
+		if grant.Decision == GrantDeny {
+			covering := grant
+			return GrantLookup{Matched: true, Grant: covering}, nil
+		}
+		if !autonomyAllowed(requested, grant.MaxAutonomy) {
+			continue
+		}
+		if bestAllow == nil || moreSpecific(grant, *bestAllow) {
+			covering := grant
+			bestAllow = &covering
+		}
 	}
-	return GrantLookup{Matched: true, Grant: grant}, nil
+	if bestAllow != nil {
+		return GrantLookup{Matched: true, Grant: *bestAllow}, nil
+	}
+	return GrantLookup{}, nil
 }
 
 func (store *GrantStore) List() ([]Grant, error) {
@@ -164,7 +208,14 @@ func (store *GrantStore) List() ([]Grant, error) {
 	sort.Strings(names)
 	grants := make([]Grant, 0, len(names))
 	for _, name := range names {
-		grants = append(grants, state.Grants[name])
+		bucket := append([]Grant(nil), state.Grants[name]...)
+		sort.Slice(bucket, func(i, j int) bool {
+			if bucket[i].Scope != bucket[j].Scope {
+				return bucket[i].Scope < bucket[j].Scope
+			}
+			return bucket[i].ScopeKind < bucket[j].ScopeKind
+		})
+		grants = append(grants, bucket...)
 	}
 	return grants, nil
 }
@@ -179,14 +230,17 @@ func (store *GrantStore) Revoke(toolName string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if _, ok := state.Grants[toolName]; !ok {
+	key := strings.TrimSpace(toolName)
+	bucket, ok := state.Grants[key]
+	if !ok || len(bucket) == 0 {
 		return 0, nil
 	}
-	delete(state.Grants, toolName)
+	count := len(bucket)
+	delete(state.Grants, key)
 	if err := store.writeState(state); err != nil {
 		return 0, err
 	}
-	return 1, nil
+	return count, nil
 }
 
 func (store *GrantStore) Clear() (int, error) {
@@ -196,7 +250,10 @@ func (store *GrantStore) Clear() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	count := len(state.Grants)
+	count := 0
+	for _, bucket := range state.Grants {
+		count += len(bucket)
+	}
 	if count == 0 {
 		return 0, nil
 	}
@@ -212,7 +269,11 @@ func FormatGrantList(grants []Grant) string {
 	}
 	lines := []string{"Sandbox Grants:"}
 	for _, grant := range grants {
-		line := fmt.Sprintf("  %s [%s/%s] approved %s", grant.ToolName, grant.Decision, grant.MaxAutonomy, grant.ApprovedAt)
+		scope := grant.Scope
+		if scope == "" {
+			scope = "*" // tool-wide
+		}
+		line := fmt.Sprintf("  %s (%s) [%s/%s] approved %s", grant.ToolName, scope, grant.Decision, grant.MaxAutonomy, grant.ApprovedAt)
 		if grant.Reason != "" {
 			line += " - " + redaction.RedactString(grant.Reason, redaction.Options{})
 		}
@@ -242,13 +303,46 @@ func createGrant(input GrantInput, now func() time.Time) (Grant, error) {
 	if err != nil {
 		return Grant{}, err
 	}
+	kind, err := normalizeScopeKind(input.ScopeKind)
+	if err != nil {
+		return Grant{}, err
+	}
+	scope := strings.TrimSpace(input.Scope)
+	scope, kind = reconcileScope(scope, kind)
 	return Grant{
 		ToolName:    toolName,
+		Scope:       scope,
+		ScopeKind:   kind,
 		Decision:    decision,
 		MaxAutonomy: autonomy,
 		ApprovedAt:  now().UTC().Format(time.RFC3339),
 		Reason:      redaction.RedactString(strings.TrimSpace(input.Reason), redaction.Options{}),
 	}, nil
+}
+
+// normalizeScopeKind validates and lower-cases a scope kind. An empty kind is the
+// tool-wide grant.
+func normalizeScopeKind(kind ScopeKind) (ScopeKind, error) {
+	switch ScopeKind(strings.ToLower(strings.TrimSpace(string(kind)))) {
+	case ScopeToolWide:
+		return ScopeToolWide, nil
+	case ScopeFile:
+		return ScopeFile, nil
+	case ScopeDir:
+		return ScopeDir, nil
+	default:
+		return "", fmt.Errorf("invalid sandbox scope kind %q. Expected file, dir, or empty", kind)
+	}
+}
+
+// reconcileScope keeps scope and kind consistent: a tool-wide kind carries no
+// path, and a file/dir kind with no path degrades to tool-wide (a scoped grant
+// with nothing to scope is meaningless).
+func reconcileScope(scope string, kind ScopeKind) (string, ScopeKind) {
+	if kind == ScopeToolWide || scope == "" {
+		return "", ScopeToolWide
+	}
+	return scope, kind
 }
 
 func (store *GrantStore) readState() (grantFile, error) {
@@ -259,27 +353,61 @@ func (store *GrantStore) readState() (grantFile, error) {
 		}
 		return grantFile{}, err
 	}
-	var state grantFile
-	if err := json.Unmarshal(data, &state); err != nil {
-		return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: %w", store.filePath, err)
+	// Peek at the schema version so a legacy (v1) file — whose grants are keyed
+	// directly to a single Grant — can be decoded and migrated separately from the
+	// current (v2) map[tool][]Grant shape.
+	var head struct {
+		SchemaVersion int             `json:"schemaVersion"`
+		Grants        json.RawMessage `json:"grants"`
 	}
-	if state.SchemaVersion != grantSchemaVersion {
+	if err := json.Unmarshal(data, &head); err != nil {
+		return grantFile{}, store.invalidGrantFile(err)
+	}
+	buckets := map[string][]Grant{}
+	switch head.SchemaVersion {
+	case 1:
+		var legacy map[string]Grant
+		if len(head.Grants) > 0 {
+			if err := json.Unmarshal(head.Grants, &legacy); err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+		}
+		for name, grant := range legacy {
+			// A v1 grant was tool-wide; carry it forward as such.
+			grant.Scope = ""
+			grant.ScopeKind = ScopeToolWide
+			buckets[name] = append(buckets[name], grant)
+		}
+	case grantSchemaVersion:
+		if len(head.Grants) > 0 {
+			if err := json.Unmarshal(head.Grants, &buckets); err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+		}
+	default:
 		return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: unsupported schemaVersion", store.filePath)
 	}
-	if state.Grants == nil {
-		state.Grants = map[string]Grant{}
-	}
-	for name, grant := range state.Grants {
-		if err := ValidateToolName(name); err != nil {
-			return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: %w", store.filePath, err)
+	// Validate and normalize every grant, canonicalizing tool keys (trimmed) so a
+	// whitespace-padded key in the file still matches at lookup time.
+	normalized := map[string][]Grant{}
+	for name, bucket := range buckets {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
 		}
-		normalized, err := normalizeStoredGrant(name, grant)
-		if err != nil {
-			return grantFile{}, fmt.Errorf("invalid sandbox grants file at %s: %w", store.filePath, err)
+		for _, grant := range bucket {
+			ng, err := normalizeStoredGrant(key, grant)
+			if err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+			normalized[key] = append(normalized[key], ng)
 		}
-		state.Grants[name] = normalized
 	}
-	return state, nil
+	return grantFile{SchemaVersion: grantSchemaVersion, Grants: normalized}, nil
+}
+
+func (store *GrantStore) invalidGrantFile(err error) error {
+	return fmt.Errorf("invalid sandbox grants file at %s: %w", store.filePath, err)
 }
 
 func (store *GrantStore) writeState(state grantFile) error {
@@ -305,9 +433,10 @@ func normalizeStoredGrant(name string, grant Grant) (Grant, error) {
 	if strings.TrimSpace(grant.ToolName) == "" {
 		grant.ToolName = name
 	}
-	if grant.ToolName != name {
+	if strings.TrimSpace(grant.ToolName) != name {
 		return Grant{}, fmt.Errorf("grant key %q does not match toolName %q", name, grant.ToolName)
 	}
+	grant.ToolName = name
 	if strings.TrimSpace(grant.ApprovedAt) == "" {
 		return Grant{}, fmt.Errorf("grant %s approvedAt is required", name)
 	}
@@ -319,8 +448,13 @@ func normalizeStoredGrant(name string, grant Grant) (Grant, error) {
 	if err != nil {
 		return Grant{}, err
 	}
+	kind, err := normalizeScopeKind(grant.ScopeKind)
+	if err != nil {
+		return Grant{}, err
+	}
 	grant.Decision = decision
 	grant.MaxAutonomy = autonomy
+	grant.Scope, grant.ScopeKind = reconcileScope(strings.TrimSpace(grant.Scope), kind)
 	grant.ApprovedAt = strings.TrimSpace(grant.ApprovedAt)
 	grant.Reason = redaction.RedactString(strings.TrimSpace(grant.Reason), redaction.Options{})
 	return grant, nil
@@ -329,7 +463,7 @@ func normalizeStoredGrant(name string, grant Grant) (Grant, error) {
 func emptyGrantState() grantFile {
 	return grantFile{
 		SchemaVersion: grantSchemaVersion,
-		Grants:        map[string]Grant{},
+		Grants:        map[string][]Grant{},
 	}
 }
 

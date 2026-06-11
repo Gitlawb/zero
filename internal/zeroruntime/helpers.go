@@ -16,6 +16,10 @@ type CollectedStream struct {
 	// response did not end normally (FinishReasonLength / FinishReasonContentFilter).
 	// It is empty for a normal completion. Truncated reports whether it is set.
 	FinishReason string
+	// ReasoningBlocks are the response's preserved reasoning artifacts (Anthropic
+	// thinking blocks) that must be replayed on the next turn. Empty for providers
+	// or runs without extended thinking.
+	ReasoningBlocks []ReasoningBlock
 }
 
 // Truncated reports whether the response ended for a non-normal reason (the
@@ -98,6 +102,11 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			if event.FinishReason != "" {
 				collected.FinishReason = event.FinishReason
 			}
+			// Reasoning blocks (Anthropic thinking) can ride on any terminal event;
+			// accumulate them regardless of type so they survive for replay.
+			if len(event.ReasoningBlocks) > 0 {
+				collected.ReasoningBlocks = append(collected.ReasoningBlocks, event.ReasoningBlocks...)
+			}
 
 			switch event.Type {
 			case StreamEventText:
@@ -106,7 +115,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 					options.OnText(event.Content)
 				}
 			case StreamEventToolCallStart:
-				collector.start(event.ToolCallID, event.ToolName)
+				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)
 			case StreamEventToolCallDelta:
 				collector.delta(event.ToolCallID, event.ArgumentsFragment)
 			case StreamEventToolCallEnd:
@@ -161,7 +170,7 @@ func newToolCallCollector() *toolCallCollector {
 // start begins a tool call. A non-empty ID reuses any open call with that ID
 // (some backends re-emit the same start); an empty ID always begins a fresh
 // synthetic call so concurrent empty-id calls stay distinct.
-func (collector *toolCallCollector) start(id string, name string) {
+func (collector *toolCallCollector) start(id string, name string, signature string) {
 	key := id
 	if id == "" {
 		// Adopt an empty-id call that a delta opened before this start, so its
@@ -180,6 +189,11 @@ func (collector *toolCallCollector) start(id string, name string) {
 	// nameless follow-up start cannot clobber an already-resolved name.
 	if name != "" && call.Name == "" {
 		call.Name = name
+	}
+	// Preserve the reasoning signature (Gemini thoughtSignature) so it can be
+	// replayed with the call on later turns.
+	if signature != "" && call.Signature == "" {
+		call.Signature = signature
 	}
 }
 

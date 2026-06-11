@@ -62,6 +62,7 @@ func (provider *fakeProvider) StreamCompletion(
 }
 
 func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "I am using the active session model."},
 		{Type: zeroruntime.StreamEventDone},
@@ -481,6 +482,101 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 		t.Fatalf("expected provider rebuild with selected model, got %#v", rebuilt)
 	}
 	for _, want := range []string{"Switched model", "model: gpt-4.1-mini", "api model: gpt-4.1-mini"} {
+		if !transcriptContains(next.transcript, want) {
+			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+}
+
+type stubModelSwitchCompactionGuard struct {
+	decision modelSwitchCompactionDecision
+	requests []modelSwitchCompactionRequest
+}
+
+func (guard *stubModelSwitchCompactionGuard) BeforeModelSwitch(request modelSwitchCompactionRequest) modelSwitchCompactionDecision {
+	guard.requests = append(guard.requests, request)
+	return guard.decision
+}
+
+func TestDefaultModelSwitchCompactionPolicyRequestsCompactionForLargeTargetWindowUsage(t *testing.T) {
+	decision := defaultModelSwitchCompactionPolicy{}.BeforeModelSwitch(modelSwitchCompactionRequest{
+		CurrentModel:        "gpt-4.1",
+		TargetModel:         "small-context-model",
+		TargetContextWindow: 1000,
+		EstimatedTokens:     850,
+		SessionEventCount:   20,
+		CompactRequests:     0,
+	})
+
+	if !decision.RequestCompaction {
+		t.Fatalf("expected default policy to request compaction, got %#v", decision)
+	}
+	if !strings.Contains(decision.Reason, "target context") {
+		t.Fatalf("expected reason to mention target context, got %q", decision.Reason)
+	}
+}
+
+func TestModelCommandRequestsCompactionBeforeDirtyContextSwitch(t *testing.T) {
+	guard := &stubModelSwitchCompactionGuard{
+		decision: modelSwitchCompactionDecision{
+			RequestCompaction: true,
+			Reason:            "dirty context uses most of the target window",
+		},
+	}
+	previousGuard := modelSwitchCompactionGuard
+	modelSwitchCompactionGuard = guard
+	defer func() { modelSwitchCompactionGuard = previousGuard }()
+
+	originalProvider := &fakeProvider{}
+	rebuilds := 0
+	m := newModel(context.Background(), Options{
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			APIKey:       "sk-test",
+			Model:        "gpt-4.1",
+		},
+		Provider: originalProvider,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			rebuilds++
+			return &fakeProvider{}, nil
+		},
+	})
+	m.sessionEvents = []sessions.Event{{Sequence: 1, Type: sessions.EventMessage}}
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if rebuilds != 0 {
+		t.Fatalf("provider should not be rebuilt before requested compaction, got %d rebuilds", rebuilds)
+	}
+	if next.modelName != "gpt-4.1" || next.provider != originalProvider {
+		t.Fatalf("expected active model/provider to remain unchanged, got model=%q provider=%#v", next.modelName, next.provider)
+	}
+	if next.compactRequests != 1 {
+		t.Fatalf("expected model switch to request compaction, got %d requests", next.compactRequests)
+	}
+	if len(guard.requests) != 1 {
+		t.Fatalf("expected one compaction guard request, got %d", len(guard.requests))
+	}
+	request := guard.requests[0]
+	if request.CurrentModel != "gpt-4.1" || request.TargetModel != "gpt-4.1-mini" {
+		t.Fatalf("unexpected guard model transition: %#v", request)
+	}
+	if request.SessionEventCount != 1 {
+		t.Fatalf("expected dirty session event count in guard request, got %#v", request)
+	}
+	for _, want := range []string{
+		"Context compaction requested before switching models.",
+		"dirty context uses most of the target window",
+	} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
 		}

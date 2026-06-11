@@ -48,6 +48,7 @@ type model struct {
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
+	sessionCompactor       SessionCompactor
 	runtimeMessageSink     func(tea.Msg)
 	agentOptions           agent.Options
 	notifier               *notify.Notifier
@@ -55,6 +56,10 @@ type model struct {
 	reasoningEffort        modelregistry.ReasoningEffort
 	responseStyle          string
 	compactRequests        int
+	compactInFlight        bool
+	compactFrame           int
+	lastCompactResult      *CompactResult
+	lastCompactError       string
 	unpricedRequests       int
 	unpricedTokens         int
 	transcript             []transcriptRow
@@ -309,6 +314,7 @@ func newModel(ctx context.Context, options Options) model {
 		sessionStore:           sessionStore,
 		sandboxStore:           sandboxStore,
 		agentOptions:           options.AgentOptions,
+		sessionCompactor:       options.SessionCompactor,
 		runtimeMessageSink:     options.RuntimeMessageSink,
 		permissionMode:         permissionMode,
 		reasoningEffort:        options.ReasoningEffort,
@@ -649,11 +655,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
 		// so no timer fires between runs.
-		if !m.pending {
+		if !m.pending && !m.compactInFlight {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		if m.compactInFlight {
+			m.compactFrame++
+			m = m.setCompactStatusRow(m.compactText(true))
+		}
 		return m, cmd
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -804,6 +814,28 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))
 		}
 		return m.launchQueuedMessageIfReady()
+	case compactResultMsg:
+		if !m.compactInFlight {
+			return m, nil
+		}
+		m.compactInFlight = false
+		m.compactFrame = 0
+		m.lastCompactResult = nil
+		m.lastCompactError = ""
+		if msg.err != nil {
+			m.lastCompactError = msg.err.Error()
+			m = m.setCompactStatusRow(m.compactText(true))
+			return m, nil
+		}
+		if msg.hasSessionSnapshot {
+			m.activeSession = msg.activeSession
+			m.sessionEvents = append([]sessions.Event{}, msg.sessionEvents...)
+			m.transcript = append([]transcriptRow{}, msg.transcript...)
+			m.resetFlushFrontier("· compacted ·")
+		}
+		m.lastCompactResult = &msg.result
+		m = m.setCompactStatusRow(m.compactText(true))
+		return m, nil
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -1329,10 +1361,22 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	if command.kind == commandPrompt && m.pending {
 		return m.queueMessage(command.text), nil
 	}
+	if command.kind == commandPrompt && m.compactInFlight {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{
+			kind: actionAppendSystem,
+			text: "Compact\nstatus: warning\nCompaction is running. Your next prompt will use the compacted context when this finishes.",
+		})
+		return m, nil
+	}
 	m.rememberInput(input)
 	m.clearComposer()
 	m.clearSuggestions()
-	m.chatScrollOffset = 0
+	// Snap the viewport back to the bottom for a real submission, but not for an
+	// empty Enter (a no-op) — that would yank the user away from wherever they
+	// had scrolled without anything actually being submitted.
+	if command.kind != commandEmpty {
+		m.chatScrollOffset = 0
+	}
 
 	switch command.kind {
 	case commandEmpty:
@@ -1447,9 +1491,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.handleSpecCommand(command.text)
 	case commandCompact:
 		text := ""
-		m, text = m.handleCompactCommand(command.text)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		var compactCmd tea.Cmd
+		m, text, compactCmd = m.handleCompactCommand(command.text)
+		m = m.setCompactStatusRow(text)
+		return m, compactCmd
 	case commandTranscript:
 		return m.toggleDetailedTranscript(), nil
 	case commandRewind:
@@ -1491,6 +1536,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)
+		return m, nil
+	case commandAddDir:
+		m = m.handleAddDirCommand(command.text)
 		return m, nil
 	case commandUnknown:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -1957,6 +2005,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			turnTools:   toolCalls,
 			turnElapsed: m.now().Sub(started),
 		})
+		if notice := result.TruncationNotice(); notice != "" {
+			rows = append(rows, transcriptRow{kind: rowSystem, text: notice})
+		}
 		sessionEvents = append(sessionEvents, pendingSessionEvent{
 			Type: sessions.EventMessage,
 			Payload: map[string]any{

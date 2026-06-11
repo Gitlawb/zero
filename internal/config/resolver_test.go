@@ -1526,3 +1526,28 @@ func TestResolveRejectsNegativeDeferThreshold(t *testing.T) {
 		t.Fatalf("Resolve() error = %v, want tools.deferThreshold rejection", err)
 	}
 }
+
+func TestMergeConfigUnionsSandboxAdditionalWriteRoots(t *testing.T) {
+	dst := FileConfig{}
+	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}
+	src := FileConfig{}
+	src.Sandbox.AdditionalWriteRoots = []string{"/extra/one", "/global/one"}
+	mergeConfig(&dst, src)
+	want := []string{"/global/one", "/extra/one"}
+	if !reflect.DeepEqual(dst.Sandbox.AdditionalWriteRoots, want) {
+		t.Fatalf("AdditionalWriteRoots=%v want union %v (append + dedupe, not replace)", dst.Sandbox.AdditionalWriteRoots, want)
+	}
+}
+
+func TestMergeProjectConfigIgnoresAdditionalWriteRoots(t *testing.T) {
+	dst := FileConfig{}
+	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}
+	src := FileConfig{}
+	src.Sandbox.AdditionalWriteRoots = []string{"/repo/sneaky"}
+	if err := mergeProjectConfig(&dst, src); err != nil {
+		t.Fatalf("mergeProjectConfig: %v", err)
+	}
+	if !reflect.DeepEqual(dst.Sandbox.AdditionalWriteRoots, []string{"/global/one"}) {
+		t.Fatalf("AdditionalWriteRoots=%v — project config must NOT be able to add write roots", dst.Sandbox.AdditionalWriteRoots)
+	}
+}

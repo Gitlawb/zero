@@ -7,9 +7,20 @@ type messagesRequest struct {
 	// System is either a plain string or a []systemBlock when prompt caching is
 	// enabled (Anthropic accepts both). The block form lets us attach a
 	// cache_control breakpoint to the stable system prompt.
-	System any             `json:"system,omitempty"`
-	Tools  []anthropicTool `json:"tools,omitempty"`
-	Stream bool            `json:"stream"`
+	System any `json:"system,omitempty"`
+	// Thinking enables extended thinking when a reasoning effort was requested.
+	// Omitted (nil) for normal requests so behavior is unchanged.
+	Thinking *thinkingConfig `json:"thinking,omitempty"`
+	Tools    []anthropicTool `json:"tools,omitempty"`
+	Stream   bool            `json:"stream"`
+}
+
+// thinkingConfig requests extended thinking with a token budget. Type is always
+// "enabled"; BudgetTokens is how many tokens the model may spend thinking (it is
+// counted against max_tokens).
+type thinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {
@@ -60,6 +71,9 @@ type contentBlock struct {
 	ID    string         `json:"id"`
 	Name  string         `json:"name"`
 	Input map[string]any `json:"input"`
+	// Data is the opaque payload of a redacted_thinking block (delivered whole in
+	// content_block_start, with no deltas).
+	Data string `json:"data"`
 }
 
 type streamDelta struct {
@@ -67,6 +81,10 @@ type streamDelta struct {
 	Text        string `json:"text"`
 	PartialJSON string `json:"partial_json"`
 	StopReason  string `json:"stop_reason"`
+	// Thinking/Signature carry extended-thinking deltas: thinking_delta streams the
+	// reasoning text, signature_delta delivers the block's verification signature.
+	Thinking  string `json:"thinking"`
+	Signature string `json:"signature"`
 }
 
 type usage struct {

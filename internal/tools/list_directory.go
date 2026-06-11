@@ -12,9 +12,14 @@ import (
 type listDirectoryTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewListDirectoryTool(workspaceRoot string) Tool {
+	return NewScopedListDirectoryTool(workspaceRoot, nil)
+}
+
+func NewScopedListDirectoryTool(workspaceRoot string, scope PathScope) Tool {
 	return listDirectoryTool{
 		baseTool: baseTool{
 			name:        "list_directory",
@@ -31,6 +36,7 @@ func NewListDirectoryTool(workspaceRoot string) Tool {
 			safety: readOnlySafety("Lists directory entries without modifying files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -56,7 +62,7 @@ func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result
 		maxDepth = 0
 	}
 
-	absolutePath, relativePath, err := resolveWorkspacePath(tool.workspaceRoot, requestedPath)
+	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error listing directory " + requestedPath + ": " + err.Error())
 	}

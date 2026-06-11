@@ -51,6 +51,26 @@ type CompactionPlan struct {
 	Truncated         bool       `json:"truncated,omitempty"`
 }
 
+type RecordCompactionInput struct {
+	Plan    CompactionPlan
+	Summary string
+}
+
+// CompactionPayload is the payload of an EventCompaction event. It records the
+// summary that should replace compacted-away events during replay.
+type CompactionPayload struct {
+	Summary                  string     `json:"summary"`
+	PreserveLast             int        `json:"preserveLast"`
+	CompactableCount         int        `json:"compactableCount"`
+	PreservedCount           int        `json:"preservedCount"`
+	CompactedThroughEventID  string     `json:"compactedThroughEventId,omitempty"`
+	CompactedThroughSequence int        `json:"compactedThroughSequence,omitempty"`
+	CompactableEvents        []EventRef `json:"compactableEvents,omitempty"`
+	PreservedEvents          []EventRef `json:"preservedEvents,omitempty"`
+	PromptChars              int        `json:"promptChars,omitempty"`
+	Truncated                bool       `json:"truncated,omitempty"`
+}
+
 const defaultCompactionPreserveLast = 8
 const defaultCompactionMaxPromptChars = 8000
 
@@ -156,6 +176,123 @@ func (store *Store) PlanCompaction(sessionID string, options CompactionOptions) 
 		PromptChars:       len(prompt),
 		Truncated:         truncated,
 	}, nil
+}
+
+func (store *Store) RecordCompaction(sessionID string, input RecordCompactionInput) (Event, error) {
+	if !ValidSessionID(sessionID) {
+		return Event{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	if strings.TrimSpace(input.Plan.SessionID) == "" {
+		return Event{}, fmt.Errorf("compaction plan session id is required")
+	}
+	if input.Plan.SessionID != sessionID {
+		return Event{}, fmt.Errorf("compaction plan session %s does not match %s", input.Plan.SessionID, sessionID)
+	}
+	payload, err := CompactionPayloadFromPlan(input.Summary, input.Plan)
+	if err != nil {
+		return Event{}, err
+	}
+	return store.AppendEvent(sessionID, AppendEventInput{Type: EventCompaction, Payload: payload})
+}
+
+func CompactionPayloadFromPlan(summary string, plan CompactionPlan) (CompactionPayload, error) {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return CompactionPayload{}, fmt.Errorf("compaction summary is required")
+	}
+	if len(plan.CompactableEvents) == 0 {
+		return CompactionPayload{}, fmt.Errorf("compaction plan has no compactable events")
+	}
+	lastCompactable := plan.CompactableEvents[len(plan.CompactableEvents)-1]
+	return CompactionPayload{
+		Summary:                  summary,
+		PreserveLast:             plan.PreserveLast,
+		CompactableCount:         plan.CompactableCount,
+		PreservedCount:           plan.PreservedCount,
+		CompactedThroughEventID:  lastCompactable.ID,
+		CompactedThroughSequence: lastCompactable.Sequence,
+		CompactableEvents:        cloneEventRefs(plan.CompactableEvents),
+		PreservedEvents:          cloneEventRefs(plan.PreservedEvents),
+		PromptChars:              plan.PromptChars,
+		Truncated:                plan.Truncated,
+	}, nil
+}
+
+func (store *Store) ReadRehydratedEvents(sessionID string) ([]Event, error) {
+	events, err := store.ReadEvents(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return RehydrateEvents(events)
+}
+
+func (store *Store) ReadReplayEvents(sessionID string) ([]Event, error) {
+	return store.ReadRehydratedEvents(sessionID)
+}
+
+func RehydrateEvents(events []Event) ([]Event, error) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != EventCompaction {
+			continue
+		}
+		payload, err := decodeCompactionPayload(events[i])
+		if err != nil {
+			return nil, err
+		}
+		return rehydrateEventsWithCompaction(events, events[i], payload), nil
+	}
+	return cloneEvents(events), nil
+}
+
+func ReplayEvents(events []Event) ([]Event, error) {
+	return RehydrateEvents(events)
+}
+
+func decodeCompactionPayload(event Event) (CompactionPayload, error) {
+	var payload CompactionPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return CompactionPayload{}, fmt.Errorf("decode compaction payload seq %d: %w", event.Sequence, err)
+	}
+	if strings.TrimSpace(payload.Summary) == "" {
+		return CompactionPayload{}, fmt.Errorf("decode compaction payload seq %d: summary is required", event.Sequence)
+	}
+	return payload, nil
+}
+
+func rehydrateEventsWithCompaction(events []Event, compaction Event, payload CompactionPayload) []Event {
+	skipIDs := map[string]bool{}
+	for _, ref := range payload.CompactableEvents {
+		if ref.ID != "" {
+			skipIDs[ref.ID] = true
+		}
+	}
+	useSequenceCutoff := len(skipIDs) == 0 && payload.CompactedThroughSequence > 0
+	shouldSkip := func(event Event) bool {
+		if skipIDs[event.ID] {
+			return true
+		}
+		return useSequenceCutoff && event.Sequence <= payload.CompactedThroughSequence
+	}
+
+	rehydrated := make([]Event, 0, len(events))
+	insertedSummary := false
+	for _, event := range events {
+		if event.ID == compaction.ID {
+			continue
+		}
+		if shouldSkip(event) {
+			if !insertedSummary {
+				rehydrated = append(rehydrated, compaction)
+				insertedSummary = true
+			}
+			continue
+		}
+		rehydrated = append(rehydrated, event)
+	}
+	if !insertedSummary {
+		return append([]Event{compaction}, rehydrated...)
+	}
+	return rehydrated
 }
 
 func buildCompactionPrompt(events []Event, maxChars int) (string, bool) {
@@ -274,4 +411,22 @@ func eventRefs(events []Event) []EventRef {
 		})
 	}
 	return refs
+}
+
+func cloneEventRefs(refs []EventRef) []EventRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	cloned := make([]EventRef, len(refs))
+	copy(cloned, refs)
+	return cloned
+}
+
+func cloneEvents(events []Event) []Event {
+	if len(events) == 0 {
+		return []Event{}
+	}
+	cloned := make([]Event, len(events))
+	copy(cloned, events)
+	return cloned
 }

@@ -10,9 +10,14 @@ import (
 type writeFileTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewWriteFileTool(workspaceRoot string) Tool {
+	return NewScopedWriteFileTool(workspaceRoot, nil)
+}
+
+func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 	return writeFileTool{
 		baseTool: baseTool{
 			name:        "write_file",
@@ -30,10 +35,15 @@ func NewWriteFileTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectWrite, "Creates or overwrites files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
-func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
+func (tool writeFileTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.RunWithOptions(ctx, args, RunOptions{})
+}
+
+func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
@@ -47,7 +57,7 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveWorkspaceTargetPath(tool.workspaceRoot, requestedPath)
+	absolutePath, relativePath, err := resolveScopedTargetPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
@@ -62,15 +72,38 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 
+	// On overwrite, refuse to clobber a tracked file that changed on disk outside
+	// Zero since it was last read — the new content was likely composed against a
+	// stale view. Only read current bytes when there is a baseline to compare,
+	// so a first-touch create/overwrite stays a single write with no extra read.
+	if existed {
+		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
+			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
+			// the overwrite rather than clobbering a file whose current state is
+			// unknown (it may have been replaced or removed out from under us).
+			current, rerr := os.ReadFile(absolutePath)
+			if rerr != nil {
+				return errorResult(fileConflictMessage(relativePath))
+			}
+			if cerr := options.FileTracker.CheckConflict(absolutePath, current); cerr != nil {
+				return errorResult(fileConflictMessage(relativePath))
+			}
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := recheckWorkspaceWriteTarget(tool.workspaceRoot, requestedPath); err != nil {
+	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	// Baseline the freshly written content so a later edit/overwrite in this
+	// session compares against what is now on disk.
+	newInfo, _ := os.Stat(absolutePath)
+	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
 
 	verb := "Created"
 	if existed {

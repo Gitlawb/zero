@@ -10,9 +10,14 @@ import (
 type editFileTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewEditFileTool(workspaceRoot string) Tool {
+	return NewScopedEditFileTool(workspaceRoot, nil)
+}
+
+func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 	return editFileTool{
 		baseTool: baseTool{
 			name:        "edit_file",
@@ -31,10 +36,15 @@ func NewEditFileTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectWrite, "Edits files in place."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
-func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
+func (tool editFileTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.RunWithOptions(ctx, args, RunOptions{})
+}
+
+func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
 	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path", "filename"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
@@ -52,13 +62,19 @@ func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for edit_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveWorkspacePath(tool.workspaceRoot, requestedPath)
+	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
 	contentBytes, err := os.ReadFile(absolutePath)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	// Refuse to edit a file that changed on disk outside Zero since it was last
+	// read: the model's old_string was formed against a stale view, so applying it
+	// now could silently corrupt the newer content.
+	if cerr := options.FileTracker.CheckConflict(absolutePath, contentBytes); cerr != nil {
+		return errorResult(fileConflictMessage(relativePath))
 	}
 	content := string(contentBytes)
 	occurrences := strings.Count(content, oldString)
@@ -79,12 +95,16 @@ func (tool editFileTool) Run(_ context.Context, args map[string]any) Result {
 	if updated == content {
 		return okResult("No changes: new_string is identical to old_string.")
 	}
-	if err := recheckWorkspaceWriteTarget(tool.workspaceRoot, requestedPath); err != nil {
+	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(updated), 0o644); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
+	// Re-baseline to the content we just wrote so subsequent edits in this session
+	// compare against the current on-disk state, not the pre-edit version.
+	newInfo, _ := os.Stat(absolutePath)
+	options.FileTracker.Record(absolutePath, []byte(updated), newInfo)
 
 	suffix := ""
 	if replacedCount != 1 {

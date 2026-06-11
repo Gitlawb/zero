@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -166,6 +167,24 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 		}
 	} else {
 		job.NextRunAt = nxt
+	}
+	// Re-read before persisting: the job may have been paused or removed while it
+	// was executing, and this in-memory copy is stale from tick start. Without
+	// this, store.Update would clobber an external pause back to active. (A single
+	// scheduler is the supported model; this narrows but does not fully close the
+	// read-modify-write window — full atomicity needs file locking.)
+	current, err := store.Get(job.ID)
+	switch {
+	case errors.Is(err, cron.ErrJobNotFound):
+		// Genuinely removed mid-run: don't recreate it by persisting.
+		fmt.Fprintf(stdout, "fired %s -> exit %d (job removed during run)\n", job.ID, code)
+		return
+	case err != nil:
+		// A transient read failure (IO/permission) is NOT removal — warn but still
+		// record the run and persist the computed next state below.
+		fmt.Fprintf(stderr, "warning: could not re-read job %s before persist: %v\n", job.ID, err)
+	case current.Status == cron.StatusPaused:
+		job.Status = cron.StatusPaused
 	}
 	if err := store.AppendRun(job.ID, rec); err != nil {
 		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, err)

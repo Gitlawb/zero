@@ -345,6 +345,47 @@ func (store *Store) Latest() (*Metadata, error) {
 	return &sessions[0], nil
 }
 
+// IsResumableKind reports whether a session kind represents a standalone,
+// user-resumable conversation rather than an agent sub-run. Regular ("") and
+// user fork sessions are resumable; child (specialist/sub-agent) and spec
+// draft/impl sessions are not — each agent task and /spec run creates one, so
+// listing them in the resume picker floods it with non-conversation entries.
+func IsResumableKind(kind SessionKind) bool {
+	switch kind {
+	case "", SessionKindFork:
+		return true
+	default:
+		return false
+	}
+}
+
+// ListResumable returns only the sessions a user can resume as standalone
+// conversations (see IsResumableKind), newest-first like List.
+func (store *Store) ListResumable() ([]Metadata, error) {
+	all, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	resumable := make([]Metadata, 0, len(all))
+	for _, session := range all {
+		if IsResumableKind(session.SessionKind) {
+			resumable = append(resumable, session)
+		}
+	}
+	return resumable, nil
+}
+
+// LatestResumable returns the most-recently-updated resumable session, or nil
+// when none exist. Used by `/resume latest` so it lands on a real conversation
+// instead of the newest child/spec sub-run.
+func (store *Store) LatestResumable() (*Metadata, error) {
+	resumable, err := store.ListResumable()
+	if err != nil || len(resumable) == 0 {
+		return nil, err
+	}
+	return &resumable[0], nil
+}
+
 func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, error) {
 	if !ValidSessionID(parentSessionID) {
 		return Metadata{}, fmt.Errorf("invalid zero session id %q", parentSessionID)
@@ -536,14 +577,34 @@ func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 		}
 		return nil, fmt.Errorf("read zero session events: %w", err)
 	}
+	// A genuine torn tail is an INCOMPLETE final write — a crash mid-append leaves
+	// the last line without its terminating newline. If the file ends with a
+	// newline, every record was fully flushed, so a malformed final line is real
+	// corruption and must still fail loudly.
+	tornTailPossible := len(data) > 0 && data[len(data)-1] != '\n'
+	lines := bytes.Split(data, []byte{'\n'})
+	lastNonEmpty := -1
+	for index, line := range lines {
+		if len(bytes.TrimSpace(line)) > 0 {
+			lastNonEmpty = index
+		}
+	}
 	events := []Event{}
-	for index, line := range bytes.Split(data, []byte{'\n'}) {
+	for index, line := range lines {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
 		var event Event
 		if err := json.Unmarshal(line, &event); err != nil {
+			// Tolerate a torn tail: a crash mid-append leaves the final line
+			// truncated (and thus without a trailing newline). Drop that partial
+			// record so resume still recovers every complete event. A malformed
+			// line anywhere earlier — or a complete-but-corrupt final line — is real
+			// corruption and still fails loudly.
+			if index == lastNonEmpty && tornTailPossible {
+				break
+			}
 			return nil, fmt.Errorf("invalid json in zero session %s %s at line %d: %w", sessionID, EventsFile, index+1, err)
 		}
 		events = append(events, event)

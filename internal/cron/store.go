@@ -16,6 +16,12 @@ const (
 	StatusPaused = "paused"
 )
 
+// ErrJobNotFound is returned (wrapped) by Get when a job's metadata file is
+// absent — a genuinely removed job. Callers use errors.Is to distinguish this
+// from a transient read failure (IO error, permission), which must NOT be
+// treated as "job removed".
+var ErrJobNotFound = errors.New("cron job not found")
+
 // Job is a stored scheduled job.
 type Job struct {
 	ID        string    `json:"id"`
@@ -147,7 +153,12 @@ func (s *Store) Get(id string) (Job, error) {
 	}
 	data, err := os.ReadFile(filepath.Join(s.jobDir(id), "metadata.json"))
 	if err != nil {
-		return Job{}, fmt.Errorf("cron job %q not found", id)
+		if errors.Is(err, os.ErrNotExist) {
+			return Job{}, fmt.Errorf("cron job %q: %w", id, ErrJobNotFound)
+		}
+		// A transient read failure (IO error, permission) is NOT a missing job;
+		// surface it as a distinct error so callers don't mistake it for removal.
+		return Job{}, fmt.Errorf("read cron job %q: %w", id, err)
 	}
 	var job Job
 	if err := json.Unmarshal(data, &job); err != nil {

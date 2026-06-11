@@ -23,6 +23,11 @@ type RunOptions struct {
 	ReasoningEffort   string
 	Depth             int
 	Cwd               string
+	// FileTracker, when set, records the version of each file read or written this
+	// session so write_file/edit_file can refuse to clobber a file that changed on
+	// disk outside Zero since it was last read. nil disables the feature entirely
+	// (the read/write tools behave exactly as before).
+	FileTracker *FileTracker
 	// EnabledTools / DisabledTools carry the run's operator tool filters so a
 	// filter-aware tool (tool_search) never discloses or loads an operator-hidden
 	// tool. They use the same allow/deny semantics as the agent's filter gate:
@@ -188,11 +193,14 @@ func scrubResultSecrets(res Result) Result {
 }
 
 func CoreReadOnlyTools(workspaceRoot string) []Tool {
+	return CoreReadOnlyToolsScoped(workspaceRoot, nil)
+}
+func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
-		NewReadFileTool(workspaceRoot),
-		NewListDirectoryTool(workspaceRoot),
-		NewGlobTool(workspaceRoot),
-		NewGrepTool(workspaceRoot),
+		NewScopedReadFileTool(workspaceRoot, scope),
+		NewScopedListDirectoryTool(workspaceRoot, scope),
+		NewScopedGlobTool(workspaceRoot, scope),
+		NewScopedGrepTool(workspaceRoot, scope),
 		// skill reads reusable instruction files from the skills dir (it resolves
 		// skills.DefaultDir itself); read-only, so it is safe in the core/MCP set.
 		NewSkillTool(""),
@@ -200,18 +208,20 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 	}
 }
 
-func CoreWriteTools(workspaceRoot string) []Tool {
+func CoreWriteTools(workspaceRoot string) []Tool { return CoreWriteToolsScoped(workspaceRoot, nil) }
+func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
-		NewWriteFileTool(workspaceRoot),
-		NewEditFileTool(workspaceRoot),
-		NewApplyPatchTool(workspaceRoot),
+		NewScopedWriteFileTool(workspaceRoot, scope),
+		NewScopedEditFileTool(workspaceRoot, scope),
+		NewScopedApplyPatchTool(workspaceRoot, scope),
 		NewUpdatePlanTool(),
 	}
 }
 
-func CoreShellTools(workspaceRoot string) []Tool {
+func CoreShellTools(workspaceRoot string) []Tool { return CoreShellToolsScoped(workspaceRoot, nil) }
+func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
-		NewBashTool(workspaceRoot),
+		NewScopedBashTool(workspaceRoot, scope),
 	}
 }
 
@@ -221,10 +231,11 @@ func CoreNetworkTools() []Tool {
 	}
 }
 
-func CoreTools(workspaceRoot string) []Tool {
-	tools := append([]Tool{}, CoreReadOnlyTools(workspaceRoot)...)
-	tools = append(tools, CoreWriteTools(workspaceRoot)...)
-	tools = append(tools, CoreShellTools(workspaceRoot)...)
+func CoreTools(workspaceRoot string) []Tool { return CoreToolsScoped(workspaceRoot, nil) }
+func CoreToolsScoped(workspaceRoot string, scope PathScope) []Tool {
+	tools := append([]Tool{}, CoreReadOnlyToolsScoped(workspaceRoot, scope)...)
+	tools = append(tools, CoreWriteToolsScoped(workspaceRoot, scope)...)
+	tools = append(tools, CoreShellToolsScoped(workspaceRoot, scope)...)
 	tools = append(tools, CoreNetworkTools()...)
 	return tools
 }

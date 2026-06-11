@@ -3,6 +3,7 @@ package sessions
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 )
 
@@ -67,7 +68,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		if parent == nil {
 			return PreparedExec{}, ExecError{"Zero session not found: " + forkID}
 		}
-		contextEvents, err := store.ReadEvents(parent.SessionID)
+		contextEvents, err := readExecContextEvents(store, parent.SessionID)
 		if err != nil {
 			return PreparedExec{}, err
 		}
@@ -103,7 +104,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		if session == nil {
 			return PreparedExec{}, ExecError{"Zero session not found: " + sessionID}
 		}
-		contextEvents, err := store.ReadEvents(session.SessionID)
+		contextEvents, err := readExecContextEvents(store, session.SessionID)
 		if err != nil {
 			return PreparedExec{}, err
 		}
@@ -140,6 +141,19 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		return PreparedExec{}, err
 	}
 	return PreparedExec{Mode: ModeNew, Session: session, ContextEvents: []Event{}, Store: store}, nil
+}
+
+func readExecContextEvents(store *Store, sessionID string) ([]Event, error) {
+	contextEvents, err := store.ReadRehydratedEvents(sessionID)
+	if err == nil {
+		return contextEvents, nil
+	}
+	rawEvents, rawErr := store.ReadEvents(sessionID)
+	if rawErr != nil {
+		return nil, err
+	}
+	log.Printf("zero sessions: failed to rehydrate compaction events for %s; falling back to raw events: %v", sessionID, err)
+	return rawEvents, nil
 }
 
 func FormatExecPrompt(prompt string, prepared PreparedExec) string {
@@ -217,6 +231,9 @@ func extractText(value any) string {
 		}
 		return strings.Join(parts, " ")
 	case map[string]any:
+		if summary, ok := typed["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+			return summary
+		}
 		parts := []string{}
 		for _, item := range typed {
 			if text := extractText(item); text != "" {

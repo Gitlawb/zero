@@ -103,6 +103,16 @@ func cronAdd(store *cron.Store, now func() time.Time, args []string, stdout io.W
 		}
 	}
 
+	if len(positional) > 1 {
+		fmt.Fprintf(stderr, "Unexpected extra arguments: %s\n", strings.Join(positional[1:], " "))
+		return exitUsage
+	}
+	// Consume an explicit positional expression BEFORE applying recipe defaults,
+	// so `cron add "0 9 * * *" --recipe X` keeps the user's schedule instead of
+	// silently dropping it in favor of the recipe's expr.
+	if len(positional) == 1 && expr == "" {
+		expr = positional[0]
+	}
 	if recipe != "" {
 		r, ok := cron.Recipe(recipe)
 		if !ok {
@@ -115,13 +125,6 @@ func cronAdd(store *cron.Store, now func() time.Time, args []string, stdout io.W
 		if prompt == "" {
 			prompt = r.Prompt
 		}
-	}
-	if len(positional) > 1 {
-		fmt.Fprintf(stderr, "Unexpected extra arguments: %s\n", strings.Join(positional[1:], " "))
-		return exitUsage
-	}
-	if len(positional) == 1 && expr == "" {
-		expr = positional[0]
 	}
 	if expr == "" {
 		fmt.Fprintln(stderr, "A cron expression is required (e.g. `zero cron add \"0 9 * * *\" --prompt ...`).")

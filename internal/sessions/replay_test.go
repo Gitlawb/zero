@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -184,4 +185,232 @@ func TestStoreCompactionPromptCanBeTruncated(t *testing.T) {
 	if !plan.Truncated || len(plan.SummaryPrompt) > 80 {
 		t.Fatalf("expected truncated summary prompt within limit, got %#v", plan)
 	}
+}
+
+func TestStoreRecordsCompactionEventPayload(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
+		time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 11, 10, 0, 1, 0, time.UTC),
+		time.Date(2026, 6, 11, 10, 0, 2, 0, time.UTC),
+		time.Date(2026, 6, 11, 10, 0, 3, 0, time.UTC),
+		time.Date(2026, 6, 11, 10, 0, 4, 0, time.UTC),
+		time.Date(2026, 6, 11, 10, 0, 5, 0, time.UTC),
+	})})
+	session, err := store.Create(CreateInput{SessionID: "compactrecord"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"raw-alpha-context", "raw-beta-context", "gamma", "delta"} {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 2, MaxPromptChars: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	event, err := store.RecordCompaction(session.SessionID, RecordCompactionInput{
+		Plan:    plan,
+		Summary: "Alpha and beta have been summarized for replay.",
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != EventCompaction || event.ID != "compactrecord:5" {
+		t.Fatalf("compaction event = %#v", event)
+	}
+	var payload CompactionPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("decode compaction payload: %v", err)
+	}
+	if payload.Summary != "Alpha and beta have been summarized for replay." {
+		t.Fatalf("summary = %q", payload.Summary)
+	}
+	if payload.CompactedThroughEventID != "compactrecord:2" || payload.CompactedThroughSequence != 2 {
+		t.Fatalf("compacted-through fields = %#v", payload)
+	}
+	if payload.PreserveLast != 2 || payload.CompactableCount != 2 || payload.PreservedCount != 2 {
+		t.Fatalf("compaction counts = %#v", payload)
+	}
+	if payload.PromptChars != plan.PromptChars || payload.Truncated != plan.Truncated {
+		t.Fatalf("compact-plan parity fields = %#v, plan = %#v", payload, plan)
+	}
+	if len(payload.CompactableEvents) != 2 || payload.CompactableEvents[0].ID != "compactrecord:1" || payload.CompactableEvents[1].ID != "compactrecord:2" {
+		t.Fatalf("compactable refs = %#v", payload.CompactableEvents)
+	}
+	if len(payload.PreservedEvents) != 2 || payload.PreservedEvents[0].ID != "compactrecord:3" || payload.PreservedEvents[1].ID != "compactrecord:4" {
+		t.Fatalf("preserved refs = %#v", payload.PreservedEvents)
+	}
+	loaded, err := store.Get(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil || loaded.EventCount != 5 || loaded.LastEventType != EventCompaction {
+		t.Fatalf("metadata after compaction = %#v", loaded)
+	}
+}
+
+func TestStoreRecordCompactionRequiresPlanSessionID(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "compactmissingplan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"alpha", "beta", "gamma"} {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 1, MaxPromptChars: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.SessionID = ""
+
+	_, err = store.RecordCompaction(session.SessionID, RecordCompactionInput{
+		Plan:    plan,
+		Summary: "summarized",
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "compaction plan session id is required") {
+		t.Fatalf("expected missing plan session id error, got %v", err)
+	}
+}
+
+func TestStoreReadRehydratedEventsReplacesCompactedPrefixWithSummary(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "rehydrate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"raw-alpha-context", "raw-beta-context", "gamma", "delta"} {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 2, MaxPromptChars: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordCompaction(session.SessionID, RecordCompactionInput{
+		Plan:    plan,
+		Summary: "Early context summary.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "epsilon"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.ReadRehydratedEvents(session.SessionID)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotIDs := eventIDs(events)
+	wantIDs := []string{"rehydrate:5", "rehydrate:3", "rehydrate:4", "rehydrate:6"}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("rehydrated ids = %#v, want %#v", gotIDs, wantIDs)
+	}
+	prepared, err := PrepareExec(PrepareExecOptions{Store: store, Resume: session.SessionID})
+	if err != nil {
+		t.Fatalf("PrepareExec returned error: %v", err)
+	}
+	if got := eventIDs(prepared.ContextEvents); strings.Join(got, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("prepared context ids = %#v, want %#v", got, wantIDs)
+	}
+	prompt := FormatExecPrompt("continue", prepared)
+	for _, want := range []string{"Early context summary.", "gamma", "delta", "epsilon"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("rehydrated prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, dropped := range []string{"raw-alpha-context", "raw-beta-context"} {
+		if strings.Contains(prompt, dropped) {
+			t.Fatalf("rehydrated prompt should not include compacted event %q:\n%s", dropped, prompt)
+		}
+	}
+}
+
+func TestPrepareExecFallsBackToRawEventsWhenLatestCompactionIsMalformed(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "malformed_compaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "before compaction"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventCompaction, Payload: json.RawMessage(`{"summary":""}`)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ReadRehydratedEvents(session.SessionID); err == nil {
+		t.Fatal("expected malformed latest compaction to fail direct rehydration")
+	}
+
+	resumed, err := PrepareExec(PrepareExecOptions{Store: store, Resume: session.SessionID})
+	if err != nil {
+		t.Fatalf("PrepareExec resume should fall back to raw events, got error: %v", err)
+	}
+	if got := eventIDs(resumed.ContextEvents); strings.Join(got, ",") != "malformed_compaction:1,malformed_compaction:2" {
+		t.Fatalf("resume context ids = %#v, want raw event ids", got)
+	}
+
+	forked, err := PrepareExec(PrepareExecOptions{Store: store, Fork: session.SessionID, SessionID: "malformed_compaction_fork"})
+	if err != nil {
+		t.Fatalf("PrepareExec fork should fall back to raw events, got error: %v", err)
+	}
+	if got := eventIDs(forked.ContextEvents); strings.Join(got, ",") != "malformed_compaction:1,malformed_compaction:2" {
+		t.Fatalf("fork context ids = %#v, want raw parent event ids", got)
+	}
+}
+
+func TestRehydrateEventsDecodesOnlyLatestCompactionPayload(t *testing.T) {
+	events := []Event{
+		{ID: "rehydratelatest:1", SessionID: "rehydratelatest", Sequence: 1, Type: EventMessage, CreatedAt: "2026-06-11T10:00:00Z", Payload: json.RawMessage(`{"content":"first"}`)},
+		{ID: "rehydratelatest:2", SessionID: "rehydratelatest", Sequence: 2, Type: EventCompaction, CreatedAt: "2026-06-11T10:00:01Z", Payload: json.RawMessage(`{"summary":""}`)},
+		{ID: "rehydratelatest:3", SessionID: "rehydratelatest", Sequence: 3, Type: EventMessage, CreatedAt: "2026-06-11T10:00:02Z", Payload: json.RawMessage(`{"content":"second"}`)},
+		{ID: "rehydratelatest:4", SessionID: "rehydratelatest", Sequence: 4, Type: EventCompaction, CreatedAt: "2026-06-11T10:00:03Z", Payload: mustRawJSON(t, CompactionPayload{
+			Summary:                 "Latest compacted summary.",
+			CompactableCount:        2,
+			PreservedCount:          1,
+			CompactedThroughEventID: "rehydratelatest:3",
+			CompactableEvents: []EventRef{
+				{ID: "rehydratelatest:2", Sequence: 2, Type: EventCompaction},
+				{ID: "rehydratelatest:3", Sequence: 3, Type: EventMessage},
+			},
+		})},
+		{ID: "rehydratelatest:5", SessionID: "rehydratelatest", Sequence: 5, Type: EventMessage, CreatedAt: "2026-06-11T10:00:04Z", Payload: json.RawMessage(`{"content":"tail"}`)},
+	}
+
+	rehydrated, err := RehydrateEvents(events)
+
+	if err != nil {
+		t.Fatalf("RehydrateEvents returned error for historical malformed payload: %v", err)
+	}
+	gotIDs := eventIDs(rehydrated)
+	wantIDs := []string{"rehydratelatest:1", "rehydratelatest:4", "rehydratelatest:5"}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("rehydrated ids = %#v, want %#v", gotIDs, wantIDs)
+	}
+}
+
+func eventIDs(events []Event) []string {
+	ids := make([]string, 0, len(events))
+	for _, event := range events {
+		ids = append(ids, event.ID)
+	}
+	return ids
+}
+
+func mustRawJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

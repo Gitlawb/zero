@@ -372,12 +372,16 @@ func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 
 	next := submitAndDrivePermissionRun(t, m, "write first", "y", runtimeMessageCh, 4)
 
-	lookup, err := grantStore.Lookup("write_file", sandbox.AutonomyMedium)
+	// The always-decision persists a grant scoped to exactly the file written.
+	lookup, err := grantStore.Lookup("write_file", filepath.Join(root, "notes.txt"), sandbox.AutonomyMedium)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !lookup.Matched || lookup.Grant.Decision != sandbox.GrantAllow {
 		t.Fatalf("expected always decision to persist allow grant, got %#v", lookup)
+	}
+	if lookup.Grant.ScopeKind != sandbox.ScopeFile {
+		t.Fatalf("expected file-scoped grant, got %#v", lookup.Grant)
 	}
 	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
 	if err != nil {
@@ -679,6 +683,30 @@ func TestResumeCommandIsBlockedWhileRunPending(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "Cannot resume sessions while a run is active") {
 		t.Fatalf("expected pending resume error, got %#v", next.transcript)
+	}
+}
+
+func TestResumePickerExcludesSubRunSessions(t *testing.T) {
+	store := testSessionStore(t)
+	if _, err := store.Create(sessions.CreateInput{Title: "Real Conversation"}); err != nil {
+		t.Fatalf("Create conversation: %v", err)
+	}
+	// A specialist/sub-agent run and a spec draft both create sessions; neither is
+	// a standalone conversation and must not flood the /resume picker.
+	if _, err := store.Create(sessions.CreateInput{Title: "Specialist Run", SessionKind: sessions.SessionKindChild}); err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	if _, err := store.Create(sessions.CreateInput{Title: "Spec Draft", SessionKind: sessions.SessionKindSpecDraft}); err != nil {
+		t.Fatalf("Create spec draft: %v", err)
+	}
+
+	out := newModel(context.Background(), Options{SessionStore: store}).resumeText("")
+
+	if !strings.Contains(out, "Real Conversation") {
+		t.Fatalf("resume picker should list the real conversation:\n%s", out)
+	}
+	if strings.Contains(out, "Specialist Run") || strings.Contains(out, "Spec Draft") {
+		t.Fatalf("resume picker must exclude child/spec sub-runs:\n%s", out)
 	}
 }
 

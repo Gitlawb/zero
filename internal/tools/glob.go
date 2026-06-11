@@ -13,18 +13,23 @@ import (
 type globTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewGlobTool(workspaceRoot string) Tool {
+	return NewScopedGlobTool(workspaceRoot, nil)
+}
+
+func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 	return globTool{
 		baseTool: baseTool{
 			name:        "glob",
-			description: "Find files by glob pattern inside the workspace.",
+			description: "Find files by glob pattern inside the workspace or an explicitly granted extra root.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"pattern":      {Type: "string", Description: `Glob pattern to match, for example "**/*.go".`},
-					"cwd":          {Type: "string", Description: "Directory to scan. Defaults to workspace root.", Default: "."},
+					"cwd":          {Type: "string", Description: "Directory to scan. Relative paths stay in the workspace; use an absolute path to scan a granted extra root. Defaults to workspace root.", Default: "."},
 					"limit":        {Type: "integer", Description: "Maximum matches to return.", Default: 100, Minimum: intPtr(1), Maximum: intPtr(1000)},
 					"include_dirs": {Type: "boolean", Description: "Whether directory matches should be included.", Default: false},
 				},
@@ -34,6 +39,7 @@ func NewGlobTool(workspaceRoot string) Tool {
 			safety: readOnlySafety("Finds matching paths without reading contents or modifying files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -60,7 +66,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
 	}
 
-	root, _, err := resolveWorkspacePath(tool.workspaceRoot, cwd)
+	root, displayRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
@@ -69,7 +75,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
 
-	matches, err := scanGlob(root, matcher, includeDirs)
+	matches, err := scanGlob(root, displayRoot, matcher, includeDirs)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
@@ -93,7 +99,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 	}
 }
 
-func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, error) {
+func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool) ([]string, error) {
 	matches := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -124,7 +130,16 @@ func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, 
 			return nil
 		}
 		if matcher.MatchString(normalized) {
-			matches = append(matches, normalized)
+			match := normalized
+			// When cwd resolved to an extra (non-workspace) root, resolveScopedPath
+			// returns an absolute displayRoot. Emit absolute matches there so the
+			// agent can feed them straight back into read_file/edit_file; a bare
+			// relative "foo.txt" would otherwise resolve against the workspace and
+			// hit the wrong file when the same name exists in both roots.
+			if filepath.IsAbs(displayRoot) {
+				match = filepath.ToSlash(filepath.Join(displayRoot, relative))
+			}
+			matches = append(matches, match)
 		}
 		return nil
 	})

@@ -307,9 +307,14 @@ func isValidID(value string) bool {
 }
 
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-[A-Za-z0-9._-]+`),
+	// OpenAI-style keys: anchor on a word boundary and require a long key body so
+	// "sk-" inside ordinary words (e.g. "task-list") is never redacted while real
+	// keys ("sk-proj-…", "sk-…") still are.
+	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`(?i)(api[_-]?key["'=:\s]+)[^"',\s)]+`),
-	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._-]+`),
+	// Bearer tokens: require a credential-length token so prose such as
+	// "bearer of bad news" or "bearer token" is not mistaken for a secret.
+	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._-]{16,}`),
 }
 
 func redactValue(value any) any {

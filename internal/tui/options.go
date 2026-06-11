@@ -32,6 +32,7 @@ type Options struct {
 	SessionStore           *sessions.Store
 	SandboxStore           *sandbox.GrantStore
 	UsageTracker           *usage.Tracker
+	SessionCompactor       SessionCompactor
 
 	AgentOptions    agent.Options
 	PermissionMode  agent.PermissionMode

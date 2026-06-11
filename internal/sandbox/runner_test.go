@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -80,7 +82,13 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 		t.Fatalf("sandbox-exec args = %#v, want profile and command", plan.Args)
 	}
 	profile := plan.Args[1]
-	for _, want := range []string{"(deny default)", "(deny network*)", `(allow file-write* (subpath "` + sandboxProfileString(resolvedRoot) + `"))`} {
+	for _, want := range []string{
+		"(deny default)",
+		"(deny network*)",
+		`(subpath "` + sandboxProfileString(resolvedRoot) + `")`,
+		`(literal "/dev/null")`,
+		`(subpath "/private/tmp")`,
+	} {
 		if !strings.Contains(profile, want) {
 			t.Fatalf("profile missing %q:\n%s", want, profile)
 		}
@@ -163,6 +171,46 @@ func assertArgsContainSequence(t *testing.T, args []string, sequence ...string) 
 	t.Fatalf("args %#v do not contain sequence %#v", args, sequence)
 }
 
+// TestSandboxExecProfileAllowsDevNullAndTemp reproduces the audit finding that
+// the generated sandbox-exec profile blocked `> /dev/null` and mktemp because
+// only the workspace was writable. It runs real commands through sandbox-exec
+// when that backend is available on the host.
+func TestSandboxExecProfileAllowsDevNullAndTemp(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("sandbox-exec is macOS-only")
+	}
+	backend := SelectBackend(BackendOptions{})
+	if !backend.Available || backend.Name != BackendSandboxExec {
+		t.Skipf("sandbox-exec backend unavailable: %s", backend.Message)
+	}
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+
+	run := func(script string) (string, error) {
+		command, _, err := engine.CommandContext(context.Background(), CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", script},
+			Dir:  root,
+		})
+		if err != nil {
+			return "", err
+		}
+		out, runErr := command.CombinedOutput()
+		return string(out), runErr
+	}
+
+	for _, script := range []string{"echo hi > /dev/null", "mktemp"} {
+		if out, err := run(script); err != nil {
+			t.Fatalf("sandboxed %q failed: %v\noutput: %s", script, err, out)
+		}
+	}
+
+	// The workspace remains writable; a sibling write still lands.
+	if out, err := run("echo ok > probe.txt && cat probe.txt"); err != nil {
+		t.Fatalf("workspace write failed: %v\noutput: %s", err, out)
+	}
+}
+
 func resolvedTestPath(t *testing.T, path string) string {
 	t.Helper()
 	resolved, err := filepath.EvalSymlinks(path)
@@ -170,4 +218,95 @@ func resolvedTestPath(t *testing.T, path string) string {
 		t.Fatalf("EvalSymlinks(%q): %v", path, err)
 	}
 	return resolved
+}
+
+func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
+	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true})
+	if !strings.Contains(profile, "(allow file-write*") {
+		t.Fatalf("profile missing file-write rule:\n%s", profile)
+	}
+	// Every granted write root is its own (subpath ...) filter.
+	for _, root := range []string{"/ws", "/extra root"} {
+		if !strings.Contains(profile, `(subpath "`+root+`")`) {
+			t.Fatalf("profile missing write root %q:\n%s", root, profile)
+		}
+	}
+	// The baseline temp tree + standard device nodes (parity with the bubblewrap
+	// backend) are kept alongside the granted roots.
+	if !strings.Contains(profile, `(subpath "/tmp")`) || !strings.Contains(profile, `(literal "/dev/null")`) {
+		t.Fatalf("profile missing baseline temp/device write allowances:\n%s", profile)
+	}
+}
+
+func TestBubblewrapPlanBindsExtraWriteRoots(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true"})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	joined := strings.Join(plan.Args, " ")
+	resolvedExtra := scope.Roots()[1]
+	if !strings.Contains(joined, "--bind "+resolvedExtra+" "+resolvedExtra) {
+		t.Fatalf("bubblewrap args missing rw bind for extra root %q:\n%s", resolvedExtra, joined)
+	}
+}
+
+func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: DefaultPolicy(), Scope: scope})
+	if _, _, _, err := engine.resolveCommandDir(extra, engine.policy); err != nil {
+		t.Fatalf("resolveCommandDir(extra root) = %v, want nil", err)
+	}
+	if _, _, _, err := engine.resolveCommandDir(t.TempDir(), engine.policy); err == nil {
+		t.Fatal("resolveCommandDir(outside all roots) = nil error, want violation")
+	}
+}
+
+func TestBubblewrapPlanChdirsToRealPathForExtraRootCwd(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+	})
+	resolvedExtra := scope.Roots()[1]
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.SandboxDir != filepath.ToSlash(resolvedExtra) {
+		t.Fatalf("SandboxDir=%q want real extra-root path %q", plan.SandboxDir, resolvedExtra)
+	}
+	joined := strings.Join(plan.Args, " ")
+	if !strings.Contains(joined, "--chdir "+filepath.ToSlash(resolvedExtra)) {
+		t.Fatalf("args missing --chdir to real extra-root path:\n%s", joined)
+	}
+	// The workspace must appear only at its /workspace remount, never
+	// double-bound at its real host path.
+	resolvedWorkspace := scope.Roots()[0]
+	if strings.Contains(joined, "--bind "+resolvedWorkspace+" "+resolvedWorkspace) {
+		t.Fatalf("workspace double-bound at real path:\n%s", joined)
+	}
 }

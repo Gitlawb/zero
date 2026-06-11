@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -84,8 +86,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
 		request := zeroruntime.CompletionRequest{
-			Messages: copyMessages(messages),
-			Tools:    exposed,
+			Messages:        copyMessages(messages),
+			Tools:           exposed,
+			ReasoningEffort: options.ReasoningEffort,
 		}
 		if reminder != "" {
 			// Append to the per-turn request copy only — NEVER to persistent
@@ -120,8 +123,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// empty-loaded partition, re-hiding every already-loaded deferred tool
 				// and dropping the reminder when deferral is active.
 				request = zeroruntime.CompletionRequest{
-					Messages: copyMessages(messages),
-					Tools:    exposed,
+					Messages:        copyMessages(messages),
+					Tools:           exposed,
+					ReasoningEffort: options.ReasoningEffort,
 				}
 				if reminder != "" {
 					// Append to the per-turn retry copy only — NEVER to persistent
@@ -159,8 +163,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// Routing through an empty-loaded partition here would re-hide every
 				// already-loaded deferred tool and drop the reminder when deferral is active.
 				retryRequest := zeroruntime.CompletionRequest{
-					Messages: copyMessages(messages),
-					Tools:    exposed,
+					Messages:        copyMessages(messages),
+					Tools:           exposed,
+					ReasoningEffort: options.ReasoningEffort,
 				}
 				if reminder != "" {
 					// Append to the per-turn retry copy only — NEVER to persistent
@@ -195,10 +200,18 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			return result, ctx.Err()
 		}
 
+		// Carry the turn's terminal stop reason so a final answer cut off at the
+		// output token cap (or by a content filter) is reported as truncated. A
+		// tool-call turn normalizes to "" and clears any prior reason.
+		result.FinishReason = collected.FinishReason
+
 		messages = append(messages, zeroruntime.Message{
 			Role:      zeroruntime.MessageRoleAssistant,
 			Content:   collected.Text,
 			ToolCalls: historySafeToolCalls(collected.ToolCalls),
+			// Preserve thinking blocks so the next turn can replay them; providers
+			// that use extended thinking reject tool conversations that drop them.
+			Reasoning: collected.ReasoningBlocks,
 		})
 
 		if len(collected.ToolCalls) == 0 {
@@ -377,8 +390,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		result.Messages = copyMessages(messages)
 		return result, ctx.Err()
 	}
-	if answer, finalMessages := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, messages, options); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
+		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
 		return result, nil
 	}
@@ -388,30 +402,31 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	return result, nil
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message) {
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages []zeroruntime.Message, options Options) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: maxTurnsFinalAnswerPrompt,
 	})
 	stream, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{
-		Messages: copyMessages(finalMessages),
+		Messages:        copyMessages(finalMessages),
+		ReasoningEffort: options.ReasoningEffort,
 	})
 	if err != nil {
-		return "", messages
+		return "", messages, ""
 	}
 	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
 		OnText:  options.OnText,
 		OnUsage: options.OnUsage,
 	})
 	if ctx.Err() != nil || collected.Error != "" || strings.TrimSpace(collected.Text) == "" {
-		return "", messages
+		return "", messages, ""
 	}
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleAssistant,
 		Content: collected.Text,
 	})
-	return collected.Text, finalMessages
+	return collected.Text, finalMessages, collected.FinishReason
 }
 
 func historySafeToolCalls(calls []ToolCall) []ToolCall {
@@ -522,7 +537,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			permissionGranted = true
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
-			grant, err := persistPermissionGrant(call.Name, decisionReason, options)
+			grant, err := persistPermissionGrant(call.Name, args, decisionReason, options)
 			if err != nil {
 				emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
 				return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent), nil
@@ -532,6 +547,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)
 			return deniedPermissionResult(call, decisionReason, requestEvent), nil
+		}
+	}
+
+	// beforeTool hooks may veto the call before it runs (a non-zero exit blocks).
+	if toolFound {
+		if outcome, blocked := dispatchBeforeTool(ctx, options, call, args); blocked {
+			return blockedByHookResult(call, outcome), nil
 		}
 	}
 
@@ -546,6 +568,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ReasoningEffort:   options.ReasoningEffort,
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
+		// Per-session file version tracker so write_file/edit_file refuse to clobber
+		// a file that changed on disk outside Zero since it was last read.
+		FileTracker: options.FileTracker,
 		// Forward the run's operator tool filters so a filter-aware tool
 		// (tool_search) never discloses or loads an operator-hidden deferred tool.
 		EnabledTools:  options.EnabledTools,
@@ -558,6 +583,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		if event, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, sandboxDecision); ok {
 			event.DecisionReason = decisionReason
 			options.OnPermission(event)
+		}
+	}
+	// afterTool hooks run once the tool has executed; their output (e.g. a
+	// formatter or vet result) is surfaced back to the model on the result.
+	if toolFound {
+		if feedback := dispatchAfterTool(ctx, options, call, args, result); feedback != "" {
+			var didRedact bool
+			result.Output, didRedact = appendHookFeedback(result.Output, feedback)
+			if didRedact {
+				result.Redacted = true
+			}
 		}
 	}
 	// Secret scrubbing happens at the registry boundary (the single point both
@@ -579,6 +615,92 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
 	}, nil
+}
+
+// dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
+// that exits non-zero vetoes the call: the returned bool is true and the tool
+// must not run. A nil dispatcher (no hooks wired) is a no-op.
+func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, args map[string]any) (hooks.DispatchOutcome, bool) {
+	if options.Hooks == nil {
+		return hooks.DispatchOutcome{}, false
+	}
+	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event:      hooks.EventBeforeTool,
+		ToolName:   call.Name,
+		ToolCallID: call.ID,
+		Payload: map[string]any{
+			"event":      string(hooks.EventBeforeTool),
+			"tool":       call.Name,
+			"toolCallId": call.ID,
+			"sessionId":  options.SessionID,
+			"cwd":        options.Cwd,
+			"args":       args,
+		},
+	})
+	return outcome, outcome.Blocked
+}
+
+// dispatchAfterTool runs configured afterTool hooks once a tool has executed and
+// returns any advisory output (e.g. a formatter or vet result) to surface back
+// to the model. afterTool hooks never block. A nil dispatcher is a no-op.
+func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
+	if options.Hooks == nil {
+		return ""
+	}
+	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event:      hooks.EventAfterTool,
+		ToolName:   call.Name,
+		ToolCallID: call.ID,
+		Payload: map[string]any{
+			"event":        string(hooks.EventAfterTool),
+			"tool":         call.Name,
+			"toolCallId":   call.ID,
+			"sessionId":    options.SessionID,
+			"cwd":          options.Cwd,
+			"status":       string(result.Status),
+			"changedFiles": result.ChangedFiles,
+		},
+	})
+	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+}
+
+// blockedByHookResult is the tool result for a call vetoed by a beforeTool hook.
+func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResult {
+	// The hook reason (its stdout/stderr) is model-visible here, an intercepted
+	// path that bypasses the registry's output redaction boundary — so scrub it
+	// like every other string that crosses into the transcript, and flag Redacted
+	// when scrubbing changed it (matching the registry's contract).
+	scrubbed := redaction.RedactString(outcome.Reason, redaction.Options{})
+	redacted := scrubbed != outcome.Reason
+	reason := strings.TrimSpace(scrubbed)
+	if reason == "" {
+		reason = "blocked by a beforeTool hook"
+	}
+	message := fmt.Sprintf("Error: %q was blocked by hook %q: %s", call.Name, outcome.BlockedBy, reason)
+	return ToolResult{
+		ToolCallID:   call.ID,
+		Name:         call.Name,
+		Status:       tools.StatusError,
+		Output:       message,
+		Redacted:     redacted,
+		DenialReason: DenialHookBlocked,
+	}
+}
+
+// appendHookFeedback appends afterTool hook output to a tool result's output,
+// scrubbed for secrets like every other string crossing the tool boundary. The
+// returned bool reports whether scrubbing changed the feedback, so the caller can
+// set ToolResult.Redacted to match the registry's redaction contract.
+func appendHookFeedback(output string, feedback string) (string, bool) {
+	scrubbed := redaction.RedactString(feedback, redaction.Options{})
+	redacted := scrubbed != feedback
+	if strings.TrimSpace(scrubbed) == "" {
+		return output, redacted
+	}
+	if strings.TrimSpace(output) == "" {
+		return "Hook output:\n" + scrubbed, redacted
+	}
+	return output + "\n\nHook output:\n" + scrubbed, redacted
 }
 
 // isRetriableToolError reports whether a failed tool result is one the model can
@@ -774,7 +896,7 @@ func normalizePermissionDecisionAction(action PermissionDecisionAction) Permissi
 	}
 }
 
-func persistPermissionGrant(toolName string, reason string, options Options) (sandbox.Grant, error) {
+func persistPermissionGrant(toolName string, args map[string]any, reason string, options Options) (sandbox.Grant, error) {
 	if options.Sandbox == nil {
 		return sandbox.Grant{}, errors.New("sandbox engine is not configured")
 	}
@@ -785,11 +907,17 @@ func persistPermissionGrant(toolName string, reason string, options Options) (sa
 	if normalized, err := sandbox.NormalizeAutonomy(maxAutonomy); err == nil {
 		maxAutonomy = normalized
 	}
+	// Scope the grant to exactly what the permission card showed (the file or
+	// directory the call touches); engine.Grant anchors it to the workspace. A
+	// call with no path-like argument yields an empty scope — a tool-wide grant.
+	scope, kind := sandbox.DeriveScope(toolName, args)
 	return options.Sandbox.Grant(sandbox.GrantInput{
 		ToolName:    toolName,
 		Decision:    sandbox.GrantAllow,
 		MaxAutonomy: maxAutonomy,
 		Reason:      reason,
+		Scope:       scope,
+		ScopeKind:   kind,
 	})
 }
 
@@ -844,6 +972,32 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 			"permission_action": string(event.Action),
 		},
 	}
+}
+
+// permissionScope returns a concise, human-readable description of what a tool
+// call will actually touch — the file path, directory, or working dir lifted
+// from its arguments — so the permission card and the persisted decision can
+// show the user exactly what "allow" covers. It is empty when the tool exposes
+// no path-like argument (the grant is then plainly tool-wide). The first
+// matching key wins, ordered most-specific (a concrete file) first.
+func permissionScope(toolName string, args map[string]any) string {
+	// sandbox.DeriveScope is the single source of truth for which arguments carry
+	// a scope, shared with grant persistence and matching so the card display can
+	// never diverge from what an "always allow" actually covers.
+	raw, _ := sandbox.DeriveScope(toolName, args)
+	if raw == "" {
+		return ""
+	}
+	return truncateScope(raw)
+}
+
+func truncateScope(value string) string {
+	const maxScopeRunes = 80
+	runes := []rune(value)
+	if len(runes) <= maxScopeRunes {
+		return value
+	}
+	return string(runes[:maxScopeRunes-1]) + "…"
 }
 
 func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, permissionGranted bool, permissionMode PermissionMode, options Options, decision *sandbox.Decision) (PermissionEvent, bool) {
@@ -908,6 +1062,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Autonomy:          autonomy,
 		SideEffect:        string(safety.SideEffect),
 		Reason:            reason,
+		Scope:             permissionScope(call.Name, args),
 		Risk:              risk,
 		Violation:         violation,
 		GrantMatched:      grantMatched,
@@ -930,6 +1085,7 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any) Perm
 		Autonomy:       event.Autonomy,
 		SideEffect:     event.SideEffect,
 		Reason:         event.Reason,
+		Scope:          event.Scope,
 		Risk:           event.Risk,
 		Args:           cloneArgs(args),
 		Violation:      event.Violation,
@@ -1215,6 +1371,9 @@ func copyMessages(messages []Message) []Message {
 		copied[index] = message
 		if message.ToolCalls != nil {
 			copied[index].ToolCalls = append([]ToolCall{}, message.ToolCalls...)
+		}
+		if message.Reasoning != nil {
+			copied[index].Reasoning = append([]zeroruntime.ReasoningBlock{}, message.Reasoning...)
 		}
 		// Deep-copy image attachments (slice AND each Data byte slice) so the
 		// raw image bytes are never aliased across history/request/result copies.

@@ -84,6 +84,65 @@ func TestStoreCreatesAppendsListsAndReadsEvents(t *testing.T) {
 	}
 }
 
+func TestReadEventsToleratesTornTail(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T10:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "zero_torn_1", Title: "t", Cwd: "/repo", ModelID: "m", Provider: "p"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "ok"}}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+	// Simulate a crash mid-append: a truncated final JSON line.
+	file, err := os.OpenFile(store.eventsPath(session.SessionID), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	if _, err := file.WriteString(`{"type":"message","payload":{"content":"tru`); err != nil {
+		t.Fatalf("write torn line: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close events: %v", err)
+	}
+
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents must tolerate a torn tail, got error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 complete events (torn tail dropped), got %d", len(events))
+	}
+}
+
+func TestReadEventsFailsOnMidFileCorruption(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T10:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "zero_corrupt_1", Title: "t", Cwd: "/repo", ModelID: "m", Provider: "p"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "ok"}}); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	// A corrupt line BEFORE a later valid line is real corruption, not a torn
+	// tail, and must still fail loudly.
+	file, err := os.OpenFile(store.eventsPath(session.SessionID), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open events: %v", err)
+	}
+	if _, err := file.WriteString("not json\n" + `{"type":"message","payload":{}}` + "\n"); err != nil {
+		t.Fatalf("write corruption: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close events: %v", err)
+	}
+
+	if _, err := store.ReadEvents(session.SessionID); err == nil {
+		t.Fatal("expected error on mid-file corruption")
+	}
+}
+
 func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
 	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
@@ -254,6 +313,60 @@ func TestStoreListsChildrenLineageAndTree(t *testing.T) {
 	}
 	if tree.Children[1].Session.SessionID != first.SessionID || len(tree.Children[1].Children) != 1 {
 		t.Fatalf("tree nested children = %#v, want grandchild under first", tree.Children)
+	}
+}
+
+func TestListAndLatestResumableExcludeSubRuns(t *testing.T) {
+	at, err := time.Parse(time.RFC3339, "2026-06-04T10:00:00Z")
+	if err != nil {
+		t.Fatalf("parse start time: %v", err)
+	}
+	// Advancing clock: each created session is strictly newer than the last, so
+	// LatestResumable is deterministic regardless of how often Create reads Now.
+	clock := func() time.Time {
+		at = at.Add(time.Second)
+		return at
+	}
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: clock})
+
+	mk := func(kind SessionKind, title string) Metadata {
+		s, err := store.Create(CreateInput{Title: title, Cwd: "/repo", ModelID: "m", Provider: "p", SessionKind: kind})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", kind, err)
+		}
+		return s
+	}
+	mk("", "conversation-1")
+	mk(SessionKindFork, "fork-1")
+	mk(SessionKindChild, "child-1")
+	mk(SessionKindSpecDraft, "spec-draft-1")
+	mk(SessionKindSpecImpl, "spec-impl-1")
+	newestResumable := mk("", "conversation-2") // newest standalone conversation
+	mk(SessionKindChild, "child-2")             // newer overall, but a sub-run
+
+	resumable, err := store.ListResumable()
+	if err != nil {
+		t.Fatalf("ListResumable: %v", err)
+	}
+	if len(resumable) != 3 {
+		t.Fatalf("ListResumable returned %d sessions, want 3 (two regular + one fork)", len(resumable))
+	}
+	for _, session := range resumable {
+		if !IsResumableKind(session.SessionKind) {
+			t.Fatalf("ListResumable leaked sub-run kind %q (%s)", session.SessionKind, session.SessionID)
+		}
+	}
+
+	latest, err := store.LatestResumable()
+	if err != nil {
+		t.Fatalf("LatestResumable: %v", err)
+	}
+	if latest == nil || latest.SessionID != newestResumable.SessionID {
+		got := "nil"
+		if latest != nil {
+			got = latest.SessionID
+		}
+		t.Fatalf("LatestResumable = %s, want newest resumable %s (must skip the newer child)", got, newestResumable.SessionID)
 	}
 }
 
