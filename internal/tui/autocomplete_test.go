@@ -166,8 +166,38 @@ func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("Enter on an argument command suggestion should not start an agent run")
 	}
-	if got := m.input.Value(); got != "/spec " {
+	if got := m.input.Value(); got != "/spec" {
 		t.Fatalf("Enter should prefill command for arguments, got %q", got)
+	}
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec") || !strings.Contains(got, "[task]") {
+		t.Fatalf("prefilled command should show argument hint, got %q", got)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("fix")})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("typing the argument should not start an agent run")
+	}
+	if got := m.input.Value(); got != "/spec fix" {
+		t.Fatalf("typing after the hint should insert one argument separator, got %q", got)
+	}
+	for range "fix" {
+		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = updated.(model)
+		if cmd != nil {
+			t.Fatal("backspacing the argument should not start an agent run")
+		}
+	}
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") || strings.Contains(got, "/spec  [task]") {
+		t.Fatalf("empty argument command should render one visual separator, got %q", got)
+	}
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("typing after deleting the argument should not start an agent run")
+	}
+	if got := m.input.Value(); got != "/spec x" {
+		t.Fatalf("typing after deleting the argument should keep one separator, got %q", got)
 	}
 	if m.suggestionsActive() {
 		t.Fatal("prefilling a command suggestion should dismiss the overlay")

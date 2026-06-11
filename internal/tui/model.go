@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -1126,11 +1127,46 @@ func (m model) composerLine(width int) string {
 		lines[len(lines)-1] = joinHeaderLine(fitStyledLine(lines[len(lines)-1], width-lipgloss.Width(hint)-2), hint, width)
 		return strings.Join(lines, "\n")
 	}
+	argumentHint := commandArgumentHintForInput(input.Value())
+	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
+		argumentHint = ""
+	}
+	if argumentHint != "" {
+		input.Width = 0
+		line := commandArgumentHintComposerLine(input, argumentHint)
+		if hint == "" {
+			return fitStyledLine(line, width)
+		}
+		return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+	}
 	line := input.View()
 	if hint == "" {
 		return fitStyledLine(line, width)
 	}
 	return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+}
+
+func commandArgumentHintComposerLine(input textinput.Model, argumentHint string) string {
+	hintRunes := []rune(argumentHint)
+	if len(hintRunes) == 0 {
+		return input.View()
+	}
+	input.Cursor.TextStyle = zeroTheme.faint
+	input.Cursor.SetChar(string(hintRunes[0]))
+	displayValue := strings.TrimRightFunc(input.Value(), unicode.IsSpace)
+	return input.PromptStyle.Render(input.Prompt) +
+		input.TextStyle.Inline(true).Render(displayValue) +
+		zeroTheme.faint.Render(" ") +
+		input.Cursor.View() +
+		zeroTheme.faint.Render(string(hintRunes[1:]))
+}
+
+func commandArgumentHintForInput(value string) string {
+	command := parseCommand(value)
+	if command.name == "" || strings.TrimSpace(command.text) != "" {
+		return ""
+	}
+	return commandRequiredInputHint(command.name)
 }
 
 func (m model) composerBox(width int) string {

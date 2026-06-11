@@ -350,9 +350,34 @@ func commandSelectionRequiresInput(name string) bool {
 	return ok && commandUsageRequiresInput(command.usage)
 }
 
+func commandRequiredInputHint(name string) string {
+	command, ok := resolveCommand(name)
+	if !ok {
+		return ""
+	}
+	placeholder := commandUsageRequiredPlaceholder(command.usage)
+	if placeholder == "" {
+		return ""
+	}
+	return "[" + placeholder + "]"
+}
+
 func commandUsageRequiresInput(usage string) bool {
+	return commandUsageRequiredPlaceholder(usage) != ""
+}
+
+func commandUsageRequiredPlaceholder(usage string) string {
 	optionalDepth := 0
+	var placeholder strings.Builder
+	inPlaceholder := false
 	for _, char := range usage {
+		if inPlaceholder {
+			if char == '>' {
+				return strings.TrimSpace(placeholder.String())
+			}
+			placeholder.WriteRune(char)
+			continue
+		}
 		switch char {
 		case '[':
 			optionalDepth++
@@ -362,11 +387,11 @@ func commandUsageRequiresInput(usage string) bool {
 			}
 		case '<':
 			if optionalDepth == 0 {
-				return true
+				inPlaceholder = true
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 func commandGroupOrder() []commandGroup {

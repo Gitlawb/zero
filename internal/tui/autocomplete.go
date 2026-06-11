@@ -211,8 +211,9 @@ func (m *model) moveSuggestion(delta int) {
 	m.suggestionIdx = ((m.suggestionIdx+delta)%n + n) % n
 }
 
-// completeSuggestion replaces the input with the selected command name plus a
-// trailing space (ready for arguments) and dismisses the overlay.
+// completeSuggestion replaces the input with the selected suggestion and
+// dismisses the overlay. Required-argument commands stay tight ("/spec") so
+// the rendered argument hint can sit next to the cursor without dead padding.
 func (m model) completeSuggestion() model {
 	if !m.suggestionsActive() || len(m.suggestions) == 0 {
 		return m
@@ -230,7 +231,11 @@ func (m model) completeSuggestion() model {
 		m.input.SetValue(nextValue)
 		m.input.SetCursor(nextCursor)
 	} else {
-		m.input.SetValue(chosen + " ")
+		if commandSelectionRequiresInput(chosen) {
+			m.input.SetValue(chosen)
+		} else {
+			m.input.SetValue(chosen + " ")
+		}
 		m.input.CursorEnd()
 	}
 	m.suggestions = nil

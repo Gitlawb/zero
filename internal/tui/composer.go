@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -202,6 +203,9 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		} else {
 			text = sanitizeComposerInput(text)
 		}
+		if shouldInsertCommandArgumentSpace(state, text) {
+			text = " " + text
+		}
 		m.setComposerState(insertComposerText(state, text))
 	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlB:
 		state.cursor--
@@ -241,6 +245,24 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		m.recomputeSuggestions()
 	}
 	return m, true
+}
+
+func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
+	if text == "" {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(text)
+	if unicode.IsSpace(first) {
+		return false
+	}
+	state = normalizeComposerState(state)
+	if state.cursor != len([]rune(state.text)) {
+		return false
+	}
+	if strings.TrimRightFunc(state.text, unicode.IsSpace) != state.text {
+		return false
+	}
+	return commandArgumentHintForInput(state.text) != ""
 }
 
 func renderComposerState(state composerState, prompt string, width int) string {

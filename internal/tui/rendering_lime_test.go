@@ -287,6 +287,40 @@ func TestComposerLineTracksRunState(t *testing.T) {
 	}
 }
 
+func TestComposerLineShowsRequiredCommandArgumentHint(t *testing.T) {
+	m := limeTestModel()
+	m.input.Width = 40
+	m.input.SetValue("/spec")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") {
+		t.Fatalf("composer line = %q, want /spec argument hint", got)
+	}
+
+	m.input.SetValue("/spec ")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") || strings.Contains(got, "/spec  [task]") {
+		t.Fatalf("composer line = %q, want /spec argument hint", got)
+	}
+
+	m.input.SetValue("/find ")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/find") || !strings.Contains(got, "[query]") {
+		t.Fatalf("composer line = %q, want /find query hint", got)
+	}
+
+	m.input.SetValue("/spec fix this")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "[task]") {
+		t.Fatalf("composer line = %q, should hide hint once an argument is present", got)
+	}
+
+	m.input.SetValue("/model ")
+	m.input.CursorEnd()
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "[list|id]") {
+		t.Fatalf("composer line = %q, should not hint optional arguments", got)
+	}
+}
+
 func TestComposerBoxFramesInputAndBottomModelModeLabel(t *testing.T) {
 	m := limeTestModel()
 	m.input.SetValue("add a flag")

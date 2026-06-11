@@ -91,6 +91,24 @@ func TestCommandSelectionRequiresInputFromUsage(t *testing.T) {
 	}
 }
 
+func TestCommandRequiredInputHintFromUsage(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{name: "/spec", want: "[task]"},
+		{name: "/search", want: "[query]"},
+		{name: "/find", want: "[query]"},
+		{name: "/image", want: "[path]"},
+		{name: "/model", want: ""},
+	}
+	for _, tc := range cases {
+		if got := commandRequiredInputHint(tc.name); got != tc.want {
+			t.Fatalf("commandRequiredInputHint(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestImageCommandIsDiscoverable(t *testing.T) {
 	found := false
 	for _, name := range listCommandNames() {
