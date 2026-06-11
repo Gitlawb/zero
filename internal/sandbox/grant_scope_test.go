@@ -170,7 +170,13 @@ func TestDeriveScope(t *testing.T) {
 }
 
 func TestResolveScopeAbs(t *testing.T) {
-	root := filepath.Join(string(filepath.Separator)+"proj", "a")
+	// Build a genuinely-absolute root. A leading separator (\proj\a) is "rooted"
+	// but NOT absolute on Windows (filepath.IsAbs wants a volume like C:), so the
+	// absolute-passthrough case below would be treated as relative and doubled.
+	root, err := filepath.Abs(filepath.Join("proj", "a"))
+	if err != nil {
+		t.Fatalf("abs root: %v", err)
+	}
 	abs := filepath.Join(root, "src", "main.go")
 
 	if got := resolveScopeAbs("src/main.go", root); got != abs {
@@ -186,7 +192,10 @@ func TestResolveScopeAbs(t *testing.T) {
 		t.Fatalf("empty scope = %q, want empty", got)
 	}
 	// A grant made in one workspace must never resolve into another.
-	otherRoot := filepath.Join(string(filepath.Separator)+"proj", "b")
+	otherRoot, err := filepath.Abs(filepath.Join("proj", "b"))
+	if err != nil {
+		t.Fatalf("abs other root: %v", err)
+	}
 	if resolveScopeAbs("src/main.go", root) == resolveScopeAbs("src/main.go", otherRoot) {
 		t.Fatalf("same relative scope resolved equal across workspaces")
 	}
