@@ -163,8 +163,11 @@ func ProviderSnapshotFromProfile(profile config.ProviderProfile, active bool) Pr
 		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey),
 		Model:        profile.Model,
 		Active:       active,
-		APIKeySet:    strings.TrimSpace(profile.APIKey) != "",
-		Status:       "ok",
+		// A profile can authenticate via a raw auth-header value instead of APIKey;
+		// treat either as a configured credential so auth-header-only profiles don't
+		// render as "not set".
+		APIKeySet: strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "",
+		Status:    "ok",
 	}
 	metadata, err := providers.ResolveRuntimeMetadata(profile, providers.Options{})
 	if err != nil {
