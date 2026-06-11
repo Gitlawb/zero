@@ -273,8 +273,25 @@ func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	if !strings.Contains(plain, "Commands") || !strings.Contains(plain, "search >") {
 		t.Fatalf("suggestion overlay should stay visible above composer while transcript is scrolled, got %q", plain)
 	}
-	if got := len(strings.Split(plain, "\n")); got != m.height {
+	lines := strings.Split(plain, "\n")
+	if got := len(lines); got != m.height {
 		t.Fatalf("alt-screen view should keep terminal height, got %d lines want %d", got, m.height)
+	}
+	paletteLine := -1
+	composerLine := -1
+	for index, line := range lines {
+		switch {
+		case strings.Contains(line, "Commands"):
+			paletteLine = index
+		case strings.Contains(line, "no model") && strings.Contains(line, "auto-approve"):
+			composerLine = index
+		}
+	}
+	if paletteLine < 0 || composerLine < 0 {
+		t.Fatalf("expected palette and composer in view, palette=%d composer=%d view=%q", paletteLine, composerLine, plain)
+	}
+	if paletteLine >= composerLine-3 {
+		t.Fatalf("palette should be centered over chat, not anchored to composer; palette line %d composer line %d", paletteLine, composerLine)
 	}
 }
 

@@ -855,7 +855,7 @@ func (m model) transcriptView() string {
 	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
-	suggestionInFooter := suggestionOverlay != "" && !(m.transcriptEmpty() && !m.pending)
+	suggestionInViewport := suggestionOverlay != "" && !(m.transcriptEmpty() && !m.pending)
 	if m.transcriptEmpty() && !m.pending {
 		if suggestionOverlay != "" {
 			body.WriteString(m.emptyStateWithOverlay(width, suggestionOverlay))
@@ -904,12 +904,6 @@ func (m model) transcriptView() string {
 
 	var footer strings.Builder
 	footer.WriteString("\n")
-	if suggestionInFooter {
-		// Once real chat content exists, keep autocomplete anchored to the
-		// composer instead of appending it into the scrollable transcript.
-		footer.WriteString(suggestionOverlay)
-		footer.WriteString("\n")
-	}
 	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
 		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")
@@ -931,13 +925,22 @@ func (m model) transcriptView() string {
 	footer.WriteString(m.statusLine(width))
 
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptView(body.String(), footer.String(), width)
+		overlay := ""
+		if suggestionInViewport {
+			overlay = suggestionOverlay
+		}
+		return m.scrollableTranscriptView(body.String(), footer.String(), width, overlay)
 	}
 
+	if suggestionInViewport {
+		body.WriteString("\n")
+		body.WriteString(suggestionOverlay)
+		body.WriteString("\n")
+	}
 	return body.String() + footer.String()
 }
 
-func (m model) scrollableTranscriptView(body string, footer string, width int) string {
+func (m model) scrollableTranscriptView(body string, footer string, width int, overlay string) string {
 	bodyLines := viewLines(body)
 	footerLines := viewLines(footer)
 	available := m.height - len(footerLines)
@@ -956,11 +959,31 @@ func (m model) scrollableTranscriptView(body string, footer string, width int) s
 	for len(lines) < available {
 		lines = append(lines, "")
 	}
+	lines = overlayViewportLines(lines, overlay, width)
 	lines = append(lines, footerLines...)
 	for index, line := range lines {
 		lines[index] = fitStyledLine(line, width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func overlayViewportLines(lines []string, overlay string, width int) []string {
+	if strings.TrimSpace(overlay) == "" || len(lines) == 0 {
+		return lines
+	}
+	overlayLines := viewLines(overlay)
+	if len(overlayLines) == 0 {
+		return lines
+	}
+	start := maxInt(0, (len(lines)-len(overlayLines))/2)
+	for offset, line := range overlayLines {
+		target := start + offset
+		if target >= len(lines) {
+			break
+		}
+		lines[target] = fitStyledLine(line, width)
+	}
+	return lines
 }
 
 func viewLines(value string) []string {
