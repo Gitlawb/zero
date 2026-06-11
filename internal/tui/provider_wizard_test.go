@@ -251,6 +251,7 @@ func TestProviderWizardSupportsLeftAndGuardedRightNavigation(t *testing.T) {
 
 	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next = updated.(model)
+	clearProviderAuthEnvForTest(t, next.providerWizard.currentProvider())
 	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRight})
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
@@ -772,6 +773,16 @@ func providerWizardProviderIndex(t *testing.T, wizard *providerWizardState, id s
 	}
 	t.Fatalf("provider %q not found in wizard providers", id)
 	return 0
+}
+
+func clearProviderAuthEnvForTest(t *testing.T, provider providercatalog.Descriptor) {
+	t.Helper()
+	for _, env := range provider.AuthEnvVars {
+		env = strings.TrimSpace(env)
+		if env != "" {
+			t.Setenv(env, "")
+		}
+	}
 }
 
 func providerWizardModelIDs(models []providerWizardModel) []string {
