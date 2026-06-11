@@ -115,7 +115,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 					options.OnText(event.Content)
 				}
 			case StreamEventToolCallStart:
-				collector.start(event.ToolCallID, event.ToolName)
+				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)
 			case StreamEventToolCallDelta:
 				collector.delta(event.ToolCallID, event.ArgumentsFragment)
 			case StreamEventToolCallEnd:
@@ -170,7 +170,7 @@ func newToolCallCollector() *toolCallCollector {
 // start begins a tool call. A non-empty ID reuses any open call with that ID
 // (some backends re-emit the same start); an empty ID always begins a fresh
 // synthetic call so concurrent empty-id calls stay distinct.
-func (collector *toolCallCollector) start(id string, name string) {
+func (collector *toolCallCollector) start(id string, name string, signature string) {
 	key := id
 	if id == "" {
 		// Adopt an empty-id call that a delta opened before this start, so its
@@ -189,6 +189,11 @@ func (collector *toolCallCollector) start(id string, name string) {
 	// nameless follow-up start cannot clobber an already-resolved name.
 	if name != "" && call.Name == "" {
 		call.Name = name
+	}
+	// Preserve the reasoning signature (Gemini thoughtSignature) so it can be
+	// replayed with the call on later turns.
+	if signature != "" && call.Signature == "" {
+		call.Signature = signature
 	}
 }
 

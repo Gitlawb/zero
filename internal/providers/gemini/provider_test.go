@@ -116,6 +116,126 @@ func TestStreamCompletionPostsGenerateContentRequest(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionEnablesThinkingWhenEffortRequested(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"usageMetadata":{"promptTokenCount":1}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{APIKey: "k", BaseURL: server.URL + "/", Model: "models/gemini-2.5-flash", MaxTokens: 65_536})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: "medium",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	cfg := gotBody["generationConfig"].(map[string]any)
+	thinking, ok := cfg["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinkingConfig missing: %#v", cfg)
+	}
+	if budget, _ := thinking["thinkingBudget"].(float64); int(budget) != 8192 {
+		t.Fatalf("thinkingBudget = %#v, want 8192", thinking["thinkingBudget"])
+	}
+}
+
+func TestStreamCompletionOmitsThinkingWithoutEffort(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"usageMetadata":{"promptTokenCount":1}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{APIKey: "k", BaseURL: server.URL + "/", Model: "models/gemini-2.5-flash", MaxTokens: 65_536})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	cfg := gotBody["generationConfig"].(map[string]any)
+	if _, ok := cfg["thinkingConfig"]; ok {
+		t.Fatalf("thinkingConfig should be omitted without effort: %#v", cfg["thinkingConfig"])
+	}
+}
+
+func TestStreamCompletionCapturesThoughtSignatureAndSkipsThoughtText(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		// A thought-summary part (must not surface as answer text) followed by a
+		// functionCall part carrying its thoughtSignature.
+		writeSSE(w, `{"candidates":[{"content":{"parts":[{"thought":true,"text":"internal reasoning"},{"functionCall":{"name":"grep","args":{"pattern":"x"}},"thoughtSignature":"sig-xyz"}]}}]}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	for _, event := range events {
+		if event.Type == zeroruntime.StreamEventText && strings.Contains(event.Content, "internal reasoning") {
+			t.Fatalf("thought text leaked into answer: %#v", event)
+		}
+	}
+	starts := eventsOfType(events, zeroruntime.StreamEventToolCallStart)
+	if len(starts) != 1 {
+		t.Fatalf("want one tool-call start, got %#v", events)
+	}
+	if starts[0].ToolCallSignature != "sig-xyz" {
+		t.Fatalf("tool call signature = %q, want sig-xyz", starts[0].ToolCallSignature)
+	}
+}
+
+func TestGeminiRequestReplaysThoughtSignature(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeSSE(w, `{"usageMetadata":{"promptTokenCount":1}}`)
+	}))
+	defer server.Close()
+
+	provider, err := New(Options{APIKey: "k", BaseURL: server.URL + "/", Model: "models/gemini-2.5-flash"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: "go"},
+			{
+				Role:      zeroruntime.MessageRoleAssistant,
+				ToolCalls: []zeroruntime.ToolCall{{ID: "call_1", Name: "grep", Arguments: `{"pattern":"x"}`, Signature: "sig-xyz"}},
+			},
+			{Role: zeroruntime.MessageRoleTool, Content: "result", ToolCallID: "call_1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned error: %v", err)
+	}
+	drain(stream)
+
+	contents := gotBody["contents"].([]any)
+	modelParts := contents[1].(map[string]any)["parts"].([]any)
+	part := modelParts[0].(map[string]any)
+	if part["thoughtSignature"] != "sig-xyz" {
+		t.Fatalf("functionCall part missing replayed thoughtSignature: %#v", part)
+	}
+}
+
 func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 	var gotDefaultAuth string
 	var gotCustomAuth string

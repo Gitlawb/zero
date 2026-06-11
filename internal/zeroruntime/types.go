@@ -154,6 +154,7 @@ type StreamEvent struct {
 	Content           string
 	ToolCallID        string
 	ToolName          string
+	ToolCallSignature string // opaque reasoning signature bound to this call (Gemini thoughtSignature)
 	ArgumentsFragment string
 	Usage             Usage
 	Error             string

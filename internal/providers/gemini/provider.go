@@ -19,6 +19,28 @@ import (
 const defaultBaseURL = "https://generativelanguage.googleapis.com"
 const defaultMaxTokens = 8192
 
+// providerName tags reasoning signatures this adapter binds to a tool call so
+// only it replays them.
+const providerName = "gemini"
+
+// thinkingBudgetForEffort maps a requested reasoning effort to a Gemini thinking
+// token budget, capped at 24576 (the lowest per-model ceiling among 2.5 models).
+// 0 means "no thinking config" (leave the request unchanged).
+func thinkingBudgetForEffort(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return 1024
+	case "low":
+		return 4096
+	case "medium":
+		return 8192
+	case "high":
+		return 24576
+	default:
+		return 0
+	}
+}
+
 // defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
 // without closing the connection, so a stalled-but-open upstream cannot hang the
 // agent forever.
@@ -214,6 +236,10 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 			continue
 		}
 		for _, part := range candidate.Content.Parts {
+			// Skip thought summary parts: their text is reasoning, not the answer.
+			if part.Thought {
+				continue
+			}
 			if part.Text != "" {
 				providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: part.Text})
 			}
@@ -226,7 +252,9 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 					continue
 				}
 				state.syntheticToolIndex++
-				if !provider.emitToolCall(ctx, *part.FunctionCall, state.syntheticToolIndex, events) {
+				// The thought signature rides on the part beside the functionCall;
+				// preserve it for replay.
+				if !provider.emitToolCall(ctx, *part.FunctionCall, part.ThoughtSignature, state.syntheticToolIndex, events) {
 					state.done = true
 					return false
 				}
@@ -241,7 +269,7 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 			continue
 		}
 		state.syntheticToolIndex++
-		if !provider.emitToolCall(ctx, functionCall, state.syntheticToolIndex, events) {
+		if !provider.emitToolCall(ctx, functionCall, "", state.syntheticToolIndex, events) {
 			state.done = true
 			return false
 		}
@@ -264,7 +292,7 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 	state.done = true
 }
 
-func (provider *Provider) emitToolCall(ctx context.Context, functionCall functionCall, syntheticIndex int, events chan<- zeroruntime.StreamEvent) bool {
+func (provider *Provider) emitToolCall(ctx context.Context, functionCall functionCall, signature string, syntheticIndex int, events chan<- zeroruntime.StreamEvent) bool {
 	id := functionCall.ID
 	if id == "" {
 		id = fmt.Sprintf("gemini_tool_%d", syntheticIndex)
@@ -279,7 +307,7 @@ func (provider *Provider) emitToolCall(ctx context.Context, functionCall functio
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider error: " + err.Error())})
 		return false
 	}
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: id, ToolName: functionCall.Name})
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: id, ToolName: functionCall.Name, ToolCallSignature: signature})
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: id, ArgumentsFragment: string(encoded)})
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: id})
 	return true
@@ -312,6 +340,11 @@ func (provider *Provider) geminiRequest(request zeroruntime.CompletionRequest) (
 		SystemInstruction: systemInstruction,
 		Contents:          contents,
 		GenerationConfig:  generationConfig{MaxOutputTokens: provider.maxTokens},
+	}
+	// Thinking: enable a budget when a reasoning effort was requested. Omitted
+	// otherwise so default requests are unchanged.
+	if budget := thinkingBudgetForEffort(request.ReasoningEffort); budget > 0 {
+		mapped.GenerationConfig.ThinkingConfig = &thinkingConfig{ThinkingBudget: budget}
 	}
 	if len(request.Tools) > 0 {
 		declarations := make([]geminiFunctionDeclaration, 0, len(request.Tools))
@@ -366,11 +399,16 @@ func mapMessages(messages []zeroruntime.Message) (*geminiContent, []geminiConten
 					return nil, nil, err
 				}
 				toolNamesByID[toolCall.ID] = toolCall.Name
-				parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
-					ID:   toolCall.ID,
-					Name: toolCall.Name,
-					Args: args,
-				}})
+				parts = append(parts, geminiPart{
+					FunctionCall: &geminiFunctionCall{
+						ID:   toolCall.ID,
+						Name: toolCall.Name,
+						Args: args,
+					},
+					// Replay the thought signature so multi-turn function calling with
+					// thinking is not rejected. Empty for non-thinking runs.
+					ThoughtSignature: toolCall.Signature,
+				})
 			}
 			if len(parts) > 0 {
 				contents = append(contents, geminiContent{Role: "model", Parts: parts})
