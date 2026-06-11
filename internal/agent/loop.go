@@ -84,8 +84,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
 		request := zeroruntime.CompletionRequest{
-			Messages: copyMessages(messages),
-			Tools:    exposed,
+			Messages:        copyMessages(messages),
+			Tools:           exposed,
+			ReasoningEffort: options.ReasoningEffort,
 		}
 		if reminder != "" {
 			// Append to the per-turn request copy only — NEVER to persistent
@@ -120,8 +121,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// empty-loaded partition, re-hiding every already-loaded deferred tool
 				// and dropping the reminder when deferral is active.
 				request = zeroruntime.CompletionRequest{
-					Messages: copyMessages(messages),
-					Tools:    exposed,
+					Messages:        copyMessages(messages),
+					Tools:           exposed,
+					ReasoningEffort: options.ReasoningEffort,
 				}
 				if reminder != "" {
 					// Append to the per-turn retry copy only — NEVER to persistent
@@ -159,8 +161,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// Routing through an empty-loaded partition here would re-hide every
 				// already-loaded deferred tool and drop the reminder when deferral is active.
 				retryRequest := zeroruntime.CompletionRequest{
-					Messages: copyMessages(messages),
-					Tools:    exposed,
+					Messages:        copyMessages(messages),
+					Tools:           exposed,
+					ReasoningEffort: options.ReasoningEffort,
 				}
 				if reminder != "" {
 					// Append to the per-turn retry copy only — NEVER to persistent
@@ -401,7 +404,8 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 		Content: maxTurnsFinalAnswerPrompt,
 	})
 	stream, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{
-		Messages: copyMessages(finalMessages),
+		Messages:        copyMessages(finalMessages),
+		ReasoningEffort: options.ReasoningEffort,
 	})
 	if err != nil {
 		return "", messages, ""

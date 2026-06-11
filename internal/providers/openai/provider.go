@@ -325,6 +325,12 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if provider.maxTokens > 0 {
 		mapped.MaxCompletionTokens = provider.maxTokens
 	}
+	// reasoning_effort is only valid for reasoning models; callers gate it against
+	// the model's capabilities, so an empty value (the default for non-reasoning
+	// models) is simply omitted. Only forward the values the API accepts.
+	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
+		mapped.ReasoningEffort = effort
+	}
 	if len(request.Tools) > 0 {
 		mapped.Tools = make([]toolDefinition, 0, len(request.Tools))
 		for _, tool := range request.Tools {
@@ -339,6 +345,18 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 		}
 	}
 	return mapped
+}
+
+// openAIReasoningEffort normalizes a requested effort to a value the OpenAI chat
+// completions API accepts, or "" to omit the field. "none" (and anything else)
+// is dropped rather than risking a 400 on an unrecognized enum.
+func openAIReasoningEffort(requested string) string {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case "minimal", "low", "medium", "high":
+		return strings.ToLower(strings.TrimSpace(requested))
+	default:
+		return ""
+	}
 }
 
 func mapMessage(message zeroruntime.Message) chatMessage {

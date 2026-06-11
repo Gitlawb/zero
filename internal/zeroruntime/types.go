@@ -148,6 +148,12 @@ type StreamEvent struct {
 type CompletionRequest struct {
 	Messages []Message
 	Tools    []ToolDefinition
+	// ReasoningEffort, when non-empty, asks a reasoning-capable model to spend the
+	// given level of thinking effort ("minimal"/"low"/"medium"/"high"). Each
+	// provider adapter maps it to its own API shape (OpenAI reasoning_effort,
+	// Anthropic/Gemini thinking budgets) and ignores it for models that do not
+	// support reasoning. Empty means "let the provider decide".
+	ReasoningEffort string
 }
 
 // Provider streams normalized completion events for one request.

@@ -284,6 +284,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 		}
 	}
+	// Effort to forward on the provider request, gated to the resolved model's
+	// supported levels (empty for non-reasoning models).
+	forwardEffort := forwardedReasoningEffort(modelRegistry, resolved.Provider.Model, runReasoningEffort)
 
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {
@@ -341,7 +344,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			prompt:             prompt,
 			sessionTitle:       sessionTitle,
 			images:             images,
-			reasoningEffort:    runReasoningEffort,
+			reasoningEffort:    forwardEffort,
 			specPermissionMode: permissionMode,
 			notifier:           notifier,
 		})
@@ -429,7 +432,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ProviderName:     resolved.Provider.Name,
 		Model:            resolved.Provider.Model,
 		ModelSwitcher:    modelSwitcher,
-		ReasoningEffort:  runReasoningEffort,
+		ReasoningEffort:  forwardEffort,
 		Cwd:              workspaceRoot,
 		Images:           images,
 		Registry:         registry,
@@ -865,6 +868,28 @@ func modelContextWindow(registry modelregistry.Registry, modelID string) int {
 // NOTE: the effective effort is not yet forwarded to the provider request — the
 // zeroruntime.CompletionRequest / provider wire schemas carry no effort field.
 // Full provider-request propagation is deferred (see slice-3 report).
+// forwardedReasoningEffort returns the effort to send on the provider request.
+// It mirrors reasoningEffortNotice: a known model that does not support reasoning
+// yields "" (matching the "ignoring" advisory, so the request never carries an
+// unsupported parameter); a known reasoning model yields its effective level; an
+// unknown model (e.g. a custom OpenAI-compatible endpoint) forwards the requested
+// value as-is, since no support claim can be made for it.
+func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return ""
+	}
+	entry, ok := registry.Get(strings.TrimSpace(modelID))
+	if !ok {
+		return requested
+	}
+	effective := modelregistry.EffectiveReasoningEffort(entry, modelregistry.ReasoningEffort(strings.ToLower(requested)))
+	if effective == modelregistry.ReasoningEffortNone {
+		return ""
+	}
+	return string(effective)
+}
+
 func reasoningEffortNotice(registry modelregistry.Registry, modelID string, requested string) string {
 	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {
