@@ -397,14 +397,12 @@ func (m model) compactRunningText() string {
 
 func compactCompleteText(result CompactResult) string {
 	lines := []string{
-		"Compact complete",
-		"summary ready · previous context compressed",
+		"Compression complete",
+		"Session summary saved.",
+		"Ready for the next prompt.",
 	}
-	if result.BeforeTokens > 0 && result.AfterTokens > 0 {
-		lines = append(lines, fmt.Sprintf("%d → %d estimated tokens", result.BeforeTokens, result.AfterTokens))
-	}
-	if summary := strings.TrimSpace(result.Summary); summary != "" {
-		lines = append(lines, summary)
+	if result.Compacted && result.BeforeTokens > 0 && result.AfterTokens > 0 && result.AfterTokens < result.BeforeTokens {
+		lines = append(lines, fmt.Sprintf("Estimated context reduced by %s tokens.", formatContextWindow(result.BeforeTokens-result.AfterTokens)))
 	}
 	return strings.Join(lines, "\n")
 }

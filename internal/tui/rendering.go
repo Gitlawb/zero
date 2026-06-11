@@ -204,6 +204,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if row.id == compactStatusRowID && strings.HasPrefix(strings.TrimSpace(row.text), "Compressing session") {
 			return renderCompactRunningCard(row.text, width)
 		}
+		if row.id == compactStatusRowID && strings.HasPrefix(strings.TrimSpace(row.text), "Compression complete") {
+			return renderCompactCompleteCard(row.text, width)
+		}
 		return renderSystemNote(row.text, width)
 	case rowError:
 		return renderErrorRow(row, width)
@@ -430,6 +433,25 @@ func renderCompactRunningCard(text string, width int) string {
 		}
 	}
 	return styledBlock(width, lines, zeroTheme.amber)
+}
+
+func renderCompactCompleteCard(text string, width int) string {
+	raw := strings.Split(strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
+	lines := make([]string, 0, len(raw)+1)
+	for index, line := range raw {
+		switch index {
+		case 0:
+			lines = append(lines, zeroTheme.green.Bold(true).Render(line))
+		case 1:
+			lines = append(lines, zeroTheme.ink.Render(line))
+		default:
+			lines = append(lines, zeroTheme.muted.Render(line))
+		}
+		if index == 0 {
+			lines = append(lines, "")
+		}
+	}
+	return styledBlock(width, lines, zeroTheme.green)
 }
 
 func renderErrorRow(row transcriptRow, width int) string {

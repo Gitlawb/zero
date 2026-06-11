@@ -196,15 +196,15 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 		t.Fatalf("expected one compact request, got %d", next.compactRequests)
 	}
 	for _, want := range []string{
-		"Compact complete",
-		"summary ready",
-		"summarized earlier turns",
+		"Compression complete",
+		"Session summary saved",
+		"Ready for the next prompt",
 	} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected compact transcript to contain %q, got %#v", want, next.transcript)
 		}
 	}
-	for _, unwanted := range []string{"context window:", "compactable:", "hint:"} {
+	for _, unwanted := range []string{"context window:", "compactable:", "hint:", "summarized earlier turns"} {
 		if transcriptContains(next.transcript, unwanted) {
 			t.Fatalf("compact completion transcript should not contain diagnostic %q, got %#v", unwanted, next.transcript)
 		}
@@ -279,6 +279,37 @@ func TestCompactRunningRowRendersAsAmberCompressionCard(t *testing.T) {
 	}
 	if strings.Contains(rendered, "context window:") || strings.Contains(rendered, "compactable:") {
 		t.Fatalf("compact card should not include diagnostic status text:\n%s", rendered)
+	}
+}
+
+func TestCompactCompleteRowRendersAsSuccessCard(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	rendered := plainRender(t, m.renderRow(transcriptRow{
+		kind: rowSystem,
+		id:   compactStatusRowID,
+		text: compactCompleteText(CompactResult{
+			Compacted:    true,
+			BeforeTokens: 320,
+			AfterTokens:  120,
+			Summary:      "raw model summary should stay hidden",
+		}),
+	}, 92, rowContext{}))
+
+	for _, want := range []string{
+		"╭",
+		"╰",
+		"Compression complete",
+		"Session summary saved",
+		"Ready for the next prompt",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected compact complete card to contain %q, got:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{"raw model summary", "context window:", "compactable:"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("compact complete card should not contain %q, got:\n%s", unwanted, rendered)
+		}
 	}
 }
 
