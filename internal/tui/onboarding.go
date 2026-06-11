@@ -45,12 +45,15 @@ type setupState struct {
 	modelLoad  bool
 	modelErr   string
 	modelSrc   string
+	modelGen   uint64
 }
 
 type setupModelsDiscoveredMsg struct {
-	providerID string
-	models     []providermodeldiscovery.Model
-	err        error
+	providerID       string
+	gen              uint64
+	redactionSecrets []string
+	models           []providermodeldiscovery.Model
+	err              error
 }
 
 func newSetupState(options SetupOptions) setupState {
@@ -219,7 +222,8 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 		if m.setup.stage == setupStageModel {
 			m.resetSetupModels()
 			m.setup.modelErr = ""
-			cmd := m.setupModelDiscoveryCmd()
+			m.setup.modelGen++
+			cmd := m.setupModelDiscoveryCmd(m.setup.modelGen)
 			m.setup.modelLoad = cmd != nil
 			return m, cmd
 		}
@@ -234,6 +238,7 @@ func (m *model) moveSetupProvider(delta int) {
 	}
 	m.setup.selected = ((m.setup.selected+delta)%len(m.setup.providers) + len(m.setup.providers)) % len(m.setup.providers)
 	m.setup.apiKey.SetValue("")
+	m.setup.modelGen++
 	m.resetSetupModels()
 }
 
@@ -287,13 +292,14 @@ func (m *model) resetSetupModels() {
 	m.setup.modelSrc = "fallback"
 }
 
-func (m model) setupModelDiscoveryCmd() tea.Cmd {
+func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 	option := m.setupProvider()
 	provider := setupProviderDescriptor(option)
 	if provider.ID == "" || !providercatalog.RuntimeSupported(provider) {
 		return nil
 	}
 	profile := providerWizardDiscoveryProfile(provider, m.setupCredentialAPIKey(option))
+	redactionSecrets := []string{m.setup.apiKey.Value(), profile.APIKey}
 	discover := m.discoverProviderModels
 	if discover == nil {
 		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
@@ -305,19 +311,18 @@ func (m model) setupModelDiscoveryCmd() tea.Cmd {
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
 		models, err := discover(ctx, profile)
-		return setupModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
+		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: redactionSecrets, models: models, err: err}
 	}
 }
 
 func (m model) applySetupModelsDiscovered(msg setupModelsDiscoveredMsg) model {
-	if !m.setup.visible || m.setup.stage != setupStageModel || m.setupProviderDescriptor().ID != msg.providerID {
+	if !m.setup.visible || m.setup.stage != setupStageModel || m.setupProviderDescriptor().ID != msg.providerID || m.setup.modelGen != msg.gen {
 		return m
 	}
 	m.setup.modelLoad = false
 	m.setup.err = ""
 	if msg.err != nil {
-		profile := providerWizardDiscoveryProfile(m.setupProviderDescriptor(), m.setupCredentialAPIKey(m.setupProvider()))
-		m.setup.modelErr = redaction.RedactString(msg.err.Error(), redaction.Options{ExtraSecretValues: []string{m.setup.apiKey.Value(), profile.APIKey}})
+		m.setup.modelErr = redaction.RedactString(msg.err.Error(), redaction.Options{ExtraSecretValues: msg.redactionSecrets})
 		m.setup.modelSrc = "fallback"
 		if len(m.setup.models) == 0 {
 			m.resetSetupModels()
@@ -475,8 +480,13 @@ func (m model) handleSetupCredentialKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyUp, tea.KeyDown:
 		return m, nil
 	}
+	previousAPIKey := m.setup.apiKey.Value()
 	var cmd tea.Cmd
 	m.setup.apiKey, cmd = m.setup.apiKey.Update(msg)
+	if m.setup.apiKey.Value() != previousAPIKey {
+		m.setup.modelGen++
+		m.resetSetupModels()
+	}
 	m.setup.err = ""
 	return m, cmd
 }

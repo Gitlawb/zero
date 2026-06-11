@@ -767,6 +767,7 @@ func TestSetupModelDiscoveryDoesNotApplyAfterLeavingModelStep(t *testing.T) {
 
 	updated := m.applySetupModelsDiscovered(setupModelsDiscoveredMsg{
 		providerID: "groq",
+		gen:        m.setup.modelGen,
 		models: []providermodeldiscovery.Model{
 			{ID: "live-coder", Description: "Live Coder"},
 		},
@@ -803,6 +804,7 @@ func TestSetupModelDiscoveryPreservesSelectedModel(t *testing.T) {
 
 	updated := m.applySetupModelsDiscovered(setupModelsDiscoveredMsg{
 		providerID: "groq",
+		gen:        m.setup.modelGen,
 		models: []providermodeldiscovery.Model{
 			{ID: "live-coder", Description: "Live Coder"},
 			{ID: target, Description: "GPT OSS"},
@@ -811,6 +813,71 @@ func TestSetupModelDiscoveryPreservesSelectedModel(t *testing.T) {
 
 	if got := updated.setupCurrentModel().ID; got != target {
 		t.Fatalf("selected model after discovery = %q, want %q", got, target)
+	}
+}
+
+func TestSetupModelDiscoveryIgnoresStaleGeneration(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+	m.setup.modelGen = 2
+	m.setup.modelLoad = true
+
+	updated := m.applySetupModelsDiscovered(setupModelsDiscoveredMsg{
+		providerID: "groq",
+		gen:        1,
+		models: []providermodeldiscovery.Model{
+			{ID: "live-coder", Description: "Live Coder"},
+		},
+	})
+
+	if !updated.setup.modelLoad {
+		t.Fatal("stale discovery result should not clear the active loading state")
+	}
+	for _, model := range updated.setup.models {
+		if model.ID == "live-coder" {
+			t.Fatalf("stale discovery result should not replace model list: %#v", updated.setup.models)
+		}
+	}
+}
+
+func TestSetupModelDiscoveryRedactsRequestAPIKey(t *testing.T) {
+	const oldSecret = "old-provider-token"
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("models failed with " + profile.APIKey)
+		},
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "ollama-cloud", Name: "Ollama Cloud", DefaultModel: "qwen3-coder:480b", EnvVar: "OLLAMA_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageCredentials
+	m.setup.apiKey.SetValue(oldSecret)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("entering model step should start discovery")
+	}
+	m.setup.apiKey.SetValue("new-provider-token")
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+
+	if strings.Contains(m.setup.modelErr, oldSecret) {
+		t.Fatalf("model discovery error leaked request API key: %q", m.setup.modelErr)
+	}
+	if !strings.Contains(m.setup.modelErr, "[REDACTED]") {
+		t.Fatalf("model discovery error should redact request API key: %q", m.setup.modelErr)
 	}
 }
 
