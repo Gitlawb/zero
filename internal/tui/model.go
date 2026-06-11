@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -975,15 +976,82 @@ func overlayViewportLines(lines []string, overlay string, width int) []string {
 	if len(overlayLines) == 0 {
 		return lines
 	}
+	left, overlayLines, overlayWidth := normalizeOverlayBlock(overlayLines, width)
+	if overlayWidth <= 0 {
+		return lines
+	}
 	start := maxInt(0, (len(lines)-len(overlayLines))/2)
 	for offset, line := range overlayLines {
 		target := start + offset
 		if target >= len(lines) {
 			break
 		}
-		lines[target] = fitStyledLine(line, width)
+		lines[target] = overlayViewportLine(lines[target], line, left, overlayWidth, width)
 	}
 	return lines
+}
+
+func normalizeOverlayBlock(lines []string, width int) (int, []string, int) {
+	left := -1
+	for _, line := range lines {
+		if strings.TrimSpace(ansi.Strip(line)) == "" {
+			continue
+		}
+		spaces := leadingPlainSpaces(line)
+		if left < 0 || spaces < left {
+			left = spaces
+		}
+	}
+	if left < 0 {
+		left = 0
+	}
+	left = minInt(left, maxInt(0, width-1))
+
+	trimmed := make([]string, 0, len(lines))
+	blockWidth := 0
+	for _, line := range lines {
+		if left > 0 && len(line) >= left {
+			line = line[left:]
+		}
+		trimmed = append(trimmed, line)
+		blockWidth = maxInt(blockWidth, lipgloss.Width(line))
+	}
+	blockWidth = minInt(blockWidth, maxInt(0, width-left))
+	return left, trimmed, blockWidth
+}
+
+func leadingPlainSpaces(line string) int {
+	spaces := 0
+	for spaces < len(line) && line[spaces] == ' ' {
+		spaces++
+	}
+	return spaces
+}
+
+func overlayViewportLine(base string, overlay string, left int, overlayWidth int, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	left = clampInt(left, 0, width)
+	overlayWidth = minInt(overlayWidth, width-left)
+	rightStart := minInt(width, left+overlayWidth)
+
+	base = fitStyledLine(base, width)
+	prefix := padStyledLine(ansi.Cut(base, 0, left), left)
+	panel := padStyledLine(overlay, overlayWidth)
+	suffix := padStyledLine(ansi.Cut(base, rightStart, width), width-rightStart)
+	return prefix + panel + suffix
+}
+
+func padStyledLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	line = fitStyledLine(line, width)
+	if pad := width - lipgloss.Width(line); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	return line
 }
 
 func viewLines(value string) []string {

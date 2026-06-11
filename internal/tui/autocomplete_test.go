@@ -295,6 +295,28 @@ func TestSuggestionOverlayStaysVisibleWhenTranscriptScrolled(t *testing.T) {
 	}
 }
 
+func TestOverlayViewportLinesPreservesTextOutsidePanel(t *testing.T) {
+	lines := []string{
+		"left edge text stays visible after panel",
+		"second row text stays visible after panel",
+		"third row text stays visible after panel",
+	}
+	overlay := strings.Join([]string{
+		"          ╭── Files ─╮",
+		"          │ row      │",
+		"          ╰──────────╯",
+	}, "\n")
+
+	got := overlayViewportLines(append([]string(nil), lines...), overlay, 48)
+	plain := plainRender(t, strings.Join(got, "\n"))
+	if !strings.Contains(plain, "left edge ╭── Files ─╮") {
+		t.Fatalf("overlay should preserve text left of the panel, got %q", plain)
+	}
+	if !strings.Contains(plain, "visible after panel") {
+		t.Fatalf("overlay should preserve text right of the panel, got %q", plain)
+	}
+}
+
 func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 96, 30
