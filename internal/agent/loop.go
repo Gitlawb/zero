@@ -589,7 +589,11 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// formatter or vet result) is surfaced back to the model on the result.
 	if toolFound {
 		if feedback := dispatchAfterTool(ctx, options, call, args, result); feedback != "" {
-			result.Output = appendHookFeedback(result.Output, feedback)
+			var didRedact bool
+			result.Output, didRedact = appendHookFeedback(result.Output, feedback)
+			if didRedact {
+				result.Redacted = true
+			}
 		}
 	}
 	// Secret scrubbing happens at the registry boundary (the single point both
@@ -664,8 +668,11 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResult {
 	// The hook reason (its stdout/stderr) is model-visible here, an intercepted
 	// path that bypasses the registry's output redaction boundary — so scrub it
-	// like every other string that crosses into the transcript.
-	reason := strings.TrimSpace(redaction.RedactString(outcome.Reason, redaction.Options{}))
+	// like every other string that crosses into the transcript, and flag Redacted
+	// when scrubbing changed it (matching the registry's contract).
+	scrubbed := redaction.RedactString(outcome.Reason, redaction.Options{})
+	redacted := scrubbed != outcome.Reason
+	reason := strings.TrimSpace(scrubbed)
 	if reason == "" {
 		reason = "blocked by a beforeTool hook"
 	}
@@ -675,21 +682,25 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 		Name:         call.Name,
 		Status:       tools.StatusError,
 		Output:       message,
+		Redacted:     redacted,
 		DenialReason: DenialHookBlocked,
 	}
 }
 
 // appendHookFeedback appends afterTool hook output to a tool result's output,
-// scrubbed for secrets like every other string crossing the tool boundary.
-func appendHookFeedback(output string, feedback string) string {
-	feedback = redaction.RedactString(feedback, redaction.Options{})
-	if strings.TrimSpace(feedback) == "" {
-		return output
+// scrubbed for secrets like every other string crossing the tool boundary. The
+// returned bool reports whether scrubbing changed the feedback, so the caller can
+// set ToolResult.Redacted to match the registry's redaction contract.
+func appendHookFeedback(output string, feedback string) (string, bool) {
+	scrubbed := redaction.RedactString(feedback, redaction.Options{})
+	redacted := scrubbed != feedback
+	if strings.TrimSpace(scrubbed) == "" {
+		return output, redacted
 	}
 	if strings.TrimSpace(output) == "" {
-		return "Hook output:\n" + feedback
+		return "Hook output:\n" + scrubbed, redacted
 	}
-	return output + "\n\nHook output:\n" + feedback
+	return output + "\n\nHook output:\n" + scrubbed, redacted
 }
 
 // isRetriableToolError reports whether a failed tool result is one the model can
