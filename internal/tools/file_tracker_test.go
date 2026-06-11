@@ -97,10 +97,14 @@ func TestNilFileTrackerIsANoop(t *testing.T) {
 }
 
 func TestHashContentIsStableAndDistinguishing(t *testing.T) {
-	if HashContent([]byte("a")) != HashContent([]byte("a")) {
+	// Store results of separate calls before comparing so the stability check is
+	// not a same-expression comparison (staticcheck SA4000).
+	first := HashContent([]byte("a"))
+	second := HashContent([]byte("a"))
+	if first != second {
 		t.Fatal("hash must be stable for identical content")
 	}
-	if HashContent([]byte("a")) == HashContent([]byte("b")) {
+	if first == HashContent([]byte("b")) {
 		t.Fatal("hash must differ for different content")
 	}
 }

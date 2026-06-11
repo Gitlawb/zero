@@ -662,7 +662,10 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 
 // blockedByHookResult is the tool result for a call vetoed by a beforeTool hook.
 func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResult {
-	reason := strings.TrimSpace(outcome.Reason)
+	// The hook reason (its stdout/stderr) is model-visible here, an intercepted
+	// path that bypasses the registry's output redaction boundary — so scrub it
+	// like every other string that crosses into the transcript.
+	reason := strings.TrimSpace(redaction.RedactString(outcome.Reason, redaction.Options{}))
 	if reason == "" {
 		reason = "blocked by a beforeTool hook"
 	}

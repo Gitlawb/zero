@@ -78,10 +78,15 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 	// so a first-touch create/overwrite stays a single write with no extra read.
 	if existed {
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
-			if current, rerr := os.ReadFile(absolutePath); rerr == nil {
-				if cerr := options.FileTracker.CheckConflict(absolutePath, current); cerr != nil {
-					return errorResult(fileConflictMessage(relativePath))
-				}
+			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
+			// the overwrite rather than clobbering a file whose current state is
+			// unknown (it may have been replaced or removed out from under us).
+			current, rerr := os.ReadFile(absolutePath)
+			if rerr != nil {
+				return errorResult(fileConflictMessage(relativePath))
+			}
+			if cerr := options.FileTracker.CheckConflict(absolutePath, current); cerr != nil {
+				return errorResult(fileConflictMessage(relativePath))
 			}
 		}
 	}
