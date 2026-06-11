@@ -163,8 +163,15 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	if parentToolUseID := strings.TrimSpace(input.ParentToolUseID); parentToolUseID != "" {
 		args = append(args, "--calling-tool-use-id", parentToolUseID)
 	}
+	// Always record the specialist name in the session title. AgentName is
+	// derived from the title's "name:" prefix, and resume refuses a session whose
+	// AgentName is empty — so a description-less run (description is optional)
+	// must still carry the name or it can never be resumed.
+	name := strings.TrimSpace(input.Manifest.Metadata.Name)
 	if description := strings.TrimSpace(input.Description); description != "" {
-		args = append(args, "--session-title", strings.TrimSpace(input.Manifest.Metadata.Name)+": "+description)
+		args = append(args, "--session-title", name+": "+description)
+	} else {
+		args = append(args, "--session-title", name)
 	}
 	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
 		args = append(args, "--cwd", cwd)
