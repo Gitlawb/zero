@@ -42,7 +42,12 @@ func DeriveScope(toolName string, args map[string]any) (string, ScopeKind) {
 			continue
 		}
 		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || trimmed == "." {
+		// Clean so every root-equivalent spelling ("." / "./" / "./." / "a/..")
+		// collapses to the workspace root and surfaces as tool-wide, not a narrower
+		// directory grant. Otherwise the same root-level action could persist either
+		// a tool-wide or a dir grant depending only on how the path was spelled,
+		// re-prompting inconsistently on later root-level requests.
+		if trimmed == "" || filepath.Clean(trimmed) == "." {
 			continue // workspace root — no extra scope to surface
 		}
 		return trimmed, candidate.kind

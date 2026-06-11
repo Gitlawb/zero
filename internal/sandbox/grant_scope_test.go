@@ -88,8 +88,12 @@ func TestLookupMostSpecificAllowWins(t *testing.T) {
 func TestGrantReplacesSameScope(t *testing.T) {
 	store := newScopeTestStore(t)
 	file := filepath.Join(string(filepath.Separator)+"proj", "src", "main.go")
-	store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyMedium, Scope: file, ScopeKind: ScopeFile})
-	store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyHigh, Scope: file, ScopeKind: ScopeFile})
+	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyMedium, Scope: file, ScopeKind: ScopeFile}); err != nil {
+		t.Fatalf("first grant: %v", err)
+	}
+	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyHigh, Scope: file, ScopeKind: ScopeFile}); err != nil {
+		t.Fatalf("second grant: %v", err)
+	}
 	grants, _ := store.List()
 	if len(grants) != 1 || grants[0].MaxAutonomy != AutonomyHigh {
 		t.Fatalf("re-granting the same scope should replace, not duplicate: %#v", grants)
@@ -154,6 +158,9 @@ func TestDeriveScope(t *testing.T) {
 		{name: "dir key", tool: "glob", args: map[string]any{"dir": "internal"}, wantRaw: "internal", wantKind: ScopeDir},
 		{name: "bash explicit cwd", tool: "bash", args: map[string]any{"command": "ls", "cwd": "services/api"}, wantRaw: "services/api", wantKind: ScopeDir},
 		{name: "bash workspace-root cwd is tool-wide", tool: "bash", args: map[string]any{"command": "ls", "cwd": "."}, wantRaw: "", wantKind: ScopeToolWide},
+		{name: "dot-slash root is tool-wide", tool: "bash", args: map[string]any{"command": "ls", "cwd": "./"}, wantRaw: "", wantKind: ScopeToolWide},
+		{name: "dot-slash-dot root is tool-wide", tool: "list_directory", args: map[string]any{"directory": "./."}, wantRaw: "", wantKind: ScopeToolWide},
+		{name: "dot-dot-collapse root is tool-wide", tool: "write_file", args: map[string]any{"path": "a/.."}, wantRaw: "", wantKind: ScopeToolWide},
 		{name: "no path-like args", tool: "bash", args: map[string]any{"command": "ls"}, wantRaw: "", wantKind: ScopeToolWide},
 		{name: "path wins over cwd", tool: "x", args: map[string]any{"cwd": "a", "path": "b"}, wantRaw: "b", wantKind: ScopeFile},
 		{name: "non-string path ignored", tool: "write_file", args: map[string]any{"path": 42}, wantRaw: "", wantKind: ScopeToolWide},

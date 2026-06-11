@@ -460,13 +460,13 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		}
 		line := zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
-			line += dot + zeroTheme.muted.Render(scope)
+			line += dot + zeroTheme.muted.Render("scope:"+scope)
 		}
-		return line
+		return fitStyledLine(line, width)
 	case agent.PermissionActionDeny:
 		line := zeroTheme.red.Render("denied") + dot + zeroTheme.red.Render(name)
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
-			line += dot + zeroTheme.muted.Render(scope)
+			line += dot + zeroTheme.muted.Render("scope:"+scope)
 		}
 		if event.Risk.Level != "" {
 			line += dot + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
@@ -482,7 +482,7 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	default:
 		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
-			line += "  " + zeroTheme.muted.Render(scope)
+			line += "  " + zeroTheme.muted.Render("scope:"+scope)
 		}
 		if event.Risk.Level != "" {
 			line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
