@@ -324,6 +324,58 @@ func TestScopedGlobReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
 	}
 }
 
+func TestScopedGrepReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Same relative name in both roots: a bare "report.go" match from the extra
+	// root would resolve back into the workspace and hit the wrong file.
+	writeTestFile(t, filepath.Join(workspace, "report.go"), "needle in workspace")
+	writeTestFile(t, filepath.Join(extra, "report.go"), "needle in extra")
+
+	tool := NewScopedGrepTool(workspace, scope)
+
+	// Grepping the extra root (absolute path) must emit absolute file paths.
+	extraRes := tool.Run(context.Background(), map[string]any{
+		"pattern": "needle",
+		"path":    extra,
+	})
+	if extraRes.Status != StatusOK {
+		t.Fatalf("extra-root grep status=%s output=%s", extraRes.Status, extraRes.Output)
+	}
+	// Matches report the symlink-resolved root (macOS /var -> /private/var).
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(extra): %v", err)
+	}
+	wantAbs := filepath.ToSlash(filepath.Join(resolvedExtra, "report.go"))
+	if !strings.HasPrefix(strings.TrimSpace(extraRes.Output), wantAbs+":") {
+		t.Fatalf("extra-root grep output=%q, want absolute path %q", extraRes.Output, wantAbs)
+	}
+
+	// files_with_matches mode must also report the absolute path.
+	filesRes := tool.Run(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"path":        extra,
+		"output_mode": "files_with_matches",
+	})
+	if strings.TrimSpace(filesRes.Output) != wantAbs {
+		t.Fatalf("extra-root files_with_matches output=%q, want absolute %q", filesRes.Output, wantAbs)
+	}
+
+	// Grepping the workspace (default path) keeps matches workspace-relative.
+	wsRes := tool.Run(context.Background(), map[string]any{"pattern": "needle"})
+	if wsRes.Status != StatusOK {
+		t.Fatalf("workspace grep status=%s output=%s", wsRes.Status, wsRes.Output)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(wsRes.Output), "report.go:") {
+		t.Fatalf("workspace grep output=%q, want workspace-relative %q", wsRes.Output, "report.go:")
+	}
+}
+
 func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "subdir"), 0o755); err != nil {

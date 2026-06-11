@@ -24,12 +24,12 @@ func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 	return globTool{
 		baseTool: baseTool{
 			name:        "glob",
-			description: "Find files by glob pattern inside the workspace.",
+			description: "Find files by glob pattern inside the workspace or an explicitly granted extra root.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"pattern":      {Type: "string", Description: `Glob pattern to match, for example "**/*.go".`},
-					"cwd":          {Type: "string", Description: "Directory to scan. Defaults to workspace root.", Default: "."},
+					"cwd":          {Type: "string", Description: "Directory to scan. Relative paths stay in the workspace; use an absolute path to scan a granted extra root. Defaults to workspace root.", Default: "."},
 					"limit":        {Type: "integer", Description: "Maximum matches to return.", Default: 100, Minimum: intPtr(1), Maximum: intPtr(1000)},
 					"include_dirs": {Type: "boolean", Description: "Whether directory matches should be included.", Default: false},
 				},

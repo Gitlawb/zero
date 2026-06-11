@@ -99,7 +99,7 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running grep: " + err.Error())
 	}
 
-	target, _, err := resolveScopedPath(tool.workspaceRoot, tool.scope, targetPath)
+	target, displayRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, targetPath)
 	if err != nil {
 		return errorResult("Error running grep: " + err.Error())
 	}
@@ -129,7 +129,10 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running grep: " + err.Error())
 	}
 
-	matches := collectGrepMatches(resolvedRoot, files, compiled)
+	// resolveScopedPath returns an absolute displayRoot when the target resolved
+	// to an extra (non-workspace) granted root; emit absolute match paths there so
+	// they survive a round-trip through read_file/edit_file (mirrors glob).
+	matches := collectGrepMatches(resolvedRoot, filepath.IsAbs(displayRoot), files, compiled)
 	if len(matches) == 0 {
 		if outputMode == "count" {
 			return okResult("0 matches found")
@@ -283,7 +286,7 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 	return files, nil
 }
 
-func collectGrepMatches(resolvedRoot string, files []string, compiled *regexp.Regexp) []grepMatch {
+func collectGrepMatches(resolvedRoot string, absolutePaths bool, files []string, compiled *regexp.Regexp) []grepMatch {
 	matches := []grepMatch{}
 	for _, file := range files {
 		// Re-confine at read time (defense-in-depth) AND to compute the clean
@@ -306,8 +309,16 @@ func collectGrepMatches(resolvedRoot string, files []string, compiled *regexp.Re
 			if len(lineMatches) == 0 {
 				continue
 			}
+			fileLabel := relative
+			if absolutePaths {
+				// Extra-root search: report the absolute, symlink-resolved path
+				// confineGrepFile already validated, so a bare workspace-relative
+				// name can't resolve under the workspace and hit the wrong file when
+				// the same name exists in both roots.
+				fileLabel = filepath.ToSlash(resolvedPath)
+			}
 			matches = append(matches, grepMatch{
-				file: relative,
+				file: fileLabel,
 				line: index + 1,
 				text: strings.TrimRight(line, "\r"),
 				hits: len(lineMatches),
