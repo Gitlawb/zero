@@ -12,9 +12,11 @@ type generationConfig struct {
 	ThinkingConfig  *thinkingConfig `json:"thinkingConfig,omitempty"`
 }
 
-// thinkingConfig requests a thinking token budget. Omitted (nil) for normal
-// requests so behavior is unchanged. IncludeThoughts is left false so thought
-// summaries are not streamed as answer text.
+// thinkingConfig requests a thinking token budget. It is omitted (nil) for
+// normal requests so behavior is unchanged, and is only set when the effort maps
+// to a positive budget — so Gemini is never sent {"thinkingBudget":0}. There is
+// no IncludeThoughts request field here; thought summaries are suppressed on the
+// response side by skipping streamed parts whose part.Thought is true.
 type thinkingConfig struct {
 	ThinkingBudget int `json:"thinkingBudget"`
 }

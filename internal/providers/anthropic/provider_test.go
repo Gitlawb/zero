@@ -311,6 +311,33 @@ func TestStreamCompletionCapturesThinkingBlocksForReplay(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionPreservesUnclosedThinkingBlockAtStreamEnd(t *testing.T) {
+	// The SSE ends after thinking_delta/signature_delta but BEFORE the thinking
+	// block's content_block_stop. The open buffer must still be finalized into the
+	// done event's ReasoningBlocks (via closeOpen), or the next Anthropic replay
+	// drops it and the tool-using conversation is rejected.
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSEEvent(w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Half a thought"}}`)
+		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-open"}}`)
+		// No content_block_stop for index 0 — the stream just ends here.
+		writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	done := eventsOfType(events, zeroruntime.StreamEventDone)
+	if len(done) != 1 {
+		t.Fatalf("want exactly one done event, got %#v", events)
+	}
+	blocks := done[0].ReasoningBlocks
+	if len(blocks) != 1 {
+		t.Fatalf("reasoning blocks = %#v, want one preserved from the unclosed buffer", blocks)
+	}
+	if blocks[0].Type != "thinking" || blocks[0].Text != "Half a thought" || blocks[0].Signature != "sig-open" {
+		t.Fatalf("reasoning block = %#v", blocks[0])
+	}
+}
+
 func TestAnthropicRequestReplaysThinkingBlocksFirst(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

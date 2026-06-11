@@ -3,11 +3,50 @@ package providerhealth
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/netip"
 	"testing"
 	"time"
 )
+
+func TestDialValidatedAddrsFallsBackPastDeadAddress(t *testing.T) {
+	addrs := []netip.Addr{
+		netip.MustParseAddr("203.0.113.1"), // dead first record
+		netip.MustParseAddr("203.0.113.2"), // reachable second record
+	}
+	var dialed []string
+	dial := func(_ context.Context, address string) (net.Conn, error) {
+		dialed = append(dialed, address)
+		if address == "203.0.113.2:443" {
+			return stubConn{}, nil
+		}
+		return nil, errors.New("connection refused")
+	}
+
+	conn, err := dialValidatedAddrs(context.Background(), addrs, "443", dial)
+	if err != nil {
+		t.Fatalf("expected fallback to the reachable address, got err %v", err)
+	}
+	_ = conn.Close()
+	if len(dialed) != 2 || dialed[0] != "203.0.113.1:443" || dialed[1] != "203.0.113.2:443" {
+		t.Fatalf("expected both addresses dialed in order, got %v", dialed)
+	}
+}
+
+func TestDialValidatedAddrsReturnsLastErrorWhenAllFail(t *testing.T) {
+	addrs := []netip.Addr{netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("203.0.113.2")}
+	dial := func(_ context.Context, _ string) (net.Conn, error) {
+		return nil, errors.New("unreachable")
+	}
+	if _, err := dialValidatedAddrs(context.Background(), addrs, "443", dial); err == nil {
+		t.Fatal("expected an error when every address fails to dial")
+	}
+}
+
+type stubConn struct{ net.Conn }
+
+func (stubConn) Close() error { return nil }
 
 func TestSafeDialContextRejectsResolvedPrivateAddress(t *testing.T) {
 	dial := safeDialContext(staticResolver{addr: netip.MustParseAddr("10.0.0.5")})

@@ -38,6 +38,7 @@ type commandResult struct {
 	Stdout   string
 	Stderr   string
 	Err      error // set when the command could not be executed (not a non-zero exit)
+	TimedOut bool  // the hook started but its deadline/cancellation fired before it returned
 }
 
 // commandRunner executes one hook command. It is injectable so the dispatch
@@ -149,7 +150,15 @@ func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definitio
 	if len(dispatcher.env) > 0 {
 		env = append(env, dispatcher.env...)
 	}
-	return dispatcher.run(runCtx, hook.Command, hook.Args, stdin, dispatcher.cwd, env)
+	result := dispatcher.run(runCtx, hook.Command, hook.Args, stdin, dispatcher.cwd, env)
+	// A deadline or cancellation that fired while the hook was running is distinct
+	// from a launch failure: the hook DID start, we just never got its verdict.
+	// classifyResult must fail CLOSED on this for a blocking event — a hung policy
+	// hook cannot be allowed to wave the tool through.
+	if runCtx.Err() != nil {
+		result.TimedOut = true
+	}
+	return result
 }
 
 // classifyResult maps a command result to an audit status and whether it vetoes
@@ -157,6 +166,16 @@ func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definitio
 // command that could not be executed at all is an error but never blocks (a
 // missing hook binary must not wedge every tool call).
 func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
+	// A hook that started but was killed by its deadline (or a cancellation) never
+	// returned a verdict. For a blocking event we must fail CLOSED and veto: a
+	// hung beforeTool policy hook cannot be treated as approval. (A launch failure
+	// below still fails OPEN, so a misconfigured hook doesn't wedge every tool.)
+	if result.TimedOut {
+		if blocksOn(event) {
+			return AuditBlocked, true
+		}
+		return AuditError, false
+	}
 	if result.Err != nil {
 		return AuditError, false
 	}
@@ -170,6 +189,12 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 }
 
 func blockReason(result commandResult) string {
+	if result.TimedOut {
+		if trimmed := strings.TrimSpace(result.Stderr); trimmed != "" {
+			return "hook timed out: " + trimmed
+		}
+		return "hook timed out before returning a verdict"
+	}
 	for _, candidate := range []string{result.Stderr, result.Stdout} {
 		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
 			return trimmed

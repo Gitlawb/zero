@@ -356,6 +356,38 @@ func TestApplyPatchToolHandlesHunkBodyLookingLikeHeader(t *testing.T) {
 	}
 }
 
+func TestApplyPatchToolRejectsHunkCountInflationHidingEscapePath(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "safe.txt"), "old\n")
+	// A crafted section heading after the closing "@@" injects a "+9,999999"
+	// token. If parseHunkCounts scanned the whole line it would treat 999999 as
+	// the new-line count, stay stuck in hunk mode, and swallow the second file
+	// header below — hiding the ../escape.txt write from path validation.
+	patch := strings.Join([]string{
+		"diff --git a/safe.txt b/safe.txt",
+		"--- a/safe.txt",
+		"+++ b/safe.txt",
+		"@@ -1,1 +1,1 @@ +9,999999",
+		"-old",
+		"+new",
+		"--- a/../escape.txt",
+		"+++ b/../escape.txt",
+		"@@ -1,1 +1,1 @@",
+		"-secret",
+		"+pwned",
+		"",
+	}, "\n")
+
+	result := NewApplyPatchTool(root).Run(context.Background(), map[string]any{"patch": patch})
+
+	if result.Status != StatusError {
+		t.Fatalf("crafted hunk header must not hide the out-of-workspace path, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "must stay inside the workspace") {
+		t.Fatalf("expected workspace-confinement rejection, got %q", result.Output)
+	}
+}
+
 func TestApplyPatchToolRejectsSymlinkPath(t *testing.T) {
 	root := t.TempDir()
 	realDirectory := filepath.Join(root, "real")

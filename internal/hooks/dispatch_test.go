@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func beforeToolConfig(hooks ...Definition) Config {
@@ -161,5 +162,44 @@ func TestExecCommandRunnerReportsLaunchFailureWithoutBlocking(t *testing.T) {
 	// A launch failure is an error, never a block, even for beforeTool.
 	if status, blocked := classifyResult(EventBeforeTool, result); blocked || status != AuditError {
 		t.Fatalf("classify = (%q, %v), want (error, false) for a launch failure", status, blocked)
+	}
+}
+
+func TestClassifyResultTimedOutFailsClosedForBeforeTool(t *testing.T) {
+	// Unlike a launch failure, a hook that STARTED but was killed by its deadline
+	// gave no verdict — a beforeTool policy hook must fail CLOSED (veto), or a hung
+	// hook would silently wave the tool through.
+	timedOut := commandResult{TimedOut: true, Err: context.DeadlineExceeded}
+	if status, blocked := classifyResult(EventBeforeTool, timedOut); !blocked || status != AuditBlocked {
+		t.Fatalf("beforeTool timeout classify = (%q, %v), want (blocked, true)", status, blocked)
+	}
+	// Observational events still never veto, even on timeout.
+	if status, blocked := classifyResult(EventAfterTool, timedOut); blocked || status != AuditError {
+		t.Fatalf("afterTool timeout classify = (%q, %v), want (error, false)", status, blocked)
+	}
+	if reason := blockReason(timedOut); !strings.Contains(reason, "timed out") {
+		t.Fatalf("blockReason = %q, want a timeout message", reason)
+	}
+}
+
+func TestDispatchBeforeToolFailsClosedWhenHookTimesOut(t *testing.T) {
+	// End-to-end: a beforeTool hook that hangs past the dispatcher timeout vetoes
+	// the tool. The injected runner blocks until its context is cancelled.
+	runner := func(ctx context.Context, _ string, _ []string, _ []byte, _ string, _ []string) commandResult {
+		<-ctx.Done()
+		return commandResult{Err: ctx.Err()}
+	}
+	config := beforeToolConfig(Definition{ID: "slow-guard", Event: EventBeforeTool, Command: "hang", Enabled: true})
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner, Timeout: 20 * time.Millisecond})
+
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"})
+	if !outcome.Blocked {
+		t.Fatal("a timed-out beforeTool hook must fail closed (block the tool)")
+	}
+	if outcome.BlockedBy != "slow-guard" {
+		t.Fatalf("BlockedBy = %q, want slow-guard", outcome.BlockedBy)
+	}
+	if !strings.Contains(outcome.Reason, "timed out") {
+		t.Fatalf("Reason = %q, want a timeout reason", outcome.Reason)
 	}
 }

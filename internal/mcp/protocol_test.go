@@ -35,6 +35,20 @@ func TestMessageReaderAcceptsNewlineDelimited(t *testing.T) {
 	}
 }
 
+func TestMessageReaderAcceptsFinalLineWithoutTrailingNewline(t *testing.T) {
+	// A final message that ends at EOF without a trailing newline must still be
+	// decoded (the read() EOF-tail branch), so a peer that doesn't terminate its
+	// last line isn't dropped.
+	in := strings.NewReader(`{"jsonrpc":"2.0","method":"tools/list"}`)
+	msg, err := newMessageReader(in).read()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if msg.Method != "tools/list" {
+		t.Fatalf("method=%q want tools/list", msg.Method)
+	}
+}
+
 func TestMessageReaderAcceptsContentLengthFraming(t *testing.T) {
 	body := `{"jsonrpc":"2.0","method":"initialize"}`
 	framed := fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body)

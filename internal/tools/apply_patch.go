@@ -193,9 +193,25 @@ func patchHeaderPaths(patch string) []string {
 
 // parseHunkCounts reads the old/new line counts from a "@@ -a,b +c,d @@" header.
 // A missing count (e.g. "@@ -a +c @@") means 1 per unified-diff convention.
+//
+// Only the range section BETWEEN the opening and closing "@@" is parsed. A hunk
+// header may carry a free-form section heading after the closing "@@" (e.g.
+// "@@ -1,1 +1,1 @@ func foo()"), and that text can itself contain "+"/"-"
+// tokens. Scanning the whole line would let a crafted heading like
+// "@@ -1,1 +1,1 @@ +1,999999" overwrite the real count, keep the parser stuck in
+// hunk mode, and swallow later "--- "/"+++ " file headers so they escape
+// validatePatchPaths / recheckPatchWriteTargets — a workspace-confinement bypass.
 func parseHunkCounts(line string) (int, int) {
+	_, rest, ok := strings.Cut(line, "@@")
+	if !ok {
+		return 0, 0
+	}
+	rangeSection := rest
+	if before, _, ok := strings.Cut(rest, "@@"); ok {
+		rangeSection = before // drop the section heading after the closing "@@"
+	}
 	old, next := 0, 0
-	for _, field := range strings.Fields(line) {
+	for _, field := range strings.Fields(rangeSection) {
 		switch {
 		case strings.HasPrefix(field, "-"):
 			old = hunkCount(field[1:])

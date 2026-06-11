@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -690,5 +691,20 @@ func (state *streamState) stopTool(ctx context.Context, index int, events chan<-
 func (state *streamState) closeOpen(ctx context.Context, events chan<- zeroruntime.StreamEvent) {
 	for index := range state.tools {
 		state.stopTool(ctx, index, events)
+	}
+	// Finalize any thinking blocks still open at stream end — the SSE ended after
+	// thinking_delta/signature_delta but before content_block_stop. Without this
+	// they never reach state.reasoningBlocks and the synthetic `done` event drops
+	// them, making the next Anthropic replay inconsistent. Finalize in index order
+	// so multiple blocks are preserved in the order Anthropic emitted them.
+	if len(state.thinking) > 0 {
+		indices := make([]int, 0, len(state.thinking))
+		for index := range state.thinking {
+			indices = append(indices, index)
+		}
+		sort.Ints(indices)
+		for _, index := range indices {
+			state.stopThinking(index)
+		}
 	}
 }

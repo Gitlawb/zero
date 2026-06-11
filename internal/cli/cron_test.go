@@ -108,8 +108,14 @@ func TestCronAddExplicitExprOverridesRecipe(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Expr != "0 9 * * *" {
 		t.Fatalf("explicit expr should win over recipe, got: %+v", jobs)
 	}
-	if jobs[0].Prompt == "" {
-		t.Fatalf("recipe prompt should still fill in, got empty: %+v", jobs)
+	// The recipe's prompt must actually propagate — assert the exact recipe text,
+	// not just non-empty (which a default prompt would also satisfy).
+	recipe, ok := cron.Recipe("git-recap")
+	if !ok {
+		t.Fatal("git-recap recipe missing")
+	}
+	if jobs[0].Prompt != recipe.Prompt {
+		t.Fatalf("recipe prompt not propagated: got %q want %q", jobs[0].Prompt, recipe.Prompt)
 	}
 }
 

@@ -464,8 +464,29 @@ func safeDialContext(resolver Resolver) func(context.Context, string, string) (n
 				return nil, endpointSafetyError{message: "provider connectivity URL is unsafe: " + reason}
 			}
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].String(), port))
+		// Every resolved address passed validation; dial them in order until one
+		// connects so a dual-stack or multi-record provider isn't failed by a
+		// single dead/unroutable address (e.g. an unreachable IPv6 first record).
+		return dialValidatedAddrs(ctx, addrs, port, func(ctx context.Context, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, address)
+		})
 	}
+}
+
+// dialValidatedAddrs dials the already-validated addresses in order and returns
+// the first connection that succeeds, so one dead address among a dual-stack or
+// multi-record answer doesn't fail the whole probe. The last dial error is
+// returned when every address fails.
+func dialValidatedAddrs(ctx context.Context, addrs []netip.Addr, port string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+	var dialErr error
+	for _, addr := range addrs {
+		conn, err := dial(ctx, net.JoinHostPort(addr.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		dialErr = err
+	}
+	return nil, dialErr
 }
 
 func blockedAddrReason(addr netip.Addr) string {

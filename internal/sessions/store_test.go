@@ -103,7 +103,9 @@ func TestReadEventsToleratesTornTail(t *testing.T) {
 	if _, err := file.WriteString(`{"type":"message","payload":{"content":"tru`); err != nil {
 		t.Fatalf("write torn line: %v", err)
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		t.Fatalf("close events: %v", err)
+	}
 
 	events, err := store.ReadEvents(session.SessionID)
 	if err != nil {
@@ -132,7 +134,9 @@ func TestReadEventsFailsOnMidFileCorruption(t *testing.T) {
 	if _, err := file.WriteString("not json\n" + `{"type":"message","payload":{}}` + "\n"); err != nil {
 		t.Fatalf("write corruption: %v", err)
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		t.Fatalf("close events: %v", err)
+	}
 
 	if _, err := store.ReadEvents(session.SessionID); err == nil {
 		t.Fatal("expected error on mid-file corruption")
