@@ -157,12 +157,18 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 		t.Fatal("expected compaction to be marked in flight")
 	}
 	for _, want := range []string{
-		"status: warning",
 		"compacting context for Gitlawb",
-		"model adaptive",
+		"gpt-4.1",
+		"preserving recent turns",
+		"next prompt will use the compressed session",
 	} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected compact start transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	for _, unwanted := range []string{"context window:", "compactable:", "hint:", "State"} {
+		if transcriptContains(next.transcript, unwanted) {
+			t.Fatalf("compact running transcript should not contain diagnostic %q, got %#v", unwanted, next.transcript)
 		}
 	}
 	msg := execCmd(cmd)
@@ -191,15 +197,17 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 		t.Fatalf("expected one compact request, got %d", next.compactRequests)
 	}
 	for _, want := range []string{
-		"Compact",
-		"status: ok",
-		"compact complete",
-		"compacted: yes",
-		"after: 42 tokens",
+		"Compact complete",
+		"summary ready",
 		"summarized earlier turns",
 	} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected compact transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	for _, unwanted := range []string{"context window:", "compactable:", "hint:"} {
+		if transcriptContains(next.transcript, unwanted) {
+			t.Fatalf("compact completion transcript should not contain diagnostic %q, got %#v", unwanted, next.transcript)
 		}
 	}
 	if got := next.compactionStatus(); !strings.Contains(got, "compacted manually") {
@@ -235,6 +243,9 @@ func TestCompactSpinnerTickRefreshesProgressFrame(t *testing.T) {
 	}
 	if !strings.Contains(after, "compacting context for Gitlawb") {
 		t.Fatalf("expected animated compact copy, got %q", after)
+	}
+	if strings.Contains(after, "context window:") || strings.Contains(after, "compactable:") {
+		t.Fatalf("animated compact copy should stay concise, got %q", after)
 	}
 }
 

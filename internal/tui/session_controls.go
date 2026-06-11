@@ -330,12 +330,16 @@ func (m model) resolveRewindTarget(arg string) (int, error) {
 }
 
 func (m model) compactText(requested bool) string {
+	if m.compactInFlight {
+		return m.compactRunningText()
+	}
+	if requested && m.lastCompactResult != nil {
+		return compactCompleteText(*m.lastCompactResult)
+	}
 	status := commandStatusInfo
 	if requested {
 		status = commandStatusWarning
-		if m.compactInFlight {
-			status = commandStatusWarning
-		} else if m.lastCompactResult != nil {
+		if m.lastCompactResult != nil {
 			status = commandStatusOK
 		}
 		if m.lastCompactError != "" {
@@ -358,16 +362,7 @@ func (m model) compactText(requested bool) string {
 			},
 		},
 	}
-	if m.compactInFlight {
-		sections = append(sections, commandSection{
-			Title: "Progress",
-			Lines: []string{
-				m.compactAnimationLine(),
-				"quote: " + compactQuote(m.compactRequests),
-				"model adaptive: " + compactModelAdaptationLine(request),
-			},
-		})
-	} else if m.lastCompactResult != nil {
+	if m.lastCompactResult != nil {
 		sections = append(sections, commandSection{
 			Title: "Result",
 			Lines: compactResultLines(*m.lastCompactResult),
@@ -395,6 +390,34 @@ func (m model) compactText(requested bool) string {
 		Sections: sections,
 		Hints:    []string{"manual compaction affects this TUI session when a compactor is available"},
 	})
+}
+
+func (m model) compactRunningText() string {
+	request := m.compactRequest()
+	lines := []string{
+		"Compacting context",
+		m.compactAnimationLine(),
+		compactModelAdaptationLine(request),
+		"next prompt will use the compressed session",
+	}
+	if quote := compactQuote(m.compactRequests); quote != "" {
+		lines = append(lines, quote)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func compactCompleteText(result CompactResult) string {
+	lines := []string{
+		"Compact complete",
+		"summary ready · previous context compressed",
+	}
+	if result.BeforeTokens > 0 && result.AfterTokens > 0 {
+		lines = append(lines, fmt.Sprintf("%d → %d estimated tokens", result.BeforeTokens, result.AfterTokens))
+	}
+	if summary := strings.TrimSpace(result.Summary); summary != "" {
+		lines = append(lines, summary)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) compactionStatus() string {
@@ -567,7 +590,6 @@ func estimateTranscriptTokens(rows []transcriptRow) int {
 
 func compactResultLines(result CompactResult) []string {
 	lines := []string{
-		"phase: compact complete",
 		"compacted: " + boolText(result.Compacted),
 	}
 	if result.BeforeTokens > 0 {
@@ -584,7 +606,7 @@ func compactResultLines(result CompactResult) []string {
 
 func (m model) compactAnimationLine() string {
 	frame := compactFrames[m.compactFrame%len(compactFrames)]
-	return frame + " compacting context for Gitlawb..."
+	return frame + " compacting context for Gitlawb"
 }
 
 func compactQuote(requests int) string {
@@ -595,11 +617,11 @@ func compactQuote(requests int) string {
 }
 
 func compactModelAdaptationLine(request CompactRequest) string {
-	window := compactContextWindowText(request.ContextWindow)
+	model := displayValue(strings.TrimSpace(request.ModelName), "active model")
 	if strings.TrimSpace(request.ModelName) == "" {
-		return "using the active model context window"
+		return "active model · preserving recent turns"
 	}
-	return fmt.Sprintf("%s uses %s; preserving the latest %d session events", request.ModelName, window, tuiCompactionPreserveLast)
+	return fmt.Sprintf("%s · %s estimated tokens · preserving recent turns", model, formatContextWindow(request.EstimatedTokens))
 }
 
 func (m model) setCompactStatusRow(text string) model {
