@@ -535,7 +535,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			permissionGranted = true
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
-			grant, err := persistPermissionGrant(call.Name, decisionReason, options)
+			grant, err := persistPermissionGrant(call.Name, args, decisionReason, options)
 			if err != nil {
 				emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
 				return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent), nil
@@ -787,7 +787,7 @@ func normalizePermissionDecisionAction(action PermissionDecisionAction) Permissi
 	}
 }
 
-func persistPermissionGrant(toolName string, reason string, options Options) (sandbox.Grant, error) {
+func persistPermissionGrant(toolName string, args map[string]any, reason string, options Options) (sandbox.Grant, error) {
 	if options.Sandbox == nil {
 		return sandbox.Grant{}, errors.New("sandbox engine is not configured")
 	}
@@ -798,11 +798,17 @@ func persistPermissionGrant(toolName string, reason string, options Options) (sa
 	if normalized, err := sandbox.NormalizeAutonomy(maxAutonomy); err == nil {
 		maxAutonomy = normalized
 	}
+	// Scope the grant to exactly what the permission card showed (the file or
+	// directory the call touches); engine.Grant anchors it to the workspace. A
+	// call with no path-like argument yields an empty scope — a tool-wide grant.
+	scope, kind := sandbox.DeriveScope(toolName, args)
 	return options.Sandbox.Grant(sandbox.GrantInput{
 		ToolName:    toolName,
 		Decision:    sandbox.GrantAllow,
 		MaxAutonomy: maxAutonomy,
 		Reason:      reason,
+		Scope:       scope,
+		ScopeKind:   kind,
 	})
 }
 
@@ -866,18 +872,14 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 // no path-like argument (the grant is then plainly tool-wide). The first
 // matching key wins, ordered most-specific (a concrete file) first.
 func permissionScope(toolName string, args map[string]any) string {
-	for _, key := range []string{"path", "file", "directory", "dir", "cwd"} {
-		value, ok := args[key].(string)
-		if !ok {
-			continue
-		}
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || trimmed == "." {
-			continue // workspace root — no extra scope to surface
-		}
-		return truncateScope(trimmed)
+	// sandbox.DeriveScope is the single source of truth for which arguments carry
+	// a scope, shared with grant persistence and matching so the card display can
+	// never diverge from what an "always allow" actually covers.
+	raw, _ := sandbox.DeriveScope(toolName, args)
+	if raw == "" {
+		return ""
 	}
-	return ""
+	return truncateScope(raw)
 }
 
 func truncateScope(value string) string {

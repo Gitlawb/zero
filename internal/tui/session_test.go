@@ -372,12 +372,16 @@ func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 
 	next := submitAndDrivePermissionRun(t, m, "write first", "y", runtimeMessageCh, 4)
 
-	lookup, err := grantStore.Lookup("write_file", sandbox.AutonomyMedium)
+	// The always-decision persists a grant scoped to exactly the file written.
+	lookup, err := grantStore.Lookup("write_file", filepath.Join(root, "notes.txt"), sandbox.AutonomyMedium)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !lookup.Matched || lookup.Grant.Decision != sandbox.GrantAllow {
 		t.Fatalf("expected always decision to persist allow grant, got %#v", lookup)
+	}
+	if lookup.Grant.ScopeKind != sandbox.ScopeFile {
+		t.Fatalf("expected file-scoped grant, got %#v", lookup.Grant)
 	}
 	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
 	if err != nil {

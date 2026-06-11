@@ -39,14 +39,14 @@ func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
 		t.Fatalf("unexpected sorted grants: %#v", grants)
 	}
 
-	match, err := reopened.Lookup("write_file", AutonomyLow)
+	match, err := reopened.Lookup("write_file", "", AutonomyLow)
 	if err != nil {
 		t.Fatalf("Lookup returned error: %v", err)
 	}
 	if !match.Matched || match.Grant.Decision != GrantAllow {
 		t.Fatalf("lookup allow = %#v, want matched allow", match)
 	}
-	match, err = reopened.Lookup("write_file", AutonomyHigh)
+	match, err = reopened.Lookup("write_file", "", AutonomyHigh)
 	if err != nil {
 		t.Fatalf("Lookup high returned error: %v", err)
 	}

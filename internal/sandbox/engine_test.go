@@ -89,6 +89,55 @@ func TestEngineEvaluatesReadPromptAndPersistentDecisions(t *testing.T) {
 	}
 }
 
+func TestEngineGrantScopesToFileAndDirectory(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Store: store})
+
+	writeReq := func(path string) Request {
+		return Request{
+			ToolName:       "write_file",
+			SideEffect:     SideEffectWrite,
+			Permission:     PermissionPrompt,
+			PermissionMode: PermissionModeAsk,
+			Autonomy:       AutonomyMedium,
+			Args:           map[string]any{"path": path},
+		}
+	}
+
+	// engine.Grant anchors a relative scope to the workspace root.
+	if _, err := engine.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyMedium, Scope: "src/main.go", ScopeKind: ScopeFile}); err != nil {
+		t.Fatalf("engine.Grant file: %v", err)
+	}
+	// The exact file auto-allows, regardless of how the request spells the path.
+	for _, path := range []string{"src/main.go", "./src/main.go"} {
+		if d := engine.Evaluate(context.Background(), writeReq(path)); d.Action != ActionAllow || !d.GrantMatched {
+			t.Fatalf("covered file %q should auto-allow, got %#v", path, d)
+		}
+	}
+	// A sibling is outside the grant and re-prompts.
+	if d := engine.Evaluate(context.Background(), writeReq("src/other.go")); d.Action != ActionPrompt || d.GrantMatched {
+		t.Fatalf("sibling file should re-prompt, got %#v", d)
+	}
+
+	// A directory deny blocks the whole subtree, even under unsafe mode.
+	if _, err := engine.Grant(GrantInput{ToolName: "write_file", Decision: GrantDeny, MaxAutonomy: AutonomyHigh, Scope: "secrets", ScopeKind: ScopeDir}); err != nil {
+		t.Fatalf("engine.Grant dir deny: %v", err)
+	}
+	denied := writeReq(filepath.Join("secrets", "creds.txt"))
+	denied.PermissionMode = PermissionUnsafe
+	denied.Autonomy = AutonomyHigh
+	if d := engine.Evaluate(context.Background(), denied); d.Action != ActionDeny || !d.GrantMatched || d.Violation == nil || d.Violation.Code != ViolationPersistentDeny {
+		t.Fatalf("path under deny subtree should be denied, got %#v", d)
+	}
+}
+
 func TestEngineDeniesOutOfWorkspacePaths(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "escape.txt")

@@ -97,7 +97,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command is blocked by sandbox policy", false)
 	}
 	if engine.store != nil {
-		match, err := engine.store.Lookup(request.ToolName, request.Autonomy)
+		reqRaw, _ := DeriveScope(request.ToolName, request.Args)
+		reqScopeAbs := resolveScopeAbs(reqRaw, request.WorkspaceRoot)
+		match, err := engine.store.Lookup(request.ToolName, reqScopeAbs, request.Autonomy)
 		if err == nil && match.Matched {
 			grant := match.Grant
 			if grant.Decision == GrantDeny {
@@ -140,6 +142,18 @@ func (engine *Engine) Grant(input GrantInput) (Grant, error) {
 	if engine == nil || engine.store == nil {
 		return Grant{}, errors.New("sandbox grant store is not configured")
 	}
+	kind, err := normalizeScopeKind(input.ScopeKind)
+	if err != nil {
+		return Grant{}, err
+	}
+	scope, kind := reconcileScope(strings.TrimSpace(input.Scope), kind)
+	if kind != ScopeToolWide {
+		// Anchor a relative scope to this workspace so the grant cannot match a
+		// same-named path in another project.
+		scope = resolveScopeAbs(scope, engine.workspaceRoot)
+	}
+	input.Scope = scope
+	input.ScopeKind = kind
 	return engine.store.Grant(input)
 }
 
