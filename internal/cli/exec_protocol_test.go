@@ -464,6 +464,7 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 }
 
 func TestRunExecStreamJSONRunStartUsesResolvedAPIModel(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -618,6 +619,7 @@ func TestRunExecStreamJSONProviderErrorEmitsErrorAndRunEnd(t *testing.T) {
 }
 
 func TestRunExecReadsStreamJSONPromptFromStdin(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

@@ -62,6 +62,7 @@ func (provider *fakeProvider) StreamCompletion(
 }
 
 func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "I am using the active session model."},
 		{Type: zeroruntime.StreamEventDone},
