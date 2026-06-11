@@ -923,6 +923,10 @@ func (m model) footerView(width int) string {
 func (m model) scrollableTranscriptView(body string, footer string, width int, overlay string) string {
 	bodyLines := viewLines(body)
 	footerLines := viewLines(footer)
+	maxFooterLines := maxInt(0, m.height-1)
+	if len(footerLines) > maxFooterLines {
+		footerLines = footerLines[len(footerLines)-maxFooterLines:]
+	}
 	available := m.height - len(footerLines)
 	if available < 1 {
 		available = 1

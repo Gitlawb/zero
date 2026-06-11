@@ -324,7 +324,6 @@ func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonNone,
 		Action: tea.MouseActionMotion,
-		Type:   tea.MouseMotion,
 		X:      7,
 		Y:      0,
 	})
@@ -343,11 +342,12 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		Type:   tea.MouseLeft,
 		X:      0,
 		Y:      0,
 	})
 	m = updated.(model)
+	// Bubble Tea marks left-button drag motion as Type MouseLeft for backward
+	// compatibility; this must update the cursor without resetting the anchor.
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionMotion,
@@ -377,7 +377,6 @@ func TestTranscriptSelectionReleaseExtendsRangeWithoutMotion(t *testing.T) {
 	updated, cmd := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonNone,
 		Action: tea.MouseActionRelease,
-		Type:   tea.MouseRelease,
 		X:      7,
 		Y:      0,
 	})

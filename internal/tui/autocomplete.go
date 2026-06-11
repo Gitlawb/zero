@@ -523,8 +523,14 @@ func fuzzySubsequenceGap(value, query string) (int, bool) {
 // owns that search text while it is open.
 func (m model) dismissSuggestions() model {
 	if m.suggestionsAreFiles {
-		m.input.SetValue(removeTrailingAtToken(m.input.Value()))
-		m.input.CursorEnd()
+		if query := extractPathQuery(m.input.Value(), m.input.Position()); query != nil {
+			runes := []rune(m.input.Value())
+			next := make([]rune, 0, len(runes)-(query.EndIndex-query.StartIndex))
+			next = append(next, runes[:query.StartIndex]...)
+			next = append(next, runes[query.EndIndex:]...)
+			m.input.SetValue(string(next))
+			m.input.SetCursor(query.StartIndex)
+		}
 		m.resetComposerFromInput()
 	} else {
 		m.clearComposer()

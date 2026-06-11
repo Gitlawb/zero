@@ -16,6 +16,7 @@ import (
 
 type providerModelsDiscoveredMsg struct {
 	providerID string
+	token      int
 	models     []providermodeldiscovery.Model
 	err        error
 }
@@ -51,18 +52,20 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 
 	wizard.modelLoading = true
 	wizard.modelLoadError = ""
+	wizard.discoveryToken++
+	token := wizard.discoveryToken
 	providerID := provider.ID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
 		defer cancel()
 		models, err := discover(ctx, profile)
-		return providerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
+		return providerModelsDiscoveredMsg{providerID: providerID, token: token, models: models, err: err}
 	}
 }
 
 func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) model {
 	wizard := m.providerWizard
-	if wizard == nil || wizard.step != providerWizardStepModel || wizard.currentProvider().ID != msg.providerID {
+	if wizard == nil || wizard.step != providerWizardStepModel || wizard.currentProvider().ID != msg.providerID || msg.token != wizard.discoveryToken {
 		return m
 	}
 	wizard.modelLoading = false

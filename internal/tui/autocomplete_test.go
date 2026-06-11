@@ -495,6 +495,27 @@ func TestEscDismissesFilePaletteAndRemovesTrailingToken(t *testing.T) {
 	if got := m.composerValue(); got != "read x" {
 		t.Fatalf("Esc should keep composer state synced after removing @ token, got %q", got)
 	}
+
+	m = newModel(context.Background(), Options{Cwd: t.TempDir()})
+	m = typeRunes(t, m, "compare @old with @new")
+	m.input.SetCursor(len([]rune("compare @old")))
+	m.recomputeSuggestions()
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+
+	if m.suggestionsActive() {
+		t.Fatal("Esc should dismiss the cursor-local file palette")
+	}
+	if got := m.input.Value(); got != "compare  with @new" {
+		t.Fatalf("Esc should remove only the cursor-local @ token, got %q", got)
+	}
+	if got := m.input.Position(); got != len([]rune("compare ")) {
+		t.Fatalf("cursor after cursor-local removal = %d, want %d", got, len([]rune("compare ")))
+	}
+	if got := m.composerValue(); got != "compare  with @new" {
+		t.Fatalf("Esc should keep composer synced after cursor-local removal, got %q", got)
+	}
 }
 
 func TestExtractPathQueryUsesCursorPosition(t *testing.T) {

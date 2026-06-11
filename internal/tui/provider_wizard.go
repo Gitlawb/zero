@@ -47,6 +47,7 @@ type providerWizardState struct {
 	modelSource      string
 	modelLoading     bool
 	modelLoadError   string
+	discoveryToken   int
 }
 
 func (m model) newProviderWizard() *providerWizardState {

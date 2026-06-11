@@ -58,6 +58,19 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	}
 }
 
+func TestAltScreenTranscriptClampsFooterToTerminalHeight(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true, ProviderName: "openai", ModelName: "gpt-4.1"})
+	m.width = 80
+	m.height = 3
+	m.copyStatus = "Copied!"
+	m.transcript = appendRow(m.transcript, rowAssistant, "hello")
+
+	view := plainRender(t, m.View())
+	if got := len(viewLines(view)); got > m.height {
+		t.Fatalf("view rendered %d lines, want at most terminal height %d:\n%s", got, m.height, view)
+	}
+}
+
 func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90

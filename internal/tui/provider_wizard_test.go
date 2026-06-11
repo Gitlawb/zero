@@ -201,6 +201,7 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 
 	updated, _ = next.Update(providerModelsDiscoveredMsg{
 		providerID: "anthropic",
+		token:      next.providerWizard.discoveryToken,
 		models: []providermodeldiscovery.Model{{
 			ID:          "claude-sonnet-4.5",
 			Description: "claude-sonnet-4.5",
@@ -277,6 +278,7 @@ func TestProviderWizardSupportsLeftAndGuardedRightNavigation(t *testing.T) {
 
 	updated, _ = next.Update(providerModelsDiscoveredMsg{
 		providerID: next.providerWizard.currentProvider().ID,
+		token:      next.providerWizard.discoveryToken,
 		models: []providermodeldiscovery.Model{{
 			ID:          next.providerWizard.currentProvider().DefaultModel,
 			Description: next.providerWizard.currentProvider().DefaultModel,
@@ -563,6 +565,62 @@ func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	assertNotContains(t, view, "gpt-4.1")
 }
 
+func TestProviderWizardIgnoresStaleDiscoveryForSameProvider(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("first model entry should start discovery")
+	}
+	staleToken := next.providerWizard.discoveryToken
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepProvider {
+		t.Fatalf("left from local model step = %v, want provider", next.providerWizard.step)
+	}
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd == nil {
+		t.Fatal("second model entry should start discovery")
+	}
+	currentToken := next.providerWizard.discoveryToken
+	if currentToken == staleToken {
+		t.Fatalf("discovery token did not advance: %d", currentToken)
+	}
+
+	updated, _ = next.Update(providerModelsDiscoveredMsg{
+		providerID: "ollama",
+		token:      staleToken,
+		models: []providermodeldiscovery.Model{{
+			ID: "stale-model",
+		}},
+	})
+	next = updated.(model)
+	if got := providerWizardModelIDs(next.providerWizard.models); containsString(got, "stale-model") {
+		t.Fatalf("stale discovery response applied: %#v", got)
+	}
+	if !next.providerWizard.modelLoading {
+		t.Fatal("stale discovery response should not clear the active loading state")
+	}
+
+	updated, _ = next.Update(providerModelsDiscoveredMsg{
+		providerID: "ollama",
+		token:      currentToken,
+		models: []providermodeldiscovery.Model{{
+			ID: "fresh-model",
+		}},
+	})
+	next = updated.(model)
+	if got := providerWizardModelIDs(next.providerWizard.models); !containsString(got, "fresh-model") {
+		t.Fatalf("fresh discovery response did not apply: %#v", got)
+	}
+}
+
 func TestProviderWizardKeepsFallbackModelsWhenLiveDiscoveryFails(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		DiscoverProviderModels: func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
@@ -744,6 +802,7 @@ func finishProviderWizardModelDiscoveryForTest(t *testing.T, m model) model {
 	modelID := firstProviderDisplayValue(provider.DefaultModel, "test-model")
 	updated, _ := m.Update(providerModelsDiscoveredMsg{
 		providerID: provider.ID,
+		token:      m.providerWizard.discoveryToken,
 		models: []providermodeldiscovery.Model{{
 			ID:          modelID,
 			Description: modelID,

@@ -111,7 +111,7 @@ func TestComposerDividerRendersMetaAtExactFit(t *testing.T) {
 		PermissionMode: agent.PermissionModeAsk,
 	})
 	label, style := m.modeLabel()
-	meta := zeroTheme.muted.Render("m") + zeroTheme.line.Render(" · ") + style.Render(label)
+	meta := zeroTheme.muted.Render("m") + zeroTheme.muted.Render(" · ") + style.Render(label)
 	width := lipgloss.Width(meta) + 4
 
 	got := plainRender(t, m.composerDividerLine(width))

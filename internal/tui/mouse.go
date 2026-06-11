@@ -126,6 +126,9 @@ func (m model) syncMouseCapture() (model, tea.Cmd) {
 	return m, tea.DisableMouse
 }
 
+// Bubble Tea's Type field is deprecated, but its parser still populates it for
+// compatibility cases such as left-button drag events. Keep these helpers
+// tolerant of both the current Button/Action pair and legacy Type values.
 func mouseLeftPress(msg tea.MouseMsg) bool {
 	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress ||
 		msg.Type == tea.MouseLeft && msg.Action == tea.MouseActionPress
