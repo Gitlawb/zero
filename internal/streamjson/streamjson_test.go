@@ -8,6 +8,33 @@ import (
 	"time"
 )
 
+func TestRedactStringDoesNotOverMatchProse(t *testing.T) {
+	// Ordinary prose must survive: the old unanchored patterns redacted "sk-"
+	// inside "task-list" and the word after a bare "bearer".
+	for _, clean := range []string{
+		"updated the task-list and the task-runner",
+		"the bearer of bad news arrived",
+		"set the bearer token in the header",
+	} {
+		if got := redactString(clean); got != clean {
+			t.Fatalf("redactString(%q) = %q, want unchanged", clean, got)
+		}
+	}
+
+	// Real secrets must still be redacted.
+	for _, secret := range []string{
+		"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+		"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9abcdef",
+	} {
+		if got := redactString(secret); strings.Contains(got, "abcdef") && !strings.Contains(got, "[REDACTED]") {
+			t.Fatalf("redactString(%q) = %q, expected redaction", secret, got)
+		}
+		if !strings.Contains(redactString(secret), "[REDACTED]") {
+			t.Fatalf("redactString(%q) did not redact", secret)
+		}
+	}
+}
+
 func TestFormatEventRedactsSecretsAndSerializesOneLine(t *testing.T) {
 	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
 
