@@ -31,12 +31,12 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 	return grepTool{
 		baseTool: baseTool{
 			name:        "grep",
-			description: "Search file contents with a regular expression inside the workspace.",
+			description: "Search file contents with a regular expression inside the workspace or an explicitly granted extra root.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"pattern":          {Type: "string", Description: "Regular expression pattern to search for."},
-					"path":             {Type: "string", Description: "Directory or file to search. Defaults to workspace root.", Default: "."},
+					"path":             {Type: "string", Description: "Directory or file to search. Relative paths stay in the workspace; use an absolute path to search a granted extra root. Defaults to workspace root.", Default: "."},
 					"glob":             {Type: "string", Description: `Optional glob filter, for example "**/*.go".`},
 					"output_mode":      {Type: "string", Description: "Output mode.", Enum: []string{"content", "files_with_matches", "count"}, Default: "content"},
 					"-i":               {Type: "boolean", Description: "Case insensitive search.", Default: false},
@@ -176,7 +176,10 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 // workspace-relative paths even when the target lives in an extra root.
 // Falls back to EvalSymlinks(workspaceRoot) when no scoped root matches.
 func resolveGrepRoot(workspaceRoot string, scope PathScope, resolvedTarget string) (string, error) {
-	roots := scopedRoots(workspaceRoot, scope)
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return "", err
+	}
 	for _, root := range roots {
 		resolved, err := filepath.EvalSymlinks(root)
 		if err != nil {

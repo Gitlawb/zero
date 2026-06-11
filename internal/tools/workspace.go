@@ -213,13 +213,22 @@ type PathScope interface {
 	Roots() []string
 }
 
-// scopedRoots returns the ordered roots to try for an absolute path:
-// the scope's roots when present, else just the workspace root.
-func scopedRoots(workspaceRoot string, scope PathScope) []string {
+// scopedRoots returns the ordered roots to try for an absolute path: the
+// scope's roots when present, else just the workspace root. A non-nil scope
+// must expose at least one root (the workspace root first, per PathScope); an
+// empty Roots() is a contract violation that fails closed with an error so the
+// scoped helpers never silently accept a path with no root to validate against.
+// Returning success there would resolve to an empty path and, e.g., run bash
+// with Cmd.Dir == "" (the process cwd) instead of an allowed root.
+func scopedRoots(workspaceRoot string, scope PathScope) ([]string, error) {
 	if scope == nil {
-		return []string{workspaceRoot}
+		return []string{workspaceRoot}, nil
 	}
-	return scope.Roots()
+	roots := scope.Roots()
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("invalid path scope: no write roots configured")
+	}
+	return roots, nil
 }
 
 // resolveScopedPath is resolveWorkspacePath generalized to a scope: relative
@@ -241,8 +250,12 @@ func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath stri
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspacePath(workspaceRoot, requestedPath)
 	}
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return "", "", err
+	}
 	var firstErr error
-	for index, root := range scopedRoots(workspaceRoot, scope) {
+	for index, root := range roots {
 		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
 		// in the prefix outside this root only, leaving in-root components
 		// verbatim for the single-root symlink checks.
@@ -277,8 +290,12 @@ func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPat
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return resolveWorkspaceTargetPath(workspaceRoot, requestedPath)
 	}
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return "", "", err
+	}
 	var firstErr error
-	for index, root := range scopedRoots(workspaceRoot, scope) {
+	for index, root := range roots {
 		// Normalize platform-level symlinks (e.g. macOS /var -> /private/var)
 		// in the prefix outside this root only; in-root components stay
 		// verbatim so the per-segment write-target symlink checks apply.
@@ -310,8 +327,12 @@ func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPa
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
 		return recheckWorkspaceWriteTarget(workspaceRoot, requestedPath)
 	}
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return err
+	}
 	var firstErr error
-	for _, root := range scopedRoots(workspaceRoot, scope) {
+	for _, root := range roots {
 		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
 		err := recheckWorkspaceWriteTarget(root, candidate)
 		if err == nil {

@@ -582,3 +582,45 @@ func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {
 		t.Fatalf("outside violation reason=%q, want --add-dir hint", outside.Violation.Reason)
 	}
 }
+
+// TestNewEngineDerivesWorkspaceRootFromScope guards the scope-only construction
+// path: when EngineOptions carries a Scope but no WorkspaceRoot, the engine must
+// adopt the scope's workspace root (Roots()[0]). Otherwise request.WorkspaceRoot
+// stays empty and Evaluate's EnforceWorkspace/path-classification guards silently
+// skip, turning the engine into an escape hatch.
+func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{Policy: DefaultPolicy(), Scope: scope})
+
+	if got := engine.workspaceRoot; got != scope.Roots()[0] {
+		t.Fatalf("workspaceRoot=%q, want derived %q", got, scope.Roots()[0])
+	}
+
+	// Enforcement is live: a write outside every root is denied rather than
+	// allowed-through on an empty workspace root.
+	outside := engine.Evaluate(context.Background(), Request{
+		ToolName:   "write_file",
+		SideEffect: SideEffectWrite,
+		Permission: PermissionAllow,
+		Args:       map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
+	})
+	if outside.Action != ActionDeny || outside.Violation == nil {
+		t.Fatalf("scope-only engine, out-of-scope write Action=%q, want deny with violation", outside.Action)
+	}
+
+	// The derived workspace root still allows in-workspace writes.
+	inside := engine.Evaluate(context.Background(), Request{
+		ToolName:   "write_file",
+		SideEffect: SideEffectWrite,
+		Permission: PermissionAllow,
+		Args:       map[string]any{"path": filepath.Join(workspace, "ok.txt")},
+	})
+	if inside.Action != ActionAllow {
+		t.Fatalf("scope-only engine, in-workspace write Action=%q (%s), want allow", inside.Action, inside.Reason)
+	}
+}

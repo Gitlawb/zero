@@ -23,12 +23,12 @@ func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
 			name:        "apply_patch",
-			description: "Apply a unified diff patch inside the workspace.",
+			description: "Apply a unified diff patch inside the workspace or an explicitly granted extra write root.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"patch": {Type: "string", Description: "Unified diff patch to apply."},
-					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Defaults to workspace root.", Default: "."},
+					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Relative paths stay in the workspace; use an absolute path to target a granted extra write root. Defaults to workspace root.", Default: "."},
 				},
 				Required:             []string{"patch"},
 				AdditionalProperties: false,

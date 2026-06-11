@@ -282,6 +282,48 @@ func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
 	}
 }
 
+func TestScopedGlobReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Same relative name in both roots: a bare "report.go" match from the extra
+	// root would resolve back into the workspace and hit the wrong file.
+	writeTestFile(t, filepath.Join(workspace, "report.go"), "package ws")
+	writeTestFile(t, filepath.Join(extra, "report.go"), "package extra")
+
+	tool := NewScopedGlobTool(workspace, scope)
+
+	// Globbing the extra root (absolute cwd) must emit absolute matches.
+	extraRes := tool.Run(context.Background(), map[string]any{
+		"pattern": "**/*.go",
+		"cwd":     extra,
+	})
+	if extraRes.Status != StatusOK {
+		t.Fatalf("extra-root glob status=%s output=%s", extraRes.Status, extraRes.Output)
+	}
+	// Matches report the symlink-resolved root (macOS /var -> /private/var).
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(extra): %v", err)
+	}
+	wantAbs := filepath.ToSlash(filepath.Join(resolvedExtra, "report.go"))
+	if strings.TrimSpace(extraRes.Output) != wantAbs {
+		t.Fatalf("extra-root glob output=%q, want absolute %q", extraRes.Output, wantAbs)
+	}
+
+	// Globbing the workspace (default cwd) keeps matches workspace-relative.
+	wsRes := tool.Run(context.Background(), map[string]any{"pattern": "**/*.go"})
+	if wsRes.Status != StatusOK {
+		t.Fatalf("workspace glob status=%s output=%s", wsRes.Status, wsRes.Output)
+	}
+	if strings.TrimSpace(wsRes.Output) != "report.go" {
+		t.Fatalf("workspace glob output=%q, want relative %q", wsRes.Output, "report.go")
+	}
+}
+
 func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "subdir"), 0o755); err != nil {

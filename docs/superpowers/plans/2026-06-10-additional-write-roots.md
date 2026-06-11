@@ -12,7 +12,7 @@
 
 ---
 
-### Task 1: `sandbox.Scope` core type
+## Task 1: `sandbox.Scope` core type
 
 **Files:**
 - Create: `internal/sandbox/scope.go`
@@ -330,7 +330,7 @@ git commit -m "sandbox: add Scope type for multi-root write access"
 
 ---
 
-### Task 2: Engine integration (policy layer + risk)
+## Task 2: Engine integration (policy layer + risk)
 
 **Files:**
 - Modify: `internal/sandbox/engine.go` (EngineOptions, Engine struct, Evaluate at line 88)
@@ -502,7 +502,7 @@ git commit -m "sandbox: make engine path validation and risk scope-aware"
 
 ---
 
-### Task 3: OS runners (seatbelt profile, bubblewrap binds, command cwd)
+## Task 3: OS runners (seatbelt profile, bubblewrap binds, command cwd)
 
 **Files:**
 - Modify: `internal/sandbox/runner.go` (`BuildCommandPlan`, `resolveCommandDir`, `bubblewrapCommandPlan`, `sandboxExecCommandPlan`, `sandboxExecProfile`)
@@ -684,7 +684,7 @@ git commit -m "sandbox: widen seatbelt/bubblewrap profiles and command cwd to sc
 
 ---
 
-### Task 4: File tools honor the scope
+## Task 4: File tools honor the scope
 
 **Files:**
 - Modify: `internal/tools/workspace.go` (scoped resolver variants)
@@ -941,7 +941,7 @@ git commit -m "tools: resolve paths against the shared write scope"
 
 ---
 
-### Task 5: Config key
+## Task 5: Config key
 
 **Files:**
 - Modify: `internal/config/types.go:57` (SandboxConfig)
@@ -1056,7 +1056,9 @@ git add internal/config/
 git commit -m "config: add sandbox.additionalWriteRoots"
 ```
 
----### Task 6: CLI wiring (`--add-dir` on `zero` and `zero exec`)
+---
+
+## Task 6: CLI wiring (`--add-dir` on `zero` and `zero exec`)
 
 **Files:**
 - Modify: `internal/cli/app.go` (`runWithDeps` arg handling at lines 138-155, `runInteractiveTUI` at 310-389, `newCoreRegistry` at 398)
@@ -1212,7 +1214,7 @@ func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.R
 (c) In `internal/cli/exec.go`: `buildExecSandboxEngine` gains a `scope *sandbox.Scope` parameter and sets `Scope: scope` in its `EngineOptions`. In the exec run path (`grep -n "buildExecSandboxEngine\|newCoreRegistry" internal/cli/exec.go` to find both call sites), build the scope first from the exec workspace root, `resolved.Sandbox.AdditionalWriteRoots`, and `options.addDirs` (same `sandbox.NewScope` call as (a), erroring out via exec's existing error path), then pass it to both the registry construction and `buildExecSandboxEngine`.
 
 (d) Help text: add to the root help (`writeHelp`) flag list:
-```
+```text
   --add-dir <path>   Allow writes in an extra directory (repeatable)
 ```
 and the same line to `writeExecHelp`'s flag section, matching surrounding formatting.
@@ -1231,7 +1233,7 @@ git commit -m "cli: add repeatable --add-dir flag wiring scope into registry and
 
 ---
 
-### Task 7: TUI `/add-dir` command
+## Task 7: TUI `/add-dir` command
 
 **Files:**
 - Modify: `internal/tui/commands.go` (kind const block at lines 9-37, definitions table at 64-230)
@@ -1378,7 +1380,7 @@ git commit -m "tui: add /add-dir command for session write-root grants"
 
 ---
 
-### Task 8: Observability (`zero sandbox` status + snapshots)
+## Task 8: Observability (`zero sandbox` status + snapshots)
 
 **Files:**
 - Modify: `internal/cli/sandbox.go` (`runSandboxPolicyEffective` at :117, `formatEffectiveSandboxPolicy` at :146; find the caller with `grep -n "runSandboxPolicyEffective(" internal/cli/sandbox.go`)
@@ -1437,7 +1439,7 @@ git commit -m "sandbox: surface write roots in zero sandbox status and plan snap
 
 ---
 
-### Task 9: Full verification + docs
+## Task 9: Full verification + docs
 
 **Files:**
 - Modify: `docs/` CLI/flag documentation if it exists (`grep -rln "image\b\|--autonomy" docs/ | head -5` — add `--add-dir` and `/add-dir` wherever flags/commands are enumerated)

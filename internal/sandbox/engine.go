@@ -33,6 +33,16 @@ func NewEngine(options EngineOptions) *Engine {
 	}
 	scope := options.Scope
 	workspaceRoot := strings.TrimSpace(options.WorkspaceRoot)
+	if scope != nil && workspaceRoot == "" {
+		// Scope-only construction must still populate workspaceRoot: Evaluate's
+		// path classification and EnforceWorkspace denial both guard on
+		// request.WorkspaceRoot != "", and resolveCommandDir hard-requires it, so
+		// leaving it blank would silently skip enforcement. Roots()[0] is the
+		// workspace root by the Scope contract.
+		if roots := scope.Roots(); len(roots) > 0 {
+			workspaceRoot = roots[0]
+		}
+	}
 	if scope == nil && workspaceRoot != "" {
 		scope = &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
 	}

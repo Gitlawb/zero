@@ -66,7 +66,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
 	}
 
-	root, _, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
+	root, displayRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
@@ -75,7 +75,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
 
-	matches, err := scanGlob(root, matcher, includeDirs)
+	matches, err := scanGlob(root, displayRoot, matcher, includeDirs)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
@@ -99,7 +99,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 	}
 }
 
-func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, error) {
+func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool) ([]string, error) {
 	matches := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -130,7 +130,16 @@ func scanGlob(root string, matcher *regexp.Regexp, includeDirs bool) ([]string, 
 			return nil
 		}
 		if matcher.MatchString(normalized) {
-			matches = append(matches, normalized)
+			match := normalized
+			// When cwd resolved to an extra (non-workspace) root, resolveScopedPath
+			// returns an absolute displayRoot. Emit absolute matches there so the
+			// agent can feed them straight back into read_file/edit_file; a bare
+			// relative "foo.txt" would otherwise resolve against the workspace and
+			// hit the wrong file when the same name exists in both roots.
+			if filepath.IsAbs(displayRoot) {
+				match = filepath.ToSlash(filepath.Join(displayRoot, relative))
+			}
+			matches = append(matches, match)
 		}
 		return nil
 	})
