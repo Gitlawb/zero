@@ -345,6 +345,47 @@ func (store *Store) Latest() (*Metadata, error) {
 	return &sessions[0], nil
 }
 
+// IsResumableKind reports whether a session kind represents a standalone,
+// user-resumable conversation rather than an agent sub-run. Regular ("") and
+// user fork sessions are resumable; child (specialist/sub-agent) and spec
+// draft/impl sessions are not — each agent task and /spec run creates one, so
+// listing them in the resume picker floods it with non-conversation entries.
+func IsResumableKind(kind SessionKind) bool {
+	switch kind {
+	case "", SessionKindFork:
+		return true
+	default:
+		return false
+	}
+}
+
+// ListResumable returns only the sessions a user can resume as standalone
+// conversations (see IsResumableKind), newest-first like List.
+func (store *Store) ListResumable() ([]Metadata, error) {
+	all, err := store.List()
+	if err != nil {
+		return nil, err
+	}
+	resumable := make([]Metadata, 0, len(all))
+	for _, session := range all {
+		if IsResumableKind(session.SessionKind) {
+			resumable = append(resumable, session)
+		}
+	}
+	return resumable, nil
+}
+
+// LatestResumable returns the most-recently-updated resumable session, or nil
+// when none exist. Used by `/resume latest` so it lands on a real conversation
+// instead of the newest child/spec sub-run.
+func (store *Store) LatestResumable() (*Metadata, error) {
+	resumable, err := store.ListResumable()
+	if err != nil || len(resumable) == 0 {
+		return nil, err
+	}
+	return &resumable[0], nil
+}
+
 func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, error) {
 	if !ValidSessionID(parentSessionID) {
 		return Metadata{}, fmt.Errorf("invalid zero session id %q", parentSessionID)

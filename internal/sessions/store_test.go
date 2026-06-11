@@ -316,6 +316,60 @@ func TestStoreListsChildrenLineageAndTree(t *testing.T) {
 	}
 }
 
+func TestListAndLatestResumableExcludeSubRuns(t *testing.T) {
+	at, err := time.Parse(time.RFC3339, "2026-06-04T10:00:00Z")
+	if err != nil {
+		t.Fatalf("parse start time: %v", err)
+	}
+	// Advancing clock: each created session is strictly newer than the last, so
+	// LatestResumable is deterministic regardless of how often Create reads Now.
+	clock := func() time.Time {
+		at = at.Add(time.Second)
+		return at
+	}
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: clock})
+
+	mk := func(kind SessionKind, title string) Metadata {
+		s, err := store.Create(CreateInput{Title: title, Cwd: "/repo", ModelID: "m", Provider: "p", SessionKind: kind})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", kind, err)
+		}
+		return s
+	}
+	mk("", "conversation-1")
+	mk(SessionKindFork, "fork-1")
+	mk(SessionKindChild, "child-1")
+	mk(SessionKindSpecDraft, "spec-draft-1")
+	mk(SessionKindSpecImpl, "spec-impl-1")
+	newestResumable := mk("", "conversation-2") // newest standalone conversation
+	mk(SessionKindChild, "child-2")             // newer overall, but a sub-run
+
+	resumable, err := store.ListResumable()
+	if err != nil {
+		t.Fatalf("ListResumable: %v", err)
+	}
+	if len(resumable) != 3 {
+		t.Fatalf("ListResumable returned %d sessions, want 3 (two regular + one fork)", len(resumable))
+	}
+	for _, session := range resumable {
+		if !IsResumableKind(session.SessionKind) {
+			t.Fatalf("ListResumable leaked sub-run kind %q (%s)", session.SessionKind, session.SessionID)
+		}
+	}
+
+	latest, err := store.LatestResumable()
+	if err != nil {
+		t.Fatalf("LatestResumable: %v", err)
+	}
+	if latest == nil || latest.SessionID != newestResumable.SessionID {
+		got := "nil"
+		if latest != nil {
+			got = latest.SessionID
+		}
+		t.Fatalf("LatestResumable = %s, want newest resumable %s (must skip the newer child)", got, newestResumable.SessionID)
+	}
+}
+
 func TestDefaultRootHonorsXDGDataHome(t *testing.T) {
 	got := DefaultRoot(map[string]string{
 		"XDG_DATA_HOME": "/tmp/zero-data",

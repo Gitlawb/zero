@@ -53,7 +53,9 @@ func (m model) resumeText(args string) string {
 			Hints: []string{"use /resume " + args + " to hydrate this TUI session"},
 		})
 	}
-	sessions, err := m.sessionStore.List()
+	// Only standalone conversations — not child/spec sub-runs, which an agent
+	// spawns by the dozen and would otherwise flood the picker (the "… N more").
+	sessions, err := m.sessionStore.ListResumable()
 	if err != nil {
 		return renderCommandOutput(commandOutput{
 			Title:  "Sessions",

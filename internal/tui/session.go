@@ -166,7 +166,9 @@ func (m model) sessionPrompt(prompt string) string {
 
 func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 	if strings.EqualFold(args, "latest") {
-		latest, err := m.sessionStore.Latest()
+		// Latest *resumable* conversation, so "latest" never lands on a child or
+		// spec sub-run. An explicit `/resume <id>` below still resolves any session.
+		latest, err := m.sessionStore.LatestResumable()
 		if err != nil {
 			return nil, err
 		}

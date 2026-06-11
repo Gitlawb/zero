@@ -682,6 +682,30 @@ func TestResumeCommandIsBlockedWhileRunPending(t *testing.T) {
 	}
 }
 
+func TestResumePickerExcludesSubRunSessions(t *testing.T) {
+	store := testSessionStore(t)
+	if _, err := store.Create(sessions.CreateInput{Title: "Real Conversation"}); err != nil {
+		t.Fatalf("Create conversation: %v", err)
+	}
+	// A specialist/sub-agent run and a spec draft both create sessions; neither is
+	// a standalone conversation and must not flood the /resume picker.
+	if _, err := store.Create(sessions.CreateInput{Title: "Specialist Run", SessionKind: sessions.SessionKindChild}); err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	if _, err := store.Create(sessions.CreateInput{Title: "Spec Draft", SessionKind: sessions.SessionKindSpecDraft}); err != nil {
+		t.Fatalf("Create spec draft: %v", err)
+	}
+
+	out := newModel(context.Background(), Options{SessionStore: store}).resumeText("")
+
+	if !strings.Contains(out, "Real Conversation") {
+		t.Fatalf("resume picker should list the real conversation:\n%s", out)
+	}
+	if strings.Contains(out, "Specialist Run") || strings.Contains(out, "Spec Draft") {
+		t.Fatalf("resume picker must exclude child/spec sub-runs:\n%s", out)
+	}
+}
+
 func TestResumeLatestHydratesNewestSession(t *testing.T) {
 	store := testSessionStore(t)
 	older, err := store.Create(sessions.CreateInput{Title: "Older"})
