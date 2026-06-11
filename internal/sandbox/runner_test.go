@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -80,7 +82,13 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 		t.Fatalf("sandbox-exec args = %#v, want profile and command", plan.Args)
 	}
 	profile := plan.Args[1]
-	for _, want := range []string{"(deny default)", "(deny network*)", `(allow file-write* (subpath "` + sandboxProfileString(resolvedRoot) + `"))`} {
+	for _, want := range []string{
+		"(deny default)",
+		"(deny network*)",
+		`(subpath "` + sandboxProfileString(resolvedRoot) + `")`,
+		`(literal "/dev/null")`,
+		`(subpath "/private/tmp")`,
+	} {
 		if !strings.Contains(profile, want) {
 			t.Fatalf("profile missing %q:\n%s", want, profile)
 		}
@@ -161,6 +169,46 @@ func assertArgsContainSequence(t *testing.T, args []string, sequence ...string) 
 		}
 	}
 	t.Fatalf("args %#v do not contain sequence %#v", args, sequence)
+}
+
+// TestSandboxExecProfileAllowsDevNullAndTemp reproduces the audit finding that
+// the generated sandbox-exec profile blocked `> /dev/null` and mktemp because
+// only the workspace was writable. It runs real commands through sandbox-exec
+// when that backend is available on the host.
+func TestSandboxExecProfileAllowsDevNullAndTemp(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("sandbox-exec is macOS-only")
+	}
+	backend := SelectBackend(BackendOptions{})
+	if !backend.Available || backend.Name != BackendSandboxExec {
+		t.Skipf("sandbox-exec backend unavailable: %s", backend.Message)
+	}
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
+
+	run := func(script string) (string, error) {
+		command, _, err := engine.CommandContext(context.Background(), CommandSpec{
+			Name: "/bin/sh",
+			Args: []string{"-c", script},
+			Dir:  root,
+		})
+		if err != nil {
+			return "", err
+		}
+		out, runErr := command.CombinedOutput()
+		return string(out), runErr
+	}
+
+	for _, script := range []string{"echo hi > /dev/null", "mktemp"} {
+		if out, err := run(script); err != nil {
+			t.Fatalf("sandboxed %q failed: %v\noutput: %s", script, err, out)
+		}
+	}
+
+	// The workspace remains writable; a sibling write still lands.
+	if out, err := run("echo ok > probe.txt && cat probe.txt"); err != nil {
+		t.Fatalf("workspace write failed: %v\noutput: %s", err, out)
+	}
 }
 
 func resolvedTestPath(t *testing.T, path string) string {
