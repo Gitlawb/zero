@@ -11,16 +11,17 @@ import "github.com/charmbracelet/lipgloss"
 // literal may appear outside this file.
 type tuiTheme struct {
 	// Base tokens.
-	ink      lipgloss.Style // primary text
-	muted    lipgloss.Style // secondary text, assistant interim prose
-	faint    lipgloss.Style // hints, metadata
-	faintest lipgloss.Style // line numbers, separators, tool args
-	accent   lipgloss.Style // brand lime: prompts, spinner, focus, final rail
-	green    lipgloss.Style // success, diff add sign, ✓
-	red      lipgloss.Style // errors, diff del sign, ✗, deny
-	amber    lipgloss.Style // permission surfaces, warnings, auto badge
-	blue     lipgloss.Style // grep file locations, local-model dot
-	line     lipgloss.Style // default borders, rules, status separators
+	ink        lipgloss.Style // primary text
+	muted      lipgloss.Style // secondary text, assistant interim prose
+	faint      lipgloss.Style // hints, metadata
+	faintest   lipgloss.Style // line numbers, separators, tool args
+	accent     lipgloss.Style // brand lime: prompts, spinner, focus, final rail
+	green      lipgloss.Style // success, diff add sign, ✓
+	red        lipgloss.Style // errors, diff del sign, ✗, deny
+	amber      lipgloss.Style // permission surfaces, warnings, auto badge
+	blue       lipgloss.Style // grep file locations, local-model dot
+	line       lipgloss.Style // default borders, rules, status separators
+	lineStrong lipgloss.Style // emphasized borders
 
 	// Title bar.
 	badge lipgloss.Style // ` 0 ` brand chip: onAccent on accent, bold
@@ -82,7 +83,7 @@ const (
 	colorPanel2   = "#121215" // card header rows, picker rows
 	colorPanel3   = "#17171b" // selected/hovered row bg
 	colorLine     = "#242429" // default borders, rules
-	colorLine2    = "#2e2e34" // emphasized borders
+	colorLine2    = "#414147" // emphasized borders
 	colorInk      = "#ececee" // primary text
 	colorMuted    = "#8b8b93" // secondary text
 	colorFaint    = "#5b5b63" // hints, metadata
@@ -105,16 +106,17 @@ const (
 )
 
 var zeroTheme = tuiTheme{
-	ink:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk)),
-	muted:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
-	faint:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaint)),
-	faintest: lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
-	accent:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
-	green:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
-	red:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
-	amber:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
-	blue:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
-	line:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine)),
+	ink:        lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk)),
+	muted:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
+	faint:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaint)),
+	faintest:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),
+	accent:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
+	green:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)),
+	red:        lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
+	amber:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
+	blue:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
+	line:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine)),
+	lineStrong: lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine2)),
 
 	badge: lipgloss.NewStyle().Background(lipgloss.Color(colorAccent)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
 

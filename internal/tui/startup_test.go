@@ -8,18 +8,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-func TestEmptyStateShowsBrandTaglineAndSuggestions(t *testing.T) {
+func TestEmptyStateShowsBrandAndTaglineOnly(t *testing.T) {
 	m := newModel(context.Background(), Options{ProviderName: "anthropic", ModelName: "claude-sonnet-4.5"})
 	m.width, m.height = 100, 30
 
 	view := plainRender(t, m.View())
 	assertContains(t, view, "███████╗███████╗██████╗  ██████╗")
 	assertContains(t, view, emptyStateTagline)
-	assertContains(t, view, "running zero against ")
-	assertContains(t, view, "anthropic/claude-sonnet-4.5")
-	for _, suggestion := range emptyStateSuggestions {
-		assertContains(t, view, suggestion)
-	}
+	assertNotContains(t, view, "running zero against ")
+	assertNotContains(t, view, "add a --version flag")
+	assertNotContains(t, view, "explain internal/agent/loop.go")
+	assertNotContains(t, view, "fix the failing test in internal/tools")
 }
 
 func TestEmptyStateDisappearsAfterFirstRow(t *testing.T) {
@@ -34,17 +33,19 @@ func TestEmptyStateDisappearsAfterFirstRow(t *testing.T) {
 	assertContains(t, view, "hello")
 }
 
-func TestSuggestionKeysInsertOnEmptySurface(t *testing.T) {
+func TestDigitsTypeNormallyOnEmptySurface(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.width, m.height = 100, 30
 
 	m = typeRunes(t, m, "2")
-	if got := m.input.Value(); got != emptyStateSuggestions[1] {
-		t.Fatalf("pressing 2 on the empty surface should insert suggestion 2, got %q", got)
+	if got := m.input.Value(); got != "2" {
+		t.Fatalf("digit should type normally on the empty surface, got %q", got)
 	}
 
-	// With text already in the composer the digit types normally.
+	// With text already in the composer the digit keeps typing normally.
+	m = newModel(context.Background(), Options{})
 	m.input.SetValue("count to ")
+	m.resetComposerFromInput()
 	m = typeRunes(t, m, "3")
 	if got := m.input.Value(); got != "count to 3" {
 		t.Fatalf("digit should append to a non-empty composer, got %q", got)

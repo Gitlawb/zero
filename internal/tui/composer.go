@@ -33,6 +33,9 @@ func deleteComposerWordBefore(state composerState) composerState {
 	}
 	runes := []rune(state.text)
 	start := state.cursor
+	for start > 0 && unicode.IsSpace(runes[start-1]) {
+		start--
+	}
 	for start > 0 && !unicode.IsSpace(runes[start-1]) {
 		start--
 	}
@@ -66,6 +69,34 @@ func deleteComposerLineBefore(state composerState) composerState {
 func deleteComposerLineAfter(state composerState) composerState {
 	state = normalizeComposerState(state)
 	return deleteComposerRange(state, state.cursor, composerLineEnd(state))
+}
+
+func moveComposerWordBefore(state composerState) composerState {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	pos := state.cursor
+	for pos > 0 && unicode.IsSpace(runes[pos-1]) {
+		pos--
+	}
+	for pos > 0 && !unicode.IsSpace(runes[pos-1]) {
+		pos--
+	}
+	state.cursor = pos
+	return state
+}
+
+func moveComposerWordAfter(state composerState) composerState {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	pos := state.cursor
+	for pos < len(runes) && unicode.IsSpace(runes[pos]) {
+		pos++
+	}
+	for pos < len(runes) && !unicode.IsSpace(runes[pos]) {
+		pos++
+	}
+	state.cursor = pos
+	return state
 }
 
 func sanitizeComposerPaste(text string) string {
@@ -150,6 +181,18 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		m.setComposerState(insertComposerText(state, "\n"))
 	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "d":
 		m.setComposerState(deleteComposerWordAfter(state))
+	case (msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlLeft) && msg.Alt:
+		m.setComposerState(moveComposerWordBefore(state))
+	case (msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlRight) && msg.Alt:
+		m.setComposerState(moveComposerWordAfter(state))
+	case msg.Type == tea.KeyCtrlLeft:
+		m.setComposerState(moveComposerWordBefore(state))
+	case msg.Type == tea.KeyCtrlRight:
+		m.setComposerState(moveComposerWordAfter(state))
+	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "b":
+		m.setComposerState(moveComposerWordBefore(state))
+	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "f":
+		m.setComposerState(moveComposerWordAfter(state))
 	case msg.Type == tea.KeySpace:
 		m.setComposerState(insertComposerText(state, " "))
 	case msg.Type == tea.KeyRunes && !msg.Alt:

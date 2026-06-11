@@ -272,8 +272,8 @@ func TestToolCardMarksAutoApprovedCalls(t *testing.T) {
 func TestComposerLineTracksRunState(t *testing.T) {
 	m := limeTestModel()
 	m.input.SetValue("add a flag")
-	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "run ↵") {
-		t.Fatalf("idle composer = %q, want run ↵ hint", got)
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "run ↵") {
+		t.Fatalf("idle composer = %q, should not show run hint", got)
 	}
 
 	m.pending = true
@@ -285,6 +285,22 @@ func TestComposerLineTracksRunState(t *testing.T) {
 	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, composerPlaceholderRunning) {
 		t.Fatalf("pending empty composer = %q, want running placeholder", got)
 	}
+}
+
+func TestComposerBoxFramesInputAndBottomModelModeLabel(t *testing.T) {
+	m := limeTestModel()
+	m.input.SetValue("add a flag")
+
+	got := plainRender(t, m.composerBox(96))
+	for _, want := range []string{"╭", "│", "❯ add a flag", "╰", "claude-sonnet-4.5", "auto-approve"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("composer box = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "run ↵") {
+		t.Fatalf("composer box = %q, should not show run hint", got)
+	}
+	assertRenderedLineWidths(t, got, 96)
 }
 
 func TestMalformedAskUserToolResultIsHiddenFromChatSurface(t *testing.T) {
@@ -320,9 +336,18 @@ func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))
-	for _, want := range []string{"● anthropic", "claude-sonnet-4.5", "interactive", "⏵⏵ auto-approve"} {
+	for _, want := range []string{"● anthropic"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status line = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "interactive") || strings.Contains(got, "claude-sonnet-4.5") || strings.Contains(got, "auto-approve") {
+		t.Fatalf("status line = %q, should not include surface, model, or permission mode", got)
+	}
+	divider := plainRender(t, m.composerDividerLine(110))
+	for _, want := range []string{"claude-sonnet-4.5", "auto-approve"} {
+		if !strings.Contains(divider, want) {
+			t.Fatalf("composer divider = %q, missing %q", divider, want)
 		}
 	}
 }
@@ -437,8 +462,8 @@ func TestDiffPreambleLinesCarryNoGutterNumbers(t *testing.T) {
 
 func TestSuggestionDigitsTypeNormallyWhilePending(t *testing.T) {
 	m := limeTestModel()
-	// /clear mid-run leaves the transcript empty while pending; the chips are
-	// not on screen, so digits must type into the composer.
+	// /clear mid-run leaves the transcript empty while pending, so digits must
+	// keep typing into the composer.
 	m.pending = true
 	m = typeRunes(t, m, "1")
 	if got := m.input.Value(); got != "1" {

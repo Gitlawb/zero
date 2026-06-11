@@ -197,9 +197,9 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	assertContains(t, view, "zero")
 	assertContains(t, view, "openai/gpt-4.1")
 	assertContains(t, view, emptyStateTagline)
-	assertContains(t, view, "running zero against ")
+	assertNotContains(t, view, "running zero against ")
 	assertContains(t, view, composerPlaceholderIdle)
-	assertContains(t, view, "interactive")
+	assertNotContains(t, view, "interactive")
 	if strings.Contains(view, "Welcome to Zero") {
 		t.Fatalf("empty chat surface should not show welcome transcript clutter, got %q", view)
 	}
@@ -229,9 +229,9 @@ func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	if strings.Contains(view, emptyStateTagline) {
 		t.Fatalf("empty state should collapse after first prompt, got %q", view)
 	}
-	// Working view shows the status-line groups instead of footer hints.
-	assertContains(t, view, "interactive")
-	assertContains(t, view, "⏵⏵ auto-approve")
+	// Working view shows provider status and the composer divider model fallback.
+	assertNotContains(t, view, "interactive")
+	assertContains(t, view, "no model")
 }
 
 func TestEmptyStateStaysVisibleOnEmptySubmit(t *testing.T) {
@@ -1078,7 +1078,8 @@ func TestAgentEventRenderingMappingCoversRuntimeContract(t *testing.T) {
 		t.Fatalf("valid usage should update footer without transcript rows, got %#v", usageRows)
 	}
 	assertContains(t, m.usageStatusSegment(), "120 tok")
-	assertContains(t, m.statusLine(96), "⏵⏵ ask")
+	assertContains(t, m.composerDividerLine(96), "gpt-4.1")
+	assertContains(t, m.composerDividerLine(96), "ask")
 }
 
 func TestToolResultRowDefaultsEmptyStatusToOK(t *testing.T) {

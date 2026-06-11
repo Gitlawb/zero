@@ -319,14 +319,6 @@ const (
 	composerPlaceholderRunning = "running… esc to interrupt"
 )
 
-// emptyStateSuggestions are the three starter prompts offered on the empty
-// chat surface; pressing 1–3 while the composer is empty inserts one.
-var emptyStateSuggestions = []string{
-	"add a --version flag",
-	"explain internal/agent/loop.go",
-	"fix the failing test in internal/tools",
-}
-
 func (m model) Init() tea.Cmd {
 	return textinput.Blink
 }
@@ -572,20 +564,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.picker.appendQuery(msg.Runes)
 			}
 			return m, nil
-		}
-		// On the empty chat surface a bare 1–3 keypress (composer empty, no modal)
-		// inserts the matching starter suggestion instead of typing the digit.
-		// !pending mirrors the render condition exactly — the chips are off
-		// screen during a run (e.g. after /clear mid-run), so digits must type.
-		if m.transcriptEmpty() && !m.pending && strings.TrimSpace(m.composerValue()) == "" {
-			if k := msg.String(); len(k) == 1 && k >= "1" && k <= "3" {
-				if index := int(k[0] - '1'); index < len(emptyStateSuggestions) {
-					m.input.SetValue(emptyStateSuggestions[index])
-					m.input.CursorEnd()
-					m.resetComposerFromInput()
-					return m, nil
-				}
-			}
 		}
 		if next, ok := m.applyComposerKey(msg); ok {
 			return next, nil
@@ -891,9 +869,7 @@ func (m model) transcriptView() string {
 		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")
 	}
-	footer.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
-	footer.WriteString("\n")
-	footer.WriteString(m.composerLine(width))
+	footer.WriteString(m.composerBox(width))
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
 		footer.WriteString("\n")
 		footer.WriteString(queued)
@@ -910,8 +886,6 @@ func (m model) transcriptView() string {
 		footer.WriteString("\n")
 		footer.WriteString(picker)
 	}
-	footer.WriteString("\n")
-	footer.WriteString(zeroTheme.line.Render(strings.Repeat("─", width)))
 	footer.WriteString("\n")
 	footer.WriteString(m.statusLine(width))
 
@@ -1000,8 +974,6 @@ func (m model) composerLine(width int) string {
 	switch {
 	case m.pending:
 		hint = zeroTheme.faint.Render("esc stop")
-	case strings.TrimSpace(m.composerValue()) != "":
-		hint = zeroTheme.faint.Render("run ↵")
 	}
 	if m.composerActive && strings.Contains(m.composer.text, "\n") {
 		line := renderComposerState(m.composer, m.input.Prompt, width)
@@ -1017,6 +989,25 @@ func (m model) composerLine(width int) string {
 		return fitStyledLine(line, width)
 	}
 	return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+}
+
+func (m model) composerBox(width int) string {
+	if width < 8 {
+		return fitStyledLine(m.composerLine(width), width)
+	}
+	innerWidth := maxInt(1, width-4)
+	content := m.composerLine(innerWidth)
+	lines := strings.Split(content, "\n")
+
+	rendered := make([]string, 0, len(lines)+2)
+	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
+	for _, line := range lines {
+		fitted := fitStyledLine(line, innerWidth)
+		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+	}
+	rendered = append(rendered, m.composerDividerLine(width))
+	return strings.Join(rendered, "\n")
 }
 
 // startsTurn reports whether a row begins a new conversational turn and therefore

@@ -22,7 +22,7 @@ type layoutTier int
 const (
 	tierTiny   layoutTier = iota // < 58: single-segment header, rail-less cards
 	tierNarrow                   // 58–79: no gutters, bare badge, lean status
-	tierMedium                   // 80–99: no tool-arg column, no ctx, no "interactive"
+	tierMedium                   // 80–99: no tool-arg column, no ctx
 	tierFull                     // ≥ 100: everything
 )
 
@@ -105,34 +105,41 @@ func (m model) titleModelSegment() string {
 	}
 }
 
+func (m model) composerDividerLine(width int) string {
+	model := displayValue(strings.TrimSpace(m.modelName), "no model")
+	label, style := m.modeLabel()
+	meta := zeroTheme.muted.Render(model) + zeroTheme.line.Render(" · ") + style.Render(label)
+	metaWidth := lipgloss.Width(meta)
+	if width < 8 {
+		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
+	}
+	if width <= metaWidth+4 {
+		return zeroTheme.lineStrong.Render("╰" + strings.Repeat("─", width-2) + "╯")
+	}
+	rule := strings.Repeat("─", width-metaWidth-4)
+	return zeroTheme.lineStrong.Render("╰"+rule+" ") + meta + zeroTheme.lineStrong.Render(" ╯")
+}
+
 // statusLine renders the bottom readout as ` │ `-separated groups: provider
-// and model on the left, then a flexible gap, then tokens/cost, the surface
-// name, and the permission mode. Groups drop with the width tier: medium
-// loses "interactive", narrow keeps provider+tokens+mode only, tiny shows
-// just the mode.
+// on the left, then a flexible gap, then tokens/cost and the surface name.
+// Groups drop with the width tier: narrow keeps provider+tokens only, tiny
+// shows the provider only.
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
-	label, style := m.modeLabel()
-	mode := style.Render("⏵⏵ " + label)
+	prefix := "  "
 
 	if tier == tierTiny {
-		return fitStyledLine(mode, width)
+		provider := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
+		return fitStyledLine(provider, width)
 	}
 
-	left := zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
-	if model := strings.TrimSpace(m.modelName); model != "" && tier >= tierMedium {
-		left += separator + zeroTheme.muted.Render(model)
-	}
+	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
 
 	rightGroups := []string{}
 	if usage := m.usageStatusSegment(); usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
 	}
-	if tier == tierFull {
-		rightGroups = append(rightGroups, zeroTheme.faint.Render("interactive"))
-	}
-	rightGroups = append(rightGroups, mode)
 	right := strings.Join(rightGroups, separator)
 
 	return fitStyledLine(joinHeaderLine(left, right, width), width)

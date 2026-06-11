@@ -33,11 +33,10 @@ var zeroWordmarkOLines = []string{
 	` ╚═════╝ `,
 }
 
-const emptyStateTagline = "a std-lib-first coding agent · bring your own key · no lock-in"
+const emptyStateTagline = "Any model. Every tool. Zero limits."
 
 // emptyState renders the centered stream-area block shown while the
-// transcript has no real content: the brand glyph, tagline, active-model
-// hint, and the three starter-suggestion chips (inserted by keys 1–3).
+// transcript has no real content: the brand glyph and tagline.
 func (m model) emptyState(width int) string {
 	lines := []string{}
 	for _, glyph := range zeroWordmarkLines() {
@@ -45,11 +44,8 @@ func (m model) emptyState(width int) string {
 	}
 	lines = append(lines, "")
 	lines = append(lines, centerLine(zeroTheme.muted.Render(emptyStateTagline), width))
-	lines = append(lines, centerLine(m.emptyStateModelHint(), width))
-	lines = append(lines, "")
-	lines = append(lines, m.emptyStateChips(width)...)
-	// centerLine pads but never truncates; below ~62 cols the tagline (and on
-	// long model ids, the hint) would exceed the frame without this fit.
+	// centerLine pads but never truncates; below ~62 cols the tagline would
+	// exceed the frame without this fit.
 	for index := range lines {
 		lines[index] = fitStyledLine(lines[index], width)
 	}
@@ -67,37 +63,6 @@ func zeroWordmarkLines() []string {
 		lines = append(lines, zeroTheme.ink.Render(zeroWordmarkPrefixLines[index])+zeroTheme.accent.Render(zeroWordmarkOLines[index]))
 	}
 	return lines
-}
-
-func (m model) emptyStateModelHint() string {
-	provider := strings.TrimSpace(m.providerName)
-	model := strings.TrimSpace(m.modelName)
-	target := provider
-	if target != "" && model != "" {
-		target += "/"
-	}
-	target += model
-	if target == "" {
-		return zeroTheme.faint.Render("no provider configured · set one with /provider")
-	}
-	return zeroTheme.faint.Render("running zero against ") + zeroTheme.ink.Render(target)
-}
-
-func (m model) emptyStateChips(width int) []string {
-	rows := make([]string, 0, len(emptyStateSuggestions))
-	boxWidth := 0
-	for _, suggestion := range emptyStateSuggestions {
-		row := zeroTheme.userPrompt.Render("❯ ") + zeroTheme.ink.Render(suggestion)
-		rows = append(rows, row)
-		if w := lipgloss.Width(row) + 4; w > boxWidth {
-			boxWidth = w
-		}
-	}
-	if boxWidth > width {
-		boxWidth = width
-	}
-	block := borderedBlock(boxWidth, rows)
-	return strings.Split(indentBlock(block, maxInt(0, (width-boxWidth)/2)), "\n")
 }
 
 func borderedBlock(width int, lines []string) string {

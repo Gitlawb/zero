@@ -24,19 +24,17 @@ func TestWidthTierSegments(t *testing.T) {
 	}, "\n")
 
 	cases := []struct {
-		width        int
-		wantCtx      bool // header context window ("200K")
-		wantCwd      bool // header cwd segment
-		wantArg      bool // tool-card arg column
-		wantGutter   bool // diff line-number gutter
-		wantInteract bool // status "interactive" group
-		wantModelID  bool // status model id group
+		width      int
+		wantCtx    bool // header context window ("200K")
+		wantCwd    bool // header cwd segment
+		wantArg    bool // tool-card arg column
+		wantGutter bool // diff line-number gutter
 	}{
-		{width: 58, wantCtx: false, wantCwd: false, wantArg: false, wantGutter: false, wantInteract: false, wantModelID: false},
-		{width: 70, wantCtx: false, wantCwd: false, wantArg: false, wantGutter: false, wantInteract: false, wantModelID: false},
-		{width: 80, wantCtx: false, wantCwd: true, wantArg: false, wantGutter: true, wantInteract: false, wantModelID: true},
-		{width: 100, wantCtx: true, wantCwd: true, wantArg: true, wantGutter: true, wantInteract: true, wantModelID: true},
-		{width: 120, wantCtx: true, wantCwd: true, wantArg: true, wantGutter: true, wantInteract: true, wantModelID: true},
+		{width: 58, wantCtx: false, wantCwd: false, wantArg: false, wantGutter: false},
+		{width: 70, wantCtx: false, wantCwd: false, wantArg: false, wantGutter: false},
+		{width: 80, wantCtx: false, wantCwd: true, wantArg: false, wantGutter: true},
+		{width: 100, wantCtx: true, wantCwd: true, wantArg: true, wantGutter: true},
+		{width: 120, wantCtx: true, wantCwd: true, wantArg: true, wantGutter: true},
 	}
 
 	for _, tc := range cases {
@@ -72,14 +70,12 @@ func TestWidthTierSegments(t *testing.T) {
 		}
 
 		status := plainRender(t, m.statusLine(tc.width))
-		if got := strings.Contains(status, "interactive"); got != tc.wantInteract {
-			t.Errorf("width %d: status interactive = %v, want %v (%q)", tc.width, got, tc.wantInteract, status)
+		if strings.Contains(status, "interactive") || strings.Contains(status, "claude-sonnet-4.5") || strings.Contains(status, "auto-approve") {
+			t.Errorf("width %d: status should not include surface, model, or permission mode (%q)", tc.width, status)
 		}
-		if got := strings.Contains(status, "claude-sonnet-4.5"); got != tc.wantModelID {
-			t.Errorf("width %d: status model id = %v, want %v (%q)", tc.width, got, tc.wantModelID, status)
-		}
-		if !strings.Contains(status, "⏵⏵") {
-			t.Errorf("width %d: status must always keep the mode group (%q)", tc.width, status)
+		divider := plainRender(t, m.composerDividerLine(tc.width))
+		if !strings.Contains(divider, "claude-sonnet-4.5") || !strings.Contains(divider, "auto-approve") {
+			t.Errorf("width %d: composer divider must keep model and mode labels (%q)", tc.width, divider)
 		}
 	}
 }
@@ -89,11 +85,15 @@ func TestTinyTierSingleSegmentAndRailLessCards(t *testing.T) {
 	m.width, m.height = 40, 20
 
 	status := plainRender(t, m.statusLine(40))
-	if strings.Contains(status, "anthropic") {
-		t.Fatalf("tiny status = %q, want mode line only", status)
+	if !strings.Contains(status, "anthropic") {
+		t.Fatalf("tiny status = %q, want provider status", status)
 	}
-	if !strings.Contains(status, "⏵⏵") {
-		t.Fatalf("tiny status = %q, want the mode group", status)
+	if strings.Contains(status, "claude-sonnet-4.5") || strings.Contains(status, "auto-approve") {
+		t.Fatalf("tiny status = %q, want provider only", status)
+	}
+	divider := plainRender(t, m.composerDividerLine(40))
+	if !strings.Contains(divider, "claude-sonnet-4.5") || !strings.Contains(divider, "auto-approve") {
+		t.Fatalf("tiny composer divider = %q, want model and mode labels", divider)
 	}
 
 	row := transcriptRow{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: "a.go:1: x"}
