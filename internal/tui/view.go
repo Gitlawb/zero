@@ -119,7 +119,7 @@ func (m model) composerDividerLine(width int) string {
 	if width < 8 {
 		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
 	}
-	if width <= metaWidth+4 {
+	if width < metaWidth+4 {
 		return zeroTheme.lineStrong.Render("╰" + strings.Repeat("─", width-2) + "╯")
 	}
 	rule := strings.Repeat("─", width-metaWidth-4)
@@ -127,9 +127,8 @@ func (m model) composerDividerLine(width int) string {
 }
 
 // statusLine renders the bottom readout as ` │ `-separated groups: provider
-// on the left, then a flexible gap, then tokens/cost and the surface name.
-// Groups drop with the width tier: narrow keeps provider+tokens only, tiny
-// shows the provider only.
+// on the left, then a flexible gap, then token/cost usage on the right. Groups
+// drop with the width tier: narrow keeps provider+usage, tiny shows provider.
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")

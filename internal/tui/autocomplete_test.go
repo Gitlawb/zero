@@ -365,6 +365,11 @@ func TestEscDismissesFilePaletteAndRemovesTrailingToken(t *testing.T) {
 	if got := m.input.Value(); got != "read " {
 		t.Fatalf("Esc should remove only the trailing @ token, got %q", got)
 	}
+
+	m = typeRunes(t, m, "x")
+	if got := m.composerValue(); got != "read x" {
+		t.Fatalf("Esc should keep composer state synced after removing @ token, got %q", got)
+	}
 }
 
 func TestExtractPathQueryUsesCursorPosition(t *testing.T) {

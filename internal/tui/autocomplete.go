@@ -512,6 +512,7 @@ func (m model) dismissSuggestions() model {
 	if m.suggestionsAreFiles {
 		m.input.SetValue(removeTrailingAtToken(m.input.Value()))
 		m.input.CursorEnd()
+		m.resetComposerFromInput()
 	} else {
 		m.clearComposer()
 	}

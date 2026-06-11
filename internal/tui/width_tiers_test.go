@@ -105,6 +105,21 @@ func TestTinyTierSingleSegmentAndRailLessCards(t *testing.T) {
 	}
 }
 
+func TestComposerDividerRendersMetaAtExactFit(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName:      "m",
+		PermissionMode: agent.PermissionModeAsk,
+	})
+	label, style := m.modeLabel()
+	meta := zeroTheme.muted.Render("m") + zeroTheme.line.Render(" · ") + style.Render(label)
+	width := lipgloss.Width(meta) + 4
+
+	got := plainRender(t, m.composerDividerLine(width))
+	if !strings.Contains(got, "m") || !strings.Contains(got, label) {
+		t.Fatalf("exact-fit composer divider = %q, want metadata", got)
+	}
+}
+
 // The spec's hard rendering invariant: never emit a styled line wider than
 // the terminal, across the whole frame at every tier — including the empty
 // state, ask-user rows, permission details, and pending image chips, which
