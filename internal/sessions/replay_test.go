@@ -252,6 +252,33 @@ func TestStoreRecordsCompactionEventPayload(t *testing.T) {
 	}
 }
 
+func TestStoreRecordCompactionRequiresPlanSessionID(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{SessionID: "compactmissingplan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"alpha", "beta", "gamma"} {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 1, MaxPromptChars: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.SessionID = ""
+
+	_, err = store.RecordCompaction(session.SessionID, RecordCompactionInput{
+		Plan:    plan,
+		Summary: "summarized",
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "compaction plan session id is required") {
+		t.Fatalf("expected missing plan session id error, got %v", err)
+	}
+}
+
 func TestStoreReadRehydratedEventsReplacesCompactedPrefixWithSummary(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	session, err := store.Create(CreateInput{SessionID: "rehydrate"})
@@ -307,10 +334,49 @@ func TestStoreReadRehydratedEventsReplacesCompactedPrefixWithSummary(t *testing.
 	}
 }
 
+func TestRehydrateEventsDecodesOnlyLatestCompactionPayload(t *testing.T) {
+	events := []Event{
+		{ID: "rehydratelatest:1", SessionID: "rehydratelatest", Sequence: 1, Type: EventMessage, CreatedAt: "2026-06-11T10:00:00Z", Payload: json.RawMessage(`{"content":"first"}`)},
+		{ID: "rehydratelatest:2", SessionID: "rehydratelatest", Sequence: 2, Type: EventCompaction, CreatedAt: "2026-06-11T10:00:01Z", Payload: json.RawMessage(`{"summary":""}`)},
+		{ID: "rehydratelatest:3", SessionID: "rehydratelatest", Sequence: 3, Type: EventMessage, CreatedAt: "2026-06-11T10:00:02Z", Payload: json.RawMessage(`{"content":"second"}`)},
+		{ID: "rehydratelatest:4", SessionID: "rehydratelatest", Sequence: 4, Type: EventCompaction, CreatedAt: "2026-06-11T10:00:03Z", Payload: mustRawJSON(t, CompactionPayload{
+			Summary:                 "Latest compacted summary.",
+			CompactableCount:        2,
+			PreservedCount:          1,
+			CompactedThroughEventID: "rehydratelatest:3",
+			CompactableEvents: []EventRef{
+				{ID: "rehydratelatest:2", Sequence: 2, Type: EventCompaction},
+				{ID: "rehydratelatest:3", Sequence: 3, Type: EventMessage},
+			},
+		})},
+		{ID: "rehydratelatest:5", SessionID: "rehydratelatest", Sequence: 5, Type: EventMessage, CreatedAt: "2026-06-11T10:00:04Z", Payload: json.RawMessage(`{"content":"tail"}`)},
+	}
+
+	rehydrated, err := RehydrateEvents(events)
+
+	if err != nil {
+		t.Fatalf("RehydrateEvents returned error for historical malformed payload: %v", err)
+	}
+	gotIDs := eventIDs(rehydrated)
+	wantIDs := []string{"rehydratelatest:1", "rehydratelatest:4", "rehydratelatest:5"}
+	if strings.Join(gotIDs, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("rehydrated ids = %#v, want %#v", gotIDs, wantIDs)
+	}
+}
+
 func eventIDs(events []Event) []string {
 	ids := make([]string, 0, len(events))
 	for _, event := range events {
 		ids = append(ids, event.ID)
 	}
 	return ids
+}
+
+func mustRawJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

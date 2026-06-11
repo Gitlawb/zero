@@ -182,7 +182,10 @@ func (store *Store) RecordCompaction(sessionID string, input RecordCompactionInp
 	if !ValidSessionID(sessionID) {
 		return Event{}, fmt.Errorf("invalid zero session id %q", sessionID)
 	}
-	if strings.TrimSpace(input.Plan.SessionID) != "" && input.Plan.SessionID != sessionID {
+	if strings.TrimSpace(input.Plan.SessionID) == "" {
+		return Event{}, fmt.Errorf("compaction plan session id is required")
+	}
+	if input.Plan.SessionID != sessionID {
 		return Event{}, fmt.Errorf("compaction plan session %s does not match %s", input.Plan.SessionID, sessionID)
 	}
 	payload, err := CompactionPayloadFromPlan(input.Summary, input.Plan)
@@ -228,23 +231,17 @@ func (store *Store) ReadReplayEvents(sessionID string) ([]Event, error) {
 }
 
 func RehydrateEvents(events []Event) ([]Event, error) {
-	index := -1
-	var payload CompactionPayload
-	for i, event := range events {
-		if event.Type != EventCompaction {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != EventCompaction {
 			continue
 		}
-		decoded, err := decodeCompactionPayload(event)
+		payload, err := decodeCompactionPayload(events[i])
 		if err != nil {
 			return nil, err
 		}
-		index = i
-		payload = decoded
+		return rehydrateEventsWithCompaction(events, events[i], payload), nil
 	}
-	if index < 0 {
-		return cloneEvents(events), nil
-	}
-	return rehydrateEventsWithCompaction(events, events[index], payload), nil
+	return cloneEvents(events), nil
 }
 
 func ReplayEvents(events []Event) ([]Event, error) {

@@ -390,7 +390,7 @@ func (m model) compactText(requested bool) string {
 func (m model) compactRunningText() string {
 	return strings.Join([]string{
 		"Compressing session",
-		"Keep typing - messages will queue and send after compression finishes.",
+		"Keep editing your draft; press Enter after compression finishes to send.",
 		m.compactAnimationLine(),
 	}, "\n")
 }

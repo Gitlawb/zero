@@ -158,7 +158,7 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Compressing session",
-		"Keep typing - messages will queue and send after compression finishes.",
+		"Keep editing your draft; press Enter after compression finishes to send.",
 		"Compressing history",
 	} {
 		if !transcriptContains(next.transcript, want) {
@@ -270,7 +270,7 @@ func TestCompactRunningRowRendersAsAmberCompressionCard(t *testing.T) {
 		"╭",
 		"╰",
 		"Compressing session",
-		"Keep typing - messages will queue and send after compression finishes.",
+		"Keep editing your draft; press Enter after compression finishes to send.",
 		"Compressing history",
 	} {
 		if !strings.Contains(rendered, want) {
