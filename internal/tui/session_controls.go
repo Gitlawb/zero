@@ -20,12 +20,7 @@ const tuiCompactionPreserveLast = 8
 const tuiCompactionMaxPromptChars = 8000
 const compactStatusRowID = "compact/status"
 
-var compactFrames = []string{"[=   ]", "[==  ]", "[=== ]", "[====]"}
-var compactQuotes = []string{
-	"compress the noise, keep the intent",
-	"small context, sharp memory",
-	"fold the scrollback, keep the thread",
-}
+var compactFrames = []string{"⠂", "⠒", "⠲", "⠴"}
 
 type SessionCompactor interface {
 	CompactSession(context.Context, CompactRequest) (CompactResult, error)
@@ -393,17 +388,11 @@ func (m model) compactText(requested bool) string {
 }
 
 func (m model) compactRunningText() string {
-	request := m.compactRequest()
-	lines := []string{
-		"Compacting context",
+	return strings.Join([]string{
+		"Compressing session",
+		"Keep typing - messages will queue and send after compression finishes.",
 		m.compactAnimationLine(),
-		compactModelAdaptationLine(request),
-		"next prompt will use the compressed session",
-	}
-	if quote := compactQuote(m.compactRequests); quote != "" {
-		lines = append(lines, quote)
-	}
-	return strings.Join(lines, "\n")
+	}, "\n")
 }
 
 func compactCompleteText(result CompactResult) string {
@@ -606,22 +595,7 @@ func compactResultLines(result CompactResult) []string {
 
 func (m model) compactAnimationLine() string {
 	frame := compactFrames[m.compactFrame%len(compactFrames)]
-	return frame + " compacting context for Gitlawb"
-}
-
-func compactQuote(requests int) string {
-	if requests <= 0 {
-		requests = 1
-	}
-	return compactQuotes[(requests-1)%len(compactQuotes)]
-}
-
-func compactModelAdaptationLine(request CompactRequest) string {
-	model := displayValue(strings.TrimSpace(request.ModelName), "active model")
-	if strings.TrimSpace(request.ModelName) == "" {
-		return "active model · preserving recent turns"
-	}
-	return fmt.Sprintf("%s · %s estimated tokens · preserving recent turns", model, formatContextWindow(request.EstimatedTokens))
+	return frame + " Compressing history..."
 }
 
 func (m model) setCompactStatusRow(text string) model {

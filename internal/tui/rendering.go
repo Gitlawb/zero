@@ -201,6 +201,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if row.tool == "sessions" {
 			return renderSessionsCards(row.text, width)
 		}
+		if row.id == compactStatusRowID && strings.HasPrefix(strings.TrimSpace(row.text), "Compressing session") {
+			return renderCompactRunningCard(row.text, width)
+		}
 		return renderSystemNote(row.text, width)
 	case rowError:
 		return renderErrorRow(row, width)
@@ -406,6 +409,27 @@ func doneLine(row transcriptRow, failed bool) string {
 // the panel surface inside a line border. Content is passed through unchanged.
 func renderSystemNote(text string, width int) string {
 	return noteBox(text, width, zeroTheme.line, zeroTheme.onPanel(zeroTheme.faint))
+}
+
+func renderCompactRunningCard(text string, width int) string {
+	raw := strings.Split(strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
+	lines := make([]string, 0, len(raw)+1)
+	for index, line := range raw {
+		switch index {
+		case 0:
+			lines = append(lines, zeroTheme.amber.Bold(true).Render(line))
+		case 1:
+			lines = append(lines, zeroTheme.muted.Render(line))
+		case 2:
+			lines = append(lines, zeroTheme.amber.Bold(true).Render(line))
+		default:
+			lines = append(lines, zeroTheme.faint.Render(line))
+		}
+		if index == 0 {
+			lines = append(lines, "")
+		}
+	}
+	return styledBlock(width, lines, zeroTheme.amber)
 }
 
 func renderErrorRow(row transcriptRow, width int) string {

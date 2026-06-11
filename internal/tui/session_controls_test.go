@@ -157,10 +157,9 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 		t.Fatal("expected compaction to be marked in flight")
 	}
 	for _, want := range []string{
-		"compacting context for Gitlawb",
-		"gpt-4.1",
-		"preserving recent turns",
-		"next prompt will use the compressed session",
+		"Compressing session",
+		"Keep typing - messages will queue and send after compression finishes.",
+		"Compressing history",
 	} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected compact start transcript to contain %q, got %#v", want, next.transcript)
@@ -241,11 +240,45 @@ func TestCompactSpinnerTickRefreshesProgressFrame(t *testing.T) {
 	if before == after {
 		t.Fatalf("expected spinner tick to refresh compact status, still %q", after)
 	}
-	if !strings.Contains(after, "compacting context for Gitlawb") {
+	if !strings.Contains(after, "Compressing history") {
 		t.Fatalf("expected animated compact copy, got %q", after)
 	}
 	if strings.Contains(after, "context window:") || strings.Contains(after, "compactable:") {
 		t.Fatalf("animated compact copy should stay concise, got %q", after)
+	}
+}
+
+func TestCompactRunningRowRendersAsAmberCompressionCard(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ModelName: "gpt-4.1",
+		SessionCompactor: compactSessionFunc(func(context.Context, CompactRequest) (CompactResult, error) {
+			return CompactResult{Compacted: true, Summary: "done"}, nil
+		}),
+	})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
+	m.input.SetValue("/compact")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	rendered := plainRender(t, next.renderRow(transcriptRow{
+		kind: rowSystem,
+		id:   compactStatusRowID,
+		text: compactStatusText(next.transcript),
+	}, 92, buildRowContext(next.transcript)))
+
+	for _, want := range []string{
+		"╭",
+		"╰",
+		"Compressing session",
+		"Keep typing - messages will queue and send after compression finishes.",
+		"Compressing history",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected compact card render to contain %q, got:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "context window:") || strings.Contains(rendered, "compactable:") {
+		t.Fatalf("compact card should not include diagnostic status text:\n%s", rendered)
 	}
 }
 
