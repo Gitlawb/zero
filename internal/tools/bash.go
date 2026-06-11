@@ -105,6 +105,10 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 
+	// Kill the shell as a process group on timeout and bound the post-kill I/O
+	// wait, so a backgrounded child cannot outlive the command or hang Run().
+	hardenProcessLifetime(command)
+
 	err = command.Run()
 	exitCode := commandExitCode(err)
 	meta["exit_code"] = strconv.Itoa(exitCode)

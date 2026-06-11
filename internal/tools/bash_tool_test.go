@@ -251,6 +251,42 @@ func TestBashToolTimesOut(t *testing.T) {
 	}
 }
 
+func TestBashToolTimeoutKillsBackgroundChildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is POSIX-only")
+	}
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "leaked")
+	// A backgrounded child sleeps well past the timeout, then drops a sentinel.
+	// `wait` keeps the foreground shell alive so the deadline fires while the
+	// child is still running. Without process-group kill the child is orphaned:
+	// it survives, eventually writes the sentinel, and (because it inherited the
+	// stdout pipe) blocks Run() until it exits.
+	command := fmt.Sprintf("(sleep 3; touch %s) & wait", shellQuote(sentinel))
+
+	start := time.Now()
+	result := NewBashTool(root).Run(context.Background(), map[string]any{
+		"command":    command,
+		"timeout_ms": 300,
+	})
+	elapsed := time.Since(start)
+
+	if result.Status != StatusError {
+		t.Fatalf("expected timeout error status, got %s: %q", result.Status, result.Output)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("Run blocked %s past the 300ms timeout; background child held the pipes", elapsed)
+	}
+
+	// Give the child more than its 3s sleep to fire if it survived the timeout.
+	time.Sleep(3500 * time.Millisecond)
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatalf("background child survived the timeout and wrote %s", sentinel)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error stat-ing sentinel: %v", err)
+	}
+}
+
 func TestRegistryRunsBashThroughSandboxEngine(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
