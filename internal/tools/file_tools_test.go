@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestReadFileToolReadsLineRanges(t *testing.T) {
@@ -261,6 +263,208 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 	}
 }
 
+func TestScopedToolsAllowExtraRootWrites(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	target := filepath.Join(extra, "saved.txt")
+
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    target,
+		"content": "hello",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("scoped write_file status=%s output=%s", res.Status, res.Output)
+	}
+	read := NewScopedReadFileTool(workspace, scope).Run(context.Background(), map[string]any{"path": target})
+	if read.Status != StatusOK || !strings.Contains(read.Output, "hello") {
+		t.Fatalf("scoped read_file status=%s output=%s", read.Status, read.Output)
+	}
+}
+
+func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    "rel.txt",
+		"content": "workspace",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("relative write status=%s output=%s", res.Status, res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "rel.txt")); err != nil {
+		t.Fatalf("relative path must land in workspace: %v", err)
+	}
+}
+
+func TestScopedGlobReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Same relative name in both roots: a bare "report.go" match from the extra
+	// root would resolve back into the workspace and hit the wrong file.
+	writeTestFile(t, filepath.Join(workspace, "report.go"), "package ws")
+	writeTestFile(t, filepath.Join(extra, "report.go"), "package extra")
+
+	tool := NewScopedGlobTool(workspace, scope)
+
+	// Globbing the extra root (absolute cwd) must emit absolute matches.
+	extraRes := tool.Run(context.Background(), map[string]any{
+		"pattern": "**/*.go",
+		"cwd":     extra,
+	})
+	if extraRes.Status != StatusOK {
+		t.Fatalf("extra-root glob status=%s output=%s", extraRes.Status, extraRes.Output)
+	}
+	// Matches report the symlink-resolved root (macOS /var -> /private/var).
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(extra): %v", err)
+	}
+	wantAbs := filepath.ToSlash(filepath.Join(resolvedExtra, "report.go"))
+	if strings.TrimSpace(extraRes.Output) != wantAbs {
+		t.Fatalf("extra-root glob output=%q, want absolute %q", extraRes.Output, wantAbs)
+	}
+
+	// Globbing the workspace (default cwd) keeps matches workspace-relative.
+	wsRes := tool.Run(context.Background(), map[string]any{"pattern": "**/*.go"})
+	if wsRes.Status != StatusOK {
+		t.Fatalf("workspace glob status=%s output=%s", wsRes.Status, wsRes.Output)
+	}
+	if strings.TrimSpace(wsRes.Output) != "report.go" {
+		t.Fatalf("workspace glob output=%q, want relative %q", wsRes.Output, "report.go")
+	}
+}
+
+func TestScopedGrepReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Same relative name in both roots: a bare "report.go" match from the extra
+	// root would resolve back into the workspace and hit the wrong file.
+	writeTestFile(t, filepath.Join(workspace, "report.go"), "needle in workspace")
+	writeTestFile(t, filepath.Join(extra, "report.go"), "needle in extra")
+
+	tool := NewScopedGrepTool(workspace, scope)
+
+	// Grepping the extra root (absolute path) must emit absolute file paths.
+	extraRes := tool.Run(context.Background(), map[string]any{
+		"pattern": "needle",
+		"path":    extra,
+	})
+	if extraRes.Status != StatusOK {
+		t.Fatalf("extra-root grep status=%s output=%s", extraRes.Status, extraRes.Output)
+	}
+	// Matches report the symlink-resolved root (macOS /var -> /private/var).
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(extra): %v", err)
+	}
+	wantAbs := filepath.ToSlash(filepath.Join(resolvedExtra, "report.go"))
+	if !strings.HasPrefix(strings.TrimSpace(extraRes.Output), wantAbs+":") {
+		t.Fatalf("extra-root grep output=%q, want absolute path %q", extraRes.Output, wantAbs)
+	}
+
+	// files_with_matches mode must also report the absolute path.
+	filesRes := tool.Run(context.Background(), map[string]any{
+		"pattern":     "needle",
+		"path":        extra,
+		"output_mode": "files_with_matches",
+	})
+	if strings.TrimSpace(filesRes.Output) != wantAbs {
+		t.Fatalf("extra-root files_with_matches output=%q, want absolute %q", filesRes.Output, wantAbs)
+	}
+
+	// Grepping the workspace (default path) keeps matches workspace-relative.
+	wsRes := tool.Run(context.Background(), map[string]any{"pattern": "needle"})
+	if wsRes.Status != StatusOK {
+		t.Fatalf("workspace grep status=%s output=%s", wsRes.Status, wsRes.Output)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(wsRes.Output), "report.go:") {
+		t.Fatalf("workspace grep output=%q, want workspace-relative %q", wsRes.Output, "report.go:")
+	}
+}
+
+func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(workspace, "link")
+	if err := os.Symlink(filepath.Join(workspace, "subdir"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(link, "x.txt"),
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("write through in-root symlink must fail (fail-closed write targets), got OK: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "subdir", "x.txt")); err == nil {
+		t.Fatal("file must not be created through the symlink")
+	}
+}
+
+func TestScopedWriteThroughSymlinkIntoGrantedRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	link := filepath.Join(workspace, "into-extra")
+	if err := os.Symlink(extra, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Final target inside a granted root: allowed (matches sandbox.Scope's
+	// documented widening — the true write location is granted).
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(link, "ok.txt"),
+		"content": "granted",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("write through symlink into granted root: status=%s output=%s", res.Status, res.Output)
+	}
+	// A symlink escaping a granted root to ungated territory stays denied.
+	escape := filepath.Join(extra, "out")
+	if err := os.Symlink(t.TempDir(), escape); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	res = NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(escape, "leak.txt"),
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("write through escaping symlink must fail, got OK: %s", res.Output)
+	}
+}
+
+func TestUnscopedToolsStillRejectOutsideWrites(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	res := NewWriteFileTool(workspace).Run(context.Background(), map[string]any{
+		"path":    outside,
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("unscoped write outside workspace must fail, got OK: %s", res.Output)
+	}
+}
+
 func writeTestFile(t *testing.T, path string, content string) {
 	t.Helper()
 
@@ -304,6 +508,57 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "keep.txt") {
 		t.Fatalf("expected keep.txt in results, got:\n%s", res.Output)
+	}
+}
+
+func TestScopedWriteRefusesSameRootSymlinkTraversal(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(extra, "subdir"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	link := filepath.Join(extra, "link")
+	if err := os.Symlink(filepath.Join(extra, "subdir"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    filepath.Join(link, "x.txt"),
+		"content": "nope",
+	})
+	if res.Status == StatusOK {
+		t.Fatalf("scoped write through same-root symlink must fail, got OK: %s", res.Output)
+	}
+	if _, err := os.Stat(filepath.Join(extra, "subdir", "x.txt")); err == nil {
+		t.Fatal("file must not be created through the symlink")
+	}
+}
+
+func TestScopedWriteReportsAbsolutePathForExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, []string{extra})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	target := filepath.Join(extra, "abs.txt")
+	res := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":    target,
+		"content": "x",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status=%s output=%s", res.Status, res.Output)
+	}
+	for _, changed := range res.ChangedFiles {
+		if !filepath.IsAbs(changed) {
+			t.Fatalf("ChangedFiles=%v — extra-root entries must be absolute, got relative %q", res.ChangedFiles, changed)
+		}
+	}
+	if len(res.ChangedFiles) == 0 {
+		t.Fatal("expected ChangedFiles to record the extra-root write")
 	}
 }
 

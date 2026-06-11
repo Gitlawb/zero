@@ -10,9 +10,14 @@ import (
 type writeFileTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewWriteFileTool(workspaceRoot string) Tool {
+	return NewScopedWriteFileTool(workspaceRoot, nil)
+}
+
+func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 	return writeFileTool{
 		baseTool: baseTool{
 			name:        "write_file",
@@ -30,6 +35,7 @@ func NewWriteFileTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectWrite, "Creates or overwrites files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -47,7 +53,7 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for write_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveWorkspaceTargetPath(tool.workspaceRoot, requestedPath)
+	absolutePath, relativePath, err := resolveScopedTargetPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
@@ -65,7 +71,7 @@ func (tool writeFileTool) Run(_ context.Context, args map[string]any) Result {
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := recheckWorkspaceWriteTarget(tool.workspaceRoot, requestedPath); err != nil {
+	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {

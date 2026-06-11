@@ -57,6 +57,34 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	}
 }
 
+func TestEmptySubmitKeepsChatScrollOffset(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	for index := 0; index < 12; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
+	}
+
+	// Scroll up, then press Enter on an empty composer: the no-op submit must not
+	// yank the viewport back to the bottom.
+	m.chatScrollOffset = 7
+	m.input.SetValue("")
+	updated, _ := m.handleSubmit()
+	m = updated.(model)
+	if m.chatScrollOffset != 7 {
+		t.Fatalf("empty submit changed chatScrollOffset to %d, want it left at 7", m.chatScrollOffset)
+	}
+
+	// A real submission (here a slash command) still snaps back to the bottom.
+	m.chatScrollOffset = 7
+	m.input.SetValue("/help")
+	updated, _ = m.handleSubmit()
+	m = updated.(model)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("real submit chatScrollOffset = %d, want 0", m.chatScrollOffset)
+	}
+}
+
 func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90

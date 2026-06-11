@@ -48,6 +48,17 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 	return command, plan, nil
 }
 
+// writeRoots returns the full ordered write-root list for command plans:
+// the workspace root plus any granted extra roots. The single-root fallback
+// only applies to engines built without a workspace root (NewEngine always
+// builds a scope otherwise); it is kept as defense in depth.
+func (engine *Engine) writeRoots(workspaceRoot string) []string {
+	if engine.scope != nil {
+		return engine.scope.Roots()
+	}
+	return []string{workspaceRoot}
+}
+
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if engine == nil {
 		return directCommandPlan(spec, Backend{Name: BackendPolicyOnly, Message: "sandbox disabled"}, Policy{}, ""), nil
@@ -76,11 +87,11 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	switch backend.Name {
 	case BackendBubblewrap:
 		if backend.Available && backend.Executable != "" {
-			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, policy, backend), nil
+			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend), nil
 		}
 	case BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
-			return sandboxExecCommandPlan(spec, workspaceRoot, policy, backend), nil
+			return sandboxExecCommandPlan(spec, workspaceRoot, engine.writeRoots(workspaceRoot), policy, backend), nil
 		}
 	}
 	if !policy.AllowPolicyOnlyRunner {
@@ -130,7 +141,7 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 		commandDir = resolved
 	}
 	if policy.EnforceWorkspace {
-		if violation := validateWorkspacePath(workspaceRoot, commandDir); violation != nil {
+		if violation := engine.scopeFor(engine.workspaceRoot).validate(commandDir); violation != nil {
 			return "", "", "", Violation{
 				Code:     violation.Code,
 				ToolName: "sandbox_command",
@@ -155,10 +166,18 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 	return workspaceRoot, commandDir, relativeDir, nil
 }
 
-func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir string, policy Policy, backend Backend) CommandPlan {
+func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir string, writeRoots []string, policy Policy, backend Backend) CommandPlan {
 	sandboxDir := bubblewrapWorkspace
 	if relativeDir != "" {
 		sandboxDir = filepath.ToSlash(filepath.Join(bubblewrapWorkspace, relativeDir))
+	}
+	// A cwd inside an extra write root is outside the /workspace remount; the
+	// extra root is bound at its real host path, so chdir there directly.
+	// (resolveCommandDir has already validated the cwd against the scope when
+	// EnforceWorkspace is on; an unvalidated out-of-scope cwd just makes
+	// bwrap's chdir fail closed.)
+	if relativeDir == ".." || strings.HasPrefix(relativeDir, ".."+string(filepath.Separator)) {
+		sandboxDir = filepath.ToSlash(spec.Dir)
 	}
 	args := []string{
 		"--die-with-parent",
@@ -169,8 +188,18 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 		"--dev", "/dev",
 		"--tmpfs", "/tmp",
 		"--bind", workspaceRoot, bubblewrapWorkspace,
-		"--chdir", sandboxDir,
 	}
+	for _, root := range writeRoots {
+		// writeRoots[0] is the scope's workspace root; it is normalized by the
+		// same Abs+EvalSymlinks pipeline resolveCommandDir applies to the
+		// workspaceRoot parameter, so this equality reliably skips the workspace
+		// (already remounted at /workspace) rather than double-binding it.
+		if root == workspaceRoot {
+			continue
+		}
+		args = append(args, "--bind", root, root)
+	}
+	args = append(args, "--chdir", sandboxDir)
 	if policy.Network == NetworkDeny {
 		args = append(args, "--unshare-net")
 	}
@@ -197,8 +226,8 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 	}
 }
 
-func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend) CommandPlan {
-	args := []string{"-p", sandboxExecProfile(workspaceRoot, policy), spec.Name}
+func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots []string, policy Policy, backend Backend) CommandPlan {
+	args := []string{"-p", sandboxExecProfile(writeRoots, policy), spec.Name}
 	args = append(args, spec.Args...)
 	return CommandPlan{
 		Backend:       backend,
@@ -289,17 +318,20 @@ var sandboxWritableSubpaths = []string{
 	"/dev/fd",
 }
 
-func sandboxExecProfile(workspaceRoot string, policy Policy) string {
+func sandboxExecProfile(writeRoots []string, policy Policy) string {
 	networkRule := "(deny network*)"
 	if policy.Network == NetworkAllow {
 		networkRule = "(allow network*)"
 	}
 	writeRule := "(allow file-write*)"
 	if policy.EnforceWorkspace {
-		// The workspace is the only writable *project* location. Temp trees and the
-		// standard device nodes are the only additions, matching what the bubblewrap
-		// backend already grants (--tmpfs /tmp, --dev /dev).
-		filters := []string{`(subpath "` + sandboxProfileString(workspaceRoot) + `")`}
+		// The granted write roots are the only writable *project* locations. Temp
+		// trees and the standard device nodes are the only additions, matching what
+		// the bubblewrap backend already grants (--tmpfs /tmp, --dev /dev).
+		filters := make([]string, 0, len(writeRoots)+len(sandboxWritableSubpaths)+len(sandboxWritableDevices))
+		for _, root := range writeRoots {
+			filters = append(filters, `(subpath "`+sandboxProfileString(root)+`")`)
+		}
 		for _, subpath := range sandboxWritableSubpaths {
 			filters = append(filters, `(subpath "`+subpath+`")`)
 		}

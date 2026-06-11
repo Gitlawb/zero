@@ -1158,7 +1158,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.rememberInput(input)
 	m.clearComposer()
 	m.clearSuggestions()
-	m.chatScrollOffset = 0
+	// Snap the viewport back to the bottom for a real submission, but not for an
+	// empty Enter (a no-op) — that would yank the user away from wherever they
+	// had scrolled without anything actually being submitted.
+	if command.kind != commandEmpty {
+		m.chatScrollOffset = 0
+	}
 
 	switch command.kind {
 	case commandEmpty:
@@ -1317,6 +1322,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)
+		return m, nil
+	case commandAddDir:
+		m = m.handleAddDirCommand(command.text)
 		return m, nil
 	case commandUnknown:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{

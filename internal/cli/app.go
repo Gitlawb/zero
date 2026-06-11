@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -141,8 +142,28 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	defer observability.Recover(observability.DefaultCrashDir(), "cli", stderr, &exitCode)
 	deps = fillAppDeps(deps)
 
+	addDirs, args, err := splitLeadingAddDirFlags(args)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs)
+	}
+
+	// --add-dir grants an extra write root, and only the interactive TUI and
+	// exec dispatch paths consume one. Fail loud everywhere else rather than
+	// silently discarding an explicit grant — including help/version, which
+	// run no agent and could only ignore it. The allowlist names exactly the
+	// cases below that forward addDirs; a future subcommand is rejected by
+	// default until it opts in here.
+	if len(addDirs) > 0 {
+		switch args[0] {
+		case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
+			// Forwarded by the matching case below.
+		default:
+			return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
+		}
 	}
 
 	switch args[0] {
@@ -151,7 +172,22 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// flag fell through to the unknown-command path, so a user could never
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
 		// gated behind unsafe) was therefore unreachable.
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe)
+		//
+		// --add-dir may legally appear on either side of the flag, so re-split
+		// the remaining args and merge with the dirs already collected. Any
+		// trailing non-flag args were ignored on this path before --add-dir
+		// existed and still are — but an --add-dir hidden BEHIND one would be
+		// silently dropped with them, so reject that misplacement loudly.
+		moreDirs, rest, err := splitLeadingAddDirFlags(args[1:])
+		if err != nil {
+			return writeAppError(stderr, err.Error(), 1)
+		}
+		for _, arg := range rest {
+			if arg == "--add-dir" || strings.HasPrefix(arg, "--add-dir=") {
+				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --skip-permissions-unsafe)", 1)
+			}
+		}
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...))
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -166,10 +202,13 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if len(args) < 2 {
 			return writePromptRequired(stderr)
 		}
-		execArgs := append([]string{"--prompt", args[1]}, args[2:]...)
+		// Forward leading --add-dir occurrences so exec's own parser collects them.
+		execArgs := append(addDirFlagArgs(addDirs), "--prompt", args[1])
+		execArgs = append(execArgs, args[2:]...)
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
-		return runExec(args[1:], stdout, stderr, deps)
+		// Forward leading --add-dir occurrences so exec's own parser collects them.
+		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
 	case "config":
 		return runConfig(args[1:], stdout, stderr, deps)
 	case "models":
@@ -309,11 +348,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode) int {
-	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, false)
+func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string) int {
+	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, false)
 }
 
-func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, forceSetup bool) int {
+func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, forceSetup bool) int {
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
@@ -338,12 +377,17 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		}
 	}
 
+	scope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), addDirs...))
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+
 	provider, err := buildProvider(resolved, deps)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
 
-	registry := newCoreRegistry(workspaceRoot)
+	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot)
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -384,6 +428,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Policy:        applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
 		Store:         sandboxStore,
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
+		Scope:         scope,
 	})
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:             workspaceRoot,
@@ -426,8 +471,12 @@ func buildProvider(resolved config.ResolvedConfig, deps appDeps) (zeroruntime.Pr
 }
 
 func newCoreRegistry(workspaceRoot string) *tools.Registry {
+	return newCoreRegistryScoped(workspaceRoot, nil)
+}
+
+func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.Registry {
 	registry := tools.NewRegistry()
-	for _, tool := range tools.CoreTools(workspaceRoot) {
+	for _, tool := range tools.CoreToolsScoped(workspaceRoot, scope) {
 		registry.Register(tool)
 	}
 	return registry
@@ -520,9 +569,61 @@ Flags:
   -h, --help                     Show this help
   -v, --version                  Print version
   -p, --prompt                   Run a one-shot prompt
+      --add-dir <path>           Allow writes in an extra directory (repeatable)
       --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
 `)
 	return err
+}
+
+// addDirFlagArgs rebuilds "--add-dir <dir>" flag pairs so dirs collected by
+// splitLeadingAddDirFlags can be forwarded into exec's own argument parser
+// (which accepts --add-dir anywhere) instead of being silently dropped.
+func addDirFlagArgs(addDirs []string) []string {
+	flags := make([]string, 0, 2*len(addDirs))
+	for _, dir := range addDirs {
+		flags = append(flags, "--add-dir", dir)
+	}
+	return flags
+}
+
+// splitLeadingAddDirFlags strips leading --add-dir flags from the root
+// argument list (zero --add-dir <path> [--add-dir <path>] [subcommand …]).
+// Subcommands like exec parse their own --add-dir occurrences.
+func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
+	addDirs := []string{}
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--add-dir":
+			if len(args) < 2 {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			value := strings.TrimSpace(args[1])
+			if value == "" {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			if strings.HasPrefix(value, "-") {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			addDirs = append(addDirs, value)
+			args = args[2:]
+		case strings.HasPrefix(args[0], "--add-dir="):
+			value := strings.TrimSpace(strings.TrimPrefix(args[0], "--add-dir="))
+			if value == "" {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			// Match the space form: a flag-like value is almost certainly a
+			// mistyped option, not a directory. A directory literally named
+			// "-foo" is still reachable as --add-dir=./-foo.
+			if strings.HasPrefix(value, "-") {
+				return nil, nil, errors.New("--add-dir requires a directory path")
+			}
+			addDirs = append(addDirs, value)
+			args = args[1:]
+		default:
+			return addDirs, args, nil
+		}
+	}
+	return addDirs, args, nil
 }
 
 func writePromptRequired(stderr io.Writer) int {
@@ -541,6 +642,7 @@ Runs a one-shot prompt through the Go agent runtime.
 Flags:
   -f, --file <path>                  Read prompt text from a file
       --image <path>                 Attach a local image (repeatable; vision models only)
+      --add-dir <path>               Allow writes in an extra directory (repeatable)
       --mode <name>                  Apply a preset (smart, deep, fast, large, precise); explicit flags override it
   -m, --model <model>                Select the model for provider setup
       --use-spec                     Draft a spec first and stop for review

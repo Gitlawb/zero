@@ -63,6 +63,10 @@ func matchesDestructive(command string) bool {
 }
 
 func Classify(request Request) Risk {
+	return classifyWithScope(request, nil)
+}
+
+func classifyWithScope(request Request, scope *Scope) Risk {
 	categories := map[string]bool{}
 	level := RiskLow
 	add := func(category string, risk RiskLevel) {
@@ -112,7 +116,13 @@ func Classify(request Request) Risk {
 			add("path_escape", RiskCritical)
 		}
 		if request.WorkspaceRoot != "" {
-			if violation := validateWorkspacePath(request.WorkspaceRoot, path); violation != nil {
+			var violation *pathViolation
+			if scope != nil {
+				violation = scope.validate(path)
+			} else {
+				violation = validateWorkspacePath(request.WorkspaceRoot, path)
+			}
+			if violation != nil {
 				switch violation.Code {
 				case ViolationSymlinkTraversal:
 					add("symlink_traversal", RiskCritical)

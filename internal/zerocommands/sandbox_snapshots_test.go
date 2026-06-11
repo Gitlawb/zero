@@ -157,6 +157,26 @@ func TestSandboxPlanSnapshotFromPlanSortsRestrictionsAndTrimsRoot(t *testing.T) 
 	}
 }
 
+func TestSandboxPlanSnapshotWriteRootsJSON(t *testing.T) {
+	snapshot := SandboxPlanSnapshot{WriteRoots: []string{"/ws", "/extra"}}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"writeRoots":["/ws","/extra"]`) {
+		t.Fatalf("expected writeRoots to flow through to JSON, got %q", string(encoded))
+	}
+
+	bare := SandboxPlanSnapshotFromPlan(sandbox.BackendPlan{WorkspaceRoot: "/repo"})
+	encoded, err = json.Marshal(bare)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if strings.Contains(string(encoded), `"writeRoots"`) {
+		t.Fatalf("writeRoots should be omitted when unset (JSON shape stable), got %q", string(encoded))
+	}
+}
+
 func TestSandboxDecisionSnapshotFromDecisionAllowBranchHasNoViolation(t *testing.T) {
 	decision := sandbox.Decision{
 		Action: sandbox.ActionAllow,

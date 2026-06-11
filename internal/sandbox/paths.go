@@ -13,18 +13,6 @@ type pathViolation struct {
 	Reason string
 }
 
-func validateWorkspacePaths(root string, request Request) *pathViolation {
-	for _, requested := range requestPaths(request) {
-		if requested == "" {
-			continue
-		}
-		if violation := validateWorkspacePath(root, requested); violation != nil {
-			return violation
-		}
-	}
-	return nil
-}
-
 func validateWorkspacePath(workspaceRoot string, requestedPath string) *pathViolation {
 	root, err := filepath.Abs(workspaceRoot)
 	if err != nil {

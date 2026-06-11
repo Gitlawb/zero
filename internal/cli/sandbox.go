@@ -67,7 +67,25 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
 	plan := backend.BuildPlan(workspaceRoot, policy)
 	if options.effective {
-		return runSandboxPolicyEffective(options, workspaceRoot, policy, backend, plan, store.FilePath(), stdout)
+		// Compute the effective write roots exactly the way the engine does:
+		// workspace root first, then the user-granted extras from the global
+		// config. A stale config entry (e.g. a directory that no longer
+		// exists) must not crash `zero sandbox policy --effective` — fall
+		// back to the workspace root and surface the error visibly instead.
+		writeRoots := []string{workspaceRoot}
+		var writeRootsErr error
+		if scope, scopeErr := zeroSandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots); scopeErr != nil {
+			writeRootsErr = scopeErr
+			// NewScope only fails on extras, so a workspace-only scope cannot
+			// fail; use it so the fallback renders the same symlink-resolved
+			// workspace root as the success path.
+			if fallback, fallbackErr := zeroSandbox.NewScope(workspaceRoot, nil); fallbackErr == nil {
+				writeRoots = fallback.Roots()
+			}
+		} else {
+			writeRoots = scope.Roots()
+		}
+		return runSandboxPolicyEffective(options, workspaceRoot, policy, backend, plan, store.FilePath(), writeRoots, writeRootsErr, stdout)
 	}
 	if options.json {
 		payload := struct {
@@ -114,53 +132,71 @@ func resolveSandboxGuards(policy zeroSandbox.Policy) sandboxGuards {
 	}
 }
 
-func runSandboxPolicyEffective(options sandboxCommandOptions, workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, grantsPath string, stdout io.Writer) int {
+func runSandboxPolicyEffective(options sandboxCommandOptions, workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, grantsPath string, writeRoots []string, writeRootsErr error, stdout io.Writer) int {
 	guards := resolveSandboxGuards(policy)
 	if options.json {
 		payload := struct {
-			WorkspaceRoot string                  `json:"workspaceRoot"`
-			Policy        zeroSandbox.Policy      `json:"policy"`
-			Backend       zeroSandbox.Backend     `json:"backend"`
-			Plan          zeroSandbox.BackendPlan `json:"plan"`
-			Guards        sandboxGuards           `json:"guards"`
-			GrantsPath    string                  `json:"grantsPath"`
+			WorkspaceRoot string   `json:"workspaceRoot"`
+			WriteRoots    []string `json:"writeRoots"`
+			// WriteRootsError carries the fail-soft scope construction error so
+			// JSON consumers see the same signal as the text write_roots_error
+			// line: a stale sandbox.additionalWriteRoots entry means the real
+			// entrypoints would refuse to launch, not run workspace-only.
+			WriteRootsError string                  `json:"writeRootsError,omitempty"`
+			Policy          zeroSandbox.Policy      `json:"policy"`
+			Backend         zeroSandbox.Backend     `json:"backend"`
+			Plan            zeroSandbox.BackendPlan `json:"plan"`
+			Guards          sandboxGuards           `json:"guards"`
+			GrantsPath      string                  `json:"grantsPath"`
 		}{
 			WorkspaceRoot: workspaceRoot,
+			WriteRoots:    writeRoots,
 			Policy:        policy,
 			Backend:       backend,
 			Plan:          plan,
 			Guards:        guards,
 			GrantsPath:    grantsPath,
 		}
+		if writeRootsErr != nil {
+			payload.WriteRootsError = writeRootsErr.Error()
+		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatEffectiveSandboxPolicy(workspaceRoot, policy, backend, plan, guards, grantsPath)); err != nil {
+	if _, err := fmt.Fprintln(stdout, formatEffectiveSandboxPolicy(workspaceRoot, policy, backend, plan, guards, grantsPath, writeRoots, writeRootsErr)); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
 }
 
-func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, guards sandboxGuards, grantsPath string) string {
+func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backend zeroSandbox.Backend, plan zeroSandbox.BackendPlan, guards sandboxGuards, grantsPath string, writeRoots []string, writeRootsErr error) string {
 	lines := []string{
 		"Zero effective sandbox policy",
 		"root: " + workspaceRoot,
 		"mode: " + string(policy.Mode),
 		"network: " + string(policy.Network),
 		"enforce_workspace: " + fmt.Sprintf("%t", policy.EnforceWorkspace),
-		"deny_destructive_shell: " + fmt.Sprintf("%t", policy.DenyDestructiveShell),
-		"allow_policy_only_runner: " + fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
-		"max_autonomy: " + string(policy.MaxAutonomy),
-		"backend: " + string(backend.Name),
-		"support_level: " + string(plan.SupportLevel),
-		"interactive_command_guard: " + enabledLabel(guards.InteractiveCommand),
-		"destructive_shell_guard: " + enabledLabel(guards.DestructiveShell),
-		"network_guard: " + enabledLabel(guards.Network),
-		"workspace_guard: " + enabledLabel(guards.Workspace),
-		"grants: " + grantsPath,
+		"write_roots: " + strings.Join(writeRoots, ", "),
 	}
+	if writeRootsErr != nil {
+		// Fail soft, visibly: a stale sandbox.additionalWriteRoots entry must
+		// not hide the rest of the status output.
+		lines = append(lines, "write_roots_error: "+writeRootsErr.Error())
+	}
+	lines = append(lines,
+		"deny_destructive_shell: "+fmt.Sprintf("%t", policy.DenyDestructiveShell),
+		"allow_policy_only_runner: "+fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
+		"max_autonomy: "+string(policy.MaxAutonomy),
+		"backend: "+string(backend.Name),
+		"support_level: "+string(plan.SupportLevel),
+		"interactive_command_guard: "+enabledLabel(guards.InteractiveCommand),
+		"destructive_shell_guard: "+enabledLabel(guards.DestructiveShell),
+		"network_guard: "+enabledLabel(guards.Network),
+		"workspace_guard: "+enabledLabel(guards.Workspace),
+		"grants: "+grantsPath,
+	)
 	if backend.Platform != "" {
 		lines = append(lines, "backend_platform: "+backend.Platform)
 	}

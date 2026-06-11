@@ -13,18 +13,23 @@ import (
 type applyPatchTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 }
 
 func NewApplyPatchTool(workspaceRoot string) Tool {
+	return NewScopedApplyPatchTool(workspaceRoot, nil)
+}
+
+func NewScopedApplyPatchTool(workspaceRoot string, scope PathScope) Tool {
 	return applyPatchTool{
 		baseTool: baseTool{
 			name:        "apply_patch",
-			description: "Apply a unified diff patch inside the workspace.",
+			description: "Apply a unified diff patch inside the workspace or an explicitly granted extra write root.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"patch": {Type: "string", Description: "Unified diff patch to apply."},
-					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Defaults to workspace root.", Default: "."},
+					"cwd":   {Type: "string", Description: "Directory where the patch should be applied. Relative paths stay in the workspace; use an absolute path to target a granted extra write root. Defaults to workspace root.", Default: "."},
 				},
 				Required:             []string{"patch"},
 				AdditionalProperties: false,
@@ -32,6 +37,7 @@ func NewApplyPatchTool(workspaceRoot string) Tool {
 			safety: promptSafety(SideEffectWrite, "Applies patch hunks that can create, edit, or delete files."),
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
+		scope:         scope,
 	}
 }
 
@@ -45,7 +51,7 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 		return errorResult("Error: Invalid arguments for apply_patch: " + err.Error())
 	}
 
-	applyRoot, relativeRoot, err := resolveWorkspacePath(tool.workspaceRoot, cwd)
+	applyRoot, relativeRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error applying patch: " + err.Error())
 	}
@@ -98,7 +104,10 @@ func (tool applyPatchTool) Run(ctx context.Context, args map[string]any) Result 
 // touches, reusing the same per-line parser used for validation. Patch paths are
 // relative to the apply cwd, so relativeRoot (the workspace-relative cwd, e.g.
 // "sub/dir", or "." for the workspace root) is prefixed so callers get true
-// workspace-relative paths regardless of cwd.
+// workspace-relative paths regardless of cwd. When the apply cwd resolves to an
+// extra write root, resolveScopedPath returns the absolute path as relativeRoot;
+// in that case the entries in the returned slice are absolute paths, since
+// workspace-relative would be ambiguous there.
 func changedFilesFromPatch(relativeRoot string, patch string) []string {
 	seen := map[string]bool{}
 	var paths []string

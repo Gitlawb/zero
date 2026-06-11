@@ -15,6 +15,7 @@ type EngineOptions struct {
 	Policy        Policy
 	Store         *GrantStore
 	Backend       Backend
+	Scope         *Scope
 }
 
 type Engine struct {
@@ -22,6 +23,7 @@ type Engine struct {
 	policy        Policy
 	store         *GrantStore
 	backend       Backend
+	scope         *Scope
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -29,12 +31,52 @@ func NewEngine(options EngineOptions) *Engine {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
+	scope := options.Scope
+	workspaceRoot := strings.TrimSpace(options.WorkspaceRoot)
+	if scope != nil && workspaceRoot == "" {
+		// Scope-only construction must still populate workspaceRoot: Evaluate's
+		// path classification and EnforceWorkspace denial both guard on
+		// request.WorkspaceRoot != "", and resolveCommandDir hard-requires it, so
+		// leaving it blank would silently skip enforcement. Roots()[0] is the
+		// workspace root by the Scope contract.
+		if roots := scope.Roots(); len(roots) > 0 {
+			workspaceRoot = roots[0]
+		}
+	}
+	if scope == nil && workspaceRoot != "" {
+		scope = &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
+	}
 	return &Engine{
-		workspaceRoot: strings.TrimSpace(options.WorkspaceRoot),
+		workspaceRoot: workspaceRoot,
 		policy:        policy,
 		store:         options.Store,
 		backend:       options.Backend,
+		scope:         scope,
 	}
+}
+
+// Scope returns the engine's shared write scope (nil when the engine was
+// built without a workspace root and no explicit Scope option). The TUI uses
+// it for /add-dir.
+func (engine *Engine) Scope() *Scope {
+	if engine == nil {
+		return nil
+	}
+	return engine.scope
+}
+
+// scopeFor returns the scope to validate request paths against. The engine's
+// shared scope applies only when the request targets the engine's own
+// workspace root; a per-request override root gets an ad-hoc single-root scope
+// (single-root semantics; it deliberately ignores the engine's extra roots so
+// an override can never inherit broader write access). The ad-hoc root is left
+// unnormalized on purpose: validateWorkspacePath re-resolves roots internally,
+// and skipping normalization avoids per-Evaluate EvalSymlinks syscalls.
+func (engine *Engine) scopeFor(requestRoot string) *Scope {
+	if engine.scope != nil && requestRoot == engine.workspaceRoot {
+		return engine.scope
+	}
+	return &Scope{workspaceRoot: requestRoot}
 }
 
 func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
@@ -77,7 +119,8 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		autonomy = AutonomyHigh
 	}
 	request.Autonomy = autonomy
-	risk := Classify(request)
+	scope := engine.scopeFor(request.WorkspaceRoot)
+	risk := classifyWithScope(request, scope)
 
 	if policy.Mode == ModeDisabled {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "sandbox policy disabled"}
@@ -86,8 +129,10 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return deny(request, risk, ViolationDeniedPermission, "", permissionReason(request), false)
 	}
 	if policy.EnforceWorkspace && request.WorkspaceRoot != "" {
-		if violation := validateWorkspacePaths(request.WorkspaceRoot, request); violation != nil {
-			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
+		for _, requested := range requestPaths(request) {
+			if violation := scope.validate(requested); violation != nil {
+				return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
+			}
 		}
 	}
 	if policy.Network == NetworkDeny && HasRiskCategory(risk, "network") {

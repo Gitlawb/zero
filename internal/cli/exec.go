@@ -94,6 +94,10 @@ type execOptions struct {
 	notifyMode string
 	// noNotify forces ModeOff for this run. Mutually exclusive with notifyMode.
 	noNotify bool
+	// addDirs holds directories passed via --add-dir that should be allowed as
+	// additional write roots for this run. Unioned with
+	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
+	addDirs []string
 }
 
 type execUsageError struct {
@@ -265,7 +269,25 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		images = nil
 	}
-	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps)
+	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
+	if err != nil {
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	// Re-register the core tools with the run scope, OVERWRITING the nil-scope
+	// instances registered before config resolve (the registry must exist that
+	// early for --list-tools and tool-filter validation, which run without a
+	// provider). This is safe only while two invariants hold:
+	//   1. Registry.Register replaces by NAME, so every path-confining core
+	//      tool is swapped wholesale; and
+	//   2. nothing between the initial registration and this point captures a
+	//      core-tool INSTANCE (tool_search holds the *Registry* and resolves
+	//      names lazily; --list-tools and filter validation use names only).
+	// A new wrapper that snapshots a core tool before this line would silently
+	// ship nil-scope enforcement — add it below this re-registration instead.
+	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
+		registry.Register(tool)
+	}
+	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
 	}
@@ -581,7 +603,7 @@ func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, 
 	registry.Register(tools.NewToolSearchTool(registry))
 }
 
-func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps) (*sandbox.Engine, error) {
+func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig, deps appDeps, scope *sandbox.Scope) (*sandbox.Engine, error) {
 	store, err := deps.newSandboxStore()
 	if err != nil {
 		return nil, err
@@ -593,6 +615,7 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 		Policy:        policy,
 		Store:         store,
 		Backend:       backend,
+		Scope:         scope,
 	}), nil
 }
 

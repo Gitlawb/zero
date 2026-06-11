@@ -72,11 +72,19 @@ type SandboxBackendSnapshot struct {
 // snapshot bundles the policy, the backend, and the human-readable
 // restriction warnings so the operator gets one payload describing
 // the entire sandbox posture.
+//
+// WriteRoots lists every directory the sandbox allows writes in
+// (workspace root first, then user-granted extras). No current
+// builder populates it — SandboxPlanSnapshotFromPlan leaves it
+// unset because a BackendPlan carries no engine scope. Callers
+// that hold the live engine can set it from engine.Scope().Roots();
+// omitempty keeps the JSON shape stable when unset.
 type SandboxPlanSnapshot struct {
 	Policy        SandboxPolicySnapshot  `json:"policy"`
 	Backend       SandboxBackendSnapshot `json:"backend"`
 	Restrictions  []string               `json:"restrictions"`
 	WorkspaceRoot string                 `json:"workspaceRoot,omitempty"`
+	WriteRoots    []string               `json:"writeRoots,omitempty"`
 }
 
 // SandboxDecisionSnapshot is the typed view of a live sandbox.Decision
@@ -166,7 +174,9 @@ func SandboxBackendSnapshotFromBackend(backend sandbox.Backend) SandboxBackendSn
 // SandboxPlanSnapshotFromPlan converts a sandbox.BackendPlan into its
 // typed snapshot. Each entry of the Restrictions slice is trimmed,
 // the slice is sorted alphabetically, and the result is copied so
-// the snapshot does not alias the input.
+// the snapshot does not alias the input. WriteRoots is left unset
+// because a BackendPlan carries no engine scope; callers that hold
+// the live engine can populate it from engine.Scope().Roots().
 func SandboxPlanSnapshotFromPlan(plan sandbox.BackendPlan) SandboxPlanSnapshot {
 	restrictions := make([]string, 0, len(plan.Restrictions))
 	for _, restriction := range plan.Restrictions {

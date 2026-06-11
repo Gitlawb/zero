@@ -90,6 +90,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.imagePaths = append(options.imagePaths, value)
+		case arg == "--add-dir":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.addDirs = append(options.addDirs, value)
+			index = next
+		case strings.HasPrefix(arg, "--add-dir="):
+			value, err := requiredInlineFlagValue(arg, "--add-dir")
+			if err != nil {
+				return options, false, err
+			}
+			options.addDirs = append(options.addDirs, value)
 		case arg == "--mode":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
