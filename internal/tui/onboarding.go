@@ -1,12 +1,19 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type setupStage int
@@ -15,6 +22,7 @@ const (
 	setupStageWelcome setupStage = iota
 	setupStageProvider
 	setupStageCredentials
+	setupStageModel
 	setupStageSafety
 	setupStageReady
 )
@@ -30,6 +38,22 @@ type setupState struct {
 	stage      setupStage
 	err        string
 	apiKey     textinput.Model
+	models     []providerWizardModel
+	modelIndex int
+	modelQuery string
+	modelForID string
+	modelLoad  bool
+	modelErr   string
+	modelSrc   string
+	modelGen   uint64
+}
+
+type setupModelsDiscoveredMsg struct {
+	providerID       string
+	gen              uint64
+	redactionSecrets []string
+	models           []providermodeldiscovery.Model
+	err              error
 }
 
 func newSetupState(options SetupOptions) setupState {
@@ -85,30 +109,63 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyEnter:
-		if m.setup.stage == setupStageProvider || m.setup.stage == setupStageReady {
+		if m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel || m.setup.stage == setupStageReady {
 			return m.advanceSetup()
 		}
 		return m, nil
 	case tea.KeySpace:
-		if m.setup.stage < setupStageReady && m.setup.stage != setupStageProvider {
+		if m.setup.stage < setupStageReady && m.setup.stage != setupStageProvider && m.setup.stage != setupStageModel {
 			return m.advanceSetup()
 		}
 		return m, nil
 	case tea.KeyUp:
 		if m.setup.stage == setupStageProvider {
 			m.moveSetupProvider(-1)
+		} else if m.setup.stage == setupStageModel {
+			m.moveSetupModel(-1)
 		}
 		return m, nil
 	case tea.KeyDown:
 		if m.setup.stage == setupStageProvider {
 			m.moveSetupProvider(1)
+		} else if m.setup.stage == setupStageModel {
+			m.moveSetupModel(1)
+		}
+		return m, nil
+	case tea.KeyRunes:
+		if m.setup.stage == setupStageModel {
+			m.appendSetupModelQuery(msg.Runes)
+			return m, nil
+		}
+		switch msg.String() {
+		case "q":
+			return m, tea.Quit
+		case "k":
+			if m.setup.stage == setupStageProvider {
+				m.moveSetupProvider(-1)
+			}
+		case "j":
+			if m.setup.stage == setupStageProvider {
+				m.moveSetupProvider(1)
+			}
+		}
+		return m, nil
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		if m.setup.stage == setupStageModel {
+			m.deleteSetupModelQueryRune()
+		}
+		return m, nil
+	case tea.KeyCtrlU:
+		if m.setup.stage == setupStageModel {
+			m.setup.modelQuery = ""
+			m.setup.modelIndex = 0
 		}
 		return m, nil
 	}
 
 	switch msg.String() {
 	case " ":
-		if m.setup.stage < setupStageReady && m.setup.stage != setupStageProvider {
+		if m.setup.stage < setupStageReady && m.setup.stage != setupStageProvider && m.setup.stage != setupStageModel {
 			return m.advanceSetup()
 		}
 	case "q":
@@ -116,10 +173,32 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k":
 		if m.setup.stage == setupStageProvider {
 			m.moveSetupProvider(-1)
+		} else if m.setup.stage == setupStageModel {
+			m.moveSetupModel(-1)
 		}
 	case "j":
 		if m.setup.stage == setupStageProvider {
 			m.moveSetupProvider(1)
+		} else if m.setup.stage == setupStageModel {
+			m.moveSetupModel(1)
+		}
+	}
+	return m, nil
+}
+
+func (m model) handleSetupMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.setup.stage == setupStageProvider {
+			m.moveSetupProvider(-1)
+		} else if m.setup.stage == setupStageModel {
+			m.moveSetupModel(-1)
+		}
+	case tea.MouseButtonWheelDown:
+		if m.setup.stage == setupStageProvider {
+			m.moveSetupProvider(1)
+		} else if m.setup.stage == setupStageModel {
+			m.moveSetupModel(1)
 		}
 	}
 	return m, nil
@@ -130,8 +209,24 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 		if m.setup.stage == setupStageProvider {
 			m.setup.apiKey.SetValue("")
 		}
+		if m.setup.stage == setupStageModel && m.setup.modelLoad {
+			m.setup.err = "Models are still loading."
+			return m, nil
+		}
+		if m.setup.stage == setupStageModel && m.setupCurrentModel().ID == "" {
+			m.setup.err = "Choose a matching model before continuing."
+			return m, nil
+		}
 		m.setup.stage++
 		m.setup.err = ""
+		if m.setup.stage == setupStageModel {
+			m.resetSetupModels()
+			m.setup.modelErr = ""
+			m.setup.modelGen++
+			cmd := m.setupModelDiscoveryCmd(m.setup.modelGen)
+			m.setup.modelLoad = cmd != nil
+			return m, cmd
+		}
 		return m, nil
 	}
 	return m.completeSetup()
@@ -143,6 +238,8 @@ func (m *model) moveSetupProvider(delta int) {
 	}
 	m.setup.selected = ((m.setup.selected+delta)%len(m.setup.providers) + len(m.setup.providers)) % len(m.setup.providers)
 	m.setup.apiKey.SetValue("")
+	m.setup.modelGen++
+	m.resetSetupModels()
 }
 
 func (m model) completeSetup() (tea.Model, tea.Cmd) {
@@ -157,7 +254,7 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 
 	result, err := m.setupSave(SetupSelection{
 		CatalogID: option.ID,
-		Model:     option.DefaultModel,
+		Model:     m.setupCurrentModel().ID,
 		APIKey:    m.setupCredentialAPIKey(option),
 	})
 	if err != nil {
@@ -180,6 +277,182 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 	}
 
 	return m.exitSetupToChat()
+}
+
+func (m *model) resetSetupModels() {
+	option := m.setupProvider()
+	provider := setupProviderDescriptor(option)
+	models := providerWizardModelOptions(provider)
+	m.setup.models = models
+	m.setup.modelIndex = 0
+	m.setup.modelQuery = ""
+	m.setup.modelForID = provider.ID
+	m.setup.modelLoad = false
+	m.setup.modelErr = ""
+	m.setup.modelSrc = "fallback"
+}
+
+func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
+	option := m.setupProvider()
+	provider := setupProviderDescriptor(option)
+	if provider.ID == "" || !providercatalog.RuntimeSupported(provider) {
+		return nil
+	}
+	profile := providerWizardDiscoveryProfile(provider, m.setupCredentialAPIKey(option))
+	redactionSecrets := []string{m.setup.apiKey.Value(), profile.APIKey}
+	discover := m.discoverProviderModels
+	if discover == nil {
+		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, providermodeldiscovery.Options{})
+		}
+	}
+	providerID := provider.ID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+		defer cancel()
+		models, err := discover(ctx, profile)
+		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: redactionSecrets, models: models, err: err}
+	}
+}
+
+func (m model) applySetupModelsDiscovered(msg setupModelsDiscoveredMsg) model {
+	if !m.setup.visible || m.setup.stage != setupStageModel || m.setupProviderDescriptor().ID != msg.providerID || m.setup.modelGen != msg.gen {
+		return m
+	}
+	m.setup.modelLoad = false
+	m.setup.err = ""
+	if msg.err != nil {
+		m.setup.modelErr = redaction.RedactString(msg.err.Error(), redaction.Options{ExtraSecretValues: msg.redactionSecrets})
+		m.setup.modelSrc = "fallback"
+		if len(m.setup.models) == 0 {
+			m.resetSetupModels()
+		}
+		return m
+	}
+	models := providerWizardModelsFromDiscovery(msg.models)
+	if len(models) == 0 {
+		m.setup.modelErr = "models endpoint returned no model ids"
+		m.setup.modelSrc = "fallback"
+		if len(m.setup.models) == 0 {
+			m.resetSetupModels()
+		}
+		return m
+	}
+	currentID := m.setupCurrentModel().ID
+	m.setup.models = models
+	m.setup.modelIndex = 0
+	m.setup.modelSrc = providerWizardModelsSource(msg.models)
+	if m.setup.modelSrc == "" {
+		m.setup.modelSrc = "live"
+	}
+	m.setup.modelErr = ""
+	if currentID != "" {
+		for index, model := range m.setupFilteredModels() {
+			if model.ID == currentID {
+				m.setup.modelIndex = index
+				break
+			}
+		}
+	}
+	return m
+}
+
+func (m model) setupProviderDescriptor() providercatalog.Descriptor {
+	return setupProviderDescriptor(m.setupProvider())
+}
+
+func setupProviderDescriptor(option SetupProviderOption) providercatalog.Descriptor {
+	if descriptor, ok := providercatalog.Get(option.ID); ok {
+		return descriptor
+	}
+	descriptor := providercatalog.Descriptor{
+		ID:           strings.TrimSpace(option.ID),
+		Name:         strings.TrimSpace(option.Name),
+		DefaultModel: strings.TrimSpace(option.DefaultModel),
+		RequiresAuth: option.RequiresAuth,
+		Local:        option.Local,
+		AuthEnvVars:  cleanSetupEnvVar(option.EnvVar),
+	}
+	return descriptor
+}
+
+func cleanSetupEnvVar(envVar string) []string {
+	if envVar = strings.TrimSpace(envVar); envVar != "" {
+		return []string{envVar}
+	}
+	return nil
+}
+
+func (m model) setupCurrentModel() providerWizardModel {
+	m.ensureSetupModels()
+	models := m.setupFilteredModels()
+	if len(models) == 0 {
+		return providerWizardModel{Description: "no matching models"}
+	}
+	index := clamp(m.setup.modelIndex, 0, len(models)-1)
+	return models[index]
+}
+
+func (m *model) ensureSetupModels() {
+	option := m.setupProvider()
+	providerID := setupProviderDescriptor(option).ID
+	if len(m.setup.models) > 0 && m.setup.modelForID == providerID {
+		return
+	}
+	m.resetSetupModels()
+}
+
+func (m model) setupFilteredModels() []providerWizardModel {
+	query := strings.ToLower(strings.TrimSpace(m.setup.modelQuery))
+	if query == "" {
+		return append([]providerWizardModel{}, m.setup.models...)
+	}
+	models := make([]providerWizardModel, 0, len(m.setup.models))
+	for _, model := range m.setup.models {
+		if model.matches(query) {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+func (m *model) moveSetupModel(delta int) {
+	if m.setup.modelLoad {
+		return
+	}
+	m.ensureSetupModels()
+	models := m.setupFilteredModels()
+	if len(models) == 0 {
+		return
+	}
+	m.setup.modelIndex = ((m.setup.modelIndex+delta)%len(models) + len(models)) % len(models)
+}
+
+func (m *model) appendSetupModelQuery(runes []rune) {
+	if m.setup.modelLoad {
+		return
+	}
+	for _, r := range runes {
+		if r < 32 || r == 127 {
+			continue
+		}
+		m.setup.modelQuery += string(r)
+	}
+	m.setup.modelIndex = 0
+	m.setup.err = ""
+}
+
+func (m *model) deleteSetupModelQueryRune() {
+	if m.setup.modelLoad {
+		return
+	}
+	if m.setup.modelQuery == "" {
+		return
+	}
+	runes := []rune(m.setup.modelQuery)
+	m.setup.modelQuery = string(runes[:len(runes)-1])
+	m.setup.modelIndex = 0
+	m.setup.err = ""
 }
 
 func (m model) exitSetupToChat() (tea.Model, tea.Cmd) {
@@ -207,8 +480,13 @@ func (m model) handleSetupCredentialKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyUp, tea.KeyDown:
 		return m, nil
 	}
+	previousAPIKey := m.setup.apiKey.Value()
 	var cmd tea.Cmd
 	m.setup.apiKey, cmd = m.setup.apiKey.Update(msg)
+	if m.setup.apiKey.Value() != previousAPIKey {
+		m.setup.modelGen++
+		m.resetSetupModels()
+	}
 	m.setup.err = ""
 	return m, cmd
 }
@@ -265,6 +543,8 @@ func (m model) setupStageLines(width int, height int) []string {
 		return m.setupProviderLines(width, height)
 	case setupStageCredentials:
 		return m.setupCredentialLines(width)
+	case setupStageModel:
+		return m.setupModelLines(width, height)
 	case setupStageSafety:
 		return []string{
 			zeroTheme.ink.Bold(true).Render("Safety"),
@@ -276,12 +556,13 @@ func (m model) setupStageLines(width int, height int) []string {
 		}
 	case setupStageReady:
 		option := m.setupProvider()
+		model := m.setupCurrentModel()
 		return []string{
 			zeroTheme.ink.Bold(true).Render("Ready"),
 			"",
 			"Zero will save this setup and open chat.",
 			"provider: " + displayValue(option.Name, option.ID),
-			"model: " + displayValue(option.DefaultModel, "default"),
+			"model: " + displayValue(model.ID, option.DefaultModel),
 			"credentials: " + m.setupCredentialSummary(option),
 			"config: " + displayValue(m.setup.configPath, "user config"),
 			"",
@@ -297,8 +578,135 @@ func (m model) setupStageLines(width int, height int) []string {
 	}
 }
 
+func (m model) setupModelLines(width int, height int) []string {
+	m.ensureSetupModels()
+	if m.setup.modelLoad {
+		return m.setupModelLoadingLines(width)
+	}
+	rowWidth := setupModelBlockWidth(width, m.setup.models)
+	models := m.setupFilteredModels()
+	maxVisible := setupModelMaxVisible(height, len(models))
+	start := selectableListStart(len(models), maxVisible, m.setup.modelIndex)
+	lines := []string{
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Choose a model"), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+m.setupModelSearchLine(rowWidth-2), rowWidth),
+	}
+	if status := m.setupModelStatus(); status != "" {
+		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(status), rowWidth))
+	}
+	lines = append(lines, blankSetupBlockLine(rowWidth))
+	if len(models) == 0 {
+		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render("No matching models"), rowWidth))
+		return lines
+	}
+	visibleModels := models[start : start+maxVisible]
+	for offset, model := range visibleModels {
+		lines = append(lines, m.setupModelRow(rowWidth, start+offset, model))
+	}
+	if hidden := len(models) - maxVisible; hidden > 0 {
+		lines = append(lines, padSetupLine("  "+zeroTheme.faint.Render(fmt.Sprintf("%d more models", hidden)), rowWidth))
+	}
+	if detail := setupModelSelectedDetail(m.setupCurrentModel()); detail != "" {
+		lines = append(lines,
+			blankSetupBlockLine(rowWidth),
+			padSetupLine("  "+zeroTheme.faint.Render(detail), rowWidth),
+		)
+	}
+	return lines
+}
+
+func (m model) setupModelLoadingLines(width int) []string {
+	rowWidth := setupModelLoadingBlockWidth(width)
+	return []string{
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Choose a model"), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+zeroTheme.faint.Render("Checking available models..."), rowWidth),
+		padSetupLine("  "+zeroTheme.faint.Render("Built-in models will be used if discovery fails."), rowWidth),
+	}
+}
+
+func setupModelMaxVisible(height int, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	maxVisible := height - 12
+	if maxVisible < 5 {
+		maxVisible = 5
+	}
+	if maxVisible > 18 {
+		maxVisible = 18
+	}
+	if maxVisible > total {
+		return total
+	}
+	return maxVisible
+}
+
+func setupModelLoadingBlockWidth(terminalWidth int) int {
+	available := maxInt(34, minInt(terminalWidth-8, 72))
+	target := maxInt(lipgloss.Width("  Choose a model"), lipgloss.Width("  Built-in models will be used if discovery fails."))
+	return minInt(maxInt(target, 42), available)
+}
+
+func setupModelBlockWidth(terminalWidth int, models []providerWizardModel) int {
+	available := maxInt(34, minInt(terminalWidth-8, 72))
+	target := lipgloss.Width("  Choose a model")
+	target = maxInt(target, lipgloss.Width("  search > Search model"))
+	for _, model := range models {
+		target = maxInt(target, 4+lipgloss.Width(model.displayLabel()))
+		if detail := setupModelSelectedDetail(model); detail != "" {
+			target = maxInt(target, lipgloss.Width("  "+detail))
+		}
+	}
+	target = maxInt(target, 42)
+	return minInt(target, available)
+}
+
+func (m model) setupModelSearchLine(width int) string {
+	query := strings.TrimSpace(m.setup.modelQuery)
+	prompt := zeroTheme.userPrompt.Render("search > ")
+	cursor := zeroTheme.accent.Render("▌")
+	if query == "" {
+		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render("model name..."), width)
+	}
+	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
+}
+
+func (m model) setupModelStatus() string {
+	if m.setup.modelLoad {
+		return "Refreshing available models"
+	}
+	if m.setup.modelErr != "" {
+		return "Using built-in model list"
+	}
+	return ""
+}
+
+func (m model) setupModelRow(width int, index int, model providerWizardModel) string {
+	selected := index == m.setup.modelIndex
+	marker := "  "
+	style := zeroTheme.ink
+	if selected {
+		marker = "❯ "
+		style = zeroTheme.accent.Bold(true)
+	}
+	left := marker + style.Render(model.displayLabel())
+	return padSetupLine(left, width)
+}
+
+func setupModelSelectedDetail(model providerWizardModel) string {
+	parts := []string{}
+	if secondary := strings.TrimSpace(model.secondaryText()); secondary != "" && !providerWizardGenericModelDescription(secondary) {
+		parts = append(parts, secondary)
+	}
+	if meta := strings.TrimSpace(model.Meta); meta != "" {
+		parts = append(parts, meta)
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (m model) setupProviderLines(width int, height int) []string {
-	option := m.setupProvider()
 	rowWidth := setupProviderBlockWidth(width, m.setup.providers)
 	maxVisible := setupProviderMaxVisible(height, len(m.setup.providers))
 	start := selectableListStart(len(m.setup.providers), maxVisible, m.setup.selected)
@@ -318,10 +726,6 @@ func (m model) setupProviderLines(width int, height int) []string {
 		line := marker + style.Render(displayValue(option.Name, option.ID))
 		lines = append(lines, padSetupLine(line, rowWidth))
 	}
-	lines = append(lines,
-		blankSetupBlockLine(rowWidth),
-		padSetupLine("  "+zeroTheme.faint.Render(setupProviderDetail(option)), rowWidth),
-	)
 	return lines
 }
 
@@ -329,7 +733,7 @@ func setupProviderMaxVisible(height int, total int) int {
 	if total <= 0 {
 		return 0
 	}
-	maxVisible := height - 10
+	maxVisible := height - 8
 	if maxVisible < 6 {
 		maxVisible = 6
 	}
@@ -341,10 +745,9 @@ func setupProviderMaxVisible(height int, total int) int {
 
 func setupProviderBlockWidth(terminalWidth int, providers []SetupProviderOption) int {
 	available := maxInt(24, minInt(terminalWidth-8, 44))
-	target := maxInt(lipgloss.Width("  step 2/5"), lipgloss.Width("  Choose a provider"))
+	target := maxInt(lipgloss.Width("  2/6"), lipgloss.Width("  Choose a provider"))
 	for _, provider := range providers {
 		target = maxInt(target, 2+lipgloss.Width(displayValue(provider.Name, provider.ID)))
-		target = maxInt(target, lipgloss.Width("  "+setupProviderDetail(provider)))
 	}
 	target = maxInt(target, 32)
 	return minInt(target, available)
@@ -355,13 +758,6 @@ func blankSetupBlockLine(width int) string {
 		return ""
 	}
 	return strings.Repeat(" ", width)
-}
-
-func setupProviderDetail(option SetupProviderOption) string {
-	if option.Local {
-		return "Local provider. Default model: " + displayValue(option.DefaultModel, "local-model")
-	}
-	return "Default model: " + displayValue(option.DefaultModel, "provider default")
 }
 
 func (m model) setupCredentialLines(width int) []string {
@@ -424,6 +820,11 @@ func (m model) setupFooter() string {
 		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to continue")
 	case setupStageProvider:
 		return zeroTheme.faint.Render("↑/↓ choose   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue   q quit")
+	case setupStageModel:
+		if m.setup.modelLoad {
+			return zeroTheme.faint.Render("checking models...")
+		}
+		return zeroTheme.faint.Render("↑/↓ choose   type search   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue")
 	case setupStageWelcome:
 		return zeroTheme.accent.Render("Space") + zeroTheme.faint.Render(" to set up Zero")
 	default:

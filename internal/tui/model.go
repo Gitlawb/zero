@@ -359,7 +359,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
 		if m.setup.visible {
-			return m, nil
+			return m.handleSetupMouse(msg)
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -795,6 +795,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
+	case setupModelsDiscoveredMsg:
+		return m.applySetupModelsDiscovered(msg), nil
 	case modelPickerModelsDiscoveredMsg:
 		return m.applyModelPickerModelsDiscovered(msg), nil
 	}

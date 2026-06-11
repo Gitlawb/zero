@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,11 +10,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
 
 func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	var saved SetupSelection
 	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
 		Setup: SetupOptions{
 			Visible:    true,
 			Required:   true,
@@ -82,6 +87,9 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 
 func TestSetupCompletionResetsChatSurfaceInsideAltScreen(t *testing.T) {
 	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
 		Setup: SetupOptions{
 			Visible: true,
 			Providers: []SetupProviderOption{
@@ -130,6 +138,9 @@ func TestSetupCompletionResetsChatSurfaceInsideAltScreen(t *testing.T) {
 
 func TestSetupTakeoverBlocksPromptSubmission(t *testing.T) {
 	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
 		Setup: SetupOptions{
 			Visible: true,
 			Providers: []SetupProviderOption{
@@ -158,6 +169,7 @@ func TestSetupRightArrowDoesNotAdvance(t *testing.T) {
 		setupStageWelcome,
 		setupStageProvider,
 		setupStageCredentials,
+		setupStageModel,
 		setupStageReady,
 	} {
 		m := newModel(context.Background(), Options{
@@ -188,6 +200,91 @@ func TestSetupRightArrowDoesNotAdvance(t *testing.T) {
 	}
 	if saveCalls != 0 {
 		t.Fatalf("right arrow should not save setup, got %d save calls", saveCalls)
+	}
+}
+
+func TestSetupProviderMouseWheelChangesSelection(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+				{ID: "anthropic", Name: "Anthropic", DefaultModel: "claude-sonnet-4.5", EnvVar: "ANTHROPIC_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageProvider
+
+	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("provider wheel should not return a command")
+	}
+	if got := m.setupProvider().ID; got != "anthropic" {
+		t.Fatalf("provider after wheel down = %q, want anthropic", got)
+	}
+
+	updated, cmd = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("provider wheel should not return a command")
+	}
+	if got := m.setupProvider().ID; got != "openai" {
+		t.Fatalf("provider after wheel up = %q, want openai", got)
+	}
+}
+
+func TestSetupModelMouseWheelChangesSelection(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+
+	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("model wheel should not return a command")
+	}
+	if got := m.setupCurrentModel().ID; got == "" || got == "llama-3.3-70b-versatile" {
+		t.Fatalf("model after wheel down = %q, want non-default model", got)
+	}
+
+	updated, cmd = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("model wheel should not return a command")
+	}
+	if got := m.setupCurrentModel().ID; got != "llama-3.3-70b-versatile" {
+		t.Fatalf("model after wheel up = %q, want default model", got)
+	}
+}
+
+func TestSetupModelMouseWheelIgnoredWhileLoading(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+	m.setup.modelLoad = true
+
+	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("loading model wheel should not return a command")
+	}
+	if got := m.setup.modelIndex; got != 0 {
+		t.Fatalf("model index after wheel while loading = %d, want 0", got)
 	}
 }
 
@@ -231,6 +328,9 @@ func TestSetupEnterDoesNotAdvanceSpaceOnlyStages(t *testing.T) {
 
 func TestSetupProviderRequiresEnter(t *testing.T) {
 	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
 		Setup: SetupOptions{
 			Visible: true,
 			Providers: []SetupProviderOption{
@@ -310,6 +410,9 @@ func TestSetupCredentialsAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T)
 	const secret = "sk-pasted-secret"
 	var saved SetupSelection
 	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
 		Setup: SetupOptions{
 			Visible: true,
 			Providers: []SetupProviderOption{
@@ -357,7 +460,428 @@ func TestSetupCredentialsAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T)
 	}
 }
 
-func TestSetupProviderStepKeepsModelInSelectedDetail(t *testing.T) {
+func TestSetupModelStepSavesCatalogModelChoice(t *testing.T) {
+	var saved SetupSelection
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+			Save: func(selection SetupSelection) (SetupResult, error) {
+				saved = selection
+				return SetupResult{
+					Provider: config.ProviderProfile{
+						Name:      selection.CatalogID,
+						CatalogID: selection.CatalogID,
+						Model:     selection.Model,
+					},
+				}, nil
+			},
+		},
+	})
+	m.width = 120
+	m.height = 30
+	m.setup.stage = setupStageCredentials
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.setup.stage != setupStageModel {
+		t.Fatalf("stage = %v, want model", m.setup.stage)
+	}
+	if cmd == nil {
+		t.Fatal("entering the model step should start model discovery")
+	}
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "Checking available models") || strings.Contains(view, "llama-3.3-70b-versatile") {
+		t.Fatalf("model step should wait for discovery before showing fallback models:\n%s", view)
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+	view = plainRender(t, m.View())
+	for _, want := range []string{"Choose a model", "llama-3.3-70b-versatile", "openai/gpt-oss-120b"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("model step missing %q:\n%s", want, view)
+		}
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(model)
+	selected := m.setupCurrentModel().ID
+	if selected == "" || selected == "llama-3.3-70b-versatile" {
+		t.Fatalf("selected model after down = %q, want a non-default catalog model", selected)
+	}
+	for m.setup.stage != setupStageReady {
+		m = pressSetupContinue(m)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if saved.Model != selected {
+		t.Fatalf("saved model = %q, want selected model %q", saved.Model, selected)
+	}
+	if m.modelName != selected {
+		t.Fatalf("active model = %q, want %q", m.modelName, selected)
+	}
+}
+
+func TestSetupModelSearchFiltersAndSavesMatch(t *testing.T) {
+	var saved SetupSelection
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("offline")
+		},
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+			Save: func(selection SetupSelection) (SetupResult, error) {
+				saved = selection
+				return SetupResult{Provider: config.ProviderProfile{Name: selection.CatalogID, CatalogID: selection.CatalogID, Model: selection.Model}}, nil
+			},
+		},
+	})
+	m.setup.stage = setupStageCredentials
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("entering the model step should start model discovery")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("oss")})
+	m = updated.(model)
+	if got := m.setupCurrentModel().ID; got != "openai/gpt-oss-120b" {
+		t.Fatalf("filtered model = %q, want openai/gpt-oss-120b", got)
+	}
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "openai/gpt-oss-120b") || strings.Contains(view, "llama-3.3-70b-versatile") {
+		t.Fatalf("model search did not filter to oss models:\n%s", view)
+	}
+	for m.setup.stage != setupStageReady {
+		m = pressSetupContinue(m)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if saved.Model != "openai/gpt-oss-120b" {
+		t.Fatalf("saved model = %q, want openai/gpt-oss-120b", saved.Model)
+	}
+}
+
+func TestSetupModelLoadingBlocksSelectionAndSearch(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return []providermodeldiscovery.Model{{ID: "live-coder", Description: "Live Coder"}}, nil
+		},
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.width = 120
+	m.height = 30
+	m.setup.stage = setupStageCredentials
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("entering the model step should start model discovery")
+	}
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "Checking available models") || strings.Contains(view, "llama-3.3-70b-versatile") {
+		t.Fatalf("loading model step should not render fallback models:\n%s", view)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("oss")})
+	m = updated.(model)
+	if m.setup.modelQuery != "" {
+		t.Fatalf("model query while loading = %q, want empty", m.setup.modelQuery)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.setup.stage != setupStageModel {
+		t.Fatalf("enter while loading advanced stage to %v", m.setup.stage)
+	}
+	if !strings.Contains(m.setup.err, "still loading") {
+		t.Fatalf("loading enter error = %q, want still loading", m.setup.err)
+	}
+}
+
+func TestSetupModelSearchAcceptsQ(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("q should search on the model step, not quit setup")
+	}
+	if m.setup.modelQuery != "q" {
+		t.Fatalf("model query = %q, want q", m.setup.modelQuery)
+	}
+}
+
+func TestSetupModelFooterUsesEnter(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.width = 96
+	m.height = 24
+	m.setup.stage = setupStageModel
+
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "type search") || !strings.Contains(view, "Enter continue") {
+		t.Fatalf("model footer should advertise search and Enter, got:\n%s", view)
+	}
+	if strings.Contains(view, "Space to continue") {
+		t.Fatalf("model footer should not advertise Space, got:\n%s", view)
+	}
+}
+
+func TestSetupModelSearchPlaceholderPutsCursorBeforeHint(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "openai", Name: "OpenAI", DefaultModel: "gpt-4.1", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+
+	empty := plainRender(t, m.setupModelSearchLine(60))
+	if !strings.Contains(empty, "search > ▌model name...") {
+		t.Fatalf("empty search line = %q, want cursor before placeholder", empty)
+	}
+	if strings.Contains(empty, "model name...▌") {
+		t.Fatalf("empty search line should not place cursor after placeholder: %q", empty)
+	}
+
+	m.setup.modelQuery = "qwen"
+	filled := plainRender(t, m.setupModelSearchLine(60))
+	if !strings.Contains(filled, "search > qwen▌") {
+		t.Fatalf("filled search line = %q, want cursor after query", filled)
+	}
+}
+
+func TestSetupModelStepDoesNotSpinWithoutDiscovery(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "custom-provider", Name: "Custom Provider", DefaultModel: "custom-model"},
+			},
+		},
+	})
+	m.setup.stage = setupStageCredentials
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("custom setup provider should not start model discovery")
+	}
+	if m.setup.modelLoad {
+		t.Fatal("model step should not show a loading state when no discovery command starts")
+	}
+}
+
+func TestSetupModelStepUsesDiscoveredModels(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			captured = profile
+			return []providermodeldiscovery.Model{
+				{ID: "live-coder", Description: "Live Coder", ContextWindow: 128000, ToolCall: true},
+				{ID: "live-fast", Description: "Live Fast"},
+			}, nil
+		},
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "ollama", Name: "Ollama Local", DefaultModel: "llama3.1", Local: true},
+			},
+		},
+	})
+	m.width = 120
+	m.height = 30
+	m.setup.stage = setupStageCredentials
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	m = updated.(model)
+	if m.setup.stage != setupStageModel {
+		t.Fatalf("stage = %v, want model", m.setup.stage)
+	}
+	if cmd == nil {
+		t.Fatal("entering setup model step should start discovery")
+	}
+	view := plainRender(t, m.View())
+	if !strings.Contains(view, "Checking available models") || strings.Contains(view, "llama3.1") {
+		t.Fatalf("setup should wait for discovered models before showing fallback list:\n%s", view)
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+
+	if captured.CatalogID != "ollama" {
+		t.Fatalf("discovery profile = %#v, want ollama", captured)
+	}
+	view = plainRender(t, m.View())
+	if !strings.Contains(view, "Live Coder") || !strings.Contains(view, "live-coder") || !strings.Contains(view, "128K ctx") || strings.Contains(view, "details") || strings.Contains(view, "llama3.1") {
+		t.Fatalf("setup model step should render discovered models only:\n%s", view)
+	}
+}
+
+func TestSetupModelDiscoveryDoesNotApplyAfterLeavingModelStep(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+	m.setup.stage = setupStageSafety
+
+	updated := m.applySetupModelsDiscovered(setupModelsDiscoveredMsg{
+		providerID: "groq",
+		gen:        m.setup.modelGen,
+		models: []providermodeldiscovery.Model{
+			{ID: "live-coder", Description: "Live Coder"},
+		},
+	})
+
+	for _, model := range updated.setup.models {
+		if model.ID == "live-coder" {
+			t.Fatalf("late discovery result should not replace model selection after leaving step: %#v", updated.setup.models)
+		}
+	}
+}
+
+func TestSetupModelDiscoveryPreservesSelectedModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+	target := "openai/gpt-oss-120b"
+	for index, model := range m.setupFilteredModels() {
+		if model.ID == target {
+			m.setup.modelIndex = index
+			break
+		}
+	}
+	if got := m.setupCurrentModel().ID; got != target {
+		t.Fatalf("test setup selected %q, want %q", got, target)
+	}
+
+	updated := m.applySetupModelsDiscovered(setupModelsDiscoveredMsg{
+		providerID: "groq",
+		gen:        m.setup.modelGen,
+		models: []providermodeldiscovery.Model{
+			{ID: "live-coder", Description: "Live Coder"},
+			{ID: target, Description: "GPT OSS"},
+		},
+	})
+
+	if got := updated.setupCurrentModel().ID; got != target {
+		t.Fatalf("selected model after discovery = %q, want %q", got, target)
+	}
+}
+
+func TestSetupModelDiscoveryIgnoresStaleGeneration(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "groq", Name: "Groq", DefaultModel: "llama-3.3-70b-versatile", EnvVar: "GROQ_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageModel
+	m.resetSetupModels()
+	m.setup.modelGen = 2
+	m.setup.modelLoad = true
+
+	updated := m.applySetupModelsDiscovered(setupModelsDiscoveredMsg{
+		providerID: "groq",
+		gen:        1,
+		models: []providermodeldiscovery.Model{
+			{ID: "live-coder", Description: "Live Coder"},
+		},
+	})
+
+	if !updated.setup.modelLoad {
+		t.Fatal("stale discovery result should not clear the active loading state")
+	}
+	for _, model := range updated.setup.models {
+		if model.ID == "live-coder" {
+			t.Fatalf("stale discovery result should not replace model list: %#v", updated.setup.models)
+		}
+	}
+}
+
+func TestSetupModelDiscoveryRedactsRequestAPIKey(t *testing.T) {
+	const oldSecret = "old-provider-token"
+	m := newModel(context.Background(), Options{
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			return nil, errors.New("models failed with " + profile.APIKey)
+		},
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "ollama-cloud", Name: "Ollama Cloud", DefaultModel: "qwen3-coder:480b", EnvVar: "OLLAMA_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageCredentials
+	m.setup.apiKey.SetValue(oldSecret)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("entering model step should start discovery")
+	}
+	m.setup.apiKey.SetValue("new-provider-token")
+	updated, _ = m.Update(cmd())
+	m = updated.(model)
+
+	if strings.Contains(m.setup.modelErr, oldSecret) {
+		t.Fatalf("model discovery error leaked request API key: %q", m.setup.modelErr)
+	}
+	if !strings.Contains(m.setup.modelErr, "[REDACTED]") {
+		t.Fatalf("model discovery error should redact request API key: %q", m.setup.modelErr)
+	}
+}
+
+func TestSetupProviderStepOmitsModelDetails(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		Setup: SetupOptions{
 			Visible: true,
@@ -372,18 +896,16 @@ func TestSetupProviderStepKeepsModelInSelectedDetail(t *testing.T) {
 	m.setup.stage = setupStageProvider
 
 	foundProviderRow := false
-	foundDefaultDetail := false
 	titleColumn := -1
 	providerColumn := -1
-	defaultColumn := -1
-	for _, line := range strings.Split(plainRender(t, m.View()), "\n") {
+	view := plainRender(t, m.View())
+	if strings.Contains(view, "Default model:") || strings.Contains(view, "gpt-4.1") || strings.Contains(view, "claude-sonnet-4.5") {
+		t.Fatalf("provider step should not render model details:\n%s", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
 		row := strings.TrimSpace(line)
 		if strings.Contains(row, "Choose a provider") {
 			titleColumn = displayColumn(line, "Choose a provider")
-		}
-		if strings.Contains(row, "Default model: gpt-4.1") {
-			foundDefaultDetail = true
-			defaultColumn = displayColumn(line, "Default model")
 		}
 		if !strings.Contains(row, "OpenAI") {
 			continue
@@ -399,12 +921,6 @@ func TestSetupProviderStepKeepsModelInSelectedDetail(t *testing.T) {
 	}
 	if !foundProviderRow {
 		t.Fatal("provider row missing from setup view")
-	}
-	if !foundDefaultDetail {
-		t.Fatal("selected provider default model detail missing from setup view")
-	}
-	if providerColumn < 0 || defaultColumn < 0 || providerColumn != defaultColumn {
-		t.Fatalf("default model detail should align with provider names, provider column %d detail column %d", providerColumn, defaultColumn)
 	}
 	if titleColumn < 0 || titleColumn != providerColumn {
 		t.Fatalf("provider title should align with provider names, title column %d provider column %d", titleColumn, providerColumn)
@@ -554,13 +1070,13 @@ func TestSetupProgressRendersAboveFooter(t *testing.T) {
 	stepIndex := -1
 	footerIndex := -1
 	for index, line := range lines {
-		if strings.Contains(line, "2/5") {
+		if strings.Contains(line, "2/6") {
 			stepIndex = index
 		}
 		if strings.Contains(line, "Enter continue") {
 			footerIndex = index
 		}
-		if strings.Contains(line, "Choose a provider") && strings.Contains(line, "2/5") {
+		if strings.Contains(line, "Choose a provider") && strings.Contains(line, "2/6") {
 			t.Fatalf("progress should not render in setup body: %q", line)
 		}
 	}
@@ -595,12 +1111,19 @@ func TestSetupReadyFooterUsesEnter(t *testing.T) {
 }
 
 func pressSetupContinue(m model) model {
-	if m.setup.stage == setupStageProvider || m.setupCredentialInputActive() || m.setup.stage == setupStageReady {
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		return updated.(model)
+	var updated tea.Model
+	var cmd tea.Cmd
+	if m.setup.stage == setupStageProvider || m.setupCredentialInputActive() || m.setup.stage == setupStageModel || m.setup.stage == setupStageReady {
+		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	} else {
+		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
 	}
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
-	return updated.(model)
+	m = updated.(model)
+	if cmd != nil {
+		updated, _ = m.Update(cmd())
+		m = updated.(model)
+	}
+	return m
 }
 
 func displayColumnForVisibleLine(t *testing.T, view string, marker string) int {
