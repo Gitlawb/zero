@@ -153,10 +153,16 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		}
 	}
 	// effectiveNetwork collapses an empty-allowlist scoped policy to deny, so a
-	// misconfigured scoped policy still fails closed here; a populated scoped
-	// policy permits network-risk tools (the egress proxy enforces the allowlist
-	// at the transport layer). Allow/deny behaviour is unchanged.
-	if effectiveNetwork(policy) == NetworkDeny && HasRiskCategory(risk, "network") {
+	// misconfigured scoped policy still fails closed here. A populated scoped policy
+	// permits network-risk tools ONLY when the active backend can actually route
+	// through the filtering proxy; otherwise (bubblewrap's isolated netns has no
+	// bridge, policy-only has no isolation) the allowlist is unenforceable and must
+	// fail closed rather than run with unrestricted networking. Allow is unchanged.
+	netMode := effectiveNetwork(policy)
+	if netMode == NetworkScoped && !engine.backend.EnforcesScopedEgress() {
+		netMode = NetworkDeny
+	}
+	if netMode == NetworkDeny && HasRiskCategory(risk, "network") {
 		return deny(request, risk, ViolationNetwork, "", "network access is blocked by sandbox policy", false)
 	}
 	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {

@@ -136,15 +136,15 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	switch backend.Name {
 	case BackendBubblewrap:
 		if backend.Available && backend.Executable != "" {
-			egress, err := startScopedEgress(policy)
-			if err != nil {
-				return CommandPlan{}, err
-			}
-			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend, egress), nil
+			// Bubblewrap isolates the network namespace (--unshare-net) with no
+			// bridge to the host loopback proxy, so it cannot enforce scoped egress;
+			// a scoped policy collapses to deny (no proxy is started). Evaluate's
+			// network gate denies network-risk tools for this backend to match.
+			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend), nil
 		}
 	case BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
-			egress, err := startScopedEgress(policy)
+			egress, err := startScopedEgress(policy, backend)
 			if err != nil {
 				return CommandPlan{}, err
 			}
@@ -166,12 +166,17 @@ type scopedEgress struct {
 }
 
 // startScopedEgress starts the local filtering proxy when the policy's effective
-// network mode is NetworkScoped, returning its address. It fails closed: a
-// proxy-start error is returned so the build aborts rather than degrading to an
-// unproxied (open) plan. A non-scoped or empty-allowlist policy returns (nil,
-// nil) and the command is wired with the existing allow/deny network behaviour.
-func startScopedEgress(policy Policy) (*scopedEgress, error) {
+// network mode is NetworkScoped AND the backend can actually route through it,
+// returning its address. It fails closed: a proxy-start error is returned so the
+// build aborts rather than degrading to an unproxied (open) plan. A non-scoped or
+// empty-allowlist policy, or a backend that cannot enforce scoped egress (e.g.
+// bubblewrap's isolated netns), returns (nil, nil); the caller then wires the
+// command with the backend's deny-equivalent network isolation.
+func startScopedEgress(policy Policy, backend Backend) (*scopedEgress, error) {
 	if effectiveNetwork(policy) != NetworkScoped {
+		return nil, nil
+	}
+	if !backend.EnforcesScopedEgress() {
 		return nil, nil
 	}
 	proxy, err := startEgressProxy(egressOptions{
@@ -250,7 +255,7 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 	return workspaceRoot, commandDir, relativeDir, nil
 }
 
-func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir string, writeRoots []string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
+func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir string, writeRoots []string, policy Policy, backend Backend) CommandPlan {
 	sandboxDir := bubblewrapWorkspace
 	if relativeDir != "" {
 		sandboxDir = filepath.ToSlash(filepath.Join(bubblewrapWorkspace, relativeDir))
@@ -284,11 +289,10 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 		args = append(args, "--bind", root, root)
 	}
 	args = append(args, "--chdir", sandboxDir)
-	// Scoped egress keeps the no-raw-network isolation of deny (--unshare-net) but
-	// reaches the filtering proxy via a loopback bridge: the proxy listens on the
-	// host's 127.0.0.1 and the sandbox is given a relay to that port plus the
-	// HTTP(S)_PROXY env so well-behaved clients route through it. deny stays a
-	// hard --unshare-net with no bridge; allow shares the host network unchanged.
+	// Both deny and scoped isolate the network namespace with --unshare-net (no raw
+	// host network). Scoped does NOT get the filtering proxy here: bubblewrap has no
+	// bridge from its netns to the host loopback proxy, so scoped collapses to deny
+	// until a real relay (e.g. slirp4netns) is added. allow shares the host network.
 	if network := effectiveNetwork(policy); network == NetworkDeny || network == NetworkScoped {
 		args = append(args, "--unshare-net")
 	}
@@ -297,14 +301,6 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 	}
 	args = append(args, "--clearenv")
 	setenvLines := sandboxEnvironment(policy, BackendBubblewrap, bubblewrapWorkspace)
-	if egress != nil {
-		// --share-net would defeat the isolation; instead the sandbox keeps its own
-		// netns (--unshare-net above) and reaches the host's loopback proxy through a
-		// relay bridge into the namespace. The proxy address is exported as
-		// HTTP(S)_PROXY/ALL_PROXY so well-behaved clients route through it; NO_PROXY
-		// keeps loopback itself direct.
-		setenvLines = append(setenvLines, scopedProxyEnv(egress.addr)...)
-	}
 	for _, env := range setenvLines {
 		key, value, ok := strings.Cut(env, "=")
 		if ok {
@@ -313,7 +309,7 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 	}
 	args = append(args, "--", spec.Name)
 	args = append(args, spec.Args...)
-	plan := CommandPlan{
+	return CommandPlan{
 		Backend:       backend,
 		WorkspaceRoot: workspaceRoot,
 		Policy:        policy,
@@ -322,10 +318,6 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 		Args:          args,
 		SandboxDir:    sandboxDir,
 	}
-	if egress != nil {
-		plan.cleanup = egress.cleanup
-	}
-	return plan
 }
 
 func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots []string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {

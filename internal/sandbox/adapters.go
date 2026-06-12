@@ -17,8 +17,22 @@ type Backend struct {
 	Fallback        bool        `json:"fallback"`
 	CommandWrapping bool        `json:"commandWrapping"`
 	NativeIsolation bool        `json:"nativeIsolation"`
-	Executable      string      `json:"executable,omitempty"`
-	Message         string      `json:"message,omitempty"`
+	// ScopedEgress reports whether this backend can route a sandboxed process's
+	// traffic through the local filtering proxy so a NetworkScoped allowlist is
+	// actually enforced. Only sandbox-exec can today (it shares the host network
+	// under a seatbelt profile that restricts outbound to the proxy port);
+	// bubblewrap isolates the network namespace with no bridge to the host proxy,
+	// so scoped egress there collapses to deny until a real relay exists.
+	ScopedEgress bool   `json:"scopedEgress,omitempty"`
+	Executable   string `json:"executable,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+// EnforcesScopedEgress reports whether a populated NetworkScoped allowlist can be
+// enforced by this backend. When false, scoped egress must fail closed (collapse
+// to deny) rather than silently run with unrestricted networking.
+func (backend Backend) EnforcesScopedEgress() bool {
+	return backend.Available && backend.Executable != "" && backend.ScopedEgress
 }
 
 type BackendPlan struct {
@@ -72,8 +86,11 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 		Fallback:        false,
 		CommandWrapping: true,
 		NativeIsolation: true,
-		Executable:      executable,
-		Message:         message,
+		// Only sandbox-exec can enforce scoped egress today; bubblewrap's isolated
+		// network namespace has no bridge to the host filtering proxy.
+		ScopedEgress: name == BackendSandboxExec,
+		Executable:   executable,
+		Message:      message,
 	}
 }
 

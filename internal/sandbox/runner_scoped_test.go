@@ -2,15 +2,15 @@ package sandbox
 
 import (
 	"context"
-	"net"
 	"strings"
 	"testing"
 )
 
-// TestScopedNetworkGateInEvaluate verifies the preflight network gate: a
-// populated scoped policy permits a network-risk tool (the proxy enforces the
-// allowlist), while an empty-allowlist scoped policy fails closed exactly like
-// NetworkDeny.
+// TestScopedNetworkGateInEvaluate verifies the preflight network gate: a populated
+// scoped policy permits a network-risk tool ONLY when the active backend can
+// actually route through the filtering proxy. A backend that cannot enforce scoped
+// egress (bubblewrap's isolated netns has no bridge; policy-only has no isolation)
+// fails closed and denies, exactly like an empty-allowlist scoped policy.
 func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	root := t.TempDir()
 	networkRequest := Request{
@@ -21,13 +21,29 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"url": "https://github.com"},
 	}
+	sandboxExec := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true}
 
-	populated := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil)})
-	if decision := populated.Evaluate(context.Background(), networkRequest); decision.Action == ActionDeny {
-		t.Fatalf("populated scoped policy denied a network tool: %#v", decision)
+	// An enforcing backend lets a populated scoped policy permit a network tool.
+	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: sandboxExec})
+	if decision := enforcing.Evaluate(context.Background(), networkRequest); decision.Action == ActionDeny {
+		t.Fatalf("enforcing backend + scoped policy denied a network tool: %#v", decision)
 	}
 
-	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy(nil, nil)})
+	// Backends that cannot enforce scoped egress must fail closed (deny).
+	unenforceable := map[string]Backend{
+		"bubblewrap":  {Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		"policy-only": {},
+	}
+	for name, backend := range unenforceable {
+		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: backend})
+		decision := engine.Evaluate(context.Background(), networkRequest)
+		if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
+			t.Fatalf("%s backend must deny scoped network it cannot enforce, got %#v", name, decision)
+		}
+	}
+
+	// Empty allowlist still fails closed regardless of backend.
+	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy(nil, nil), Backend: sandboxExec})
 	decision := empty.Evaluate(context.Background(), networkRequest)
 	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
 		t.Fatalf("empty scoped policy must deny network like NetworkDeny, got %#v", decision)
@@ -67,12 +83,20 @@ func TestEffectiveNetworkScopedEmptyIsDeny(t *testing.T) {
 	}
 }
 
-// TestBubblewrapScopedPlanWiresProxy verifies a scoped bubblewrap plan keeps
-// --unshare-net (no raw network) yet exports the proxy env so well-behaved
-// clients route through the local filtering proxy, and that the plan carries a
-// cleanup that shuts the proxy down.
-func TestBubblewrapScopedPlanWiresProxy(t *testing.T) {
+// TestBubblewrapScopedPlanFailsClosedWithoutProxy verifies that, because
+// bubblewrap isolates the network namespace (--unshare-net) with no bridge to the
+// host loopback proxy, a scoped policy collapses to deny: the plan keeps
+// --unshare-net, never exports a proxy, and never starts an (unreachable) proxy.
+func TestBubblewrapScopedPlanFailsClosedWithoutProxy(t *testing.T) {
 	root := t.TempDir()
+	started := false
+	restore := startEgressProxy
+	startEgressProxy = func(egressOptions) (*egressProxy, error) {
+		started = true
+		return nil, errEmptyAllowlist
+	}
+	defer func() { startEgressProxy = restore }()
+
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy([]string{"github.com"}, nil),
@@ -86,23 +110,13 @@ func TestBubblewrapScopedPlanWiresProxy(t *testing.T) {
 
 	joined := strings.Join(plan.Args, " ")
 	if !strings.Contains(joined, "--unshare-net") {
-		t.Fatalf("scoped bubblewrap plan dropped --unshare-net:\n%s", joined)
+		t.Fatalf("scoped bubblewrap plan must keep --unshare-net (deny-equivalent):\n%s", joined)
 	}
-	proxyAddr := proxySetenvValue(t, plan.Args, "HTTP_PROXY")
-	if proxyAddr == "" {
-		t.Fatalf("scoped bubblewrap plan missing HTTP_PROXY setenv:\n%s", joined)
+	if proxyAddr := proxySetenvValue(t, plan.Args, "HTTP_PROXY"); proxyAddr != "" {
+		t.Fatalf("scoped bubblewrap plan must not export a proxy it cannot reach:\n%s", joined)
 	}
-	for _, key := range []string{"HTTPS_PROXY", "ALL_PROXY"} {
-		if got := proxySetenvValue(t, plan.Args, key); got != proxyAddr {
-			t.Fatalf("%s setenv = %q, want %q", key, got, proxyAddr)
-		}
-	}
-	if got := proxySetenvValue(t, plan.Args, "NO_PROXY"); !strings.Contains(got, "localhost") {
-		t.Fatalf("NO_PROXY setenv = %q, want it to include localhost", got)
-	}
-	host, _, err := net.SplitHostPort(strings.TrimPrefix(proxyAddr, "http://"))
-	if err != nil || host != "127.0.0.1" {
-		t.Fatalf("proxy addr %q not bound to loopback: host=%q err=%v", proxyAddr, host, err)
+	if started {
+		t.Fatal("bubblewrap must not start an unreachable egress proxy for a scoped policy")
 	}
 }
 
@@ -114,7 +128,7 @@ func TestSandboxExecScopedPlanWiresProxy(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy([]string{"github.com"}, nil),
-		Backend:       Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec"},
+		Backend:       Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {
@@ -176,7 +190,8 @@ func TestScopedProxyStartFailureDeniesNetwork(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy([]string{"github.com"}, nil),
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		// sandbox-exec actually starts the proxy, so its failure must fail closed.
+		Backend: Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true},
 	})
 	// Force the proxy factory to fail; the build must surface an error rather than
 	// degrade to an unproxied (open) network plan.
