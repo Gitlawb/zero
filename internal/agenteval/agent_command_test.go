@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentCommandRunnerExpandsPlaceholdersAndUsesWorkspaceDir(t *testing.T) {
@@ -58,6 +60,56 @@ func TestCommandAgentRunnerCapturesStdoutStderrAndExitCode(t *testing.T) {
 	}
 	if result.Stderr != "agent stderr\n" {
 		t.Fatalf("Stderr = %q", result.Stderr)
+	}
+}
+
+func TestCommandAgentRunnerTruncatesOversizedOutput(t *testing.T) {
+	runner := CommandAgentRunner{
+		Command:     helperCommand("spew", "5000"),
+		OutputLimit: 1000,
+	}
+
+	result := runner.Run(context.Background(), AgentRunInput{WorkspacePath: t.TempDir()})
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0; result=%#v", result.ExitCode, result)
+	}
+	if !result.Truncated {
+		t.Fatalf("expected Truncated=true; stdout len=%d", len(result.Stdout))
+	}
+	if len(result.Stdout) != 1000 {
+		t.Fatalf("captured stdout len = %d, want 1000", len(result.Stdout))
+	}
+}
+
+func TestCommandAgentRunnerTimesOutHangingAgent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	runner := CommandAgentRunner{Command: helperCommand("sleep")}
+
+	start := time.Now()
+	result := runner.Run(ctx, AgentRunInput{WorkspacePath: t.TempDir()})
+
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("runner did not honor timeout; elapsed=%s", elapsed)
+	}
+	if result.ExitCode != -1 {
+		t.Fatalf("ExitCode = %d, want -1; result=%#v", result.ExitCode, result)
+	}
+	if result.Error == "" {
+		t.Fatalf("expected a timeout error; result=%#v", result)
+	}
+}
+
+func TestExpandAgentCommandDoesNotReexpandInjectedPlaceholders(t *testing.T) {
+	got := expandAgentCommand(
+		[]string{"agent", "{prompt}", "{task_id}"},
+		AgentRunInput{Prompt: "edit {workspace} now", WorkspacePath: "/ws", TaskID: "t1"},
+	)
+
+	want := []string{"agent", "edit {workspace} now", "t1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expandAgentCommand = %#v, want %#v", got, want)
 	}
 }
 
@@ -160,6 +212,17 @@ func TestCommandAgentRunnerHelperProcess(t *testing.T) {
 		os.Stdout.WriteString("agent stdout\n")
 		os.Stderr.WriteString("agent stderr\n")
 		os.Exit(7)
+	case "spew":
+		if len(args) < 3 {
+			os.Exit(2)
+		}
+		count, err := strconv.Atoi(args[2])
+		if err != nil {
+			os.Exit(2)
+		}
+		os.Stdout.Write([]byte(strings.Repeat("a", count)))
+	case "sleep":
+		time.Sleep(30 * time.Second)
 	default:
 		os.Exit(2)
 	}

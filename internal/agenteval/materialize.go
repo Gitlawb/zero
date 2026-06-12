@@ -51,9 +51,11 @@ func (Materializer) MaterializeTask(ctx context.Context, suitePath string, task 
 		return Workspace{}, fmt.Errorf("create workspace: %w", err)
 	}
 	if err := copyFixtureDir(fixturePath, workspacePath); err != nil {
+		_ = os.RemoveAll(workspacePath)
 		return Workspace{}, err
 	}
 	if err := initGitBaseline(ctx, workspacePath); err != nil {
+		_ = os.RemoveAll(workspacePath)
 		return Workspace{}, err
 	}
 	return Workspace{Path: workspacePath, TaskID: task.ID, FixturePath: fixturePath}, nil
@@ -109,7 +111,10 @@ func copyFixtureDir(src string, dst string) error {
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			return nil
+			// Reject symlinks, devices, sockets, and other non-regular entries
+			// rather than silently dropping them, which would materialize an
+			// incomplete workspace and skew scoring.
+			return fmt.Errorf("unsupported fixture entry %q: only regular files and directories are supported", rel)
 		}
 		return copyFixtureFile(path, target, info.Mode().Perm())
 	})
@@ -123,14 +128,19 @@ func copyFixtureFile(src string, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	target, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
-	defer target.Close()
-	_, err = io.Copy(target, source)
-	return err
+	_, copyErr := io.Copy(target, source)
+	// Close may flush buffered data and surface write errors (e.g. disk full),
+	// so its error must not be discarded.
+	closeErr := target.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func initGitBaseline(ctx context.Context, workspace string) error {

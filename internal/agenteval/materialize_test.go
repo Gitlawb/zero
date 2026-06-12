@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMaterializeTaskCopiesFixtureAndInitializesGit(t *testing.T) {
@@ -36,8 +37,73 @@ func TestMaterializeTaskCopiesFixtureAndInitializesGit(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace.Path, "go.mod")); err != nil {
 		t.Fatalf("fixture was not copied: %v", err)
 	}
-	if output, err := exec.Command("git", "-C", workspace.Path, "status", "--porcelain").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "" {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, "git", "-C", workspace.Path, "status", "--porcelain").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "" {
 		t.Fatalf("workspace baseline is dirty: err=%v output=%s", err, output)
+	}
+}
+
+func TestMaterializeTaskRejectsSymlinkFixtureEntryAndCleansUp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on windows")
+	}
+	root := t.TempDir()
+	suitePath := filepath.Join(root, "suite.json")
+	fixturePath := filepath.Join(root, "fixtures", "source")
+	if err := os.MkdirAll(fixturePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixturePath, "real.txt"), []byte("real"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.txt", filepath.Join(fixturePath, "link.txt")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	task := Task{ID: "symlink-task", WorkspaceFixture: "fixtures/source"}
+	workRoot := t.TempDir()
+
+	_, err := Materializer{}.MaterializeTask(context.Background(), suitePath, task, MaterializeInput{WorkRoot: workRoot})
+	if err == nil {
+		t.Fatal("MaterializeTask returned nil error for a symlink fixture entry")
+	}
+	if !strings.Contains(err.Error(), "unsupported fixture entry") {
+		t.Fatalf("error %q does not mention unsupported fixture entry", err)
+	}
+	entries, readErr := os.ReadDir(workRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("work root was not cleaned up after error: %v", entries)
+	}
+}
+
+func TestMaterializeTaskPreservesExecutableBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix file mode bits are not preserved on windows")
+	}
+	root := t.TempDir()
+	suitePath := filepath.Join(root, "suite.json")
+	fixturePath := filepath.Join(root, "fixtures", "source")
+	if err := os.MkdirAll(fixturePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixturePath, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	task := Task{ID: "mode-task", WorkspaceFixture: "fixtures/source"}
+
+	workspace, err := Materializer{}.MaterializeTask(context.Background(), suitePath, task, MaterializeInput{WorkRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("MaterializeTask: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(workspace.Path, "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("executable bit not preserved: mode=%v", info.Mode())
 	}
 }
 

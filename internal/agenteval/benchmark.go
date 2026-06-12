@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 type BenchmarkInput struct {
@@ -12,6 +13,9 @@ type BenchmarkInput struct {
 	WorkRoot       string
 	Models         []string
 	KeepWorkspaces bool
+	// Timeout bounds each task's materialization, agent run, and scoring. A
+	// non-positive value leaves the task unbounded.
+	Timeout time.Duration
 }
 
 type BenchmarkReport struct {
@@ -89,6 +93,11 @@ func (harness Harness) Run(ctx context.Context, suitePath string, suite Suite, i
 }
 
 func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suite, task Task, model string, input BenchmarkInput) BenchmarkTaskReport {
+	if input.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, input.Timeout)
+		defer cancel()
+	}
 	taskReport := BenchmarkTaskReport{TaskID: task.ID, Model: model}
 	if harness.Agent == nil {
 		taskReport.Agent = AgentRunResult{ExitCode: -1, Error: "agent command is required"}
@@ -110,7 +119,7 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 	taskReport.WorkspacePath = workspace.Path
 	taskReport.FixturePath = workspace.FixturePath
 	if !input.KeepWorkspaces {
-		defer os.RemoveAll(workspace.Path)
+		defer func() { _ = os.RemoveAll(workspace.Path) }()
 	}
 
 	agentResult := harness.Agent.Run(ctx, AgentRunInput{

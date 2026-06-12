@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/agenteval"
 )
 
 func TestRunEvalHelpIsListed(t *testing.T) {
@@ -329,6 +332,207 @@ func TestRunEvalBenchDefaultHarnessRunsModelMatrix(t *testing.T) {
 		!strings.HasPrefix(decoded.Failures[0].ID, "model-a.document-stream-json-verify-events") ||
 		!strings.HasPrefix(decoded.Failures[len(decoded.Failures)-1].ID, "model-b.document-stream-json-verify-events") {
 		t.Fatalf("model-prefixed failures = %#v", decoded.Failures)
+	}
+}
+
+func TestRunEvalBenchTextOutputShowsScores(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite", "evals/context.json",
+		"--agent-command", "zero", "exec", "{prompt}",
+	}, &stdout, &stderr, appDeps{
+		runAgentEval: func(_ context.Context, _ agentEvalOptions) (agentEvalReport, error) {
+			// agentEvalReportFromBenchmark populates both Tasks and Total; the
+			// text formatter must still surface the scored tallies.
+			return agentEvalReport{
+				Suite:  "quality-context",
+				Status: "fail",
+				OK:     false,
+				Tasks:  2,
+				Total:  2,
+				Passed: 1,
+				Failed: 1,
+			}, nil
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider-style failure exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "summary: 2 total, 1 passed, 1 failed, 0 blocked, 0 errors") {
+		t.Fatalf("expected scored summary in bench text output, got:\n%s", out)
+	}
+	if strings.Contains(out, "tasks, 0 checks") {
+		t.Fatalf("bench text output must not hide scores behind the validate-style summary:\n%s", out)
+	}
+}
+
+func TestRunEvalBenchTextOutputSurfacesWorkRoot(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite", "evals/context.json",
+		"--keep-workspaces",
+		"--agent-command", "zero", "exec", "{prompt}",
+	}, &stdout, &stderr, appDeps{
+		runAgentEval: func(_ context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if !options.KeepWorkspaces {
+				t.Fatalf("expected keep-workspaces option: %#v", options)
+			}
+			return agentEvalReport{
+				Suite:    "quality-context",
+				Status:   "pass",
+				OK:       true,
+				Total:    1,
+				Passed:   1,
+				WorkRoot: "/tmp/zero-eval-abc",
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected success exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "work-root: /tmp/zero-eval-abc") {
+		t.Fatalf("expected kept work root in text output, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunEvalBenchKeepWorkspacesSurfacesRealWorkRoot(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	suitePath := filepath.Join("..", "agenteval", "testdata", "sample_suite.json")
+	workRoot := t.TempDir()
+
+	// Drive the real defaultRunAgentEval (appDeps{}) so the keep-workspaces
+	// WorkRoot wiring is exercised, not just the formatter.
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite", suitePath,
+		"--task", "document-stream-json-verify-events",
+		"--work-root", workRoot,
+		"--keep-workspaces",
+	}, &stdout, &stderr, appDeps{})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider-style exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "work-root: "+workRoot) {
+		t.Fatalf("expected real work root surfaced in text output, got:\n%s", stdout.String())
+	}
+}
+
+func TestAgentEvalReportFromBenchmarkSurfacesTruncation(t *testing.T) {
+	report := agenteval.BenchmarkReport{
+		SuiteID: "s",
+		OK:      true,
+		Summary: agenteval.BenchmarkSummary{TotalTasks: 1, PassedTasks: 1},
+		Tasks: []agenteval.BenchmarkTaskReport{{
+			TaskID: "t1",
+			Agent:  agenteval.AgentRunResult{ExitCode: 0, Truncated: true},
+			Report: agenteval.Report{Status: agenteval.StatusPass, OK: true},
+		}},
+	}
+
+	converted := agentEvalReportFromBenchmark(agenteval.Suite{ID: "s", Name: "S"}, report)
+
+	if !converted.Truncated {
+		t.Fatal("expected Truncated to be surfaced from the task agent result")
+	}
+	if text := formatAgentEvalReport(converted); !strings.Contains(text, "note: agent output was truncated") {
+		t.Fatalf("expected truncation note in text output:\n%s", text)
+	}
+}
+
+func TestRunEvalBenchParsesTimeout(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite", "evals/context.json",
+		"--timeout", "90s",
+		"--json",
+		"--agent-command", "zero", "exec", "{prompt}",
+	}, &stdout, &stderr, appDeps{
+		runAgentEval: func(_ context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if options.Timeout != 90*time.Second {
+				t.Fatalf("Timeout = %s, want 90s", options.Timeout)
+			}
+			return agentEvalReport{Suite: "quality-context", OK: true, Total: 1, Passed: 1}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected success exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+}
+
+func TestRunEvalTimeoutValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "run mode rejected",
+			args: []string{"eval", "run", "--suite", "evals/context.json", "--timeout", "5s"},
+			want: "--timeout is only valid for eval bench",
+		},
+		{
+			name: "invalid duration",
+			args: []string{"eval", "bench", "--suite", "evals/context.json", "--timeout=soon"},
+			want: "--timeout must be a Go duration",
+		},
+		{
+			name: "negative duration",
+			args: []string{"eval", "bench", "--suite", "evals/context.json", "--timeout=-5s"},
+			want: "--timeout must not be negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithDeps(tt.args, &stdout, &stderr, appDeps{
+				runAgentEval: func(context.Context, agentEvalOptions) (agentEvalReport, error) {
+					t.Fatal("runAgentEval should not be called for invalid --timeout")
+					return agentEvalReport{}, nil
+				},
+			})
+
+			if exitCode != exitUsage {
+				t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+			}
+			if !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("expected %q, got %q", tt.want, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunEvalRuntimeErrorReturnsCrashExit(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"eval", "bench", "--suite", "evals/context.json"}, &stdout, &stderr, appDeps{
+		runAgentEval: func(context.Context, agentEvalOptions) (agentEvalReport, error) {
+			return agentEvalReport{}, agentEvalRuntimeError{errors.New("create benchmark work root: disk full")}
+		},
+	})
+
+	if exitCode != exitCrash {
+		t.Fatalf("expected crash exit %d, got %d", exitCrash, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "disk full") {
+		t.Fatalf("expected runtime error message in stderr, got %q", stderr.String())
 	}
 }
 

@@ -3,27 +3,39 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agenteval"
 )
 
 type agentEvalOptions struct {
-	Mode           string   `json:"mode"`
-	SuitePath      string   `json:"suite_path"`
-	TaskID         string   `json:"task_id,omitempty"`
-	WorkspacePath  string   `json:"workspace_path,omitempty"`
-	WorkRoot       string   `json:"work_root,omitempty"`
-	AgentCommand   []string `json:"agent_command,omitempty"`
-	Models         []string `json:"models,omitempty"`
-	KeepWorkspaces bool     `json:"keep_workspaces,omitempty"`
-	ReportDir      string   `json:"report_dir,omitempty"`
-	JSON           bool     `json:"json"`
+	Mode           string        `json:"mode"`
+	SuitePath      string        `json:"suite_path"`
+	TaskID         string        `json:"task_id,omitempty"`
+	WorkspacePath  string        `json:"workspace_path,omitempty"`
+	WorkRoot       string        `json:"work_root,omitempty"`
+	AgentCommand   []string      `json:"agent_command,omitempty"`
+	Models         []string      `json:"models,omitempty"`
+	KeepWorkspaces bool          `json:"keep_workspaces,omitempty"`
+	Timeout        time.Duration `json:"timeout,omitempty"`
+	ReportDir      string        `json:"report_dir,omitempty"`
+	JSON           bool          `json:"json"`
 }
+
+// agentEvalRuntimeError marks an eval failure that is a runtime/environment
+// problem (e.g. failing to create a work root) rather than a usage error, so
+// the command can exit with a crash code instead of the usage code.
+type agentEvalRuntimeError struct{ err error }
+
+func (e agentEvalRuntimeError) Error() string { return e.err.Error() }
+
+func (e agentEvalRuntimeError) Unwrap() error { return e.err }
 
 type agentEvalReport struct {
 	Suite      string                     `json:"suite"`
@@ -38,6 +50,8 @@ type agentEvalReport struct {
 	Failed     int                        `json:"failed"`
 	Blocked    int                        `json:"blocked"`
 	Errors     int                        `json:"errors"`
+	Truncated  bool                       `json:"truncated,omitempty"`
+	WorkRoot   string                     `json:"work_root,omitempty"`
 	ReportPath string                     `json:"report_path,omitempty"`
 	Failures   []agentEvalFailure         `json:"failures,omitempty"`
 	Benchmark  *agenteval.BenchmarkReport `json:"benchmark,omitempty"`
@@ -61,6 +75,10 @@ func runAgentEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 	}
 	report, err := deps.runAgentEval(context.Background(), options)
 	if err != nil {
+		var runtimeErr agentEvalRuntimeError
+		if errors.As(err, &runtimeErr) {
+			return writeAppError(stderr, runtimeErr.Error(), exitCrash)
+		}
 		return writeExecUsageError(stderr, err.Error())
 	}
 	if options.ReportDir != "" {
@@ -202,6 +220,33 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 				return options, false, err
 			}
 			options.Models = appendAgentEvalModels(options.Models, value)
+		case arg == "--timeout":
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--timeout is only valid for eval bench"}
+			}
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			duration, err := parseEvalTimeout(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.Timeout = duration
+			index = next
+		case strings.HasPrefix(arg, "--timeout="):
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--timeout is only valid for eval bench"}
+			}
+			value, err := requiredInlineFlagValue(arg, "--timeout")
+			if err != nil {
+				return options, false, err
+			}
+			duration, err := parseEvalTimeout(value)
+			if err != nil {
+				return options, false, err
+			}
+			options.Timeout = duration
 		case arg == "--agent-command":
 			if options.Mode != "bench" {
 				return options, false, execUsageError{"--agent-command is only valid for eval bench"}
@@ -279,6 +324,18 @@ func appendAgentEvalModels(models []string, value string) []string {
 	return models
 }
 
+func parseEvalTimeout(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, execUsageError{fmt.Sprintf("--timeout must be a Go duration such as 90s or 5m: %v", err)}
+	}
+	if duration < 0 {
+		return 0, execUsageError{"--timeout must not be negative"}
+	}
+	return duration, nil
+}
+
 func formatAgentEvalReport(report agentEvalReport) string {
 	lines := []string{
 		"Zero agent eval",
@@ -290,7 +347,9 @@ func formatAgentEvalReport(report agentEvalReport) string {
 	if report.TaskID != "" {
 		lines = append(lines, "task: "+report.TaskID)
 	}
-	if report.Tasks > 0 || report.Checks > 0 {
+	// Only validate mode reports a static check count; run and bench modes carry
+	// scored pass/fail/blocked/error tallies that must be surfaced instead.
+	if report.Checks > 0 {
 		lines = append(lines, fmt.Sprintf("summary: %d tasks, %d checks", report.Tasks, report.Checks))
 	} else {
 		lines = append(lines, fmt.Sprintf("summary: %d total, %d passed, %d failed, %d blocked, %d errors", report.Total, report.Passed, report.Failed, report.Blocked, report.Errors))
@@ -304,8 +363,14 @@ func formatAgentEvalReport(report agentEvalReport) string {
 		}
 	}
 	lines = append(lines, "status: "+status)
+	if report.WorkRoot != "" {
+		lines = append(lines, "work-root: "+report.WorkRoot)
+	}
 	if report.ReportPath != "" {
 		lines = append(lines, "report: "+report.ReportPath)
+	}
+	if report.Truncated {
+		lines = append(lines, "note: agent output was truncated")
 	}
 	if len(report.Failures) > 0 {
 		lines = append(lines, "failures:")
@@ -339,9 +404,12 @@ Flags:
       --work-root <path>      Work root for materialized benchmark workspaces (eval bench only)
       --model <id>            Model id for eval bench model-matrix runs; repeatable
       --models <ids>          Comma-separated model ids for eval bench model-matrix runs
-      --agent-command <argv>  Agent command argv for eval bench; may include {prompt}, {workspace}, {task_id}, and {model}; consumes remaining arguments
+      --timeout <duration>    Per-task timeout for eval bench (Go duration, e.g. 90s, 5m)
       --keep-workspaces       Keep materialized benchmark workspaces (eval bench only)
       --report-dir <path>     Write agent-eval-report.json (eval run or eval bench)
+      --agent-command <argv>  Agent command argv for eval bench; may include {prompt},
+                              {workspace}, {task_id}, and {model}; must be last as it
+                              consumes all remaining arguments
       --json                  Print JSON output
   -h, --help                  Show this help
 `)
@@ -366,7 +434,7 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 			return agentEvalReport{}, err
 		}
 		if cleanup != "" {
-			defer os.RemoveAll(cleanup)
+			defer func() { _ = os.RemoveAll(cleanup) }()
 		}
 		harness := agenteval.Harness{}
 		if len(options.AgentCommand) > 0 {
@@ -377,8 +445,15 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 			WorkRoot:       workRoot,
 			Models:         options.Models,
 			KeepWorkspaces: options.KeepWorkspaces,
+			Timeout:        options.Timeout,
 		})
-		return agentEvalReportFromBenchmark(suite, report), nil
+		converted := agentEvalReportFromBenchmark(suite, report)
+		if options.KeepWorkspaces {
+			// Surface where the kept workspaces live, especially when the work
+			// root was an unnamed temp dir the caller never specified.
+			converted.WorkRoot = workRoot
+		}
+		return converted, nil
 	}
 	checks := 0
 	for _, task := range suite.Tasks {
@@ -401,7 +476,7 @@ func agentEvalBenchWorkRoot(options agentEvalOptions) (string, string, error) {
 	}
 	created, err := os.MkdirTemp("", "zero-eval-")
 	if err != nil {
-		return "", "", err
+		return "", "", agentEvalRuntimeError{fmt.Errorf("create benchmark work root: %w", err)}
 	}
 	if options.KeepWorkspaces {
 		return created, "", nil
@@ -430,6 +505,9 @@ func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.Benchm
 		converted.TaskID = report.Tasks[0].TaskID
 	}
 	for _, task := range report.Tasks {
+		if task.Agent.Truncated {
+			converted.Truncated = true
+		}
 		for _, failure := range agentEvalFailuresFromTaskReport(task) {
 			converted.Failures = append(converted.Failures, failure)
 		}

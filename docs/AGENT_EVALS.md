@@ -180,11 +180,24 @@ go run ./cmd/zero eval bench \
   --agent-command ./scripts/fake-agent --workspace {workspace} --task {task_id} --prompt {prompt}
 ```
 
+Bound a benchmark run with `--timeout` (a Go duration) so a wedged or
+interactive agent cannot block the harness forever. The timeout applies per
+task and cancels materialization, the agent process, and scoring:
+
+```bash
+go run ./cmd/zero eval bench \
+  --suite internal/agenteval/testdata/sample_suite.json \
+  --task document-stream-json-verify-events \
+  --work-root /tmp/zero-evals \
+  --timeout 5m \
+  --agent-command ./scripts/fake-agent --workspace {workspace} --prompt {prompt}
+```
+
 Use `--report-dir` to persist the CLI report artifact. The file is always named
 `agent-eval-report.json`; with bench mode it records the suite status, task
 counts, pass/fail totals, failures, and the nested benchmark report with each
 task/model run. Use `--keep-workspaces` when you also need to inspect the
-materialized workspaces after the run.
+materialized workspaces after the run:
 
 ```bash
 go run ./cmd/zero eval bench \
@@ -196,6 +209,12 @@ go run ./cmd/zero eval bench \
   --json \
   --agent-command ./scripts/fake-agent --workspace {workspace} --task {task_id} --prompt {prompt}
 ```
+
+**Scoring caveat:** changed-file scoring inspects the workspace with
+`git status --porcelain` against the baseline commit. An agent that *commits*
+its own changes (or otherwise leaves a clean working tree) defeats this check —
+the committed edits no longer appear as changed files, so `expectedChangedFiles`
+will not match. Agents under bench should leave their edits uncommitted.
 
 Run the package tests when changing the suite schema or scorer:
 

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHarnessRunsSelectedTaskFromFixtureAndScoresResult(t *testing.T) {
@@ -299,6 +300,168 @@ func TestHarnessBlocksWhenAgentRunFails(t *testing.T) {
 	}
 	if report.Tasks[0].Report.Status != StatusBlocked {
 		t.Fatalf("Report.Status = %q", report.Tasks[0].Report.Status)
+	}
+}
+
+func TestHarnessReportsErrorForUnknownTaskID(t *testing.T) {
+	suitePath := filepath.Join("testdata", "sample_suite.json")
+	suite, err := LoadSuite(suitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := Harness{
+		Materializer: Materializer{},
+		Agent: AgentRunnerFunc(func(context.Context, AgentRunInput) AgentRunResult {
+			t.Fatal("agent should not run for an unknown task id")
+			return AgentRunResult{}
+		}),
+		Runner: Runner{},
+	}
+
+	report := harness.Run(context.Background(), suitePath, suite, BenchmarkInput{
+		TaskID:   "no-such-task",
+		WorkRoot: t.TempDir(),
+	})
+
+	if report.OK {
+		t.Fatalf("OK = true; report=%#v", report)
+	}
+	if report.Summary != (BenchmarkSummary{TotalTasks: 1, ErrorTasks: 1}) {
+		t.Fatalf("Summary = %#v", report.Summary)
+	}
+	if len(report.Tasks) != 1 || report.Tasks[0].TaskID != "no-such-task" {
+		t.Fatalf("Tasks = %#v", report.Tasks)
+	}
+	if report.Tasks[0].Report.Status != StatusError {
+		t.Fatalf("Report.Status = %q", report.Tasks[0].Report.Status)
+	}
+}
+
+func TestHarnessReportsErrorWhenMaterializationFails(t *testing.T) {
+	suite := Suite{
+		ID:   "suite-mat",
+		Name: "Suite Mat",
+		Tasks: []Task{{
+			ID:                   "missing-fixture",
+			Name:                 "Missing fixture",
+			Prompt:               "do work",
+			WorkspaceFixture:     "fixtures/does-not-exist",
+			ExpectedChangedFiles: []string{"x.txt"},
+			VerificationCommands: []Command{{ID: "v", Name: "V", Command: []string{"go", "version"}}},
+		}},
+	}
+	agentCalled := false
+	harness := Harness{
+		Materializer: Materializer{},
+		Agent: AgentRunnerFunc(func(context.Context, AgentRunInput) AgentRunResult {
+			agentCalled = true
+			return AgentRunResult{ExitCode: 0}
+		}),
+		Runner: Runner{RunCommand: func(context.Context, string, Command) CommandResult {
+			t.Fatal("runner should not score when materialization fails")
+			return CommandResult{}
+		}},
+	}
+
+	report := harness.Run(context.Background(), filepath.Join("testdata", "sample_suite.json"), suite, BenchmarkInput{
+		WorkRoot: t.TempDir(),
+	})
+
+	if report.OK {
+		t.Fatalf("OK = true; report=%#v", report)
+	}
+	if report.Summary != (BenchmarkSummary{TotalTasks: 1, ErrorTasks: 1}) {
+		t.Fatalf("Summary = %#v", report.Summary)
+	}
+	if report.Tasks[0].Report.Status != StatusError {
+		t.Fatalf("Report.Status = %q", report.Tasks[0].Report.Status)
+	}
+	if !strings.Contains(report.Tasks[0].Report.Error, "materialization failed") {
+		t.Fatalf("Report.Error = %q", report.Tasks[0].Report.Error)
+	}
+	if agentCalled {
+		t.Fatal("agent should not run when materialization fails")
+	}
+}
+
+func TestHarnessAppliesPerTaskTimeout(t *testing.T) {
+	suitePath := filepath.Join("testdata", "sample_suite.json")
+	suite, err := LoadSuite(suitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hadDeadline bool
+	harness := Harness{
+		Materializer: Materializer{},
+		Agent: AgentRunnerFunc(func(ctx context.Context, input AgentRunInput) AgentRunResult {
+			_, hadDeadline = ctx.Deadline()
+			target := filepath.Join(input.WorkspacePath, "docs", "STREAM_JSON_PROTOCOL.md")
+			if err := os.WriteFile(target, []byte("updated"), 0o644); err != nil {
+				return AgentRunResult{ExitCode: -1, Error: err.Error()}
+			}
+			return AgentRunResult{ExitCode: 0}
+		}),
+		Runner: Runner{
+			RunCommand: func(_ context.Context, _ string, command Command) CommandResult {
+				return CommandResult{ID: command.ID, ExitCode: 0}
+			},
+		},
+	}
+
+	report := harness.Run(context.Background(), suitePath, suite, BenchmarkInput{
+		TaskID:   "document-stream-json-verify-events",
+		WorkRoot: t.TempDir(),
+		Timeout:  30 * time.Second,
+	})
+
+	if !report.OK {
+		t.Fatalf("OK = false; report=%#v", report)
+	}
+	if !hadDeadline {
+		t.Fatal("expected agent context to carry a deadline when Timeout is set")
+	}
+}
+
+func TestHarnessTimeoutCancelsBlockedAgent(t *testing.T) {
+	suitePath := filepath.Join("testdata", "sample_suite.json")
+	suite, err := LoadSuite(suitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentReached := false
+	sawCancel := false
+	harness := Harness{
+		Materializer: Materializer{},
+		Agent: AgentRunnerFunc(func(ctx context.Context, _ AgentRunInput) AgentRunResult {
+			agentReached = true
+			<-ctx.Done()
+			sawCancel = ctx.Err() != nil
+			return AgentRunResult{ExitCode: -1, Error: ctx.Err().Error()}
+		}),
+		Runner: Runner{RunCommand: func(context.Context, string, Command) CommandResult {
+			t.Fatal("runner should not score after a timed-out agent run")
+			return CommandResult{}
+		}},
+	}
+
+	// The timeout is comfortably longer than materialization but the agent
+	// blocks until the deadline fires, so the task must end non-OK.
+	report := harness.Run(context.Background(), suitePath, suite, BenchmarkInput{
+		TaskID:   "document-stream-json-verify-events",
+		WorkRoot: t.TempDir(),
+		Timeout:  500 * time.Millisecond,
+	})
+
+	if report.OK {
+		t.Fatalf("OK = true; expected the timeout to fail the task; report=%#v", report)
+	}
+	if agentReached {
+		if !sawCancel {
+			t.Fatal("agent ran but never observed context cancellation")
+		}
+		if report.Tasks[0].Report.Status != StatusBlocked {
+			t.Fatalf("Report.Status = %q, want blocked after agent timeout", report.Tasks[0].Report.Status)
+		}
 	}
 }
 
