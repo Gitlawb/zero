@@ -201,6 +201,12 @@ type Options struct {
 	// request), so every existing caller is unaffected. A returned error is
 	// non-fatal: the run continues on the current model.
 	ModelSwitcher func(ctx context.Context, modelID string) (Provider, error)
+	// SelfCorrect, when set, runs a post-edit verify-and-correct cycle after a
+	// mutating tool call: it verifies the changed files (LSP diagnostics + project
+	// tests) and feeds failures back to the model to fix, bounded by an attempt
+	// ceiling and the autonomy gate. nil disables it entirely (the loop is
+	// byte-identical to before). One instance per run — it holds attempt state.
+	SelfCorrect *SelfCorrector
 }
 
 type Result struct {
