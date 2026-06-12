@@ -290,7 +290,9 @@ func TestProviderConfigCheckCredentialPresence(t *testing.T) {
 	}{
 		{"api key", base(func(p *config.ProviderProfile) { p.APIKey = "sk-x" }), "set"},
 		{"auth header only", base(func(p *config.ProviderProfile) { p.AuthHeaderValue = "Bearer t" }), "set"},
+		{"both", base(func(p *config.ProviderProfile) { p.APIKey = "sk-x"; p.AuthHeaderValue = "Bearer t" }), "set"},
 		{"whitespace api key", base(func(p *config.ProviderProfile) { p.APIKey = "   " }), "not set"},
+		{"whitespace auth header only", base(func(p *config.ProviderProfile) { p.AuthHeaderValue = "   " }), "not set"},
 		{"no credential", base(func(*config.ProviderProfile) {}), "not set"},
 	}
 	for _, tc := range cases {
