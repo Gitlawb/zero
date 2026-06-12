@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 type networkClient struct {
@@ -47,9 +48,13 @@ type sseEvent struct {
 }
 
 func connectNetwork(ctx context.Context, server Server) (ToolClient, error) {
+	httpClient, err := oauthHTTPClient(server)
+	if err != nil {
+		return nil, err
+	}
 	client := &networkClient{
 		server: server,
-		client: http.DefaultClient,
+		client: httpClient,
 		nextID: 1,
 	}
 	if err := client.initialize(ctx); err != nil {
@@ -59,9 +64,13 @@ func connectNetwork(ctx context.Context, server Server) (ToolClient, error) {
 }
 
 func connectRemoteSSE(ctx context.Context, server Server) (ToolClient, error) {
+	httpClient, err := oauthHTTPClient(server)
+	if err != nil {
+		return nil, err
+	}
 	client := &remoteSSEClient{
 		server:  server,
-		client:  http.DefaultClient,
+		client:  httpClient,
 		nextID:  1,
 		pending: map[string]chan ssePendingResponse{},
 	}
@@ -702,4 +711,152 @@ func rpcResponseKey(id any) string {
 		return ""
 	}
 	return fmt.Sprint(id)
+}
+
+// oauthTokenSource supplies a current bearer token and refreshes it on demand.
+type oauthTokenSource interface {
+	AccessToken(ctx context.Context) (string, error)
+	Refresh(ctx context.Context) (string, error)
+}
+
+// oauthRoundTripper attaches a bearer token to every request and, on a 401,
+// refreshes the token once and retries the request a single time. A refresh
+// failure is surfaced as an actionable error that points at the login command.
+type oauthRoundTripper struct {
+	base       http.RoundTripper
+	source     oauthTokenSource
+	serverName string
+}
+
+func newOAuthRoundTripper(base http.RoundTripper, source oauthTokenSource, serverName string) *oauthRoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &oauthRoundTripper{base: base, source: source, serverName: serverName}
+}
+
+func (transport *oauthRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	token, err := transport.source.AccessToken(request.Context())
+	if err != nil {
+		return nil, err
+	}
+
+	first, body, err := cloneRequestWithBearer(request, token)
+	if err != nil {
+		return nil, err
+	}
+	response, err := transport.base.RoundTrip(first)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusUnauthorized {
+		return response, nil
+	}
+
+	// Drain and close the 401 body before retrying to free the connection.
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+
+	refreshed, refreshErr := transport.source.Refresh(request.Context())
+	if refreshErr != nil {
+		return nil, fmt.Errorf("MCP OAuth token refresh failed for %s: re-run `zero mcp oauth login %s`: %w", transport.serverName, transport.serverName, refreshErr)
+	}
+
+	retry, _, err := cloneRequestWithBearer(request, refreshed)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		retry.Body = io.NopCloser(bytes.NewReader(body))
+		retry.ContentLength = int64(len(body))
+	}
+	return transport.base.RoundTrip(retry)
+}
+
+// cloneRequestWithBearer copies a request, buffers its body so the request can
+// be retried, and sets the Authorization header.
+func cloneRequestWithBearer(request *http.Request, token string) (*http.Request, []byte, error) {
+	var body []byte
+	if request.Body != nil {
+		buffered, err := io.ReadAll(request.Body)
+		_ = request.Body.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		body = buffered
+	}
+	clone := request.Clone(request.Context())
+	if body != nil {
+		clone.Body = io.NopCloser(bytes.NewReader(body))
+		clone.ContentLength = int64(len(body))
+	}
+	if strings.TrimSpace(token) != "" {
+		clone.Header.Set("Authorization", "Bearer "+token)
+	}
+	return clone, body, nil
+}
+
+// storeTokenSource adapts the persistent token store and refresh logic to the
+// oauthTokenSource interface used by the round tripper.
+type storeTokenSource struct {
+	server     Server
+	store      *TokenStore
+	httpClient *http.Client
+	now        func() time.Time
+}
+
+func (source *storeTokenSource) config() OAuthConfig {
+	if source.server.OAuth != nil {
+		return *source.server.OAuth
+	}
+	return OAuthConfig{}
+}
+
+func (source *storeTokenSource) AccessToken(ctx context.Context) (string, error) {
+	token, ok, err := source.store.Load(source.server.Name)
+	if err != nil {
+		return "", err
+	}
+	if !ok || strings.TrimSpace(token.AccessToken) == "" {
+		return "", fmt.Errorf("no stored OAuth token for MCP server %s: run `zero mcp oauth login %s`", source.server.Name, source.server.Name)
+	}
+	return token.AccessToken, nil
+}
+
+func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
+	token, ok, err := source.store.Load(source.server.Name)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("no stored OAuth token for MCP server %s", source.server.Name)
+	}
+	refreshed, err := refreshAccessToken(ctx, source.httpClient, source.config(), token, source.now)
+	if err != nil {
+		return "", err
+	}
+	if err := source.store.Save(source.server.Name, refreshed); err != nil {
+		return "", err
+	}
+	return refreshed.AccessToken, nil
+}
+
+// oauthHTTPClient returns an HTTP client whose transport attaches OAuth bearer
+// tokens and refreshes them on 401 for OAuth-configured servers. Servers that do
+// not declare OAuth get the default client unchanged.
+func oauthHTTPClient(server Server) (*http.Client, error) {
+	if !strings.EqualFold(strings.TrimSpace(server.Auth), ServerAuthOAuth) {
+		return http.DefaultClient, nil
+	}
+	store, err := NewTokenStore(TokenStoreOptions{})
+	if err != nil {
+		return nil, err
+	}
+	source := &storeTokenSource{
+		server:     server,
+		store:      store,
+		httpClient: http.DefaultClient,
+		now:        time.Now,
+	}
+	return &http.Client{Transport: newOAuthRoundTripper(http.DefaultTransport, source, server.Name)}, nil
 }

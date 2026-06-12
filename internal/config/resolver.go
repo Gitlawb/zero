@@ -559,6 +559,12 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig) MCPServerConfig 
 	if next.Headers != nil {
 		base.Headers = copyMCPStringMap(next.Headers)
 	}
+	if strings.TrimSpace(next.Auth) != "" {
+		base.Auth = next.Auth
+	}
+	if next.OAuth != nil {
+		base.OAuth = next.OAuth
+	}
 	if next.disabledSet || next.Disabled {
 		base.Disabled = next.Disabled
 	}

@@ -162,8 +162,25 @@ type MCPServerConfig struct {
 	Env         map[string]string `json:"env,omitempty"`
 	URL         string            `json:"url,omitempty"`
 	Headers     map[string]string `json:"headers,omitempty"`
+	Auth        string            `json:"auth,omitempty"`
+	OAuth       *MCPOAuthConfig   `json:"oauth,omitempty"`
 	Disabled    bool              `json:"disabled,omitempty"`
 	disabledSet bool
+}
+
+// MCPOAuthConfig describes how to authenticate to a remote MCP server using an
+// OAuth 2.0 + PKCE authorization-code flow. Endpoints may be discovered from the
+// authorization server's metadata document; explicit values here override or
+// fill in anything discovery cannot provide. Client credentials are optional
+// when the server supports dynamic client registration.
+type MCPOAuthConfig struct {
+	ClientID              string   `json:"clientID,omitempty"`
+	ClientSecret          string   `json:"clientSecret,omitempty"`
+	Scopes                []string `json:"scopes,omitempty"`
+	AuthorizationEndpoint string   `json:"authorizationEndpoint,omitempty"`
+	TokenEndpoint         string   `json:"tokenEndpoint,omitempty"`
+	RegistrationEndpoint  string   `json:"registrationEndpoint,omitempty"`
+	IssuerURL             string   `json:"issuerURL,omitempty"`
 }
 
 func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
@@ -215,6 +232,8 @@ func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 		Env      map[string]string `json:"env"`
 		URL      string            `json:"url"`
 		Headers  map[string]string `json:"headers"`
+		Auth     string            `json:"auth"`
+		OAuth    *MCPOAuthConfig   `json:"oauth"`
 		Disabled *bool             `json:"disabled"`
 	}
 
@@ -228,6 +247,8 @@ func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 	server.Env = raw.Env
 	server.URL = raw.URL
 	server.Headers = raw.Headers
+	server.Auth = raw.Auth
+	server.OAuth = raw.OAuth
 	server.Disabled = false
 	server.disabledSet = false
 	if raw.Disabled != nil {

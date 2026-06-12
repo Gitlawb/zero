@@ -136,6 +136,71 @@ func TestServerIdentityChangesWithTransportFields(t *testing.T) {
 	}
 }
 
+func TestNormalizeConfigCarriesOAuth(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"remote": {
+			Type: "http",
+			URL:  "https://example.com/mcp",
+			Auth: "oauth",
+			OAuth: &config.MCPOAuthConfig{
+				ClientID:      "client-123",
+				Scopes:        []string{" read ", "write", "  "},
+				TokenEndpoint: " https://example.com/token ",
+			},
+		},
+	}}
+
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("servers = %#v", servers)
+	}
+	server := servers[0]
+	if server.Auth != ServerAuthOAuth {
+		t.Fatalf("auth = %q, want oauth", server.Auth)
+	}
+	if server.OAuth == nil {
+		t.Fatal("OAuth = nil, want carried config")
+	}
+	if server.OAuth.ClientID != "client-123" {
+		t.Fatalf("client id = %q", server.OAuth.ClientID)
+	}
+	if server.OAuth.TokenEndpoint != "https://example.com/token" {
+		t.Fatalf("token endpoint = %q, want trimmed", server.OAuth.TokenEndpoint)
+	}
+	if len(server.OAuth.Scopes) != 2 || server.OAuth.Scopes[0] != "read" || server.OAuth.Scopes[1] != "write" {
+		t.Fatalf("scopes = %#v, want trimmed and filtered", server.OAuth.Scopes)
+	}
+}
+
+func TestNormalizeConfigRejectsUnsupportedAuth(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"remote": {Type: "http", URL: "https://example.com/mcp", Auth: "basic"},
+	}}
+	_, err := NormalizeConfig(cfg)
+	if err == nil {
+		t.Fatal("NormalizeConfig() error = nil, want unsupported auth error")
+	}
+	if !strings.Contains(err.Error(), "unsupported auth") {
+		t.Fatalf("error = %q, want unsupported auth", err.Error())
+	}
+}
+
+func TestNormalizeConfigRejectsAuthOnStdio(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"local": {Type: "stdio", Command: "local-mcp", Auth: "oauth"},
+	}}
+	_, err := NormalizeConfig(cfg)
+	if err == nil {
+		t.Fatal("NormalizeConfig() error = nil, want auth-on-stdio error")
+	}
+	if !strings.Contains(err.Error(), "auth is only supported") {
+		t.Fatalf("error = %q, want auth-on-stdio error", err.Error())
+	}
+}
+
 func TestCopyStringMapTrimsKeysAndPreservesValues(t *testing.T) {
 	copied := copyStringMap(map[string]string{
 		" TOKEN ": "  keep surrounding spaces  ",

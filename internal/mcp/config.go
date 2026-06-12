@@ -28,6 +28,8 @@ type Server struct {
 	Env      map[string]string
 	URL      string
 	Headers  map[string]string
+	Auth     string
+	OAuth    *OAuthConfig
 	Identity string
 }
 
@@ -70,6 +72,7 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		}
 	}
 
+	auth := strings.ToLower(strings.TrimSpace(raw.Auth))
 	server := Server{
 		Name:    name,
 		Type:    serverType,
@@ -78,6 +81,8 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		Env:     copyStringMap(raw.Env),
 		URL:     strings.TrimSpace(raw.URL),
 		Headers: copyStringMap(raw.Headers),
+		Auth:    auth,
+		OAuth:   normalizeOAuthConfig(raw.OAuth),
 	}
 
 	switch server.Type {
@@ -90,6 +95,9 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		}
 		if len(server.Headers) > 0 {
 			return Server{}, fmt.Errorf("MCP server %s headers are only supported for http or sse transports", server.Name)
+		}
+		if server.Auth != "" {
+			return Server{}, fmt.Errorf("MCP server %s auth is only supported for http or sse transports", server.Name)
 		}
 	case ServerTypeHTTP, ServerTypeSSE:
 		if server.URL == "" {
@@ -108,8 +116,30 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		return Server{}, fmt.Errorf("MCP server %s has unsupported type %q", server.Name, raw.Type)
 	}
 
+	if server.Auth != "" && server.Auth != ServerAuthOAuth {
+		return Server{}, fmt.Errorf("MCP server %s has unsupported auth %q", server.Name, raw.Auth)
+	}
+
 	server.Identity = computeServerIdentity(server)
 	return server, nil
+}
+
+// normalizeOAuthConfig converts a raw config OAuth block into the mcp package's
+// OAuthConfig, trimming endpoint and identifier fields. Credential values are
+// preserved verbatim.
+func normalizeOAuthConfig(raw *config.MCPOAuthConfig) *OAuthConfig {
+	if raw == nil {
+		return nil
+	}
+	return &OAuthConfig{
+		ClientID:              strings.TrimSpace(raw.ClientID),
+		ClientSecret:          raw.ClientSecret,
+		Scopes:                trimStringSlice(raw.Scopes),
+		AuthorizationEndpoint: strings.TrimSpace(raw.AuthorizationEndpoint),
+		TokenEndpoint:         strings.TrimSpace(raw.TokenEndpoint),
+		RegistrationEndpoint:  strings.TrimSpace(raw.RegistrationEndpoint),
+		IssuerURL:             strings.TrimSpace(raw.IssuerURL),
+	}
 }
 
 func validateHTTPURL(serverName string, value string) error {
@@ -131,6 +161,8 @@ func computeServerIdentity(server Server) string {
 		Env     map[string]string `json:"env,omitempty"`
 		URL     string            `json:"url,omitempty"`
 		Headers map[string]string `json:"headers,omitempty"`
+		Auth    string            `json:"auth,omitempty"`
+		OAuth   *OAuthConfig      `json:"oauth,omitempty"`
 	}{
 		Type:    server.Type,
 		Command: server.Command,
@@ -138,6 +170,8 @@ func computeServerIdentity(server Server) string {
 		Env:     copyStringMap(server.Env),
 		URL:     server.URL,
 		Headers: copyStringMap(server.Headers),
+		Auth:    server.Auth,
+		OAuth:   server.OAuth,
 	}
 	// Marshal cannot fail for this canonical shape because it only contains
 	// JSON-serializable primitive, slice, and map fields.

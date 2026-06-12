@@ -144,6 +144,8 @@ func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
 	case "tools":
 		return runMCPTools(args[1:], stdout, stderr, deps)
+	case "oauth":
+		return runMCPOAuth(args[1:], stdout, stderr, deps)
 	case "list":
 		return runMCPLegacyList(args[1:], stdout, stderr, deps)
 	default:
@@ -556,6 +558,7 @@ func writeMCPHelp(w io.Writer) error {
 
 Commands:
   list           List configured MCP servers, or tools with --tools
+  oauth          Manage OAuth credentials for remote MCP servers
   permissions    Manage persistent MCP tool permissions
   tools          Inspect configured MCP tools
 `)

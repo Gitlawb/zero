@@ -46,6 +46,7 @@ type appDeps struct {
 	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
 	skillsDir            func() string
 	newMCPStore          func() (*mcp.PermissionStore, error)
+	newMCPTokenStore     func() (*mcp.TokenStore, error)
 	newSandboxStore      func() (*sandbox.GrantStore, error)
 	selectSandboxBackend func(sandbox.BackendOptions) sandbox.Backend
 	registerMCPTools     func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
@@ -112,6 +113,9 @@ func defaultAppDeps() appDeps {
 		},
 		newMCPStore: func() (*mcp.PermissionStore, error) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{})
+		},
+		newMCPTokenStore: func() (*mcp.TokenStore, error) {
+			return mcp.NewTokenStore(mcp.TokenStoreOptions{})
 		},
 		newSandboxStore: func() (*sandbox.GrantStore, error) {
 			return sandbox.NewGrantStore(sandbox.StoreOptions{})
@@ -309,6 +313,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.newMCPStore == nil {
 		deps.newMCPStore = defaults.newMCPStore
+	}
+	if deps.newMCPTokenStore == nil {
+		deps.newMCPTokenStore = defaults.newMCPTokenStore
 	}
 	if deps.newSandboxStore == nil {
 		deps.newSandboxStore = defaults.newSandboxStore
