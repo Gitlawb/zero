@@ -444,24 +444,25 @@ func TestHarnessTimeoutCancelsBlockedAgent(t *testing.T) {
 		}},
 	}
 
-	// The timeout is comfortably longer than materialization but the agent
-	// blocks until the deadline fires, so the task must end non-OK.
+	// The timeout is far longer than materialization of the small fixture, so
+	// the agent is always reached; it then blocks until the deadline fires.
 	report := harness.Run(context.Background(), suitePath, suite, BenchmarkInput{
 		TaskID:   "document-stream-json-verify-events",
 		WorkRoot: t.TempDir(),
-		Timeout:  500 * time.Millisecond,
+		Timeout:  2 * time.Second,
 	})
 
+	if !agentReached {
+		t.Fatal("agent was never reached; the timeout fired before the agent ran")
+	}
+	if !sawCancel {
+		t.Fatal("agent ran but never observed context cancellation")
+	}
 	if report.OK {
 		t.Fatalf("OK = true; expected the timeout to fail the task; report=%#v", report)
 	}
-	if agentReached {
-		if !sawCancel {
-			t.Fatal("agent ran but never observed context cancellation")
-		}
-		if report.Tasks[0].Report.Status != StatusBlocked {
-			t.Fatalf("Report.Status = %q, want blocked after agent timeout", report.Tasks[0].Report.Status)
-		}
+	if report.Tasks[0].Report.Status != StatusBlocked {
+		t.Fatalf("Report.Status = %q, want blocked after agent timeout", report.Tasks[0].Report.Status)
 	}
 }
 
