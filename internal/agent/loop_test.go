@@ -568,6 +568,67 @@ func TestRunDefersSelfCorrectFeedbackUntilAfterToolBatch(t *testing.T) {
 	}
 }
 
+func TestRunBatchesSelfCorrectOncePerTurn(t *testing.T) {
+	// Two mutating tool calls in one assistant turn must trigger a single
+	// AfterEdit over the union of changed files — not one per call — so the per-run
+	// attempt budget isn't consumed twice and an intermediate edit isn't verified
+	// after a later call in the same turn supersedes it.
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"a.txt","content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"path":"b.txt","content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	corrector := NewSelfCorrector(root, erroringChecker{err: errors.New("boom")}, nil, SelfCorrectConfig{
+		Enabled:    true,
+		IncludeLSP: true,
+		Autonomy:   "high",
+	})
+
+	if _, err := Run(context.Background(), "go", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		SelfCorrect:    corrector,
+		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "test"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One AfterEdit for the whole turn -> exactly one corrective attempt consumed
+	// (the old per-call path would have consumed two).
+	if corrector.attempts != 1 {
+		t.Fatalf("AfterEdit should run once per turn (attempts=1), got %d", corrector.attempts)
+	}
+	feedbackCount := 0
+	for _, m := range provider.requests[1].Messages {
+		if m.Role == zeroruntime.MessageRoleUser && strings.Contains(m.Content, "Verification failed after your edit") {
+			feedbackCount++
+		}
+	}
+	if feedbackCount != 1 {
+		t.Fatalf("expected exactly one self-correct feedback message, got %d", feedbackCount)
+	}
+}
+
 func TestRunDeniesPromptToolWithoutUnsafePermission(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

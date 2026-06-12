@@ -260,12 +260,15 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// after the batch, so every tool_result is recorded first and at most one
 		// switch occurs per turn.
 		turnRequestedModel := ""
-		// selfCorrectFeedback accumulates post-edit verification feedback during
-		// the batch; it is appended ONCE after the loop so every advertised tool
-		// call keeps its tool_result contiguous (a user message interleaved between
-		// tool_results breaks strict provider replay) — same after-batch rationale
-		// as turnRequestedModel above.
-		var selfCorrectFeedback []string
+		// changedFilesThisBatch aggregates every file the turn's mutating tools
+		// touched, so post-edit self-correction runs ONCE over the union after the
+		// batch — one AfterEdit call keeps the per-run attempt budget accurate and
+		// avoids verifying an intermediate edit a later call in the same turn already
+		// superseded. Its feedback is appended after the loop so every advertised
+		// tool call keeps its tool_result contiguous (a user message interleaved
+		// between tool_results breaks strict provider replay) — same after-batch
+		// rationale as turnRequestedModel above.
+		var changedFilesThisBatch []string
 		for index, call := range collected.ToolCalls {
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
@@ -333,25 +336,25 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
 			}
 
-			// Post-edit self-correction: after a successful mutating tool call,
-			// verify the changed files and feed any failure back so the model can
-			// fix it next turn. nil SelfCorrect (the default) is a no-op, and a
-			// read-only tool (no ChangedFiles) never triggers verification.
+			// Post-edit self-correction: collect the files this successful mutating
+			// tool changed; verification runs once over the union after the batch.
+			// A read-only tool (no ChangedFiles) never contributes.
 			if options.SelfCorrect != nil && toolResult.Status == tools.StatusOK && len(toolResult.ChangedFiles) > 0 {
-				if feedback, _ := options.SelfCorrect.AfterEdit(ctx, toolResult.ChangedFiles); feedback != "" {
-					selfCorrectFeedback = append(selfCorrectFeedback, feedback)
-				}
+				changedFilesThisBatch = append(changedFilesThisBatch, toolResult.ChangedFiles...)
 			}
 		}
 
-		// Append accumulated self-correct feedback now that every tool_result for
-		// this batch is recorded, so the assistant's tool_results stay contiguous
-		// (a user message between tool_results breaks strict provider replay).
-		if len(selfCorrectFeedback) > 0 {
-			messages = append(messages, zeroruntime.Message{
-				Role:    zeroruntime.MessageRoleUser,
-				Content: strings.Join(selfCorrectFeedback, "\n\n"),
-			})
+		// Run post-edit self-correction once over the union of files this turn
+		// changed, then append any feedback after every tool_result is recorded so
+		// the assistant's tool_results stay contiguous (a user message between
+		// tool_results breaks strict provider replay). nil SelfCorrect is a no-op.
+		if options.SelfCorrect != nil && len(changedFilesThisBatch) > 0 {
+			if feedback, _ := options.SelfCorrect.AfterEdit(ctx, dedupeStrings(changedFilesThisBatch)); feedback != "" {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: feedback,
+				})
+			}
 		}
 
 		// Mid-run model escalation: if a tool asked to switch models this turn and
@@ -1389,6 +1392,21 @@ func appendAbortedToolResults(messages []Message, remaining []ToolCall) []Messag
 		})
 	}
 	return messages
+}
+
+// dedupeStrings returns values with duplicates removed, preserving first-seen
+// order so the deduped list (e.g. a turn's changed files) stays deterministic.
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func copyMessages(messages []Message) []Message {
