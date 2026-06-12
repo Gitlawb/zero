@@ -87,14 +87,18 @@ func (dispatcher *Dispatcher) runHTTPAction(ctx context.Context, hook Definition
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return commandResult{ExitCode: -1, Err: err}
+		// No verdict from the policy endpoint (connect/transport failure). Fail
+		// closed: a non-zero exit blocks a beforeTool hook via classifyResult while
+		// staying advisory for non-blocking events. Returning Err would fail OPEN
+		// (classifyResult maps any Err to a non-blocking AuditError).
+		return commandResult{ExitCode: 1, Stderr: "http hook request failed: " + err.Error()}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxHTTPHookResponseBytes))
 	if readErr != nil {
-		// A reset/truncated body means we never got the full verdict; treat it as
-		// an execution failure rather than silently reporting a clean (ExitCode 0) pass.
-		return commandResult{ExitCode: -1, Err: fmt.Errorf("read http hook response: %w", readErr)}
+		// A reset/truncated body means we never got the full verdict. Fail closed
+		// for the same reason: a non-zero exit blocks beforeTool; Err would not.
+		return commandResult{ExitCode: 1, Stderr: "read http hook response: " + readErr.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return commandResult{ExitCode: 1, Stderr: fmt.Sprintf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}

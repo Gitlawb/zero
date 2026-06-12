@@ -159,6 +159,27 @@ func TestDispatchHTTPActionTreatsTruncatedResponseAsFailure(t *testing.T) {
 	}
 }
 
+func TestDispatchHTTPActionBeforeToolReadFailureBlocks(t *testing.T) {
+	const url = "https://allowed.example/hook"
+	badClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		// Headers arrive, but the body resets mid-read: no verdict from the gate.
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(errReader{}), Header: make(http.Header)}, nil
+	})}
+	config := Config{Enabled: true, Hooks: []Definition{
+		{ID: "policy", Event: EventBeforeTool, Type: ActionHTTP, URL: url, Enabled: true},
+	}}
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, AllowedHTTPURLs: []string{url}, HTTPClient: badClient})
+
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"})
+
+	if !outcome.Blocked {
+		t.Fatalf("a beforeTool HTTP policy hook whose response read fails must fail closed (block): %#v", outcome)
+	}
+	if outcome.BlockedBy != "policy" {
+		t.Fatalf("BlockedBy = %q, want policy", outcome.BlockedBy)
+	}
+}
+
 func TestDispatchHTTPActionRejectsNonAllowlistedURL(t *testing.T) {
 	var called bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
