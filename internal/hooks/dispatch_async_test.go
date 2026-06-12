@@ -105,14 +105,18 @@ func TestDispatchAsyncRewakeNoSignalOnSuccess(t *testing.T) {
 
 func TestDispatchAsyncRewakeNoSignalWhenTimedOut(t *testing.T) {
 	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
-		// Exits with the blocking code, but the run is killed (no real verdict).
+		// Wait for the per-hook deadline to fire, then return the blocking code:
+		// the result is both ExitCode 2 and TimedOut, with no real verdict. Waiting
+		// on ctx.Done() makes TimedOut deterministic on every platform (no reliance
+		// on a sub-tick timer firing within a synchronous window).
+		<-ctx.Done()
 		return commandResult{ExitCode: 2, Stderr: "exited 2 while being killed"}
 	}
 	config := Config{Enabled: true, Hooks: []Definition{
 		{ID: "verifier", Event: EventAfterTool, Command: "verify", AsyncRewake: true, RewakeMessage: "broke:", Enabled: true},
 	}}
-	// A 1ns timeout forces executeAction to mark the result TimedOut.
-	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner, Timeout: time.Nanosecond})
+	// A short timeout the runner waits for, forcing executeAction to mark TimedOut.
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner, Timeout: 10 * time.Millisecond})
 
 	dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventAfterTool, ToolName: "edit_file"})
 	dispatcher.WaitAsync()
