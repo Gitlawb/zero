@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
@@ -24,6 +25,14 @@ type ServeOptions struct {
 	Name              string
 	Version           string
 	PermissionGranted bool
+	// WorkspaceRoot is the directory whose files are exposed as MCP resources.
+	// Empty means the process working directory. Resource reads are confined to
+	// this root (and any extra Scope roots).
+	WorkspaceRoot string
+	// Scope, when set, widens the resource roots beyond WorkspaceRoot using the
+	// same multi-root scoping the sandbox/file tools use. nil means
+	// workspace-only.
+	Scope tools.PathScope
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, registry *tools.Registry, options ServeOptions) error {
@@ -32,10 +41,13 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, registry *too
 	}
 	reader := newMessageReader(input)
 	writer := newMessageWriter(output)
+	resolvedOptions := options.withDefaults()
 	server := toolServer{
-		registry: registry,
-		options:  options.withDefaults(),
-		writer:   writer,
+		registry:      registry,
+		options:       resolvedOptions,
+		writer:        writer,
+		workspaceRoot: resolvedOptions.WorkspaceRoot,
+		scope:         resolvedOptions.Scope,
 	}
 
 	// Run the blocking reads on a goroutine and select on ctx so a
@@ -89,13 +101,20 @@ func (options ServeOptions) withDefaults() ServeOptions {
 	if strings.TrimSpace(options.Version) == "" {
 		options.Version = "dev"
 	}
+	if strings.TrimSpace(options.WorkspaceRoot) == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			options.WorkspaceRoot = cwd
+		}
+	}
 	return options
 }
 
 type toolServer struct {
-	registry *tools.Registry
-	options  ServeOptions
-	writer   *messageWriter
+	registry      *tools.Registry
+	options       ServeOptions
+	writer        *messageWriter
+	workspaceRoot string
+	scope         tools.PathScope
 }
 
 func (server toolServer) handle(ctx context.Context, message rpcMessage) error {
@@ -110,7 +129,11 @@ func (server toolServer) handle(ctx context.Context, message rpcMessage) error {
 	case "initialize":
 		return server.writeResult(message.ID, map[string]any{
 			"protocolVersion": defaultProtocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"capabilities": map[string]any{
+				"tools":     map[string]any{},
+				"resources": map[string]any{},
+				"prompts":   map[string]any{},
+			},
 			"serverInfo": map[string]any{
 				"name":    server.options.Name,
 				"version": server.options.Version,
@@ -124,6 +147,28 @@ func (server toolServer) handle(ctx context.Context, message rpcMessage) error {
 		result, err := server.callTool(ctx, message.Params)
 		if err != nil {
 			return server.writeError(message.ID, jsonRPCInvalidParams, err.Error())
+		}
+		return server.writeResult(message.ID, result)
+	case "resources/list":
+		return server.writeResult(message.ID, map[string]any{
+			"resources": server.listResources(),
+		})
+	case "resources/read":
+		contents, code, err := server.readResource(message.Params)
+		if err != nil {
+			return server.writeError(message.ID, code, err.Error())
+		}
+		return server.writeResult(message.ID, map[string]any{
+			"contents": contents,
+		})
+	case "prompts/list":
+		return server.writeResult(message.ID, map[string]any{
+			"prompts": listPrompts(),
+		})
+	case "prompts/get":
+		result, code, err := getPrompt(message.Params)
+		if err != nil {
+			return server.writeError(message.ID, code, err.Error())
 		}
 		return server.writeResult(message.ID, result)
 	case "ping":
