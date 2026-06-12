@@ -326,6 +326,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if outcome.InjectHint && failureHint == "" {
 				failureHint = toolFailureHint(call.Name, toolSchemaJSON(registry, call.Name), toolResult.Output)
 			}
+
+			// Post-edit self-correction: after a successful mutating tool call,
+			// verify the changed files and feed any failure back so the model can
+			// fix it next turn. nil SelfCorrect (the default) is a no-op, and a
+			// read-only tool (no ChangedFiles) never triggers verification.
+			if options.SelfCorrect != nil && toolResult.Status == tools.StatusOK && len(toolResult.ChangedFiles) > 0 {
+				if feedback, _ := options.SelfCorrect.AfterEdit(ctx, toolResult.ChangedFiles); feedback != "" {
+					messages = append(messages, zeroruntime.Message{
+						Role:    zeroruntime.MessageRoleUser,
+						Content: feedback,
+					})
+				}
+			}
 		}
 
 		// Mid-run model escalation: if a tool asked to switch models this turn and
