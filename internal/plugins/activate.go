@@ -206,7 +206,7 @@ func activateHooks(plugin LoadedPlugin, result *ActivationResult) {
 			Name:        ext.Name,
 			Description: ext.Description,
 			Event:       event,
-			Command:     expandPluginRoot(ext.Command, plugin.PluginDir),
+			Command:     expandPluginRootPath(ext.Command, plugin.PluginDir),
 			Args:        expandPluginRootAll(ext.Args, plugin.PluginDir),
 			Enabled:     true,
 		})
@@ -433,6 +433,20 @@ func expandPluginRoot(value string, pluginDir string) string {
 	return strings.ReplaceAll(value, pluginRootPlaceholder, pluginDir)
 }
 
+// expandPluginRootPath is expandPluginRoot for an executable path: when the
+// placeholder is present it also normalizes separators to the host OS via
+// filepath.FromSlash, so a manifest "${AGENT_PLUGIN_ROOT}/bin/x" yields a clean
+// native path (C:\...\bin\x on Windows) rather than a mixed-separator one. Bare
+// command names and author-provided absolute paths are returned unchanged, and
+// arguments are NOT normalized (they may legitimately contain forward slashes,
+// e.g. URLs or flag values).
+func expandPluginRootPath(value string, pluginDir string) string {
+	if !strings.Contains(value, pluginRootPlaceholder) {
+		return value
+	}
+	return filepath.FromSlash(strings.ReplaceAll(value, pluginRootPlaceholder, pluginDir))
+}
+
 func expandPluginRootAll(values []string, pluginDir string) []string {
 	if len(values) == 0 {
 		return nil
@@ -470,7 +484,7 @@ func newPluginTool(plugin LoadedPlugin, ext ToolExtension, options ActivateOptio
 		description: description,
 		pluginID:    plugin.ID,
 		pluginDir:   plugin.PluginDir,
-		command:     expandPluginRoot(ext.Command, plugin.PluginDir),
+		command:     expandPluginRootPath(ext.Command, plugin.PluginDir),
 		args:        expandPluginRootAll(ext.Args, plugin.PluginDir),
 		parameters:  mcp.SchemaFromMCP(ext.InputSchema),
 		safety:      toolSafety(plugin, ext),
