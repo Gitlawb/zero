@@ -146,9 +146,14 @@ runs:
         if [ -z "${version}" ]; then
           version="${ACTION_REF}"
         fi
+        # A commit-SHA pin (github.action_ref is the 40-hex SHA) is not a release
+        # tag, so fall back to latest rather than fetching releases/download/v<sha>.
         case "${version}" in
           ""|refs/*|*/*) version="latest" ;;
         esac
+        if printf '%s' "${version}" | grep -qiE '^[0-9a-f]{40}$'; then
+          version="latest"
+        fi
         install_dir="${RUNNER_TEMP}/zero-bin"
         mkdir -p "${install_dir}"
         # Reuse ZERO's own checksum-verifying installer, shipped with the action.
@@ -183,6 +188,13 @@ runs:
         # keeps the action provider-agnostic: no provider->env mapping is baked
         # in. The value is never printed.
         if [ -n "${ZERO_INPUT_API_KEY}" ] && [ -n "${ZERO_INPUT_API_KEY_ENV}" ]; then
+          if ! printf '%s' "${ZERO_INPUT_API_KEY_ENV}" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+            echo "::error::api-key-env must be a valid environment variable name." >&2
+            exit 2
+          fi
+          # Export in-process so the zero invocation in this same run block sees
+          # it, and append to GITHUB_ENV so any later steps inherit it too.
+          export "${ZERO_INPUT_API_KEY_ENV}=${ZERO_INPUT_API_KEY}"
           printf '%s=%s\n' "${ZERO_INPUT_API_KEY_ENV}" "${ZERO_INPUT_API_KEY}" >> "${GITHUB_ENV}"
         fi
         if [ -n "${ZERO_INPUT_PROVIDER}" ]; then
@@ -191,6 +203,10 @@ runs:
 
         args=(exec)
 
+        if [ -n "${ZERO_INPUT_PROMPT_FILE}" ] && [ -n "${ZERO_INPUT_PROMPT}" ]; then
+          echo "::error::The 'prompt' and 'prompt-file' inputs are mutually exclusive." >&2
+          exit 2
+        fi
         if [ -n "${ZERO_INPUT_PROMPT_FILE}" ]; then
           args+=(--file "${ZERO_INPUT_PROMPT_FILE}")
         elif [ -n "${ZERO_INPUT_PROMPT}" ]; then
@@ -213,7 +229,8 @@ runs:
         # Split add-dir on newlines and commas; each non-empty entry is a root.
         if [ -n "${ZERO_INPUT_ADD_DIR}" ]; then
           while IFS= read -r dir; do
-            dir="$(echo "${dir}" | tr -d '[:space:]')"
+            # Trim only surrounding whitespace so paths with internal spaces survive.
+            dir="$(printf '%s' "${dir}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
             [ -n "${dir}" ] && args+=(--add-dir "${dir}")
           done < <(printf '%s' "${ZERO_INPUT_ADD_DIR}" | tr ',' '\n')
         fi

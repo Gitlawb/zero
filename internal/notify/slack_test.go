@@ -187,3 +187,69 @@ func TestWebhookSinkEmptyURLIsNoop(t *testing.T) {
 	sink := NewWebhookSink(WebhookConfig{})
 	sink.Emit(Completion, "hi") // no server, no panic, returns.
 }
+
+func TestWebhookSinkRedactsWebhookURLInPayload(t *testing.T) {
+	// If the message or summary echoes the webhook URL (which carries a secret
+	// token), that URL must be redacted before it is sent in the payload.
+	got := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		got <- string(raw)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sink := NewWebhookSink(WebhookConfig{
+		URL:     server.URL,
+		Summary: "see " + server.URL + " for the run",
+		Links:   []WebhookLink{{Label: "Hook", URL: server.URL}},
+	})
+	sink.Emit(Completion, "delivering to "+server.URL)
+
+	select {
+	case raw := <-got:
+		if strings.Contains(raw, server.URL) {
+			t.Fatalf("webhook URL leaked into payload: %s", raw)
+		}
+		if !strings.Contains(raw, "[REDACTED]") {
+			t.Fatalf("expected redaction marker in payload, got %s", raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook server never received a request")
+	}
+}
+
+func TestWebhookSinkCopiesConfigSlices(t *testing.T) {
+	// The sink must own its links/secrets so a caller mutating the config slices
+	// after construction cannot alter (or race with) future payloads.
+	const token = "xoxb-123456789012-abcdefghijklmno"
+	got := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		got <- string(raw)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	links := []WebhookLink{{Label: "Run", URL: "https://example.test/run/1"}}
+	secrets := []string{token}
+	sink := NewWebhookSink(WebhookConfig{URL: server.URL, Links: links, ExtraSecrets: secrets})
+
+	// Mutate the caller-owned slices after construction.
+	links[0] = WebhookLink{Label: "Hijacked", URL: "https://attacker.test"}
+	secrets[0] = "no-longer-redacted"
+
+	sink.Emit(Completion, "leaking "+token+" oops")
+
+	select {
+	case raw := <-got:
+		if strings.Contains(raw, "attacker.test") || strings.Contains(raw, "Hijacked") {
+			t.Fatalf("mutated link leaked into payload: %s", raw)
+		}
+		if strings.Contains(raw, token) {
+			t.Fatalf("token leaked despite original secret config: %s", raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook server never received a request")
+	}
+}

@@ -94,10 +94,12 @@ func NewWebhookSink(cfg WebhookConfig) *WebhookSink {
 	return &WebhookSink{
 		url:     strings.TrimSpace(cfg.URL),
 		summary: cfg.Summary,
-		links:   cfg.Links,
+		// Copy the caller-owned slices so later mutation of cfg can neither
+		// change a future payload nor race with a concurrent Emit.
+		links:   append([]WebhookLink(nil), cfg.Links...),
 		client:  client,
 		logf:    cfg.Logf,
-		secrets: cfg.ExtraSecrets,
+		secrets: append([]string(nil), cfg.ExtraSecrets...),
 	}
 }
 
@@ -110,7 +112,9 @@ func (s *WebhookSink) Emit(event Event, message string) {
 		return
 	}
 
-	options := redaction.Options{ExtraSecretValues: s.secrets}
+	// The webhook URL itself can carry a secret token, so treat it as a secret
+	// when redacting outbound fields (matching log()), not just s.secrets.
+	options := redaction.Options{ExtraSecretValues: append([]string{s.url}, s.secrets...)}
 	safeMessage := redaction.RedactString(message, options)
 	safeSummary := redaction.RedactString(s.summary, options)
 	links := s.redactLinks(options)
