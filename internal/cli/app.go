@@ -45,6 +45,8 @@ type appDeps struct {
 	loadPlugins          func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
 	skillsDir            func() string
+	pluginsDir           func() string
+	toolsDir             func() string
 	newMCPStore          func() (*mcp.PermissionStore, error)
 	newMCPTokenStore     func() (*mcp.TokenStore, error)
 	newSandboxStore      func() (*sandbox.GrantStore, error)
@@ -111,6 +113,10 @@ func defaultAppDeps() appDeps {
 		skillsDir: func() string {
 			return skills.DefaultDir(nil)
 		},
+		pluginsDir: defaultUserPluginsDir,
+		// Scaffolded tools are plugins, so the toolbox dir is the user plugins root:
+		// after activation a `tools make` skeleton is discovered like any plugin.
+		toolsDir: defaultUserPluginsDir,
 		newMCPStore: func() (*mcp.PermissionStore, error) {
 			return mcp.NewPermissionStore(mcp.StoreOptions{})
 		},
@@ -140,6 +146,24 @@ func defaultAppDeps() appDeps {
 
 func userAgent() string {
 	return "zero/" + version
+}
+
+// defaultUserPluginsDir resolves the user-scoped plugins root
+// ($XDG_CONFIG_HOME/zero/plugins) used as the install target for `plugin add`
+// and the toolbox for `tools make`. It is the SourceUser root from
+// plugins.ResolveRoots; an empty string is returned only if it cannot be
+// resolved, which the command layer surfaces as an error.
+func defaultUserPluginsDir() string {
+	roots, err := plugins.ResolveRoots(plugins.ResolveRootOptions{})
+	if err != nil {
+		return ""
+	}
+	for _, root := range roots {
+		if root.Source == plugins.SourceUser {
+			return root.Path
+		}
+	}
+	return ""
 }
 
 func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
@@ -241,6 +265,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runPlugins(args[1:], stdout, stderr, deps)
 	case "skills", "skill":
 		return runSkills(args[1:], stdout, stderr, deps)
+	case "tools", "tool":
+		return runTools(args[1:], stdout, stderr, deps)
 	case "hooks":
 		return runHooks(args[1:], stdout, stderr, deps)
 	case "mcp":
@@ -310,6 +336,12 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.skillsDir == nil {
 		deps.skillsDir = defaults.skillsDir
+	}
+	if deps.pluginsDir == nil {
+		deps.pluginsDir = defaults.pluginsDir
+	}
+	if deps.toolsDir == nil {
+		deps.toolsDir = defaults.toolsDir
 	}
 	if deps.newMCPStore == nil {
 		deps.newMCPStore = defaults.newMCPStore
@@ -566,8 +598,9 @@ Commands:
   sessions   Inspect local Zero session lineage
   spec       Review and approve saved spec-mode drafts
   specialist Manage local Zero specialist profiles
-  plugins    Inspect local Zero plugin manifests
-  skills     Inspect local Zero skills
+  plugins    Inspect, install, and remove local Zero plugins
+  skills     Inspect, install, and remove local Zero skills
+  tools      Scaffold and list local Zero plugin-tools
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings
   sandbox    Inspect sandbox policy and persistent grants

@@ -1,0 +1,404 @@
+package skills
+
+// Distribution: install a skill from a git URL or a local path into the skills
+// directory, with a content hash recorded in a lockfile (skills.lock) so every
+// install/update is verifiable. Skills are markdown, so install NEVER executes
+// fetched content — it copies and validates the SKILL.md and nothing else.
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// LockFileName is the name of the per-directory lockfile that maps an installed
+// skill name to the source it was installed from and the content hash recorded
+// at install time.
+const LockFileName = "skills.lock"
+
+// ErrNameClash is returned when an install would overwrite a skill that was
+// installed from a DIFFERENT source, unless InstallOptions.Force is set. It is a
+// safety guard so a remote source can never silently shadow a skill the user
+// already trusts.
+var ErrNameClash = errors.New("a different skill with that name is already installed")
+
+// GitRunner fetches the skill at source into destination. The default runner
+// shallow-clones with the system git, which inherits the process environment
+// (and therefore any proxy/egress settings). It is injectable so tests never hit
+// the network. A runner must only fetch — it must never execute fetched content.
+type GitRunner func(ctx context.Context, destination string, source string) error
+
+// InstallOptions configures a single skill install.
+type InstallOptions struct {
+	// Source is a git URL or a local filesystem path to a skill directory (one
+	// that contains a SKILL.md, or whose tree contains exactly one).
+	Source string
+	// Dir is the skills directory to install into (typically DefaultDir(env)).
+	Dir string
+	// Force allows overwriting a skill that was installed from a different source.
+	Force bool
+	// GitRunner overrides the fetch implementation (tests/proxy control). When
+	// nil, a git source is shallow-cloned with the system git.
+	GitRunner GitRunner
+}
+
+// InstallResult reports what an install did.
+type InstallResult struct {
+	Name string `json:"name"`
+	// Path is the absolute path to the installed SKILL.md.
+	Path string `json:"path"`
+	// Hash is the content hash recorded for the installed skill.
+	Hash string `json:"hash"`
+	// Source echoes the source the skill was installed from.
+	Source string `json:"source"`
+	// Updated is true when an existing install was replaced; PreviousHash then
+	// carries the prior recorded hash so a caller can show the change.
+	Updated      bool   `json:"updated"`
+	PreviousHash string `json:"previousHash,omitempty"`
+}
+
+// LockEntry records the source and content hash for one installed skill.
+type LockEntry struct {
+	Source string `json:"source"`
+	Hash   string `json:"hash"`
+}
+
+// SkillInfo bundles a discovered skill with its recorded source and hash, for
+// `skill info`.
+type SkillInfo struct {
+	Skill  Skill  `json:"skill"`
+	Source string `json:"source,omitempty"`
+	Hash   string `json:"hash,omitempty"`
+}
+
+// Install fetches the skill at options.Source and copies its SKILL.md into
+// options.Dir/<name>/, validating the frontmatter and recording a content hash
+// in the lockfile. A git URL is fetched via the (injectable) GitRunner into a
+// temp dir; a local path is read in place. Fetched content is never executed.
+func Install(ctx context.Context, options InstallOptions) (InstallResult, error) {
+	source := strings.TrimSpace(options.Source)
+	if source == "" {
+		return InstallResult{}, errors.New("a skill source (git URL or path) is required")
+	}
+	dir := strings.TrimSpace(options.Dir)
+	if dir == "" {
+		return InstallResult{}, errors.New("a skills directory is required")
+	}
+
+	fetchDir, cleanup, err := fetchSource(ctx, source, options.GitRunner)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	defer cleanup()
+
+	skillDir, err := locateSkillDir(fetchDir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+
+	// Validate by parsing the SKILL.md through the same loader the runtime uses;
+	// reject anything without a usable frontmatter/dir name.
+	manifestPath := filepath.Join(skillDir, skillFileName)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("read SKILL.md: %w", err)
+	}
+	parsed := parseSkill(filepath.Base(skillDir), manifestPath, string(data))
+	name := strings.TrimSpace(parsed.Name)
+	if name == "" || !validSkillName(name) {
+		return InstallResult{}, fmt.Errorf("skill has no usable name (set a frontmatter `name:` or use a directory name of letters, numbers, dots, dashes, or underscores)")
+	}
+
+	hash := hashContent(data)
+
+	lock, err := ReadLock(dir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	previous, existed := lock[name]
+	// A different source under the same name is a clash unless Force is set.
+	if existed && previous.Source != source && !options.Force {
+		return InstallResult{}, fmt.Errorf("%w: %q is installed from %s (use --force to overwrite)", ErrNameClash, name, previous.Source)
+	}
+
+	target := filepath.Join(dir, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return InstallResult{}, fmt.Errorf("create skills dir: %w", err)
+	}
+	// Replace any existing install atomically-enough: write the new SKILL.md after
+	// clearing a prior directory so a re-install never mixes old and new files.
+	if err := os.RemoveAll(target); err != nil {
+		return InstallResult{}, fmt.Errorf("clear previous skill: %w", err)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return InstallResult{}, fmt.Errorf("create skill dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, skillFileName), data, 0o644); err != nil {
+		return InstallResult{}, fmt.Errorf("write SKILL.md: %w", err)
+	}
+
+	lock[name] = LockEntry{Source: source, Hash: hash}
+	if err := writeLock(dir, lock); err != nil {
+		return InstallResult{}, err
+	}
+
+	result := InstallResult{
+		Name:   name,
+		Path:   filepath.Join(target, skillFileName),
+		Hash:   hash,
+		Source: source,
+	}
+	if existed {
+		result.Updated = previous.Hash != hash
+		result.PreviousHash = previous.Hash
+	}
+	return result, nil
+}
+
+// Remove deletes an installed skill directory and its lockfile entry. It errors
+// if the named skill is not present in either the dir or the lockfile.
+func Remove(dir string, name string) error {
+	dir = strings.TrimSpace(dir)
+	name = strings.TrimSpace(name)
+	if dir == "" || name == "" {
+		return errors.New("a skills directory and skill name are required")
+	}
+	if !validSkillName(name) {
+		return fmt.Errorf("invalid skill name %q", name)
+	}
+
+	lock, err := ReadLock(dir)
+	if err != nil {
+		return err
+	}
+	_, locked := lock[name]
+	target := filepath.Join(dir, name)
+	_, statErr := os.Stat(target)
+	present := statErr == nil
+	if !locked && !present {
+		return fmt.Errorf("skill %q is not installed", name)
+	}
+
+	if present {
+		if err := os.RemoveAll(target); err != nil {
+			return fmt.Errorf("remove skill dir: %w", err)
+		}
+	}
+	if locked {
+		delete(lock, name)
+		if err := writeLock(dir, lock); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Info returns the named skill plus its recorded source and hash, or ok=false if
+// it is not discoverable in dir.
+func Info(dir string, name string) (SkillInfo, bool) {
+	skill, ok := Get(dir, name)
+	if !ok {
+		return SkillInfo{}, false
+	}
+	info := SkillInfo{Skill: skill}
+	if lock, err := ReadLock(dir); err == nil {
+		if entry, found := lock[skill.Name]; found {
+			info.Source = entry.Source
+			info.Hash = entry.Hash
+		}
+	}
+	return info, true
+}
+
+// ReadLock loads the lockfile from dir. A missing lockfile yields an empty map
+// with no error so callers can treat "no lockfile" as "nothing installed".
+func ReadLock(dir string) (map[string]LockEntry, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return map[string]LockEntry{}, nil
+	}
+	data, err := os.ReadFile(filepath.Join(dir, LockFileName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]LockEntry{}, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", LockFileName, err)
+	}
+	entries := map[string]LockEntry{}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return entries, nil
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", LockFileName, err)
+	}
+	return entries, nil
+}
+
+// writeLock persists the lockfile deterministically (json.Marshal sorts map keys),
+// creating the skills dir if necessary.
+func writeLock(dir string, entries map[string]LockEntry) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create skills dir: %w", err)
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", LockFileName, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, LockFileName), append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", LockFileName, err)
+	}
+	return nil
+}
+
+// fetchSource resolves a source into a local directory to read from. A local
+// path is used in place (no copy, no cleanup); a git URL is shallow-cloned into a
+// temp dir via the runner. The returned cleanup is always safe to call.
+func fetchSource(ctx context.Context, source string, runner GitRunner) (string, func(), error) {
+	if isLocalPath(source) {
+		info, err := os.Stat(source)
+		if err != nil {
+			return "", func() {}, fmt.Errorf("read source: %w", err)
+		}
+		if !info.IsDir() {
+			return "", func() {}, fmt.Errorf("source must be a directory: %s", source)
+		}
+		abs, err := filepath.Abs(source)
+		if err != nil {
+			return "", func() {}, err
+		}
+		return abs, func() {}, nil
+	}
+
+	if runner == nil {
+		runner = defaultGitRunner
+	}
+	temp, err := os.MkdirTemp("", "zero-skill-fetch-")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create temp dir: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(temp) }
+	if err := runner(ctx, temp, source); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("fetch %s: %w", source, err)
+	}
+	return temp, cleanup, nil
+}
+
+// defaultGitRunner shallow-clones source into destination. exec.CommandContext
+// inherits the process environment, so proxy/egress settings are honored, and
+// GIT_TERMINAL_PROMPT=0 keeps a missing-credential clone from blocking on a
+// terminal prompt. Cloning only fetches; it never executes repository content.
+func defaultGitRunner(ctx context.Context, destination string, source string) error {
+	command := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--", source, destination)
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("git clone failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// locateSkillDir finds the directory holding the SKILL.md within root. The common
+// case is a SKILL.md at the root; otherwise it searches one level deeper (a repo
+// whose skill lives in a subdirectory) and requires exactly one match so the
+// install target is unambiguous.
+func locateSkillDir(root string) (string, error) {
+	if fileExists(filepath.Join(root, skillFileName)) {
+		return root, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", fmt.Errorf("scan source: %w", err)
+	}
+	matches := []string{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(root, entry.Name())
+		if fileExists(filepath.Join(candidate, skillFileName)) {
+			matches = append(matches, candidate)
+		}
+	}
+	sort.Strings(matches)
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no %s found in source", skillFileName)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("source contains multiple skills (%d); install one at a time", len(matches))
+	}
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// isLocalPath reports whether source should be treated as a local filesystem
+// path rather than a remote URL. URLs (scheme://… or scp-style host:path) and
+// the common git shorthand are treated as remote.
+func isLocalPath(source string) bool {
+	if source == "" {
+		return false
+	}
+	if strings.HasPrefix(source, ".") || strings.HasPrefix(source, "/") || strings.HasPrefix(source, "~") {
+		return true
+	}
+	if filepath.IsAbs(source) {
+		return true
+	}
+	if hasURLScheme(source) {
+		return false
+	}
+	// scp-style git remote: user@host:path or host:path (no scheme). A Windows
+	// drive path (C:\…) is local, so only treat host:path as remote when the
+	// segment before ':' is not a single drive letter.
+	if idx := strings.Index(source, ":"); idx > 0 {
+		host := source[:idx]
+		if strings.Contains(host, "@") {
+			return false
+		}
+		if len(host) == 1 {
+			return true // drive letter
+		}
+		if strings.Contains(host, ".") {
+			return false // looks like a hostname
+		}
+	}
+	return true
+}
+
+func hasURLScheme(source string) bool {
+	for _, scheme := range []string{"http://", "https://", "git://", "ssh://", "git+ssh://", "ftp://", "ftps://", "file://"} {
+		if strings.HasPrefix(strings.ToLower(source), scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// validSkillName mirrors the install target safety rule: a skill name becomes a
+// single directory component, so it must not contain path separators or traversal.
+func validSkillName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return false
+	}
+	return name == filepath.Base(name)
+}
+
+func hashContent(data []byte) string {
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}

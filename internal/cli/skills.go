@@ -23,8 +23,8 @@ func runSkills(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 				return exitCrash
 			}
 			return exitSuccess
-		case "list":
-			command, rest = "list", args[1:]
+		case "list", "add", "info", "remove", "rm":
+			command, rest = args[0], args[1:]
 		default:
 			// Treat a leading flag (e.g. --json) as belonging to the implicit
 			// `list` command so `zero skills --json` works like `zero plugins`.
@@ -47,6 +47,12 @@ func runSkills(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 			return exitSuccess
 		}
 		return runSkillsList(deps.skillsDir(), options, stdout, stderr)
+	case "add":
+		return runSkillAdd(rest, deps.skillsDir(), stdout, stderr)
+	case "info":
+		return runSkillInfo(rest, deps.skillsDir(), stdout, stderr)
+	case "remove", "rm":
+		return runSkillRemove(rest, deps.skillsDir(), stdout, stderr)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown skills subcommand %q", command))
 	}
@@ -109,7 +115,10 @@ func writeSkillsHelp(w io.Writer) error {
   zero skills <command>
 
 Commands:
-  list    List discovered Zero skills
+  list                 List discovered Zero skills
+  add <git-url|path>   Install a skill (checksum-pinned in skills.lock)
+  info <name>          Show a skill's frontmatter, source, and pinned hash
+  remove <name>        Remove an installed skill and its lockfile entry
 `)
 	return err
 }

@@ -76,6 +76,10 @@ func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 			return exitCrash
 		}
 		return exitSuccess
+	case "add":
+		return runPluginAdd(args[1:], deps.pluginsDir(), stdout, stderr)
+	case "remove", "rm":
+		return runPluginRemove(args[1:], deps.pluginsDir(), stdout, stderr)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown plugins subcommand %q", args[0]))
 	}
@@ -515,7 +519,9 @@ func writePluginsHelp(w io.Writer) error {
   zero plugins <command>
 
 Commands:
-  list    List local Zero plugins
+  list                 List local Zero plugins
+  add <git-url|path>   Install a plugin (manifest-validated, pinned in plugins.lock)
+  remove <id>          Remove an installed plugin and its lockfile entry
 `)
 	return err
 }
