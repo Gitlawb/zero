@@ -206,17 +206,14 @@ func TestInstallSameLocalSourceDifferentSpellingIsNotAClash(t *testing.T) {
 		t.Fatalf("first install: %v", err)
 	}
 
-	// Reinstall using a relative spelling of the same directory.
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	rel, err := filepath.Rel(wd, abs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Install(context.Background(), InstallOptions{Source: rel, Dir: destDir}); err != nil {
-		t.Fatalf("reinstall with relative spelling should not clash: %v", err)
+	// Reinstall using a different textual spelling of the same directory (a
+	// redundant "/./" segment). canonicalSource normalizes both spellings to the
+	// same absolute path, so this must not be treated as a clash. (A cwd-relative
+	// spelling can't be expressed across drives on Windows, where the temp dir and
+	// the repo live on different volumes, so use a same-directory alternate.)
+	messy := filepath.Dir(abs) + string(filepath.Separator) + "." + string(filepath.Separator) + filepath.Base(abs)
+	if _, err := Install(context.Background(), InstallOptions{Source: messy, Dir: destDir}); err != nil {
+		t.Fatalf("reinstall with an equivalent spelling should not clash: %v", err)
 	}
 
 	want := canonicalSource(abs)

@@ -41,6 +41,13 @@ func TestRunSkillAddInfoRemove(t *testing.T) {
 	skillsDir := t.TempDir()
 	src := writeSourceSkillDir(t, filepath.Join(t.TempDir(), "src"),
 		"---\nname: confirmation-policy\ndescription: Ask first.\n---\nbody\n")
+	// Install records the canonical (symlink-resolved) source, which "info" then
+	// shows. Normalize here too so the assertion matches on every platform — on
+	// Windows the temp dir is an 8.3 short path EvalSymlinks expands, and on macOS
+	// it resolves /var -> /private/var.
+	if resolved, err := filepath.EvalSymlinks(src); err == nil {
+		src = resolved
+	}
 
 	deps := appDeps{skillsDir: func() string { return skillsDir }}
 
