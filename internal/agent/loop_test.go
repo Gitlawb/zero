@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -485,6 +486,85 @@ func TestRunSanitizesMalformedToolCallArgumentsBeforeRetry(t *testing.T) {
 	}
 	if toolParseError == "" {
 		t.Fatalf("expected model-visible tool result to keep the parse error, messages: %#v", provider.requests[1].Messages)
+	}
+}
+
+func TestRunDefersSelfCorrectFeedbackUntilAfterToolBatch(t *testing.T) {
+	// A single assistant turn with two tool calls where the first mutates and
+	// self-correct fails must keep both tool_results contiguous, with the feedback
+	// appended only after the whole batch — otherwise a user message interleaves
+	// between tool_results and breaks strict provider replay.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "existing.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	registry.Register(tools.NewReadFileTool(root))
+
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"hello"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "read_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"path":"existing.txt"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	corrector := NewSelfCorrector(root, erroringChecker{err: errors.New("lsp boom")}, nil, SelfCorrectConfig{
+		Enabled:    true,
+		IncludeLSP: true,
+		Autonomy:   "high",
+	})
+
+	if _, err := Run(context.Background(), "go", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		SelfCorrect:    corrector,
+		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "test"}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("expected a second completion request, got %d", len(provider.requests))
+	}
+
+	msgs := provider.requests[1].Messages
+	var toolIdx []int
+	feedbackIdx := -1
+	for i, m := range msgs {
+		switch m.Role {
+		case zeroruntime.MessageRoleTool:
+			toolIdx = append(toolIdx, i)
+		case zeroruntime.MessageRoleUser:
+			if strings.Contains(m.Content, "Verification failed after your edit") {
+				feedbackIdx = i
+			}
+		}
+	}
+	if len(toolIdx) != 2 {
+		t.Fatalf("expected 2 tool_result messages, got %d: %#v", len(toolIdx), msgs)
+	}
+	if feedbackIdx == -1 {
+		t.Fatalf("expected a self-correct feedback message, messages: %#v", msgs)
+	}
+	if toolIdx[1] != toolIdx[0]+1 {
+		t.Fatalf("tool_results must be contiguous, got indices %v: %#v", toolIdx, msgs)
+	}
+	if feedbackIdx < toolIdx[1] {
+		t.Fatalf("self-correct feedback (idx %d) must come after both tool_results %v", feedbackIdx, toolIdx)
 	}
 }
 

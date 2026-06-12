@@ -260,6 +260,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// after the batch, so every tool_result is recorded first and at most one
 		// switch occurs per turn.
 		turnRequestedModel := ""
+		// selfCorrectFeedback accumulates post-edit verification feedback during
+		// the batch; it is appended ONCE after the loop so every advertised tool
+		// call keeps its tool_result contiguous (a user message interleaved between
+		// tool_results breaks strict provider replay) — same after-batch rationale
+		// as turnRequestedModel above.
+		var selfCorrectFeedback []string
 		for index, call := range collected.ToolCalls {
 			if options.OnToolCall != nil {
 				options.OnToolCall(call)
@@ -333,12 +339,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// read-only tool (no ChangedFiles) never triggers verification.
 			if options.SelfCorrect != nil && toolResult.Status == tools.StatusOK && len(toolResult.ChangedFiles) > 0 {
 				if feedback, _ := options.SelfCorrect.AfterEdit(ctx, toolResult.ChangedFiles); feedback != "" {
-					messages = append(messages, zeroruntime.Message{
-						Role:    zeroruntime.MessageRoleUser,
-						Content: feedback,
-					})
+					selfCorrectFeedback = append(selfCorrectFeedback, feedback)
 				}
 			}
+		}
+
+		// Append accumulated self-correct feedback now that every tool_result for
+		// this batch is recorded, so the assistant's tool_results stay contiguous
+		// (a user message between tool_results breaks strict provider replay).
+		if len(selfCorrectFeedback) > 0 {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: strings.Join(selfCorrectFeedback, "\n\n"),
+			})
 		}
 
 		// Mid-run model escalation: if a tool asked to switch models this turn and
