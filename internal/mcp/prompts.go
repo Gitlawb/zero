@@ -160,6 +160,17 @@ func getPrompt(rawParams json.RawMessage) (getPromptResult, int, error) {
 	if !ok {
 		return getPromptResult{}, jsonRPCPromptNotFound, fmt.Errorf("unknown prompt: %s", name)
 	}
+	// Honor the contract advertised by prompts/list: a required argument must be
+	// supplied and non-empty, otherwise the call is invalid rather than silently
+	// rendering a blank.
+	for _, arg := range template.prompt.Arguments {
+		if !arg.Required {
+			continue
+		}
+		if value, present := params.Arguments[arg.Name]; !present || strings.TrimSpace(value) == "" {
+			return getPromptResult{}, jsonRPCInvalidParams, fmt.Errorf("prompts/get: missing required argument %q", arg.Name)
+		}
+	}
 
 	messages := make([]PromptMessage, 0, len(template.messages))
 	for _, message := range template.messages {
@@ -177,27 +188,28 @@ func getPrompt(rawParams json.RawMessage) (getPromptResult, int, error) {
 	}, 0, nil
 }
 
-// substituteArgs replaces every {{name}} placeholder with the matching argument
-// value. Placeholders without a supplied argument render as empty so a partial
-// invocation never leaks raw template syntax to the consumer.
+// substituteArgs renders a TEMPLATE by replacing each {{name}} placeholder with
+// the matching argument value (or blank when not supplied). It scans the
+// template left-to-right and writes argument values verbatim, so {{...}} that
+// appears inside a supplied value (Helm/Mustache/Actions snippets in a pasted
+// diff, etc.) is preserved and never re-interpreted as a placeholder.
 func substituteArgs(text string, arguments map[string]string) string {
-	for name, value := range arguments {
-		text = strings.ReplaceAll(text, "{{"+name+"}}", value)
-	}
-	return blankRemainingPlaceholders(text)
-}
-
-// blankRemainingPlaceholders strips any {{...}} placeholders left unfilled.
-func blankRemainingPlaceholders(text string) string {
+	var b strings.Builder
 	for {
 		open := strings.Index(text, "{{")
 		if open < 0 {
-			return text
+			b.WriteString(text)
+			break
 		}
-		close := strings.Index(text[open:], "}}")
-		if close < 0 {
-			return text
+		rel := strings.Index(text[open:], "}}")
+		if rel < 0 {
+			b.WriteString(text)
+			break
 		}
-		text = text[:open] + text[open+close+2:]
+		b.WriteString(text[:open])
+		name := strings.TrimSpace(text[open+2 : open+rel])
+		b.WriteString(arguments[name]) // missing arg -> "" (blank)
+		text = text[open+rel+2:]
 	}
+	return b.String()
 }

@@ -93,6 +93,41 @@ func TestServePromptsGetSubstitutesArguments(t *testing.T) {
 	}
 }
 
+func TestSubstituteArgsPreservesPlaceholdersInUserInput(t *testing.T) {
+	// A supplied value containing {{...}} (a pasted template/CI snippet) must
+	// survive verbatim — only TEMPLATE placeholders are replaced.
+	out := substituteArgs("Review this: {{diff}}", map[string]string{
+		"diff": "run: ${{ secrets.TOKEN }}\nvalue: {{ .Values.x }}",
+	})
+	if !strings.Contains(out, "${{ secrets.TOKEN }}") || !strings.Contains(out, "{{ .Values.x }}") {
+		t.Fatalf("user-supplied {{...}} was mangled: %q", out)
+	}
+	// An unfilled template placeholder still renders blank (no raw syntax leaks).
+	if blank := substituteArgs("a {{missing}} b", map[string]string{}); strings.Contains(blank, "{{") {
+		t.Fatalf("unfilled template placeholder leaked raw syntax: %q", blank)
+	}
+}
+
+func TestServePromptsGetMissingRequiredArgErrors(t *testing.T) {
+	// code_review.diff is required; omitting it must error rather than silently
+	// rendering a blank, honoring the contract prompts/list advertises.
+	var input bytes.Buffer
+	writeServerTestMessage(t, &input, rpcMessage{
+		ID:     1,
+		Method: "prompts/get",
+		Params: mustRaw(map[string]any{"name": "code_review", "arguments": map[string]any{}}),
+	})
+
+	var output bytes.Buffer
+	if err := Serve(context.Background(), &input, &output, tools.NewRegistry(), ServeOptions{}); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	message := readServerTestMessage(t, newMessageReader(&output))
+	if message.Error == nil {
+		t.Fatalf("expected error for missing required argument, got result %s", string(message.Result))
+	}
+}
+
 func TestServePromptsGetUnknownErrors(t *testing.T) {
 	var input bytes.Buffer
 	writeServerTestMessage(t, &input, rpcMessage{

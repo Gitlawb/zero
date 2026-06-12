@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -163,7 +164,10 @@ func (server toolServer) readResource(rawParams json.RawMessage) ([]ResourceCont
 	}
 
 	contents := ResourceContents{
-		URI:      fileURI(absolute),
+		// Echo the requested URI (what resources/list advertised) rather than the
+		// symlink-resolved path, so list and read stay consistent and reading a
+		// file never reveals the canonical host path behind a symlinked root.
+		URI:      uri,
 		MimeType: mimeTypeForPath(absolute),
 	}
 	if looksBinary(absolute, data) {
@@ -190,13 +194,20 @@ func (server toolServer) resolveResourcePath(requested string) (string, error) {
 	}
 	cleaned := filepath.Clean(requested)
 
+	// Resolve symlinks BEFORE the scope check: an in-root symlink that points
+	// outside the roots (e.g. link -> /etc/passwd) must NOT be readable. A path
+	// that cannot be resolved (missing file) is rejected. Roots are resolved too
+	// so a symlinked root prefix (e.g. macOS /var -> /private/var) still matches.
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		return "", errors.New("resource is outside the allowed workspace scope")
+	}
 	for _, root := range server.resourceRoots() {
-		if containedInRoot(root, cleaned) {
-			return cleaned, nil
+		realRoot, rootErr := filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			realRoot = filepath.Clean(root)
 		}
-		// Resolve symlinks so an in-scope symlink that still lands inside a root
-		// is accepted, while a link escaping the roots is rejected.
-		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && containedInRoot(root, resolved) {
+		if containedInRoot(realRoot, resolved) {
 			return resolved, nil
 		}
 	}
@@ -229,30 +240,33 @@ func fileURI(absolute string) string {
 	if !strings.HasPrefix(slashed, "/") {
 		slashed = "/" + slashed
 	}
-	return "file://" + slashed
+	// Build via url.URL so the path is percent-encoded (spaces, #, %, ? in file
+	// names round-trip through standards-compliant clients).
+	u := url.URL{Scheme: "file", Path: slashed}
+	return u.String()
 }
 
 // pathFromURI extracts an absolute filesystem path from a resource URI. It
 // accepts file:// URIs (the scheme resources/list advertises); any other scheme
 // is rejected so a client cannot smuggle in an unexpected locator.
 func pathFromURI(uri string) (string, error) {
-	const scheme = "file://"
-	if !strings.HasPrefix(uri, scheme) {
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "", fmt.Errorf("invalid resource uri: %s", uri)
+	}
+	if parsed.Scheme != "file" {
 		return "", fmt.Errorf("unsupported resource uri scheme: %s", uri)
 	}
-	rest := strings.TrimPrefix(uri, scheme)
-	// file:///abs -> /abs ; file://host/abs is not supported (no remote hosts).
-	if rest == "" {
+	// Only a local file URI (empty or "localhost" authority) is supported; a real
+	// remote host must not be smuggled in.
+	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+		return "", fmt.Errorf("resource uri host is not supported: %s", uri)
+	}
+	// parsed.Path is already percent-decoded, so names with spaces / # / % work.
+	if parsed.Path == "" {
 		return "", errors.New("resource uri has no path")
 	}
-	// Drop an optional empty authority (file:///path) but reject a real host.
-	if !strings.HasPrefix(rest, "/") {
-		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-			return "", fmt.Errorf("resource uri host is not supported: %s", uri)
-		}
-		return "", fmt.Errorf("unsupported resource uri: %s", uri)
-	}
-	decoded := filepath.FromSlash(rest)
+	decoded := filepath.FromSlash(parsed.Path)
 	// On Windows a file URI like file:///C:/x yields /C:/x; strip the leading
 	// slash so it becomes a valid drive-rooted path.
 	if len(decoded) >= 3 && decoded[0] == filepath.Separator && decoded[2] == ':' {

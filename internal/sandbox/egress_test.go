@@ -79,6 +79,25 @@ func TestEgressProxyBindsLoopback(t *testing.T) {
 	}
 }
 
+// TestEgressProxyHTTPAuthorizesURLHostNotHostHeader verifies an absolute-URL
+// request to a DENIED host carrying an ALLOWED Host header is refused —
+// authorization follows the dialed URL host, not the spoofable Host header.
+func TestEgressProxyHTTPAuthorizesURLHostNotHostHeader(t *testing.T) {
+	proxy, err := newEgressProxy(egressOptions{Allowed: []string{"allowed.example"}})
+	if err != nil {
+		t.Fatalf("newEgressProxy: %v", err)
+	}
+	defer proxy.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "http://denied.example/data", nil)
+	req.Host = "allowed.example" // spoofed allowed Host header
+	rec := httptest.NewRecorder()
+	proxy.handleHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (Host header must not authorize a different URL host)", rec.Code)
+	}
+}
+
 // TestEgressProxyConnectAllowed verifies an allowlisted CONNECT tunnels through
 // to a fake upstream TLS server.
 func TestEgressProxyConnectAllowed(t *testing.T) {

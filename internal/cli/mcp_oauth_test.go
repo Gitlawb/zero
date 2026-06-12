@@ -142,7 +142,7 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 
 	// Drive the loopback redirect as soon as the authorization URL is printed.
 	stdout := &syncBuffer{}
-	var stderr bytes.Buffer
+	stderr := &syncBuffer{}
 	go func() {
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
@@ -154,7 +154,19 @@ func TestRunMCPOAuthLoginStoresTokens(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
-	exitCode := runWithDeps([]string{"mcp", "oauth", "login", "remote"}, stdout, &stderr, deps)
+	// Run the command (which blocks waiting for the callback) off-goroutine and
+	// bound it: if the callback is never driven, fail fast instead of hanging
+	// until the package test timeout.
+	done := make(chan int, 1)
+	go func() {
+		done <- runWithDeps([]string{"mcp", "oauth", "login", "remote"}, stdout, stderr, deps)
+	}()
+	var exitCode int
+	select {
+	case exitCode = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("login did not complete within 10s; stderr=%s stdout=%s", stderr.String(), stdout.String())
+	}
 	if exitCode != exitSuccess {
 		t.Fatalf("exitCode = %d stderr=%s stdout=%s", exitCode, stderr.String(), stdout.String())
 	}

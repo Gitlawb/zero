@@ -156,6 +156,28 @@ func TestServeResourcesReadRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestServeResourcesReadRejectsInRootSymlinkEscape(t *testing.T) {
+	workspace := t.TempDir()
+	writeResourceFile(t, workspace, "inside.txt", "in\n")
+	// A secret outside the workspace, reachable only via an in-workspace symlink.
+	// Resolving symlinks before the scope check must keep it unreadable.
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("top secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(workspace, "link.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	message := readResourceMessage(t, workspace, fileURI(link))
+	if message.Error == nil {
+		t.Fatalf("expected error for an in-root symlink escaping the workspace, got result %s", string(message.Result))
+	}
+	if len(message.Result) != 0 {
+		t.Fatalf("symlink escape returned contents: %s", string(message.Result))
+	}
+}
+
 func TestServeResourcesReadRejectsOutOfScopeAbsolute(t *testing.T) {
 	workspace := t.TempDir()
 	outside := t.TempDir()

@@ -159,11 +159,15 @@ func TestTokenStoreStatusReportsPresenceWithoutToken(t *testing.T) {
 }
 
 func TestResolveTokenStorePathUsesXDG(t *testing.T) {
-	path, err := ResolveTokenStorePath(map[string]string{"XDG_CONFIG_HOME": "/tmp/xdg-test"})
+	// Use a real temp dir so the base is absolute on every OS (a literal
+	// "/tmp/..." isn't absolute on Windows, where ResolveTokenStorePath would
+	// then prepend the drive letter and diverge from a hard-coded want).
+	configHome := t.TempDir()
+	path, err := ResolveTokenStorePath(map[string]string{"XDG_CONFIG_HOME": configHome})
 	if err != nil {
 		t.Fatalf("ResolveTokenStorePath() error = %v", err)
 	}
-	want := filepath.Join("/tmp/xdg-test", "zero", "mcp-oauth-tokens.json")
+	want := filepath.Join(configHome, "zero", "mcp-oauth-tokens.json")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}

@@ -391,9 +391,15 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 	if timeout <= 0 {
 		timeout = defaultLoginTimeout
 	}
+	// One deadline bounds the WHOLE interactive login — discovery, optional client
+	// registration, the callback wait, and the code exchange — so a hung
+	// metadata/registration/token endpoint can't block the command forever (the
+	// CLI passes a non-cancelable context).
+	loginCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	cfg := options.Config
-	metadata, err := resolveAuthorizationServer(ctx, httpClient, options.ServerURL, cfg)
+	metadata, err := resolveAuthorizationServer(loginCtx, httpClient, options.ServerURL, cfg)
 	if err != nil {
 		return StoredToken{}, err
 	}
@@ -409,7 +415,7 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		if registration := strings.TrimSpace(metadata.RegistrationEndpoint); registration != "" {
-			clientID, clientSecret, regErr := registerClient(ctx, httpClient, registration, redirectURI, cfg.Scopes)
+			clientID, clientSecret, regErr := registerClient(loginCtx, httpClient, registration, redirectURI, cfg.Scopes)
 			if regErr != nil {
 				return StoredToken{}, regErr
 			}
@@ -485,21 +491,18 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 		return StoredToken{}, fmt.Errorf("open authorization URL: %w", err)
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	select {
 	case result := <-resultChan:
 		if result.err != nil {
 			return StoredToken{}, result.err
 		}
-		token, err := flow.exchangeCode(waitCtx, result.code, redirectURI)
+		token, err := flow.exchangeCode(loginCtx, result.code, redirectURI)
 		if err != nil {
 			return StoredToken{}, err
 		}
 		return token, nil
-	case <-waitCtx.Done():
-		return StoredToken{}, fmt.Errorf("timed out waiting for OAuth authorization callback: %w", waitCtx.Err())
+	case <-loginCtx.Done():
+		return StoredToken{}, fmt.Errorf("timed out waiting for OAuth authorization callback: %w", loginCtx.Err())
 	}
 }
 
@@ -508,7 +511,15 @@ func joinWellKnown(baseURL string) (string, error) {
 	if err != nil || parsed.Host == "" {
 		return "", fmt.Errorf("invalid base URL for metadata discovery: %q", baseURL)
 	}
+	// RFC 8414: the well-known segment is inserted between the host and any issuer
+	// path component, so a path-based issuer (https://host/tenant-a) is probed at
+	// https://host/.well-known/oauth-authorization-server/tenant-a — not at the
+	// host root (which would break tenant-scoped discovery).
+	issuerPath := strings.Trim(parsed.Path, "/")
 	parsed.Path = wellKnownAuthServerPath
+	if issuerPath != "" {
+		parsed.Path = strings.TrimRight(wellKnownAuthServerPath, "/") + "/" + issuerPath
+	}
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil

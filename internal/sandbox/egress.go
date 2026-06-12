@@ -160,9 +160,14 @@ func (proxy *egressProxy) handleConnect(w http.ResponseWriter, r *http.Request) 
 // host, then re-issues the request upstream and copies the response back. A
 // denied host gets a 403 and the request is never forwarded.
 func (proxy *egressProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	target := r.Host
+	// Authorize the host actually dialed. A forward-proxy request carries an
+	// absolute URL whose host is the upstream target, so authorize r.URL.Host
+	// and fall back to the Host header only when the request line had no host.
+	// Trusting the Host header here would let `GET http://denied/ Host: allowed`
+	// bypass the allowlist while the transport still dials the URL host.
+	target := r.URL.Host
 	if target == "" {
-		target = r.URL.Host
+		target = r.Host
 	}
 	host := hostnameOnly(target)
 	if host == "" || !domainAllowed(host, proxy.allowed, proxy.denied) {

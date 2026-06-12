@@ -34,7 +34,7 @@ func runMCPOAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 }
 
 func runMCPOAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	_, positional, help, err := parseMCPPositionalCommand(args)
+	opts, positional, help, err := parseMCPPositionalCommand(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -43,6 +43,12 @@ func runMCPOAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps ap
 			return exitCrash
 		}
 		return exitSuccess
+	}
+	if opts.json {
+		// login is an interactive flow (prints a URL, waits for the callback); a
+		// machine-readable mode would be misleading, so reject it rather than
+		// accepting the flag and ignoring it.
+		return writeExecUsageError(stderr, "zero mcp oauth login does not support --json")
 	}
 	if len(positional) != 1 {
 		return writeExecUsageError(stderr, "usage: zero mcp oauth login <server>")
