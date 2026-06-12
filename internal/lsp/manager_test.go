@@ -1,0 +1,199 @@
+package lsp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"io"
+	"sync"
+	"testing"
+	"time"
+)
+
+// stubLSPServer is an lspServer backed by in-memory pipes. On each didOpen/
+// didChange it publishes the next entry of a configured diagnostics sequence
+// (repeating the last entry), or nothing when neverPublish is set.
+type stubLSPServer struct {
+	client       *Client
+	serverWriter *io.PipeWriter
+	clientWriter *io.PipeWriter
+	closeOnce    sync.Once
+}
+
+func (s *stubLSPServer) Client() *Client { return s.client }
+
+func (s *stubLSPServer) Shutdown(_ context.Context) error {
+	s.closeOnce.Do(func() {
+		_ = s.client.Close()
+		_ = s.serverWriter.Close()
+		_ = s.clientWriter.Close()
+	})
+	return nil
+}
+
+func (s *stubLSPServer) run(serverReader io.Reader, sequence [][]Diagnostic, neverPublish bool) {
+	reader := bufio.NewReader(serverReader)
+	count := 0
+	for {
+		body, err := readMessage(reader)
+		if err != nil {
+			return
+		}
+		var msg struct {
+			Method string `json:"method"`
+			Params struct {
+				TextDocument struct {
+					URI string `json:"uri"`
+				} `json:"textDocument"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		if msg.Method != "textDocument/didOpen" && msg.Method != "textDocument/didChange" {
+			continue
+		}
+		if neverPublish {
+			continue
+		}
+		diags := []Diagnostic{}
+		if count < len(sequence) {
+			diags = sequence[count]
+		} else if len(sequence) > 0 {
+			diags = sequence[len(sequence)-1]
+		}
+		count++
+		_ = writeMessage(s.serverWriter, map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "textDocument/publishDiagnostics",
+			"params":  PublishDiagnosticsParams{URI: msg.Params.TextDocument.URI, Diagnostics: diags},
+		})
+	}
+}
+
+func stubStarter(sequence [][]Diagnostic, neverPublish bool) serverStarter {
+	return func(_ context.Context, _ []string, _ string) (lspServer, error) {
+		clientReader, serverWriter := io.Pipe()
+		serverReader, clientWriter := io.Pipe()
+		stub := &stubLSPServer{
+			client:       NewClient(clientReader, clientWriter),
+			serverWriter: serverWriter,
+			clientWriter: clientWriter,
+		}
+		go stub.run(serverReader, sequence, neverPublish)
+		return stub, nil
+	}
+}
+
+func fastManager(starter serverStarter) *Manager {
+	m := newManagerWithStarter("/repo", starter)
+	m.debounce = 15 * time.Millisecond // keep tests quick
+	return m
+}
+
+func TestManagerCheckReturnsDiagnostics(t *testing.T) {
+	errDiag := Diagnostic{
+		Range:    Range{Start: Position{Line: 2, Character: 0}},
+		Severity: SeverityError,
+		Message:  "undefined: foo",
+	}
+	m := fastManager(stubStarter([][]Diagnostic{{errDiag}}, false))
+	defer m.Shutdown(context.Background())
+
+	diags, err := m.Check(context.Background(), "main.go", "package main")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(diags) != 1 || diags[0].Message != "undefined: foo" {
+		t.Fatalf("diagnostics = %#v", diags)
+	}
+	if !m.HasErrors("main.go") {
+		t.Fatal("HasErrors should be true after an error diagnostic")
+	}
+}
+
+func TestManagerCheckClearsDiagnosticsOnChange(t *testing.T) {
+	errDiag := Diagnostic{Severity: SeverityError, Message: "boom"}
+	// First sync publishes an error; second publishes an empty list (fixed).
+	m := fastManager(stubStarter([][]Diagnostic{{errDiag}, {}}, false))
+	defer m.Shutdown(context.Background())
+
+	if _, err := m.Check(context.Background(), "main.go", "broken"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasErrors("main.go") {
+		t.Fatal("expected errors after first check")
+	}
+	diags, err := m.Check(context.Background(), "main.go", "fixed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diags) != 0 || m.HasErrors("main.go") {
+		t.Fatalf("expected diagnostics cleared, got %#v", diags)
+	}
+}
+
+func TestManagerCheckTimesOutWithoutPublish(t *testing.T) {
+	m := fastManager(stubStarter(nil, true)) // server never publishes
+	defer m.Shutdown(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	diags, err := m.Check(ctx, "main.go", "package main")
+	if err != nil {
+		t.Fatalf("Check should not error on timeout, got %v", err)
+	}
+	if len(diags) != 0 {
+		t.Fatalf("expected no diagnostics, got %#v", diags)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("Check hung well past the context timeout")
+	}
+}
+
+func TestManagerNoServerForExtension(t *testing.T) {
+	calls := 0
+	m := fastManager(func(_ context.Context, _ []string, _ string) (lspServer, error) {
+		calls++
+		return nil, nil
+	})
+	diags, err := m.Check(context.Background(), "notes.md", "hello")
+	if err != nil || diags != nil {
+		t.Fatalf("unconfigured extension should return (nil,nil), got (%#v,%v)", diags, err)
+	}
+	if calls != 0 {
+		t.Fatal("no server should be started for an unconfigured extension")
+	}
+}
+
+func TestManagerCheckConcurrentReusesOneServer(t *testing.T) {
+	var mu sync.Mutex
+	started := 0
+	base := stubStarter([][]Diagnostic{{{Severity: SeverityWarning, Message: "w"}}}, false)
+	m := fastManager(func(ctx context.Context, command []string, root string) (lspServer, error) {
+		mu.Lock()
+		started++
+		mu.Unlock()
+		return base(ctx, command, root)
+	})
+	defer m.Shutdown(context.Background())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := m.Check(context.Background(), "main.go", "package main"); err != nil {
+				t.Errorf("concurrent Check: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// All four calls target the same .go server; only one session is retained.
+	m.mu.Lock()
+	sessions := len(m.sessions)
+	m.mu.Unlock()
+	if sessions != 1 {
+		t.Fatalf("expected a single reused session, got %d", sessions)
+	}
+}
