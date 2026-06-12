@@ -1,0 +1,87 @@
+name: ZERO Action Smoke
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/zero-action-smoke.yml
+  push:
+    branches:
+      - main
+    paths:
+      - action.yml
+      - .github/workflows/zero-action-smoke.yml
+
+jobs:
+  validate:
+    name: Validate action.yml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse action.yml and assert documented inputs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import sys, yaml
+
+          with open("action.yml", "r", encoding="utf-8") as handle:
+              doc = yaml.safe_load(handle)
+
+          assert isinstance(doc, dict), "action.yml must be a mapping"
+          assert doc.get("name"), "action must declare a name"
+          assert doc.get("description"), "action must declare a description"
+
+          runs = doc.get("runs") or {}
+          assert runs.get("using") == "composite", "action must be a composite action"
+          steps = runs.get("steps") or []
+          assert len(steps) >= 2, "composite action must define steps"
+
+          inputs = doc.get("inputs") or {}
+          expected_inputs = [
+              "prompt", "prompt-file", "provider", "api-key", "api-key-env",
+              "model", "mode", "auto", "self-correct", "add-dir", "worktree",
+              "output-format", "post-to", "slack-webhook-url", "github-token",
+              "working-directory", "zero-version", "zero-repo",
+          ]
+          missing = [name for name in expected_inputs if name not in inputs]
+          assert not missing, f"action.yml is missing inputs: {missing}"
+
+          # Conservative CI default: autonomy must default to 'low'.
+          assert inputs["auto"].get("default") == "low", "auto must default to low"
+          # stream-json is the documented default capture format.
+          assert inputs["output-format"].get("default") == "stream-json", \
+              "output-format must default to stream-json"
+
+          outputs = doc.get("outputs") or {}
+          for name in ("exit-code", "output-file", "summary"):
+              assert name in outputs, f"action.yml is missing output: {name}"
+
+          # The action must never enable unsafe mode implicitly.
+          serialized = yaml.safe_dump(doc)
+          assert "--skip-permissions-unsafe" not in serialized, \
+              "action must never pass --skip-permissions-unsafe"
+
+          print(f"action.yml OK: {len(inputs)} inputs, {len(outputs)} outputs, {len(steps)} steps")
+          PY
+
+      - name: Shell-syntax-check embedded run blocks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml
+          with open("action.yml", "r", encoding="utf-8") as handle:
+              doc = yaml.safe_load(handle)
+          steps = (doc.get("runs") or {}).get("steps") or []
+          for index, step in enumerate(steps):
+              run = step.get("run")
+              if run:
+                  with open(f"/tmp/zero_step_{index}.sh", "w", encoding="utf-8") as out:
+                      out.write(run)
+          PY
+          for script in /tmp/zero_step_*.sh; do
+            echo "bash -n ${script}"
+            bash -n "${script}"
+          done
