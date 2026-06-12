@@ -1,0 +1,352 @@
+package agenteval
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestLoadSuiteParsesJSONAndNormalizesDeterministicFields(t *testing.T) {
+	path := writeSuite(t, `{
+		"id": "quality-context",
+		"name": "Quality context",
+		"description": "Offline regression tasks",
+		"tasks": [{
+			"id": "edit-reader",
+			"name": "Edit reader",
+			"description": "Keep prompt context tight.",
+			"prompt": "Update the reader.",
+			"workspaceFixture": "fixtures/reader",
+			"verificationCommands": [
+				{"id": "test", "name": "Tests", "command": ["go", "test", "./..."]}
+			],
+			"expectedChangedFiles": ["internal/reader/b.go", "internal/reader/a.go"]
+		}]
+	}`)
+
+	suite, err := LoadSuite(path)
+	if err != nil {
+		t.Fatalf("LoadSuite returned error: %v", err)
+	}
+
+	if suite.ID != "quality-context" || suite.Tasks[0].WorkspaceFixture != "fixtures/reader" {
+		t.Fatalf("unexpected suite: %#v", suite)
+	}
+	wantFiles := []string{"internal/reader/a.go", "internal/reader/b.go"}
+	if !reflect.DeepEqual(suite.Tasks[0].ExpectedChangedFiles, wantFiles) {
+		t.Fatalf("expected files = %#v, want %#v", suite.Tasks[0].ExpectedChangedFiles, wantFiles)
+	}
+	if got := strings.Join(suite.Tasks[0].VerificationCommands[0].Command, " "); got != "go test ./..." {
+		t.Fatalf("command = %q, want go test ./...", got)
+	}
+}
+
+func TestSampleSuiteLoads(t *testing.T) {
+	matches, err := filepath.Glob(filepath.Join("testdata", "*.json"))
+	if err != nil {
+		t.Fatalf("glob sample suites: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected at least one sample suite")
+	}
+	for _, path := range matches {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			if _, err := LoadSuite(path); err != nil {
+				t.Fatalf("sample suite should load: %v", err)
+			}
+		})
+	}
+
+	suite, err := LoadSuite(filepath.Join("testdata", "sample_suite.json"))
+	if err != nil {
+		t.Fatalf("sample suite should load: %v", err)
+	}
+	if len(suite.Tasks) != 3 {
+		t.Fatalf("sample suite tasks = %d, want 3", len(suite.Tasks))
+	}
+	for _, task := range suite.Tasks {
+		if len(task.ExpectedChangedFiles) == 0 {
+			t.Fatalf("sample task %q has no expected changed files", task.ID)
+		}
+		if len(task.VerificationCommands) == 0 {
+			t.Fatalf("sample task %q has no verification commands", task.ID)
+		}
+	}
+}
+
+func TestValidateRejectsMalformedExpectedChangedFiles(t *testing.T) {
+	err := Suite{
+		ID:   "suite",
+		Name: "Suite",
+		Tasks: []Task{{
+			ID:               "task",
+			Name:             "Task",
+			Prompt:           "Do it",
+			WorkspaceFixture: "fixtures/task",
+			ExpectedChangedFiles: []string{
+				"",
+				"/tmp/outside.go",
+				"../outside.go",
+				`C:\tmp\outside.go`,
+			},
+			VerificationCommands: []Command{{
+				ID:      "test",
+				Name:    "Tests",
+				Command: []string{"go", "test", "./..."},
+			}},
+		}},
+	}.Validate()
+
+	if err == nil {
+		t.Fatal("Validate returned nil, want malformed expectedChangedFiles errors")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"expectedChangedFiles[0] must not be empty",
+		"expectedChangedFiles[1] must be a relative workspace path",
+		"expectedChangedFiles[2] must be a relative workspace path",
+		"expectedChangedFiles[3] must be a relative workspace path",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected validation error %q in:\n%s", want, message)
+		}
+	}
+}
+
+func TestValidateReportsUsefulErrors(t *testing.T) {
+	err := Suite{
+		ID: "suite",
+		Tasks: []Task{
+			{ID: "dup", Prompt: "do it", WorkspaceFixture: "fixtures/a"},
+			{ID: "dup", VerificationCommands: []Command{{ID: "test"}}},
+		},
+	}.Validate()
+
+	if err == nil {
+		t.Fatal("Validate returned nil, want errors")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"suite name is required",
+		"tasks[0] name is required",
+		"tasks[0] verificationCommands must not be empty",
+		"tasks[1] id duplicates tasks[0]",
+		"tasks[1] prompt is required",
+		"tasks[1] workspaceFixture is required",
+		"tasks[1] verificationCommands[0] command must not be empty",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected validation error %q in:\n%s", want, message)
+		}
+	}
+}
+
+func TestScorePassesWhenCommandsAndChangedFilesMatch(t *testing.T) {
+	suite := sampleSuite()
+
+	report := Score(suite, ScoreInput{
+		TaskID: "edit-reader",
+		CommandResults: []CommandResult{
+			{ID: "test", ExitCode: 0, Stdout: "ok\n"},
+		},
+		ChangedFiles: []string{"internal/reader/b.go", "internal/reader/a.go"},
+	})
+
+	if !report.OK || report.Status != StatusPass {
+		t.Fatalf("expected passing report, got %#v", report)
+	}
+	if report.Summary.Total != 2 || report.Summary.Passed != 2 {
+		t.Fatalf("unexpected summary: %#v", report.Summary)
+	}
+	if report.Results[0].Kind != ResultCommand || report.Results[0].Status != StatusPass {
+		t.Fatalf("unexpected command result: %#v", report.Results)
+	}
+	if report.Results[1].Kind != ResultChangedFiles || report.Results[1].Status != StatusPass {
+		t.Fatalf("unexpected changed-file result: %#v", report.Results)
+	}
+}
+
+func TestScoreFailsForCommandFailureAndChangedFileMismatch(t *testing.T) {
+	report := Score(sampleSuite(), ScoreInput{
+		TaskID: "edit-reader",
+		CommandResults: []CommandResult{
+			{ID: "test", ExitCode: 1, Stderr: "FAIL\n"},
+		},
+		ChangedFiles: []string{"internal/reader/a.go", "internal/reader/extra.go"},
+	})
+
+	if report.OK || report.Status != StatusFail {
+		t.Fatalf("expected failing report, got %#v", report)
+	}
+	if report.Summary.Failed != 2 {
+		t.Fatalf("expected two failed checks, got %#v", report.Summary)
+	}
+	changed := report.Results[1]
+	if !reflect.DeepEqual(changed.MissingFiles, []string{"internal/reader/b.go"}) {
+		t.Fatalf("missing files = %#v", changed.MissingFiles)
+	}
+	if !reflect.DeepEqual(changed.UnexpectedFiles, []string{"internal/reader/extra.go"}) {
+		t.Fatalf("unexpected files = %#v", changed.UnexpectedFiles)
+	}
+}
+
+func TestScoreErrorsWhenExpectedCommandResultIsMissing(t *testing.T) {
+	report := Score(sampleSuite(), ScoreInput{
+		TaskID:       "edit-reader",
+		ChangedFiles: []string{"internal/reader/a.go", "internal/reader/b.go"},
+	})
+
+	if report.OK || report.Status != StatusError {
+		t.Fatalf("expected missing command result to error, got %#v", report)
+	}
+	if report.Summary.Errors != 1 {
+		t.Fatalf("expected one error, got %#v", report.Summary)
+	}
+	if got := report.Results[0].Message; got != "missing command result" {
+		t.Fatalf("missing-command message = %q", got)
+	}
+	if report.Results[0].ExitCode != nil {
+		t.Fatalf("missing command result should not expose an exit code: %#v", report.Results[0])
+	}
+}
+
+func TestScoreReportsBlockedRun(t *testing.T) {
+	report := Score(sampleSuite(), ScoreInput{
+		TaskID:       "edit-reader",
+		Blocked:      true,
+		BlockReason:  "fixture setup failed",
+		ChangedFiles: []string{"internal/reader/a.go"},
+	})
+
+	if report.OK || report.Status != StatusBlocked {
+		t.Fatalf("expected blocked report, got %#v", report)
+	}
+	if report.Summary.Blocked != 2 || report.Results[0].Status != StatusBlocked {
+		t.Fatalf("unexpected blocked summary/results: %#v", report)
+	}
+	if !strings.Contains(report.Results[0].Message, "fixture setup failed") {
+		t.Fatalf("expected block reason in result message: %#v", report.Results[0])
+	}
+}
+
+func TestScoreUsesDeterministicOrderingForInjectedInputs(t *testing.T) {
+	report := Score(sampleSuite(), ScoreInput{
+		TaskID: "edit-reader",
+		CommandResults: []CommandResult{
+			{ID: "zzz", ExitCode: 1},
+			{ID: "test", ExitCode: 0},
+			{ID: "aaa", ExitCode: 1},
+		},
+		ChangedFiles: []string{"z.go", "internal/reader/a.go", "m.go"},
+	})
+
+	gotIDs := []string{}
+	for _, result := range report.Results {
+		gotIDs = append(gotIDs, result.ID)
+	}
+	wantIDs := []string{"test", "changed_files", "unknown_command.aaa", "unknown_command.zzz"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("result IDs = %#v, want %#v", gotIDs, wantIDs)
+	}
+	if !reflect.DeepEqual(report.ChangedFiles, []string{"internal/reader/a.go", "m.go", "z.go"}) {
+		t.Fatalf("changed files not sorted: %#v", report.ChangedFiles)
+	}
+	if !reflect.DeepEqual(report.Results[1].UnexpectedFiles, []string{"m.go", "z.go"}) {
+		t.Fatalf("unexpected files not sorted: %#v", report.Results[1].UnexpectedFiles)
+	}
+}
+
+func TestReportJSONIsStable(t *testing.T) {
+	report := Score(sampleSuite(), ScoreInput{
+		TaskID: "edit-reader",
+		CommandResults: []CommandResult{
+			{ID: "test", ExitCode: 0},
+		},
+		ChangedFiles: []string{"internal/reader/a.go", "internal/reader/b.go"},
+	})
+
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	want := `{
+  "contract": "zero.agenteval.report.v1",
+  "suiteId": "quality-context",
+  "taskId": "edit-reader",
+  "status": "pass",
+  "ok": true,
+  "summary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "blocked": 0,
+    "errors": 0
+  },
+  "changedFiles": [
+    "internal/reader/a.go",
+    "internal/reader/b.go"
+  ],
+  "results": [
+    {
+      "id": "test",
+      "name": "Tests",
+      "kind": "command",
+      "status": "pass",
+      "command": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "exitCode": 0
+    },
+    {
+      "id": "changed_files",
+      "name": "Expected changed files",
+      "kind": "changed_files",
+      "status": "pass",
+      "expectedFiles": [
+        "internal/reader/a.go",
+        "internal/reader/b.go"
+      ],
+      "actualFiles": [
+        "internal/reader/a.go",
+        "internal/reader/b.go"
+      ]
+    }
+  ]
+}`
+	if string(data) != want {
+		t.Fatalf("stable JSON mismatch:\n%s", string(data))
+	}
+}
+
+func writeSuite(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "suite.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write suite: %v", err)
+	}
+	return path
+}
+
+func sampleSuite() Suite {
+	return Suite{
+		ID:   "quality-context",
+		Name: "Quality context",
+		Tasks: []Task{{
+			ID:               "edit-reader",
+			Name:             "Edit reader",
+			Prompt:           "Update the reader.",
+			WorkspaceFixture: "fixtures/reader",
+			VerificationCommands: []Command{{
+				ID:      "test",
+				Name:    "Tests",
+				Command: []string{"go", "test", "./..."},
+			}},
+			ExpectedChangedFiles: []string{"internal/reader/a.go", "internal/reader/b.go"},
+		}},
+	}
+}

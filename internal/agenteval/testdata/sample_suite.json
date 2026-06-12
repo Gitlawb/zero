@@ -1,0 +1,72 @@
+{
+  "id": "zero-offline-agent-sample",
+  "name": "zero-offline-agent-sample",
+  "description": "Small offline fixture suite for exercising Zero coding-agent scoring contracts without live provider calls.",
+  "tasks": [
+    {
+      "id": "verify-json-contract-doc",
+      "name": "Document verify JSON contract behavior",
+      "description": "Docs-only task for verify and selfverify JSON contracts.",
+      "prompt": "Update the stream-json protocol documentation so maintainers can see how `zero verify --json` reports verification events. Keep the wording honest and do not change runtime code.",
+      "workspaceFixture": "fixtures/zero-repo",
+      "expectedChangedFiles": [
+        "docs/STREAM_JSON_PROTOCOL.md"
+      ],
+      "verificationCommands": [
+        {
+          "id": "go-test-verify-contracts",
+          "name": "Verify contract tests",
+          "command": [
+            "go",
+            "test",
+            "./internal/verify",
+            "./internal/selfverify"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "npm-wrapper-smoke-fixture",
+      "name": "Tighten npm wrapper smoke guidance",
+      "description": "Docs-only task for npm wrapper validation guidance.",
+      "prompt": "Improve the npm wrapper smoke checklist so a maintainer can distinguish Go release checks from direct Node wrapper checks. Do not add Node build dependencies.",
+      "workspaceFixture": "fixtures/zero-repo",
+      "expectedChangedFiles": [
+        "docs/NPM_WRAPPER_SMOKE.md"
+      ],
+      "verificationCommands": [
+        {
+          "id": "go-test-npm-release",
+          "name": "NPM wrapper and release tests",
+          "command": [
+            "go",
+            "test",
+            "./internal/npmwrapper",
+            "./internal/release"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "provider-catalog-validation-test",
+      "name": "Add provider catalog validation coverage",
+      "description": "Focused test task for model registry catalog stability.",
+      "prompt": "Add focused tests for provider catalog defaults so model aliases and provider display names remain stable. Keep the change inside the model registry package.",
+      "workspaceFixture": "fixtures/zero-repo",
+      "expectedChangedFiles": [
+        "internal/modelregistry/catalog_test.go"
+      ],
+      "verificationCommands": [
+        {
+          "id": "go-test-modelregistry",
+          "name": "Model registry tests",
+          "command": [
+            "go",
+            "test",
+            "./internal/modelregistry"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -53,6 +53,7 @@ type appDeps struct {
 	detectVerifyPlan     func(string) (verify.Plan, error)
 	runVerify            func(context.Context, verify.Plan, verify.RunOptions) verify.Report
 	runSelfVerify        func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval         func(context.Context, agentEvalOptions) (agentEvalReport, error)
 	inspectChanges       func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
 	commitChanges        func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
 	runTUI               func(context.Context, tui.Options) int
@@ -123,6 +124,7 @@ func defaultAppDeps() appDeps {
 		detectVerifyPlan: verify.DetectPlan,
 		runVerify:        verify.Run,
 		runSelfVerify:    selfverify.Run,
+		runAgentEval:     defaultRunAgentEval,
 		inspectChanges:   zerogit.Inspect,
 		commitChanges:    zerogit.Commit,
 		runTUI:           tui.Run,
@@ -247,6 +249,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runWorktrees(args[1:], stdout, stderr, deps)
 	case "verify":
 		return runVerifyCommand(args[1:], stdout, stderr, deps)
+	case "eval":
+		return runAgentEvalCommand(args[1:], stdout, stderr, deps)
 	case "changes", "change":
 		return runChanges(args[1:], stdout, stderr, deps)
 	case "usage":
@@ -326,6 +330,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.runSelfVerify == nil {
 		deps.runSelfVerify = defaults.runSelfVerify
+	}
+	if deps.runAgentEval == nil {
+		deps.runAgentEval = defaults.runAgentEval
 	}
 	if deps.inspectChanges == nil {
 		deps.inspectChanges = defaults.inspectChanges
@@ -560,6 +567,7 @@ Commands:
   update     Check for Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
+  eval       Run offline agent eval suites
   changes    Inspect and commit local git changes
   usage      Summarize token usage and estimated cost
   cron       Schedule agent jobs (foreground, file-backed)
