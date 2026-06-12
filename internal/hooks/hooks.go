@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 )
 
 type Event string
+type ActionType string
 type DiagnosticKind string
 type ConfigSource string
 type AuditStatus string
@@ -25,6 +27,20 @@ const (
 	EventSessionEnd      Event = "sessionEnd"
 	EventSpecialistStart Event = "specialistStart"
 	EventSpecialistStop  Event = "specialistStop"
+	// Stage 05 lifecycle events.
+	EventUserPromptSubmit Event = "userPromptSubmit"
+	EventPreCompact       Event = "preCompact"
+	EventNotification     Event = "notification"
+	EventStop             Event = "stop"
+)
+
+const (
+	// ActionCommand is the default action: execute Command/Args as a process.
+	ActionCommand ActionType = "command"
+	// ActionPrompt evaluates Prompt against a model; its text becomes the output.
+	ActionPrompt ActionType = "prompt"
+	// ActionHTTP POSTs the event payload to URL (allowlisted at dispatch time).
+	ActionHTTP ActionType = "http"
 )
 
 const (
@@ -56,9 +72,27 @@ type Definition struct {
 	Description string   `json:"description,omitempty"`
 	Event       Event    `json:"event"`
 	Matcher     string   `json:"matcher,omitempty"`
-	Command     string   `json:"command"`
-	Args        []string `json:"args"`
+	Command     string   `json:"command,omitempty"`
+	Args        []string `json:"args,omitempty"`
 	Enabled     bool     `json:"enabled"`
+
+	// Type selects the action executor; empty/"command" preserves legacy behaviour.
+	Type ActionType `json:"type,omitempty"`
+	// Async runs the hook without blocking the turn; its result is collected
+	// out-of-band. AsyncRewake implies Async.
+	Async       bool `json:"async,omitempty"`
+	AsyncRewake bool `json:"asyncRewake,omitempty"`
+	// RewakeMessage prefixes the system-reminder injected when an asyncRewake hook
+	// exits with the blocking code; RewakeSummary is the one-line user notice.
+	RewakeMessage string `json:"rewakeMessage,omitempty"`
+	RewakeSummary string `json:"rewakeSummary,omitempty"`
+	// ContinueOnBlock feeds a blocking afterTool hook's reason back to the model
+	// and continues the turn instead of ending it.
+	ContinueOnBlock bool `json:"continueOnBlock,omitempty"`
+	// Prompt/Model drive the "prompt" action; URL drives the "http" action.
+	Prompt string `json:"prompt,omitempty"`
+	Model  string `json:"model,omitempty"`
+	URL    string `json:"url,omitempty"`
 }
 
 type Config struct {
@@ -694,13 +728,74 @@ func normalizeDefinition(raw any, field string) (Definition, error) {
 	if matcher != "" && !eventSupportsMatcher(event) {
 		return Definition{}, manifestError{fieldPath: field + ".matcher", message: "matcher is only supported for beforeTool and afterTool hooks."}
 	}
-	command, err := requiredString(obj, field+".command")
+	actionType, err := parseActionType(obj["type"], field+".type")
+	if err != nil {
+		return Definition{}, err
+	}
+	command, err := optionalString(obj, field+".command")
 	if err != nil {
 		return Definition{}, err
 	}
 	args, err := optionalStringArray(obj["args"], field+".args")
 	if err != nil {
 		return Definition{}, err
+	}
+	prompt, err := optionalString(obj, field+".prompt")
+	if err != nil {
+		return Definition{}, err
+	}
+	model, err := optionalString(obj, field+".model")
+	if err != nil {
+		return Definition{}, err
+	}
+	hookURL, err := optionalString(obj, field+".url")
+	if err != nil {
+		return Definition{}, err
+	}
+	rewakeMessage, err := optionalString(obj, field+".rewakeMessage")
+	if err != nil {
+		return Definition{}, err
+	}
+	rewakeSummary, err := optionalString(obj, field+".rewakeSummary")
+	if err != nil {
+		return Definition{}, err
+	}
+	async, err := optionalBool(obj, field+".async")
+	if err != nil {
+		return Definition{}, err
+	}
+	asyncRewake, err := optionalBool(obj, field+".asyncRewake")
+	if err != nil {
+		return Definition{}, err
+	}
+	continueOnBlock, err := optionalBool(obj, field+".continueOnBlock")
+	if err != nil {
+		return Definition{}, err
+	}
+	// Per-action required fields. New bools default false; back-compat command
+	// hooks (no "type") still require a command.
+	switch actionType {
+	case ActionCommand:
+		if command == "" {
+			return Definition{}, manifestError{fieldPath: field + ".command", message: "Expected a non-empty string."}
+		}
+	case ActionPrompt:
+		if prompt == "" {
+			return Definition{}, manifestError{fieldPath: field + ".prompt", message: "prompt action requires a prompt."}
+		}
+	case ActionHTTP:
+		if hookURL == "" {
+			return Definition{}, manifestError{fieldPath: field + ".url", message: "http action requires a url."}
+		}
+		if message := validateHookURL(hookURL); message != "" {
+			return Definition{}, manifestError{fieldPath: field + ".url", message: message}
+		}
+		if !eventAllowsHTTP(event) {
+			return Definition{}, manifestError{fieldPath: field + ".type", message: "http action is not allowed for setup events (sessionStart/sessionEnd)."}
+		}
+	}
+	if asyncRewake {
+		async = true
 	}
 	enabled := true
 	if rawEnabled, ok := obj["enabled"]; ok {
@@ -710,7 +805,68 @@ func normalizeDefinition(raw any, field string) (Definition, error) {
 		}
 		enabled = parsed
 	}
-	return Definition{ID: id, Name: name, Description: description, Event: event, Matcher: matcher, Command: command, Args: args, Enabled: enabled}, nil
+	return Definition{
+		ID: id, Name: name, Description: description, Event: event, Matcher: matcher,
+		Command: command, Args: args, Enabled: enabled,
+		Type: actionType, Async: async, AsyncRewake: asyncRewake,
+		RewakeMessage: rewakeMessage, RewakeSummary: rewakeSummary, ContinueOnBlock: continueOnBlock,
+		Prompt: prompt, Model: model, URL: hookURL,
+	}, nil
+}
+
+func parseActionType(raw any, field string) (ActionType, error) {
+	if raw == nil {
+		return ActionCommand, nil
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return "", manifestError{fieldPath: field, message: "Expected a string."}
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ActionCommand, nil
+	}
+	switch ActionType(text) {
+	case ActionCommand, ActionPrompt, ActionHTTP:
+		return ActionType(text), nil
+	default:
+		return "", manifestError{fieldPath: field, message: "Expected command, prompt, or http."}
+	}
+}
+
+func optionalBool(obj map[string]any, field string) (bool, error) {
+	value, ok := obj[lastPathSegment(field)]
+	if !ok || value == nil {
+		return false, nil
+	}
+	parsed, ok := value.(bool)
+	if !ok {
+		return false, manifestError{fieldPath: field, message: "Expected a boolean."}
+	}
+	return parsed, nil
+}
+
+// validateHookURL returns an empty string when raw is an acceptable http(s) URL,
+// otherwise a human-readable reason. The per-run allowlist is enforced at
+// dispatch time; this only rejects structurally invalid URLs at parse time.
+func validateHookURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "Expected a valid URL."
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "Expected an http or https URL."
+	}
+	if parsed.Host == "" {
+		return "Expected a URL with a host."
+	}
+	return ""
+}
+
+// eventAllowsHTTP blocks http actions for setup-type events, which run before the
+// session is fully trusted and should not reach the network from config alone.
+func eventAllowsHTTP(event Event) bool {
+	return event != EventSessionStart && event != EventSessionEnd
 }
 
 func matchesHookMatcher(matcher string, toolName string) bool {
@@ -809,10 +965,11 @@ func parseEvent(raw any, field string) (Event, error) {
 	}
 	event := Event(strings.TrimSpace(text))
 	switch event {
-	case EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd, EventSpecialistStart, EventSpecialistStop:
+	case EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd, EventSpecialistStart, EventSpecialistStop,
+		EventUserPromptSubmit, EventPreCompact, EventNotification, EventStop:
 		return event, nil
 	default:
-		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, or specialistStop."}
+		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, specialistStop, userPromptSubmit, preCompact, notification, or stop."}
 	}
 }
 
@@ -861,9 +1018,13 @@ func definitionToRaw(definition Definition) map[string]any {
 	value := map[string]any{
 		"id":      definition.ID,
 		"event":   string(definition.Event),
-		"command": definition.Command,
-		"args":    definition.Args,
 		"enabled": definition.Enabled,
+	}
+	if definition.Command != "" {
+		value["command"] = definition.Command
+	}
+	if len(definition.Args) > 0 {
+		value["args"] = definition.Args
 	}
 	if definition.Name != "" {
 		value["name"] = definition.Name
@@ -873,6 +1034,33 @@ func definitionToRaw(definition Definition) map[string]any {
 	}
 	if definition.Matcher != "" {
 		value["matcher"] = definition.Matcher
+	}
+	if definition.Type != "" && definition.Type != ActionCommand {
+		value["type"] = string(definition.Type)
+	}
+	if definition.Async {
+		value["async"] = true
+	}
+	if definition.AsyncRewake {
+		value["asyncRewake"] = true
+	}
+	if definition.RewakeMessage != "" {
+		value["rewakeMessage"] = definition.RewakeMessage
+	}
+	if definition.RewakeSummary != "" {
+		value["rewakeSummary"] = definition.RewakeSummary
+	}
+	if definition.ContinueOnBlock {
+		value["continueOnBlock"] = true
+	}
+	if definition.Prompt != "" {
+		value["prompt"] = definition.Prompt
+	}
+	if definition.Model != "" {
+		value["model"] = definition.Model
+	}
+	if definition.URL != "" {
+		value["url"] = definition.URL
 	}
 	return value
 }

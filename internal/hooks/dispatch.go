@@ -5,15 +5,31 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
+	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
 // defaultHookTimeout bounds a single hook command so a hung or slow hook cannot
 // stall the agent indefinitely.
 const defaultHookTimeout = 30 * time.Second
+
+// blockingExitCode is the conventional "blocking error" exit code. A beforeTool
+// hook already vetoes on any non-zero exit; afterTool hooks use exactly this code
+// to signal a block decision (continue-on-block or end-turn), and an asyncRewake
+// hook uses it to wake the model.
+const blockingExitCode = 2
+
+// RewakeSignal is emitted when a background (asyncRewake) hook exits with the
+// blocking code. The loop selects on Dispatcher.Rewakes() and, on receipt, wakes
+// the model with a system-reminder built from Message and shows Summary to the user.
+type RewakeSignal struct {
+	HookID  string
+	Summary string
+	Message string
+}
 
 // DispatchInput describes one lifecycle point at which hooks may run.
 type DispatchInput struct {
@@ -35,6 +51,14 @@ type DispatchOutcome struct {
 	// produced any, in run order. afterTool validators use this to feed results
 	// (e.g. a formatter diff or vet warning) back to the model on the tool result.
 	Messages []string
+	// AsyncLaunched counts hooks started in the background (not awaited).
+	AsyncLaunched int
+	// ContinueReason is set when an afterTool hook signalled a block with
+	// ContinueOnBlock=true: its reason is fed back to the model and the turn continues.
+	ContinueReason string
+	// EndTurn is set when an afterTool hook signalled a block without
+	// ContinueOnBlock: the turn should end (Reason carries why).
+	EndTurn bool
 }
 
 type commandResult struct {
@@ -56,8 +80,15 @@ type DispatcherOptions struct {
 	Cwd     string        // working directory for hook commands
 	Env     []string      // extra environment entries appended to the process env
 	Timeout time.Duration // per-command timeout (defaults to defaultHookTimeout)
-	now     func() time.Time
-	run     commandRunner
+	// PromptRunner evaluates "prompt" action hooks; nil makes them a non-blocking
+	// error. AllowedHTTPURLs is the exact-match allowlist for "http" action hooks;
+	// a URL not on it is rejected before any request is made. HTTPClient is
+	// injectable for tests (defaults to http.DefaultClient).
+	PromptRunner    PromptRunner
+	AllowedHTTPURLs []string
+	HTTPClient      *http.Client
+	now             func() time.Time
+	run             commandRunner
 }
 
 // Dispatcher selects and runs the hooks configured for a lifecycle event,
@@ -65,13 +96,36 @@ type DispatcherOptions struct {
 // blocks the tool; hooks for other events are advisory (failures are recorded
 // but do not interrupt the run).
 type Dispatcher struct {
-	config  Config
-	audit   *AuditStore
-	cwd     string
-	env     []string
-	timeout time.Duration
-	now     func() time.Time
-	run     commandRunner
+	config          Config
+	audit           *AuditStore
+	cwd             string
+	env             []string
+	timeout         time.Duration
+	promptRunner    PromptRunner
+	allowedHTTPURLs map[string]bool
+	httpClient      *http.Client
+	now             func() time.Time
+	run             commandRunner
+	rewakes         chan RewakeSignal
+	wg              sync.WaitGroup
+}
+
+// Rewakes returns the channel on which background asyncRewake hooks deliver
+// wake-the-model signals. The loop should select on it between turns.
+func (dispatcher *Dispatcher) Rewakes() <-chan RewakeSignal {
+	if dispatcher == nil {
+		return nil
+	}
+	return dispatcher.rewakes
+}
+
+// WaitAsync blocks until every background hook launched so far has finished. The
+// loop drains async hooks at session end; tests use it to observe their results.
+func (dispatcher *Dispatcher) WaitAsync() {
+	if dispatcher == nil {
+		return
+	}
+	dispatcher.wg.Wait()
 }
 
 // NewDispatcher builds a Dispatcher. A zero/empty config yields a dispatcher that
@@ -89,14 +143,24 @@ func NewDispatcher(options DispatcherOptions) *Dispatcher {
 	if run == nil {
 		run = execCommandRunner
 	}
+	allowed := map[string]bool{}
+	for _, raw := range options.AllowedHTTPURLs {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			allowed[trimmed] = true
+		}
+	}
 	return &Dispatcher{
-		config:  options.Config,
-		audit:   options.Audit,
-		cwd:     options.Cwd,
-		env:     options.Env,
-		timeout: timeout,
-		now:     now,
-		run:     run,
+		config:          options.Config,
+		audit:           options.Audit,
+		cwd:             options.Cwd,
+		env:             options.Env,
+		timeout:         timeout,
+		promptRunner:    options.PromptRunner,
+		allowedHTTPURLs: allowed,
+		httpClient:      options.HTTPClient,
+		now:             now,
+		run:             run,
+		rewakes:         make(chan RewakeSignal, 16),
 	}
 }
 
@@ -125,11 +189,20 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 	}
 
 	for _, hook := range selected {
+		// Async hooks run in the background and never block the turn; their result
+		// is collected out-of-band (audit + asyncRewake channel). AsyncRewake
+		// implies async even if config normalization did not set it.
+		if hook.Async || hook.AsyncRewake {
+			dispatcher.runAsync(ctx, hook, input, payload)
+			outcome.AsyncLaunched++
+			continue
+		}
+
 		command := Command{Command: hook.Command, Args: hook.Args}
 		dispatcher.recordStarted(hook, input, command)
 
 		started := dispatcher.now()
-		result := dispatcher.runWithTimeout(ctx, hook, payload)
+		result := dispatcher.executeAction(ctx, hook, payload)
 		durationMs := int(dispatcher.now().Sub(started) / time.Millisecond)
 		outcome.Ran++
 
@@ -147,26 +220,77 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 			// Stop on the first veto: the action is already denied.
 			return outcome
 		}
+
+		// afterTool (and other non-veto events) signal a block decision with the
+		// conventional blocking exit code. ContinueOnBlock feeds the reason back and
+		// keeps going; otherwise the turn ends.
+		if !blocksOn(input.Event) && result.Err == nil && !result.TimedOut && result.ExitCode == blockingExitCode {
+			reason := blockReason(result)
+			if hook.ContinueOnBlock {
+				outcome.ContinueReason = appendReason(outcome.ContinueReason, reason)
+				continue
+			}
+			outcome.EndTurn = true
+			outcome.Reason = reason
+			return outcome
+		}
 	}
 	return outcome
 }
 
-func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definition, stdin []byte) commandResult {
-	runCtx, cancel := context.WithTimeout(ctx, dispatcher.timeout)
-	defer cancel()
-	env := os.Environ()
-	if len(dispatcher.env) > 0 {
-		env = append(env, dispatcher.env...)
+// runAsync launches a background hook. It records the run to the audit store and,
+// for asyncRewake hooks that exit with the blocking code, emits a RewakeSignal.
+func (dispatcher *Dispatcher) runAsync(ctx context.Context, hook Definition, input DispatchInput, payload []byte) {
+	dispatcher.recordStarted(hook, input, Command{Command: hook.Command, Args: hook.Args})
+	dispatcher.wg.Add(1)
+	go func() {
+		defer dispatcher.wg.Done()
+		started := dispatcher.now()
+		result := dispatcher.executeAction(ctx, hook, payload)
+		durationMs := int(dispatcher.now().Sub(started) / time.Millisecond)
+		status, _ := classifyResult(input.Event, result)
+		dispatcher.recordCompleted(hook, input, status, result, durationMs)
+
+		if hook.AsyncRewake && result.Err == nil && result.ExitCode == blockingExitCode {
+			signal := RewakeSignal{
+				HookID:  hook.ID,
+				Summary: firstNonEmpty(hook.RewakeSummary, "a background hook requested attention"),
+				Message: buildRewakeMessage(hook.RewakeMessage, result),
+			}
+			// Never block the goroutine if nobody is draining the channel.
+			select {
+			case dispatcher.rewakes <- signal:
+			default:
+			}
+		}
+	}()
+}
+
+// buildRewakeMessage joins the configured prefix with the hook's output into the
+// system-reminder body fed to the model.
+func buildRewakeMessage(prefix string, result commandResult) string {
+	parts := make([]string, 0, 2)
+	if trimmed := strings.TrimSpace(prefix); trimmed != "" {
+		parts = append(parts, trimmed)
 	}
-	result := dispatcher.run(runCtx, hook.Command, hook.Args, stdin, dispatcher.cwd, env)
-	// A deadline or cancellation that fired while the hook was running is distinct
-	// from a launch failure: the hook DID start, we just never got its verdict.
-	// classifyResult must fail CLOSED on this for a blocking event — a hung policy
-	// hook cannot be allowed to wave the tool through.
-	if runCtx.Err() != nil {
-		result.TimedOut = true
+	if message := hookMessage(result); message != "" {
+		parts = append(parts, message)
 	}
-	return result
+	if len(parts) == 0 {
+		return "a background hook exited with the blocking code"
+	}
+	return strings.Join(parts, "\n")
+}
+
+func appendReason(existing string, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return existing
+	}
+	if existing == "" {
+		return reason
+	}
+	return existing + "\n" + reason
 }
 
 // classifyResult maps a command result to an audit status and whether it vetoes

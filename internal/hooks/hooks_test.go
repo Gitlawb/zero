@@ -307,6 +307,141 @@ func TestSpecialistHookEventsLoadAndSelect(t *testing.T) {
 	}
 }
 
+func TestNewLifecycleEventsLoadAndSelect(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{
+			map[string]any{"id": "zero.user-prompt", "event": "userPromptSubmit", "command": "node"},
+			map[string]any{"id": "zero.pre-compact", "event": "preCompact", "command": "node"},
+			map[string]any{"id": "zero.notification", "event": "notification", "command": "node"},
+			map[string]any{"id": "zero.stop", "event": "stop", "command": "node"},
+		},
+	})
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", result.Diagnostics)
+	}
+	for event, wantID := range map[Event]string{
+		EventUserPromptSubmit: "zero.user-prompt",
+		EventPreCompact:       "zero.pre-compact",
+		EventNotification:     "zero.notification",
+		EventStop:             "zero.stop",
+	} {
+		if got := hookIDs(Select(result.Config, SelectInput{Event: event})); !reflect.DeepEqual(got, []string{wantID}) {
+			t.Fatalf("%s selection = %#v, want [%q]", event, got, wantID)
+		}
+	}
+}
+
+func TestActionTypeHooksLoadFieldsAndDefaults(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{
+			map[string]any{"id": "a.command", "event": "afterTool", "command": "gofmt"},
+			map[string]any{"id": "b.prompt", "event": "afterTool", "type": "prompt", "prompt": "Follows conventions?", "model": "sonnet"},
+			map[string]any{"id": "c.http", "event": "notification", "type": "http", "url": "https://hooks.example/zero"},
+			map[string]any{"id": "d.rewake", "event": "afterTool", "command": "verify", "asyncRewake": true, "rewakeMessage": "You broke the build:", "rewakeSummary": "build broken", "continueOnBlock": true},
+		},
+	})
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", result.Diagnostics)
+	}
+	byID := map[string]Definition{}
+	for _, hook := range result.Config.Hooks {
+		byID[hook.ID] = hook
+	}
+
+	if got := byID["a.command"]; got.Type != ActionCommand || got.Command != "gofmt" {
+		t.Fatalf("a.command = %#v; want command type, gofmt command", got)
+	}
+	if got := byID["b.prompt"]; got.Type != ActionPrompt || got.Prompt != "Follows conventions?" || got.Model != "sonnet" || got.Command != "" {
+		t.Fatalf("b.prompt = %#v", got)
+	}
+	if got := byID["c.http"]; got.Type != ActionHTTP || got.URL != "https://hooks.example/zero" {
+		t.Fatalf("c.http = %#v", got)
+	}
+	if got := byID["d.rewake"]; !got.Async || !got.AsyncRewake || got.RewakeMessage != "You broke the build:" || got.RewakeSummary != "build broken" || !got.ContinueOnBlock {
+		t.Fatalf("d.rewake = %#v; want asyncRewake forcing async, messages set, continueOnBlock", got)
+	}
+}
+
+func TestActionTypeHooksValidation(t *testing.T) {
+	cases := []struct {
+		name      string
+		hook      map[string]any
+		fieldPath string
+	}{
+		{
+			name:      "prompt requires prompt",
+			hook:      map[string]any{"id": "p", "event": "afterTool", "type": "prompt"},
+			fieldPath: "hooks.0.prompt",
+		},
+		{
+			name:      "http requires url",
+			hook:      map[string]any{"id": "h", "event": "notification", "type": "http"},
+			fieldPath: "hooks.0.url",
+		},
+		{
+			name:      "http rejects non-http url",
+			hook:      map[string]any{"id": "h", "event": "notification", "type": "http", "url": "ftp://x/y"},
+			fieldPath: "hooks.0.url",
+		},
+		{
+			name:      "http disallowed for sessionStart",
+			hook:      map[string]any{"id": "h", "event": "sessionStart", "type": "http", "url": "https://x/y"},
+			fieldPath: "hooks.0.type",
+		},
+		{
+			name:      "unknown type rejected",
+			hook:      map[string]any{"id": "x", "event": "afterTool", "type": "webhook", "command": "node"},
+			fieldPath: "hooks.0.type",
+		},
+		{
+			name:      "command still required for command type",
+			hook:      map[string]any{"id": "c", "event": "afterTool"},
+			fieldPath: "hooks.0.command",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			projectConfigPath := filepath.Join(dir, "hooks.json")
+			writeHookJSON(t, projectConfigPath, map[string]any{"hooks": []any{tt.hook}})
+
+			result, err := LoadConfig(LoadOptions{
+				UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+				ProjectConfigPath: projectConfigPath,
+			})
+			if err != nil {
+				t.Fatalf("LoadConfig returned error: %v", err)
+			}
+			if len(result.Config.Hooks) != 0 {
+				t.Fatalf("expected invalid hook to be skipped: %#v", result.Config.Hooks)
+			}
+			if !hasHookDiagnostic(result.Diagnostics, DiagnosticSchema, "", tt.fieldPath) {
+				t.Fatalf("missing diagnostic for %s: %#v", tt.fieldPath, result.Diagnostics)
+			}
+		})
+	}
+}
+
 func TestAuditStoreAppendsAndSkipsMalformedLines(t *testing.T) {
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	if err := os.WriteFile(auditPath, []byte(strings.Join([]string{
