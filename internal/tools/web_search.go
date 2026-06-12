@@ -28,9 +28,9 @@ type searchResult struct {
 	Snippet string
 }
 
-// searchBackend discovers URLs for a query. It is an interface so Brave / Tavily
-// / Exa / You.com (or a fake, in tests) can be dropped in without touching the
-// tool. nil means no backend is configured.
+// searchBackend discovers URLs for a query. It is an interface so any hosted
+// search API (or a fake, in tests) can be dropped in without touching the tool.
+// nil means no backend is configured.
 type searchBackend interface {
 	Search(ctx context.Context, query string, limit int) ([]searchResult, error)
 }
@@ -152,8 +152,8 @@ func defaultSearchBackend() searchBackend {
 
 // httpSearchBackend is the generic JSON backend: POST {query,limit} to a
 // configured endpoint and parse an array of {title,url,snippet}. Its shape
-// matches common providers (Exa / You / Tavily / Brave) without copying any of
-// their code; swap in a provider-specific backend by implementing searchBackend.
+// matches common hosted search APIs without copying any of their code; swap in a
+// backend-specific implementation by implementing searchBackend.
 type httpSearchBackend struct {
 	client   *http.Client
 	baseURL  string
