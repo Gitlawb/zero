@@ -1,0 +1,20 @@
+{
+  "id": "terminal-bench-sample",
+  "name": "Terminal-Bench (sample)",
+  "tasks": [
+    {
+      "id": "hello-fix",
+      "name": "make the failing test pass",
+      "prompt": "The test in ./hello fails. Fix the implementation so `go test ./...` passes.",
+      "workspaceFixture": "./hello",
+      "verificationCommand": ["go", "test", "./..."]
+    },
+    {
+      "id": "add-json-flag",
+      "name": "add a --json flag",
+      "prompt": "Add a --json flag to the CLI that prints the result as JSON, and a test for it.",
+      "workspaceFixture": "./cli",
+      "verificationCommand": ["go", "test", "./..."]
+    }
+  ]
+}

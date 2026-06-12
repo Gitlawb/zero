@@ -9,6 +9,8 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providerhealth"
+	"github.com/Gitlawb/zero/internal/provideronboarding"
 	"github.com/Gitlawb/zero/internal/tui"
 )
 
@@ -19,6 +21,10 @@ type setupOptions struct {
 	baseURL   string
 	apiKeyEnv string
 	json      bool
+	// verify runs a live connectivity probe after saving the provider and reports
+	// a specific, fixable error on failure (wrong base URL, bad key, model not
+	// found) — the first-run "paste key -> working" confirmation.
+	verify bool
 }
 
 func runSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -47,21 +53,89 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+
+	var verification *setupVerification
+	if options.verify {
+		verified, probeErr := verifySetupProvider(deps, result.Provider)
+		verification = &verified
+		if probeErr != nil {
+			// A failed probe is reported as a specific, fixable provider error — the
+			// profile is already saved, so the message tells the user the one thing to
+			// change and re-run, never a stack trace.
+			if options.json {
+				if err := writePrettyJSON(stdout, setupJSONPayload(result, verification)); err != nil {
+					return exitCrash
+				}
+			} else {
+				if _, err := fmt.Fprintln(stdout, formatSetupComplete(result)); err != nil {
+					return exitCrash
+				}
+			}
+			return writeAppError(stderr, "setup verification failed: "+probeErr.Error(), exitProvider)
+		}
+	}
+
 	if options.json {
-		if err := writePrettyJSON(stdout, map[string]any{
-			"configPath": result.ConfigPath,
-			"provider":   result.Provider.Name,
-			"model":      result.Provider.Model,
-			"catalogID":  result.Provider.CatalogID,
-		}); err != nil {
+		if err := writePrettyJSON(stdout, setupJSONPayload(result, verification)); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatSetupComplete(result)); err != nil {
+	output := formatSetupComplete(result)
+	if verification != nil && verification.OK {
+		output += "\nverified: " + verification.Summary
+	}
+	if _, err := fmt.Fprintln(stdout, output); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// setupVerification is the outcome of the optional first-run connectivity probe.
+type setupVerification struct {
+	OK      bool
+	Summary string
+}
+
+// verifySetupProvider runs a live connectivity probe against the just-saved
+// provider and classifies any failure into a specific, fixable message. It is a
+// no-op (reports OK) when no probe is wired, so it never blocks setup in a
+// context that cannot probe.
+func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVerification, error) {
+	if deps.probeProviderHealth == nil {
+		return setupVerification{OK: true, Summary: "probe unavailable; skipped"}, nil
+	}
+	ctx, stop := signalContext()
+	defer stop()
+	result := deps.probeProviderHealth(ctx, providerhealth.Options{
+		Profile:      profile,
+		Connectivity: true,
+		UserAgent:    userAgent(),
+	})
+	if probeErr, failed := provideronboarding.ClassifySetupProbe(result); failed {
+		return setupVerification{OK: false, Summary: string(probeErr.Class)}, probeErr
+	}
+	summary := "provider endpoint reachable"
+	if check := result.PrimaryCheck(); check != nil && strings.TrimSpace(check.Message) != "" {
+		summary = strings.TrimSpace(check.Message)
+	}
+	return setupVerification{OK: true, Summary: summary}, nil
+}
+
+func setupJSONPayload(result tui.SetupResult, verification *setupVerification) map[string]any {
+	payload := map[string]any{
+		"configPath": result.ConfigPath,
+		"provider":   result.Provider.Name,
+		"model":      result.Provider.Model,
+		"catalogID":  result.Provider.CatalogID,
+	}
+	if verification != nil {
+		payload["verified"] = verification.OK
+		if verification.Summary != "" {
+			payload["verifyStatus"] = verification.Summary
+		}
+	}
+	return payload
 }
 
 func parseSetupArgs(args []string) (setupOptions, bool, error) {
@@ -73,6 +147,8 @@ func parseSetupArgs(args []string) (setupOptions, bool, error) {
 			return options, true, nil
 		case arg == "--json":
 			options.json = true
+		case arg == "--verify":
+			options.verify = true
 		case arg == "--name":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -224,7 +300,19 @@ func formatSetupComplete(result tui.SetupResult) string {
 		}
 	}
 	lines = append(lines, "next: "+setupCheckCommand(result.Provider.Name), "next: zero")
+	lines = append(lines, "try this: "+setupTryThisExample(result.Provider))
 	return strings.Join(lines, "\n")
+}
+
+// setupTryThisExample returns a concrete one-line headless run the user can paste
+// to confirm a real completion, parameterized by the model just configured. This
+// is the "end the wizard in a working state" example from the first-run spec.
+func setupTryThisExample(profile config.ProviderProfile) string {
+	example := `zero exec "say hello in one short sentence"`
+	if model := strings.TrimSpace(profile.Model); model != "" {
+		example += " --model " + setupCommandArg(model)
+	}
+	return example
 }
 
 func setupMissingCredentialEnv(profile config.ProviderProfile) (string, bool) {
@@ -308,6 +396,7 @@ Flags:
       --model <model>           Override the default model
       --base-url <url>          Override provider base URL
       --api-key-env <name>      Store an API key environment variable name
+      --verify                  Probe the provider after saving and report a fixable error on failure
       --json                    Print machine-readable setup result
   -h, --help                    Show this help
 `)

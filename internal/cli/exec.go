@@ -89,6 +89,12 @@ type execOptions struct {
 	// default — a run without the flag is byte-identical to before (no tool, nil
 	// switcher).
 	allowEscalation bool
+	// selfCorrect opts the run into the post-edit verify-and-correct loop: after a
+	// mutating tool call ZERO runs the workspace verification plan and feeds
+	// failures back to the model to fix, bounded by an attempt ceiling and the
+	// autonomy gate. Off by default — a run without the flag wires a nil
+	// SelfCorrector, leaving the agent loop byte-identical to before.
+	selfCorrect bool
 	// notifyMode overrides config.Notify.Mode for this run. Mutually exclusive
 	// with noNotify.
 	notifyMode string
@@ -441,6 +447,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// cleanly (the loop honors context cancellation) instead of being killed.
 	runCtx, stopSignals := signalContext()
 	defer stopSignals()
+	// --self-correct opts the run into the post-edit verify-and-correct loop. Off
+	// by default the corrector is nil, leaving the agent loop byte-identical. When
+	// on we verify with the workspace test plan (the LSP half stays nil here since
+	// headless exec does not run a language-server manager); the autonomy gate
+	// inside the corrector still decides whether failures auto-fix or just report.
+	selfCorrector := newExecSelfCorrector(options.selfCorrect, workspaceRoot, options.autonomy)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
@@ -460,6 +472,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Registry:         registry,
 		PermissionMode:   permissionMode,
 		Autonomy:         options.autonomy,
+		SelfCorrect:      selfCorrector,
 		Sandbox:          sandboxEngine,
 		FileTracker:      tools.NewFileTracker(),
 		Hooks:            newHookDispatcher(workspaceRoot),
@@ -573,6 +586,26 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 // population here keeps registration and activation in agreement: tool_search is
 // registered iff the partition will actually go active. Built-ins never implement
 // the Deferred interface, so they never count.
+// newExecSelfCorrector builds the post-edit self-corrector for a headless run,
+// or nil when --self-correct is off. nil is deliberately the disabled state the
+// agent loop treats as a no-op, so a run without the flag stays byte-identical.
+//
+// The headless wiring verifies with the workspace test plan only (IncludeLSP is
+// false: exec does not spin up a language-server manager, and NewSelfCorrector
+// accepts a nil checker). Whether a failure auto-fixes or is merely reported is
+// decided by the corrector's autonomy gate from the run's --auto level.
+func newExecSelfCorrector(enabled bool, workspaceRoot string, autonomy string) *agent.SelfCorrector {
+	if !enabled {
+		return nil
+	}
+	return agent.NewSelfCorrector(workspaceRoot, nil, agent.NewProjectVerifier(workspaceRoot), agent.SelfCorrectConfig{
+		Enabled:      true,
+		IncludeTests: true,
+		IncludeLSP:   false,
+		Autonomy:     autonomy,
+	})
+}
+
 func deferredEligibleCount(registry *tools.Registry, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) int {
 	count := 0
 	for _, tool := range registry.All() {

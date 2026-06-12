@@ -45,6 +45,13 @@ type Options struct {
 	Provider       config.ProviderProfile
 	Connectivity   bool
 	ProviderHealth *providerhealth.Result
+	// GOOS overrides the platform used to resolve the sandbox backend. Empty
+	// means runtime.GOOS. Tests set it to assert platform-specific remedies.
+	GOOS string
+	// LookupExecutable resolves a binary on PATH for the sandbox-backend and
+	// LSP-server checks. Nil means exec.LookPath; tests inject a stub so the
+	// checks are deterministic regardless of the host's installed tooling.
+	LookupExecutable func(string) (string, error)
 }
 
 func Run(options Options) Report {
@@ -62,6 +69,8 @@ func Run(options Options) Report {
 	modelCheck := providerModelCheck(options.Provider)
 	checks = append(checks, modelCheck)
 	checks = append(checks, connectivityCheck(options.Provider, options.Connectivity, modelCheck.Status, options.ProviderHealth))
+	checks = append(checks, sandboxBackendCheck(options.GOOS, options.LookupExecutable))
+	checks = append(checks, lspServersCheck(options.LookupExecutable))
 
 	report := Report{
 		GeneratedAt: now().UTC().Format(time.RFC3339),

@@ -26,6 +26,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			options.listTools = true
 		case arg == "--allow-escalation":
 			options.allowEscalation = true
+		case arg == "--self-correct":
+			options.selfCorrect = true
 		case arg == "--no-notify":
 			options.noNotify = true
 		case arg == "--notify":

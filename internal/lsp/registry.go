@@ -3,6 +3,7 @@ package lsp
 import (
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -28,6 +29,27 @@ var languageIDs = map[string]string{
 	".jsx": "javascriptreact",
 	".py":  "python",
 	".rs":  "rust",
+}
+
+// ServerBinaries returns the unique set of language-server binaries ZERO may
+// spawn, sorted for stable output. It is the canonical list `zero doctor` checks
+// against PATH, so the configured commands stay the single source of truth.
+func ServerBinaries() []string {
+	seen := map[string]bool{}
+	binaries := make([]string, 0, len(serverCommands))
+	for _, command := range serverCommands {
+		if len(command) == 0 {
+			continue
+		}
+		binary := command[0]
+		if binary == "" || seen[binary] {
+			continue
+		}
+		seen[binary] = true
+		binaries = append(binaries, binary)
+	}
+	sort.Strings(binaries)
+	return binaries
 }
 
 // ServerFor returns the server command for a path's extension, and whether one is
