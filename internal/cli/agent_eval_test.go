@@ -140,6 +140,186 @@ func TestRunEvalRunJSONModePassesRunnerOptions(t *testing.T) {
 	}
 }
 
+func TestRunEvalBenchJSONModePassesHarnessOptions(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite", "evals/context.json",
+		"--task", "edit-reader",
+		"--work-root", "D:\\tmp\\zero-evals",
+		"--json",
+		"--agent-command", "zero", "exec", "{prompt}",
+	}, &stdout, &stderr, appDeps{
+		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if options.Mode != "bench" || options.SuitePath != "evals/context.json" || options.TaskID != "edit-reader" || options.WorkRoot != "D:\\tmp\\zero-evals" || !options.JSON {
+				t.Fatalf("unexpected eval bench options: %#v", options)
+			}
+			if got, want := strings.Join(options.AgentCommand, "\x00"), strings.Join([]string{"zero", "exec", "{prompt}"}, "\x00"); got != want {
+				t.Fatalf("agent command = %#v, want zero exec {prompt}", options.AgentCommand)
+			}
+			return agentEvalReport{
+				Suite:  "quality-context",
+				TaskID: "edit-reader",
+				Status: "pass",
+				OK:     true,
+				Total:  1,
+				Passed: 1,
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	var decoded agentEvalReport
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode eval bench JSON: %v\n%s", err, stdout.String())
+	}
+	if decoded.TaskID != "edit-reader" || decoded.Status != "pass" || decoded.Passed != 1 {
+		t.Fatalf("unexpected eval bench JSON: %#v", decoded)
+	}
+}
+
+func TestRunEvalBenchReportDirAndKeepWorkspacesPassHarnessOptions(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	reportDir := t.TempDir()
+
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite=evals/context.json",
+		"--task=edit-reader",
+		"--keep-workspaces",
+		"--report-dir", reportDir,
+	}, &stdout, &stderr, appDeps{
+		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if options.Mode != "bench" || !options.KeepWorkspaces || options.ReportDir != reportDir {
+				t.Fatalf("unexpected eval bench options: %#v", options)
+			}
+			if options.WorkRoot != "" {
+				t.Fatalf("default work root should remain empty at parse layer: %#v", options)
+			}
+			return agentEvalReport{
+				Suite:   "quality-context",
+				TaskID:  "edit-reader",
+				Status:  "blocked",
+				OK:      false,
+				Total:   1,
+				Blocked: 1,
+			}, nil
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider-style failure exit %d, got %d", exitProvider, exitCode)
+	}
+	reportPath := filepath.Join(reportDir, "agent-eval-report.json")
+	if _, err := os.Stat(reportPath); err != nil {
+		t.Fatalf("expected report file: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "report: "+reportPath) {
+		t.Fatalf("expected text output to mention report path, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunEvalBenchDefaultHarnessBlocksWithoutAgentCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	suitePath := filepath.Join("..", "agenteval", "testdata", "sample_suite.json")
+
+	exitCode := runWithDeps([]string{
+		"eval", "bench",
+		"--suite", suitePath,
+		"--task", "document-stream-json-verify-events",
+		"--json",
+	}, &stdout, &stderr, appDeps{})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider-style failure exit %d, got %d: %s", exitProvider, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	var decoded agentEvalReport
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode eval bench JSON: %v\n%s", err, stdout.String())
+	}
+	if decoded.Status != "blocked" || decoded.Blocked != 1 {
+		t.Fatalf("expected blocked benchmark report, got %#v", decoded)
+	}
+	if len(decoded.Failures) == 0 || !strings.Contains(decoded.Failures[0].Message, "agent command is required") {
+		t.Fatalf("expected agent command failure, got %#v", decoded.Failures)
+	}
+}
+
+func TestRunEvalBenchRejectsRunOnlyWorkspaceFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"eval", "bench", "--suite", "evals/context.json", "--workspace", "."}, &stdout, &stderr, appDeps{
+		runAgentEval: func(context.Context, agentEvalOptions) (agentEvalReport, error) {
+			t.Fatal("runAgentEval should not be called for invalid bench flags")
+			return agentEvalReport{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--workspace is only valid for eval run") {
+		t.Fatalf("expected workspace mode error, got %q", stderr.String())
+	}
+}
+
+func TestRunEvalRunRejectsBenchOnlyFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "work root",
+			args: []string{"eval", "run", "--suite", "evals/context.json", "--work-root", "D:\\tmp\\zero-evals"},
+			want: "--work-root is only valid for eval bench",
+		},
+		{
+			name: "keep workspaces",
+			args: []string{"eval", "run", "--suite", "evals/context.json", "--keep-workspaces"},
+			want: "--keep-workspaces is only valid for eval bench",
+		},
+		{
+			name: "agent command",
+			args: []string{"eval", "run", "--suite", "evals/context.json", "--agent-command", "zero", "exec", "{prompt}"},
+			want: "--agent-command is only valid for eval bench",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithDeps(tt.args, &stdout, &stderr, appDeps{
+				runAgentEval: func(context.Context, agentEvalOptions) (agentEvalReport, error) {
+					t.Fatal("runAgentEval should not be called for invalid run flags")
+					return agentEvalReport{}, nil
+				},
+			})
+
+			if exitCode != exitUsage {
+				t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+			}
+			if !strings.Contains(stderr.String(), tt.want) {
+				t.Fatalf("expected %q, got %q", tt.want, stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunEvalRunFailureTextShowsSummaryAndFailures(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

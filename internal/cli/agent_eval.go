@@ -13,12 +13,15 @@ import (
 )
 
 type agentEvalOptions struct {
-	Mode          string `json:"mode"`
-	SuitePath     string `json:"suite_path"`
-	TaskID        string `json:"task_id,omitempty"`
-	WorkspacePath string `json:"workspace_path,omitempty"`
-	ReportDir     string `json:"report_dir,omitempty"`
-	JSON          bool   `json:"json"`
+	Mode           string   `json:"mode"`
+	SuitePath      string   `json:"suite_path"`
+	TaskID         string   `json:"task_id,omitempty"`
+	WorkspacePath  string   `json:"workspace_path,omitempty"`
+	WorkRoot       string   `json:"work_root,omitempty"`
+	AgentCommand   []string `json:"agent_command,omitempty"`
+	KeepWorkspaces bool     `json:"keep_workspaces,omitempty"`
+	ReportDir      string   `json:"report_dir,omitempty"`
+	JSON           bool     `json:"json"`
 }
 
 type agentEvalReport struct {
@@ -81,7 +84,7 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 	options := agentEvalOptions{Mode: "validate"}
 	if len(args) > 0 {
 		switch args[0] {
-		case "run", "validate":
+		case "bench", "run", "validate":
 			options.Mode = args[0]
 			args = args[1:]
 		}
@@ -103,8 +106,8 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 		case strings.HasPrefix(arg, "--suite="):
 			options.SuitePath = strings.TrimSpace(strings.TrimPrefix(arg, "--suite="))
 		case arg == "--task":
-			if options.Mode != "run" {
-				return options, false, execUsageError{"--task is only valid for eval run"}
+			if options.Mode != "run" && options.Mode != "bench" {
+				return options, false, execUsageError{"--task is only valid for eval run or eval bench"}
 			}
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -113,8 +116,8 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 			options.TaskID = strings.TrimSpace(value)
 			index = next
 		case strings.HasPrefix(arg, "--task="):
-			if options.Mode != "run" {
-				return options, false, execUsageError{"--task is only valid for eval run"}
+			if options.Mode != "run" && options.Mode != "bench" {
+				return options, false, execUsageError{"--task is only valid for eval run or eval bench"}
 			}
 			value, err := requiredInlineFlagValue(arg, "--task")
 			if err != nil {
@@ -140,9 +143,51 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 				return options, false, err
 			}
 			options.WorkspacePath = strings.TrimSpace(value)
+		case arg == "--work-root":
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--work-root is only valid for eval bench"}
+			}
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.WorkRoot = strings.TrimSpace(value)
+			index = next
+		case strings.HasPrefix(arg, "--work-root="):
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--work-root is only valid for eval bench"}
+			}
+			value, err := requiredInlineFlagValue(arg, "--work-root")
+			if err != nil {
+				return options, false, err
+			}
+			options.WorkRoot = strings.TrimSpace(value)
+		case arg == "--agent-command":
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--agent-command is only valid for eval bench"}
+			}
+			if index+1 >= len(args) {
+				return options, false, execUsageError{"--agent-command requires at least one argument"}
+			}
+			options.AgentCommand = append([]string{}, args[index+1:]...)
+			index = len(args)
+		case strings.HasPrefix(arg, "--agent-command="):
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--agent-command is only valid for eval bench"}
+			}
+			value, err := requiredInlineFlagValue(arg, "--agent-command")
+			if err != nil {
+				return options, false, err
+			}
+			options.AgentCommand = []string{value}
+		case arg == "--keep-workspaces":
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--keep-workspaces is only valid for eval bench"}
+			}
+			options.KeepWorkspaces = true
 		case arg == "--report-dir":
-			if options.Mode != "run" {
-				return options, false, execUsageError{"--report-dir is only valid for eval run"}
+			if options.Mode != "run" && options.Mode != "bench" {
+				return options, false, execUsageError{"--report-dir is only valid for eval run or eval bench"}
 			}
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -151,8 +196,8 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 			options.ReportDir = strings.TrimSpace(value)
 			index = next
 		case strings.HasPrefix(arg, "--report-dir="):
-			if options.Mode != "run" {
-				return options, false, execUsageError{"--report-dir is only valid for eval run"}
+			if options.Mode != "run" && options.Mode != "bench" {
+				return options, false, execUsageError{"--report-dir is only valid for eval run or eval bench"}
 			}
 			value, err := requiredInlineFlagValue(arg, "--report-dir")
 			if err != nil {
@@ -223,16 +268,20 @@ func writeAgentEvalHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero eval --suite <path> [flags]
   zero eval run --suite <path> [flags]
+  zero eval bench --suite <path> [flags] [--agent-command <argv...>]
 
-Validates offline agent eval suites and runs local scoring when a runner is wired in.
+Validates offline agent eval suites, scores an existing workspace, or benchmarks an agent command against fixture workspaces.
 
 Flags:
-      --suite <path>      Eval suite JSON file
-      --task <id>         Run one task (eval run only)
-      --workspace <path>  Workspace path for local scoring (eval run only, default ".")
-      --report-dir <path> Write agent-eval-report.json (eval run only)
-      --json              Print JSON output
-  -h, --help              Show this help
+      --suite <path>          Eval suite JSON file
+      --task <id>             Run one task (eval run or eval bench)
+      --workspace <path>      Workspace path for local scoring (eval run only, default ".")
+      --work-root <path>      Work root for materialized benchmark workspaces (eval bench only)
+      --agent-command <argv>  Agent command argv for eval bench; consumes remaining arguments
+      --keep-workspaces       Keep materialized benchmark workspaces (eval bench only)
+      --report-dir <path>     Write agent-eval-report.json (eval run or eval bench)
+      --json                  Print JSON output
+  -h, --help                  Show this help
 `)
 	return err
 }
@@ -249,6 +298,25 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 		})
 		return agentEvalReportFromRunner(suite, report), nil
 	}
+	if options.Mode == "bench" {
+		workRoot, cleanup, err := agentEvalBenchWorkRoot(options)
+		if err != nil {
+			return agentEvalReport{}, err
+		}
+		if cleanup != "" {
+			defer os.RemoveAll(cleanup)
+		}
+		harness := agenteval.Harness{}
+		if len(options.AgentCommand) > 0 {
+			harness.Agent = agenteval.CommandAgentRunner{Command: options.AgentCommand}
+		}
+		report := harness.Run(ctx, options.SuitePath, suite, agenteval.BenchmarkInput{
+			TaskID:         options.TaskID,
+			WorkRoot:       workRoot,
+			KeepWorkspaces: options.KeepWorkspaces,
+		})
+		return agentEvalReportFromBenchmark(suite, report), nil
+	}
 	checks := 0
 	for _, task := range suite.Tasks {
 		// Every task has N verification commands plus one changed-file expectation
@@ -263,6 +331,91 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 		Tasks:  len(suite.Tasks),
 		Checks: checks,
 	}, nil
+}
+
+func agentEvalBenchWorkRoot(options agentEvalOptions) (string, string, error) {
+	workRoot := strings.TrimSpace(options.WorkRoot)
+	if workRoot != "" {
+		return workRoot, "", nil
+	}
+	created, err := os.MkdirTemp("", "zero-eval-")
+	if err != nil {
+		return "", "", err
+	}
+	if options.KeepWorkspaces {
+		return created, "", nil
+	}
+	return created, created, nil
+}
+
+func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.BenchmarkReport) agentEvalReport {
+	converted := agentEvalReport{
+		Suite:   report.SuiteID,
+		Name:    suite.Name,
+		Status:  benchmarkStatus(report),
+		OK:      report.OK,
+		Tasks:   report.Summary.TotalTasks,
+		Total:   report.Summary.TotalTasks,
+		Passed:  report.Summary.PassedTasks,
+		Failed:  report.Summary.FailedTasks,
+		Blocked: report.Summary.BlockedTasks,
+		Errors:  report.Summary.ErrorTasks,
+	}
+	if converted.Suite == "" {
+		converted.Suite = suite.ID
+	}
+	if len(report.Tasks) == 1 {
+		converted.TaskID = report.Tasks[0].TaskID
+	}
+	for _, task := range report.Tasks {
+		for _, failure := range agentEvalFailuresFromTaskReport(task) {
+			converted.Failures = append(converted.Failures, failure)
+		}
+	}
+	return converted
+}
+
+func benchmarkStatus(report agenteval.BenchmarkReport) string {
+	switch {
+	case report.Summary.BlockedTasks > 0:
+		return string(agenteval.StatusBlocked)
+	case report.Summary.ErrorTasks > 0:
+		return string(agenteval.StatusError)
+	case report.Summary.FailedTasks > 0:
+		return string(agenteval.StatusFail)
+	default:
+		return string(agenteval.StatusPass)
+	}
+}
+
+func agentEvalFailuresFromTaskReport(task agenteval.BenchmarkTaskReport) []agentEvalFailure {
+	failures := []agentEvalFailure{}
+	if task.Agent.Error != "" {
+		failures = append(failures, agentEvalFailure{
+			ID:      task.TaskID,
+			Message: task.Agent.Error,
+		})
+	}
+	for _, result := range task.Report.Results {
+		if result.Status == agenteval.StatusPass {
+			continue
+		}
+		id := task.TaskID
+		if result.ID != "" {
+			id += "." + result.ID
+		}
+		failures = append(failures, agentEvalFailure{
+			ID:      id,
+			Message: agentEvalResultMessage(result),
+		})
+	}
+	if task.Report.Error != "" {
+		failures = append(failures, agentEvalFailure{
+			ID:      task.TaskID,
+			Message: task.Report.Error,
+		})
+	}
+	return failures
 }
 
 func agentEvalReportFromRunner(suite agenteval.Suite, report agenteval.Report) agentEvalReport {

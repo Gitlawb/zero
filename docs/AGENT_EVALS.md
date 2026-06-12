@@ -6,9 +6,10 @@ expected to change, the commands that should verify the result, and the scoring
 rules an offline harness can apply to a captured run.
 
 These fixtures are intentionally local-first. They do not prove provider quality
-or live model execution by themselves; they give tests and future CLI work a
+or live model execution by themselves; they give tests and CLI workflows a
 stable sample suite to validate, run against copied workspaces, and score from
-saved outputs.
+saved outputs. The eval harness is local and offline-testable. It only makes
+live model calls when the supplied agent command does.
 
 ## Suite Format
 
@@ -39,9 +40,12 @@ the loader and tests are updated in the same PR.
 
 ## Modes
 
-`zero eval` defaults to validate mode. It parses the suite, rejects schema or
-contract errors, and reports the number of tasks and checks. It does not copy
-fixtures, invoke an agent, or execute verification commands.
+### Validate Mode
+
+`zero eval` defaults to `validate` mode. In validate mode, the command performs
+schema and contract checks only: it parses the suite, rejects invalid task
+definitions, and reports the number of tasks and checks. It does not copy
+fixtures, invoke an agent, score a workspace, or execute verification commands.
 
 ```bash
 go run ./cmd/zero eval --suite internal/agenteval/testdata/sample_suite.json
@@ -53,12 +57,16 @@ Use JSON output when another local tool needs the validation summary:
 go run ./cmd/zero eval --suite internal/agenteval/testdata/sample_suite.json --json
 ```
 
-`zero eval run` scores one local workspace. It does not invoke the agent yet;
-point it at a Git worktree where a fixture has already been copied and a task
-has already been attempted. The runner executes each `verificationCommands`
-entry, collects changed files with `git status --porcelain`, and emits the
-task-success report contract below. When `--workspace` is omitted, the current
-directory is used.
+### Run Mode
+
+`zero eval run` scores an already-mutated Git worktree. In run mode, use it
+after a fixture has been copied somewhere, initialized as a Git repository, and
+changed by an agent or by a deterministic local script. Run mode does not copy
+fixtures or invoke an agent.
+
+The runner executes each `verificationCommands` entry, collects changed files
+with `git status --porcelain`, and emits the task-success report contract below.
+When `--workspace` is omitted, the current directory is used.
 
 ```bash
 go run ./cmd/zero eval run \
@@ -76,6 +84,51 @@ go run ./cmd/zero eval run \
   --workspace /tmp/zero-eval-workspace \
   --report-dir /tmp/zero-eval-report \
   --json
+```
+
+### Bench Mode
+
+`zero eval bench` runs the full benchmark harness for one task or a suite. Bench
+mode copies each task fixture into `--work-root`, initializes a clean Git
+baseline, runs the supplied `--agent-command` in that workspace, then scores the
+result with the same scorer used by run mode.
+
+Agent commands are passed as argv, without shell interpolation. The harness
+expands these placeholders in each argument:
+
+- `{workspace}`: copied task workspace path.
+- `{prompt}`: task prompt from the suite.
+- `{task_id}`: selected task ID.
+
+Example using a real local agent command:
+
+```bash
+go run ./cmd/zero eval bench \
+  --suite internal/agenteval/testdata/sample_suite.json \
+  --task document-stream-json-verify-events \
+  --work-root /tmp/zero-evals \
+  --agent-command zero exec --cwd {workspace} {prompt}
+```
+
+Include `{task_id}` when the agent wrapper needs stable per-task logging,
+branching, or fixture-specific behavior:
+
+```bash
+go run ./cmd/zero eval bench \
+  --suite internal/agenteval/testdata/sample_suite.json \
+  --work-root /tmp/zero-evals \
+  --agent-command zero-agent-wrapper --task {task_id} --workspace {workspace} --prompt {prompt}
+```
+
+For deterministic offline testing, point `--agent-command` at a local script
+that edits the copied workspace without calling a model:
+
+```bash
+go run ./cmd/zero eval bench \
+  --suite internal/agenteval/testdata/sample_suite.json \
+  --task document-stream-json-verify-events \
+  --work-root /tmp/zero-evals \
+  --agent-command ./scripts/fake-agent --workspace {workspace} --task {task_id} --prompt {prompt}
 ```
 
 Run the package tests when changing the suite schema or scorer:
