@@ -162,6 +162,11 @@ type model struct {
 	pendingImages      []zeroruntime.ImageBlock
 	pendingImageLabels []string
 
+	// pendingDocuments holds PDF text layers staged by /image for the next user
+	// turn; the text is prepended to the prompt as a preamble at submit time and
+	// the slice is cleared (or by /image clear). nil = no documents staged.
+	pendingDocuments []pendingDocument
+
 	// captureRunImages, when set, is invoked with the images a run is launched
 	// with. Nil in production; used by tests to assert image threading without a
 	// real provider round-trip.
@@ -934,7 +939,7 @@ func (m model) transcriptView() string {
 func (m model) footerView(width int) string {
 	var footer strings.Builder
 	footer.WriteString("\n")
-	if chips := renderImageChips(m.pendingImageLabels); chips != "" {
+	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
 		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")
 	}
@@ -1583,6 +1588,12 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 			text: "No provider configured.",
 		})
 		return m, nil
+	}
+	// Prepend any staged PDF document text as a model-facing preamble. The
+	// visible transcript above keeps the user's clean prompt; the agent (and the
+	// recorded session, for resume fidelity) sees the document text first.
+	if preamble := m.consumePendingDocuments(); preamble != "" {
+		prompt = preamble + prompt
 	}
 	var err error
 	m, err = m.ensureActiveSession(prompt)

@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -256,5 +259,200 @@ func TestSubmitDropsImagesWhenModelSwitchedToNonVision(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected captureRunImages to be invoked (with no images)")
+	}
+}
+
+// writeTestPDF writes a tiny single-page PDF whose text layer is the given
+// string and returns its path. It mirrors the in-package fixture builder so the
+// TUI test exercises the real LoadDocument path on real PDF bytes.
+func writeTestPDF(t *testing.T, dir, name, text string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	offsets := make([]int, 0, 8)
+	startObj := func() { offsets = append(offsets, buf.Len()) }
+
+	buf.WriteString("%PDF-1.4\n")
+	startObj()
+	buf.WriteString("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+	startObj()
+	buf.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
+	startObj()
+	buf.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n")
+	content := "BT /F1 24 Tf 72 700 Td (" + text + ") Tj ET"
+	startObj()
+	buf.WriteString("4 0 obj\n<< /Length " + strconv.Itoa(len(content)) + " >>\nstream\n")
+	buf.WriteString(content)
+	buf.WriteString("\nendstream\nendobj\n")
+	startObj()
+	buf.WriteString("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n")
+
+	xrefStart := buf.Len()
+	buf.WriteString("xref\n0 " + strconv.Itoa(len(offsets)+1) + "\n0000000000 65535 f \n")
+	for _, off := range offsets {
+		buf.WriteString(fmt.Sprintf("%010d 00000 n \n", off))
+	}
+	buf.WriteString("trailer\n<< /Size " + strconv.Itoa(len(offsets)+1) + " /Root 1 0 R >>\nstartxref\n" + strconv.Itoa(xrefStart) + "\n%%EOF\n")
+
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	return path
+}
+
+// A PDF carries a text layer every model can read, so /image <file.pdf> stages a
+// pending document even on a non-vision model -- unlike a raw image, which is
+// refused. No page images are staged without a rasterizer.
+func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
+	root := t.TempDir()
+	writeTestPDF(t, root, "spec.pdf", "Design spec body text")
+
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "totally-unknown-custom"})
+	m.input.SetValue("/image spec.pdf")
+	updated, _ := m.handleSubmit()
+	next := updated.(model)
+
+	if len(next.pendingDocuments) != 1 {
+		t.Fatalf("expected 1 pending document, got %d", len(next.pendingDocuments))
+	}
+	if next.pendingDocuments[0].label != "spec.pdf" {
+		t.Fatalf("document label = %q, want spec.pdf", next.pendingDocuments[0].label)
+	}
+	if !strings.Contains(next.pendingDocuments[0].text, "Design spec body text") {
+		t.Fatalf("document text %q should contain the body", next.pendingDocuments[0].text)
+	}
+	if len(next.pendingImages) != 0 {
+		t.Fatalf("no rasterizer: expected 0 page images, got %d", len(next.pendingImages))
+	}
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "spec.pdf") {
+		t.Fatalf("expected an attach notice naming the PDF, got %q", notice)
+	}
+}
+
+// A .pdf-named file that is not a real PDF is rejected with the explicit
+// not-a-PDF notice and stages nothing.
+func TestImageCommandRejectsFakePDF(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "fake.pdf"), []byte("definitely not a pdf"), 0o644); err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
+	m.input.SetValue("/image fake.pdf")
+	updated, _ := m.handleSubmit()
+	next := updated.(model)
+
+	if len(next.pendingDocuments) != 0 || len(next.pendingImages) != 0 {
+		t.Fatal("a fake PDF must stage nothing")
+	}
+	if notice := lastTranscriptText(next); !strings.Contains(notice, "not a PDF") {
+		t.Fatalf("expected a not-a-PDF notice, got %q", notice)
+	}
+}
+
+// /image clear removes staged documents as well as images.
+func TestImageCommandClearAlsoClearsDocuments(t *testing.T) {
+	root := t.TempDir()
+	writeTestPDF(t, root, "spec.pdf", "some text")
+
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "gpt-4.1"})
+	m.input.SetValue("/image spec.pdf")
+	updated, _ := m.handleSubmit()
+	m = updated.(model)
+	if len(m.pendingDocuments) != 1 {
+		t.Fatalf("setup: expected 1 staged document, got %d", len(m.pendingDocuments))
+	}
+
+	m.input.SetValue("/image clear")
+	updated, _ = m.handleSubmit()
+	next := updated.(model)
+	if len(next.pendingDocuments) != 0 {
+		t.Fatalf("clear must drop staged documents, got %d", len(next.pendingDocuments))
+	}
+}
+
+// The chip row shows a "[doc: …]" entry for staged documents.
+func TestTranscriptViewShowsDocumentChips(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	m.width = 100
+	m.height = 30
+	m.pendingDocuments = []pendingDocument{{label: "spec.pdf", text: "body"}}
+
+	view := m.transcriptView()
+	if !strings.Contains(view, "spec.pdf") {
+		t.Fatalf("transcript view should show the document chip, got:\n%s", view)
+	}
+}
+
+// On submit, the staged document text is prepended to the prompt the agent
+// receives (so the model can read it), and the pending documents are cleared.
+func TestSubmitPrependsDocumentTextThenClears(t *testing.T) {
+	root := t.TempDir()
+	writeTestPDF(t, root, "spec.pdf", "Top secret design notes")
+
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "ok"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		Cwd:          root,
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
+	})
+	m.agentOptions.OnText = func(string) {}
+
+	m.input.SetValue("/image spec.pdf")
+	updated, _ := m.handleSubmit()
+	m = updated.(model)
+	if len(m.pendingDocuments) != 1 {
+		t.Fatalf("setup: expected 1 staged document, got %d", len(m.pendingDocuments))
+	}
+
+	m.input.SetValue("summarize the attached doc")
+	updated, cmd := m.handleSubmit()
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected a prompt submit to start a run")
+	}
+	if len(next.pendingDocuments) != 0 {
+		t.Fatalf("submit must clear staged documents, got %d", len(next.pendingDocuments))
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	_ = updated.(model)
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one provider request, got %d", len(provider.requests))
+	}
+	// The last message is the user turn; it must carry both the document text and
+	// the user's question.
+	msgs := provider.requests[0].Messages
+	last := msgs[len(msgs)-1]
+	if last.Role != zeroruntime.MessageRoleUser {
+		t.Fatalf("last message role = %v, want user", last.Role)
+	}
+	if !strings.Contains(last.Content, "Top secret design notes") {
+		t.Fatalf("agent prompt should contain the document text, got:\n%s", last.Content)
+	}
+	if !strings.Contains(last.Content, "summarize the attached doc") {
+		t.Fatalf("agent prompt should contain the user question, got:\n%s", last.Content)
+	}
+	if !strings.Contains(last.Content, "spec.pdf") {
+		t.Fatalf("agent prompt should name the attached document, got:\n%s", last.Content)
+	}
+}
+
+func TestRenderAttachmentChips(t *testing.T) {
+	if got := renderAttachmentChips(nil, nil); got != "" {
+		t.Fatalf("empty attachments should render no chips, got %q", got)
+	}
+	got := renderAttachmentChips([]string{"a.png"}, []pendingDocument{{label: "spec.pdf"}})
+	if !strings.Contains(got, "[img: a.png]") {
+		t.Fatalf("chip row %q should include the image", got)
+	}
+	if !strings.Contains(got, "[doc: spec.pdf]") {
+		t.Fatalf("chip row %q should include the document", got)
 	}
 }
