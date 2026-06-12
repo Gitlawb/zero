@@ -136,9 +136,11 @@ func TestInstallRejectsInvalidSkill(t *testing.T) {
 
 func TestInstallRejectsSkillWithBlankFrontmatterName(t *testing.T) {
 	destDir := t.TempDir()
-	// Frontmatter present but the name resolves to empty after trimming; the dir
-	// name is also blank-ish so there is nothing valid to install under.
-	src := writeSourceSkill(t, filepath.Join(t.TempDir(), " "),
+	// Frontmatter name is blank, so the name falls back to the source dir's base —
+	// which is itself not a usable skill name (validSkillName rejects "..") — so
+	// there is nothing valid to install under. (A whitespace-only dir name would be
+	// the other no-usable-name case, but that is not creatable on Windows.)
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "no..usable..name"),
 		"---\nname:    \n---\nbody\n")
 
 	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir}); err == nil {
