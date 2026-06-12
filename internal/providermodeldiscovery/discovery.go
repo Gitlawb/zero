@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
@@ -39,7 +40,7 @@ type Options struct {
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
 	catalogModels, catalogErr := fetchCatalogModels(ctx, provider, options)
-	canProbeProvider := openAICompatibleDiscoveryAllowed(profile) && (!provider.RequiresAuth || strings.TrimSpace(profile.APIKey) != "")
+	canProbeProvider := openAICompatibleDiscoveryAllowed(profile) && (!provider.RequiresAuth || discoveryHasCredential(profile))
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
@@ -58,6 +59,14 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 	return nil, fmt.Errorf("no provider models discovered")
 }
 
+// discoveryHasCredential reports whether the profile carries a usable credential
+// for an authenticated /models probe. A profile may authenticate via a raw
+// auth-header value instead of APIKey, so treat either as present — consistent
+// with config credential checks and zerocommands ProviderSnapshot.APIKeySet.
+func discoveryHasCredential(profile config.ProviderProfile) bool {
+	return strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != ""
+}
+
 func Discover(ctx context.Context, profile config.ProviderProfile, options Options) ([]Model, error) {
 	if !openAICompatibleDiscoveryAllowed(profile) {
 		return nil, fmt.Errorf("provider %s does not expose OpenAI-compatible model discovery", displayProviderName(profile))
@@ -71,9 +80,19 @@ func Discover(ctx context.Context, profile config.ProviderProfile, options Optio
 	if err != nil {
 		return nil, err
 	}
-	if key := strings.TrimSpace(profile.APIKey); key != "" {
-		request.Header.Set("Authorization", "Bearer "+key)
-	}
+	// Authenticate via either an APIKey (Authorization: Bearer ...) or a raw
+	// auth-header value / custom headers, matching how the live providers build
+	// their requests (internal/providers/providerio). Honoring AuthHeaderValue
+	// keeps discovery consistent with the credential-present logic elsewhere.
+	providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+		APIKey:            profile.APIKey,
+		DefaultAuthHeader: "Authorization",
+		DefaultAuthScheme: "Bearer",
+		AuthHeader:        profile.AuthHeader,
+		AuthScheme:        profile.AuthScheme,
+		AuthHeaderValue:   profile.AuthHeaderValue,
+		CustomHeaders:     profile.CustomHeaders,
+	})
 	request.Header.Set("Accept", "application/json")
 
 	client := options.HTTPClient

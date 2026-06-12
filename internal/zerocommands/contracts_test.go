@@ -347,3 +347,17 @@ func TestProviderSnapshotAPIKeySetCountsAuthHeaderValue(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderSnapshotRedactsAuthHeaderValueInBaseURL(t *testing.T) {
+	// A raw auth-header value that leaks into the base URL must be redacted too,
+	// not just APIKey.
+	const secret = "authhdr-secret-9f8e7d6c5b"
+	snapshot := ProviderSnapshotFromProfile(config.ProviderProfile{
+		Name:            "p",
+		BaseURL:         "https://api.test/v1?token=" + secret,
+		AuthHeaderValue: secret,
+	}, false)
+	if strings.Contains(snapshot.BaseURL, secret) {
+		t.Fatalf("auth-header value leaked into base URL: %q", snapshot.BaseURL)
+	}
+}

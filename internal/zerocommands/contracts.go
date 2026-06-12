@@ -160,7 +160,7 @@ func ProviderSnapshotFromProfile(profile config.ProviderProfile, active bool) Pr
 	snapshot := ProviderSnapshot{
 		Name:         profile.Name,
 		ProviderKind: string(profile.ProviderKind),
-		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey),
+		BaseURL:      redactProviderBaseURL(profile.BaseURL, profile.APIKey, profile.AuthHeaderValue),
 		Model:        profile.Model,
 		Active:       active,
 		// A profile can authenticate via a raw auth-header value instead of APIKey;
@@ -333,13 +333,21 @@ func SessionTreeSnapshotFromNode(node sessions.TreeNode) SessionTreeSnapshot {
 	}
 }
 
-func redactProviderBaseURL(baseURL string, apiKey string) string {
+func redactProviderBaseURL(baseURL string, secrets ...string) string {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		return ""
 	}
 	safeURL := stripURLCredentials(baseURL)
-	return redaction.RedactString(safeURL, redaction.Options{ExtraSecretValues: []string{apiKey}})
+	// Redact any configured credential (APIKey and/or a raw auth-header value) if
+	// it leaked into the URL. Drop empties so an unset credential can't match.
+	extra := make([]string, 0, len(secrets))
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret) != "" {
+			extra = append(extra, secret)
+		}
+	}
+	return redaction.RedactString(safeURL, redaction.Options{ExtraSecretValues: extra})
 }
 
 func stripURLCredentials(value string) string {

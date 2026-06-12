@@ -51,6 +51,52 @@ func TestDiscoverOpenAICompatibleModelsFetchesModelsEndpoint(t *testing.T) {
 	}
 }
 
+func TestDiscoverOpenAICompatibleModelsHonorsAuthHeaderValue(t *testing.T) {
+	// A profile can authenticate via a raw auth-header value instead of APIKey;
+	// discovery must send it rather than probe unauthenticated.
+	const headerValue = "Bearer raw-header-secret"
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a"}]}`))
+	}))
+	defer server.Close()
+
+	if _, err := Discover(context.Background(), config.ProviderProfile{
+		Name:            "test",
+		ProviderKind:    config.ProviderKindOpenAICompatible,
+		BaseURL:         server.URL + "/v1",
+		AuthHeaderValue: headerValue,
+	}, Options{HTTPClient: server.Client()}); err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if gotAuth != headerValue {
+		t.Fatalf("Authorization = %q, want raw auth-header value %q", gotAuth, headerValue)
+	}
+}
+
+func TestDiscoveryHasCredential(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile config.ProviderProfile
+		want    bool
+	}{
+		{"api key", config.ProviderProfile{APIKey: "sk-x"}, true},
+		{"auth header only", config.ProviderProfile{AuthHeaderValue: "Bearer t"}, true},
+		{"both", config.ProviderProfile{APIKey: "sk-x", AuthHeaderValue: "Bearer t"}, true},
+		{"neither", config.ProviderProfile{}, false},
+		{"whitespace only", config.ProviderProfile{APIKey: "  ", AuthHeaderValue: "\t"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := discoveryHasCredential(tc.profile); got != tc.want {
+				t.Fatalf("discoveryHasCredential = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDiscoverOpenAICompatibleModelsHandlesBaseURLWithoutVersion(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
