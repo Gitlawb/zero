@@ -111,7 +111,7 @@ func TestInstallCopiesLocalPluginAndRecordsHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadLock: %v", err)
 	}
-	if entries["zero.demo"].Hash != result.Hash || entries["zero.demo"].Source != src {
+	if entries["zero.demo"].Hash != result.Hash || entries["zero.demo"].Source != canonicalSource(src) {
 		t.Fatalf("lockfile entry unexpected: %#v", entries["zero.demo"])
 	}
 }
@@ -187,6 +187,54 @@ func TestInstallReinstallShowsHashChange(t *testing.T) {
 	}
 }
 
+// TestInstallReinstallDetectsNestedFileChange guards that the recorded hash
+// covers the whole installed tree, not just plugin.json. A change to a tool
+// script (with the manifest unchanged) must still be reported as an update so
+// checksum pinning catches modified executable content.
+func TestInstallReinstallDetectsNestedFileChange(t *testing.T) {
+	destDir := t.TempDir()
+	src := filepath.Join(t.TempDir(), "src")
+	writeSourcePlugin(t, src, map[string]any{
+		"schemaVersion": float64(1),
+		"id":            "zero.tool",
+		"name":          "Tool",
+		"version":       "0.1.0",
+		"tools": []any{map[string]any{
+			"name":    "lookup",
+			"command": "node",
+			"args":    []any{"tools/lookup.mjs"},
+		}},
+	})
+	entryDir := filepath.Join(src, "tools")
+	if err := os.MkdirAll(entryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(entryDir, "lookup.mjs")
+	if err := os.WriteFile(entry, []byte("console.log('v1')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+	if err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	// Change ONLY the nested tool script; the manifest is untouched.
+	if err := os.WriteFile(entry, []byte("console.log('v2')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+	if err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	if !second.Updated {
+		t.Fatalf("changing a nested file should be flagged as an update")
+	}
+	if second.PreviousHash != first.Hash || second.Hash == first.Hash {
+		t.Fatalf("expected the hash to change: prev=%q first=%q new=%q", second.PreviousHash, first.Hash, second.Hash)
+	}
+}
+
 func TestInstallNameClashWarnsAndDoesNotOverwriteWithoutForce(t *testing.T) {
 	destDir := t.TempDir()
 	srcA := writeSourcePlugin(t, filepath.Join(t.TempDir(), "a"), validManifest())
@@ -204,8 +252,41 @@ func TestInstallNameClashWarnsAndDoesNotOverwriteWithoutForce(t *testing.T) {
 		t.Fatalf("forced reinstall: %v", err)
 	}
 	entries, _ := ReadLock(destDir)
-	if entries["zero.demo"].Source != srcB {
+	if entries["zero.demo"].Source != canonicalSource(srcB) {
 		t.Fatalf("forced overwrite did not update source: %#v", entries["zero.demo"])
+	}
+}
+
+// TestInstallSameLocalSourceDifferentSpellingIsNotAClash verifies that a local
+// source installed via an absolute path and re-installed via an equivalent
+// relative spelling is treated as the same source, not a clash, because the
+// recorded source is canonicalized.
+func TestInstallSameLocalSourceDifferentSpellingIsNotAClash(t *testing.T) {
+	destDir := t.TempDir()
+	abs := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+
+	if _, err := Install(context.Background(), InstallOptions{Source: abs, Dir: destDir}); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), InstallOptions{Source: rel, Dir: destDir}); err != nil {
+		t.Fatalf("reinstall with relative spelling should not clash: %v", err)
+	}
+
+	entries, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if entries["zero.demo"].Source != canonicalSource(abs) {
+		t.Fatalf("lockfile should record the canonical source %q, got %q", canonicalSource(abs), entries["zero.demo"].Source)
 	}
 }
 

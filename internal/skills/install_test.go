@@ -111,8 +111,9 @@ func TestInstallCopiesLocalSkillAndRecordsHash(t *testing.T) {
 	if entry.Hash != result.Hash {
 		t.Fatalf("lockfile hash %q != install hash %q", entry.Hash, result.Hash)
 	}
-	if entry.Source != source {
-		t.Fatalf("lockfile source = %q, want %q", entry.Source, source)
+	// The recorded source is the canonical (absolute, symlink-resolved) local path.
+	if entry.Source != canonicalSource(source) {
+		t.Fatalf("lockfile source = %q, want %q", entry.Source, canonicalSource(source))
 	}
 }
 
@@ -188,6 +189,43 @@ func TestInstallReinstallShowsHashChange(t *testing.T) {
 	got, _ := Get(destDir, "demo")
 	if !strings.Contains(got.Content, "second body") {
 		t.Fatalf("reinstall did not overwrite content: %q", got.Content)
+	}
+}
+
+// TestInstallSameLocalSourceDifferentSpellingIsNotAClash verifies that a local
+// source installed via one spelling (e.g. a relative path) and re-installed via
+// an equivalent spelling (the absolute path) is treated as the same source, not
+// a clash, because the recorded source is canonicalized.
+func TestInstallSameLocalSourceDifferentSpellingIsNotAClash(t *testing.T) {
+	destDir := t.TempDir()
+	srcRoot := t.TempDir()
+	abs := writeSourceSkill(t, filepath.Join(srcRoot, "src"),
+		"---\nname: demo\ndescription: v1\n---\nbody\n")
+
+	if _, err := Install(context.Background(), InstallOptions{Source: abs, Dir: destDir}); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	// Reinstall using a relative spelling of the same directory.
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), InstallOptions{Source: rel, Dir: destDir}); err != nil {
+		t.Fatalf("reinstall with relative spelling should not clash: %v", err)
+	}
+
+	want := canonicalSource(abs)
+	entries, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatalf("ReadLock: %v", err)
+	}
+	if entries["demo"].Source != want {
+		t.Fatalf("lockfile should record the canonical source %q, got %q", want, entries["demo"].Source)
 	}
 }
 
@@ -334,8 +372,8 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 	if info.Skill.Description != "described" {
 		t.Fatalf("Info description = %q", info.Skill.Description)
 	}
-	if info.Source != src {
-		t.Fatalf("Info source = %q, want %q", info.Source, src)
+	if info.Source != installed.Source {
+		t.Fatalf("Info source = %q, want %q", info.Source, installed.Source)
 	}
 	if info.Hash != installed.Hash {
 		t.Fatalf("Info hash = %q, want %q", info.Hash, installed.Hash)

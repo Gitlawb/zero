@@ -82,6 +82,9 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	if dir == "" {
 		return InstallResult{}, errors.New("a plugins directory is required")
 	}
+	// Canonicalize a local source so clash detection keys off the resolved path,
+	// not the spelling the user typed (relative vs absolute, symlinked vs not).
+	source = canonicalSource(source)
 
 	fetchDir, cleanup, err := fetchSource(ctx, source, options.GitRunner)
 	if err != nil {
@@ -117,7 +120,13 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 	id := parsed.ID
 
-	hash := hashContent(data)
+	// Hash the SAME filtered tree that copyTree installs (not just the manifest),
+	// so a change to any installed file — a tool script, prompt, or bundled skill —
+	// is reflected in the lock hash and reported as an update.
+	hash, err := hashTree(pluginDir)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("hash plugin: %w", err)
+	}
 
 	lock, err := ReadLock(dir)
 	if err != nil {
@@ -379,6 +388,25 @@ func fileExists(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// canonicalSource normalizes a local filesystem source to an absolute,
+// symlink-evaluated path so a re-install via a different spelling of the same
+// directory is recognized as the same source. Remote sources (git URLs) are
+// returned unchanged. On any resolution error the input is returned as-is so a
+// non-existent local path still surfaces its real error later in fetchSource.
+func canonicalSource(source string) string {
+	if !isLocalPath(source) {
+		return source
+	}
+	abs, err := filepath.Abs(source)
+	if err != nil {
+		return source
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
 // isLocalPath reports whether source is a local filesystem path rather than a
 // remote URL. URLs (scheme://… or scp-style host:path) and git shorthand are
 // remote.
@@ -428,7 +456,75 @@ func validInstallID(id string) bool {
 	return id == filepath.Base(id) && !strings.ContainsAny(id, `/\`) && !strings.Contains(id, "..")
 }
 
-func hashContent(data []byte) string {
-	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:])
+// hashTree computes a content hash over the same filtered tree that copyTree
+// installs: regular files only, .git and symlinks skipped, walked in a stable
+// sorted order. Each file contributes its plugin-relative path, executable bit,
+// and bytes, so renames, mode flips, and content edits all change the hash.
+func hashTree(root string) (string, error) {
+	hasher := sha256.New()
+	if err := hashTreeInto(hasher, root, root); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func hashTreeInto(hasher io.Writer, root string, dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name == ".git" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			// Skipped by copyTree, so excluded from the hash too.
+			continue
+		case info.IsDir():
+			if err := hashTreeInto(hasher, root, path); err != nil {
+				return err
+			}
+		case info.Mode().IsRegular():
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			executable := 0
+			if info.Mode().Perm()&0o111 != 0 {
+				executable = 1
+			}
+			// Length-prefixed header keeps file boundaries unambiguous so two trees
+			// cannot collide by shifting bytes across the path/content split.
+			header := fmt.Sprintf("%s\x00%d\x00", filepath.ToSlash(rel), executable)
+			if _, err := io.WriteString(hasher, header); err != nil {
+				return err
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(hasher, file); err != nil {
+				_ = file.Close()
+				return err
+			}
+			if err := file.Close(); err != nil {
+				return err
+			}
+		default:
+			// FIFOs, sockets, devices: skipped by copyTree, excluded here.
+			continue
+		}
+	}
+	return nil
 }

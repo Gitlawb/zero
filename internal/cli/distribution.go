@@ -146,7 +146,7 @@ func runSkillInfo(args []string, dir string, stdout io.Writer, stderr io.Writer)
 }
 
 func runSkillRemove(args []string, dir string, stdout io.Writer, stderr io.Writer) int {
-	name, _, help, err := parseNameCommandArgs(args, "skill remove")
+	name, asJSON, help, err := parseNameCommandArgs(args, "skill remove")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -155,6 +155,9 @@ func runSkillRemove(args []string, dir string, stdout io.Writer, stderr io.Write
 			return exitCrash
 		}
 		return exitSuccess
+	}
+	if asJSON {
+		return writeExecUsageError(stderr, "skill remove does not support --json")
 	}
 	if name == "" {
 		return writeExecUsageError(stderr, "usage: zero skill remove <name>")
@@ -223,7 +226,7 @@ func runPluginAdd(args []string, dir string, stdout io.Writer, stderr io.Writer)
 }
 
 func runPluginRemove(args []string, dir string, stdout io.Writer, stderr io.Writer) int {
-	id, _, help, err := parseNameCommandArgs(args, "plugin remove")
+	id, asJSON, help, err := parseNameCommandArgs(args, "plugin remove")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -232,6 +235,9 @@ func runPluginRemove(args []string, dir string, stdout io.Writer, stderr io.Writ
 			return exitCrash
 		}
 		return exitSuccess
+	}
+	if asJSON {
+		return writeExecUsageError(stderr, "plugin remove does not support --json")
 	}
 	if id == "" {
 		return writeExecUsageError(stderr, "usage: zero plugin remove <id>")
@@ -339,7 +345,7 @@ func runToolsMake(args []string, dir string, stdout io.Writer, stderr io.Writer)
 		"",
 		"Next steps:",
 		"  1. Implement the TODO in the entry script.",
-		"  2. Run `zero plugins list` to confirm it loads.",
+		"  2. Run `zero tools list` to confirm it loads.",
 		"  3. The tool activates through the normal permission flow.",
 	}
 	if _, err := fmt.Fprintln(stdout, redaction.RedactString(strings.Join(lines, "\n"), redaction.Options{})); err != nil {
@@ -376,14 +382,15 @@ func runToolsList(args []string, dir string, stdout io.Writer, stderr io.Writer)
 	items := toolboxItems(result.Plugins)
 	if asJSON {
 		payload := struct {
-			Tools []toolboxItem `json:"tools"`
-		}{Tools: items}
+			Tools       []toolboxItem        `json:"tools"`
+			Diagnostics []plugins.Diagnostic `json:"diagnostics"`
+		}{Tools: items, Diagnostics: result.Diagnostics}
 		if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
 			return exitCrash
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, redaction.RedactString(formatToolboxList(items, dir), redaction.Options{})); err != nil {
+	if _, err := fmt.Fprintln(stdout, redaction.RedactString(formatToolboxList(items, result.Diagnostics, dir), redaction.Options{})); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -424,20 +431,40 @@ func toolboxItems(loaded []plugins.LoadedPlugin) []toolboxItem {
 	return items
 }
 
-func formatToolboxList(items []toolboxItem, dir string) string {
+func formatToolboxList(items []toolboxItem, diagnostics []plugins.Diagnostic, dir string) string {
+	lines := []string{}
 	if len(items) == 0 {
-		return fmt.Sprintf("No Zero plugin-tools found in %s.", dir)
-	}
-	lines := []string{"Zero Tools:"}
-	for _, item := range items {
-		line := "  " + item.Name + " (" + item.Plugin + ")"
-		if item.Description != "" {
-			line += " - " + item.Description
+		lines = append(lines, fmt.Sprintf("No Zero plugin-tools found in %s.", dir))
+	} else {
+		lines = append(lines, "Zero Tools:")
+		for _, item := range items {
+			line := "  " + item.Name + " (" + item.Plugin + ")"
+			if item.Description != "" {
+				line += " - " + item.Description
+			}
+			lines = append(lines, line)
+			lines = append(lines, fmt.Sprintf("    command: %s [%s]", item.Command, item.Permission))
 		}
+	}
+	for _, line := range formatToolboxDiagnostics(diagnostics) {
 		lines = append(lines, line)
-		lines = append(lines, fmt.Sprintf("    command: %s [%s]", item.Command, item.Permission))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatToolboxDiagnostics renders loader diagnostics the same way the plugins
+// listing does, so a broken toolbox plugin surfaces a warning instead of
+// silently vanishing from the listing.
+func formatToolboxDiagnostics(diagnostics []plugins.Diagnostic) []string {
+	if len(diagnostics) == 0 {
+		return nil
+	}
+	lines := []string{"Tool diagnostics:"}
+	for _, diagnostic := range diagnostics {
+		line := fmt.Sprintf("  [%s] %s", diagnostic.Kind, diagnostic.Message)
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // parseNameCommandArgs parses a single positional name plus an optional --json

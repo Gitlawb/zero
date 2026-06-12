@@ -92,6 +92,9 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	if dir == "" {
 		return InstallResult{}, errors.New("a skills directory is required")
 	}
+	// Canonicalize a local source so clash detection keys off the resolved path,
+	// not the spelling the user typed (relative vs absolute, symlinked vs not).
+	source = canonicalSource(source)
 
 	fetchDir, cleanup, err := fetchSource(ctx, source, options.GitRunner)
 	if err != nil {
@@ -341,6 +344,25 @@ func locateSkillDir(root string) (string, error) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+// canonicalSource normalizes a local filesystem source to an absolute,
+// symlink-evaluated path so a re-install via a different spelling of the same
+// directory is recognized as the same source. Remote sources (git URLs) are
+// returned unchanged. On any resolution error the input is returned as-is so a
+// non-existent local path still surfaces its real error later in fetchSource.
+func canonicalSource(source string) string {
+	if !isLocalPath(source) {
+		return source
+	}
+	abs, err := filepath.Abs(source)
+	if err != nil {
+		return source
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
 }
 
 // isLocalPath reports whether source should be treated as a local filesystem

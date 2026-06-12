@@ -86,6 +86,69 @@ func commandReferencesEntry(tool plugins.ToolExtension, entryPath string, plugin
 	return false
 }
 
+// TestScaffoldCoversAllRuntimes exercises every runtimeSpecFor branch (shell,
+// node, python) so template/manifest drift in the non-default runtimes is caught:
+// each must produce an entry stub inside the plugin dir, a manifest that parses
+// against the real plugin schema, and a tool command that references the entry.
+func TestScaffoldCoversAllRuntimes(t *testing.T) {
+	for _, runtime := range []tools.ScaffoldRuntime{tools.RuntimeShell, tools.RuntimeNode, tools.RuntimePython} {
+		runtime := runtime
+		t.Run(string(runtime), func(t *testing.T) {
+			dir := t.TempDir()
+			name := "tool-" + string(runtime)
+			pluginDir := filepath.Join(dir, name)
+
+			result, err := tools.Scaffold(tools.ScaffoldOptions{Name: name, Dir: dir, Runtime: runtime})
+			if err != nil {
+				t.Fatalf("Scaffold(%s) returned error: %v", runtime, err)
+			}
+			if result.ManifestPath != filepath.Join(pluginDir, "plugin.json") {
+				t.Fatalf("ManifestPath = %q, want under %q", result.ManifestPath, pluginDir)
+			}
+			if _, err := os.Stat(result.ManifestPath); err != nil {
+				t.Fatalf("manifest not created: %v", err)
+			}
+			if _, err := os.Stat(result.EntryPath); err != nil {
+				t.Fatalf("entry stub not created: %v", err)
+			}
+			if !strings.HasPrefix(result.EntryPath, pluginDir) {
+				t.Fatalf("entry stub should live inside the plugin dir, got %q", result.EntryPath)
+			}
+
+			data, err := os.ReadFile(result.ManifestPath)
+			if err != nil {
+				t.Fatalf("read manifest: %v", err)
+			}
+			var raw any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("manifest is not valid JSON: %v\n%s", err, data)
+			}
+			plugin, err := plugins.ParseManifest(raw, plugins.ParseManifestOptions{
+				Source:       plugins.SourceUser,
+				Root:         dir,
+				PluginDir:    pluginDir,
+				ManifestPath: result.ManifestPath,
+			})
+			if err != nil {
+				t.Fatalf("generated manifest does not parse: %v", err)
+			}
+			if len(plugin.Tools) != 1 {
+				t.Fatalf("expected exactly one tool, got %d", len(plugin.Tools))
+			}
+			tool := plugin.Tools[0]
+			if tool.Command == "" {
+				t.Fatalf("tool command should not be empty")
+			}
+			if !commandReferencesEntry(tool, result.EntryPath, pluginDir) {
+				t.Fatalf("manifest command/args do not reference the entry script: cmd=%q args=%v entry=%q", tool.Command, tool.Args, result.EntryPath)
+			}
+			if tool.Permission != plugins.PermissionPrompt {
+				t.Fatalf("scaffolded tool permission = %q, want prompt", tool.Permission)
+			}
+		})
+	}
+}
+
 func TestScaffoldStubIsRunnableShape(t *testing.T) {
 	dir := t.TempDir()
 	result, err := tools.Scaffold(tools.ScaffoldOptions{Name: "greeter", Dir: dir})

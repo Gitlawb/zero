@@ -242,6 +242,64 @@ func TestRunToolsMakeRequiresName(t *testing.T) {
 	}
 }
 
+// A broken plugin in the toolbox dir must not vanish silently: tools list surfaces
+// the loader diagnostic in both text and JSON output.
+func TestRunToolsListSurfacesDiagnostics(t *testing.T) {
+	toolsDir := t.TempDir()
+	// A plugin dir whose plugin.json is not valid JSON yields a load diagnostic.
+	broken := filepath.Join(toolsDir, "broken")
+	if err := os.MkdirAll(broken, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, "plugin.json"), []byte("{ not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps := appDeps{toolsDir: func() string { return toolsDir }}
+
+	var stdout, stderr bytes.Buffer
+	if exit := runWithDeps([]string{"tools", "list"}, &stdout, &stderr, deps); exit != exitSuccess {
+		t.Fatalf("tools list exit = %d, stderr = %s", exit, stderr.String())
+	}
+	if !strings.Contains(strings.ToLower(stdout.String()), "diagnostic") {
+		t.Fatalf("text listing should surface loader diagnostics:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if exit := runWithDeps([]string{"tools", "list", "--json"}, &stdout, &stderr, deps); exit != exitSuccess {
+		t.Fatalf("tools list --json exit = %d, stderr = %s", exit, stderr.String())
+	}
+	var payload struct {
+		Tools       []map[string]any `json:"tools"`
+		Diagnostics []map[string]any `json:"diagnostics"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("tools list --json not valid JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Diagnostics) == 0 {
+		t.Fatalf("JSON listing should include loader diagnostics:\n%s", stdout.String())
+	}
+}
+
+func TestRunRemoveRejectsJSONFlag(t *testing.T) {
+	for _, args := range [][]string{
+		{"skill", "remove", "demo", "--json"},
+		{"plugin", "remove", "zero.demo", "--json"},
+	} {
+		var stdout, stderr bytes.Buffer
+		exit := runWithDeps(args, &stdout, &stderr, appDeps{
+			skillsDir:  func() string { return t.TempDir() },
+			pluginsDir: func() string { return t.TempDir() },
+		})
+		if exit == exitSuccess {
+			t.Fatalf("%v should reject --json, got success", args)
+		}
+		if !strings.Contains(strings.ToLower(stderr.String()), "json") {
+			t.Fatalf("%v error should mention json:\n%s", args, stderr.String())
+		}
+	}
+}
+
 func TestRunToolsListEmpty(t *testing.T) {
 	toolsDir := filepath.Join(t.TempDir(), "missing")
 	var stdout, stderr bytes.Buffer
