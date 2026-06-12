@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -236,5 +237,17 @@ func TestSessionDropsStaleVersionPublish(t *testing.T) {
 	sess.handleNotification("textDocument/publishDiagnostics", fresh)
 	if d := sess.diagnosticsFor(uri); len(d) != 1 || d[0].Message != "fresh" {
 		t.Fatalf("a current-version publish must apply, got %#v", d)
+	}
+}
+
+func TestManagerCheckDegradesWhenServerBinaryMissing(t *testing.T) {
+	// A configured extension whose binary isn't on PATH (exec.ErrNotFound) must
+	// degrade to no diagnostics, exactly like an unsupported extension.
+	m := fastManager(func(context.Context, []string, string) (lspServer, error) {
+		return nil, &exec.Error{Name: "gopls", Err: exec.ErrNotFound}
+	})
+	diags, err := m.Check(context.Background(), "main.go", "package main")
+	if err != nil || diags != nil {
+		t.Fatalf("missing server binary should degrade to (nil,nil), got (%#v, %v)", diags, err)
 	}
 }

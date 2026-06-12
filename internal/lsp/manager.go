@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -63,6 +64,13 @@ func (m *Manager) Check(ctx context.Context, path, text string) ([]Diagnostic, e
 
 	sess, err := m.sessionFor(ctx, command)
 	if err != nil {
+		// A configured extension whose language-server binary isn't installed must
+		// degrade exactly like an unsupported extension — LSP is an opportunistic
+		// layer, not a hard dependency. Only a missing binary degrades; any other
+		// start failure still surfaces.
+		if isServerUnavailable(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	baseline := sess.publishBaseline(uri)
@@ -142,6 +150,13 @@ func (m *Manager) sessionFor(ctx context.Context, command []string) (*session, e
 	m.sessions[key] = sess
 	m.mu.Unlock()
 	return sess, nil
+}
+
+// isServerUnavailable reports whether a start error is just a missing binary
+// (exec could not find the language server on PATH), which should degrade to
+// "no diagnostics" rather than fail the run.
+func isServerUnavailable(err error) bool {
+	return errors.Is(err, exec.ErrNotFound)
 }
 
 func (m *Manager) absPath(path string) string {
