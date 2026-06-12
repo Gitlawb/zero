@@ -1,0 +1,192 @@
+package agenteval
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+type RunInput struct {
+	TaskID        string
+	WorkspacePath string
+}
+
+type CommandRunner func(context.Context, string, Command) CommandResult
+
+type ChangedFilesFunc func(context.Context, string) ([]string, error)
+
+type Runner struct {
+	RunCommand   CommandRunner
+	ChangedFiles ChangedFilesFunc
+
+	runGit func(context.Context, string, ...string) ([]byte, error)
+}
+
+func (runner Runner) Run(ctx context.Context, suite Suite, input RunInput) Report {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	task, err := selectTask(suite, input.TaskID)
+	if err != nil {
+		return Score(suite, ScoreInput{TaskID: input.TaskID})
+	}
+	workspace, err := verifyWorkspace(input.WorkspacePath)
+	if err != nil {
+		return runner.blocked(suite, task.ID, fmt.Sprintf("workspace setup failed: %v", err), nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return runner.blocked(suite, task.ID, err.Error(), nil)
+	}
+
+	results := make([]CommandResult, 0, len(task.VerificationCommands))
+	for _, command := range task.VerificationCommands {
+		if err := ctx.Err(); err != nil {
+			return runner.blocked(suite, task.ID, err.Error(), results)
+		}
+		result := runner.runCommand(ctx, workspace, command)
+		if result.ID == "" {
+			result.ID = command.ID
+		}
+		results = append(results, result)
+	}
+
+	files, err := runner.changedFiles(ctx, workspace)
+	if err != nil {
+		reason := fmt.Sprintf("changed files collection failed: %v", err)
+		return runner.blocked(suite, task.ID, reason, results)
+	}
+
+	return Score(suite, ScoreInput{
+		TaskID:         task.ID,
+		CommandResults: results,
+		ChangedFiles:   files,
+	})
+}
+
+func (runner Runner) blocked(suite Suite, taskID string, reason string, results []CommandResult) Report {
+	return Score(suite, ScoreInput{
+		TaskID:         taskID,
+		CommandResults: results,
+		Blocked:        true,
+		BlockReason:    reason,
+	})
+}
+
+func (runner Runner) runCommand(ctx context.Context, workspace string, command Command) CommandResult {
+	if runner.RunCommand != nil {
+		return runner.RunCommand(ctx, workspace, command)
+	}
+	return execCommand(ctx, workspace, command)
+}
+
+func (runner Runner) changedFiles(ctx context.Context, workspace string) ([]string, error) {
+	if runner.ChangedFiles != nil {
+		return runner.ChangedFiles(ctx, workspace)
+	}
+	runGit := runner.runGit
+	if runGit == nil {
+		runGit = defaultRunGit
+	}
+	output, err := runGit(ctx, workspace, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	return parseGitStatusPorcelain(output), nil
+}
+
+func execCommand(ctx context.Context, workspace string, command Command) CommandResult {
+	result := CommandResult{ID: command.ID, ExitCode: -1}
+	if emptyCommand(command.Command) {
+		result.Error = "command must not be empty"
+		return result
+	}
+	args := trimCommand(command.Command)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = workspace
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	result.Stdout = stdout.String()
+	result.Stderr = stderr.String()
+	if err == nil {
+		result.ExitCode = 0
+		return result
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+		return result
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		result.Error = ctxErr.Error()
+		return result
+	}
+	result.Error = err.Error()
+	return result
+}
+
+func defaultRunGit(ctx context.Context, workspace string, args ...string) ([]byte, error) {
+	allArgs := append([]string{"-C", workspace}, args...)
+	cmd := exec.CommandContext(ctx, "git", allArgs...)
+	output, err := cmd.Output()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
+	return output, nil
+}
+
+func parseGitStatusPorcelain(output []byte) []string {
+	lines := strings.Split(string(output), "\n")
+	files := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		file := strings.TrimSpace(line[3:])
+		if arrow := strings.LastIndex(file, " -> "); arrow >= 0 {
+			file = file[arrow+4:]
+		}
+		files = append(files, file)
+	}
+	return normalizeFiles(files)
+}
+
+func verifyWorkspace(workspace string) (string, error) {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return "", errors.New("workspace path is required")
+	}
+	clean, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(clean)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("workspace path must be a directory")
+	}
+	return clean, nil
+}
+
+func trimCommand(command []string) []string {
+	trimmed := make([]string, 0, len(command))
+	for _, part := range command {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			trimmed = append(trimmed, part)
+		}
+	}
+	return trimmed
+}

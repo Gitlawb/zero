@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,7 +63,7 @@ func TestRunEvalJSONMode(t *testing.T) {
 
 	exitCode := runWithDeps([]string{"eval", "--suite", "evals/context.yaml", "--json"}, &stdout, &stderr, appDeps{
 		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
-			if options.SuitePath != "evals/context.yaml" || !options.JSON {
+			if options.Mode != "validate" || options.SuitePath != "evals/context.yaml" || !options.JSON {
 				t.Fatalf("unexpected eval options: %#v", options)
 			}
 			return report, nil
@@ -91,9 +92,183 @@ func TestRunEvalJSONMode(t *testing.T) {
 			t.Fatalf("expected JSON key %q in %s", key, stdout.String())
 		}
 	}
-	for _, key := range []string{"tasks", "checks", "failed", "errors"} {
+	for _, key := range []string{"tasks", "checks", "failed", "blocked", "errors"} {
 		if string(raw[key]) != "0" {
 			t.Fatalf("expected JSON key %q to be zero, got %s", key, string(raw[key]))
+		}
+	}
+}
+
+func TestRunEvalRunJSONModePassesRunnerOptions(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{
+		"eval", "run",
+		"--suite", "evals/context.json",
+		"--task", "edit-reader",
+		"--workspace", "D:\\work\\zero-fixture",
+		"--json",
+	}, &stdout, &stderr, appDeps{
+		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if options.Mode != "run" || options.SuitePath != "evals/context.json" || options.TaskID != "edit-reader" || options.WorkspacePath != "D:\\work\\zero-fixture" || !options.JSON {
+				t.Fatalf("unexpected eval run options: %#v", options)
+			}
+			return agentEvalReport{
+				Suite:  "quality-context",
+				TaskID: "edit-reader",
+				Status: "pass",
+				OK:     true,
+				Total:  2,
+				Passed: 2,
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	var decoded agentEvalReport
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode eval run JSON: %v\n%s", err, stdout.String())
+	}
+	if decoded.TaskID != "edit-reader" || decoded.Status != "pass" || decoded.Blocked != 0 {
+		t.Fatalf("unexpected eval run JSON: %#v", decoded)
+	}
+}
+
+func TestRunEvalRunFailureTextShowsSummaryAndFailures(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"eval", "run", "--suite=evals/context.json", "--task=edit-reader"}, &stdout, &stderr, appDeps{
+		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if options.Mode != "run" || options.TaskID != "edit-reader" || options.WorkspacePath != "." {
+				t.Fatalf("unexpected eval run options: %#v", options)
+			}
+			return agentEvalReport{
+				Suite:   "quality-context",
+				TaskID:  "edit-reader",
+				Status:  "fail",
+				OK:      false,
+				Total:   3,
+				Passed:  1,
+				Failed:  1,
+				Blocked: 1,
+				Failures: []agentEvalFailure{{
+					ID:      "test",
+					Message: "go test ./... exited 1",
+				}},
+			}, nil
+		},
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("expected provider-style failure exit %d, got %d", exitProvider, exitCode)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	for _, want := range []string{
+		"suite: quality-context",
+		"task: edit-reader",
+		"status: fail",
+		"summary: 3 total, 1 passed, 1 failed, 1 blocked, 0 errors",
+		"failures:",
+		"test - go test ./... exited 1",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunEvalRunReportDirWritesJSONReport(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	reportDir := t.TempDir()
+
+	exitCode := runWithDeps([]string{"eval", "run", "--suite", "evals/context.json", "--report-dir", reportDir}, &stdout, &stderr, appDeps{
+		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
+			if options.ReportDir != reportDir {
+				t.Fatalf("unexpected report dir: %#v", options)
+			}
+			return agentEvalReport{
+				Suite:  "quality-context",
+				TaskID: "edit-reader",
+				Status: "pass",
+				OK:     true,
+				Total:  1,
+				Passed: 1,
+			}, nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	reportPath := filepath.Join(reportDir, "agent-eval-report.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var decoded agentEvalReport
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("decode report: %v\n%s", err, string(data))
+	}
+	if decoded.ReportPath != reportPath || decoded.Suite != "quality-context" {
+		t.Fatalf("unexpected written report: %#v", decoded)
+	}
+	if !strings.Contains(stdout.String(), "report: "+reportPath) {
+		t.Fatalf("expected text output to mention report path, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunEvalRunDefaultRunnerUsesAgentEvalRunner(t *testing.T) {
+	workspace := t.TempDir()
+	if output, err := exec.Command("git", "-C", workspace, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, string(output))
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "expected.txt"), []byte("changed"), 0o600); err != nil {
+		t.Fatalf("write expected file: %v", err)
+	}
+	suitePath := filepath.Join(t.TempDir(), "suite.json")
+	if err := os.WriteFile(suitePath, []byte(`{
+		"id": "runner-cli",
+		"name": "Runner CLI",
+		"tasks": [{
+			"id": "local-score",
+			"name": "Local score",
+			"prompt": "Touch the expected file.",
+			"workspaceFixture": "fixtures/runner",
+			"verificationCommands": [
+				{"id": "go-version", "name": "Go version", "command": ["go", "version"]}
+			],
+			"expectedChangedFiles": ["expected.txt"]
+		}]
+	}`), 0o600); err != nil {
+		t.Fatalf("write suite: %v", err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"eval", "run", "--suite", suitePath, "--workspace", workspace}, &stdout, &stderr, appDeps{})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s\n%s", exitSuccess, exitCode, stderr.String(), stdout.String())
+	}
+	for _, want := range []string{
+		"suite: runner-cli",
+		"name: Runner CLI",
+		"task: local-score",
+		"summary: 2 total, 2 passed, 0 failed, 0 blocked, 0 errors",
+		"status: pass",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, stdout.String())
 		}
 	}
 }

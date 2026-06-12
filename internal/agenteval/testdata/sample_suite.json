@@ -1,21 +1,21 @@
 {
-  "id": "zero-offline-agent-sample",
-  "name": "zero-offline-agent-sample",
-  "description": "Small offline fixture suite for exercising Zero coding-agent scoring contracts without live provider calls.",
+  "id": "zero-local-agent-quality",
+  "name": "zero-local-agent-quality",
+  "description": "Clean-room local fixture suite for exercising Zero coding-agent task success without live provider calls.",
   "tasks": [
     {
-      "id": "verify-json-contract-doc",
-      "name": "Document verify JSON contract behavior",
-      "description": "Docs-only task for verify and selfverify JSON contracts.",
-      "prompt": "Update the stream-json protocol documentation so maintainers can see how `zero verify --json` reports verification events. Keep the wording honest and do not change runtime code.",
-      "workspaceFixture": "fixtures/zero-repo",
+      "id": "document-stream-json-verify-events",
+      "name": "Document stream JSON verify events",
+      "description": "Docs-only task covering the verify and self-verify event contract.",
+      "prompt": "Update the stream-json protocol docs so maintainers can see how `zero verify --json` and `zero selfverify --json` report start, check, summary, and error events. Keep the wording accurate, local-first, and do not change runtime code.",
+      "workspaceFixture": "fixtures/zero-mini",
       "expectedChangedFiles": [
         "docs/STREAM_JSON_PROTOCOL.md"
       ],
       "verificationCommands": [
         {
-          "id": "go-test-verify-contracts",
-          "name": "Verify contract tests",
+          "id": "verify-contract-tests",
+          "name": "Verify JSON contract tests",
           "command": [
             "go",
             "test",
@@ -26,17 +26,17 @@
       ]
     },
     {
-      "id": "npm-wrapper-smoke-fixture",
-      "name": "Tighten npm wrapper smoke guidance",
-      "description": "Docs-only task for npm wrapper validation guidance.",
-      "prompt": "Improve the npm wrapper smoke checklist so a maintainer can distinguish Go release checks from direct Node wrapper checks. Do not add Node build dependencies.",
-      "workspaceFixture": "fixtures/zero-repo",
+      "id": "separate-go-release-from-node-wrapper-smoke",
+      "name": "Separate Go release checks from Node wrapper checks",
+      "description": "Docs task that keeps the npm wrapper guidance honest and dependency-free.",
+      "prompt": "Improve the npm wrapper smoke checklist so a maintainer can distinguish Go release checks from direct `bin/zero.js` wrapper checks. Keep Node usage limited to the wrapper itself and do not add Bun, TypeScript, or package build dependencies.",
+      "workspaceFixture": "fixtures/zero-mini",
       "expectedChangedFiles": [
         "docs/NPM_WRAPPER_SMOKE.md"
       ],
       "verificationCommands": [
         {
-          "id": "go-test-npm-release",
+          "id": "npm-wrapper-release-tests",
           "name": "NPM wrapper and release tests",
           "command": [
             "go",
@@ -48,22 +48,111 @@
       ]
     },
     {
-      "id": "provider-catalog-validation-test",
-      "name": "Add provider catalog validation coverage",
-      "description": "Focused test task for model registry catalog stability.",
-      "prompt": "Add focused tests for provider catalog defaults so model aliases and provider display names remain stable. Keep the change inside the model registry package.",
-      "workspaceFixture": "fixtures/zero-repo",
+      "id": "add-provider-catalog-stability-coverage",
+      "name": "Add provider catalog stability coverage",
+      "description": "Focused test task for model registry aliases and provider names.",
+      "prompt": "Add focused tests for provider catalog defaults so common model aliases and provider display names remain stable. Keep the change inside the model registry package.",
+      "workspaceFixture": "fixtures/zero-mini",
       "expectedChangedFiles": [
         "internal/modelregistry/catalog_test.go"
       ],
       "verificationCommands": [
         {
-          "id": "go-test-modelregistry",
+          "id": "modelregistry-tests",
           "name": "Model registry tests",
           "command": [
             "go",
             "test",
             "./internal/modelregistry"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "tighten-config-validation-errors",
+      "name": "Tighten config validation errors",
+      "description": "Small Go task for deterministic config validation behavior.",
+      "prompt": "Make config validation return actionable errors when the default provider is missing from the provider map, and cover the behavior with a table test. Do not change config file locations or environment variable names.",
+      "workspaceFixture": "fixtures/zero-mini",
+      "expectedChangedFiles": [
+        "internal/config/validate.go",
+        "internal/config/validate_test.go"
+      ],
+      "verificationCommands": [
+        {
+          "id": "config-tests",
+          "name": "Config package tests",
+          "command": [
+            "go",
+            "test",
+            "./internal/config"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "preserve-mcp-server-order",
+      "name": "Preserve MCP server order",
+      "description": "Regression task for deterministic MCP configuration output.",
+      "prompt": "Add coverage showing MCP server names are emitted in deterministic sorted order when rendering config summaries. Keep the production change, if any, inside the MCP config package.",
+      "workspaceFixture": "fixtures/zero-mini",
+      "expectedChangedFiles": [
+        "internal/mcp/config.go",
+        "internal/mcp/config_test.go"
+      ],
+      "verificationCommands": [
+        {
+          "id": "mcp-tests",
+          "name": "MCP config tests",
+          "command": [
+            "go",
+            "test",
+            "./internal/mcp"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "clarify-agent-permission-denial-copy",
+      "name": "Clarify agent permission denial copy",
+      "description": "Prompt and test task for local permission-denial messaging.",
+      "prompt": "Clarify the local agent system prompt so denied file operations explain the blocked path and the next safe action. Add a focused test that checks the denial guidance without depending on a live model.",
+      "workspaceFixture": "fixtures/zero-mini",
+      "expectedChangedFiles": [
+        "internal/agent/system_prompt.md",
+        "internal/agent/denial_test.go"
+      ],
+      "verificationCommands": [
+        {
+          "id": "agent-prompt-tests",
+          "name": "Agent prompt tests",
+          "command": [
+            "go",
+            "test",
+            "./internal/agent"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "add-release-smoke-dry-run-note",
+      "name": "Add release smoke dry-run note",
+      "description": "Release-facing task that ties docs to local smoke behavior.",
+      "prompt": "Update the release smoke guidance and tests so maintainers can tell when a smoke run is using an already-built local binary. Keep the checks local and deterministic.",
+      "workspaceFixture": "fixtures/zero-mini",
+      "expectedChangedFiles": [
+        "cmd/zero-release/main_test.go",
+        "docs/RELEASE_SMOKE.md"
+      ],
+      "verificationCommands": [
+        {
+          "id": "release-command-tests",
+          "name": "Release command tests",
+          "command": [
+            "go",
+            "test",
+            "./cmd/zero-release",
+            "./internal/release"
           ]
         }
       ]

@@ -90,8 +90,8 @@ func TestSampleSuiteLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sample suite should load: %v", err)
 	}
-	if len(suite.Tasks) != 3 {
-		t.Fatalf("sample suite tasks = %d, want 3", len(suite.Tasks))
+	if len(suite.Tasks) < 5 || len(suite.Tasks) > 8 {
+		t.Fatalf("sample suite tasks = %d, want 5-8", len(suite.Tasks))
 	}
 	for _, task := range suite.Tasks {
 		if len(task.ExpectedChangedFiles) == 0 {

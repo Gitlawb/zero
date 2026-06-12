@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/repomap"
+	"github.com/Gitlawb/zero/internal/workspaceseed"
 )
 
 // coreSystemPrompt is the de-branded coding-craft instruction set: identity,
@@ -42,6 +43,11 @@ const maxProjectContextBytes = 8 << 10 // 8 KiB
 // remain stable across normal agent turns.
 const maxRepoMapContextBytes = 4 << 10 // 4 KiB
 
+const (
+	workspaceSeedMaxLines = 12
+	workspaceSeedWidth    = 100
+)
+
 // buildSystemPrompt assembles the full system prompt for a run: the core
 // coding-craft instructions, dynamic workspace context (cwd, git branch, project
 // guidelines), and the safety confirmation policy. It is built once per run so
@@ -60,6 +66,9 @@ func buildSystemPrompt(options Options) string {
 	}
 	if session := sessionRuntimeContext(options); session != "" {
 		sections = append(sections, session)
+	}
+	if seed := workspaceSeedContext(options.Cwd); seed != "" {
+		sections = append(sections, seed)
 	}
 	if ws := workspaceContext(options.Cwd); ws != "" {
 		sections = append(sections, ws)
@@ -135,6 +144,27 @@ func workspaceContext(cwd string) string {
 		b.WriteString("\n\n## Repo map\n\n" + repoMap)
 	}
 	return b.String()
+}
+
+func workspaceSeedContext(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	seed, err := workspaceseed.BuildFromWorkspace(cwd, workspaceseed.GitInfo{
+		Branch: gitBranchForPrompt(cwd),
+	})
+	if err != nil {
+		return ""
+	}
+	rendered := strings.TrimSpace(workspaceseed.Render(seed, workspaceseed.RenderOptions{
+		MaxLines: workspaceSeedMaxLines,
+		Width:    workspaceSeedWidth,
+	}))
+	if rendered == "" {
+		return ""
+	}
+	return "<workspace_seed>\n" + rendered + "\n</workspace_seed>"
 }
 
 func repoMapContext(cwd string) string {
