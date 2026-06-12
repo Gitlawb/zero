@@ -324,3 +324,24 @@ func TestSessionTreeSnapshotConvertsChildren(t *testing.T) {
 		t.Fatalf("child lineage not preserved in tree snapshot: %#v", snapshot)
 	}
 }
+
+func TestProviderSnapshotAPIKeySetCountsAuthHeaderValue(t *testing.T) {
+	cases := []struct {
+		name    string
+		profile config.ProviderProfile
+		want    bool
+	}{
+		{"api key only", config.ProviderProfile{Name: "p", APIKey: "sk-x"}, true},
+		{"auth header only", config.ProviderProfile{Name: "p", AuthHeaderValue: "Bearer t"}, true},
+		{"both", config.ProviderProfile{Name: "p", APIKey: "sk-x", AuthHeaderValue: "Bearer t"}, true},
+		{"neither", config.ProviderProfile{Name: "p"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := ProviderSnapshotFromProfile(tc.profile, false)
+			if snapshot.APIKeySet != tc.want {
+				t.Fatalf("APIKeySet = %v, want %v", snapshot.APIKeySet, tc.want)
+			}
+		})
+	}
+}

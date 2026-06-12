@@ -129,8 +129,10 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 	// Report key PRESENCE, never the value: the raw key would only be redacted
 	// downstream anyway, and an unconditional [REDACTED] read as "configured"
 	// even when no key was set at all.
+	// A profile can authenticate via a raw auth-header value instead of APIKey, so
+	// treat either as a configured credential (matches ProviderSnapshot.APIKeySet).
 	apiKey := "not set"
-	if profile.APIKey != "" {
+	if profile.APIKey != "" || profile.AuthHeaderValue != "" {
 		apiKey = "set"
 	}
 	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), map[string]any{

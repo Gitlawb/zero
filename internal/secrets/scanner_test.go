@@ -96,5 +96,8 @@ func TestScanDetectsModernPrefixedOpenAIKeys(t *testing.T) {
 		if strings.Contains(redacted, key) {
 			t.Fatalf("key leaked after redaction: %q", redacted)
 		}
+		if !strings.Contains(redacted, "[REDACTED:openai_key]") {
+			t.Fatalf("missing typed placeholder for %q: %q", key, redacted)
+		}
 	}
 }
