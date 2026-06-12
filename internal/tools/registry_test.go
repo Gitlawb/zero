@@ -47,29 +47,32 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 }
 
 func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
-	toolset := CoreNetworkTools()
-	if len(toolset) != 1 {
-		t.Fatalf("expected 1 core network tool, got %d", len(toolset))
+	byName := map[string]Tool{}
+	for _, tool := range CoreNetworkTools() {
+		byName[tool.Name()] = tool
+		// Every core network tool shares the same prompt-gated egress posture.
+		safety := tool.Safety()
+		if safety.SideEffect != SideEffectNetwork || safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
+			t.Fatalf("network tool %q has unexpected safety metadata: %#v", tool.Name(), safety)
+		}
 	}
 
-	tool := toolset[0]
-	if tool.Name() != "web_fetch" {
-		t.Fatalf("expected web_fetch network tool, got %q", tool.Name())
-	}
-	safety := tool.Safety()
-	if safety.SideEffect != SideEffectNetwork || safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
-		t.Fatalf("unexpected web_fetch safety metadata: %#v", safety)
-	}
-	schema := tool.Parameters()
-	if schema.Properties == nil {
-		t.Fatal("web_fetch schema properties are nil")
-	}
-	urlProperty, ok := schema.Properties["url"]
+	// web_fetch retrieves a known URL; its key parameter is "url".
+	fetch, ok := byName["web_fetch"]
 	if !ok {
-		t.Fatal("web_fetch schema missing url property")
+		t.Fatal("expected web_fetch in core network tools")
 	}
-	if urlProperty.Type != "string" {
-		t.Fatalf("web_fetch url type = %s, want string", urlProperty.Type)
+	if property, ok := fetch.Parameters().Properties["url"]; !ok || property.Type != "string" {
+		t.Fatalf("web_fetch must expose a string url property, got %#v", fetch.Parameters().Properties["url"])
+	}
+
+	// web_search discovers URLs; its key parameter is "query".
+	search, ok := byName["web_search"]
+	if !ok {
+		t.Fatal("expected web_search in core network tools")
+	}
+	if property, ok := search.Parameters().Properties["query"]; !ok || property.Type != "string" {
+		t.Fatalf("web_search must expose a string query property, got %#v", search.Parameters().Properties["query"])
 	}
 }
 

@@ -228,6 +228,7 @@ func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 func CoreNetworkTools() []Tool {
 	return []Tool{
 		NewWebFetchTool(),
+		NewWebSearchTool(),
 	}
 }
 

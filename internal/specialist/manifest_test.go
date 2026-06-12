@@ -133,7 +133,7 @@ Prompt.`,
 			content: `---
 name: explorer
 description: Explores code
-tools: [web_search]
+tools: [web_crawl]
 ---
 Prompt.`,
 			want: "unknown tool or category",
