@@ -73,7 +73,11 @@ func runAgentEvalCommand(args []string, stdout io.Writer, stderr io.Writer, deps
 		}
 		return exitSuccess
 	}
-	report, err := deps.runAgentEval(context.Background(), options)
+	// Run under a signal-aware context so Ctrl+C / SIGTERM cancels in-flight
+	// verification commands (which honor context cancellation) instead of leaking them.
+	ctx, stop := signalContext()
+	defer stop()
+	report, err := deps.runAgentEval(ctx, options)
 	if err != nil {
 		var runtimeErr agentEvalRuntimeError
 		if errors.As(err, &runtimeErr) {
@@ -299,7 +303,10 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 		return options, false, execUsageError{"--suite requires a path"}
 	}
 	if options.Mode == "run" && options.WorkspacePath == "" {
-		options.WorkspacePath = "."
+		// Require an explicit workspace: defaulting to "." would run the suite's
+		// verification commands (go test/git) against the real working tree instead
+		// of a staged fixture.
+		return options, false, execUsageError{"--workspace requires a path for eval run"}
 	}
 	return options, false, nil
 }
@@ -400,7 +407,7 @@ Validates offline agent eval suites, scores an existing workspace, or benchmarks
 Flags:
       --suite <path>          Eval suite JSON file
       --task <id>             Run one task (eval run or eval bench)
-      --workspace <path>      Workspace path for local scoring (eval run only, default ".")
+      --workspace <path>      Workspace path for local scoring (eval run only, required)
       --work-root <path>      Work root for materialized benchmark workspaces (eval bench only)
       --model <id>            Model id for eval bench model-matrix runs; repeatable
       --models <ids>          Comma-separated model ids for eval bench model-matrix runs

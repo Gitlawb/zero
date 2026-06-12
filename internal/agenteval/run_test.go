@@ -50,6 +50,34 @@ func TestRunnerMapsPassingAndFailingCommandResults(t *testing.T) {
 	}
 }
 
+func TestRunnerBoundsCommandsWithDefaultTimeout(t *testing.T) {
+	workspace := t.TempDir()
+	var hadDeadline bool
+	runner := Runner{
+		RunCommand: func(ctx context.Context, _ string, command Command) CommandResult {
+			_, hadDeadline = ctx.Deadline()
+			return CommandResult{ID: command.ID, ExitCode: 0}
+		},
+		ChangedFiles: func(context.Context, string) ([]string, error) {
+			return []string{"internal/reader/a.go"}, nil
+		},
+	}
+
+	// No CommandTimeout set: a per-command deadline must still apply by default so a
+	// hung verification command cannot run unbounded.
+	report := runner.Run(context.Background(), runnerSuite(), RunInput{
+		TaskID:        "two-commands",
+		WorkspacePath: workspace,
+	})
+
+	if report.Status == StatusError {
+		t.Fatalf("unexpected error report: %#v", report)
+	}
+	if !hadDeadline {
+		t.Fatal("verification commands must run under a per-command deadline by default")
+	}
+}
+
 func TestRunnerBlocksWhenWorkspaceSetupFails(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	calledCommand := false

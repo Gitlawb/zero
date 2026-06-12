@@ -82,14 +82,14 @@ go run ./cmd/zero eval --suite internal/agenteval/testdata/sample_suite.json --j
 
 ### Run Mode
 
-`zero eval run` scores an already-mutated Git worktree. In run mode, use it
-after a fixture has been copied somewhere, initialized as a Git repository, and
-changed by an agent or by a deterministic local script. Run mode does not copy
-fixtures or invoke an agent.
-
-The runner executes each `verificationCommands` entry, collects changed files
-with `git status --porcelain`, and emits the task-success report contract below.
-When `--workspace` is omitted, the current directory is used.
+`zero eval run` scores one already-mutated Git workspace. It does not copy
+fixtures or invoke an agent; point it at a Git worktree where a fixture has
+already been copied, initialized, and attempted by an agent or deterministic
+local script. The runner executes each `verificationCommands` entry, collects
+changed files with `git status --porcelain`, and emits the task-success report
+contract below. `--workspace` is required: it must point at the prepared fixture
+worktree, never the current directory, so the suite's verification commands
+(`go test`, `git`, ...) don't run against your real repo.
 
 ```bash
 go run ./cmd/zero eval run \
