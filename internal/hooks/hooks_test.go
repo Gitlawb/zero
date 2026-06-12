@@ -404,6 +404,11 @@ func TestActionTypeHooksValidation(t *testing.T) {
 			fieldPath: "hooks.0.url",
 		},
 		{
+			name:      "http rejects cleartext to non-loopback host",
+			hook:      map[string]any{"id": "h", "event": "notification", "type": "http", "url": "http://hooks.example/zero"},
+			fieldPath: "hooks.0.url",
+		},
+		{
 			name:      "http disallowed for sessionStart",
 			hook:      map[string]any{"id": "h", "event": "sessionStart", "type": "http", "url": "https://x/y"},
 			fieldPath: "hooks.0.type",
@@ -439,6 +444,32 @@ func TestActionTypeHooksValidation(t *testing.T) {
 				t.Fatalf("missing diagnostic for %s: %#v", tt.fieldPath, result.Diagnostics)
 			}
 		})
+	}
+}
+
+func TestActionTypeHTTPAllowsHTTPSAndLoopbackHTTP(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{
+			map[string]any{"id": "secure", "event": "notification", "type": "http", "url": "https://hooks.example/zero"},
+			map[string]any{"id": "loopback-name", "event": "notification", "type": "http", "url": "http://localhost:8080/zero"},
+			map[string]any{"id": "loopback-ip", "event": "notification", "type": "http", "url": "http://127.0.0.1:9000/zero"},
+		},
+	})
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if len(result.Diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %#v", result.Diagnostics)
+	}
+	if got := hookIDs(result.Config.Hooks); !reflect.DeepEqual(got, []string{"loopback-ip", "loopback-name", "secure"}) {
+		t.Fatalf("hook ids = %#v", got)
 	}
 }
 

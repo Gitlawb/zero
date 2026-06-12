@@ -90,7 +90,12 @@ func (dispatcher *Dispatcher) runHTTPAction(ctx context.Context, hook Definition
 		return commandResult{ExitCode: -1, Err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxHTTPHookResponseBytes))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxHTTPHookResponseBytes))
+	if readErr != nil {
+		// A reset/truncated body means we never got the full verdict; treat it as
+		// an execution failure rather than silently reporting a clean (ExitCode 0) pass.
+		return commandResult{ExitCode: -1, Err: fmt.Errorf("read http hook response: %w", readErr)}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return commandResult{ExitCode: 1, Stderr: fmt.Sprintf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}
 	}

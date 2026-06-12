@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -846,21 +847,41 @@ func optionalBool(obj map[string]any, field string) (bool, error) {
 	return parsed, nil
 }
 
-// validateHookURL returns an empty string when raw is an acceptable http(s) URL,
-// otherwise a human-readable reason. The per-run allowlist is enforced at
-// dispatch time; this only rejects structurally invalid URLs at parse time.
+// validateHookURL returns an empty string when raw is an acceptable hook URL,
+// otherwise a human-readable reason. Hook payloads and block decisions can be
+// sensitive, so cleartext http is allowed only to loopback hosts; everything else
+// must be https. The per-run allowlist is enforced at dispatch time; this only
+// rejects structurally invalid or insecure URLs at parse time.
 func validateHookURL(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "Expected a valid URL."
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "Expected an http or https URL."
-	}
 	if parsed.Host == "" {
 		return "Expected a URL with a host."
 	}
-	return ""
+	switch parsed.Scheme {
+	case "https":
+		return ""
+	case "http":
+		if isLoopbackHost(parsed.Hostname()) {
+			return ""
+		}
+		return "Expected an https URL (cleartext http is only allowed for loopback hosts)."
+	default:
+		return "Expected an http or https URL."
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // eventAllowsHTTP blocks http actions for setup-type events, which run before the

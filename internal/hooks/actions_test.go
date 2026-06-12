@@ -2,12 +2,22 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("connection reset mid-body") }
 
 func TestDispatchPromptActionReturnsModelOutput(t *testing.T) {
 	var gotModel, gotPrompt string
@@ -114,6 +124,38 @@ func TestDispatchHTTPActionDoesNotFollowRedirectToNonAllowlistedHost(t *testing.
 
 	if evilCalled {
 		t.Fatal("http hook followed a redirect to a non-allowlisted host (allowlist bypass / SSRF)")
+	}
+}
+
+func TestDispatchHTTPActionTreatsTruncatedResponseAsFailure(t *testing.T) {
+	const url = "https://allowed.example/hook"
+	badClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		// 200 headers, but the body errors mid-read (server reset).
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(errReader{}), Header: make(http.Header)}, nil
+	})}
+	audit, err := NewAuditStore(AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	config := Config{Enabled: true, Hooks: []Definition{
+		{ID: "h", Event: EventNotification, Type: ActionHTTP, URL: url, Enabled: true},
+	}}
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, Audit: audit, AllowedHTTPURLs: []string{url}, HTTPClient: badClient})
+
+	dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventNotification})
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	var status AuditStatus
+	for _, e := range events {
+		if e.Type == "hook_execution_completed" && e.HookID == "h" {
+			status = e.Status
+		}
+	}
+	if status != AuditError {
+		t.Fatalf("a truncated/erroring http response must be recorded as an error, got status %q", status)
 	}
 }
 
