@@ -89,6 +89,34 @@ func TestDispatchHTTPActionPostsToAllowlistedURL(t *testing.T) {
 	}
 }
 
+func TestDispatchHTTPActionDoesNotFollowRedirectToNonAllowlistedHost(t *testing.T) {
+	var evilCalled bool
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		evilCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer evil.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	config := Config{Enabled: true, Hooks: []Definition{
+		{ID: "h", Event: EventNotification, Type: ActionHTTP, URL: redirector.URL, Enabled: true},
+	}}
+	// Only the redirector is allowlisted; the redirect target is not.
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, AllowedHTTPURLs: []string{redirector.URL}})
+
+	dispatcher.Dispatch(context.Background(), DispatchInput{
+		Event:   EventNotification,
+		Payload: map[string]any{"secret": "payload"},
+	})
+
+	if evilCalled {
+		t.Fatal("http hook followed a redirect to a non-allowlisted host (allowlist bypass / SSRF)")
+	}
+}
+
 func TestDispatchHTTPActionRejectsNonAllowlistedURL(t *testing.T) {
 	var called bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

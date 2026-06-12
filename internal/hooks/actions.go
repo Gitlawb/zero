@@ -21,6 +21,16 @@ type PromptRunner func(ctx context.Context, model string, prompt string, payload
 // a chatty endpoint cannot bloat the audit log or model context.
 const maxHTTPHookResponseBytes = 64 * 1024
 
+// noRedirectHTTPClient refuses to follow redirects. Following a 3xx would let an
+// allowlisted endpoint bounce the request (and its event payload) to a host that
+// is not on the allowlist — an allowlist bypass / SSRF vector. ErrUseLastResponse
+// returns the 3xx response unfollowed, which runHTTPAction reports as a failure.
+var noRedirectHTTPClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // executeAction runs one hook through the executor selected by its Type, bounded
 // by the dispatcher timeout. The command path preserves the original behaviour;
 // prompt and http are the Stage 05 additions. A deadline/cancellation that fired
@@ -73,7 +83,7 @@ func (dispatcher *Dispatcher) runHTTPAction(ctx context.Context, hook Definition
 	req.Header.Set("Content-Type", "application/json")
 	client := dispatcher.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = noRedirectHTTPClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -722,7 +722,10 @@ func dispatchUserPromptSubmit(ctx context.Context, options Options, prompt strin
 			"prompt":    prompt,
 		},
 	})
-	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+	// Hook output is injected straight into the transcript, bypassing the registry
+	// redaction boundary, so scrub secrets exactly like the other hook-output paths.
+	injected := strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+	return redaction.RedactString(injected, redaction.Options{})
 }
 
 // dispatchStop runs stop hooks as the run ends. It is observational: output is

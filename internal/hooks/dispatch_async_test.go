@@ -103,6 +103,51 @@ func TestDispatchAsyncRewakeNoSignalOnSuccess(t *testing.T) {
 	}
 }
 
+func TestDispatchAsyncRewakeNoSignalWhenTimedOut(t *testing.T) {
+	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+		// Exits with the blocking code, but the run is killed (no real verdict).
+		return commandResult{ExitCode: 2, Stderr: "exited 2 while being killed"}
+	}
+	config := Config{Enabled: true, Hooks: []Definition{
+		{ID: "verifier", Event: EventAfterTool, Command: "verify", AsyncRewake: true, RewakeMessage: "broke:", Enabled: true},
+	}}
+	// A 1ns timeout forces executeAction to mark the result TimedOut.
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner, Timeout: time.Nanosecond})
+
+	dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventAfterTool, ToolName: "edit_file"})
+	dispatcher.WaitAsync()
+
+	select {
+	case sig := <-dispatcher.Rewakes():
+		t.Fatalf("a timed-out hook produced no verdict and must not wake the model: %#v", sig)
+	default:
+	}
+}
+
+func TestRunAsyncDetachesFromRequestContext(t *testing.T) {
+	release := make(chan struct{})
+	sawCancelled := make(chan bool, 1)
+	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+		<-release
+		sawCancelled <- (ctx.Err() != nil)
+		return commandResult{ExitCode: 0}
+	}
+	config := Config{Enabled: true, Hooks: []Definition{
+		{ID: "bg", Event: EventAfterTool, Command: "bg", Async: true, Enabled: true},
+	}}
+	dispatcher := NewDispatcher(DispatcherOptions{Config: config, run: runner})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatcher.Dispatch(ctx, DispatchInput{Event: EventAfterTool, ToolName: "edit_file"})
+	cancel() // cancel the request context while the background hook is mid-run
+	close(release)
+	dispatcher.WaitAsync()
+
+	if <-sawCancelled {
+		t.Fatal("background async hook saw a cancelled context; it must be detached from the request context to outlive the turn")
+	}
+}
+
 func TestDispatchAfterToolContinueOnBlockFeedsReasonAndContinues(t *testing.T) {
 	var ran []string
 	runner := func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {

@@ -73,7 +73,7 @@ type Definition struct {
 	Event       Event    `json:"event"`
 	Matcher     string   `json:"matcher,omitempty"`
 	Command     string   `json:"command,omitempty"`
-	Args        []string `json:"args,omitempty"`
+	Args        []string `json:"args"`
 	Enabled     bool     `json:"enabled"`
 
 	// Type selects the action executor; empty/"command" preserves legacy behaviour.

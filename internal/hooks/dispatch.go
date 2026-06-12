@@ -121,6 +121,8 @@ func (dispatcher *Dispatcher) Rewakes() <-chan RewakeSignal {
 
 // WaitAsync blocks until every background hook launched so far has finished. The
 // loop drains async hooks at session end; tests use it to observe their results.
+// It must be called after the final Dispatch, not concurrently with one: like any
+// sync.WaitGroup, a Dispatch that adds from a zero counter must not race a Wait.
 func (dispatcher *Dispatcher) WaitAsync() {
 	if dispatcher == nil {
 		return
@@ -242,16 +244,23 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 // for asyncRewake hooks that exit with the blocking code, emits a RewakeSignal.
 func (dispatcher *Dispatcher) runAsync(ctx context.Context, hook Definition, input DispatchInput, payload []byte) {
 	dispatcher.recordStarted(hook, input, Command{Command: hook.Command, Args: hook.Args})
+	// Detach from the request context so a background hook outlives the turn that
+	// launched it (the whole point of async); it remains bounded by the per-hook
+	// timeout applied inside executeAction. WithoutCancel preserves ctx values.
+	asyncCtx := context.WithoutCancel(ctx)
 	dispatcher.wg.Add(1)
 	go func() {
 		defer dispatcher.wg.Done()
 		started := dispatcher.now()
-		result := dispatcher.executeAction(ctx, hook, payload)
+		result := dispatcher.executeAction(asyncCtx, hook, payload)
 		durationMs := int(dispatcher.now().Sub(started) / time.Millisecond)
 		status, _ := classifyResult(input.Event, result)
 		dispatcher.recordCompleted(hook, input, status, result, durationMs)
 
-		if hook.AsyncRewake && result.Err == nil && result.ExitCode == blockingExitCode {
+		// A timed-out/killed hook never produced a real verdict, so it must not wake
+		// the model — matching the synchronous afterTool block decision's fail-closed
+		// TimedOut check.
+		if hook.AsyncRewake && result.Err == nil && !result.TimedOut && result.ExitCode == blockingExitCode {
 			signal := RewakeSignal{
 				HookID:  hook.ID,
 				Summary: firstNonEmpty(hook.RewakeSummary, "a background hook requested attention"),
