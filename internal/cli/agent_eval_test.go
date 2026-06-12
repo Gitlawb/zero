@@ -140,13 +140,51 @@ func TestRunEvalRunJSONModePassesRunnerOptions(t *testing.T) {
 	}
 }
 
+func TestRunEvalRunRequiresExplicitWorkspace(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"eval", "run", "--suite", "evals/context.json", "--task", "edit-reader"}, &stdout, &stderr, appDeps{
+		runAgentEval: func(context.Context, agentEvalOptions) (agentEvalReport, error) {
+			t.Fatal("eval run must not execute without an explicit --workspace (would run against the real working tree)")
+			return agentEvalReport{}, nil
+		},
+	})
+
+	if exitCode != exitUsage {
+		t.Fatalf("expected usage exit %d, got %d", exitUsage, exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--workspace") {
+		t.Fatalf("expected a --workspace required error, got %q", stderr.String())
+	}
+}
+
+func TestRunEvalRunsUnderCancellableContext(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cancellable := false
+
+	runWithDeps([]string{"eval", "--suite", "evals/context.json"}, &stdout, &stderr, appDeps{
+		runAgentEval: func(ctx context.Context, _ agentEvalOptions) (agentEvalReport, error) {
+			// signal.NotifyContext yields a cancellable context (non-nil Done);
+			// context.Background().Done() is nil.
+			cancellable = ctx.Done() != nil
+			return agentEvalReport{Suite: "quality-context", OK: true}, nil
+		},
+	})
+
+	if !cancellable {
+		t.Fatal("eval must run under a cancellable signal context, not context.Background()")
+	}
+}
+
 func TestRunEvalRunFailureTextShowsSummaryAndFailures(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	exitCode := runWithDeps([]string{"eval", "run", "--suite=evals/context.json", "--task=edit-reader"}, &stdout, &stderr, appDeps{
+	exitCode := runWithDeps([]string{"eval", "run", "--suite=evals/context.json", "--task=edit-reader", "--workspace", "fixture-dir"}, &stdout, &stderr, appDeps{
 		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
-			if options.Mode != "run" || options.TaskID != "edit-reader" || options.WorkspacePath != "." {
+			if options.Mode != "run" || options.TaskID != "edit-reader" || options.WorkspacePath != "fixture-dir" {
 				t.Fatalf("unexpected eval run options: %#v", options)
 			}
 			return agentEvalReport{
@@ -191,7 +229,7 @@ func TestRunEvalRunReportDirWritesJSONReport(t *testing.T) {
 	var stderr bytes.Buffer
 	reportDir := t.TempDir()
 
-	exitCode := runWithDeps([]string{"eval", "run", "--suite", "evals/context.json", "--report-dir", reportDir}, &stdout, &stderr, appDeps{
+	exitCode := runWithDeps([]string{"eval", "run", "--suite", "evals/context.json", "--workspace", "fixture-dir", "--report-dir", reportDir}, &stdout, &stderr, appDeps{
 		runAgentEval: func(ctx context.Context, options agentEvalOptions) (agentEvalReport, error) {
 			if options.ReportDir != reportDir {
 				t.Fatalf("unexpected report dir: %#v", options)

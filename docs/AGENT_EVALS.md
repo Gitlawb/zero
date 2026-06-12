@@ -57,8 +57,9 @@ go run ./cmd/zero eval --suite internal/agenteval/testdata/sample_suite.json --j
 point it at a Git worktree where a fixture has already been copied and a task
 has already been attempted. The runner executes each `verificationCommands`
 entry, collects changed files with `git status --porcelain`, and emits the
-task-success report contract below. When `--workspace` is omitted, the current
-directory is used.
+task-success report contract below. `--workspace` is required: it must point at
+the prepared fixture worktree, never the current directory, so the suite's
+verification commands (`go test`, `git`, …) don't run against your real repo.
 
 ```bash
 go run ./cmd/zero eval run \

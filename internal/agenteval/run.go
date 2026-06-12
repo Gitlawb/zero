@@ -9,11 +9,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// defaultCommandTimeout bounds a single verification command so a hung command
+// (e.g. a test that waits on input) cannot run unbounded. Generous enough for
+// real build/test commands; overridable per run via RunInput.CommandTimeout.
+const defaultCommandTimeout = 10 * time.Minute
 
 type RunInput struct {
 	TaskID        string
 	WorkspacePath string
+	// CommandTimeout bounds each verification command. Non-positive applies
+	// defaultCommandTimeout.
+	CommandTimeout time.Duration
 }
 
 type CommandRunner func(context.Context, string, Command) CommandResult
@@ -43,12 +52,16 @@ func (runner Runner) Run(ctx context.Context, suite Suite, input RunInput) Repor
 		return runner.blocked(suite, task.ID, err.Error(), nil)
 	}
 
+	timeout := input.CommandTimeout
+	if timeout <= 0 {
+		timeout = defaultCommandTimeout
+	}
 	results := make([]CommandResult, 0, len(task.VerificationCommands))
 	for _, command := range task.VerificationCommands {
 		if err := ctx.Err(); err != nil {
 			return runner.blocked(suite, task.ID, err.Error(), results)
 		}
-		result := runner.runCommand(ctx, workspace, command)
+		result := runner.runCommand(ctx, workspace, command, timeout)
 		if result.ID == "" {
 			result.ID = command.ID
 		}
@@ -77,7 +90,12 @@ func (runner Runner) blocked(suite Suite, taskID string, reason string, results 
 	})
 }
 
-func (runner Runner) runCommand(ctx context.Context, workspace string, command Command) CommandResult {
+func (runner Runner) runCommand(ctx context.Context, workspace string, command Command, timeout time.Duration) CommandResult {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	if runner.RunCommand != nil {
 		return runner.RunCommand(ctx, workspace, command)
 	}
