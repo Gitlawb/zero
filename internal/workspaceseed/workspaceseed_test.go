@@ -78,7 +78,7 @@ func TestBuildKeepsPathsRelativeToCWD(t *testing.T) {
 
 func TestBuildRejectsAbsolutePathsWithoutCWD(t *testing.T) {
 	got := Build(Input{
-		Paths: []string{"/home/alice/repo/go.mod"},
+		Paths: []string{"/home/alice/repo/go.mod", `C:\Users\alice\repo\package.json`},
 	})
 
 	if len(got.ProjectFiles) != 0 {
@@ -86,6 +86,23 @@ func TestBuildRejectsAbsolutePathsWithoutCWD(t *testing.T) {
 	}
 	if len(got.Layout) != 0 {
 		t.Fatalf("Layout=%v want none", got.Layout)
+	}
+}
+
+func TestBuildNormalizesBackslashPathsBeforeTraversalChecks(t *testing.T) {
+	got := Build(Input{
+		Paths: []string{
+			`docs\PRD.md`,
+			`..\..\etc\passwd`,
+			`\\server\share\secret.txt`,
+		},
+	})
+
+	if want := []string{"docs/"}; !reflect.DeepEqual(got.Layout, want) {
+		t.Fatalf("Layout=%v want %v", got.Layout, want)
+	}
+	if want := []string{"docs/PRD.md"}; !reflect.DeepEqual(got.ProjectFiles, want) {
+		t.Fatalf("ProjectFiles=%v want %v", got.ProjectFiles, want)
 	}
 }
 

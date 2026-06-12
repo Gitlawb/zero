@@ -142,6 +142,32 @@ func TestValidateRejectsMalformedExpectedChangedFiles(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDuplicateNormalizedExpectedChangedFiles(t *testing.T) {
+	err := Suite{
+		ID:   "suite",
+		Name: "Suite",
+		Tasks: []Task{{
+			ID:                   "task",
+			Name:                 "Task",
+			Prompt:               "Do it",
+			WorkspaceFixture:     "fixtures/task",
+			ExpectedChangedFiles: []string{"internal/reader/b.go", "internal/reader/a/../b.go"},
+			VerificationCommands: []Command{{
+				ID:      "test",
+				Name:    "Tests",
+				Command: []string{"go", "test", "./..."},
+			}},
+		}},
+	}.Validate()
+
+	if err == nil {
+		t.Fatal("Validate returned nil, want duplicate expectedChangedFiles error")
+	}
+	if !strings.Contains(err.Error(), "expectedChangedFiles[1] duplicates expectedChangedFiles[0]") {
+		t.Fatalf("unexpected validation error:\n%s", err.Error())
+	}
+}
+
 func TestValidateReportsUsefulErrors(t *testing.T) {
 	err := Suite{
 		ID: "suite",
@@ -167,6 +193,33 @@ func TestValidateReportsUsefulErrors(t *testing.T) {
 		if !strings.Contains(message, want) {
 			t.Fatalf("expected validation error %q in:\n%s", want, message)
 		}
+	}
+}
+
+func TestScoreNormalizesSingleTaskExpectedChangedFiles(t *testing.T) {
+	report := Score(Suite{
+		ID:   "quality-context",
+		Name: "Quality context",
+		Tasks: []Task{{
+			ID:                   "edit-reader",
+			Name:                 "Edit reader",
+			ExpectedChangedFiles: []string{"internal/reader/a/../b.go"},
+			VerificationCommands: []Command{{
+				ID:      "test",
+				Name:    "Tests",
+				Command: []string{"go", "test", "./..."},
+			}},
+		}},
+	}, ScoreInput{
+		CommandResults: []CommandResult{{ID: "test", ExitCode: 0}},
+		ChangedFiles:   []string{"internal/reader/b.go"},
+	})
+
+	if !report.OK || report.Status != StatusPass {
+		t.Fatalf("expected normalized single-task report to pass, got %#v", report)
+	}
+	if got, want := report.Results[1].ExpectedFiles, []string{"internal/reader/b.go"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected files = %#v, want %#v", got, want)
 	}
 }
 
@@ -239,6 +292,29 @@ func TestScoreErrorsWhenExpectedCommandResultIsMissing(t *testing.T) {
 	}
 }
 
+func TestScoreErrorsWhenTaskSelectionFails(t *testing.T) {
+	suite := Suite{
+		ID:   "quality-context",
+		Name: "Quality context",
+		Tasks: []Task{
+			sampleSuite().Tasks[0],
+			{ID: "other-task", Name: "Other task"},
+		},
+	}
+
+	report := Score(suite, ScoreInput{})
+
+	if report.OK || report.Status != StatusError {
+		t.Fatalf("expected task selection error report, got %#v", report)
+	}
+	if report.Summary.Errors != 1 || report.Error == "" {
+		t.Fatalf("unexpected task selection summary/error: %#v", report)
+	}
+	if !strings.Contains(report.Error, "taskId is required") {
+		t.Fatalf("task selection error = %q", report.Error)
+	}
+}
+
 func TestScoreReportsBlockedRun(t *testing.T) {
 	report := Score(sampleSuite(), ScoreInput{
 		TaskID:       "edit-reader",
@@ -258,6 +334,27 @@ func TestScoreReportsBlockedRun(t *testing.T) {
 	}
 }
 
+func TestScoreMarksUnknownCommandsBlockedWhenRunBlocked(t *testing.T) {
+	report := Score(sampleSuite(), ScoreInput{
+		TaskID:      "edit-reader",
+		Blocked:     true,
+		BlockReason: "fixture setup failed",
+		CommandResults: []CommandResult{
+			{ID: "unexpected", ExitCode: 1},
+		},
+	})
+
+	if report.Status != StatusBlocked || report.Summary.Blocked != 3 {
+		t.Fatalf("unexpected blocked report: %#v", report)
+	}
+	if report.Summary.Failed != 0 || report.Summary.Errors != 0 {
+		t.Fatalf("blocked run should not report failed/error unknown commands: %#v", report.Summary)
+	}
+	if got := report.Results[2]; got.ID != "unknown_command.unexpected" || got.Status != StatusBlocked {
+		t.Fatalf("unexpected unknown command result: %#v", got)
+	}
+}
+
 func TestScoreUsesDeterministicOrderingForInjectedInputs(t *testing.T) {
 	report := Score(sampleSuite(), ScoreInput{
 		TaskID: "edit-reader",
@@ -265,6 +362,7 @@ func TestScoreUsesDeterministicOrderingForInjectedInputs(t *testing.T) {
 			{ID: "zzz", ExitCode: 1},
 			{ID: "test", ExitCode: 0},
 			{ID: "aaa", ExitCode: 1},
+			{ID: "zzz", ExitCode: 1},
 		},
 		ChangedFiles: []string{"z.go", "internal/reader/a.go", "m.go"},
 	})

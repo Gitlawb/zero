@@ -73,7 +73,10 @@ commands, and malformed changed-file expectations.
 
 ## Score Interpretation
 
-Scores are offline quality signals, not pass/fail release gates by default.
+Scores are offline quality signals, not pass/fail release gates by default. The
+current `zero eval` command validates and summarizes suite files only; the
+statuses below are produced by the `internal/agenteval.Score` library API when a
+future harness supplies captured command results and changed files.
 
 - `pass`: every verification command exited successfully and the changed files
   matched `expectedChangedFiles`.

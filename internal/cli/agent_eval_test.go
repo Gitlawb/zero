@@ -82,6 +82,20 @@ func TestRunEvalJSONMode(t *testing.T) {
 	if decoded.Suite != report.Suite || !decoded.OK || decoded.Passed != 2 {
 		t.Fatalf("unexpected eval JSON: %#v", decoded)
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw eval JSON: %v", err)
+	}
+	for _, key := range []string{"tasks", "checks", "total", "passed", "failed", "errors"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("expected JSON key %q in %s", key, stdout.String())
+		}
+	}
+	for _, key := range []string{"tasks", "checks", "failed", "errors"} {
+		if string(raw[key]) != "0" {
+			t.Fatalf("expected JSON key %q to be zero, got %s", key, string(raw[key]))
+		}
+	}
 }
 
 func TestRunEvalDefaultRunnerLoadsSuite(t *testing.T) {
@@ -117,7 +131,7 @@ func TestRunEvalDefaultRunnerLoadsSuite(t *testing.T) {
 		"suite: quality-foundation",
 		"name: Quality foundation",
 		"summary: 1 tasks, 2 checks",
-		"status: ready",
+		"status: valid",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected output to contain %q, got:\n%s", want, stdout.String())

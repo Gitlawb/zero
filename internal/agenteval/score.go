@@ -108,7 +108,7 @@ func Score(suite Suite, input ScoreInput) Report {
 		report.Results = append(report.Results, scoreCommand(command, result, found, input))
 	}
 	report.Results = append(report.Results, scoreChangedFiles(task.ExpectedChangedFiles, report.ChangedFiles, input))
-	for _, result := range unknownCommandResults(input.CommandResults, seenCommands) {
+	for _, result := range unknownCommandResults(input.CommandResults, seenCommands, input) {
 		report.Results = append(report.Results, result)
 	}
 	report.finishSummary()
@@ -172,21 +172,28 @@ func scoreChangedFiles(expected []string, actual []string, input ScoreInput) Res
 	return result
 }
 
-func unknownCommandResults(results []CommandResult, seen map[string]bool) []Result {
-	unknown := []CommandResult{}
+func unknownCommandResults(results []CommandResult, seen map[string]bool, input ScoreInput) []Result {
+	unknownByID := map[string]CommandResult{}
 	for _, result := range results {
 		if result.ID != "" && !seen[result.ID] {
-			unknown = append(unknown, result)
+			unknownByID[result.ID] = result
 		}
 	}
-	sort.Slice(unknown, func(i, j int) bool {
-		return unknown[i].ID < unknown[j].ID
-	})
-	scored := make([]Result, 0, len(unknown))
-	for _, result := range unknown {
+	ids := make([]string, 0, len(unknownByID))
+	for id := range unknownByID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	scored := make([]Result, 0, len(ids))
+	for _, id := range ids {
+		result := unknownByID[id]
 		exitCode := result.ExitCode
 		status := StatusError
-		if result.Error == "" && result.ExitCode != 0 {
+		message := firstNonEmpty(result.Error, fmt.Sprintf("unexpected command result %q", result.ID))
+		if input.Blocked {
+			status = StatusBlocked
+			message = blockMessage(input.BlockReason)
+		} else if result.Error == "" && result.ExitCode != 0 {
 			status = StatusFail
 		}
 		scored = append(scored, Result{
@@ -197,7 +204,7 @@ func unknownCommandResults(results []CommandResult, seen map[string]bool) []Resu
 			ExitCode: &exitCode,
 			Stdout:   result.Stdout,
 			Stderr:   result.Stderr,
-			Message:  firstNonEmpty(result.Error, fmt.Sprintf("unexpected command result %q", result.ID)),
+			Message:  message,
 		})
 	}
 	return scored
@@ -243,18 +250,22 @@ func commandResultsByID(results []CommandResult) map[string]CommandResult {
 
 func selectTask(suite Suite, taskID string) (Task, error) {
 	if taskID == "" && len(suite.Tasks) == 1 {
-		return suite.Tasks[0], nil
+		return normalizeTask(suite.Tasks[0]), nil
 	}
 	for _, task := range suite.Tasks {
 		if task.ID == taskID {
-			task.ExpectedChangedFiles = normalizeFiles(task.ExpectedChangedFiles)
-			return task, nil
+			return normalizeTask(task), nil
 		}
 	}
 	if taskID == "" {
 		return Task{}, fmt.Errorf("taskId is required when suite has %d tasks", len(suite.Tasks))
 	}
 	return Task{}, fmt.Errorf("task %q not found", taskID)
+}
+
+func normalizeTask(task Task) Task {
+	task.ExpectedChangedFiles = normalizeFiles(task.ExpectedChangedFiles)
+	return task
 }
 
 func diffFiles(left []string, right []string) []string {

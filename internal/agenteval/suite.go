@@ -153,6 +153,7 @@ func validateExpectedChangedFiles(taskPath string, files []string) []string {
 		return []string{taskPath + " expectedChangedFiles must not be empty"}
 	}
 	problems := []string{}
+	seen := map[string]int{}
 	for index, file := range files {
 		normalized, ok := normalizeEvalPath(file)
 		if !ok {
@@ -161,7 +162,13 @@ func validateExpectedChangedFiles(taskPath string, files []string) []string {
 		}
 		if normalized == "" {
 			problems = append(problems, fmt.Sprintf("%s expectedChangedFiles[%d] must not be empty", taskPath, index))
+			continue
 		}
+		if previous, ok := seen[normalized]; ok {
+			problems = append(problems, fmt.Sprintf("%s expectedChangedFiles[%d] duplicates expectedChangedFiles[%d]", taskPath, index, previous))
+			continue
+		}
+		seen[normalized] = index
 	}
 	return problems
 }

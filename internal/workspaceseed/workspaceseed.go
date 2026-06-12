@@ -168,6 +168,7 @@ func normalizePath(cwd string, value string) string {
 	if value == "" {
 		return ""
 	}
+	value = strings.ReplaceAll(value, "\\", "/")
 	if filepath.IsAbs(value) {
 		if cwd == "" {
 			return ""

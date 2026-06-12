@@ -19,12 +19,12 @@ type agentEvalReport struct {
 	Name     string             `json:"name,omitempty"`
 	Status   string             `json:"status,omitempty"`
 	OK       bool               `json:"ok"`
-	Tasks    int                `json:"tasks,omitempty"`
-	Checks   int                `json:"checks,omitempty"`
-	Total    int                `json:"total,omitempty"`
-	Passed   int                `json:"passed,omitempty"`
-	Failed   int                `json:"failed,omitempty"`
-	Errors   int                `json:"errors,omitempty"`
+	Tasks    int                `json:"tasks"`
+	Checks   int                `json:"checks"`
+	Total    int                `json:"total"`
+	Passed   int                `json:"passed"`
+	Failed   int                `json:"failed"`
+	Errors   int                `json:"errors"`
 	Failures []agentEvalFailure `json:"failures,omitempty"`
 }
 
@@ -155,7 +155,7 @@ func defaultRunAgentEval(_ context.Context, options agentEvalOptions) (agentEval
 	return agentEvalReport{
 		Suite:  suite.ID,
 		Name:   suite.Name,
-		Status: "ready",
+		Status: "valid",
 		OK:     true,
 		Tasks:  len(suite.Tasks),
 		Checks: checks,

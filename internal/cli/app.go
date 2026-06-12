@@ -567,7 +567,7 @@ Commands:
   update     Check for Zero CLI updates
   worktrees  Prepare isolated git worktrees
   verify     Detect and run local verification checks
-  eval       Run offline agent eval suites
+  eval       Validate offline agent eval suites
   changes    Inspect and commit local git changes
   usage      Summarize token usage and estimated cost
   cron       Schedule agent jobs (foreground, file-backed)
