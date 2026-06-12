@@ -213,7 +213,7 @@ func NewLSPDiagnosticsChecker(manager *lsp.Manager) diagnosticsChecker {
 func (c lspDiagnosticsChecker) Check(ctx context.Context, path string) ([]lsp.Diagnostic, error) {
 	text, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil // unreadable (e.g. deleted) -> no diagnostics, degrade quietly
+		return nil, err // unreadable (e.g. deleted) -> let the caller decide
 	}
 	return c.manager.Check(ctx, path, string(text))
 }

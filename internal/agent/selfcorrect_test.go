@@ -34,6 +34,16 @@ func (f fakeChecker) Check(_ context.Context, path string) ([]lsp.Diagnostic, er
 	return f.byPath[path], nil
 }
 
+func TestLSPDiagnosticsCheckerPropagatesReadError(t *testing.T) {
+	// A read failure (e.g. the edit deleted the file) must propagate so callers
+	// can decide how to handle it, rather than being swallowed as "no diagnostics".
+	// manager is never reached on a read error, so a nil manager is fine here.
+	c := lspDiagnosticsChecker{}
+	if _, err := c.Check(context.Background(), "/nonexistent/zero-selfcorrect/missing.go"); err == nil {
+		t.Fatal("expected Check to propagate the file-read error, got nil")
+	}
+}
+
 func failingReport(stderr string) verify.Report {
 	return verify.Report{
 		OK: false,
