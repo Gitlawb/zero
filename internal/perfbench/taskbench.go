@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -121,18 +122,31 @@ func LoadTaskSet(path string) (TaskSet, error) {
 	if err := decoder.Decode(&set); err != nil {
 		return TaskSet{}, fmt.Errorf("parse task set: %w", err)
 	}
+	// DisallowUnknownFields only validates the first top-level value, so a file
+	// like `{...}\nnot-json` would still load. Reject any trailing content so a
+	// malformed manifest fails loudly rather than silently using only the prefix.
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return TaskSet{}, errors.New("parse task set: unexpected trailing content")
+	}
 	if strings.TrimSpace(set.ID) == "" {
 		return TaskSet{}, errors.New("parse task set: id is required")
 	}
 	if len(set.Tasks) == 0 {
 		return TaskSet{}, errors.New("parse task set: tasks must not be empty")
 	}
+	// Resolve relative workspace fixtures against the manifest's directory so the
+	// runner's cmd.Dir does not depend on the caller's cwd (the documented sample
+	// uses paths like ./hello relative to the manifest, not the repo root).
+	base := filepath.Dir(path)
 	for index, task := range set.Tasks {
 		if strings.TrimSpace(task.ID) == "" {
 			return TaskSet{}, fmt.Errorf("parse task set: tasks[%d] id is required", index)
 		}
 		if strings.TrimSpace(task.Prompt) == "" {
 			return TaskSet{}, fmt.Errorf("parse task set: tasks[%d] prompt is required", index)
+		}
+		if fixture := strings.TrimSpace(task.WorkspaceFixture); fixture != "" && !filepath.IsAbs(fixture) {
+			set.Tasks[index].WorkspaceFixture = filepath.Clean(filepath.Join(base, fixture))
 		}
 	}
 	return set, nil
@@ -299,16 +313,25 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 		cmd.Stderr = &stderr
 		runErr := cmd.Run()
 
+		// The terminal run_end exit code is authoritative for pass/fail: a non-zero
+		// agent exit is a normal task failure, not a harness error, even though
+		// cmd.Run() reports any non-zero process exit as an *exec.ExitError. Only when
+		// no terminal run_end event was parsed do we fall back to treating the run as
+		// a harness error — failing closed so a missing terminal event never reads as
+		// a pass.
 		exitCode, haveExit := streamJSONExitCode(stdout.Bytes())
-		if runErr != nil {
-			detail := strings.TrimSpace(stderr.String())
-			if detail == "" {
-				detail = runErr.Error()
-			}
-			return TaskOutcome{Err: fmt.Errorf("zero exec failed: %s", detail)}
-		}
 		if haveExit && exitCode != 0 {
 			return TaskOutcome{Passed: false, Detail: fmt.Sprintf("agent run_end exit code %d", exitCode)}
+		}
+		if !haveExit {
+			detail := strings.TrimSpace(stderr.String())
+			if detail == "" && runErr != nil {
+				detail = runErr.Error()
+			}
+			if detail == "" {
+				detail = "missing terminal run_end event"
+			}
+			return TaskOutcome{Err: fmt.Errorf("zero exec failed: %s", detail)}
 		}
 
 		if len(task.VerificationCommand) > 0 {

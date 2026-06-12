@@ -39,6 +39,19 @@ func TestParseExecSelfCorrectFlag(t *testing.T) {
 			t.Fatal("expected an error for --self-correct=yes, got nil")
 		}
 	})
+
+	t.Run("rejects combination with --use-spec", func(t *testing.T) {
+		// --use-spec routes through the spec-draft (planning) path, which never wires
+		// the post-edit self-correct loop. Accepting --self-correct there would
+		// silently ignore it, so the combination is rejected at parse time.
+		_, _, err := parseExecArgs([]string{"--use-spec", "--self-correct", "hello"})
+		if err == nil {
+			t.Fatal("expected an error for --use-spec with --self-correct, got nil")
+		}
+		if !strings.Contains(err.Error(), "--self-correct") || !strings.Contains(err.Error(), "--use-spec") {
+			t.Fatalf("error should name both flags, got %q", err.Error())
+		}
+	})
 }
 
 func TestRunExecHelpDocumentsSelfCorrect(t *testing.T) {

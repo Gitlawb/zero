@@ -3,6 +3,10 @@ package perfbench
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -197,4 +201,130 @@ func TestFormatTaskSummarySelfCorrectOff(t *testing.T) {
 
 func passingRunner(context.Context, BenchTask, RunContext) TaskOutcome {
 	return TaskOutcome{Passed: true}
+}
+
+func writeManifest(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "suite.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return path
+}
+
+func TestLoadTaskSetRejectsTrailingContent(t *testing.T) {
+	// A "fail loudly" manifest loader must reject extra JSON after the object, not
+	// silently load only the first value.
+	path := writeManifest(t, t.TempDir(), `{"id":"s","tasks":[{"id":"t1","prompt":"p"}]}
+not-json`)
+	if _, err := LoadTaskSet(path); err == nil {
+		t.Fatalf("LoadTaskSet should reject trailing content after the manifest object")
+	}
+}
+
+func TestLoadTaskSetResolvesFixturesRelativeToManifest(t *testing.T) {
+	// Relative workspaceFixture paths must be anchored at the manifest's directory,
+	// not the caller's cwd, so the documented repo-root command points at the right
+	// directories.
+	dir := t.TempDir()
+	path := writeManifest(t, dir, `{"id":"s","tasks":[
+		{"id":"t1","prompt":"p","workspaceFixture":"./hello"},
+		{"id":"t2","prompt":"p","workspaceFixture":"sub/cli"},
+		{"id":"t3","prompt":"p"}
+	]}`)
+	set, err := LoadTaskSet(path)
+	if err != nil {
+		t.Fatalf("LoadTaskSet returned error: %v", err)
+	}
+	wantT1 := filepath.Join(dir, "hello")
+	if set.Tasks[0].WorkspaceFixture != wantT1 {
+		t.Fatalf("t1 fixture = %q, want %q", set.Tasks[0].WorkspaceFixture, wantT1)
+	}
+	wantT2 := filepath.Join(dir, "sub", "cli")
+	if set.Tasks[1].WorkspaceFixture != wantT2 {
+		t.Fatalf("t2 fixture = %q, want %q", set.Tasks[1].WorkspaceFixture, wantT2)
+	}
+	if set.Tasks[2].WorkspaceFixture != "" {
+		t.Fatalf("t3 fixture = %q, want empty (no fixture)", set.Tasks[2].WorkspaceFixture)
+	}
+}
+
+func TestLoadTaskSetKeepsAbsoluteFixtures(t *testing.T) {
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "elsewhere")
+	path := writeManifest(t, dir, `{"id":"s","tasks":[{"id":"t1","prompt":"p","workspaceFixture":`+strconv.Quote(abs)+`}]}`)
+	set, err := LoadTaskSet(path)
+	if err != nil {
+		t.Fatalf("LoadTaskSet returned error: %v", err)
+	}
+	if set.Tasks[0].WorkspaceFixture != abs {
+		t.Fatalf("absolute fixture = %q, want unchanged %q", set.Tasks[0].WorkspaceFixture, abs)
+	}
+}
+
+func writeExecStub(t *testing.T, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("exec stub uses a POSIX shell script")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero-stub.sh")
+	script := "#!/bin/sh\n" + body
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write exec stub: %v", err)
+	}
+	return path
+}
+
+func TestNewExecRunnerNonZeroRunEndIsFailNotError(t *testing.T) {
+	// A non-zero run_end exit code is a normal task failure, not a harness error,
+	// even though the process itself exits non-zero.
+	stub := writeExecStub(t, `echo '{"type":"run_end","exitCode":1}'
+exit 1
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err != nil {
+		t.Fatalf("non-zero run_end must not be a harness error, got Err=%v", outcome.Err)
+	}
+	if outcome.Passed {
+		t.Fatalf("non-zero run_end must be a failed task, got Passed=true")
+	}
+}
+
+func TestNewExecRunnerMissingRunEndFailsClosed(t *testing.T) {
+	// A clean exit with no terminal run_end event is a harness error: we cannot
+	// claim the task passed when the agent never reported a terminal event.
+	stub := writeExecStub(t, `echo '{"type":"text","text":"hi"}'
+exit 0
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err == nil {
+		t.Fatalf("missing terminal run_end must be a harness error, got Passed=%v", outcome.Passed)
+	}
+}
+
+func TestNewExecRunnerZeroRunEndPasses(t *testing.T) {
+	stub := writeExecStub(t, `echo '{"type":"run_end","exitCode":0}'
+exit 0
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err != nil {
+		t.Fatalf("zero run_end with no verification must pass, got Err=%v", outcome.Err)
+	}
+	if !outcome.Passed {
+		t.Fatalf("zero run_end with no verification must pass, got Passed=false")
+	}
+}
+
+func TestNewExecRunnerLaunchFailureIsHarnessError(t *testing.T) {
+	// A binary that cannot be launched (no terminal event, process error) is a
+	// genuine harness error.
+	runner := NewExecRunner(filepath.Join(t.TempDir(), "does-not-exist"))
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err == nil {
+		t.Fatalf("a launch failure must be a harness error")
+	}
 }

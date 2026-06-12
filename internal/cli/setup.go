@@ -82,7 +82,7 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 		return exitSuccess
 	}
 	output := formatSetupComplete(result)
-	if verification != nil && verification.OK {
+	if verification != nil && verification.Ran && verification.OK {
 		output += "\nverified: " + verification.Summary
 	}
 	if _, err := fmt.Fprintln(stdout, output); err != nil {
@@ -92,18 +92,22 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 }
 
 // setupVerification is the outcome of the optional first-run connectivity probe.
+// Ran distinguishes "the probe ran and passed" (OK) from "no probe was wired so
+// nothing was verified", so a skipped probe is never reported as verified.
 type setupVerification struct {
+	Ran     bool
 	OK      bool
 	Summary string
 }
 
 // verifySetupProvider runs a live connectivity probe against the just-saved
-// provider and classifies any failure into a specific, fixable message. It is a
-// no-op (reports OK) when no probe is wired, so it never blocks setup in a
-// context that cannot probe.
+// provider and classifies any failure into a specific, fixable message. When no
+// probe is wired it reports a skipped (not-run) state rather than success, so it
+// never blocks setup in a context that cannot probe and never claims a provider
+// is verified when nothing was checked.
 func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVerification, error) {
 	if deps.probeProviderHealth == nil {
-		return setupVerification{OK: true, Summary: "probe unavailable; skipped"}, nil
+		return setupVerification{Ran: false, Summary: "probe unavailable; skipped"}, nil
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -113,13 +117,13 @@ func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVer
 		UserAgent:    userAgent(),
 	})
 	if probeErr, failed := provideronboarding.ClassifySetupProbe(result); failed {
-		return setupVerification{OK: false, Summary: string(probeErr.Class)}, probeErr
+		return setupVerification{Ran: true, OK: false, Summary: string(probeErr.Class)}, probeErr
 	}
 	summary := "provider endpoint reachable"
 	if check := result.PrimaryCheck(); check != nil && strings.TrimSpace(check.Message) != "" {
 		summary = strings.TrimSpace(check.Message)
 	}
-	return setupVerification{OK: true, Summary: summary}, nil
+	return setupVerification{Ran: true, OK: true, Summary: summary}, nil
 }
 
 func setupJSONPayload(result tui.SetupResult, verification *setupVerification) map[string]any {
@@ -130,7 +134,11 @@ func setupJSONPayload(result tui.SetupResult, verification *setupVerification) m
 		"catalogID":  result.Provider.CatalogID,
 	}
 	if verification != nil {
-		payload["verified"] = verification.OK
+		// Only emit the machine-readable verified flag when a probe actually ran, so
+		// a skipped probe is never reported as a passing verification.
+		if verification.Ran {
+			payload["verified"] = verification.OK
+		}
 		if verification.Summary != "" {
 			payload["verifyStatus"] = verification.Summary
 		}

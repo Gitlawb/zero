@@ -59,6 +59,44 @@ func TestClassifySetupProbeModelNotFound(t *testing.T) {
 	}
 }
 
+func TestClassifySetupProbeBadBaseURL404IsNotModel(t *testing.T) {
+	// A 404 from a wrong base URL/path is a common first-run mistake. It must not be
+	// classified as a missing model — that would send the user to change the model
+	// when the real fix is the endpoint. With no model-lookup context in the
+	// message, a provider-category 404 stays an unclassified provider error.
+	probeErr, ok := ClassifySetupProbe(providerhealth.Result{
+		Status: providerhealth.StatusFail,
+		Model:  "gpt-4.1",
+		Checks: []providerhealth.Check{
+			{ID: "provider.connectivity", Status: providerhealth.StatusFail, Category: providerhealth.CategoryProvider, Message: "Provider endpoint returned 404: 404 page not found", Details: map[string]any{"statusCode": 404}},
+		},
+	})
+	if !ok {
+		t.Fatalf("a failing provider probe must produce an error")
+	}
+	if probeErr.Class == SetupProbeModel {
+		t.Fatalf("a bad-base-URL 404 must not classify as a missing model, got %q", probeErr.Class)
+	}
+}
+
+func TestClassifySetupProbeModelNotFound404WithModelContext(t *testing.T) {
+	// A 404 whose message names a model lookup failure stays classified as a model
+	// problem.
+	probeErr, ok := ClassifySetupProbe(providerhealth.Result{
+		Status: providerhealth.StatusFail,
+		Model:  "gpt-4.1",
+		Checks: []providerhealth.Check{
+			{ID: "provider.connectivity", Status: providerhealth.StatusFail, Category: providerhealth.CategoryProvider, Message: "Provider endpoint returned 404: The model `gpt-4.1` does not exist", Details: map[string]any{"statusCode": 404}},
+		},
+	})
+	if !ok {
+		t.Fatalf("a failing provider probe must produce an error")
+	}
+	if probeErr.Class != SetupProbeModel {
+		t.Fatalf("a model-context 404 must classify as model, got %q", probeErr.Class)
+	}
+}
+
 func TestClassifySetupProbeNetworkFailure(t *testing.T) {
 	cases := []struct {
 		name     string

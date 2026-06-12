@@ -96,6 +96,35 @@ func TestRunSetupVerifySucceedsAndConfirmsWorking(t *testing.T) {
 	}
 }
 
+func TestVerifySetupProviderWithoutProbeIsNotVerified(t *testing.T) {
+	// When no probe is wired, the verification did not run. It must report Ran=false
+	// (and not OK=true), so the caller never claims the provider is verified.
+	verification, err := verifySetupProvider(appDeps{probeProviderHealth: nil}, config.ProviderProfile{Name: "openai"})
+	if err != nil {
+		t.Fatalf("verifySetupProvider returned error: %v", err)
+	}
+	if verification.Ran {
+		t.Fatalf("a skipped probe must report Ran=false, got Ran=true")
+	}
+	if verification.OK {
+		t.Fatalf("a skipped probe must not report OK=true, got OK=true")
+	}
+}
+
+func TestSetupJSONPayloadGatesVerifiedOnRan(t *testing.T) {
+	// A verification that did not run must not emit a "verified" flag at all, so a
+	// machine consumer never reads a skipped probe as a passing verification.
+	payload := setupJSONPayload(tui.SetupResult{Provider: config.ProviderProfile{Name: "openai", Model: "gpt-4.1"}}, &setupVerification{Ran: false, OK: false, Summary: "probe unavailable; skipped"})
+	if _, present := payload["verified"]; present {
+		t.Fatalf("a probe that did not run must not emit a verified flag, got %#v", payload["verified"])
+	}
+
+	ranPayload := setupJSONPayload(tui.SetupResult{Provider: config.ProviderProfile{Name: "openai"}}, &setupVerification{Ran: true, OK: true, Summary: "reachable"})
+	if got, present := ranPayload["verified"]; !present || got != true {
+		t.Fatalf("a probe that ran and passed must emit verified=true, got present=%v value=%#v", present, got)
+	}
+}
+
 func TestRunSetupWithoutVerifyDoesNotProbe(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")

@@ -49,7 +49,7 @@ func ClassifySetupProbe(result providerhealth.Result) (SetupProbeError, bool) {
 		return SetupProbeError{}, false
 	}
 
-	check := failingProbeCheck(result)
+	check := result.PrimaryCheck()
 	category := providerhealth.Category("")
 	detail := ""
 	if check != nil {
@@ -99,43 +99,26 @@ func ClassifySetupProbe(result providerhealth.Result) (SetupProbeError, bool) {
 	}
 }
 
-// failingProbeCheck returns the most relevant check for diagnosis: the first
-// failing check, else the first warning, else the connectivity check, else nil.
-func failingProbeCheck(result providerhealth.Result) *providerhealth.Check {
-	for index := range result.Checks {
-		if result.Checks[index].Status == providerhealth.StatusFail {
-			return &result.Checks[index]
-		}
-	}
-	for index := range result.Checks {
-		if result.Checks[index].Status == providerhealth.StatusWarn {
-			return &result.Checks[index]
-		}
-	}
-	if connectivity := result.Check("provider.connectivity"); connectivity != nil {
-		return connectivity
-	}
-	if len(result.Checks) == 0 {
-		return nil
-	}
-	return &result.Checks[0]
-}
-
 // isModelNotFound reports whether a provider-category check looks like a
-// model-not-found error: an explicit 404 status, or a message that names the
-// model alongside a "not found"/"does not exist"/"unknown model" phrase.
+// model-not-found error: a message that names the model alongside a "not
+// found"/"does not exist"/"unknown" phrase, or a 404 whose message actually
+// references a model lookup. A bare 404 is intentionally NOT treated as a model
+// problem — a wrong base URL/path is an equally common first-run cause, and that
+// is reported as the endpoint, not the model.
 func isModelNotFound(check *providerhealth.Check, model string) bool {
 	if check == nil {
 		return false
 	}
-	if code, ok := statusCode(check.Details); ok && code == 404 {
+	message := strings.ToLower(check.Message)
+	model = strings.ToLower(strings.TrimSpace(model))
+	mentionsModel := strings.Contains(message, "model") || (model != "" && strings.Contains(message, model))
+	if code, ok := statusCode(check.Details); ok && code == 404 && mentionsModel {
 		return true
 	}
-	message := strings.ToLower(check.Message)
 	if strings.Contains(message, "model") && (strings.Contains(message, "not found") || strings.Contains(message, "does not exist") || strings.Contains(message, "unknown")) {
 		return true
 	}
-	if model = strings.ToLower(strings.TrimSpace(model)); model != "" && strings.Contains(message, model) && strings.Contains(message, "not found") {
+	if model != "" && strings.Contains(message, model) && strings.Contains(message, "not found") {
 		return true
 	}
 	return false
