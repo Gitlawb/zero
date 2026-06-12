@@ -221,8 +221,8 @@ runs:
         output_file="${RUNNER_TEMP}/zero-output.txt"
 
         # Run ZERO. Capture stdout to a file AND echo it to the log. Surface the
-        # real exit code as the step's status. The sandbox is active by default
-        # (this action never passes --skip-permissions-unsafe).
+        # real exit code as the step's status. The sandbox is active by default;
+        # this action never enables unsafe permission-skipping.
         set +e
         zero "${args[@]}" | tee "${output_file}"
         code=${PIPESTATUS[0]}
