@@ -43,8 +43,11 @@ func (m model) handleImageCommand(arg string) model {
 	}
 
 	// A PDF carries a text layer every model can read, so it is not gated on
-	// vision the way a raw image is; the optional rasterized pages are.
-	if imageinput.IsProbablyDocumentPath(trimmed) {
+	// vision the way a raw image is; the optional rasterized pages are. Route by
+	// the ".pdf" hint OR a content sniff so a real PDF whose name lacks the
+	// extension still reaches the document path rather than the vision-only image
+	// path. The cheap header sniff runs before the vision gate.
+	if imageinput.IsProbablyDocumentPath(trimmed) || imageinput.LooksLikeDocumentFile(trimmed, m.cwd) {
 		return m.handleDocumentAttach(trimmed)
 	}
 

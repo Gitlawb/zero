@@ -96,6 +96,36 @@ func IsProbablyDocumentPath(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".pdf")
 }
 
+// LooksLikeDocumentFile reports whether the file at path is a PDF by content,
+// reading only its leading magic bytes. It lets input surfaces route a real PDF
+// to LoadDocument even when its name lacks a ".pdf" extension, so detection is
+// content-based rather than extension-only. It opens nothing it cannot stat as a
+// regular file and never reads more than the magic prefix; any I/O error (missing
+// file, permission, non-regular) simply reports false and lets the normal path
+// surface a precise error. Relative paths resolve against workspaceRoot.
+func LooksLikeDocumentFile(path string, workspaceRoot string) bool {
+	resolved := path
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(workspaceRoot, resolved)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	header := make([]byte, len(pdfMagic))
+	n, err := io.ReadFull(file, header)
+	if err != nil && n < len(pdfMagic) {
+		return false
+	}
+	return isPDF(header)
+}
+
 // LoadDocument reads the PDF at path (resolved against workspaceRoot when
 // relative), enforces the per-document size cap, and extracts its text layer.
 // With opts.Vision and an available rasterizer it also renders the first N pages
@@ -131,6 +161,10 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	if useExternal {
 		if t, ok := extractTextWithPoppler(data); ok {
 			text = t
+			// pdftotext does not report a page count, so derive it from the pure-Go
+			// reader (cheap structural read, no text extraction) to keep
+			// Document.Pages correct regardless of which text path wins.
+			pages = pdfPageCount(data)
 		}
 	}
 	if strings.TrimSpace(text) == "" {
@@ -227,14 +261,39 @@ func extractTextPureGo(data []byte) (text string, pages int, err error) {
 	return strings.TrimSpace(buf.String()), pages, nil
 }
 
+// pdfPageCount returns the page count via the pure-Go reader without extracting
+// any text. It backs Document.Pages on the poppler text path (pdftotext does not
+// report a count). Like extractTextPureGo it recovers from the parser's panics on
+// malformed input and reports 0 rather than crashing -- the page count is
+// informational, so an unreadable structure simply yields 0.
+func pdfPageCount(data []byte) (pages int) {
+	defer func() {
+		if recover() != nil {
+			pages = 0
+		}
+	}()
+	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return 0
+	}
+	return reader.NumPage()
+}
+
 // capDocumentText truncates text to MaxDocumentTextBytes on a UTF-8 rune
 // boundary and appends documentTruncatedMarker when it had to cut. The second
-// return reports whether truncation happened.
+// return reports whether truncation happened. The marker is counted against the
+// cap so the returned string never exceeds MaxDocumentTextBytes.
 func capDocumentText(text string) (string, bool) {
 	if len(text) <= MaxDocumentTextBytes {
 		return text, false
 	}
-	cut := MaxDocumentTextBytes
+	// Reserve room for the marker so the final payload (text + marker) stays at or
+	// under the advertised cap. If the marker alone would not fit, cut to nothing
+	// and return just the marker.
+	cut := MaxDocumentTextBytes - len(documentTruncatedMarker)
+	if cut < 0 {
+		cut = 0
+	}
 	// Back up to a rune boundary so we never split a multi-byte character.
 	for cut > 0 && !utf8RuneStart(text[cut]) {
 		cut--

@@ -169,8 +169,8 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadDocument: %v", err)
 	}
-	if len(doc.Text) > MaxDocumentTextBytes+len(documentTruncatedMarker) {
-		t.Fatalf("text length %d exceeds cap %d", len(doc.Text), MaxDocumentTextBytes)
+	if len(doc.Text) > MaxDocumentTextBytes {
+		t.Fatalf("capped text length %d exceeds cap %d (marker must be counted against the cap)", len(doc.Text), MaxDocumentTextBytes)
 	}
 	if !doc.Truncated {
 		t.Fatal("Truncated should be set when extracted text is capped")
@@ -279,6 +279,77 @@ func TestLoadDocumentVisionWithoutRasterizerUsesText(t *testing.T) {
 	}
 	if !strings.Contains(doc.Text, want) {
 		t.Fatalf("vision-without-raster should keep text, got %q", doc.Text)
+	}
+}
+
+// capDocumentText must keep the final payload (text + marker) at or under the
+// advertised cap: the marker is counted against MaxDocumentTextBytes, not added
+// on top of it.
+func TestCapDocumentTextRespectsCap(t *testing.T) {
+	// Text comfortably over the cap so truncation triggers.
+	over := strings.Repeat("a", MaxDocumentTextBytes+1024)
+	got, truncated := capDocumentText(over)
+	if !truncated {
+		t.Fatal("expected truncation for over-cap text")
+	}
+	if len(got) > MaxDocumentTextBytes {
+		t.Fatalf("capped text length %d exceeds cap %d", len(got), MaxDocumentTextBytes)
+	}
+	if !strings.HasSuffix(got, documentTruncatedMarker) {
+		t.Fatal("capped text should end with the truncation marker")
+	}
+
+	// At-or-under the cap is returned unchanged with no marker.
+	under := strings.Repeat("b", MaxDocumentTextBytes)
+	got, truncated = capDocumentText(under)
+	if truncated {
+		t.Fatal("text exactly at the cap must not be truncated")
+	}
+	if got != under {
+		t.Fatal("at-cap text must be returned unchanged")
+	}
+}
+
+// pdfPageCount must report the real page count from PDF bytes (this is what
+// backs Document.Pages on the poppler text path, where pdftotext gives no count)
+// and must return 0 -- not panic -- on garbage.
+func TestPDFPageCount(t *testing.T) {
+	if got := pdfPageCount(buildMinimalPDF("one page")); got != 1 {
+		t.Fatalf("pdfPageCount = %d, want 1", got)
+	}
+	if got := pdfPageCount([]byte("not a pdf at all")); got != 0 {
+		t.Fatalf("pdfPageCount on garbage = %d, want 0", got)
+	}
+}
+
+// LooksLikeDocumentFile sniffs PDF content by magic bytes, so a real PDF with no
+// ".pdf" extension is still recognized while a non-PDF (even named .pdf) is not.
+func TestLooksLikeDocumentFile(t *testing.T) {
+	root := t.TempDir()
+	// A real PDF named without a .pdf extension.
+	if err := os.WriteFile(filepath.Join(root, "spec"), buildMinimalPDF("hi"), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	// A non-PDF named with a .pdf extension.
+	if err := os.WriteFile(filepath.Join(root, "fake.pdf"), []byte("not a pdf"), 0o644); err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+	// A directory must not be treated as a document.
+	if err := os.Mkdir(filepath.Join(root, "adir"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	if !LooksLikeDocumentFile("spec", root) {
+		t.Fatal("a real PDF without a .pdf extension should be recognized by content")
+	}
+	if LooksLikeDocumentFile("fake.pdf", root) {
+		t.Fatal("a .pdf-named non-PDF must not be recognized as a document")
+	}
+	if LooksLikeDocumentFile("nope", root) {
+		t.Fatal("a missing file must not be recognized as a document")
+	}
+	if LooksLikeDocumentFile("adir", root) {
+		t.Fatal("a directory must not be recognized as a document")
 	}
 }
 

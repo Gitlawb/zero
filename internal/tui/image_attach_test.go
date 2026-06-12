@@ -329,6 +329,29 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 	}
 }
 
+// A real PDF whose path lacks a ".pdf" extension is still routed to the document
+// path by a content sniff (not the extension), so its text layer attaches even on
+// a non-vision model instead of being refused as a non-image.
+func TestImageCommandAttachesExtensionlessPDFByContent(t *testing.T) {
+	root := t.TempDir()
+	writeTestPDF(t, root, "spec", "Extensionless PDF body text")
+
+	m := newModel(context.Background(), Options{Cwd: root, ModelName: "totally-unknown-custom"})
+	m.input.SetValue("/image spec")
+	updated, _ := m.handleSubmit()
+	next := updated.(model)
+
+	if len(next.pendingDocuments) != 1 {
+		t.Fatalf("expected 1 pending document from a content-sniffed PDF, got %d", len(next.pendingDocuments))
+	}
+	if !strings.Contains(next.pendingDocuments[0].text, "Extensionless PDF body text") {
+		t.Fatalf("document text %q should contain the body", next.pendingDocuments[0].text)
+	}
+	if notice := lastTranscriptText(next); strings.Contains(notice, "does not support image input") {
+		t.Fatalf("a real PDF must not be refused at the vision gate, got %q", notice)
+	}
+}
+
 // A .pdf-named file that is not a real PDF is rejected with the explicit
 // not-a-PDF notice and stages nothing.
 func TestImageCommandRejectsFakePDF(t *testing.T) {
