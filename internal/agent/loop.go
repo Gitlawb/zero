@@ -50,6 +50,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		return Result{}, errors.New("agent provider is required")
 	}
 
+	// stop hooks fire once as the run ends, on every exit path. A detached context
+	// lets end-of-run hooks still execute even if the run's own context is done.
+	defer dispatchStop(context.Background(), options)
+
 	maxTurns := options.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 12
@@ -66,6 +70,15 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	}
 
 	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
+
+	// userPromptSubmit hooks may inject additional context for this run (e.g.
+	// repository conventions); their output is appended once before the turn loop.
+	if injected := dispatchUserPromptSubmit(ctx, options, prompt); injected != "" {
+		messages = append(messages, zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: injected,
+		})
+	}
 
 	guards := newGuardState()
 	compactor := newCompactionState(options)
@@ -691,6 +704,43 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 		},
 	})
 	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+}
+
+// dispatchUserPromptSubmit runs userPromptSubmit hooks before the run's turn loop
+// and returns any hook output to inject into the model context for this run (e.g.
+// a hook that prepends repository conventions). A nil dispatcher is a no-op.
+func dispatchUserPromptSubmit(ctx context.Context, options Options, prompt string) string {
+	if options.Hooks == nil {
+		return ""
+	}
+	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event: hooks.EventUserPromptSubmit,
+		Payload: map[string]any{
+			"event":     string(hooks.EventUserPromptSubmit),
+			"sessionId": options.SessionID,
+			"cwd":       options.Cwd,
+			"prompt":    prompt,
+		},
+	})
+	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+}
+
+// dispatchStop runs stop hooks as the run ends. It is observational: output is
+// recorded to the audit store but does not change the result. A nil dispatcher is
+// a no-op. Callers should pass a non-cancelled context so end-of-run hooks still
+// execute after the run's own context is done.
+func dispatchStop(ctx context.Context, options Options) {
+	if options.Hooks == nil {
+		return
+	}
+	options.Hooks.Dispatch(ctx, hooks.DispatchInput{
+		Event: hooks.EventStop,
+		Payload: map[string]any{
+			"event":     string(hooks.EventStop),
+			"sessionId": options.SessionID,
+			"cwd":       options.Cwd,
+		},
+	})
 }
 
 // blockedByHookResult is the tool result for a call vetoed by a beforeTool hook.

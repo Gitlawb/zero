@@ -92,4 +92,8 @@ func TestDispatchHelpersAreNoopWithoutDispatcher(t *testing.T) {
 	if feedback := dispatchAfterTool(context.Background(), options, ToolCall{Name: "bash"}, nil, tools.Result{}); feedback != "" {
 		t.Fatalf("a nil dispatcher must yield no feedback, got %q", feedback)
 	}
+	if injected := dispatchUserPromptSubmit(context.Background(), options, "do the thing"); injected != "" {
+		t.Fatalf("a nil dispatcher must inject no userPromptSubmit context, got %q", injected)
+	}
+	dispatchStop(context.Background(), options) // must not panic with a nil dispatcher
 }
