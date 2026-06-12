@@ -1,6 +1,16 @@
 package sandbox
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// EnvAutoAllowBash is the environment variable that opts in to auto-allowing the
+// bash tool when the sandbox is active for the command. It is OFF by default;
+// only an explicit truthy value enables it.
+const EnvAutoAllowBash = "ZERO_SANDBOX_AUTO_ALLOW_BASH"
 
 type SideEffect string
 type Permission string
@@ -54,6 +64,11 @@ const (
 const (
 	NetworkDeny  NetworkMode = "deny"
 	NetworkAllow NetworkMode = "allow"
+	// NetworkScoped is the middle ground between deny and allow: the sandboxed
+	// process may reach only the policy's AllowedDomains (minus DeniedDomains) and
+	// nothing else, routed through a local filtering egress proxy. An empty
+	// effective allowlist makes it behave exactly like NetworkDeny (fail closed).
+	NetworkScoped NetworkMode = "scoped"
 )
 
 const (
@@ -109,6 +124,18 @@ type Policy struct {
 	DenyDestructiveShell  bool        `json:"denyDestructiveShell"`
 	AllowPolicyOnlyRunner bool        `json:"allowPolicyOnlyRunner"`
 	MaxAutonomy           Autonomy    `json:"maxAutonomy,omitempty"`
+	// AllowedDomains / DeniedDomains apply only when Network is NetworkScoped:
+	// the sandboxed process may reach the allowed domains (exact host or any
+	// subdomain) minus the denied ones. They are ignored for NetworkAllow and
+	// NetworkDeny so existing policies keep their exact behaviour.
+	AllowedDomains []string `json:"allowedDomains,omitempty"`
+	DeniedDomains  []string `json:"deniedDomains,omitempty"`
+	// AutoAllowBashWhenSandboxed, when true, auto-allows the bash tool WITHOUT a
+	// permission prompt — but only when the sandbox is actually active (a
+	// native-isolation backend wraps the command). The sandbox is then the safety
+	// boundary. When the sandbox is not active the flag is ignored: unsandboxed
+	// bash is never auto-allowed. Off by default.
+	AutoAllowBashWhenSandboxed bool `json:"autoAllowBashWhenSandboxed,omitempty"`
 }
 
 type Request struct {
@@ -130,6 +157,11 @@ type Decision struct {
 	GrantMatched bool       `json:"grantMatched,omitempty"`
 	Grant        *Grant     `json:"grant,omitempty"`
 	Violation    *Violation `json:"violation,omitempty"`
+	// AutoAllowed marks an allow that the sandbox itself authorized without a user
+	// prompt or persistent grant — currently only AutoAllowBashWhenSandboxed for a
+	// sandboxed shell command. Enforcement points treat it like a grant-authorized
+	// allow so a prompt tool runs without a separately-recorded PermissionGranted.
+	AutoAllowed bool `json:"autoAllowed,omitempty"`
 }
 
 type Risk struct {
@@ -174,4 +206,29 @@ func DefaultPolicy() Policy {
 		AllowPolicyOnlyRunner: true,
 		MaxAutonomy:           AutonomyHigh,
 	}
+}
+
+// AutoAllowBashEnvEnabled reports whether the EnvAutoAllowBash environment
+// variable is set to a truthy value. It is the env surface for
+// AutoAllowBashWhenSandboxed and is OFF for any unset/blank/falsey value, so the
+// safe default (prompt) holds unless the operator explicitly opts in.
+func AutoAllowBashEnvEnabled() bool {
+	value := strings.TrimSpace(os.Getenv(EnvAutoAllowBash))
+	if value == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(value)
+	return err == nil && enabled
+}
+
+// ApplyAutoAllowBashEnv overlays the EnvAutoAllowBash opt-in onto a policy: when
+// the env var is truthy it enables AutoAllowBashWhenSandboxed. It never disables
+// an already-enabled policy field, so an explicit config opt-in is preserved
+// even when the env var is unset. Wire this where the engine policy is built so
+// the env surface takes effect.
+func ApplyAutoAllowBashEnv(policy Policy) Policy {
+	if AutoAllowBashEnvEnabled() {
+		policy.AutoAllowBashWhenSandboxed = true
+	}
+	return policy
 }

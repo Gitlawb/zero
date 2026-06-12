@@ -104,6 +104,9 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 			Meta:   meta,
 		}
 	}
+	// Release any plan-scoped resources (e.g. the scoped-egress proxy) once the
+	// command has finished running.
+	defer plan.Cleanup()
 	addSandboxMeta(meta, plan)
 
 	var stdout bytes.Buffer

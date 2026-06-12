@@ -131,7 +131,10 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
-		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && d.GrantMatched
+		// A persistent grant OR a sandbox auto-allow (AutoAllowBashWhenSandboxed for
+		// a sandboxed shell command) authorizes a prompt tool to run without a
+		// separately-recorded PermissionGranted; the sandbox is the safety boundary.
+		sandboxGrantAuthorized = d.Action == sandbox.ActionAllow && (d.GrantMatched || d.AutoAllowed)
 	}
 
 	switch tool.Safety().Permission {

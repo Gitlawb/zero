@@ -79,6 +79,23 @@ func (engine *Engine) scopeFor(requestRoot string) *Scope {
 	return &Scope{workspaceRoot: requestRoot}
 }
 
+// shellSandboxActive reports whether a native wrapping sandbox would actually
+// wrap a shell command under the given policy. It is true only when the policy
+// is enforcing and the engine's backend can wrap commands with native isolation
+// (bubblewrap / sandbox-exec available). A policy-only fallback, a disabled
+// policy, or a nil engine all report false — so AutoAllowBashWhenSandboxed never
+// auto-allows an unsandboxed command.
+func (engine *Engine) shellSandboxActive(policy Policy) bool {
+	if engine == nil {
+		return false
+	}
+	if policy.Mode == ModeDisabled {
+		return false
+	}
+	backend := engine.backend
+	return backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation
+}
+
 func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if ctx == nil {
 		ctx = context.Background()
@@ -135,7 +152,11 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			}
 		}
 	}
-	if policy.Network == NetworkDeny && HasRiskCategory(risk, "network") {
+	// effectiveNetwork collapses an empty-allowlist scoped policy to deny, so a
+	// misconfigured scoped policy still fails closed here; a populated scoped
+	// policy permits network-risk tools (the egress proxy enforces the allowlist
+	// at the transport layer). Allow/deny behaviour is unchanged.
+	if effectiveNetwork(policy) == NetworkDeny && HasRiskCategory(risk, "network") {
 		return deny(request, risk, ViolationNetwork, "", "network access is blocked by sandbox policy", false)
 	}
 	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {
@@ -173,6 +194,18 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	if request.Permission == PermissionAllow {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
+	}
+	// Auto-allow a sandboxed shell command when the operator opted in: the active
+	// native sandbox is the safety boundary, so the bash prompt is skipped. This
+	// only applies to shell commands AND only when a wrapping sandbox is actually
+	// active; an inactive sandbox (policy-only / disabled) ignores the flag so
+	// unsandboxed bash is never silently allowed. It still respects the autonomy
+	// ceiling, matching how an explicit permission grant is clamped.
+	if policy.AutoAllowBashWhenSandboxed && request.SideEffect == SideEffectShell && engine.shellSandboxActive(policy) {
+		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
+		}
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "auto-allowed: sandbox is active for this shell command", AutoAllowed: true}
 	}
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
 		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {

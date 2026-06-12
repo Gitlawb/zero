@@ -221,7 +221,7 @@ func resolvedTestPath(t *testing.T, path string) string {
 }
 
 func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true})
+	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 	if !strings.Contains(profile, "(allow file-write*") {
 		t.Fatalf("profile missing file-write rule:\n%s", profile)
 	}
