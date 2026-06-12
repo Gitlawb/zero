@@ -52,7 +52,12 @@ const (
 type CorrectionReport struct {
 	LSPDiagnostics map[string][]lsp.Diagnostic // path -> error diagnostics
 	VerifyReport   verify.Report
-	Failed         bool
+	// InspectErrors holds non-degradable verification failures (an LSP
+	// startup/sync error, an unreadable changed file, or plan detection failing).
+	// These are distinct from diagnostics and must fail the pass rather than be
+	// silently swallowed into a false "passed".
+	InspectErrors []string
+	Failed        bool
 }
 
 // SelfCorrector runs verification after a mutating edit and, when it fails,
@@ -112,6 +117,12 @@ func (sc *SelfCorrector) inspect(ctx context.Context, changedFiles []string) Cor
 			abs := sc.absPath(file)
 			diags, err := sc.checker.Check(ctx, abs)
 			if err != nil {
+				// Manager.Check degrades missing servers / unsupported files to
+				// (nil, nil), so a non-nil error here is a real failure (LSP
+				// startup/sync, or an unreadable changed file). Surface it instead
+				// of silently passing.
+				report.InspectErrors = append(report.InspectErrors, fmt.Sprintf("%s: %v", file, err))
+				report.Failed = true
 				continue
 			}
 			if errs := lsp.FilterBySeverity(diags, lsp.SeverityError); len(errs) > 0 {
@@ -122,7 +133,14 @@ func (sc *SelfCorrector) inspect(ctx context.Context, changedFiles []string) Cor
 	}
 
 	if sc.cfg.IncludeTests && sc.verifier != nil {
-		if vr, err := sc.verifier.Verify(ctx); err == nil {
+		vr, err := sc.verifier.Verify(ctx)
+		if err != nil {
+			// "No plan / no tests" is not an error (DetectPlan returns an empty
+			// plan), so a non-nil error means verification could not run at all —
+			// don't let that masquerade as a pass.
+			report.InspectErrors = append(report.InspectErrors, fmt.Sprintf("verification could not run: %v", err))
+			report.Failed = true
+		} else {
 			report.VerifyReport = vr
 			if !vr.OK {
 				report.Failed = true
@@ -142,6 +160,9 @@ func (sc *SelfCorrector) feedback(report CorrectionReport, corrective bool) stri
 		b.WriteString("Verification failed after your edit (auto-correction is off at low autonomy; reporting only):\n")
 	}
 
+	for _, msg := range report.InspectErrors {
+		fmt.Fprintf(&b, "could not verify after edit: %s\n", msg)
+	}
 	for file, diags := range report.LSPDiagnostics {
 		b.WriteString(lsp.FormatDiagnostics(file, diags))
 		b.WriteString("\n")

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -32,6 +33,53 @@ type fakeChecker struct {
 
 func (f fakeChecker) Check(_ context.Context, path string) ([]lsp.Diagnostic, error) {
 	return f.byPath[path], nil
+}
+
+type erroringChecker struct{ err error }
+
+func (e erroringChecker) Check(context.Context, string) ([]lsp.Diagnostic, error) {
+	return nil, e.err
+}
+
+type erroringVerifier struct{ err error }
+
+func (e erroringVerifier) Verify(context.Context) (verify.Report, error) {
+	return verify.Report{}, e.err
+}
+
+func TestSelfCorrectSurfacesCheckerErrorInsteadOfPassing(t *testing.T) {
+	// Manager.Check degrades missing servers to (nil, nil); a real error (LSP
+	// startup/sync failure or unreadable file) must fail the pass, not be swallowed
+	// into OutcomePassed.
+	sc := NewSelfCorrector("/root", erroringChecker{err: errors.New("lsp server crashed")}, nil, SelfCorrectConfig{
+		Enabled:    true,
+		IncludeLSP: true,
+		Autonomy:   "high",
+	})
+	feedback, outcome := sc.AfterEdit(context.Background(), []string{"a.go"})
+	if outcome != OutcomeCorrecting {
+		t.Fatalf("outcome = %q, want %q (a checker error must not pass)", outcome, OutcomeCorrecting)
+	}
+	if !strings.Contains(feedback, "lsp server crashed") {
+		t.Fatalf("feedback should surface the checker error, got: %q", feedback)
+	}
+}
+
+func TestSelfCorrectSurfacesVerifierErrorInsteadOfPassing(t *testing.T) {
+	// DetectPlan returns an empty plan (not an error) when no tests exist, so a
+	// non-nil Verify error means verification could not run — it must fail the pass.
+	sc := NewSelfCorrector("/root", nil, erroringVerifier{err: errors.New("plan detection failed")}, SelfCorrectConfig{
+		Enabled:      true,
+		IncludeTests: true,
+		Autonomy:     "high",
+	})
+	feedback, outcome := sc.AfterEdit(context.Background(), []string{"a.go"})
+	if outcome != OutcomeCorrecting {
+		t.Fatalf("outcome = %q, want %q (a verifier error must not pass)", outcome, OutcomeCorrecting)
+	}
+	if !strings.Contains(feedback, "plan detection failed") {
+		t.Fatalf("feedback should surface the verifier error, got: %q", feedback)
+	}
 }
 
 func TestLSPDiagnosticsCheckerPropagatesReadError(t *testing.T) {
