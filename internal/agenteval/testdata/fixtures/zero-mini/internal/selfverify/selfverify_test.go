@@ -1,11 +1,14 @@
 package selfverify
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestChecksAreLocal(t *testing.T) {
-	for _, check := range Checks() {
-		if check == "" {
-			t.Fatal("check names must not be empty")
-		}
+	got := Checks()
+	want := []string{"version", "fixtures"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Checks() = %#v, want %#v", got, want)
 	}
 }
