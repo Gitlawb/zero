@@ -76,6 +76,19 @@ func TestBuildKeepsPathsRelativeToCWD(t *testing.T) {
 	}
 }
 
+func TestBuildRejectsAbsolutePathsWithoutCWD(t *testing.T) {
+	got := Build(Input{
+		Paths: []string{"/home/alice/repo/go.mod"},
+	})
+
+	if len(got.ProjectFiles) != 0 {
+		t.Fatalf("ProjectFiles=%v want none", got.ProjectFiles)
+	}
+	if len(got.Layout) != 0 {
+		t.Fatalf("Layout=%v want none", got.Layout)
+	}
+}
+
 func TestRenderHonorsLineAndWidthBudgets(t *testing.T) {
 	seed := Build(Input{
 		CWD:       "/repo/Zero",

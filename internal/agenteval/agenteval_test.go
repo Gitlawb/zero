@@ -23,7 +23,7 @@ func TestLoadSuiteParsesJSONAndNormalizesDeterministicFields(t *testing.T) {
 			"verificationCommands": [
 				{"id": "test", "name": "Tests", "command": ["go", "test", "./..."]}
 			],
-			"expectedChangedFiles": ["internal/reader/b.go", "internal/reader/a.go"]
+			"expectedChangedFiles": ["internal/reader/a/../b.go", "internal/reader/a.go"]
 		}]
 	}`)
 
@@ -41,6 +41,32 @@ func TestLoadSuiteParsesJSONAndNormalizesDeterministicFields(t *testing.T) {
 	}
 	if got := strings.Join(suite.Tasks[0].VerificationCommands[0].Command, " "); got != "go test ./..." {
 		t.Fatalf("command = %q, want go test ./...", got)
+	}
+}
+
+func TestLoadSuiteRejectsTrailingJSON(t *testing.T) {
+	path := writeSuite(t, `{
+		"id": "quality-context",
+		"name": "Quality context",
+		"tasks": [{
+			"id": "edit-reader",
+			"name": "Edit reader",
+			"prompt": "Update the reader.",
+			"workspaceFixture": "fixtures/reader",
+			"verificationCommands": [
+				{"id": "test", "name": "Tests", "command": ["go", "test", "./..."]}
+			],
+			"expectedChangedFiles": ["internal/reader/a.go"]
+		}]
+	}
+	{}`)
+
+	_, err := LoadSuite(path)
+	if err == nil {
+		t.Fatal("LoadSuite returned nil, want trailing JSON error")
+	}
+	if !strings.Contains(err.Error(), "trailing JSON") {
+		t.Fatalf("LoadSuite error = %q, want trailing JSON", err.Error())
 	}
 }
 

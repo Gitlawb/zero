@@ -168,7 +168,10 @@ func normalizePath(cwd string, value string) string {
 	if value == "" {
 		return ""
 	}
-	if cwd != "" && filepath.IsAbs(value) {
+	if filepath.IsAbs(value) {
+		if cwd == "" {
+			return ""
+		}
 		rel, err := filepath.Rel(filepath.Clean(cwd), filepath.Clean(value))
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return ""
@@ -176,8 +179,13 @@ func normalizePath(cwd string, value string) string {
 		value = rel
 	}
 	value = filepath.ToSlash(value)
+	if isAbsoluteLikePath(value) {
+		return ""
+	}
 	value = path.Clean(value)
-	value = strings.TrimPrefix(value, "/")
+	if isAbsoluteLikePath(value) {
+		return ""
+	}
 	for strings.HasPrefix(value, "./") {
 		value = strings.TrimPrefix(value, "./")
 	}
@@ -185,6 +193,17 @@ func normalizePath(cwd string, value string) string {
 		return ""
 	}
 	return value
+}
+
+func isAbsoluteLikePath(value string) bool {
+	if strings.HasPrefix(value, "/") {
+		return true
+	}
+	if len(value) >= 2 && value[1] == ':' {
+		drive := value[0]
+		return (drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')
+	}
+	return false
 }
 
 func topLevelLayout(paths []string, maxEntries int) ([]string, bool) {

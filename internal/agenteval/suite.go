@@ -2,7 +2,9 @@ package agenteval
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"sort"
@@ -53,6 +55,12 @@ func LoadSuite(path string) (Suite, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&suite); err != nil {
 		return Suite{}, fmt.Errorf("parse agent eval suite: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return Suite{}, fmt.Errorf("parse agent eval suite: trailing JSON after suite")
+	} else if !errors.Is(err, io.EOF) {
+		return Suite{}, fmt.Errorf("parse agent eval suite: trailing JSON after suite: %w", err)
 	}
 	if err := suite.Validate(); err != nil {
 		return Suite{}, err
@@ -129,8 +137,8 @@ func normalizeFiles(files []string) []string {
 	seen := map[string]bool{}
 	normalized := make([]string, 0, len(files))
 	for _, file := range files {
-		file = strings.TrimSpace(strings.ReplaceAll(file, "\\", "/"))
-		if file == "" || seen[file] {
+		file, ok := normalizeEvalPath(file)
+		if !ok || file == "" || seen[file] {
 			continue
 		}
 		seen[file] = true
