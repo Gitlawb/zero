@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -195,5 +197,44 @@ func TestManagerCheckConcurrentReusesOneServer(t *testing.T) {
 	m.mu.Unlock()
 	if sessions != 1 {
 		t.Fatalf("expected a single reused session, got %d", sessions)
+	}
+}
+
+type errShutdownServer struct{}
+
+func (errShutdownServer) Client() *Client { return NewClient(strings.NewReader(""), io.Discard) }
+func (errShutdownServer) Shutdown(context.Context) error {
+	return errors.New("server refused to exit")
+}
+
+func TestManagerShutdownPropagatesErrors(t *testing.T) {
+	m := newManagerWithStarter("/repo", func(context.Context, []string, string) (lspServer, error) {
+		return errShutdownServer{}, nil
+	})
+	if _, err := m.sessionFor(context.Background(), []string{"gopls"}); err != nil {
+		t.Fatalf("sessionFor: %v", err)
+	}
+	if err := m.Shutdown(context.Background()); err == nil {
+		t.Fatal("Shutdown must surface a server that refused to exit")
+	}
+}
+
+func TestSessionDropsStaleVersionPublish(t *testing.T) {
+	sess := newSession(errShutdownServer{})
+	uri := PathToURI("/repo/main.go")
+	sess.mu.Lock()
+	sess.versions[uri] = 3
+	sess.mu.Unlock()
+
+	stale, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Version: 2, Diagnostics: []Diagnostic{{Message: "stale"}}})
+	sess.handleNotification("textDocument/publishDiagnostics", stale)
+	if len(sess.diagnosticsFor(uri)) != 0 {
+		t.Fatal("a publish for an older version must be ignored")
+	}
+
+	fresh, _ := json.Marshal(PublishDiagnosticsParams{URI: uri, Version: 3, Diagnostics: []Diagnostic{{Message: "fresh"}}})
+	sess.handleNotification("textDocument/publishDiagnostics", fresh)
+	if d := sess.diagnosticsFor(uri); len(d) != 1 || d[0].Message != "fresh" {
+		t.Fatalf("a current-version publish must apply, got %#v", d)
 	}
 }

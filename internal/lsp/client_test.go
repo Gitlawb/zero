@@ -226,3 +226,20 @@ func TestClientNotificationHandler(t *testing.T) {
 		t.Fatal("notification handler was not called")
 	}
 }
+
+func TestClientRejectsCallsAfterClose(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	client := NewClient(clientReader, clientWriter)
+	defer serverWriter.Close()
+	defer clientWriter.Close()
+	_ = serverReader
+
+	client.Close()
+	if _, err := client.Call(context.Background(), "initialize", nil); err == nil {
+		t.Fatal("Call after Close must return an error")
+	}
+	if err := client.Notify(context.Background(), "initialized", nil); err == nil {
+		t.Fatal("Notify after Close must return an error")
+	}
+}

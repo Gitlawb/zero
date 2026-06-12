@@ -99,6 +99,14 @@ func (c *Client) SetNotificationHandler(handler NotificationHandler) {
 // Call sends a request and blocks until the matching response arrives, the
 // context is cancelled, or the connection closes.
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	// A closed client is unusable: don't register a pending entry that nothing
+	// will ever resolve.
+	select {
+	case <-c.closed:
+		return nil, c.readError()
+	default:
+	}
+
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -209,6 +217,13 @@ func (c *Client) readError() error {
 }
 
 func (c *Client) write(payload any) error {
+	// Reject writes once the client is closed so Notify (and Call's request write)
+	// can't keep pushing frames onto a dead connection.
+	select {
+	case <-c.closed:
+		return c.readError()
+	default:
+	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return writeMessage(c.writer, payload)

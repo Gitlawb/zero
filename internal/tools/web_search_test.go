@@ -2,7 +2,10 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -106,5 +109,31 @@ func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("web_search should be registered in CoreNetworkTools()")
+	}
+}
+
+func TestHTTPSearchBackendSendsProviderAndParsesResults(t *testing.T) {
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"title":"Title","url":"https://x.dev","snippet":"snip"}]}`))
+	}))
+	defer server.Close()
+
+	backend := &httpSearchBackend{client: server.Client(), baseURL: server.URL, apiKey: "k", provider: "exa"}
+	results, err := backend.Search(context.Background(), "q", 3)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 || results[0].Title != "Title" || results[0].URL != "https://x.dev" {
+		t.Fatalf("results = %#v", results)
+	}
+	// The configured provider and query must reach the backend.
+	if gotBody["provider"] != "exa" {
+		t.Fatalf("ZERO_WEBSEARCH_PROVIDER not forwarded: %#v", gotBody)
+	}
+	if gotBody["query"] != "q" {
+		t.Fatalf("query not forwarded: %#v", gotBody)
 	}
 }

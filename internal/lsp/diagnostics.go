@@ -21,6 +21,13 @@ func severityLabel(severity DiagnosticSeverity) string {
 	}
 }
 
+// collapseWhitespace flattens a (possibly multi-line) diagnostic message to a
+// single line so each formatted record stays "path:line:col: severity: message"
+// and downstream line-based parsing isn't broken by embedded \n / \t.
+func collapseWhitespace(message string) string {
+	return strings.Join(strings.Fields(message), " ")
+}
+
 // hasErrors reports whether any diagnostic is error severity.
 func hasErrors(diags []Diagnostic) bool {
 	for _, diag := range diags {
@@ -62,7 +69,7 @@ func FormatDiagnostics(path string, diags []Diagnostic) string {
 			diag.Range.Start.Line+1,
 			diag.Range.Start.Character+1,
 			severityLabel(diag.Severity),
-			strings.TrimSpace(diag.Message),
+			collapseWhitespace(diag.Message),
 		))
 	}
 	return strings.Join(lines, "\n")

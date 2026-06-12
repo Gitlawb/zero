@@ -162,7 +162,13 @@ type httpSearchBackend struct {
 }
 
 func (backend *httpSearchBackend) Search(ctx context.Context, query string, limit int) ([]searchResult, error) {
-	payload, err := json.Marshal(map[string]any{"query": query, "limit": limit})
+	requestBody := map[string]any{"query": query, "limit": limit}
+	// Forward the configured provider so an aggregating endpoint can route the
+	// query; without this the ZERO_WEBSEARCH_PROVIDER knob would be inert.
+	if backend.provider != "" {
+		requestBody["provider"] = backend.provider
+	}
+	payload, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("encode search request: %w", err)
 	}

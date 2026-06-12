@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"time"
@@ -68,7 +69,12 @@ func (m *Manager) Check(ctx context.Context, path, text string) ([]Diagnostic, e
 	if err := sess.sync(ctx, abs, languageID, text); err != nil {
 		return nil, err
 	}
-	sess.waitForDiagnostics(ctx, uri, m.debounce, baseline)
+	// If no publish newer than baseline arrived (server too slow / ctx expired),
+	// return no diagnostics rather than a stale prior result for the new text —
+	// a missing signal degrades like a missing server, not a false "compiles".
+	if !sess.waitForDiagnostics(ctx, uri, m.debounce, baseline) {
+		return nil, nil
+	}
 	return sess.diagnosticsFor(uri), nil
 }
 
@@ -93,16 +99,20 @@ func (m *Manager) HasErrors(path string) bool {
 	return hasErrors(m.DiagnosticsFor(path))
 }
 
-// Shutdown stops every running server.
+// Shutdown stops every running server, returning the joined errors of any that
+// failed to exit cleanly (a leaked language-server process is worth surfacing).
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	sessions := m.sessions
 	m.sessions = map[string]*session{}
 	m.mu.Unlock()
+	var errs []error
 	for _, sess := range sessions {
-		_ = sess.server.Shutdown(ctx)
+		if err := sess.server.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // sessionFor returns the running session for a server command, starting one if

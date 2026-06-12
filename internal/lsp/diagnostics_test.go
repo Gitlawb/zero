@@ -42,3 +42,15 @@ func TestFilterBySeverity(t *testing.T) {
 		t.Fatalf("warning filter should include error+warning, got %#v", upToWarning)
 	}
 }
+
+func TestFormatDiagnosticsCollapsesMultilineMessage(t *testing.T) {
+	diags := []Diagnostic{{
+		Range:    Range{Start: Position{Line: 0, Character: 0}},
+		Severity: SeverityError,
+		Message:  "first line\n\tsecond   line",
+	}}
+	got := FormatDiagnostics("a.go", diags)
+	if want := "a.go:1:1: error: first line second line"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
