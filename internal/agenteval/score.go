@@ -21,14 +21,19 @@ type ResultKind string
 const (
 	ResultCommand      ResultKind = "command"
 	ResultChangedFiles ResultKind = "changed_files"
+	ResultContext      ResultKind = "context"
+	ResultTrace        ResultKind = "trace"
 )
 
 type ScoreInput struct {
-	TaskID         string
-	CommandResults []CommandResult
-	ChangedFiles   []string
-	Blocked        bool
-	BlockReason    string
+	TaskID             string
+	CommandResults     []CommandResult
+	ChangedFiles       []string
+	ContextCheckResult *ContextCheckResult
+	ContextCheckError  string
+	TraceStdout        string
+	Blocked            bool
+	BlockReason        string
 }
 
 type CommandResult struct {
@@ -73,6 +78,9 @@ type Result struct {
 	ActualFiles     []string   `json:"actualFiles,omitempty"`
 	MissingFiles    []string   `json:"missingFiles,omitempty"`
 	UnexpectedFiles []string   `json:"unexpectedFiles,omitempty"`
+	ExpectedEvents  []string   `json:"expectedEvents,omitempty"`
+	ActualEvents    []string   `json:"actualEvents,omitempty"`
+	MissingEvents   []string   `json:"missingEvents,omitempty"`
 }
 
 func Score(suite Suite, input ScoreInput) Report {
@@ -108,6 +116,15 @@ func Score(suite Suite, input ScoreInput) Report {
 		report.Results = append(report.Results, scoreCommand(command, result, found, input))
 	}
 	report.Results = append(report.Results, scoreChangedFiles(task.ExpectedChangedFiles, report.ChangedFiles, input))
+	if len(task.ForbiddenChangedFiles) > 0 {
+		report.Results = append(report.Results, scoreForbiddenChangedFiles(task.ForbiddenChangedFiles, report.ChangedFiles, input))
+	}
+	if len(task.ContextChecks.RequiredFiles) > 0 || len(task.ContextChecks.ForbiddenFiles) > 0 {
+		report.Results = append(report.Results, scoreContextChecks(task.ContextChecks, input))
+	}
+	if len(task.RequiredTraceEvents) > 0 {
+		report.Results = append(report.Results, scoreTraceEvents(task.RequiredTraceEvents, input))
+	}
 	for _, result := range unknownCommandResults(input.CommandResults, seenCommands, input) {
 		report.Results = append(report.Results, result)
 	}
@@ -165,6 +182,83 @@ func scoreChangedFiles(expected []string, actual []string, input ScoreInput) Res
 	result.MissingFiles = diffFiles(expected, actual)
 	result.UnexpectedFiles = diffFiles(actual, expected)
 	if len(result.MissingFiles) > 0 || len(result.UnexpectedFiles) > 0 {
+		result.Status = StatusFail
+		return result
+	}
+	result.Status = StatusPass
+	return result
+}
+
+func scoreForbiddenChangedFiles(forbidden []string, actual []string, input ScoreInput) Result {
+	result := Result{
+		ID:            "forbidden_changed_files",
+		Name:          "Forbidden changed files",
+		Kind:          ResultChangedFiles,
+		ExpectedFiles: append([]string{}, forbidden...),
+		ActualFiles:   append([]string{}, actual...),
+	}
+	if input.Blocked {
+		result.Status = StatusBlocked
+		result.Message = blockMessage(input.BlockReason)
+		return result
+	}
+	result.UnexpectedFiles = intersectFiles(actual, forbidden)
+	if len(result.UnexpectedFiles) > 0 {
+		result.Status = StatusFail
+		return result
+	}
+	result.Status = StatusPass
+	return result
+}
+
+func scoreContextChecks(checks ContextChecks, input ScoreInput) Result {
+	result := Result{
+		ID:            "context_checks",
+		Name:          "Context quality checks",
+		Kind:          ResultContext,
+		ExpectedFiles: append([]string{}, checks.RequiredFiles...),
+	}
+	if input.Blocked {
+		result.Status = StatusBlocked
+		result.Message = blockMessage(input.BlockReason)
+		return result
+	}
+	if input.ContextCheckError != "" {
+		result.Status = StatusError
+		result.Message = input.ContextCheckError
+		return result
+	}
+	if input.ContextCheckResult == nil {
+		result.Status = StatusError
+		result.Message = "missing context check result"
+		return result
+	}
+	result.MissingFiles = append([]string{}, input.ContextCheckResult.MissingRequiredFiles...)
+	result.UnexpectedFiles = append([]string{}, input.ContextCheckResult.PresentForbiddenFiles...)
+	if len(result.MissingFiles) > 0 || len(result.UnexpectedFiles) > 0 {
+		result.Status = StatusFail
+		return result
+	}
+	result.Status = StatusPass
+	return result
+}
+
+func scoreTraceEvents(required []string, input ScoreInput) Result {
+	actual := ParseTraceEventKeys(input.TraceStdout)
+	result := Result{
+		ID:             "trace_events",
+		Name:           "Required agent trace events",
+		Kind:           ResultTrace,
+		ExpectedEvents: append([]string{}, required...),
+		ActualEvents:   actual,
+	}
+	if input.Blocked {
+		result.Status = StatusBlocked
+		result.Message = blockMessage(input.BlockReason)
+		return result
+	}
+	result.MissingEvents = diffFiles(required, actual)
+	if len(result.MissingEvents) > 0 {
 		result.Status = StatusFail
 		return result
 	}
@@ -265,6 +359,10 @@ func selectTask(suite Suite, taskID string) (Task, error) {
 
 func normalizeTask(task Task) Task {
 	task.ExpectedChangedFiles = normalizeFiles(task.ExpectedChangedFiles)
+	task.ForbiddenChangedFiles = normalizeFiles(task.ForbiddenChangedFiles)
+	task.RequiredTraceEvents = normalizeStrings(task.RequiredTraceEvents)
+	task.ContextChecks.RequiredFiles = normalizeFiles(task.ContextChecks.RequiredFiles)
+	task.ContextChecks.ForbiddenFiles = normalizeFiles(task.ContextChecks.ForbiddenFiles)
 	return task
 }
 
@@ -281,6 +379,23 @@ func diffFiles(left []string, right []string) []string {
 	}
 	sort.Strings(diff)
 	return diff
+}
+
+func intersectFiles(left []string, right []string) []string {
+	rightSet := map[string]bool{}
+	for _, file := range right {
+		rightSet[file] = true
+	}
+	intersection := []string{}
+	seen := map[string]bool{}
+	for _, file := range left {
+		if rightSet[file] && !seen[file] {
+			seen[file] = true
+			intersection = append(intersection, file)
+		}
+	}
+	sort.Strings(intersection)
+	return intersection
 }
 
 func blockMessage(reason string) string {

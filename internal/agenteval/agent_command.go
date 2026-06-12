@@ -12,13 +12,14 @@ type AgentRunInput struct {
 	TaskID        string
 	Prompt        string
 	WorkspacePath string
+	Model         string
 }
 
 type AgentRunResult struct {
-	ExitCode int
-	Stdout   string
-	Stderr   string
-	Error    string
+	ExitCode int    `json:"exitCode"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 type AgentRunner interface {
@@ -78,6 +79,7 @@ func expandAgentCommand(command []string, input AgentRunInput) []string {
 		arg = strings.ReplaceAll(arg, "{prompt}", input.Prompt)
 		arg = strings.ReplaceAll(arg, "{workspace}", input.WorkspacePath)
 		arg = strings.ReplaceAll(arg, "{task_id}", input.TaskID)
+		arg = strings.ReplaceAll(arg, "{model}", input.Model)
 		expanded[i] = arg
 	}
 	return expanded

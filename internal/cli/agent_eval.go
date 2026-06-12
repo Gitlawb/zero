@@ -19,26 +19,28 @@ type agentEvalOptions struct {
 	WorkspacePath  string   `json:"workspace_path,omitempty"`
 	WorkRoot       string   `json:"work_root,omitempty"`
 	AgentCommand   []string `json:"agent_command,omitempty"`
+	Models         []string `json:"models,omitempty"`
 	KeepWorkspaces bool     `json:"keep_workspaces,omitempty"`
 	ReportDir      string   `json:"report_dir,omitempty"`
 	JSON           bool     `json:"json"`
 }
 
 type agentEvalReport struct {
-	Suite      string             `json:"suite"`
-	Name       string             `json:"name,omitempty"`
-	TaskID     string             `json:"task_id,omitempty"`
-	Status     string             `json:"status,omitempty"`
-	OK         bool               `json:"ok"`
-	Tasks      int                `json:"tasks"`
-	Checks     int                `json:"checks"`
-	Total      int                `json:"total"`
-	Passed     int                `json:"passed"`
-	Failed     int                `json:"failed"`
-	Blocked    int                `json:"blocked"`
-	Errors     int                `json:"errors"`
-	ReportPath string             `json:"report_path,omitempty"`
-	Failures   []agentEvalFailure `json:"failures,omitempty"`
+	Suite      string                     `json:"suite"`
+	Name       string                     `json:"name,omitempty"`
+	TaskID     string                     `json:"task_id,omitempty"`
+	Status     string                     `json:"status,omitempty"`
+	OK         bool                       `json:"ok"`
+	Tasks      int                        `json:"tasks"`
+	Checks     int                        `json:"checks"`
+	Total      int                        `json:"total"`
+	Passed     int                        `json:"passed"`
+	Failed     int                        `json:"failed"`
+	Blocked    int                        `json:"blocked"`
+	Errors     int                        `json:"errors"`
+	ReportPath string                     `json:"report_path,omitempty"`
+	Failures   []agentEvalFailure         `json:"failures,omitempty"`
+	Benchmark  *agenteval.BenchmarkReport `json:"benchmark,omitempty"`
 }
 
 type agentEvalFailure struct {
@@ -162,6 +164,44 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 				return options, false, err
 			}
 			options.WorkRoot = strings.TrimSpace(value)
+		case arg == "--model":
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--model is only valid for eval bench"}
+			}
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.Models = appendAgentEvalModel(options.Models, value)
+			index = next
+		case strings.HasPrefix(arg, "--model="):
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--model is only valid for eval bench"}
+			}
+			value, err := requiredInlineFlagValue(arg, "--model")
+			if err != nil {
+				return options, false, err
+			}
+			options.Models = appendAgentEvalModel(options.Models, value)
+		case arg == "--models":
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--models is only valid for eval bench"}
+			}
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.Models = appendAgentEvalModels(options.Models, value)
+			index = next
+		case strings.HasPrefix(arg, "--models="):
+			if options.Mode != "bench" {
+				return options, false, execUsageError{"--models is only valid for eval bench"}
+			}
+			value, err := requiredInlineFlagValue(arg, "--models")
+			if err != nil {
+				return options, false, err
+			}
+			options.Models = appendAgentEvalModels(options.Models, value)
 		case arg == "--agent-command":
 			if options.Mode != "bench" {
 				return options, false, execUsageError{"--agent-command is only valid for eval bench"}
@@ -219,6 +259,26 @@ func parseAgentEvalArgs(args []string) (agentEvalOptions, bool, error) {
 	return options, false, nil
 }
 
+func appendAgentEvalModel(models []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return models
+	}
+	for _, model := range models {
+		if model == value {
+			return models
+		}
+	}
+	return append(models, value)
+}
+
+func appendAgentEvalModels(models []string, value string) []string {
+	for _, model := range strings.Split(value, ",") {
+		models = appendAgentEvalModel(models, model)
+	}
+	return models
+}
+
 func formatAgentEvalReport(report agentEvalReport) string {
 	lines := []string{
 		"Zero agent eval",
@@ -268,7 +328,7 @@ func writeAgentEvalHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero eval --suite <path> [flags]
   zero eval run --suite <path> [flags]
-  zero eval bench --suite <path> [flags] [--agent-command <argv...>]
+  zero eval bench --suite <path> [flags] [--model <id>] [--agent-command <argv...>]
 
 Validates offline agent eval suites, scores an existing workspace, or benchmarks an agent command against fixture workspaces.
 
@@ -277,7 +337,9 @@ Flags:
       --task <id>             Run one task (eval run or eval bench)
       --workspace <path>      Workspace path for local scoring (eval run only, default ".")
       --work-root <path>      Work root for materialized benchmark workspaces (eval bench only)
-      --agent-command <argv>  Agent command argv for eval bench; consumes remaining arguments
+      --model <id>            Model id for eval bench model-matrix runs; repeatable
+      --models <ids>          Comma-separated model ids for eval bench model-matrix runs
+      --agent-command <argv>  Agent command argv for eval bench; may include {prompt}, {workspace}, {task_id}, and {model}; consumes remaining arguments
       --keep-workspaces       Keep materialized benchmark workspaces (eval bench only)
       --report-dir <path>     Write agent-eval-report.json (eval run or eval bench)
       --json                  Print JSON output
@@ -313,15 +375,14 @@ func defaultRunAgentEval(ctx context.Context, options agentEvalOptions) (agentEv
 		report := harness.Run(ctx, options.SuitePath, suite, agenteval.BenchmarkInput{
 			TaskID:         options.TaskID,
 			WorkRoot:       workRoot,
+			Models:         options.Models,
 			KeepWorkspaces: options.KeepWorkspaces,
 		})
 		return agentEvalReportFromBenchmark(suite, report), nil
 	}
 	checks := 0
 	for _, task := range suite.Tasks {
-		// Every task has N verification commands plus one changed-file expectation
-		// check in the scoring contract.
-		checks += len(task.VerificationCommands) + 1
+		checks += agentEvalTaskCheckCount(task)
 	}
 	return agentEvalReport{
 		Suite:  suite.ID,
@@ -350,16 +411,17 @@ func agentEvalBenchWorkRoot(options agentEvalOptions) (string, string, error) {
 
 func agentEvalReportFromBenchmark(suite agenteval.Suite, report agenteval.BenchmarkReport) agentEvalReport {
 	converted := agentEvalReport{
-		Suite:   report.SuiteID,
-		Name:    suite.Name,
-		Status:  benchmarkStatus(report),
-		OK:      report.OK,
-		Tasks:   report.Summary.TotalTasks,
-		Total:   report.Summary.TotalTasks,
-		Passed:  report.Summary.PassedTasks,
-		Failed:  report.Summary.FailedTasks,
-		Blocked: report.Summary.BlockedTasks,
-		Errors:  report.Summary.ErrorTasks,
+		Suite:     report.SuiteID,
+		Name:      suite.Name,
+		Status:    benchmarkStatus(report),
+		OK:        report.OK,
+		Tasks:     report.Summary.TotalTasks,
+		Total:     report.Summary.TotalTasks,
+		Passed:    report.Summary.PassedTasks,
+		Failed:    report.Summary.FailedTasks,
+		Blocked:   report.Summary.BlockedTasks,
+		Errors:    report.Summary.ErrorTasks,
+		Benchmark: &report,
 	}
 	if converted.Suite == "" {
 		converted.Suite = suite.ID
@@ -390,9 +452,10 @@ func benchmarkStatus(report agenteval.BenchmarkReport) string {
 
 func agentEvalFailuresFromTaskReport(task agenteval.BenchmarkTaskReport) []agentEvalFailure {
 	failures := []agentEvalFailure{}
+	taskID := benchmarkFailureTaskID(task)
 	if task.Agent.Error != "" {
 		failures = append(failures, agentEvalFailure{
-			ID:      task.TaskID,
+			ID:      taskID,
 			Message: task.Agent.Error,
 		})
 	}
@@ -400,7 +463,7 @@ func agentEvalFailuresFromTaskReport(task agenteval.BenchmarkTaskReport) []agent
 		if result.Status == agenteval.StatusPass {
 			continue
 		}
-		id := task.TaskID
+		id := taskID
 		if result.ID != "" {
 			id += "." + result.ID
 		}
@@ -411,11 +474,18 @@ func agentEvalFailuresFromTaskReport(task agenteval.BenchmarkTaskReport) []agent
 	}
 	if task.Report.Error != "" {
 		failures = append(failures, agentEvalFailure{
-			ID:      task.TaskID,
+			ID:      taskID,
 			Message: task.Report.Error,
 		})
 	}
 	return failures
+}
+
+func benchmarkFailureTaskID(task agenteval.BenchmarkTaskReport) string {
+	if task.Model == "" {
+		return task.TaskID
+	}
+	return task.Model + "." + task.TaskID
 }
 
 func agentEvalReportFromRunner(suite agenteval.Suite, report agenteval.Report) agentEvalReport {
@@ -471,4 +541,18 @@ func writeAgentEvalReportFile(reportDir string, report agentEvalReport) error {
 		return err
 	}
 	return os.WriteFile(report.ReportPath, append(data, '\n'), 0o644)
+}
+
+func agentEvalTaskCheckCount(task agenteval.Task) int {
+	checks := len(task.VerificationCommands) + 1
+	if len(task.ForbiddenChangedFiles) > 0 {
+		checks++
+	}
+	if len(task.ContextChecks.RequiredFiles) > 0 || len(task.ContextChecks.ForbiddenFiles) > 0 {
+		checks++
+	}
+	if len(task.RequiredTraceEvents) > 0 {
+		checks++
+	}
+	return checks
 }

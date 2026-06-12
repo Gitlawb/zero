@@ -10,6 +10,7 @@ import (
 type BenchmarkInput struct {
 	TaskID         string
 	WorkRoot       string
+	Models         []string
 	KeepWorkspaces bool
 }
 
@@ -23,6 +24,7 @@ type BenchmarkReport struct {
 
 type BenchmarkTaskReport struct {
 	TaskID        string         `json:"taskId"`
+	Model         string         `json:"model,omitempty"`
 	WorkspacePath string         `json:"workspacePath"`
 	FixturePath   string         `json:"fixturePath"`
 	Agent         AgentRunResult `json:"agent"`
@@ -78,14 +80,16 @@ func (harness Harness) Run(ctx context.Context, suitePath string, suite Suite, i
 	}
 
 	for _, task := range tasks {
-		report.Tasks = append(report.Tasks, harness.runTask(ctx, suitePath, suite, task, input))
+		for _, model := range benchmarkModels(input.Models) {
+			report.Tasks = append(report.Tasks, harness.runTask(ctx, suitePath, suite, task, model, input))
+		}
 	}
 	report.finishSummary()
 	return report
 }
 
-func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suite, task Task, input BenchmarkInput) BenchmarkTaskReport {
-	taskReport := BenchmarkTaskReport{TaskID: task.ID}
+func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suite, task Task, model string, input BenchmarkInput) BenchmarkTaskReport {
+	taskReport := BenchmarkTaskReport{TaskID: task.ID, Model: model}
 	if harness.Agent == nil {
 		taskReport.Agent = AgentRunResult{ExitCode: -1, Error: "agent command is required"}
 		taskReport.Report = Score(suite, ScoreInput{
@@ -111,6 +115,7 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 
 	agentResult := harness.Agent.Run(ctx, AgentRunInput{
 		TaskID:        task.ID,
+		Model:         model,
 		Prompt:        task.Prompt,
 		WorkspacePath: workspace.Path,
 	})
@@ -128,6 +133,7 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 	taskReport.Report = harness.Runner.Run(ctx, suite, RunInput{
 		TaskID:        task.ID,
 		WorkspacePath: workspace.Path,
+		TraceStdout:   agentResult.Stdout,
 	})
 	return taskReport
 }
@@ -165,6 +171,23 @@ func selectBenchmarkTasks(suite Suite, taskID string) ([]Task, error) {
 		return nil, err
 	}
 	return []Task{task}, nil
+}
+
+func benchmarkModels(models []string) []string {
+	normalized := make([]string, 0, len(models))
+	seen := map[string]bool{}
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			continue
+		}
+		seen[model] = true
+		normalized = append(normalized, model)
+	}
+	if len(normalized) == 0 {
+		return []string{""}
+	}
+	return normalized
 }
 
 func errorReport(suiteID string, taskID string, message string) Report {

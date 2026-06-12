@@ -18,12 +18,20 @@ func TestLoadSuiteParsesJSONAndNormalizesDeterministicFields(t *testing.T) {
 			"id": "edit-reader",
 			"name": "Edit reader",
 			"description": "Keep prompt context tight.",
+			"tags": ["repo-map", "tool-use"],
+			"difficulty": "medium",
 			"prompt": "Update the reader.",
 			"workspaceFixture": "fixtures/reader",
+			"requiredTraceEvents": ["tool:read_file", "tool:apply_patch"],
+			"contextChecks": {
+				"requiredFiles": ["internal/reader/a/../b.go"],
+				"forbiddenFiles": ["node_modules/cache.txt"]
+			},
 			"verificationCommands": [
 				{"id": "test", "name": "Tests", "command": ["go", "test", "./..."]}
 			],
-			"expectedChangedFiles": ["internal/reader/a/../b.go", "internal/reader/a.go"]
+			"expectedChangedFiles": ["internal/reader/a/../b.go", "internal/reader/a.go"],
+			"forbiddenChangedFiles": ["docs/generated.log"]
 		}]
 	}`)
 
@@ -41,6 +49,25 @@ func TestLoadSuiteParsesJSONAndNormalizesDeterministicFields(t *testing.T) {
 	}
 	if got := strings.Join(suite.Tasks[0].VerificationCommands[0].Command, " "); got != "go test ./..." {
 		t.Fatalf("command = %q, want go test ./...", got)
+	}
+	task := suite.Tasks[0]
+	if !reflect.DeepEqual(task.Tags, []string{"repo-map", "tool-use"}) {
+		t.Fatalf("tags = %#v", task.Tags)
+	}
+	if task.Difficulty != "medium" {
+		t.Fatalf("difficulty = %q", task.Difficulty)
+	}
+	if !reflect.DeepEqual(task.RequiredTraceEvents, []string{"tool:apply_patch", "tool:read_file"}) {
+		t.Fatalf("required trace events = %#v", task.RequiredTraceEvents)
+	}
+	if !reflect.DeepEqual(task.ContextChecks.RequiredFiles, []string{"internal/reader/b.go"}) {
+		t.Fatalf("context required files = %#v", task.ContextChecks.RequiredFiles)
+	}
+	if !reflect.DeepEqual(task.ContextChecks.ForbiddenFiles, []string{"node_modules/cache.txt"}) {
+		t.Fatalf("context forbidden files = %#v", task.ContextChecks.ForbiddenFiles)
+	}
+	if !reflect.DeepEqual(task.ForbiddenChangedFiles, []string{"docs/generated.log"}) {
+		t.Fatalf("forbidden changed files = %#v", task.ForbiddenChangedFiles)
 	}
 }
 
@@ -90,16 +117,35 @@ func TestSampleSuiteLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sample suite should load: %v", err)
 	}
-	if len(suite.Tasks) < 5 || len(suite.Tasks) > 8 {
-		t.Fatalf("sample suite tasks = %d, want 5-8", len(suite.Tasks))
+	if len(suite.Tasks) < 8 || len(suite.Tasks) > 12 {
+		t.Fatalf("sample suite tasks = %d, want 8-12", len(suite.Tasks))
 	}
+	traceTasks := 0
 	for _, task := range suite.Tasks {
+		if len(task.Tags) == 0 {
+			t.Fatalf("sample task %q has no tags", task.ID)
+		}
+		if task.Difficulty == "" {
+			t.Fatalf("sample task %q has no difficulty", task.ID)
+		}
 		if len(task.ExpectedChangedFiles) == 0 {
 			t.Fatalf("sample task %q has no expected changed files", task.ID)
+		}
+		if len(task.ForbiddenChangedFiles) == 0 {
+			t.Fatalf("sample task %q has no forbidden changed files", task.ID)
+		}
+		if len(task.ContextChecks.RequiredFiles) == 0 {
+			t.Fatalf("sample task %q has no required context files", task.ID)
 		}
 		if len(task.VerificationCommands) == 0 {
 			t.Fatalf("sample task %q has no verification commands", task.ID)
 		}
+		if len(task.RequiredTraceEvents) > 0 {
+			traceTasks++
+		}
+	}
+	if traceTasks < 4 {
+		t.Fatalf("sample suite trace tasks = %d, want at least 4", traceTasks)
 	}
 }
 
@@ -165,6 +211,45 @@ func TestValidateRejectsDuplicateNormalizedExpectedChangedFiles(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "expectedChangedFiles[1] duplicates expectedChangedFiles[0]") {
 		t.Fatalf("unexpected validation error:\n%s", err.Error())
+	}
+}
+
+func TestValidateRejectsMalformedQualityFileLists(t *testing.T) {
+	err := Suite{
+		ID:   "suite",
+		Name: "Suite",
+		Tasks: []Task{{
+			ID:                    "task",
+			Name:                  "Task",
+			Prompt:                "Do it",
+			WorkspaceFixture:      "fixtures/task",
+			ExpectedChangedFiles:  []string{"internal/reader/a.go"},
+			ForbiddenChangedFiles: []string{"../outside.go", "logs/../logs/run.txt", "logs/run.txt"},
+			ContextChecks: ContextChecks{
+				RequiredFiles:  []string{"/tmp/outside.go"},
+				ForbiddenFiles: []string{"docs/ok.md", "docs/./ok.md"},
+			},
+			VerificationCommands: []Command{{
+				ID:      "test",
+				Name:    "Tests",
+				Command: []string{"go", "test", "./..."},
+			}},
+		}},
+	}.Validate()
+
+	if err == nil {
+		t.Fatal("Validate returned nil, want malformed quality file list errors")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"forbiddenChangedFiles[0] must be a relative workspace path",
+		"forbiddenChangedFiles[2] duplicates forbiddenChangedFiles[1]",
+		"contextChecks.requiredFiles[0] must be a relative workspace path",
+		"contextChecks.forbiddenFiles[1] duplicates contextChecks.forbiddenFiles[0]",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected validation error %q in:\n%s", want, message)
+		}
 	}
 }
 
@@ -269,6 +354,30 @@ func TestScoreFailsForCommandFailureAndChangedFileMismatch(t *testing.T) {
 	}
 	if !reflect.DeepEqual(changed.UnexpectedFiles, []string{"internal/reader/extra.go"}) {
 		t.Fatalf("unexpected files = %#v", changed.UnexpectedFiles)
+	}
+}
+
+func TestScoreFailsWhenForbiddenFilesChange(t *testing.T) {
+	suite := sampleSuite()
+	suite.Tasks[0].ForbiddenChangedFiles = []string{"internal/reader/private.go", "docs/generated.log"}
+
+	report := Score(suite, ScoreInput{
+		TaskID: "edit-reader",
+		CommandResults: []CommandResult{
+			{ID: "test", ExitCode: 0},
+		},
+		ChangedFiles: []string{"internal/reader/a.go", "internal/reader/b.go", "internal/reader/private.go"},
+	})
+
+	if report.OK || report.Status != StatusFail {
+		t.Fatalf("expected forbidden-file failure, got %#v", report)
+	}
+	result := findResultByID(t, report.Results, "forbidden_changed_files")
+	if result.Status != StatusFail {
+		t.Fatalf("forbidden result = %#v", result)
+	}
+	if !reflect.DeepEqual(result.UnexpectedFiles, []string{"internal/reader/private.go"}) {
+		t.Fatalf("forbidden touched files = %#v", result.UnexpectedFiles)
 	}
 }
 
@@ -445,6 +554,17 @@ func TestReportJSONIsStable(t *testing.T) {
 	if string(data) != want {
 		t.Fatalf("stable JSON mismatch:\n%s", string(data))
 	}
+}
+
+func findResultByID(t *testing.T, results []Result, id string) Result {
+	t.Helper()
+	for _, result := range results {
+		if result.ID == id {
+			return result
+		}
+	}
+	t.Fatalf("missing result %q in %#v", id, results)
+	return Result{}
 }
 
 func writeSuite(t *testing.T, content string) string {

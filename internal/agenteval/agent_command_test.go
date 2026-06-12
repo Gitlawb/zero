@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestCommandAgentRunnerExpandsPlaceholdersAndUsesWorkspaceDir(t *testing.T) {
+func TestAgentCommandRunnerExpandsPlaceholdersAndUsesWorkspaceDir(t *testing.T) {
 	workspace := t.TempDir()
 	runner := CommandAgentRunner{Command: helperCommand(
 		"record",
@@ -17,12 +17,14 @@ func TestCommandAgentRunnerExpandsPlaceholdersAndUsesWorkspaceDir(t *testing.T) 
 		"{task_id}",
 		"{workspace}",
 		"{prompt}",
+		"{model}",
 	)}
 
 	result := runner.Run(context.Background(), AgentRunInput{
 		TaskID:        "task-a",
 		WorkspacePath: workspace,
 		Prompt:        "fix bug",
+		Model:         "gpt-5",
 	})
 
 	if result.ExitCode != 0 || result.Error != "" {
@@ -33,7 +35,7 @@ func TestCommandAgentRunnerExpandsPlaceholdersAndUsesWorkspaceDir(t *testing.T) 
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	want := []string{"cwd=" + workspace, "task-a", workspace, "fix bug"}
+	want := []string{"cwd=" + workspace, "task-a", workspace, "fix bug", "gpt-5"}
 	if !reflect.DeepEqual(lines, want) {
 		t.Fatalf("recorded args = %#v, want %#v", lines, want)
 	}

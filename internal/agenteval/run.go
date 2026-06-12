@@ -14,6 +14,7 @@ import (
 type RunInput struct {
 	TaskID        string
 	WorkspacePath string
+	TraceStdout   string
 }
 
 type CommandRunner func(context.Context, string, Command) CommandResult
@@ -42,6 +43,16 @@ func (runner Runner) Run(ctx context.Context, suite Suite, input RunInput) Repor
 	if err := ctx.Err(); err != nil {
 		return runner.blocked(suite, task.ID, err.Error(), nil)
 	}
+	var contextResult *ContextCheckResult
+	var contextError string
+	if len(task.ContextChecks.RequiredFiles) > 0 || len(task.ContextChecks.ForbiddenFiles) > 0 {
+		result, err := task.ContextChecks.CheckWorkspace(workspace)
+		if err != nil {
+			contextError = err.Error()
+		} else {
+			contextResult = &result
+		}
+	}
 
 	results := make([]CommandResult, 0, len(task.VerificationCommands))
 	for _, command := range task.VerificationCommands {
@@ -62,9 +73,12 @@ func (runner Runner) Run(ctx context.Context, suite Suite, input RunInput) Repor
 	}
 
 	return Score(suite, ScoreInput{
-		TaskID:         task.ID,
-		CommandResults: results,
-		ChangedFiles:   files,
+		TaskID:             task.ID,
+		CommandResults:     results,
+		ChangedFiles:       files,
+		ContextCheckResult: contextResult,
+		ContextCheckError:  contextError,
+		TraceStdout:        input.TraceStdout,
 	})
 }
 
