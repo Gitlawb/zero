@@ -335,6 +335,8 @@ func TestProviderSnapshotAPIKeySetCountsAuthHeaderValue(t *testing.T) {
 		{"auth header only", config.ProviderProfile{Name: "p", AuthHeaderValue: "Bearer t"}, true},
 		{"both", config.ProviderProfile{Name: "p", APIKey: "sk-x", AuthHeaderValue: "Bearer t"}, true},
 		{"neither", config.ProviderProfile{Name: "p"}, false},
+		{"whitespace api key only", config.ProviderProfile{Name: "p", APIKey: "   "}, false},
+		{"whitespace auth header only", config.ProviderProfile{Name: "p", AuthHeaderValue: "   "}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

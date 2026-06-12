@@ -276,3 +276,29 @@ func fixedDoctorClock(value string) func() time.Time {
 	}
 	return func() time.Time { return parsed }
 }
+
+func TestProviderConfigCheckCredentialPresence(t *testing.T) {
+	base := func(extra func(*config.ProviderProfile)) config.ProviderProfile {
+		p := config.ProviderProfile{Name: "main", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"}
+		extra(&p)
+		return p
+	}
+	cases := []struct {
+		name    string
+		profile config.ProviderProfile
+		want    string
+	}{
+		{"api key", base(func(p *config.ProviderProfile) { p.APIKey = "sk-x" }), "set"},
+		{"auth header only", base(func(p *config.ProviderProfile) { p.AuthHeaderValue = "Bearer t" }), "set"},
+		{"whitespace api key", base(func(p *config.ProviderProfile) { p.APIKey = "   " }), "not set"},
+		{"no credential", base(func(*config.ProviderProfile) {}), "not set"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerConfigCheck(tc.profile).Details["credentialConfigured"]
+			if got != tc.want {
+				t.Fatalf("credentialConfigured = %v, want %q (matches ProviderSnapshot.APIKeySet trimming)", got, tc.want)
+			}
+		})
+	}
+}

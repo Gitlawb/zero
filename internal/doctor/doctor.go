@@ -126,21 +126,22 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 	if emptyProviderProfile(profile) {
 		return check("provider.config", "Provider config", StatusFail, "No LLM provider is configured.", map[string]any{"help": "Set a provider in config or environment."})
 	}
-	// Report key PRESENCE, never the value: the raw key would only be redacted
-	// downstream anyway, and an unconditional [REDACTED] read as "configured"
-	// even when no key was set at all.
-	// A profile can authenticate via a raw auth-header value instead of APIKey, so
-	// treat either as a configured credential (matches ProviderSnapshot.APIKeySet).
-	apiKey := "not set"
-	if profile.APIKey != "" || profile.AuthHeaderValue != "" {
-		apiKey = "set"
+	// Report credential PRESENCE, never the value. Reported under a non-sensitive
+	// key ("credentialConfigured"): the prior "apiKey" key was itself sensitive, so
+	// check()'s redaction scrubbed the indicator to [REDACTED] — making "set"/"not
+	// set" invisible. A profile can authenticate via a raw auth-header value instead
+	// of APIKey, and both are trimmed so a whitespace-only value reads "not set"
+	// (matching ProviderSnapshot.APIKeySet).
+	credential := "not set"
+	if strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
+		credential = "set"
 	}
 	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), map[string]any{
-		"name":     profile.Name,
-		"provider": profile.ProviderKind,
-		"baseURL":  profile.BaseURL,
-		"model":    profile.Model,
-		"apiKey":   apiKey,
+		"name":                 profile.Name,
+		"provider":             profile.ProviderKind,
+		"baseURL":              profile.BaseURL,
+		"model":                profile.Model,
+		"credentialConfigured": credential,
 	})
 }
 
