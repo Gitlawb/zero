@@ -177,6 +177,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
+	// Make local plugins live for this run: register their declared tools into the
+	// registry and collect their hooks + skill roots for the dispatcher and skill
+	// tool below. Done before --list-tools and filter validation so plugin tools
+	// are listable and filter-validatable; it fails OPEN (a bad plugin is skipped).
+	pluginActivation := activatePlugins(workspaceRoot, registry, deps, stderr)
 	if options.useSpec {
 		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
 	}
@@ -462,7 +467,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Autonomy:         options.autonomy,
 		Sandbox:          sandboxEngine,
 		FileTracker:      tools.NewFileTracker(),
-		Hooks:            newHookDispatcher(workspaceRoot),
+		Hooks:            newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
 		EnabledTools:     options.enabledTools,
 		DisabledTools:    options.disabledTools,
 		OnText:           writer.text,
