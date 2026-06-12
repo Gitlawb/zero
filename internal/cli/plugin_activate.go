@@ -33,6 +33,13 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 		return pluginActivation{}
 	}
 
+	// Load fails OPEN per plugin: a malformed manifest is recorded as a diagnostic
+	// and the plugin is dropped rather than aborting the whole load. Surface those
+	// diagnostics so a skipped plugin is never silent.
+	for _, diagnostic := range loaded.Diagnostics {
+		writePluginActivationWarning(stderr, formatLoadDiagnostic(diagnostic))
+	}
+
 	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot})
 	for _, warning := range result.Warnings {
 		writePluginActivationWarning(stderr, warning)
@@ -48,6 +55,17 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 	}
 
 	return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots}
+}
+
+// formatLoadDiagnostic renders a plugin load diagnostic into a single warning
+// line, prefixing the diagnostic kind and appending the manifest path (when
+// known) so an operator can locate the offending plugin.
+func formatLoadDiagnostic(diagnostic plugins.Diagnostic) string {
+	message := fmt.Sprintf("[%s] %s", diagnostic.Kind, diagnostic.Message)
+	if diagnostic.ManifestPath != "" {
+		message += " (" + diagnostic.ManifestPath + ")"
+	}
+	return message
 }
 
 func writePluginActivationWarning(stderr io.Writer, message string) {

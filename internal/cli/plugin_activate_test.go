@@ -106,6 +106,34 @@ func TestActivatePluginsRegistersPluginSkillTool(t *testing.T) {
 	}
 }
 
+func TestActivatePluginsSurfacesLoadDiagnostics(t *testing.T) {
+	// Load succeeds (no top-level error) but reports a per-plugin diagnostic for a
+	// plugin it had to skip. activatePlugins must forward that diagnostic to stderr
+	// rather than dropping it, so a skipped plugin is never silent.
+	deps := appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		loadPlugins: func(plugins.LoadOptions) (plugins.LoadResult, error) {
+			return plugins.LoadResult{
+				Diagnostics: []plugins.Diagnostic{{
+					Kind:    plugins.DiagnosticSchema,
+					Message: "schemaVersion: Expected schemaVersion 1.",
+				}},
+			}, nil
+		},
+		skillsDir: func() string { return t.TempDir() },
+	}
+	registry := tools.NewRegistry()
+	var stderr bytes.Buffer
+	activatePlugins(t.TempDir(), registry, deps, &stderr)
+
+	if stderr.Len() == 0 {
+		t.Fatal("a load diagnostic must be surfaced on stderr")
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("Expected schemaVersion 1")) {
+		t.Fatalf("stderr should carry the diagnostic message, got %q", stderr.String())
+	}
+}
+
 func TestActivatePluginsFailsOpenOnLoadError(t *testing.T) {
 	deps := appDeps{
 		loadPlugins: func(plugins.LoadOptions) (plugins.LoadResult, error) {

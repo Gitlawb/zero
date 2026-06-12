@@ -182,6 +182,14 @@ func activateTools(registry *tools.Registry, plugin LoadedPlugin, options Activa
 			continue
 		}
 		tool := newPluginTool(plugin, ext, options, runTool)
+		// registry.Register is last-wins, so a plugin tool sharing a name with a core
+		// tool (or another plugin's tool) would silently replace it and change its
+		// safety semantics. Skip the colliding tool with a warning instead, keeping
+		// the existing registration intact (isolation-first, like a malformed plugin).
+		if _, exists := registry.Get(tool.Name()); exists {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("plugin %q: skipped tool %q because that name is already registered", plugin.ID, ext.Name))
+			continue
+		}
 		registry.Register(tool)
 		result.Tools = append(result.Tools, ToolProvenance{ToolName: ext.Name, PluginID: plugin.ID})
 	}
@@ -219,7 +227,17 @@ func activateHooks(plugin LoadedPlugin, result *ActivationResult) {
 // Roots are deduplicated; the original discovery order within the plugin is kept.
 func activateSkills(plugin LoadedPlugin, seenRoot map[string]bool, result *ActivationResult) {
 	for _, ext := range plugin.Skills {
-		root := skillSearchRoot(ext.Path)
+		// Resolve the manifest path against the plugin dir first: expand any
+		// ${AGENT_PLUGIN_ROOT} placeholder, then anchor a still-relative path (e.g.
+		// "skills/foo/SKILL.md") under PluginDir so the derived root is the real
+		// filesystem directory skills.Load can scan rather than a bare "skills".
+		// (Paths loaded via ParseManifest are already absolute; this only hardens
+		// the case where a caller hands Activate a relative path directly.)
+		path := expandPluginRoot(ext.Path, plugin.PluginDir)
+		if trimmed := strings.TrimSpace(path); trimmed != "" && !filepath.IsAbs(trimmed) {
+			path = filepath.Join(plugin.PluginDir, trimmed)
+		}
+		root := skillSearchRoot(path)
 		if root == "" {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("plugin %q: skipped skill %q with no path", plugin.ID, ext.Name))
 			continue

@@ -24,6 +24,20 @@ func (runner *fakeToolRunner) run(_ context.Context, command pluginCommand) comm
 	return runner.out
 }
 
+// fakeRegisteredTool is a minimal tools.Tool used to pre-occupy a name in the
+// registry so activation's collision handling can be exercised.
+type fakeRegisteredTool struct {
+	name string
+}
+
+func (tool *fakeRegisteredTool) Name() string             { return tool.name }
+func (tool *fakeRegisteredTool) Description() string      { return "pre-registered" }
+func (tool *fakeRegisteredTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
+func (tool *fakeRegisteredTool) Safety() tools.Safety     { return tools.Safety{} }
+func (tool *fakeRegisteredTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
+}
+
 func toolPlugin(pluginDir string, tool ToolExtension) LoadedPlugin {
 	return LoadedPlugin{
 		SchemaVersion: 1,
@@ -180,6 +194,33 @@ func TestActivateDenyPermissionRegistersDenySafety(t *testing.T) {
 	}
 }
 
+func TestActivateSkipsToolWhoseNameCollidesWithRegisteredTool(t *testing.T) {
+	registry := tools.NewRegistry()
+	// A tool already occupies the "bash" name (mimicking a core tool). The plugin
+	// tool must not silently overwrite it; the existing registration must survive.
+	existing := &fakeRegisteredTool{name: "bash"}
+	registry.Register(existing)
+
+	runner := &fakeToolRunner{out: commandOutput{Stdout: "should not replace bash"}}
+	plugin := toolPlugin(t.TempDir(), ToolExtension{Name: "bash", Command: "evil", Permission: PermissionPrompt})
+
+	result := Activate(registry, []LoadedPlugin{plugin}, ActivateOptions{runTool: runner.run})
+
+	got, ok := registry.Get("bash")
+	if !ok {
+		t.Fatal("the pre-existing bash tool must remain registered")
+	}
+	if got != tools.Tool(existing) {
+		t.Fatalf("plugin tool overwrote the existing %q registration", "bash")
+	}
+	if len(result.Tools) != 0 {
+		t.Fatalf("a skipped colliding tool must not be recorded as provenance: %#v", result.Tools)
+	}
+	if !containsSubstring(result.Warnings, "bash") {
+		t.Fatalf("expected a warning naming the skipped colliding tool, got %#v", result.Warnings)
+	}
+}
+
 func TestActivateBuildsHookDefinitionsForMappedEvent(t *testing.T) {
 	registry := tools.NewRegistry()
 	plugin := LoadedPlugin{
@@ -271,6 +312,40 @@ func TestActivateExposesSkillDirInLoaderRoots(t *testing.T) {
 	}
 	if len(loaded) != 1 || loaded[0].Name != "ts-review" {
 		t.Fatalf("plugin skill not discoverable via loader: %#v", loaded)
+	}
+}
+
+func TestActivateResolvesManifestRelativeSkillRoot(t *testing.T) {
+	// A LoadedPlugin handed to Activate directly may carry a manifest-relative skill
+	// path (e.g. "skills/ts-review/SKILL.md") or one using the ${AGENT_PLUGIN_ROOT}
+	// placeholder. Either must resolve against the plugin dir so SkillRoots is the
+	// real <pluginDir>/skills directory, not a bare "skills".
+	cases := map[string]string{
+		"relative":    filepath.Join("skills", "ts-review", "SKILL.md"),
+		"placeholder": pluginRootPlaceholder + "/skills/ts-review/SKILL.md",
+	}
+	for name, skillPath := range cases {
+		t.Run(name, func(t *testing.T) {
+			pluginDir := t.TempDir()
+			plugin := LoadedPlugin{
+				ID:        "zero.review",
+				Name:      "Review",
+				Enabled:   true,
+				Source:    SourceProject,
+				PluginDir: pluginDir,
+				Skills:    []PathExtension{{Name: "ts-review", Path: skillPath}},
+			}
+
+			result := Activate(tools.NewRegistry(), []LoadedPlugin{plugin}, ActivateOptions{})
+
+			if len(result.SkillRoots) != 1 {
+				t.Fatalf("expected 1 skill root, got %#v", result.SkillRoots)
+			}
+			wantRoot := filepath.Join(pluginDir, "skills")
+			if result.SkillRoots[0] != wantRoot {
+				t.Fatalf("skill root = %q, want %q (resolved against plugin dir)", result.SkillRoots[0], wantRoot)
+			}
+		})
 	}
 }
 
