@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -124,5 +125,22 @@ func TestReconcileOverdueKeepsExactlyDueJob(t *testing.T) {
 	}
 	if o, _ := store.Get(overdue.ID); !o.NextRunAt.After(now) {
 		t.Fatalf("strictly-overdue job must be pushed to the future, got %v", o.NextRunAt)
+	}
+}
+
+func TestExtractStreamJSONError(t *testing.T) {
+	// Under --output-format stream-json the failure detail rides on stdout as an
+	// `error` event; the last one wins, and non-error lines are ignored.
+	output := strings.Join([]string{
+		`{"type":"run_start","runId":"r1"}`,
+		`{"type":"text","delta":"working"}`,
+		`{"type":"error","message":"provider request failed: 500"}`,
+		`{"type":"run_end","status":"error","exitCode":1}`,
+	}, "\n")
+	if got := extractStreamJSONError(output); got != "provider request failed: 500" {
+		t.Fatalf("extractStreamJSONError = %q, want the error event message", got)
+	}
+	if got := extractStreamJSONError(`{"type":"run_end","status":"success"}`); got != "" {
+		t.Fatalf("no error event should yield empty, got %q", got)
 	}
 }

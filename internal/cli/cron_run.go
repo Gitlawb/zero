@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/cron"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // execRunner runs a `zero exec ...` invocation and returns its exit code. The
@@ -148,7 +150,14 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 
 	rec := cron.RunRecord{JobID: job.ID, At: fired, ExitCode: code, SessionTitle: "cron:" + job.ID}
 	if code != 0 {
-		rec.Error = cronTruncate(strings.TrimSpace(errBuf.String()), 500)
+		// The job runs with --output-format stream-json, so a failure is reported as
+		// an `error` event on STDOUT, not stderr. Prefer that message; fall back to
+		// stderr when stdout carries no error event.
+		detail := strings.TrimSpace(errBuf.String())
+		if streamErr := extractStreamJSONError(outBuf.String()); streamErr != "" {
+			detail = streamErr
+		}
+		rec.Error = cronTruncate(detail, 500)
 	}
 
 	job.FireCount++
@@ -202,4 +211,30 @@ func cronTruncate(s string, max int) string {
 	// Cut on a UTF-8 rune boundary so a persisted run-error excerpt can't end in
 	// a split multi-byte rune (invalid UTF-8 in the cron record).
 	return cutRuneBoundary(s, max) + "…"
+}
+
+// extractStreamJSONError scans a stream-json output stream for the message of an
+// `error` event (the last one wins). Under --output-format stream-json the
+// failure detail rides on stdout, so this recovers it for the run record.
+func extractStreamJSONError(output string) string {
+	found := ""
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.Type == string(streamjson.EventError) {
+			if message := strings.TrimSpace(event.Message); message != "" {
+				found = message
+			}
+		}
+	}
+	return found
 }
