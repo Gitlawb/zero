@@ -415,3 +415,31 @@ func TestWebFetchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
 		t.Fatalf("error must explain the scoped allowlist, got %q", result.Output)
 	}
 }
+
+// TestRegistryRoutesWebFetchThroughSandboxScopedPolicy proves the full wiring:
+// the registry runs Evaluate (which passes a scoped, egress-capable backend),
+// then routes web_fetch through RunWithSandbox, whose per-host allowlist check
+// blocks an unlisted host before any network dial.
+func TestRegistryRoutesWebFetchThroughSandboxScopedPolicy(t *testing.T) {
+	failingClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("web_fetch must not dial: the registry must enforce the scoped policy first")
+		return nil, nil
+	})}
+	registry := NewRegistry()
+	registry.Register(newWebFetchToolWithClient(failingClient))
+
+	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+		Backend: zeroSandbox.Backend{
+			Name: zeroSandbox.BackendSandboxExec, Available: true,
+			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
+		},
+	})
+	res := registry.RunWithOptions(context.Background(), "web_fetch", map[string]any{"url": "https://evil.test"}, RunOptions{
+		Sandbox:           engine,
+		PermissionGranted: true,
+	})
+	if res.Status != StatusError || !strings.Contains(res.Output, "allowlist") {
+		t.Fatalf("registry must block an unlisted host via RunWithSandbox, got %q: %s", res.Status, res.Output)
+	}
+}
