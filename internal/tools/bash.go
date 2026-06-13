@@ -118,9 +118,13 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	// wait, so a backgrounded child cannot outlive the command or hang Run().
 	hardenProcessLifetime(command)
 
+	// Capture sandbox denials when the plan opted in (macOS + Policy.MonitorDenials).
+	// A no-op when MonitorTag is empty, so the default path is unchanged.
+	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
 	err = command.Run()
 	exitCode := commandExitCode(err)
 	meta["exit_code"] = strconv.Itoa(exitCode)
+	stderrText := appendSandboxViolations(stderr.String(), monitor.Stop())
 
 	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 		return Result{
@@ -139,16 +143,36 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		}
 		return Result{
 			Status: StatusError,
-			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderr.String(), exitCode, meta),
+			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
 			Meta:   meta,
 		}
 	}
 
 	return Result{
 		Status: StatusOK,
-		Output: formatBashOutput(stdout.String(), stderr.String(), exitCode),
+		Output: formatBashOutput(stdout.String(), stderrText, exitCode),
 		Meta:   meta,
 	}
+}
+
+// appendSandboxViolations appends a <sandbox_violations> block listing the denials
+// the sandbox log monitor captured, so the model can see what was blocked. With no
+// violations the stderr is returned unchanged.
+func appendSandboxViolations(stderr string, violations []string) string {
+	if len(violations) == 0 {
+		return stderr
+	}
+	var builder strings.Builder
+	builder.WriteString("<sandbox_violations>\n")
+	for _, violation := range violations {
+		builder.WriteString(violation)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("</sandbox_violations>")
+	if strings.TrimSpace(stderr) == "" {
+		return builder.String()
+	}
+	return stderr + "\n" + builder.String()
 }
 
 func shellIssueBlockResult(issue shellIssue) Result {

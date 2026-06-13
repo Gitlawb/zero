@@ -139,6 +139,13 @@ type Policy struct {
 	// boundary. When the sandbox is not active the flag is ignored: unsandboxed
 	// bash is never auto-allowed. Off by default.
 	AutoAllowBashWhenSandboxed bool `json:"autoAllowBashWhenSandboxed,omitempty"`
+	// MonitorDenials, when true on macOS, tags the sandbox-exec profile's denials
+	// and tails `log stream` for them so blocked operations can be surfaced back to
+	// the agent. Off by default: it starts a `log stream` subprocess per command and
+	// appends a <sandbox_violations> note to the command's stderr, so it is opt-in.
+	// Ignored on non-macOS backends, and a no-op where the OS does not deliver
+	// seatbelt denials to the unified log.
+	MonitorDenials bool `json:"monitorDenials,omitempty"`
 }
 
 type Request struct {

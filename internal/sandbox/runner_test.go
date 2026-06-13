@@ -250,6 +250,21 @@ func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
 	}
 }
 
+func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
+	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
+	if strings.Contains(off, "with message") {
+		t.Fatalf("denials must not be tagged when monitoring is off:\n%s", off)
+	}
+	if !strings.Contains(off, "(deny default)") {
+		t.Fatalf("profile missing the plain default-deny:\n%s", off)
+	}
+
+	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "")
+	if !strings.Contains(on, `(deny default (with message "`+sandboxDenialLogTag+`"))`) {
+		t.Fatalf("denials must be tagged when monitoring is on:\n%s", on)
+	}
+}
+
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
 	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 

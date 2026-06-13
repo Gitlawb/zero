@@ -489,3 +489,18 @@ func shellQuote(value string) string {
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
+
+func TestAppendSandboxViolations(t *testing.T) {
+	if got := appendSandboxViolations("err output", nil); got != "err output" {
+		t.Fatalf("no violations must leave stderr unchanged, got %q", got)
+	}
+	got := appendSandboxViolations("err output", []string{"deny file-write-create /etc/x"})
+	for _, want := range []string{"err output", "<sandbox_violations>", "deny file-write-create /etc/x", "</sandbox_violations>"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("annotated stderr missing %q:\n%s", want, got)
+		}
+	}
+	if block := appendSandboxViolations("", []string{"deny x"}); strings.HasPrefix(block, "\n") {
+		t.Fatalf("empty stderr must not yield a leading newline: %q", block)
+	}
+}

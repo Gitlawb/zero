@@ -33,6 +33,11 @@ type CommandPlan struct {
 	Dir           string   `json:"dir,omitempty"`
 	Env           []string `json:"env,omitempty"`
 	SandboxDir    string   `json:"sandboxDir,omitempty"`
+	// MonitorTag, when non-empty, is the unique marker embedded in the
+	// sandbox-exec profile's denial messages; a caller passes it to
+	// StartDenialMonitor to capture what the sandbox blocked. Empty unless
+	// Policy.MonitorDenials is set on a macOS sandbox-exec plan.
+	MonitorTag string `json:"monitorTag,omitempty"`
 	// cleanup releases resources tied to the plan's lifetime — currently the
 	// scoped-egress proxy, which must outlive the command run and be shut down
 	// afterwards. It is never serialized; callers invoke it via Cleanup() once the
@@ -357,6 +362,9 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 	if egress != nil {
 		plan.cleanup = egress.cleanup
 	}
+	if policy.MonitorDenials {
+		plan.MonitorTag = sandboxDenialLogTag
+	}
 	return plan
 }
 
@@ -464,6 +472,12 @@ var sandboxMachServices = []string{
 	"com.apple.pasteboard.1",
 }
 
+// sandboxDenialLogTag marks a sandbox-exec denial in the unified log when
+// Policy.MonitorDenials is set, so the runtime monitor can find it via
+// `log stream`. It is a fixed marker; with concurrent sandboxed commands a denial
+// may be attributed to more than one (acceptable for opt-in observability).
+const sandboxDenialLogTag = "zero-sandbox-denied-v1"
+
 func sandboxMachLookupRule() string {
 	filters := make([]string, 0, len(sandboxMachServices))
 	for _, service := range sandboxMachServices {
@@ -491,9 +505,16 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string) st
 		}
 		writeRule = "(allow file-write*\n  " + strings.Join(filters, "\n  ") + ")"
 	}
+	denyDefault := "(deny default)"
+	if policy.MonitorDenials {
+		// Tag denials so the runtime log monitor can attribute them; the message is
+		// emitted to the unified log on every deny and StartDenialMonitor filters
+		// `log stream` for this tag.
+		denyDefault = `(deny default (with message "` + sandboxDenialLogTag + `"))`
+	}
 	return strings.Join([]string{
 		"(version 1)",
-		"(deny default)",
+		denyDefault,
 		"(allow process*)",
 		"(allow sysctl-read)",
 		// Let a sandboxed command signal itself and its own process group so scripts
