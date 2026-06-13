@@ -84,6 +84,42 @@ func Connect(ctx context.Context, server Server) (ToolClient, error) {
 	}
 }
 
+// maxStderrCapture bounds how much of an MCP server's stderr is retained. The
+// buffer is only read when initialize fails (early in the process life), so a
+// modest head is plenty; this stops a long-lived, chatty server from growing the
+// buffer without bound for the whole process lifetime.
+const maxStderrCapture = 64 * 1024
+
+// boundedBuffer is a concurrency-safe io.Writer that retains at most cap bytes
+// (the earliest ones) and silently discards the rest, so attaching it as
+// cmd.Stderr can never leak unbounded memory. os/exec writes to it from its own
+// copy goroutine, hence the mutex.
+type boundedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+	cap int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if remaining := b.cap - b.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			b.buf.Write(p[:remaining])
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	// Report the full length so the writer never sees a short write.
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func connectStdio(ctx context.Context, server Server) (*Client, error) {
 	cmd := exec.CommandContext(ctx, server.Command, server.Args...)
 	cmd.Env = mergeProcessEnv(server.Env)
@@ -95,8 +131,8 @@ func connectStdio(ctx context.Context, server Server) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open MCP stdout for %s: %w", server.Name, err)
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &boundedBuffer{cap: maxStderrCapture}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start MCP server %s: %w", server.Name, err)
 	}

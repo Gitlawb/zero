@@ -638,3 +638,20 @@ func TestStdioClientServerFromConfig(t *testing.T) {
 		t.Fatalf("server = %#v", servers[0])
 	}
 }
+
+func TestBoundedBufferCapsRetainedBytes(t *testing.T) {
+	b := &boundedBuffer{cap: 8}
+
+	// Each Write must report the full input length (no short writes), even past cap.
+	if n, err := b.Write([]byte("hello")); n != 5 || err != nil {
+		t.Fatalf("Write 1 = (%d,%v), want (5,nil)", n, err)
+	}
+	if n, err := b.Write([]byte("world!!!")); n != 8 || err != nil {
+		t.Fatalf("Write 2 = (%d,%v), want (8,nil)", n, err)
+	}
+
+	// Only the first cap bytes are retained; the overflow is discarded.
+	if got := b.String(); got != "hellowor" {
+		t.Fatalf("retained %q, want %q (capped at 8 bytes, head kept)", got, "hellowor")
+	}
+}
