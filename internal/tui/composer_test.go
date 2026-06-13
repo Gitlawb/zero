@@ -155,25 +155,6 @@ func TestPastedMultilineComposerContentRendersAsPreview(t *testing.T) {
 	}
 }
 
-func TestPastedLongSingleLineComposerPreviewShowsLineCount(t *testing.T) {
-	paste := strings.Repeat("single line log entry ", 18)
-	m := newModel(context.Background(), Options{})
-
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
-	next := updated.(model)
-
-	if got := next.composerValue(); got != paste {
-		t.Fatalf("composer value should preserve full paste = %q, want %q", got, paste)
-	}
-	view := plainRender(t, next.composerBox(96))
-	if !strings.Contains(view, "1 line") {
-		t.Fatalf("composer preview should show line count instead of chars:\n%s", view)
-	}
-	if strings.Contains(view, "chars") {
-		t.Fatalf("composer preview should not show char count:\n%s", view)
-	}
-}
-
 func TestBackspaceAfterPastedPreviewDeletesWholePaste(t *testing.T) {
 	paste := "first line\nsecond line\nthird line"
 	m := newModel(context.Background(), Options{})

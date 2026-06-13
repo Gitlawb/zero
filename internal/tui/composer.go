@@ -327,11 +327,10 @@ func composerPastePreviewLabel(text string) (string, bool) {
 		snippet = "pasted text"
 	}
 	snippet = truncateComposerPasteSnippet(snippet, 48)
-	label := "lines"
-	if lineCount == 1 {
-		label = "line"
+	if lineCount >= 3 {
+		return "[" + snippet + " · " + strconv.Itoa(lineCount) + " lines]", true
 	}
-	return "[" + snippet + " · " + strconv.Itoa(lineCount) + " " + label + "]", true
+	return "[" + snippet + " · " + strconv.Itoa(runeCount) + " chars]", true
 }
 
 func truncateComposerPasteSnippet(text string, limit int) string {
