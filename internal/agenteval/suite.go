@@ -19,13 +19,18 @@ type Suite struct {
 }
 
 type Task struct {
-	ID                   string    `json:"id"`
-	Name                 string    `json:"name"`
-	Description          string    `json:"description,omitempty"`
-	Prompt               string    `json:"prompt"`
-	WorkspaceFixture     string    `json:"workspaceFixture"`
-	VerificationCommands []Command `json:"verificationCommands"`
-	ExpectedChangedFiles []string  `json:"expectedChangedFiles"`
+	ID                    string        `json:"id"`
+	Name                  string        `json:"name"`
+	Description           string        `json:"description,omitempty"`
+	Tags                  []string      `json:"tags,omitempty"`
+	Difficulty            string        `json:"difficulty,omitempty"`
+	Prompt                string        `json:"prompt"`
+	WorkspaceFixture      string        `json:"workspaceFixture"`
+	VerificationCommands  []Command     `json:"verificationCommands"`
+	ExpectedChangedFiles  []string      `json:"expectedChangedFiles"`
+	ForbiddenChangedFiles []string      `json:"forbiddenChangedFiles,omitempty"`
+	RequiredTraceEvents   []string      `json:"requiredTraceEvents,omitempty"`
+	ContextChecks         ContextChecks `json:"contextChecks,omitempty"`
 }
 
 type Command struct {
@@ -102,7 +107,11 @@ func (suite Suite) Validate() error {
 		if len(task.VerificationCommands) == 0 {
 			problems = append(problems, taskPath+" verificationCommands must not be empty")
 		}
-		problems = append(problems, validateExpectedChangedFiles(taskPath, task.ExpectedChangedFiles)...)
+		problems = append(problems, validateFileList(taskPath, "expectedChangedFiles", task.ExpectedChangedFiles, true)...)
+		problems = append(problems, validateFileList(taskPath, "forbiddenChangedFiles", task.ForbiddenChangedFiles, false)...)
+		problems = append(problems, validateFileList(taskPath, "contextChecks.requiredFiles", task.ContextChecks.RequiredFiles, false)...)
+		problems = append(problems, validateFileList(taskPath, "contextChecks.forbiddenFiles", task.ContextChecks.ForbiddenFiles, false)...)
+		problems = append(problems, validateStringList(taskPath, "requiredTraceEvents", task.RequiredTraceEvents)...)
 		commandIndexes := map[string]int{}
 		for commandIndex, command := range task.VerificationCommands {
 			commandPath := fmt.Sprintf("%s verificationCommands[%d]", taskPath, commandIndex)
@@ -130,6 +139,10 @@ func (suite Suite) Validate() error {
 func (suite *Suite) normalize() {
 	for taskIndex := range suite.Tasks {
 		suite.Tasks[taskIndex].ExpectedChangedFiles = normalizeFiles(suite.Tasks[taskIndex].ExpectedChangedFiles)
+		suite.Tasks[taskIndex].ForbiddenChangedFiles = normalizeFiles(suite.Tasks[taskIndex].ForbiddenChangedFiles)
+		suite.Tasks[taskIndex].RequiredTraceEvents = normalizeStrings(suite.Tasks[taskIndex].RequiredTraceEvents)
+		suite.Tasks[taskIndex].ContextChecks.RequiredFiles = normalizeFiles(suite.Tasks[taskIndex].ContextChecks.RequiredFiles)
+		suite.Tasks[taskIndex].ContextChecks.ForbiddenFiles = normalizeFiles(suite.Tasks[taskIndex].ContextChecks.ForbiddenFiles)
 	}
 }
 
@@ -148,27 +161,49 @@ func normalizeFiles(files []string) []string {
 	return normalized
 }
 
-func validateExpectedChangedFiles(taskPath string, files []string) []string {
-	if len(files) == 0 {
-		return []string{taskPath + " expectedChangedFiles must not be empty"}
+func validateFileList(taskPath string, field string, files []string, required bool) []string {
+	if required && len(files) == 0 {
+		return []string{taskPath + " " + field + " must not be empty"}
 	}
 	problems := []string{}
 	seen := map[string]int{}
 	for index, file := range files {
 		normalized, ok := normalizeEvalPath(file)
 		if !ok {
-			problems = append(problems, fmt.Sprintf("%s expectedChangedFiles[%d] must be a relative workspace path", taskPath, index))
+			problems = append(problems, fmt.Sprintf("%s %s[%d] must be a relative workspace path", taskPath, field, index))
 			continue
 		}
 		if normalized == "" {
-			problems = append(problems, fmt.Sprintf("%s expectedChangedFiles[%d] must not be empty", taskPath, index))
+			problems = append(problems, fmt.Sprintf("%s %s[%d] must not be empty", taskPath, field, index))
 			continue
 		}
 		if previous, ok := seen[normalized]; ok {
-			problems = append(problems, fmt.Sprintf("%s expectedChangedFiles[%d] duplicates expectedChangedFiles[%d]", taskPath, index, previous))
+			problems = append(problems, fmt.Sprintf("%s %s[%d] duplicates %s[%d]", taskPath, field, index, field, previous))
 			continue
 		}
 		seen[normalized] = index
+	}
+	return problems
+}
+
+func validateExpectedChangedFiles(taskPath string, files []string) []string {
+	return validateFileList(taskPath, "expectedChangedFiles", files, true)
+}
+
+func validateStringList(taskPath string, field string, values []string) []string {
+	problems := []string{}
+	seen := map[string]int{}
+	for index, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			problems = append(problems, fmt.Sprintf("%s %s[%d] must not be empty", taskPath, field, index))
+			continue
+		}
+		if previous, ok := seen[value]; ok {
+			problems = append(problems, fmt.Sprintf("%s %s[%d] duplicates %s[%d]", taskPath, field, index, field, previous))
+			continue
+		}
+		seen[value] = index
 	}
 	return problems
 }
@@ -190,6 +225,21 @@ func normalizeEvalPath(file string) (string, bool) {
 
 func blank(value string) bool {
 	return strings.TrimSpace(value) == ""
+}
+
+func normalizeStrings(values []string) []string {
+	seen := map[string]bool{}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		normalized = append(normalized, value)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func emptyCommand(command []string) bool {
