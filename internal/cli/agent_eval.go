@@ -537,12 +537,18 @@ func benchmarkStatus(report agenteval.BenchmarkReport) string {
 
 func agentEvalFailuresFromTaskReport(task agenteval.BenchmarkTaskReport) []agentEvalFailure {
 	failures := []agentEvalFailure{}
+	seen := map[string]struct{}{}
+	appendUnique := func(id string, message string) {
+		key := strings.TrimSpace(id) + "\x00" + strings.TrimSpace(message)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		failures = append(failures, agentEvalFailure{ID: id, Message: message})
+	}
 	taskID := benchmarkFailureTaskID(task)
 	if task.Agent.Error != "" {
-		failures = append(failures, agentEvalFailure{
-			ID:      taskID,
-			Message: task.Agent.Error,
-		})
+		appendUnique(taskID, task.Agent.Error)
 	}
 	for _, result := range task.Report.Results {
 		if result.Status == agenteval.StatusPass {
@@ -552,16 +558,10 @@ func agentEvalFailuresFromTaskReport(task agenteval.BenchmarkTaskReport) []agent
 		if result.ID != "" {
 			id += "." + result.ID
 		}
-		failures = append(failures, agentEvalFailure{
-			ID:      id,
-			Message: agentEvalResultMessage(result),
-		})
+		appendUnique(id, agentEvalResultMessage(result))
 	}
 	if task.Report.Error != "" {
-		failures = append(failures, agentEvalFailure{
-			ID:      taskID,
-			Message: task.Report.Error,
-		})
+		appendUnique(taskID, task.Report.Error)
 	}
 	return failures
 }

@@ -62,6 +62,7 @@ func (harness Harness) Run(ctx context.Context, suitePath string, suite Suite, i
 		taskID := input.TaskID
 		report.Tasks = append(report.Tasks, BenchmarkTaskReport{
 			TaskID: taskID,
+			Agent:  AgentRunResult{ExitCode: -1, Error: err.Error()},
 			Report: Report{
 				Contract: ReportContractVersion,
 				SuiteID:  suite.ID,
@@ -98,7 +99,11 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 		ctx, cancel = context.WithTimeout(ctx, input.Timeout)
 		defer cancel()
 	}
-	taskReport := BenchmarkTaskReport{TaskID: task.ID, Model: model}
+	taskReport := BenchmarkTaskReport{
+		TaskID: task.ID,
+		Model:  model,
+		Agent:  AgentRunResult{ExitCode: -1},
+	}
 	if harness.Agent == nil {
 		taskReport.Agent = AgentRunResult{ExitCode: -1, Error: "agent command is required"}
 		taskReport.Report = Score(suite, ScoreInput{
@@ -113,6 +118,7 @@ func (harness Harness) runTask(ctx context.Context, suitePath string, suite Suit
 		WorkRoot: input.WorkRoot,
 	})
 	if err != nil {
+		taskReport.Agent.Error = err.Error()
 		taskReport.Report = errorReport(suite.ID, task.ID, fmt.Sprintf("workspace materialization failed: %v", err))
 		return taskReport
 	}

@@ -137,6 +137,18 @@ func TestCommandAgentRunnerEmptyCommandReturnsError(t *testing.T) {
 	}
 }
 
+func TestCommandAgentRunnerRequiresWorkspacePath(t *testing.T) {
+	result := (CommandAgentRunner{Command: helperCommand("record", filepath.Join(t.TempDir(), "out.txt"))}).
+		Run(context.Background(), AgentRunInput{})
+
+	if result.ExitCode != -1 {
+		t.Fatalf("ExitCode = %d, want -1", result.ExitCode)
+	}
+	if result.Error != "workspace path is required" {
+		t.Fatalf("Error = %q", result.Error)
+	}
+}
+
 func TestCommandAgentRunnerReportsContextErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -209,8 +221,12 @@ func TestCommandAgentRunnerHelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 	case "exit":
-		os.Stdout.WriteString("agent stdout\n")
-		os.Stderr.WriteString("agent stderr\n")
+		if _, err := os.Stdout.WriteString("agent stdout\n"); err != nil {
+			os.Exit(2)
+		}
+		if _, err := os.Stderr.WriteString("agent stderr\n"); err != nil {
+			os.Exit(2)
+		}
 		os.Exit(7)
 	case "spew":
 		if len(args) < 3 {
@@ -220,7 +236,9 @@ func TestCommandAgentRunnerHelperProcess(t *testing.T) {
 		if err != nil {
 			os.Exit(2)
 		}
-		os.Stdout.Write([]byte(strings.Repeat("a", count)))
+		if _, err := os.Stdout.Write([]byte(strings.Repeat("a", count))); err != nil {
+			os.Exit(2)
+		}
 	case "sleep":
 		time.Sleep(30 * time.Second)
 	default:

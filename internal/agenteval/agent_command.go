@@ -52,6 +52,10 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 		result.Error = "agent command is required"
 		return result
 	}
+	if strings.TrimSpace(input.WorkspacePath) == "" {
+		result.Error = "workspace path is required"
+		return result
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

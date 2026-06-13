@@ -79,6 +79,34 @@ func TestMaterializeTaskRejectsSymlinkFixtureEntryAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestMaterializeTaskRejectsSymlinkFixtureRootEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on windows")
+	}
+	root := t.TempDir()
+	suitePath := filepath.Join(root, "suite.json")
+	fixturesDir := filepath.Join(root, "fixtures")
+	if err := os.MkdirAll(fixturesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "go.mod"), []byte("module outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(fixturesDir, "escape")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	task := Task{ID: "escape-task", WorkspaceFixture: "fixtures/escape"}
+
+	_, err := Materializer{}.MaterializeTask(context.Background(), suitePath, task, MaterializeInput{WorkRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("MaterializeTask returned nil error for a symlink-escaped fixture root")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "within") {
+		t.Fatalf("error %q does not mention containment", err)
+	}
+}
+
 func TestMaterializeTaskPreservesExecutableBit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix file mode bits are not preserved on windows")

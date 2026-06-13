@@ -335,6 +335,31 @@ func TestRunEvalBenchDefaultHarnessRunsModelMatrix(t *testing.T) {
 	}
 }
 
+func TestAgentEvalFailuresFromTaskReportDeduplicatesTaskLevelFailures(t *testing.T) {
+	failures := agentEvalFailuresFromTaskReport(agenteval.BenchmarkTaskReport{
+		TaskID: "task-a",
+		Model:  "model-a",
+		Agent:  agenteval.AgentRunResult{Error: "boom"},
+		Report: agenteval.Report{
+			Error: "boom",
+			Results: []agenteval.Result{
+				{Status: agenteval.StatusError, Message: "boom"},
+				{ID: "verify", Status: agenteval.StatusFail, Message: "boom"},
+			},
+		},
+	})
+
+	if len(failures) != 2 {
+		t.Fatalf("failures = %#v, want two unique entries", failures)
+	}
+	if failures[0] != (agentEvalFailure{ID: "model-a.task-a", Message: "boom"}) {
+		t.Fatalf("first failure = %#v", failures[0])
+	}
+	if failures[1] != (agentEvalFailure{ID: "model-a.task-a.verify", Message: "boom"}) {
+		t.Fatalf("second failure = %#v", failures[1])
+	}
+}
+
 func TestRunEvalBenchTextOutputShowsScores(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

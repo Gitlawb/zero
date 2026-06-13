@@ -73,18 +73,53 @@ func resolveFixturePath(suitePath string, fixture string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	canonicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve suite directory: %w", err)
+	}
 	resolved, err := filepath.Abs(filepath.Join(base, filepath.FromSlash(fixture)))
 	if err != nil {
 		return "", err
 	}
-	rel, err := filepath.Rel(base, resolved)
+	canonicalResolved, err := evalSymlinkPath(resolved)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(canonicalBase, canonicalResolved)
 	if err != nil {
 		return "", err
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", errors.New("workspace fixture must stay within suite directory")
 	}
-	return resolved, nil
+	return canonicalResolved, nil
+}
+
+func evalSymlinkPath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	current := filepath.Clean(path)
+	missing := []string{}
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func copyFixtureDir(src string, dst string) error {

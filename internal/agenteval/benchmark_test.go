@@ -263,6 +263,9 @@ func TestHarnessBlocksSelectedTasksWhenAgentIsNil(t *testing.T) {
 	if report.Tasks[0].Agent.Error != "agent command is required" {
 		t.Fatalf("Agent.Error = %q", report.Tasks[0].Agent.Error)
 	}
+	if report.Tasks[0].Agent.ExitCode != -1 {
+		t.Fatalf("Agent.ExitCode = %d, want -1", report.Tasks[0].Agent.ExitCode)
+	}
 	if report.Tasks[0].Report.Status != StatusBlocked {
 		t.Fatalf("Report.Status = %q", report.Tasks[0].Report.Status)
 	}
@@ -335,6 +338,9 @@ func TestHarnessReportsErrorForUnknownTaskID(t *testing.T) {
 	if report.Tasks[0].Report.Status != StatusError {
 		t.Fatalf("Report.Status = %q", report.Tasks[0].Report.Status)
 	}
+	if report.Tasks[0].Agent.ExitCode != -1 || !strings.Contains(report.Tasks[0].Agent.Error, "no-such-task") {
+		t.Fatalf("Agent should record non-run selection error, got %#v", report.Tasks[0].Agent)
+	}
 }
 
 func TestHarnessReportsErrorWhenMaterializationFails(t *testing.T) {
@@ -378,6 +384,9 @@ func TestHarnessReportsErrorWhenMaterializationFails(t *testing.T) {
 	}
 	if !strings.Contains(report.Tasks[0].Report.Error, "materialization failed") {
 		t.Fatalf("Report.Error = %q", report.Tasks[0].Report.Error)
+	}
+	if report.Tasks[0].Agent.ExitCode != -1 || report.Tasks[0].Agent.Error == "" {
+		t.Fatalf("Agent should record non-run materialization error, got %#v", report.Tasks[0].Agent)
 	}
 	if agentCalled {
 		t.Fatal("agent should not run when materialization fails")
