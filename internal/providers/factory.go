@@ -112,7 +112,11 @@ func resolveProfile(profile config.ProviderProfile, options Options) (resolvedPr
 
 	if entry, ok := registry.Get(model); ok {
 		modelProvider := configKind(entry.Provider)
-		if !explicitProvider || isImplicitOpenAI(profile, providerKind) {
+		// Adopt the registry entry's provider only when the caller did not pin one.
+		// (The old `|| isImplicitOpenAI(...)` clause was dead: explicitProvider==true
+		// means ProviderKind or Provider is set, but isImplicitOpenAI required both
+		// empty, so it could never add a case.)
+		if !explicitProvider {
 			providerKind = modelProvider
 		}
 		if providerKind == config.ProviderKindOpenAICompatible {
@@ -154,13 +158,6 @@ func explicitProviderKind(profile config.ProviderProfile) (config.ProviderKind, 
 		return config.ProviderKind(provider), true
 	}
 	return "", false
-}
-
-func isImplicitOpenAI(profile config.ProviderProfile, providerKind config.ProviderKind) bool {
-	return providerKind == config.ProviderKindOpenAI &&
-		strings.TrimSpace(string(profile.ProviderKind)) == "" &&
-		strings.TrimSpace(profile.Provider) == "" &&
-		strings.TrimSpace(profile.BaseURL) == ""
 }
 
 func configKind(provider modelregistry.ProviderKind) config.ProviderKind {

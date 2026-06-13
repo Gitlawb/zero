@@ -114,9 +114,17 @@ func (tool readFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		header = fmt.Sprintf("File: %s (lines %d-%d of %d)", relativePath, startLine, lastLine, total)
 	}
 
+	body := strings.Join(numbered, "\n")
+	if truncated {
+		// The Truncated flag alone is invisible to the model in the rendered
+		// output, so it cannot tell a max_lines cut from a complete read. Make the
+		// cut explicit and tell it how to continue.
+		body += fmt.Sprintf("\n\n[truncated: %d more line(s) in the requested range not shown; set start_line=%d to continue]", endLine-lastLine, lastLine+1)
+	}
+
 	return Result{
 		Status:    StatusOK,
-		Output:    header + "\n\n" + strings.Join(numbered, "\n"),
+		Output:    header + "\n\n" + body,
 		Truncated: truncated,
 	}
 }

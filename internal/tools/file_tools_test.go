@@ -38,6 +38,25 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	}
 }
 
+func TestReadFileToolMarksTruncation(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "a\nb\nc\nd\ne")
+
+	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+		"path":      "notes.txt",
+		"max_lines": 2,
+	})
+
+	if result.Status != StatusOK || !result.Truncated {
+		t.Fatalf("expected ok+truncated, got status=%s truncated=%v", result.Status, result.Truncated)
+	}
+	// The cut must be visible in the rendered output, not just the Truncated flag,
+	// and must tell the model where to continue.
+	if !strings.Contains(result.Output, "[truncated:") || !strings.Contains(result.Output, "start_line=3") {
+		t.Fatalf("expected truncation marker pointing to the next line, got %q", result.Output)
+	}
+}
+
 func TestReadFileToolRejectsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")
