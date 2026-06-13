@@ -117,7 +117,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/image",
 		usage:       "/image <path> | clear",
 		group:       commandGroupSession,
-		description: "Attach a local image to the next message (vision models). /image clear removes pending attachments.",
+		description: "Attach a local image (vision models) or PDF (text layer for any model) to the next message. /image clear removes pending attachments.",
 		kind:        commandImage,
 	},
 	{
