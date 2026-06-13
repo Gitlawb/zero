@@ -129,6 +129,22 @@ func TestSanitizeComposerPastePreservesNewlines(t *testing.T) {
 	}
 }
 
+func TestCtrlVDoesNotPasteIntoComposer(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("hello")
+	m.input.CursorEnd()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("ctrl+v should not run the textinput clipboard paste command")
+	}
+	if got := next.composerValue(); got != "hello" {
+		t.Fatalf("composer value after ctrl+v = %q, want unchanged", got)
+	}
+}
+
 func TestPastedMultilineComposerContentRendersAsPreview(t *testing.T) {
 	paste := strings.Join([]string{
 		"Create a book library dashboard page with the Bootstrap theme.",

@@ -294,6 +294,7 @@ func newModel(ctx context.Context, options Options) model {
 	input.TextStyle = zeroTheme.ink
 	input.PlaceholderStyle = zeroTheme.faint
 	input.Placeholder = composerPlaceholder
+	input.KeyMap.Paste.SetEnabled(false)
 	input.Focus()
 
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(zeroTheme.accent))

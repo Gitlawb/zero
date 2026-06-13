@@ -569,6 +569,30 @@ func TestSetupCredentialsAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T)
 	}
 }
 
+func TestSetupCredentialsCtrlVDoesNotRunClipboardPaste(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "ollama-cloud", Name: "Ollama Cloud", DefaultModel: "qwen3-coder:480b", EnvVar: "OLLAMA_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.setup.stage = setupStageCredentials
+	m.setup.apiKey.SetValue("existing")
+	m.setup.apiKey.CursorEnd()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("ctrl+v should not run the setup input clipboard paste command")
+	}
+	if got := next.setup.apiKey.Value(); got != "existing" {
+		t.Fatalf("setup API key after ctrl+v = %q, want unchanged", got)
+	}
+}
+
 func TestSetupModelStepSavesCatalogModelChoice(t *testing.T) {
 	var saved SetupSelection
 	m := newModel(context.Background(), Options{

@@ -78,6 +78,7 @@ func newSetupState(options SetupOptions) setupState {
 	apiKey.Placeholder = "paste key or leave blank"
 	apiKey.EchoMode = textinput.EchoPassword
 	apiKey.EchoCharacter = '*'
+	apiKey.KeyMap.Paste.SetEnabled(false)
 	apiKey.Focus()
 	return setupState{
 		visible:    options.Visible,
