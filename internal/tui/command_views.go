@@ -47,7 +47,7 @@ func (m model) toolsText() string {
 	})
 }
 
-func (m model) mcpText() string {
+func (m *model) mcpText() string {
 	width := 0
 	if m.width > 0 {
 		width = chatWidth(m.width)
@@ -66,7 +66,7 @@ func (m *model) refreshMCPViewState() {
 	m.mcpViewStateReady = true
 }
 
-func (m model) mcpViewState() MCPViewState {
+func (m *model) mcpViewState() MCPViewState {
 	if m.mcpViewStateReady {
 		return m.mcpViewStateCache
 	}
