@@ -144,6 +144,16 @@ func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 			return exitCrash
 		}
 		return exitSuccess
+	case "add":
+		return runMCPAdd(args[1:], stdout, stderr, deps)
+	case "remove", "rm":
+		return runMCPRemove(args[1:], stdout, stderr, deps)
+	case "enable":
+		return runMCPToggle(args[1:], stdout, stderr, deps, false)
+	case "disable":
+		return runMCPToggle(args[1:], stdout, stderr, deps, true)
+	case "check":
+		return runMCPCheck(args[1:], stdout, stderr, deps)
 	case "permissions":
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
 	case "tools":
@@ -563,10 +573,15 @@ func writeMCPHelp(w io.Writer) error {
   zero mcp <command>
 
 Commands:
-  list           List configured MCP servers, or tools with --tools
-  oauth          Manage OAuth credentials for remote MCP servers
-  permissions    Manage persistent MCP tool permissions
-  tools          Inspect configured MCP tools
+  add <server>      Add or update an MCP server in user config
+  remove <server>   Remove an MCP server from user config
+  enable <server>   Enable a user-configured MCP server
+  disable <server>  Disable a user-configured MCP server
+  check <server>    Connect to one MCP server and list its tools
+  list              List configured MCP servers, or tools with --tools
+  oauth             Manage OAuth credentials for remote MCP servers
+  permissions       Manage persistent MCP tool permissions
+  tools             Inspect configured MCP tools
 `)
 	return err
 }

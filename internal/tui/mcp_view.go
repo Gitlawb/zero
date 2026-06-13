@@ -1,0 +1,274 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+type MCPViewState struct {
+	Servers     []MCPServerView
+	Tools       []MCPToolView
+	Permissions MCPPermissionSummary
+	OAuth       MCPOAuthSummary
+}
+
+type MCPServerView struct {
+	Name      string
+	Transport string
+	State     string
+	Target    string
+	Auth      string
+	ToolCount int
+}
+
+type MCPToolView struct {
+	ServerName   string
+	Name         string
+	RegistryName string
+	SideEffect   string
+	Permission   string
+	Description  string
+}
+
+type MCPPermissionSummary struct {
+	Mode         string
+	GrantCount   int
+	ServerGrants int
+	ToolGrants   int
+	PromptCount  int
+	DeniedCount  int
+	Grants       []MCPPermissionGrantView
+}
+
+type MCPPermissionGrantView struct {
+	Target     string
+	Autonomy   string
+	ApprovedAt string
+}
+
+type MCPOAuthSummary struct {
+	Servers []MCPOAuthServerView
+}
+
+type MCPOAuthServerView struct {
+	ServerName      string
+	Configured      bool
+	HasToken        bool
+	HasRefreshToken bool
+	TokenType       string
+	Scopes          []string
+	ExpiresAt       time.Time
+	Expired         bool
+}
+
+func renderMCPView(state MCPViewState, width int) string {
+	output := commandOutput{
+		Title:  "MCP",
+		Status: mcpViewStatus(state),
+	}
+
+	if !hasMCPViewContent(state) {
+		output.Sections = []commandSection{{
+			Title: "State",
+			Lines: []string{"No MCP servers configured."},
+		}}
+		output.Hints = []string{"zero mcp list", "zero mcp tools list"}
+		return fitCommandOutput(output, width)
+	}
+
+	if len(state.Servers) > 0 {
+		output.Sections = append(output.Sections, commandSection{
+			Title: "Servers",
+			Lines: mcpServerLines(state.Servers),
+		})
+	}
+	if len(state.Tools) > 0 {
+		output.Sections = append(output.Sections, commandSection{
+			Title: "Tools",
+			Lines: mcpToolLines(state.Tools),
+		})
+	}
+	if hasMCPPermissionSummary(state.Permissions) {
+		output.Sections = append(output.Sections, commandSection{
+			Title: "Permissions",
+			Lines: mcpPermissionLines(state.Permissions),
+		})
+	}
+	if len(state.OAuth.Servers) > 0 {
+		output.Sections = append(output.Sections, commandSection{
+			Title: "OAuth",
+			Lines: mcpOAuthLines(state.OAuth.Servers),
+		})
+	}
+
+	return fitCommandOutput(output, width)
+}
+
+func mcpViewStatus(state MCPViewState) commandStatus {
+	if !hasMCPViewContent(state) {
+		return commandStatusWarning
+	}
+	for _, server := range state.Servers {
+		status := strings.ToLower(strings.TrimSpace(server.State))
+		if strings.Contains(status, "error") || strings.Contains(status, "failed") {
+			return commandStatusBlocked
+		}
+	}
+	return commandStatusOK
+}
+
+func hasMCPViewContent(state MCPViewState) bool {
+	return len(state.Servers) > 0 ||
+		len(state.Tools) > 0 ||
+		hasMCPPermissionSummary(state.Permissions) ||
+		len(state.OAuth.Servers) > 0
+}
+
+func mcpServerLines(servers []MCPServerView) []string {
+	lines := make([]string, 0, len(servers))
+	for _, server := range servers {
+		name := displayValue(strings.TrimSpace(server.Name), "unnamed")
+		transport := displayValue(strings.TrimSpace(server.Transport), "unknown")
+		state := displayValue(strings.TrimSpace(server.State), "configured")
+
+		line := fmt.Sprintf("%s [%s] %s", name, transport, state)
+		if auth := strings.TrimSpace(server.Auth); auth != "" {
+			line += " " + auth
+		}
+		if server.ToolCount > 0 {
+			line += " " + pluralCount(server.ToolCount, "tool")
+		}
+		if target := strings.TrimSpace(server.Target); target != "" {
+			line += " - " + target
+		}
+		lines = append(lines, commandBullet(line))
+	}
+	return lines
+}
+
+func mcpToolLines(tools []MCPToolView) []string {
+	lines := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.RegistryName)
+		if name == "" {
+			name = strings.Trim(strings.Join([]string{"mcp", tool.ServerName, tool.Name}, "_"), "_")
+		}
+		if name == "" {
+			name = "mcp_tool"
+		}
+
+		sideEffect := displayValue(strings.TrimSpace(tool.SideEffect), "unknown")
+		permission := displayValue(strings.TrimSpace(tool.Permission), "prompt")
+		line := fmt.Sprintf("%s [%s/%s]", name, sideEffect, permission)
+
+		if target := mcpToolTarget(tool); target != "" {
+			line += " - " + target
+		}
+		if description := strings.TrimSpace(tool.Description); description != "" {
+			line += " - " + description
+		}
+		lines = append(lines, commandBullet(line))
+	}
+	return lines
+}
+
+func mcpToolTarget(tool MCPToolView) string {
+	server := strings.TrimSpace(tool.ServerName)
+	name := strings.TrimSpace(tool.Name)
+	switch {
+	case server != "" && name != "":
+		return server + "/" + name
+	case server != "":
+		return server + "/*"
+	default:
+		return name
+	}
+}
+
+func hasMCPPermissionSummary(summary MCPPermissionSummary) bool {
+	return strings.TrimSpace(summary.Mode) != "" ||
+		summary.GrantCount > 0 ||
+		summary.ServerGrants > 0 ||
+		summary.ToolGrants > 0 ||
+		summary.PromptCount > 0 ||
+		summary.DeniedCount > 0 ||
+		len(summary.Grants) > 0
+}
+
+func mcpPermissionLines(summary MCPPermissionSummary) []string {
+	lines := []string{
+		"mode: " + displayValue(strings.TrimSpace(summary.Mode), "unknown"),
+		fmt.Sprintf("persistent grants: %d", summary.GrantCount),
+		fmt.Sprintf("server grants: %d", summary.ServerGrants),
+		fmt.Sprintf("tool grants: %d", summary.ToolGrants),
+		fmt.Sprintf("prompted this session: %d", summary.PromptCount),
+		fmt.Sprintf("denied this session: %d", summary.DeniedCount),
+	}
+	if len(summary.Grants) == 0 {
+		return lines
+	}
+	for _, grant := range summary.Grants {
+		target := displayValue(strings.TrimSpace(grant.Target), "unknown")
+		autonomy := displayValue(strings.TrimSpace(grant.Autonomy), "low")
+		line := fmt.Sprintf("%s [%s]", target, autonomy)
+		if approvedAt := strings.TrimSpace(grant.ApprovedAt); approvedAt != "" {
+			line += " approved " + approvedAt
+		}
+		lines = append(lines, commandBullet(line))
+	}
+	return lines
+}
+
+func mcpOAuthLines(servers []MCPOAuthServerView) []string {
+	lines := make([]string, 0, len(servers))
+	for _, server := range servers {
+		name := displayValue(strings.TrimSpace(server.ServerName), "unnamed")
+		parts := []string{name}
+		if server.Configured {
+			parts = append(parts, "configured")
+			if server.HasToken {
+				parts = append(parts, "token")
+			} else {
+				parts = append(parts, "no token")
+			}
+			if server.HasRefreshToken {
+				parts = append(parts, "refresh")
+			}
+			if server.Expired {
+				parts = append(parts, "expired")
+			} else if !server.ExpiresAt.IsZero() {
+				parts = append(parts, "expires", server.ExpiresAt.UTC().Format(time.RFC3339))
+			}
+			if tokenType := strings.TrimSpace(server.TokenType); tokenType != "" {
+				parts = append(parts, tokenType)
+			}
+			if len(server.Scopes) > 0 {
+				parts = append(parts, "scopes", strings.Join(server.Scopes, ","))
+			}
+		} else {
+			parts = append(parts, "not configured")
+		}
+		lines = append(lines, commandBullet(strings.Join(parts, " ")))
+	}
+	return lines
+}
+
+func fitCommandOutput(output commandOutput, width int) string {
+	rendered := renderCommandOutput(output)
+	if width <= 0 {
+		return rendered
+	}
+	lines := strings.Split(rendered, "\n")
+	for index, line := range lines {
+		lines[index] = fitStyledLine(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func pluralCount(count int, noun string) string {
+	if count == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", count, noun)
+}

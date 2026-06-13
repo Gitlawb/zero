@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -45,6 +46,9 @@ type model struct {
 	registry               *tools.Registry
 	sessionStore           *sessions.Store
 	sandboxStore           *sandbox.GrantStore
+	mcpConfig              config.MCPConfig
+	mcpPermissionStore     *internalmcp.PermissionStore
+	mcpTokenStore          *internalmcp.TokenStore
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
@@ -318,6 +322,9 @@ func newModel(ctx context.Context, options Options) model {
 		registry:               registry,
 		sessionStore:           sessionStore,
 		sandboxStore:           sandboxStore,
+		mcpConfig:              options.MCPConfig,
+		mcpPermissionStore:     options.MCPPermissionStore,
+		mcpTokenStore:          options.MCPTokenStore,
 		agentOptions:           options.AgentOptions,
 		sessionCompactor:       options.SessionCompactor,
 		runtimeMessageSink:     options.RuntimeMessageSink,
@@ -1407,6 +1414,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
+		return m, nil
+	case commandMCP:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.mcpText()})
 		return m, nil
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})

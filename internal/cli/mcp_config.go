@@ -1,0 +1,770 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+type mcpAddOptions struct {
+	json       bool
+	serverName string
+	server     config.MCPServerConfig
+}
+
+type mcpWritableConfig struct {
+	file      config.FileConfig
+	raw       map[string]json.RawMessage
+	mcpRaw    map[string]json.RawMessage
+	serverRaw map[string]json.RawMessage
+}
+
+func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseMCPAddArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeMCPAddHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
+	}
+	cfg, err := readMCPWritableConfig(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if cfg.file.MCP.Servers == nil {
+		cfg.file.MCP.Servers = map[string]config.MCPServerConfig{}
+	}
+	updated, err := cfg.upsertServer(options.serverName, options.server)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := writeMCPWritableConfig(configPath, cfg); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+
+	if options.json {
+		payload := struct {
+			ServerName string                 `json:"serverName"`
+			Updated    bool                   `json:"updated"`
+			ConfigPath string                 `json:"configPath"`
+			Server     config.MCPServerConfig `json:"server"`
+		}{
+			ServerName: options.serverName,
+			Updated:    updated,
+			ConfigPath: configPath,
+			Server:     redactMCPServerConfigs(map[string]config.MCPServerConfig{options.serverName: options.server})[options.serverName],
+		}
+		if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	action := "Added"
+	if updated {
+		action = "Updated"
+	}
+	if _, err := fmt.Fprintf(stdout, "%s MCP server %s in %s.\n", action, options.serverName, configPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, positional, help, err := parseMCPConfigPositionalCommand(args, "remove")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeMCPRemoveHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if len(positional) != 1 {
+		return writeExecUsageError(stderr, "usage: zero mcp remove <server> [--json]")
+	}
+	serverName := positional[0]
+	if err := mcp.ValidateServerName(serverName); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
+	}
+	cfg, err := readMCPWritableConfig(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	removed, err := cfg.removeServer(serverName)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if removed {
+		if err := writeMCPWritableConfig(configPath, cfg); err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+	}
+
+	if options.json {
+		payload := struct {
+			ServerName string `json:"serverName"`
+			Removed    bool   `json:"removed"`
+			ConfigPath string `json:"configPath"`
+		}{ServerName: serverName, Removed: removed, ConfigPath: configPath}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if removed {
+		if _, err := fmt.Fprintf(stdout, "Removed MCP server %s from %s.\n", serverName, configPath); err != nil {
+			return exitCrash
+		}
+	} else if _, err := fmt.Fprintf(stdout, "No MCP server named %s is configured in %s.\n", serverName, configPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) int {
+	commandName := "enable"
+	if disabled {
+		commandName = "disable"
+	}
+	options, positional, help, err := parseMCPConfigPositionalCommand(args, commandName)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeMCPToggleHelp(stdout, commandName); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if len(positional) != 1 {
+		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero mcp %s <server> [--json]", commandName))
+	}
+	serverName := positional[0]
+	if err := mcp.ValidateServerName(serverName); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
+	}
+	cfg, err := readMCPWritableConfig(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	changed, found, err := cfg.setServerDisabled(serverName, disabled)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if !found {
+		return writeExecUsageError(stderr, fmt.Sprintf("MCP server %s is not configured in user config", serverName))
+	}
+	if changed {
+		if err := writeMCPWritableConfig(configPath, cfg); err != nil {
+			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+		}
+	}
+
+	if options.json {
+		payload := struct {
+			ServerName string `json:"serverName"`
+			Disabled   bool   `json:"disabled"`
+			Changed    bool   `json:"changed"`
+			ConfigPath string `json:"configPath"`
+		}{ServerName: serverName, Disabled: disabled, Changed: changed, ConfigPath: configPath}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+
+	state := "enabled"
+	if disabled {
+		state = "disabled"
+	}
+	if changed {
+		if _, err := fmt.Fprintf(stdout, "MCP server %s is now %s in %s.\n", serverName, state, configPath); err != nil {
+			return exitCrash
+		}
+	} else if _, err := fmt.Fprintf(stdout, "MCP server %s was already %s in %s.\n", serverName, state, configPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func runMCPCheck(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, positional, help, err := parseMCPConfigPositionalCommand(args, "check")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeMCPCheckHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if len(positional) != 1 {
+		return writeExecUsageError(stderr, "usage: zero mcp check <server> [--json]")
+	}
+	serverName := positional[0]
+	if err := mcp.ValidateServerName(serverName); err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	cwd, err := deps.getwd()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
+	}
+	cfg, err := deps.resolveMCPConfig(cwd)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	raw, ok := cfg.Servers[serverName]
+	if !ok {
+		return writeAppError(stderr, fmt.Sprintf("MCP server %q is not configured", serverName), exitCrash)
+	}
+	if raw.Disabled {
+		return writeAppError(stderr, fmt.Sprintf("MCP server %q is disabled", serverName), exitCrash)
+	}
+	scoped := config.MCPConfig{Servers: map[string]config.MCPServerConfig{serverName: raw}}
+	if _, err := mcp.NormalizeConfig(scoped); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+
+	store, err := deps.newMCPStore()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	registry := tools.NewRegistry()
+	runtime, err := deps.registerMCPTools(context.Background(), registry, scoped, mcp.RegisterOptions{
+		PermissionStore: store,
+		Autonomy:        mcp.AutonomyLow,
+	})
+	if err != nil {
+		closeMCPRuntime(stderr, runtime)
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	defer closeMCPRuntime(stderr, runtime)
+
+	items := mcpToolList(registry)
+	if options.json {
+		payload := struct {
+			ServerName string            `json:"serverName"`
+			Status     string            `json:"status"`
+			ToolCount  int               `json:"toolCount"`
+			Tools      []mcpToolListItem `json:"tools"`
+		}{ServerName: serverName, Status: "ok", ToolCount: len(items), Tools: items}
+		if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "MCP server %s is reachable. %d tool(s) available.\n", serverName, len(items)); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func parseMCPAddArgs(args []string) (mcpAddOptions, bool, error) {
+	options := mcpAddOptions{}
+	command := []string{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			return options, true, nil
+		case options.serverName == "":
+			if strings.HasPrefix(arg, "-") {
+				return options, false, execUsageError{"usage: zero mcp add <server> [flags] -- <command> [args...]"}
+			}
+			options.serverName = arg
+		case arg == "--":
+			command = append(command, args[i+1:]...)
+			i = len(args)
+		case arg == "--json":
+			options.json = true
+		case arg == "--disabled":
+			options.server.Disabled = true
+		case arg == "--type":
+			value, err := requiredNextMCPFlagValue(args, &i, "--type")
+			if err != nil {
+				return options, false, err
+			}
+			options.server.Type = value
+		case strings.HasPrefix(arg, "--type="):
+			value, err := requiredInlineFlagValue(arg, "--type")
+			if err != nil {
+				return options, false, err
+			}
+			options.server.Type = value
+		case arg == "--url":
+			value, err := requiredNextMCPFlagValue(args, &i, "--url")
+			if err != nil {
+				return options, false, err
+			}
+			options.server.URL = value
+		case strings.HasPrefix(arg, "--url="):
+			value, err := requiredInlineFlagValue(arg, "--url")
+			if err != nil {
+				return options, false, err
+			}
+			options.server.URL = value
+		case arg == "--env":
+			value, err := requiredNextMCPFlagValue(args, &i, "--env")
+			if err != nil {
+				return options, false, err
+			}
+			if err := addMCPStringMapValue(&options.server.Env, value, "--env"); err != nil {
+				return options, false, err
+			}
+		case strings.HasPrefix(arg, "--env="):
+			value, err := requiredInlineFlagValue(arg, "--env")
+			if err != nil {
+				return options, false, err
+			}
+			if err := addMCPStringMapValue(&options.server.Env, value, "--env"); err != nil {
+				return options, false, err
+			}
+		case arg == "--header":
+			value, err := requiredNextMCPFlagValue(args, &i, "--header")
+			if err != nil {
+				return options, false, err
+			}
+			if err := addMCPStringMapValue(&options.server.Headers, value, "--header"); err != nil {
+				return options, false, err
+			}
+		case strings.HasPrefix(arg, "--header="):
+			value, err := requiredInlineFlagValue(arg, "--header")
+			if err != nil {
+				return options, false, err
+			}
+			if err := addMCPStringMapValue(&options.server.Headers, value, "--header"); err != nil {
+				return options, false, err
+			}
+		case arg == "--auth":
+			value, err := requiredNextMCPFlagValue(args, &i, "--auth")
+			if err != nil {
+				return options, false, err
+			}
+			options.server.Auth = value
+		case strings.HasPrefix(arg, "--auth="):
+			value, err := requiredInlineFlagValue(arg, "--auth")
+			if err != nil {
+				return options, false, err
+			}
+			options.server.Auth = value
+		case strings.HasPrefix(arg, "-"):
+			return options, false, execUsageError{fmt.Sprintf("unknown mcp add flag %q", arg)}
+		default:
+			command = append(command, args[i:]...)
+			i = len(args)
+		}
+	}
+
+	options.serverName = strings.TrimSpace(options.serverName)
+	if options.serverName == "" {
+		return options, false, execUsageError{"usage: zero mcp add <server> [flags] -- <command> [args...]"}
+	}
+	if err := mcp.ValidateServerName(options.serverName); err != nil {
+		return options, false, err
+	}
+
+	options.server.Type = strings.ToLower(strings.TrimSpace(options.server.Type))
+	options.server.Auth = strings.ToLower(strings.TrimSpace(options.server.Auth))
+	if options.server.Type == "" {
+		if strings.TrimSpace(options.server.URL) != "" {
+			options.server.Type = string(mcp.ServerTypeHTTP)
+		} else {
+			options.server.Type = string(mcp.ServerTypeStdio)
+		}
+	}
+	switch mcp.ServerType(options.server.Type) {
+	case mcp.ServerTypeStdio:
+		if len(command) == 0 {
+			return options, false, execUsageError{"usage: zero mcp add <server> [flags] -- <command> [args...]"}
+		}
+		options.server.Command = command[0]
+		options.server.Args = append([]string{}, command[1:]...)
+	case mcp.ServerTypeHTTP, mcp.ServerTypeSSE:
+		if strings.TrimSpace(options.server.URL) == "" {
+			return options, false, execUsageError{fmt.Sprintf("zero mcp add --type %s requires --url", options.server.Type)}
+		}
+		if len(command) > 0 {
+			return options, false, execUsageError{fmt.Sprintf("zero mcp add --type %s does not accept a command", options.server.Type)}
+		}
+	default:
+		return options, false, execUsageError{fmt.Sprintf("unsupported MCP server type %q", options.server.Type)}
+	}
+
+	validationServer := options.server
+	validationServer.Disabled = false
+	if _, err := mcp.NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{options.serverName: validationServer}}); err != nil {
+		return options, false, err
+	}
+	return options, false, nil
+}
+
+func requiredNextMCPFlagValue(args []string, index *int, flag string) (string, error) {
+	if *index+1 >= len(args) {
+		return "", execUsageError{fmt.Sprintf("%s requires a value", flag)}
+	}
+	*index = *index + 1
+	value := args[*index]
+	if strings.TrimSpace(value) == "" {
+		return "", execUsageError{fmt.Sprintf("%s requires a value", flag)}
+	}
+	return value, nil
+}
+
+func addMCPStringMapValue(target *map[string]string, raw string, flag string) error {
+	key, value, ok := strings.Cut(raw, "=")
+	key = strings.TrimSpace(key)
+	if !ok || key == "" {
+		return execUsageError{fmt.Sprintf("%s expects KEY=VALUE", flag)}
+	}
+	if *target == nil {
+		*target = map[string]string{}
+	}
+	(*target)[key] = value
+	return nil
+}
+
+func parseMCPConfigPositionalCommand(args []string, command string) (mcpCommandOptions, []string, bool, error) {
+	options := mcpCommandOptions{}
+	positional := []string{}
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "help":
+			return options, positional, true, nil
+		case "--json":
+			options.json = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return options, positional, false, execUsageError{fmt.Sprintf("unknown mcp %s flag %q", command, arg)}
+			}
+			positional = append(positional, arg)
+		}
+	}
+	return options, positional, false, nil
+}
+
+func readMCPWritableConfig(path string) (mcpWritableConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return mcpWritableConfig{}, fmt.Errorf("config path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			cfg := mcpWritableConfig{}
+			cfg.ensureRaw()
+			return cfg, nil
+		}
+		return mcpWritableConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg := mcpWritableConfig{}
+	if err := json.Unmarshal(data, &cfg.file); err != nil {
+		return mcpWritableConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &cfg.raw); err != nil {
+		return mcpWritableConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	cfg.ensureRaw()
+	if data, ok := cfg.raw["mcp"]; ok && len(data) > 0 && string(data) != "null" {
+		if err := json.Unmarshal(data, &cfg.mcpRaw); err != nil {
+			return mcpWritableConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	}
+	cfg.ensureRaw()
+	if data, ok := cfg.mcpRaw["servers"]; ok && len(data) > 0 && string(data) != "null" {
+		if err := json.Unmarshal(data, &cfg.serverRaw); err != nil {
+			return mcpWritableConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+	}
+	cfg.ensureRaw()
+	return cfg, nil
+}
+
+func writeMCPWritableConfig(path string, cfg mcpWritableConfig) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create config directory %s: %w", dir, err)
+		}
+	}
+	data, err := cfg.marshalJSON()
+	if err != nil {
+		return fmt.Errorf("encode config JSON: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".zero-config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secure config permissions %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	if err := replaceMCPWritableConfigFile(tmpPath, path); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
+}
+
+func (cfg *mcpWritableConfig) ensureRaw() {
+	if cfg.raw == nil {
+		cfg.raw = map[string]json.RawMessage{}
+	}
+	if cfg.mcpRaw == nil {
+		cfg.mcpRaw = map[string]json.RawMessage{}
+	}
+	if cfg.serverRaw == nil {
+		cfg.serverRaw = map[string]json.RawMessage{}
+	}
+}
+
+func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerConfig) (bool, error) {
+	cfg.ensureRaw()
+	if cfg.file.MCP.Servers == nil {
+		cfg.file.MCP.Servers = map[string]config.MCPServerConfig{}
+	}
+	_, updated := cfg.file.MCP.Servers[name]
+	cfg.file.MCP.Servers[name] = server
+	data, err := json.Marshal(server)
+	if err != nil {
+		return false, err
+	}
+	cfg.serverRaw[name] = data
+	if _, err := cfg.removeLegacyServer(name); err != nil {
+		return false, err
+	}
+	return updated, nil
+}
+
+func (cfg *mcpWritableConfig) removeServer(name string) (bool, error) {
+	cfg.ensureRaw()
+	removed := false
+	if cfg.file.MCP.Servers != nil {
+		if _, ok := cfg.file.MCP.Servers[name]; ok {
+			delete(cfg.file.MCP.Servers, name)
+			removed = true
+		}
+	}
+	if _, ok := cfg.serverRaw[name]; ok {
+		delete(cfg.serverRaw, name)
+		removed = true
+	}
+	removedLegacy, err := cfg.removeLegacyServer(name)
+	if err != nil {
+		return false, err
+	}
+	return removed || removedLegacy, nil
+}
+
+func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (bool, bool, error) {
+	cfg.ensureRaw()
+	raw, found := cfg.serverRaw[name]
+	if !found {
+		return false, false, nil
+	}
+	var server map[string]json.RawMessage
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &server); err != nil {
+			return false, false, err
+		}
+	}
+	if server == nil {
+		server = map[string]json.RawMessage{}
+	}
+
+	current := false
+	if rawDisabled, ok := server["disabled"]; ok && len(rawDisabled) > 0 && string(rawDisabled) != "null" {
+		if err := json.Unmarshal(rawDisabled, &current); err != nil {
+			return false, false, err
+		}
+	}
+	changed := current != disabled
+	if disabled {
+		data, err := json.Marshal(true)
+		if err != nil {
+			return false, false, err
+		}
+		server["disabled"] = data
+	} else {
+		delete(server, "disabled")
+	}
+	data, err := json.Marshal(server)
+	if err != nil {
+		return false, false, err
+	}
+	cfg.serverRaw[name] = data
+
+	if cfg.file.MCP.Servers != nil {
+		typed := cfg.file.MCP.Servers[name]
+		typed.Disabled = disabled
+		cfg.file.MCP.Servers[name] = typed
+	}
+	return changed, true, nil
+}
+
+func (cfg *mcpWritableConfig) removeLegacyServer(name string) (bool, error) {
+	cfg.ensureRaw()
+	removed := false
+	for _, key := range []string{"mcpServers", "mcp_servers"} {
+		data, ok := cfg.raw[key]
+		if !ok || len(data) == 0 || string(data) == "null" {
+			continue
+		}
+		var servers map[string]json.RawMessage
+		if err := json.Unmarshal(data, &servers); err != nil {
+			return false, err
+		}
+		if _, ok := servers[name]; !ok {
+			continue
+		}
+		delete(servers, name)
+		removed = true
+		if len(servers) == 0 {
+			delete(cfg.raw, key)
+			continue
+		}
+		next, err := json.Marshal(servers)
+		if err != nil {
+			return false, err
+		}
+		cfg.raw[key] = next
+	}
+	return removed, nil
+}
+
+func (cfg mcpWritableConfig) marshalJSON() ([]byte, error) {
+	cfg.ensureRaw()
+	if len(cfg.serverRaw) > 0 {
+		data, err := json.Marshal(cfg.serverRaw)
+		if err != nil {
+			return nil, err
+		}
+		cfg.mcpRaw["servers"] = data
+	} else {
+		delete(cfg.mcpRaw, "servers")
+	}
+	if len(cfg.mcpRaw) > 0 {
+		data, err := json.Marshal(cfg.mcpRaw)
+		if err != nil {
+			return nil, err
+		}
+		cfg.raw["mcp"] = data
+	} else {
+		delete(cfg.raw, "mcp")
+	}
+	data, err := json.MarshalIndent(cfg.raw, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func replaceMCPWritableConfigFile(tmpPath string, path string) error {
+	if err := os.Rename(tmpPath, path); err == nil || runtime.GOOS != "windows" {
+		return err
+	}
+	existing, readErr := os.ReadFile(path)
+	if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+		return removeErr
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		if readErr == nil {
+			_ = os.WriteFile(path, existing, 0o600)
+		}
+		return err
+	}
+	return nil
+}
+
+func writeMCPAddHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero mcp add <server> [flags] -- <command> [args...]
+  zero mcp add <server> --url <url> [flags]
+
+Flags:
+      --auth <auth>        Authentication mode for remote servers (for example: oauth)
+      --disabled           Persist the server as disabled
+      --env KEY=VALUE      Add stdio environment variable (repeatable)
+      --header KEY=VALUE   Add HTTP/SSE header (repeatable)
+      --json               Print command result as JSON
+      --type <type>        MCP transport: stdio, http, or sse
+      --url <url>          Remote MCP endpoint URL
+  -h, --help               Show this help
+`)
+	return err
+}
+
+func writeMCPRemoveHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero mcp remove <server> [flags]
+
+Flags:
+      --json    Print command result as JSON
+  -h, --help    Show this help
+`)
+	return err
+}
+
+func writeMCPToggleHelp(w io.Writer, commandName string) error {
+	_, err := fmt.Fprintf(w, `Usage:
+  zero mcp %s <server> [flags]
+
+Flags:
+      --json    Print command result as JSON
+  -h, --help    Show this help
+`, commandName)
+	return err
+}
+
+func writeMCPCheckHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero mcp check <server> [flags]
+
+Flags:
+      --json    Print command result as JSON
+  -h, --help    Show this help
+`)
+	return err
+}

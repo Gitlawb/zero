@@ -1,8 +1,18 @@
 package tui
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
+	internalmcp "github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
@@ -33,6 +43,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 		"  /permissions - Show the active permission mode and sandbox grants.",
 		"  /debug (/debug-mode) - Show debug mode status.",
 		"tools:",
+		"  /mcp (/mcp-status) - Show MCP server status.",
 		"  /search <query> (/find) - Search local session events. Requires a query argument.",
 		"meta:",
 		"  /exit (/quit) - Exit Zero.",
@@ -43,9 +54,192 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 	}
 }
 
+func TestMCPCommandMetadataAndAutocomplete(t *testing.T) {
+	command, ok := resolveCommand("/mcp")
+	if !ok {
+		t.Fatal("expected /mcp to resolve")
+	}
+	if command.kind == commandUnknown || command.kind == commandPrompt || command.kind == commandEmpty {
+		t.Fatalf("expected /mcp to resolve to a concrete command kind, got %v", command.kind)
+	}
+	if command.group != commandGroupTools {
+		t.Fatalf("expected /mcp in tools group, got %q", command.group)
+	}
+	if commandSelectionRequiresInput("/mcp") {
+		t.Fatal("/mcp should run without required input")
+	}
+
+	alias, ok := resolveCommand("/mcp-status")
+	if !ok || alias.kind != command.kind {
+		t.Fatalf("expected /mcp-status to resolve to MCP command, got ok=%v command=%#v", ok, alias)
+	}
+
+	names := listCommandNames()
+	for _, want := range []string{"/mcp", "/mcp-status"} {
+		if !commandTestStringSliceContains(names, want) {
+			t.Fatalf("expected command names to contain %s, got %#v", want, names)
+		}
+	}
+
+	for _, token := range []string{"/mc", "/mcp-status"} {
+		if !commandSuggestionNamesContain(matchCommandSuggestions(token), "/mcp") {
+			t.Fatalf("expected autocomplete for %q to surface canonical /mcp", token)
+		}
+	}
+}
+
+func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(commandTestMCPTool{
+		name:        "mcp_docs_lookup",
+		serverName:  "docs",
+		description: "Look up docs",
+		safety: tools.Safety{
+			SideEffect: tools.SideEffectNetwork,
+			Permission: tools.PermissionPrompt,
+		},
+	})
+
+	permissionStore, err := internalmcp.NewPermissionStore(internalmcp.StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "mcp-permissions.json"),
+		Now:      func() time.Time { return time.Date(2026, 6, 13, 9, 30, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("NewPermissionStore returned error: %v", err)
+	}
+	if _, err := permissionStore.GrantServer(internalmcp.GrantServerInput{
+		ServerName:     "docs",
+		ServerIdentity: "docs-identity",
+		MaxAutonomy:    internalmcp.AutonomyLow,
+	}); err != nil {
+		t.Fatalf("GrantServer returned error: %v", err)
+	}
+	if _, err := permissionStore.GrantTool(internalmcp.GrantToolInput{
+		ServerName:     "github",
+		ServerIdentity: "github-identity",
+		ToolName:       "create_issue",
+		MaxAutonomy:    internalmcp.AutonomyMedium,
+	}); err != nil {
+		t.Fatalf("GrantTool returned error: %v", err)
+	}
+
+	tokenStore, err := internalmcp.NewTokenStore(internalmcp.TokenStoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"),
+		Now:      func() time.Time { return time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("NewTokenStore returned error: %v", err)
+	}
+	if err := tokenStore.Save("github", internalmcp.StoredToken{
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		TokenType:    "Bearer",
+		Scopes:       []string{"issues:read", "issues:write"},
+		ExpiresAt:    time.Date(2026, 6, 13, 11, 45, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Save token returned error: %v", err)
+	}
+
+	m := newModel(context.Background(), Options{
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAsk,
+	})
+	m.mcpConfig = config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {
+			Type:    "stdio",
+			Command: "zero-docs-mcp",
+			Args:    []string{"--workspace", "."},
+		},
+		"github": {
+			Type: "http",
+			URL:  "https://mcp.github.example",
+			Auth: "oauth",
+			OAuth: &config.MCPOAuthConfig{
+				Scopes: []string{"issues:read", "issues:write"},
+			},
+		},
+	}}
+	m.mcpPermissionStore = permissionStore
+	m.mcpTokenStore = tokenStore
+	m.input.SetValue("/mcp")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /mcp to be handled without starting an agent run")
+	}
+	if next.pending || next.activeRunID != 0 || next.runID != 0 {
+		t.Fatalf("expected /mcp not to mutate agent run state, pending=%v activeRunID=%d runID=%d", next.pending, next.activeRunID, next.runID)
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"MCP",
+		"status: ok",
+		"Servers",
+		"docs [stdio] enabled 1 tool - zero-docs-mcp --workspace .",
+		"github [http] enabled oauth - https://mcp.github.example",
+		"Tools",
+		"mcp_docs_lookup [network/prompt] - docs/lookup - Look up docs",
+		"Permissions",
+		"mode: ask",
+		"persistent grants: 2",
+		"server grants: 1",
+		"tool grants: 1",
+		"docs/* [low] approved 2026-06-13T09:30:00Z",
+		"github/create_issue [medium] approved 2026-06-13T09:30:00Z",
+		"OAuth",
+		"github configured token refresh expires 2026-06-13T11:45:00Z Bearer scopes issues:read,issues:write",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected MCP status text to contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+type commandTestMCPTool struct {
+	name        string
+	serverName  string
+	description string
+	safety      tools.Safety
+}
+
+func (tool commandTestMCPTool) Name() string {
+	return tool.name
+}
+
+func (tool commandTestMCPTool) Description() string {
+	return tool.description
+}
+
+func (tool commandTestMCPTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object"}
+}
+
+func (tool commandTestMCPTool) Safety() tools.Safety {
+	return tool.safety
+}
+
+func (tool commandTestMCPTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK}
+}
+
+func (tool commandTestMCPTool) MCPServerName() string {
+	return tool.serverName
+}
+
 func commandTestStringSliceContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func commandSuggestionNamesContain(suggestions []commandSuggestion, want string) bool {
+	for _, suggestion := range suggestions {
+		if suggestion.Name == want {
 			return true
 		}
 	}

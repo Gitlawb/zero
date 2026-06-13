@@ -13,6 +13,7 @@ const (
 	commandClear
 	commandExit
 	commandTools
+	commandMCP
 	commandPermissions
 	commandProvider
 	commandModel
@@ -141,6 +142,14 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupTools,
 		description: "Search local session events. Requires a query argument.",
 		kind:        commandSearch,
+	},
+	{
+		name:        "/mcp",
+		aliases:     []string{"/mcp-status"},
+		usage:       "/mcp",
+		group:       commandGroupTools,
+		description: "Show MCP server status.",
+		kind:        commandMCP,
 	},
 	{
 		name:        "/resume",

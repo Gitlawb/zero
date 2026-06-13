@@ -7,6 +7,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -31,6 +32,9 @@ type Options struct {
 	Registry               *tools.Registry
 	SessionStore           *sessions.Store
 	SandboxStore           *sandbox.GrantStore
+	MCPConfig              config.MCPConfig
+	MCPPermissionStore     *mcp.PermissionStore
+	MCPTokenStore          *mcp.TokenStore
 	UsageTracker           *usage.Tracker
 	SessionCompactor       SessionCompactor
 

@@ -439,7 +439,25 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
-	mcpRuntime, err := registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, mcp.AutonomyLow)
+	mcpConfig, err := deps.resolveMCPConfig(workspaceRoot)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	mcpPermissionStore, err := deps.newMCPStore()
+	if err != nil {
+		return writeAppError(stderr, "failed to initialize MCP permissions: "+err.Error(), 1)
+	}
+	mcpTokenStore, err := deps.newMCPTokenStore()
+	if err != nil {
+		return writeAppError(stderr, "failed to initialize MCP OAuth tokens: "+err.Error(), 1)
+	}
+	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
+	if len(mcpConfig.Servers) > 0 {
+		mcpRuntime, err = deps.registerMCPTools(context.Background(), registry, mcpConfig, mcp.RegisterOptions{
+			PermissionStore: mcpPermissionStore,
+			Autonomy:        mcp.AutonomyLow,
+		})
+	}
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
@@ -482,17 +500,20 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Scope:         scope,
 	})
 	return deps.runTUI(context.Background(), tui.Options{
-		Cwd:             workspaceRoot,
-		UserConfigPath:  userConfigPath,
-		ProviderName:    resolved.Provider.Name,
-		ModelName:       resolved.Provider.Model,
-		ProviderProfile: resolved.Provider,
-		FavoriteModels:  resolved.Preferences.FavoriteModels,
-		Provider:        provider,
-		NewProvider:     deps.newProvider,
-		Registry:        registry,
-		SessionStore:    deps.newSessionStore(),
-		SandboxStore:    sandboxStore,
+		Cwd:                workspaceRoot,
+		UserConfigPath:     userConfigPath,
+		ProviderName:       resolved.Provider.Name,
+		ModelName:          resolved.Provider.Model,
+		ProviderProfile:    resolved.Provider,
+		FavoriteModels:     resolved.Preferences.FavoriteModels,
+		Provider:           provider,
+		NewProvider:        deps.newProvider,
+		Registry:           registry,
+		SessionStore:       deps.newSessionStore(),
+		SandboxStore:       sandboxStore,
+		MCPConfig:          mcpConfig,
+		MCPPermissionStore: mcpPermissionStore,
+		MCPTokenStore:      mcpTokenStore,
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,

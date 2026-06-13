@@ -44,6 +44,24 @@ func (m model) toolsText() string {
 	})
 }
 
+func (m model) mcpText() string {
+	width := 0
+	if m.width > 0 {
+		width = chatWidth(m.width)
+	}
+	return renderMCPView(m.mcpViewState(), width)
+}
+
+func (m model) mcpViewState() MCPViewState {
+	return BuildMCPViewState(MCPStateOptions{
+		Config:          m.mcpConfig,
+		Registry:        m.registry,
+		PermissionStore: m.mcpPermissionStore,
+		PermissionMode:  string(m.permissionMode),
+		TokenStore:      m.mcpTokenStore,
+	})
+}
+
 func (m model) permissionsText() string {
 	stateLines := []string{
 		"Permission mode: " + string(m.permissionMode),
