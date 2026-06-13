@@ -4,7 +4,8 @@ package background
 
 import (
 	"errors"
-	"os"
+	"fmt"
+	"os/exec"
 	"syscall"
 	"time"
 )
@@ -16,52 +17,68 @@ var (
 	terminationPollInterval = 50 * time.Millisecond
 )
 
-// terminateProcess stops a background process. It first asks politely with
-// SIGTERM (so the process can flush/clean up), then escalates to SIGKILL if the
-// process is still alive after terminationGracePeriod — so a process that traps
-// or ignores SIGTERM cannot leak. It returns nil once the process is gone.
+// ConfigureChildProcessGroup puts a child into its own process group so the whole
+// group can be signalled as a unit. terminateProcess depends on this: it signals
+// the negative PID (the group), so any process the child forks dies with it
+// instead of being orphaned. Must be called before cmd.Start.
+func ConfigureChildProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// terminateProcess stops a background process group. It first asks politely with
+// SIGTERM (so processes can flush/clean up), then escalates to SIGKILL if the
+// group is still alive after terminationGracePeriod — so a process that traps or
+// ignores SIGTERM cannot leak. Signalling the negative PID targets the whole
+// process group created by ConfigureChildProcessGroup, so forked children die
+// with the leader instead of being orphaned. It returns nil once the group is
+// gone.
 func terminateProcess(pid int) error {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
+	// Guard pid <= 1: kill(-0) would target our OWN process group and kill(-1)
+	// every process we can signal. A real child PID is always > 1, so never let a
+	// bogus 0/1 expand into either.
+	if pid <= 1 {
+		return fmt.Errorf("refusing to terminate invalid pid %d", pid)
 	}
 
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		if processGoneError(err) {
 			return nil
 		}
 		return err
 	}
 
-	// Poll liveness so we return promptly once the process exits, rather than
+	// Poll liveness so we return promptly once the group exits, rather than
 	// always waiting out the full grace period.
 	deadline := time.Now().Add(terminationGracePeriod)
 	for time.Now().Before(deadline) {
-		if !processAlive(process) {
+		if !processGroupAlive(pid) {
 			return nil
 		}
 		time.Sleep(terminationPollInterval)
 	}
-	if !processAlive(process) {
+	if !processGroupAlive(pid) {
 		return nil
 	}
 
-	// Still alive after the grace period: force-kill.
-	if err := process.Kill(); err != nil && !processGoneError(err) {
+	// Still alive after the grace period: force-kill the group.
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !processGoneError(err) {
 		return err
 	}
 	return nil
 }
 
-// processAlive reports whether the process can still be signalled (signal 0 is
-// the standard liveness probe — it performs error checking without sending a
-// signal).
-func processAlive(process *os.Process) bool {
-	return process.Signal(syscall.Signal(0)) == nil
+// processGroupAlive reports whether any process in the group still exists (signal
+// 0 performs error checking without delivering a signal).
+func processGroupAlive(pid int) bool {
+	return syscall.Kill(-pid, syscall.Signal(0)) == nil
 }
 
-// processGoneError reports whether an error means the process has already exited
-// (so termination is effectively done).
+// processGoneError reports whether an error means the process group has already
+// exited (so termination is effectively done). syscall.Kill reports ESRCH when
+// no process in the target group remains.
 func processGoneError(err error) bool {
-	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
+	return errors.Is(err, syscall.ESRCH)
 }

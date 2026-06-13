@@ -352,7 +352,15 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 	}
 	if pid > 0 {
 		if err := manager.SetPID(built.SessionID, pid); err != nil {
+			// The child is running but its PID was never recorded, so nothing can
+			// track or stop it later. Kill it (and its process group) now, mark the
+			// task errored, and record the stop so it cannot become an untracked
+			// orphan. The dedup in recordSpecialistStop makes the later onExit
+			// accounting a no-op.
+			_ = background.TerminateProcess(pid)
+			_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 			executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
+			executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
 			return ExecResult{}, err
 		}
 	}
@@ -651,6 +659,9 @@ func launchBackgroundProcess(binaryPath string, args []string, outputFile string
 	command.Stdout = file
 	command.Stderr = file
 	command.Stdin = nil
+	// Put the child in its own process group so terminating the task later kills
+	// the whole group (any grandchildren it forks) instead of orphaning them.
+	background.ConfigureChildProcessGroup(command)
 	if err := command.Start(); err != nil {
 		_ = file.Close()
 		return 0, fmt.Errorf("launch specialist background child: %w", err)

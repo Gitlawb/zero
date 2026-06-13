@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"errors"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -33,6 +35,7 @@ func TestTerminateProcessEscalatesToSIGKILL(t *testing.T) {
 	// command would be exec-optimized, dropping the trap); "ready" is printed
 	// AFTER the trap is installed so we don't signal before it takes effect.
 	cmd := exec.Command("sh", "-c", "trap '' TERM; echo ready; while true; do sleep 0.2; done")
+	ConfigureChildProcessGroup(cmd) // group leader, so the negative-pid kill targets it
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
@@ -73,6 +76,7 @@ func TestTerminateProcessGracefulSIGTERM(t *testing.T) {
 	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
 
 	cmd := exec.Command("sh", "-c", "sleep 30") // default disposition: SIGTERM kills it
+	ConfigureChildProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -101,6 +105,7 @@ func TestTerminateProcessGracefulSIGTERM(t *testing.T) {
 
 func TestTerminateProcessAlreadyExited(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
+	ConfigureChildProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -108,5 +113,50 @@ func TestTerminateProcessAlreadyExited(t *testing.T) {
 
 	if err := terminateProcess(cmd.Process.Pid); err != nil {
 		t.Fatalf("terminateProcess on an exited process should be a no-op, got %v", err)
+	}
+}
+
+func TestTerminateProcessKillsForkedChildren(t *testing.T) {
+	grace, poll := terminationGracePeriod, terminationPollInterval
+	terminationGracePeriod, terminationPollInterval = 2*time.Second, 20*time.Millisecond
+	t.Cleanup(func() { terminationGracePeriod, terminationPollInterval = grace, poll })
+
+	// The parent shell forks a long-lived child and prints its PID. Without
+	// group termination the child would be reparented to init and outlive the
+	// parent; group termination must take it down too.
+	cmd := exec.Command("sh", "-c", "sleep 300 & echo $!; wait")
+	ConfigureChildProcessGroup(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read forked child pid: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatalf("parse forked child pid %q: %v", line, err)
+	}
+	go func() { _ = cmd.Wait() }()
+
+	if err := terminateProcess(cmd.Process.Pid); err != nil {
+		t.Fatalf("terminateProcess: %v", err)
+	}
+
+	// The forked child must be gone too (poll until reaped by init).
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if syscall.Kill(childPID, syscall.Signal(0)) != nil {
+			break // child no longer exists
+		}
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+			t.Fatalf("forked child %d survived terminateProcess — group kill failed", childPID)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
