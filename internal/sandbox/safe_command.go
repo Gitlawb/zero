@@ -195,28 +195,34 @@ var wrapperPrograms = map[string]bool{
 	"setsid": true, "ionice": true, "xargs": true,
 }
 
-// wrapperValueOptionsByProg lists, PER wrapper program, the short options that
-// consume the FOLLOWING token as their value (e.g. `sudo -u root`, `timeout -s
-// KILL`). It is keyed by wrapper because the same flag means different things to
-// different launchers — `sudo -n` is valueless (non-interactive) while `nice -n`
-// takes an adjustment — so a single global set would wrongly swallow the real
-// program after a valueless flag (e.g. skip `rm` in `sudo -n rm -rf`).
+// wrapperValueOptionsByProg lists, PER wrapper program, the options that consume
+// the FOLLOWING token as their value (both short `-u` and long `--user` spellings,
+// e.g. `sudo -u root` / `sudo --user root` / `timeout -s KILL`). It is keyed by
+// wrapper because the same flag means different things to different launchers —
+// `sudo -n` is valueless (non-interactive) while `nice -n` takes an adjustment —
+// so a single global set would wrongly swallow the real program after a valueless
+// flag (e.g. skip `rm` in `sudo -n rm -rf`). The `--flag=value` spelling is a
+// single token and needs no entry; only the space-separated form consumes a value.
 var wrapperValueOptionsByProg = map[string]map[string]bool{
-	"sudo":    {"-u": true, "-g": true, "-p": true, "-C": true, "-r": true, "-T": true, "-U": true, "-h": true, "-D": true, "-R": true},
+	"sudo":    {"-u": true, "--user": true, "-g": true, "--group": true, "-p": true, "--prompt": true, "-C": true, "--close-from": true, "-r": true, "--role": true, "-T": true, "--command-timeout": true, "-U": true, "--other-user": true, "-h": true, "--host": true, "-D": true, "--chdir": true, "-R": true, "--chroot": true},
 	"doas":    {"-u": true, "-C": true},
-	"env":     {"-u": true, "-S": true, "-C": true},
-	"timeout": {"-s": true, "-k": true},
-	"nice":    {"-n": true},
-	"ionice":  {"-c": true, "-n": true, "-p": true},
-	"stdbuf":  {"-i": true, "-o": true, "-e": true},
-	"xargs":   {"-a": true, "-d": true, "-E": true, "-I": true, "-L": true, "-n": true, "-P": true, "-s": true},
+	"env":     {"-u": true, "--unset": true, "-S": true, "--split-string": true, "-C": true, "--chdir": true},
+	"timeout": {"-s": true, "--signal": true, "-k": true, "--kill-after": true},
+	"nice":    {"-n": true, "--adjustment": true},
+	"ionice":  {"-c": true, "--class": true, "-n": true, "--classdata": true, "-p": true, "--pid": true},
+	"stdbuf":  {"-i": true, "--input": true, "-o": true, "--output": true, "-e": true, "--error": true},
+	"xargs":   {"-a": true, "--arg-file": true, "-d": true, "--delimiter": true, "-E": true, "-I": true, "--replace": true, "-L": true, "--max-lines": true, "-n": true, "--max-args": true, "-P": true, "--max-procs": true, "-s": true, "--max-chars": true},
 }
 
 // wrapperConsumesValue reports whether option is a value-consuming flag of the
 // active wrapper. With no active wrapper (or an unknown one, or a flag not listed
 // for it) it returns false, so token scanning never skips a token that might be
-// the real program.
+// the real program. A `--flag=value` token carries its own value, so it never
+// consumes the next token.
 func wrapperConsumesValue(wrapper, option string) bool {
+	if strings.Contains(option, "=") {
+		return false
+	}
 	opts, ok := wrapperValueOptionsByProg[wrapper]
 	return ok && opts[option]
 }

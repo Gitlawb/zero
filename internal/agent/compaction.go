@@ -436,7 +436,15 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 		{Role: zeroruntime.MessageRoleUser, Content: combined},
 	}, onUsage)
 	if reduceErr != nil {
-		return combined, nil
+		if isContextLimitError(reduceErr.Error()) {
+			// Even the two combined partials don't fit (extreme): fall back to the
+			// joined text — still better than failing, and each half is already
+			// compacted.
+			return combined, nil
+		}
+		// A non-context failure (auth/network/provider) must surface unchanged, per
+		// this function's contract — don't mask it behind the joined fallback.
+		return "", reduceErr
 	}
 	return reduced, nil
 }

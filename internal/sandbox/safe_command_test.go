@@ -108,6 +108,8 @@ func TestDetectInteractiveThroughWrappersAndShellC(t *testing.T) {
 		{name: "ionice", command: "ionice -c3 vim file.txt", wantCmd: "vim"},
 		{name: "xargs", command: "xargs vim", wantCmd: "vim"},
 		{name: "sudo with option", command: "sudo -u root vim file.txt", wantCmd: "vim"},
+		{name: "sudo with long option value", command: "sudo --user root vim file.txt", wantCmd: "vim"},
+		{name: "sudo with long option joined value", command: "sudo --user=root vim file.txt", wantCmd: "vim"},
 		{name: "env with assignment option", command: "env -i EDITOR=x vim file.txt", wantCmd: "vim"},
 		{name: "sh -c payload", command: "sh -c 'vim file.txt'", wantCmd: "vim"},
 		{name: "bash -c payload", command: `bash -c "less /var/log/syslog"`, wantCmd: "less"},

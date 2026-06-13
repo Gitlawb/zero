@@ -5,9 +5,18 @@ Total verified: 175 of 175 extracted findings
 | Status | Count |
 |---|---|
 | fixed | 97 |
-| open | 64 |
-| partial | 14 |
+| open | 66 |
+| partial | 12 |
 | obsolete | 0 |
+
+<!--
+Counts are the post-re-verification view: of the 87 rows the body still marks
+open/partial (69 open + 18 partial), the re-verification found 9 already fixed on
+`main` (3 open + 6 partial; listed in 2026-06-13-reverification.md), leaving 66
+open + 12 partial = 78 genuinely pending, and fixed 88 + 9 = 97. The per-finding
+rows below retain their original verdicts pending a row-level reclassification pass.
+-->
+
 
 > **Authoritative re-verification (2026-06-13, branch `fix/audit-batch` off current `main`).**
 > All 87 rows the 06-11 snapshot marked `open`/`partial` were re-checked against the ACTUAL

@@ -152,6 +152,59 @@ func TestCompactPropagatesSummarizeError(t *testing.T) {
 	}
 }
 
+// scriptedSummaryProvider returns, per StreamCompletion call, either an error
+// event (when the script entry is non-empty) or a success text, so a test can
+// drive the recursive summarizeWithFallback split/reduce path deterministically.
+type scriptedSummaryProvider struct {
+	calls   int
+	scripts []string
+}
+
+func (p *scriptedSummaryProvider) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	i := p.calls
+	p.calls++
+	if i < len(p.scripts) && p.scripts[i] != "" {
+		return streamEvents([]zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventError, Error: p.scripts[i]}}), nil
+	}
+	return streamEvents([]zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "PARTIAL"},
+		{Type: zeroruntime.StreamEventDone},
+	}), nil
+}
+
+func TestSummarizeWithFallbackPropagatesNonContextReduceError(t *testing.T) {
+	msgs := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: "a"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "b"},
+	}
+	ctxLimit := "This model's maximum context length is 1000 tokens. Please reduce the length of the messages."
+	// call 1 (full slice): context-limit → split; calls 2,3 (halves): succeed;
+	// call 4 (reduce of the two partials): a NON-context provider error that must
+	// surface unchanged rather than be masked by the joined-text fallback.
+	provider := &scriptedSummaryProvider{scripts: []string{ctxLimit, "", "", "provider request failed: 401 unauthorized"}}
+	if _, err := summarizeWithFallback(context.Background(), provider, msgs, func(Usage) {}); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("a non-context reduce error must surface, got %v", err)
+	}
+}
+
+func TestSummarizeWithFallbackUsesJoinedTextOnContextLimitReduce(t *testing.T) {
+	msgs := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: "a"},
+		{Role: zeroruntime.MessageRoleAssistant, Content: "b"},
+	}
+	ctxLimit := "This model's maximum context length is 1000 tokens. Please reduce the length of the messages."
+	// Same split, but the reduce also hits a context-limit: fall back to the joined
+	// partial summaries instead of failing.
+	provider := &scriptedSummaryProvider{scripts: []string{ctxLimit, "", "", ctxLimit}}
+	got, err := summarizeWithFallback(context.Background(), provider, msgs, func(Usage) {})
+	if err != nil {
+		t.Fatalf("a context-limit reduce must fall back to joined text, got error %v", err)
+	}
+	if !strings.Contains(got, "PARTIAL") {
+		t.Fatalf("joined fallback should contain the partial summaries, got %q", got)
+	}
+}
+
 // --- estimateTokens tests -------------------------------------------------
 
 func TestEstimateTokensMonotonic(t *testing.T) {
