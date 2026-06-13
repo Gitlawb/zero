@@ -727,13 +727,19 @@ func wrapMarkdownInlineWithPrefixes(firstPrefix string, continuationPrefix strin
 		}
 		wordWidth := lipgloss.Width(word.text)
 		rendered := renderMarkdownInlineSegment(word)
+		separator := " "
+		separatorWidth := 1
+		if joinsPreviousMarkdownWord(word.text) {
+			separator = ""
+			separatorWidth = 0
+		}
 		switch {
 		case line == "":
 			line = rendered
 			lineWidth = wordWidth
-		case lineWidth+1+wordWidth <= available:
-			line += " " + rendered
-			lineWidth += 1 + wordWidth
+		case lineWidth+separatorWidth+wordWidth <= available:
+			line += separator + rendered
+			lineWidth += separatorWidth + wordWidth
 		default:
 			flush()
 			line = rendered
@@ -754,6 +760,10 @@ func markdownInlineWords(segments []markdownInlineSegment) []markdownInlineSegme
 		}
 	}
 	return words
+}
+
+func joinsPreviousMarkdownWord(text string) bool {
+	return text != "" && strings.Trim(text, ".,!?;:%)]}") == ""
 }
 
 func renderMarkdownInline(text string) string {
@@ -805,14 +815,14 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 	for index := 0; index < len(text); {
 		switch {
 		case strings.HasPrefix(text[index:], "**"):
-			if bold || strings.Contains(text[index+2:], "**") {
+			if !code && (bold || strings.Contains(text[index+2:], "**")) {
 				flush()
 				bold = !bold
 				index += 2
 				continue
 			}
 		case strings.HasPrefix(text[index:], "__"):
-			if bold || strings.Contains(text[index+2:], "__") {
+			if !code && (bold || strings.Contains(text[index+2:], "__")) {
 				flush()
 				bold = !bold
 				index += 2
@@ -820,12 +830,14 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 			}
 		case text[index] == '`':
 			if code || strings.Contains(text[index+1:], "`") {
+				flush()
 				code = !code
 				index++
 				continue
 			}
 		case text[index] == '*':
-			if emphasis || strings.Contains(text[index+1:], "*") {
+			if !code && !strings.HasPrefix(text[index:], "**") && (emphasis || hasClosingMarkdownSingleStar(text[index+1:])) {
+				flush()
 				emphasis = !emphasis
 				index++
 				continue
@@ -841,6 +853,20 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 	}
 	flush()
 	return segments
+}
+
+func hasClosingMarkdownSingleStar(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] != '*' {
+			continue
+		}
+		if index+1 < len(text) && text[index+1] == '*' {
+			index++
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func longestMarkdownWordWidth(text string) int {

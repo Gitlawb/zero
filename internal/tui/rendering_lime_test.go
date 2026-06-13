@@ -98,6 +98,26 @@ func TestMarkdownInlineRendersBoldControlCodes(t *testing.T) {
 	}
 }
 
+func TestMarkdownInlinePreservesLiteralStarsAndCodeBoundaries(t *testing.T) {
+	got := renderMarkdownInline("literal * stays and **bold `not bold` bold**")
+	plain := ansiPattern.ReplaceAllString(got, "")
+	if plain != "literal * stays and bold not bold bold" {
+		t.Fatalf("inline markdown plain text = %q, want literal star and stripped markers", plain)
+	}
+	if strings.Contains(got, markdownBoldStart+"not bold"+markdownBoldEnd) {
+		t.Fatalf("inline code span inherited bold styling in %q", got)
+	}
+	for _, want := range []string{
+		markdownBoldStart + "bold " + markdownBoldEnd,
+		"not bold",
+		markdownBoldStart + " bold" + markdownBoldEnd,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("inline markdown render missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestMarkdownTableHeaderRendersBold(t *testing.T) {
 	lines := renderAssistantMarkdownText(strings.Join([]string{
 		"| Feature | System A | System B |",
@@ -215,6 +235,9 @@ func TestMarkdownPlainTextStripsRenderControls(t *testing.T) {
 			t.Fatalf("plain markdown render leaked %q in:\n%s", unwanted, got)
 		}
 	}
+	if ansiPattern.MatchString(got) {
+		t.Fatalf("plain markdown render leaked ANSI escapes in:\n%s", got)
+	}
 	for _, want := range []string{"Feature", "Mode", "│", "─┼─"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("plain markdown render missing %q in:\n%s", want, got)
@@ -246,6 +269,9 @@ func TestSelectableAssistantRowKeepsMarkdownSemanticsPlain(t *testing.T) {
 			if strings.Contains(line.text, unwanted) {
 				t.Fatalf("selectable metadata leaked %q in %#v", unwanted, line)
 			}
+		}
+		if ansiPattern.MatchString(line.text) {
+			t.Fatalf("selectable metadata leaked ANSI escapes in %#v", line)
 		}
 	}
 }
@@ -297,6 +323,9 @@ func TestFinalAnswerRendersMarkdownTableForTerminal(t *testing.T) {
 	}
 	if !strings.Contains(got, " │ ") || !strings.Contains(got, "─┼─") {
 		t.Fatalf("markdown table should render terminal table separators, got:\n%s", got)
+	}
+	if !strings.Contains(got, "● done") {
+		t.Fatalf("markdown final row = %q, want done line terminator", got)
 	}
 	for index, line := range strings.Split(rendered, "\n") {
 		if gotWidth := lipgloss.Width(line); gotWidth > 72 {
