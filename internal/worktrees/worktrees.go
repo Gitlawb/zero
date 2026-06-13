@@ -1,6 +1,7 @@
 package worktrees
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -247,7 +248,14 @@ func gitCommonDir(ctx context.Context, runGit GitRunner, dir string) (string, er
 func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResult, error) {
 	command := exec.CommandContext(ctx, "git", args...)
 	command.Dir = dir
-	output, err := command.CombinedOutput()
+	// Capture stdout and stderr separately: callers parse Stdout for values
+	// (rev-parse output) and prefer Stderr for error messages. CombinedOutput
+	// merged the two, letting git's stderr warnings pollute parsed output and
+	// leaving CommandResult.Stderr always empty.
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
 	exitCode := 0
 	if err != nil {
 		exitCode = -1
@@ -256,7 +264,7 @@ func defaultRunGit(ctx context.Context, dir string, args ...string) (CommandResu
 			err = nil
 		}
 	}
-	return CommandResult{Stdout: string(output), ExitCode: exitCode}, err
+	return CommandResult{Stdout: stdout.String(), Stderr: stderr.String(), ExitCode: exitCode}, err
 }
 
 func defaultWorktreeName(now time.Time) string {

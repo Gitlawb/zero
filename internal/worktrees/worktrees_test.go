@@ -3,12 +3,45 @@ package worktrees
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDefaultRunGitSeparatesStdoutAndStderr(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+
+	// A successful command writes to Stdout, leaving Stderr clean.
+	ok, err := defaultRunGit(context.Background(), dir, "--version")
+	if err != nil {
+		t.Fatalf("git --version returned error: %v", err)
+	}
+	if !strings.Contains(ok.Stdout, "git version") {
+		t.Fatalf("Stdout = %q, want a git version line", ok.Stdout)
+	}
+	if strings.TrimSpace(ok.Stderr) != "" {
+		t.Fatalf("Stderr should be empty on success, got %q", ok.Stderr)
+	}
+
+	// A failing command's diagnostic must land on Stderr, not Stdout — the prior
+	// CombinedOutput merged them and left Stderr empty.
+	bad, err := defaultRunGit(context.Background(), dir, "not-a-real-subcommand")
+	if err != nil {
+		t.Fatalf("a non-zero git exit must not be a runner error, got %v", err)
+	}
+	if bad.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit code for a bad subcommand")
+	}
+	if strings.TrimSpace(bad.Stderr) == "" {
+		t.Fatalf("expected the git error on Stderr, got Stdout=%q Stderr=%q", bad.Stdout, bad.Stderr)
+	}
+}
 
 func TestPrepareCreatesDetachedGitWorktree(t *testing.T) {
 	root := t.TempDir()

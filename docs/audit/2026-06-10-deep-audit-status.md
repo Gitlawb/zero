@@ -4,8 +4,8 @@ Total verified: 175 of 175 extracted findings
 
 | Status | Count |
 |---|---|
-| fixed | 87 |
-| open | 70 |
+| fixed | 88 |
+| open | 69 |
 | partial | 18 |
 | obsolete | 0 |
 
@@ -159,7 +159,7 @@ Total verified: 175 of 175 extracted findings
 | medium | fixed | internal/secrets/scanner.go:81 | [reverified+fixed 2026-06-13, fix/audit-batch] Redact now replaces longest matches first (copies findings, sorts by len(Match) desc) so a containing PRIVATE KEY block is redacted before any nested shorter match corrupts its exact string. Covered by scanner_test.go TestRedactNestedSecretStillRemovesWholeBlock (fails pre-fix: leaks BEGIN/END header) |
 | medium | fixed | internal/redaction/redaction.go:362 | [reverified 2026-06-13] already fixed on main: urlWithCredsPattern is a package-level var (redaction.go:367) and redactURLPasswords (:369) uses it via ReplaceAllStringFunc — no per-call regexp.MustCompile remains |
 | medium | open | internal/zerogit/zerogit.go:212 | zerogit.go:223 `path := strings.TrimSpace(line[3:])` — no C-quote unescaping and no `old -> new` rename split; no -z porcelain used |
-| medium | open | internal/worktrees/worktrees.go:247 | worktrees.go:250 still uses command.CombinedOutput(); :259 returns CommandResult{Stdout: string(output)} with Stderr never set |
+| medium | fixed | internal/worktrees/worktrees.go:247 | [reverified+fixed 2026-06-13, fix/audit-batch] defaultRunGit now captures stdout/stderr into separate bytes.Buffers and returns CommandResult{Stdout, Stderr}; git warnings no longer pollute parsed rev-parse output and error messages get real stderr. Covered by worktrees_test.go TestDefaultRunGitSeparatesStdoutAndStderr |
 | medium | open | internal/sessions/store.go:632 | store.go:632-635 writeMetadata still os.WriteFile temp + os.Rename with no file/dir Sync; zero Sync() calls anywhere in internal/sessions; appendEventLocked (store.go:512-517) also unsynced |
 | medium | open | internal/tui/session_controls.go:235 | session_controls.go:244 returns lastCheckpoint-1 while the tool_call is persisted immediately before its checkpoint (model.go:1505 then 1527), so truncate (rewind.go:205 keeps seq<=target) retains the dangling tool_call |
 | medium | open | internal/sessions/store.go:387 | store.go:387-391 Fork re-appends every parent event (no provider_usage skip) via AppendEvent which stamps a fresh CreatedAt (store.go:495-501); BuildReport has no event-id dedupe |
