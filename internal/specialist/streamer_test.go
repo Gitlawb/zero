@@ -104,3 +104,18 @@ func TestParseStreamRejectsInvalidLines(t *testing.T) {
 		t.Fatalf("expected json parse error, got %v", err)
 	}
 }
+
+func TestParseStreamHandlesLineLargerThan1MiB(t *testing.T) {
+	// A single stream-json line bigger than the old bufio.Scanner 1 MiB cap (e.g.
+	// a large final answer or tool result) must parse instead of aborting the run.
+	huge := strings.Repeat("a", 2*1024*1024)
+	line := `{"schemaVersion":1,"type":"final","runId":"run_1","text":"` + huge + `"}`
+
+	events, err := ParseStream(strings.NewReader(line + "\n"))
+	if err != nil {
+		t.Fatalf("ParseStream errored on a >1 MiB line: %v", err)
+	}
+	if len(events) != 1 || events[0].Text != huge {
+		t.Fatalf("expected one final event carrying the full %d-byte text, got %d events", len(huge), len(events))
+	}
+}

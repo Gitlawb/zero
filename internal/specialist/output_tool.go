@@ -241,11 +241,6 @@ func optionalTaskInt(args map[string]any, key string) (int, error) {
 	}
 }
 
-func formatTaskOutput(task background.Task, data string) string {
-	summary, rawLines := summarizeTaskData(data, task.ExitCode)
-	return formatTaskOutputSummary(task, summary, rawLines)
-}
-
 func formatTaskOutputSummary(task background.Task, summary StreamResult, rawLines []string) string {
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "task_id: %s\n", task.ID)
