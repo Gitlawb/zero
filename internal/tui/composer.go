@@ -269,9 +269,10 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		if nextState, nextPreviews, ok := deleteComposerPastePreviewBefore(state, m.composerPastePreviews); ok && !m.suggestionsActive() {
 			m.setComposerState(nextState)
 			m.composerPastePreviews = nextPreviews
-		} else if nextState, ok := deleteCompletedFileMentionBefore(state); ok && !m.suggestionsActive() {
+		} else if start, end, ok := completedFileMentionRangeBefore(state); ok && !m.suggestionsActive() {
+			nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, start, end)
 			m.setComposerState(nextState)
-			m.composerPastePreviews = nil
+			m.composerPastePreviews = nextPreviews
 		} else {
 			nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor-1, state.cursor)
 			m.setComposerState(nextState)
@@ -318,6 +319,16 @@ func (m model) insertComposerTextWithPastePreview(state composerState, text stri
 	}
 	m.composerPastePreviews = nextPreviews
 	return m
+}
+
+func (m model) replaceComposerRangeWithPastePreviews(state composerState, start int, end int, replacement string) model {
+	nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, start, end)
+	m.setComposerState(nextState)
+	m.composerPastePreviews = nextPreviews
+	if replacement == "" {
+		return m
+	}
+	return m.insertComposerTextWithPastePreview(m.currentComposerState(), replacement, "")
 }
 
 func (m model) composerPastePreviewWrapWidth() int {
@@ -570,10 +581,18 @@ func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
 }
 
 func deleteCompletedFileMentionBefore(state composerState) (composerState, bool) {
+	start, end, ok := completedFileMentionRangeBefore(state)
+	if !ok {
+		return state, false
+	}
+	return deleteComposerRange(state, start, end), true
+}
+
+func completedFileMentionRangeBefore(state composerState) (int, int, bool) {
 	state = normalizeComposerState(state)
 	runes := []rune(state.text)
 	if state.cursor <= 0 || state.cursor > len(runes) || !isPathQueryBoundary(runes[state.cursor-1]) {
-		return state, false
+		return 0, 0, false
 	}
 	tokenEnd := state.cursor
 	for tokenEnd > 0 && isPathQueryBoundary(runes[tokenEnd-1]) {
@@ -584,9 +603,9 @@ func deleteCompletedFileMentionBefore(state composerState) (composerState, bool)
 		tokenStart--
 	}
 	if tokenStart >= tokenEnd || runes[tokenStart] != '@' || tokenEnd-tokenStart <= 1 {
-		return state, false
+		return 0, 0, false
 	}
-	return deleteComposerRange(state, tokenStart, state.cursor), true
+	return tokenStart, state.cursor, true
 }
 
 func deleteComposerRange(state composerState, start int, end int) composerState {

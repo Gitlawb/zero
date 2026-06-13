@@ -630,6 +630,118 @@ func TestEnterOnFileSuggestionClosesFilePalette(t *testing.T) {
 	}
 }
 
+func TestFileSuggestionCompletionKeepsPastePreviewCollapsed(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "docs/guide.md")
+	paste := "Create a book library dashboard page with the Bootstrap theme. " + strings.Repeat("SECRET_TAIL ", 20)
+	m := newModel(context.Background(), Options{Cwd: root})
+	m.width = 44
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@guide")})
+	m = updated.(model)
+
+	if !m.suggestionsActive() || !m.suggestionsAreFiles {
+		t.Fatalf("expected file suggestions after @guide, got suggestions=%v files=%v", m.suggestionsActive(), m.suggestionsAreFiles)
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("file completion should not submit a prompt")
+	}
+	if got := m.composerValue(); got != paste+" @docs/guide.md " {
+		t.Fatalf("composer value after file completion = %q", got)
+	}
+	view := plainRender(t, m.composerBox(96))
+	for _, want := range []string{"[Create a book library dashboard page", "lines", "@docs/guide.md"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("file completion view missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "SECRET_TAIL") {
+		t.Fatalf("file completion should keep pasted content collapsed:\n%s", view)
+	}
+}
+
+func TestFileSuggestionDismissKeepsPastePreviewCollapsed(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "docs/guide.md")
+	paste := "Create a book library dashboard page with the Bootstrap theme. " + strings.Repeat("SECRET_TAIL ", 20)
+	m := newModel(context.Background(), Options{Cwd: root})
+	m.width = 44
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@guide")})
+	m = updated.(model)
+
+	if !m.suggestionsActive() || !m.suggestionsAreFiles {
+		t.Fatalf("expected file suggestions after @guide, got suggestions=%v files=%v", m.suggestionsActive(), m.suggestionsAreFiles)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+
+	if got := m.composerValue(); got != paste+" " {
+		t.Fatalf("composer value after dismissing file suggestion = %q", got)
+	}
+	if m.suggestionsActive() {
+		t.Fatal("file suggestion dismiss should close the file palette")
+	}
+	view := plainRender(t, m.composerBox(96))
+	for _, want := range []string{"[Create a book library dashboard page", "lines"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("file dismiss view missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "SECRET_TAIL") || strings.Contains(view, "@guide") {
+		t.Fatalf("file dismiss should remove the query and keep pasted content collapsed:\n%s", view)
+	}
+}
+
+func TestBackspaceAfterCompletedFileSuggestionKeepsPastePreviewCollapsed(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, root, "docs/guide.md")
+	paste := "Create a book library dashboard page with the Bootstrap theme. " + strings.Repeat("SECRET_TAIL ", 20)
+	m := newModel(context.Background(), Options{Cwd: root})
+	m.width = 44
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@guide")})
+	m = updated.(model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if got := m.composerValue(); got != paste+" @docs/guide.md " {
+		t.Fatalf("composer value after file completion = %q", got)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = updated.(model)
+
+	if got := m.composerValue(); got != paste+" " {
+		t.Fatalf("composer value after deleting completed file mention = %q", got)
+	}
+	view := plainRender(t, m.composerBox(96))
+	for _, want := range []string{"[Create a book library dashboard page", "lines"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("backspace after file completion view missing %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"SECRET_TAIL", "@docs/guide.md"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("backspace after file completion should keep pasted content collapsed and remove mention:\n%s", view)
+		}
+	}
+}
+
 func TestFileSuggestionsMatchesAndSkipsVCSDirs(t *testing.T) {
 	root := t.TempDir()
 	mustWrite := func(rel string) {

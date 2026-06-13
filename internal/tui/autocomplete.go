@@ -225,11 +225,7 @@ func (m model) completeSuggestion() model {
 	chosen := m.suggestions[idx].Name
 	if m.suggestionsAreFiles {
 		isDir := fileSuggestionIsDirectory(m.suggestions[idx])
-		// Replace only the trailing "@token" with the chosen path so any preceding
-		// prompt text ("read @foo") is preserved.
-		nextValue, nextCursor := completePathQueryWithTrailingSpace(m.input.Value(), m.input.Position(), chosen, !isDir)
-		m.input.SetValue(nextValue)
-		m.input.SetCursor(nextCursor)
+		m = m.completeFileSuggestion(chosen, !isDir)
 	} else {
 		if commandSelectionRequiresInput(chosen) {
 			m.input.SetValue(chosen)
@@ -244,6 +240,32 @@ func (m model) completeSuggestion() model {
 	m.commandPaletteOpen = false
 	m.filePaletteOpen = false
 	return m
+}
+
+func (m model) completeFileSuggestion(chosen string, trailingSpace bool) model {
+	state := m.fileSuggestionComposerState()
+	query := extractPathQuery(state.text, state.cursor)
+	if query == nil {
+		nextValue, nextCursor := completePathQueryWithTrailingSpace(m.input.Value(), m.input.Position(), chosen, trailingSpace)
+		m.input.SetValue(nextValue)
+		m.input.SetCursor(nextCursor)
+		m.resetComposerFromInput()
+		return m
+	}
+	replacement := chosen
+	if trailingSpace {
+		replacement += " "
+	}
+	return m.replaceComposerRangeWithPastePreviews(state, query.StartIndex, query.EndIndex, replacement)
+}
+
+func (m model) fileSuggestionComposerState() composerState {
+	state := m.currentComposerState()
+	inputState := normalizeComposerState(composerState{text: m.input.Value(), cursor: m.input.Position()})
+	if m.composerActive && inputState.text == state.text && inputState.cursor != state.cursor {
+		return inputState
+	}
+	return state
 }
 
 func (m model) selectedSuggestionIsDirectory() bool {
@@ -523,15 +545,10 @@ func fuzzySubsequenceGap(value, query string) (int, bool) {
 // owns that search text while it is open.
 func (m model) dismissSuggestions() model {
 	if m.suggestionsAreFiles {
-		if query := extractPathQuery(m.input.Value(), m.input.Position()); query != nil {
-			runes := []rune(m.input.Value())
-			next := make([]rune, 0, len(runes)-(query.EndIndex-query.StartIndex))
-			next = append(next, runes[:query.StartIndex]...)
-			next = append(next, runes[query.EndIndex:]...)
-			m.input.SetValue(string(next))
-			m.input.SetCursor(query.StartIndex)
+		state := m.fileSuggestionComposerState()
+		if query := extractPathQuery(state.text, state.cursor); query != nil {
+			m = m.replaceComposerRangeWithPastePreviews(state, query.StartIndex, query.EndIndex, "")
 		}
-		m.resetComposerFromInput()
 	} else {
 		m.clearComposer()
 	}

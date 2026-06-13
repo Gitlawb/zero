@@ -1582,7 +1582,9 @@ func (m model) chooseSuggestion() (tea.Model, tea.Cmd) {
 	wasDirectory := m.selectedSuggestionIsDirectory()
 	requiresInput := m.selectedCommandSuggestionRequiresInput()
 	next := m.completeSuggestion()
-	next.resetComposerFromInput()
+	if !wasFiles {
+		next.resetComposerFromInput()
+	}
 	if wasFiles && wasDirectory {
 		next.recomputeSuggestions()
 		return next, nil
