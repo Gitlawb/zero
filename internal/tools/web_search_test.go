@@ -224,6 +224,12 @@ func TestSameHostRedirectPolicy(t *testing.T) {
 	if err := sameHostRedirectPolicy(cross, []*http.Request{orig}); err == nil {
 		t.Fatal("cross-host redirect must be refused so scoped/deny can't be bypassed via a hop")
 	}
+	// A same-host HTTPS→HTTP downgrade must be refused (it would leak the query and
+	// bearer token over plaintext).
+	downgrade, _ := http.NewRequest(http.MethodGet, "http://search.example/api", nil)
+	if err := sameHostRedirectPolicy(downgrade, []*http.Request{orig}); err == nil {
+		t.Fatal("https→http downgrade redirect must be refused")
+	}
 	chain := make([]*http.Request, webSearchRedirectLimit)
 	for i := range chain {
 		chain[i] = orig

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 )
 
 const bubblewrapWorkspace = "/workspace"
@@ -359,7 +360,10 @@ var seccompHelper = findSeccompHelper
 func findSeccompHelper() string {
 	if exe, err := os.Executable(); err == nil {
 		candidate := filepath.Join(filepath.Dir(exe), "zero-seccomp")
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+		// Require an executable regular file: selecting a present-but-non-executable
+		// file would make the sandboxed command fail with EACCES instead of degrading
+		// gracefully. (exec.LookPath below applies the same check on PATH.)
+		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
 			return candidate
 		}
 	}
@@ -376,7 +380,11 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 			proxyPort = port
 		}
 	}
-	args := []string{"-p", sandboxExecProfile(writeRoots, policy, proxyPort), spec.Name}
+	denialTag := ""
+	if policy.MonitorDenials {
+		denialTag = nextSandboxDenialTag()
+	}
+	args := []string{"-p", sandboxExecProfile(writeRoots, policy, proxyPort, denialTag), spec.Name}
 	args = append(args, spec.Args...)
 	env := sandboxEnvironment(policy, BackendSandboxExec, workspaceRoot)
 	if egress != nil {
@@ -396,9 +404,9 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 	if egress != nil {
 		plan.cleanup = egress.cleanup
 	}
-	if policy.MonitorDenials {
-		plan.MonitorTag = sandboxDenialLogTag
-	}
+	// The plan's monitor tag MUST equal the one embedded in the profile above so the
+	// monitor matches exactly this run's denials.
+	plan.MonitorTag = denialTag
 	return plan
 }
 
@@ -506,11 +514,23 @@ var sandboxMachServices = []string{
 	"com.apple.pasteboard.1",
 }
 
-// sandboxDenialLogTag marks a sandbox-exec denial in the unified log when
-// Policy.MonitorDenials is set, so the runtime monitor can find it via
-// `log stream`. It is a fixed marker; with concurrent sandboxed commands a denial
-// may be attributed to more than one (acceptable for opt-in observability).
+// sandboxDenialLogTag is the base marker for a sandbox-exec denial in the unified
+// log when Policy.MonitorDenials is set; nextSandboxDenialTag derives a unique
+// per-plan tag from it so the runtime monitor can find this run's denials via
+// `log stream`.
 const sandboxDenialLogTag = "zero-sandbox-denied-v1"
+
+// sandboxDenialTagSeq makes each monitored plan's denial tag unique.
+var sandboxDenialTagSeq atomic.Uint64
+
+// nextSandboxDenialTag returns a process-unique denial tag. Without uniqueness,
+// two concurrent monitored commands share one marker and StartDenialMonitor —
+// which filters `log stream` only by tag — would ingest each other's denials,
+// leaking unrelated paths/hosts into the wrong <sandbox_violations> block. The pid
+// disambiguates across processes; the counter across plans within a process.
+func nextSandboxDenialTag() string {
+	return fmt.Sprintf("%s-%d-%d", sandboxDenialLogTag, os.Getpid(), sandboxDenialTagSeq.Add(1))
+}
 
 func sandboxMachLookupRule() string {
 	filters := make([]string, 0, len(sandboxMachServices))
@@ -520,7 +540,7 @@ func sandboxMachLookupRule() string {
 	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
 }
 
-func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string) string {
+func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, denialTag string) string {
 	networkRule := networkRuleFor(policy, proxyPort)
 	writeRule := "(allow file-write*)"
 	if policy.EnforceWorkspace {
@@ -540,11 +560,11 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string) st
 		writeRule = "(allow file-write*\n  " + strings.Join(filters, "\n  ") + ")"
 	}
 	denyDefault := "(deny default)"
-	if policy.MonitorDenials {
-		// Tag denials so the runtime log monitor can attribute them; the message is
-		// emitted to the unified log on every deny and StartDenialMonitor filters
-		// `log stream` for this tag.
-		denyDefault = `(deny default (with message "` + sandboxDenialLogTag + `"))`
+	if denialTag != "" {
+		// Tag denials so the runtime log monitor can attribute them to THIS run; the
+		// message is emitted to the unified log on every deny and StartDenialMonitor
+		// filters `log stream` for this exact (per-plan) tag.
+		denyDefault = `(deny default (with message "` + denialTag + `"))`
 	}
 	return strings.Join([]string{
 		"(version 1)",

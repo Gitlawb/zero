@@ -150,7 +150,9 @@ func TestTerminateProcessKillsForkedChildren(t *testing.T) {
 	// The forked child must be gone too (poll until reaped by init).
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if syscall.Kill(childPID, syscall.Signal(0)) != nil {
+		// Only ESRCH proves the child is gone; any other error (e.g. EPERM) would
+		// wrongly pass the test, so treat it as still-present and keep polling.
+		if errors.Is(syscall.Kill(childPID, syscall.Signal(0)), syscall.ESRCH) {
 			break // child no longer exists
 		}
 		if time.Now().After(deadline) {

@@ -188,8 +188,14 @@ func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= webSearchRedirectLimit {
 		return fmt.Errorf("stopped after %d redirects", webSearchRedirectLimit)
 	}
-	if origin := via[0].URL.Hostname(); !strings.EqualFold(req.URL.Hostname(), origin) {
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Hostname(), origin.Hostname()) {
 		return fmt.Errorf("refusing cross-host redirect to %q", req.URL.Hostname())
+	}
+	// Refuse a scheme change too — a same-host https→http downgrade would send the
+	// query (and the bearer token Go keeps on same-host redirects) over plaintext.
+	if !strings.EqualFold(req.URL.Scheme, origin.Scheme) {
+		return fmt.Errorf("refusing redirect that changes scheme %q→%q", origin.Scheme, req.URL.Scheme)
 	}
 	return nil
 }

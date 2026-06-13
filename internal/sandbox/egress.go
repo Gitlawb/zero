@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,9 +37,10 @@ type egressProxy struct {
 
 	// domainPrompt, when set, is asked to authorize an UNKNOWN host (one neither
 	// allowed nor explicitly denied) instead of failing closed. It must return
-	// within promptTimeout or the request is denied. Decisions are cached for the
-	// proxy's lifetime so a host is prompted at most once.
-	domainPrompt  func(host string, port int) (bool, error)
+	// within promptTimeout — the passed context is cancelled on timeout so a
+	// well-behaved callback can abort instead of leaking — or the request is denied.
+	// Decisions are cached for the proxy's lifetime so a host is prompted at most once.
+	domainPrompt  func(ctx context.Context, host string, port int) (bool, error)
 	promptTimeout time.Duration
 
 	cacheMu       sync.Mutex
@@ -62,9 +64,11 @@ type egressOptions struct {
 	Log     func(string)
 	// DomainPrompt, when set, authorizes an unknown host at request time (e.g. by
 	// prompting the user) instead of failing closed. PromptTimeout bounds the wait
-	// (default 60s); a timeout or error denies. Explicitly denied hosts are never
-	// prompted. Leave nil to keep the strict fail-closed behavior.
-	DomainPrompt  func(host string, port int) (bool, error)
+	// (default 60s); a timeout or error denies, and the context passed to the
+	// callback is cancelled on timeout so it can abort rather than leak a goroutine.
+	// Explicitly denied hosts are never prompted. Leave nil to keep the strict
+	// fail-closed behavior.
+	DomainPrompt  func(ctx context.Context, host string, port int) (bool, error)
 	PromptTimeout time.Duration
 }
 
@@ -297,23 +301,25 @@ func (proxy *egressProxy) promptForHost(host string, port int) bool {
 }
 
 // runDomainPrompt invokes the callback with a timeout. A timeout or error denies.
+// The context is cancelled when the wait ends (timeout or answer received), giving
+// a cooperative callback a chance to abort instead of leaking its goroutine.
 func (proxy *egressProxy) runDomainPrompt(host string, port int) bool {
 	timeout := proxy.promptTimeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	done := make(chan bool, 1)
 	go func() {
-		allow, err := proxy.domainPrompt(host, port)
+		allow, err := proxy.domainPrompt(ctx, host, port)
 		done <- allow && err == nil
 	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case allow := <-done:
 		return allow
-	case <-timer.C:
-		return false
+	case <-ctx.Done():
+		return false // timeout (ctx is cancelled, signalling the callback to abort)
 	}
 }
 

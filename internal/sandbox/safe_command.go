@@ -477,11 +477,16 @@ func splitShellSegments(command string) []string {
 
 	inSingle := false
 	inDouble := false
-	// substStack saves the quoting state at each `$(` so a substitution runs in a
-	// fresh quoting context (POSIX) and restores the outer state on its matching
-	// `)`. Its depth doubles as the substitution-nesting count.
-	type quoteState struct{ inSingle, inDouble bool }
-	var substStack []quoteState
+	// substStack saves the quoting state entering each command substitution (`$(`
+	// or a backtick) so the substitution runs in a fresh quoting context (POSIX)
+	// and the outer quoting is restored when it closes. backtick marks which
+	// delimiter opened the frame so `)` only closes `$(` frames and a backtick only
+	// closes a backtick frame.
+	type substFrame struct {
+		inSingle, inDouble bool
+		backtick           bool
+	}
+	var substStack []substFrame
 	runes := []rune(command)
 	for i := 0; i < len(runes); i++ {
 		c := runes[i]
@@ -521,15 +526,28 @@ func splitShellSegments(command string) []string {
 		// less") or a bare "a) less") is literal and must not split.
 		switch {
 		case c == '`':
+			// A backtick opens a substitution, or closes the active one if the top
+			// frame is itself a backtick. Saving/restoring quote state means inner
+			// separators in `echo "`a | less`"` are seen instead of staying hidden
+			// by the outer double quotes.
+			if n := len(substStack); n > 0 && substStack[n-1].backtick {
+				prev := substStack[n-1]
+				substStack = substStack[:n-1]
+				inSingle, inDouble = prev.inSingle, prev.inDouble
+				flush()
+				continue
+			}
 			flush()
+			substStack = append(substStack, substFrame{inSingle, inDouble, true})
+			inSingle, inDouble = false, false
 			continue
 		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
 			flush()
-			substStack = append(substStack, quoteState{inSingle, inDouble})
+			substStack = append(substStack, substFrame{inSingle, inDouble, false})
 			inSingle, inDouble = false, false
 			i++ // consume the '('
 			continue
-		case c == ')' && len(substStack) > 0 && !inSingle && !inDouble:
+		case c == ')' && len(substStack) > 0 && !substStack[len(substStack)-1].backtick && !inSingle && !inDouble:
 			prev := substStack[len(substStack)-1]
 			substStack = substStack[:len(substStack)-1]
 			inSingle, inDouble = prev.inSingle, prev.inDouble

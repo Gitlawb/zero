@@ -261,6 +261,8 @@ func TestDetectInteractiveBypasses(t *testing.T) {
 		"'vim' file.txt",            // single-quoted program
 		"echo $(vim file.txt)",      // command substitution
 		"echo `vim file.txt`",       // backtick substitution
+		"echo \"`true | less`\"",    // backtick in double quotes hides an inner pager
+		"echo \"$(true | less)\"",   // $() in double quotes hides an inner pager
 		"/bin/less /var/log/syslog", // absolute pager
 	}
 	for _, cmd := range blocked {

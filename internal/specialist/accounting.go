@@ -141,7 +141,13 @@ func specialistEventExists(store *sessions.Store, parentSessionID string, eventT
 		if specialistPayloadString(payload, "childSessionId") != childSessionID && specialistPayloadString(payload, "taskId") != childSessionID {
 			continue
 		}
-		if runID == "" || specialistPayloadString(payload, "runId") == runID {
+		// An already-recorded event with NO runId is a catch-all for this child (e.g.
+		// the immediate stop written when a PID couldn't be registered) and must
+		// match a later event that does carry a runId — otherwise the same child gets
+		// two stop/usage events. We match when: we're querying without a runId, the
+		// existing event has none, or the runIds are equal.
+		existingRunID := specialistPayloadString(payload, "runId")
+		if runID == "" || existingRunID == "" || existingRunID == runID {
 			return true
 		}
 	}

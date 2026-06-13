@@ -128,6 +128,14 @@ func (store *Store) Tree(rootSessionID string) (TreeNode, error) {
 	if !ValidSessionID(rootSessionID) {
 		return TreeNode{}, fmt.Errorf("invalid zero session id %q", rootSessionID)
 	}
+	// Fetch the root directly first. store.List() silently skips sessions whose
+	// metadata cannot be read, so a corrupt/unreadable root would otherwise degrade
+	// to a generic "not found"; a direct Get surfaces the real metadata error and
+	// distinguishes corruption from genuine absence.
+	root, err := store.Get(rootSessionID)
+	if err != nil {
+		return TreeNode{}, err
+	}
 	// Snapshot every session once and index children by parent in memory. The
 	// previous recursion called ListChildren per node, and each ListChildren ran a
 	// full store.List() disk scan (reading every metadata.json), making Tree
@@ -144,6 +152,9 @@ func (store *Store) Tree(rootSessionID string) (TreeNode, error) {
 			childrenByParent[session.ParentSessionID] = append(childrenByParent[session.ParentSessionID], session)
 		}
 	}
+	// Ensure the validated root is present even if List() skipped it (e.g. a
+	// transient read race), so the tree still builds from it.
+	byID[rootSessionID] = *root
 	for parent := range childrenByParent {
 		sortChildSessions(childrenByParent[parent])
 	}

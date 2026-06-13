@@ -233,7 +233,7 @@ func resolvedTestPath(t *testing.T, path string) string {
 }
 
 func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
+	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "")
 	if !strings.Contains(profile, "(allow file-write*") {
 		t.Fatalf("profile missing file-write rule:\n%s", profile)
 	}
@@ -251,7 +251,7 @@ func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
 }
 
 func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
-	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
+	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "")
 	if strings.Contains(off, "with message") {
 		t.Fatalf("denials must not be tagged when monitoring is off:\n%s", off)
 	}
@@ -259,14 +259,39 @@ func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
 		t.Fatalf("profile missing the plain default-deny:\n%s", off)
 	}
 
-	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "")
-	if !strings.Contains(on, `(deny default (with message "`+sandboxDenialLogTag+`"))`) {
+	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "", "run-tag-123")
+	if !strings.Contains(on, `(deny default (with message "run-tag-123"))`) {
 		t.Fatalf("denials must be tagged when monitoring is on:\n%s", on)
 	}
 }
 
+func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
+	policy := Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}
+	backend := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/bin/sandbox-exec"}
+	spec := CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/ws"}
+
+	p1 := sandboxExecCommandPlan(spec, "/ws", []string{"/ws"}, policy, backend, nil)
+	p2 := sandboxExecCommandPlan(spec, "/ws", []string{"/ws"}, policy, backend, nil)
+	if p1.MonitorTag == "" || p2.MonitorTag == "" {
+		t.Fatalf("monitored plans must carry a denial tag: %q %q", p1.MonitorTag, p2.MonitorTag)
+	}
+	if p1.MonitorTag == p2.MonitorTag {
+		t.Fatalf("each monitored plan must get a unique tag so monitors can't cross-ingest, both = %q", p1.MonitorTag)
+	}
+	// The profile embedded in each plan must carry that plan's own tag (the monitor
+	// matches on it).
+	if !strings.Contains(strings.Join(p1.Args, " "), p1.MonitorTag) {
+		t.Fatalf("plan profile must embed its own tag %q:\n%v", p1.MonitorTag, p1.Args)
+	}
+
+	off := sandboxExecCommandPlan(spec, "/ws", []string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, backend, nil)
+	if off.MonitorTag != "" {
+		t.Fatalf("a non-monitored plan must carry no tag, got %q", off.MonitorTag)
+	}
+}
+
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
+	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "")
 
 	// Signalling own process group lets a sandboxed script kill the children it
 	// spawns; without it seatbelt denies kill() with "Operation not permitted".

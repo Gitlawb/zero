@@ -282,7 +282,7 @@ func runSandboxGrantSet(command string, args []string, stdout io.Writer, stderr 
 		return exitSuccess
 	}
 	if len(positional) != 1 {
-		return writeExecUsageError(stderr, "usage: zero sandbox grants "+command+" <tool> [--auto low|medium|high] [--reason text] [--json]")
+		return writeExecUsageError(stderr, "usage: zero sandbox grants "+command+" <tool> [--path file] [--auto low|medium|high] [--reason text] [--json]")
 	}
 	decision := zeroSandbox.GrantAllow
 	if command == "deny" {
@@ -338,7 +338,7 @@ func runSandboxGrantRevoke(args []string, stdout io.Writer, stderr io.Writer, de
 		return exitSuccess
 	}
 	if len(positional) != 1 {
-		return writeExecUsageError(stderr, "usage: zero sandbox grants revoke <tool> [--json]")
+		return writeExecUsageError(stderr, "usage: zero sandbox grants revoke <tool> [--path file] [--json]")
 	}
 	store, err := deps.newSandboxStore()
 	if err != nil {

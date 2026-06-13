@@ -135,7 +135,14 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 	for index := 0; index < len(args); index++ {
 		text := wordText(args[index])
 		if text == "" {
-			return "", nil
+			// A dynamic ($x) token in the PROGRAM position can't be classified, so
+			// fail closed. But once we're past a wrapper, a dynamic arg is most
+			// likely a wrapper flag/value — keep scanning so the literal payload that
+			// follows is still classified (e.g. `env "$opts" curl …`).
+			if wrapper == "" {
+				return "", nil
+			}
+			continue
 		}
 		if strings.Contains(text, "=") && !strings.HasPrefix(text, "=") {
 			continue // env-assignment prefix (e.g. `env FOO=bar cmd`)

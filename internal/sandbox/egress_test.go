@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -307,7 +308,7 @@ func TestEgressProxyAuthorizeDomainPrompt(t *testing.T) {
 		denied:        normalizeDomains([]string{"denied.test"}),
 		decisionCache: map[string]bool{},
 		promptTimeout: 500 * time.Millisecond,
-		domainPrompt: func(host string, port int) (bool, error) {
+		domainPrompt: func(_ context.Context, host string, port int) (bool, error) {
 			mu.Lock()
 			calls[host]++
 			mu.Unlock()
@@ -349,7 +350,7 @@ func TestEgressProxyDomainPromptTimeoutDenies(t *testing.T) {
 		allowed:       normalizeDomains([]string{"allowed.test"}),
 		decisionCache: map[string]bool{},
 		promptTimeout: 20 * time.Millisecond,
-		domainPrompt: func(host string, port int) (bool, error) {
+		domainPrompt: func(_ context.Context, host string, port int) (bool, error) {
 			time.Sleep(250 * time.Millisecond) // exceeds promptTimeout
 			return true, nil
 		},
@@ -359,13 +360,35 @@ func TestEgressProxyDomainPromptTimeoutDenies(t *testing.T) {
 	}
 }
 
+func TestEgressProxyDomainPromptTimeoutCancelsContext(t *testing.T) {
+	cancelled := make(chan struct{}, 1)
+	proxy := &egressProxy{
+		decisionCache: map[string]bool{},
+		inflight:      map[string]chan struct{}{},
+		promptTimeout: 20 * time.Millisecond,
+		domainPrompt: func(ctx context.Context, host string, port int) (bool, error) {
+			<-ctx.Done() // a cooperative callback returns when the wait times out
+			cancelled <- struct{}{}
+			return true, ctx.Err()
+		},
+	}
+	if proxy.authorize("slow.test", 443) {
+		t.Fatal("a prompt that doesn't answer before the timeout must deny")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("the prompt callback's context must be cancelled on timeout so it can abort")
+	}
+}
+
 func TestEgressProxyDeduplicatesConcurrentPrompts(t *testing.T) {
 	var calls int32
 	proxy := &egressProxy{
 		decisionCache: map[string]bool{},
 		inflight:      map[string]chan struct{}{},
 		promptTimeout: time.Second,
-		domainPrompt: func(host string, port int) (bool, error) {
+		domainPrompt: func(_ context.Context, host string, port int) (bool, error) {
 			atomic.AddInt32(&calls, 1)
 			time.Sleep(40 * time.Millisecond) // hold the prompt so others pile up
 			return true, nil
