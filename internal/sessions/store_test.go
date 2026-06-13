@@ -696,3 +696,25 @@ func sequenceClock(values []time.Time) func() time.Time {
 		return value
 	}
 }
+
+func TestWriteFileSyncRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.json")
+	want := []byte("durable bytes\n")
+	if err := writeFileSync(path, want, 0o600); err != nil {
+		t.Fatalf("writeFileSync: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("round-trip = %q, want %q", got, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("perm = %o, want 600", perm)
+	}
+}

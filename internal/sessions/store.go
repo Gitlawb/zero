@@ -690,7 +690,11 @@ func (store *Store) writeMetadata(session Metadata) error {
 	}
 	path := store.metadataPath(session.SessionID)
 	tmp := fmt.Sprintf("%s.tmp-%d", path, store.idCounter.Add(1))
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	// fsync the temp file before renaming it into place. os.WriteFile does not
+	// sync, so a crash right after the rename could surface a metadata file whose
+	// contents were never flushed — a torn or empty file that corrupts the whole
+	// session. Syncing the data before the atomic rename closes that window.
+	if err := writeFileSync(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write zero session metadata: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -698,6 +702,24 @@ func (store *Store) writeMetadata(session Metadata) error {
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
 	return nil
+}
+
+// writeFileSync writes data to path and fsyncs it before returning, so the bytes
+// are durably on disk (unlike os.WriteFile, which leaves them in the page cache).
+func writeFileSync(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func rawPayload(payload any) (json.RawMessage, error) {
