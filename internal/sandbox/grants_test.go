@@ -148,3 +148,46 @@ func writeText(path string, content string) error {
 	}
 	return os.WriteFile(path, []byte(content), 0o600)
 }
+
+func TestGrantStoreRevokePathRemovesOnlyMatchingScope(t *testing.T) {
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:30:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore: %v", err)
+	}
+	dir := t.TempDir()
+	fileA := filepath.Join(dir, "a.txt")
+	fileB := filepath.Join(dir, "b.txt")
+	for _, scope := range []string{fileA, fileB} {
+		if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyLow, Scope: scope, ScopeKind: ScopeFile}); err != nil {
+			t.Fatalf("Grant %s: %v", scope, err)
+		}
+	}
+	// A tool-wide grant for the same tool must survive a path-scoped revoke.
+	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyLow}); err != nil {
+		t.Fatalf("Grant tool-wide: %v", err)
+	}
+
+	removed, err := store.RevokePath("write_file", fileA)
+	if err != nil || removed != 1 {
+		t.Fatalf("RevokePath(fileA) = (%d,%v), want (1,nil)", removed, err)
+	}
+	grants, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("expected 2 grants left (fileB + tool-wide), got %d: %#v", len(grants), grants)
+	}
+	for _, grant := range grants {
+		if grant.Scope == fileA {
+			t.Fatalf("fileA grant should have been revoked: %#v", grants)
+		}
+	}
+	// A path with no matching grant removes nothing (and does not error).
+	if removed, err := store.RevokePath("write_file", filepath.Join(dir, "nope.txt")); err != nil || removed != 0 {
+		t.Fatalf("RevokePath(nonexistent) = (%d,%v), want (0,nil)", removed, err)
+	}
+}

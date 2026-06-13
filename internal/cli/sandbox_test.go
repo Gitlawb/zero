@@ -102,6 +102,49 @@ func TestRunSandboxGrantsAllowListDenyRevokeAndClear(t *testing.T) {
 	}
 }
 
+func TestRunSandboxGrantsCreateAndRevokeByPath(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil }}
+	path := filepath.Join(t.TempDir(), "secret.txt")
+
+	var stdout, stderr bytes.Buffer
+	run := func(args ...string) int {
+		stdout.Reset()
+		stderr.Reset()
+		return runWithDeps(args, &stdout, &stderr, deps)
+	}
+
+	// An exact-path grant and a tool-wide grant for the same tool.
+	if exit := run("sandbox", "grants", "allow", "write_file", "--path", path); exit != exitSuccess {
+		t.Fatalf("allow --path exit = %d, stderr %q", exit, stderr.String())
+	}
+	if exit := run("sandbox", "grants", "allow", "write_file"); exit != exitSuccess {
+		t.Fatalf("allow tool-wide exit = %d, stderr %q", exit, stderr.String())
+	}
+
+	// Revoking by path removes only the path-scoped grant.
+	if exit := run("sandbox", "grants", "revoke", "write_file", "--path", path, "--json"); exit != exitSuccess {
+		t.Fatalf("revoke --path exit = %d, stderr %q", exit, stderr.String())
+	}
+	var payload struct {
+		Revoked int `json:"revoked"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode revoke JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.Revoked != 1 {
+		t.Fatalf("revoked = %d, want 1", payload.Revoked)
+	}
+
+	grants, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(grants) != 1 || grants[0].ScopeKind != sandbox.ScopeToolWide {
+		t.Fatalf("expected only the tool-wide grant to remain, got %#v", grants)
+	}
+}
+
 func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 	store := newSandboxTestStore(t)
 	deps := appDeps{

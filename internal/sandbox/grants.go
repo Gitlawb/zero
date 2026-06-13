@@ -243,6 +243,54 @@ func (store *GrantStore) Revoke(toolName string) (int, error) {
 	return count, nil
 }
 
+// RevokePath revokes only the grants for toolName whose scope matches scopePath
+// (a file or directory grant), leaving tool-wide and other-path grants intact.
+// scopePath is canonicalized to an absolute, cleaned path the same way stored
+// scopes are, so the caller can pass either an absolute path or one relative to
+// the working directory (or copy it from `grants list`). Returns the number of
+// grants removed.
+func (store *GrantStore) RevokePath(toolName string, scopePath string) (int, error) {
+	if err := ValidateToolName(toolName); err != nil {
+		return 0, err
+	}
+	target := resolveScopeAbs(scopePath, "")
+	if target == "" {
+		return 0, fmt.Errorf("a non-empty --path is required to revoke a single grant")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state, err := store.readState()
+	if err != nil {
+		return 0, err
+	}
+	key := strings.TrimSpace(toolName)
+	bucket, ok := state.Grants[key]
+	if !ok || len(bucket) == 0 {
+		return 0, nil
+	}
+	kept := make([]Grant, 0, len(bucket))
+	removed := 0
+	for _, grant := range bucket {
+		if grant.Scope == target {
+			removed++
+			continue
+		}
+		kept = append(kept, grant)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	if len(kept) == 0 {
+		delete(state.Grants, key)
+	} else {
+		state.Grants[key] = kept
+	}
+	if err := store.writeState(state); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 func (store *GrantStore) Clear() (int, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()

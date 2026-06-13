@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -15,6 +16,7 @@ type sandboxCommandOptions struct {
 	effective bool
 	autonomy  string
 	reason    string
+	path      string
 }
 
 func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -290,12 +292,23 @@ func runSandboxGrantSet(command string, args []string, stdout io.Writer, stderr 
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	grant, err := store.Grant(zeroSandbox.GrantInput{
+	input := zeroSandbox.GrantInput{
 		ToolName:    positional[0],
 		Decision:    decision,
 		MaxAutonomy: zeroSandbox.Autonomy(options.autonomy),
 		Reason:      options.reason,
-	})
+	}
+	if options.path != "" {
+		// --path persists an exact-file grant. Resolve to an absolute path so it
+		// matches how scopes are stored (and how `revoke --path` looks them up).
+		abs, absErr := filepath.Abs(options.path)
+		if absErr != nil {
+			return writeExecUsageError(stderr, absErr.Error())
+		}
+		input.Scope = abs
+		input.ScopeKind = zeroSandbox.ScopeFile
+	}
+	grant, err := store.Grant(input)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -331,7 +344,14 @@ func runSandboxGrantRevoke(args []string, stdout io.Writer, stderr io.Writer, de
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	revoked, err := store.Revoke(positional[0])
+	// With --path, revoke only the grant scoped to that exact file/dir; otherwise
+	// revoke every grant for the tool (the pre-existing behavior).
+	var revoked int
+	if options.path != "" {
+		revoked, err = store.RevokePath(positional[0], options.path)
+	} else {
+		revoked, err = store.Revoke(positional[0])
+	}
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -440,6 +460,15 @@ func parseSandboxPositionalOptions(args []string) (sandboxCommandOptions, []stri
 			index = next
 		case strings.HasPrefix(arg, "--reason="):
 			options.reason = strings.TrimSpace(strings.TrimPrefix(arg, "--reason="))
+		case arg == "--path":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, positional, false, err
+			}
+			options.path = value
+			index = next
+		case strings.HasPrefix(arg, "--path="):
+			options.path = strings.TrimSpace(strings.TrimPrefix(arg, "--path="))
 		case strings.HasPrefix(arg, "-"):
 			return options, positional, false, execUsageError{fmt.Sprintf("unknown sandbox grants flag %q", arg)}
 		default:
@@ -527,6 +556,7 @@ func writeSandboxGrantSetHelp(w io.Writer) error {
 Flags:
       --auto <level>      Maximum autonomy covered by the grant
       --reason <text>     Human-readable reason for the grant
+      --path <path>       Scope the grant to one exact file (default: tool-wide)
       --json              Print JSON output
   -h, --help              Show this help
 `)
@@ -538,6 +568,8 @@ func writeSandboxGrantRevokeHelp(w io.Writer) error {
   zero sandbox grants revoke <tool> [flags]
 
 Flags:
+      --path <path>       Revoke only the grant scoped to this exact file/dir
+                          (default: revoke every grant for the tool)
       --json              Print JSON output
   -h, --help              Show this help
 `)
