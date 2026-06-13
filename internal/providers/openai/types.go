@@ -71,8 +71,9 @@ type streamChoice struct {
 }
 
 type streamDelta struct {
-	Content   string                `json:"content"`
-	ToolCalls []streamToolCallDelta `json:"tool_calls"`
+	Content          string                `json:"content"`
+	ReasoningContent string                `json:"reasoning_content"`
+	ToolCalls        []streamToolCallDelta `json:"tool_calls"`
 }
 
 type streamToolCallDelta struct {

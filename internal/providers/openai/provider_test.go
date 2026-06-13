@@ -207,6 +207,25 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. "}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Answering now."}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	var text string
+	for _, event := range events {
+		if event.Type == zeroruntime.StreamEventText {
+			text += event.Content
+		}
+	}
+	if text != "Thinking. Answering now." {
+		t.Fatalf("collected text = %q, want reasoning content text", text)
+	}
+}
+
 func TestStreamCompletionBuffersToolArgsUntilIDAndNameArrive(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`)

@@ -227,6 +227,12 @@ func (provider *Provider) emitChunk(
 	events chan<- zeroruntime.StreamEvent,
 ) {
 	for _, choice := range chunk.Choices {
+		if choice.Delta.ReasoningContent != "" {
+			sendEvent(ctx, events, zeroruntime.StreamEvent{
+				Type:    zeroruntime.StreamEventText,
+				Content: choice.Delta.ReasoningContent,
+			})
+		}
 		if choice.Delta.Content != "" {
 			sendEvent(ctx, events, zeroruntime.StreamEvent{
 				Type:    zeroruntime.StreamEventText,
@@ -371,9 +377,8 @@ func mapMessage(message zeroruntime.Message) chatMessage {
 	// message that happens to carry Images keeps the plain string/nil content
 	// path (its images are simply not serialized).
 	if len(message.Images) == 0 || message.Role != zeroruntime.MessageRoleUser {
-		// Preserve today's behavior exactly: a string assigned only when
-		// non-empty, leaving Content nil otherwise so the `omitempty` tag still
-		// drops the key. An empty string boxed in `any` would NOT be omitted.
+		// Preserve the legacy behavior: only non-empty text is serialized, so
+		// empty content is omitted by the `omitempty` tag.
 		if message.Content != "" {
 			mapped.Content = message.Content
 		}

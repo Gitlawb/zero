@@ -270,7 +270,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	lines = append(lines,
 		"Switched model for this TUI session.",
 		"model: "+target.modelID,
-		"provider: "+string(metadata.ProviderKind),
+		"provider: "+displayValue(nextProfile.Name, string(metadata.ProviderKind)),
 		"api model: "+metadata.APIModel,
 		effortLine,
 	)
@@ -400,7 +400,7 @@ func (m model) handleModeCommand(args string) (model, string) {
 		"Switched to mode "+mode.Name+" for this TUI session.",
 		mode.Description,
 		"model: "+entry.ID,
-		"provider: "+string(metadata.ProviderKind),
+		"provider: "+displayValue(nextProfile.Name, string(metadata.ProviderKind)),
 		effortLine,
 		turnsLine,
 	)
