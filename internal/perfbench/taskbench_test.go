@@ -328,3 +328,22 @@ func TestNewExecRunnerLaunchFailureIsHarnessError(t *testing.T) {
 		t.Fatalf("a launch failure must be a harness error")
 	}
 }
+
+func TestRunVerificationInheritsEnvironment(t *testing.T) {
+	// The verifier must see the inherited environment (PATH, HOME, toolchain
+	// vars, ...) the same way a maintainer running the command by hand would.
+	// A command that only succeeds when it can read an inherited var proves the
+	// environment is passed through rather than reset to NO_COLOR only.
+	if runtime.GOOS == "windows" {
+		t.Skip("verification probe uses a POSIX shell")
+	}
+	t.Setenv("PERFBENCH_VERIFY_PROBE", "present")
+	task := BenchTask{
+		ID:                  "t1",
+		VerificationCommand: []string{"sh", "-c", `[ "$PERFBENCH_VERIFY_PROBE" = present ]`},
+	}
+	outcome := runVerification(context.Background(), task)
+	if !outcome.Passed {
+		t.Fatalf("verifier should see the inherited env var, got Passed=false detail=%q", outcome.Detail)
+	}
+}

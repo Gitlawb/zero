@@ -359,7 +359,10 @@ func buildExecArgs(task BenchTask, rc RunContext, extraArgs []string) []string {
 
 func runVerification(ctx context.Context, task BenchTask) TaskOutcome {
 	cmd := exec.CommandContext(ctx, task.VerificationCommand[0], task.VerificationCommand[1:]...)
-	cmd.Env = appendNoColor(nil)
+	// Inherit the environment so the verifier sees PATH, HOME, language toolchain
+	// vars, etc. — the same surface a maintainer gets running the command by hand
+	// (matching the agent run above). NO_COLOR is appended for stable output.
+	cmd.Env = appendNoColor(os.Environ())
 	if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 		cmd.Dir = dir
 	}
