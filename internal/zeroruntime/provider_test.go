@@ -45,6 +45,7 @@ func TestSeedMessagesProducesSystemAndUserTurns(t *testing.T) {
 func TestStreamEventNamesMatchProviderContract(t *testing.T) {
 	cases := map[StreamEventType]string{
 		StreamEventText:          "text",
+		StreamEventReasoning:     "reasoning",
 		StreamEventToolCallStart: "tool-call-start",
 		StreamEventToolCallDelta: "tool-call-delta",
 		StreamEventToolCallEnd:   "tool-call-end",
@@ -238,21 +239,24 @@ func TestCollectStreamAccumulatesMixedUsageShapes(t *testing.T) {
 	}
 }
 
-func TestCollectStreamWithOptionsEmitsTextAndUsageCallbacks(t *testing.T) {
+func TestCollectStreamWithOptionsEmitsTextReasoningAndUsageCallbacks(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {
 		defer close(events)
 		events <- StreamEvent{Type: StreamEventText, Content: "Hello "}
+		events <- StreamEvent{Type: StreamEventReasoning, Content: "Thinking. "}
 		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{PromptTokens: 12, CompletionTokens: 5, CachedInputTokens: 2}}
 		events <- StreamEvent{Type: StreamEventText, Content: "zero"}
 		events <- StreamEvent{Type: StreamEventDone}
 	}()
 
 	var textDeltas []string
+	var reasoningDeltas []string
 	var usageEvents []Usage
 	collected := CollectStreamWithOptions(context.Background(), events, CollectOptions{
-		OnText:  func(delta string) { textDeltas = append(textDeltas, delta) },
-		OnUsage: func(usage Usage) { usageEvents = append(usageEvents, usage) },
+		OnText:      func(delta string) { textDeltas = append(textDeltas, delta) },
+		OnReasoning: func(delta string) { reasoningDeltas = append(reasoningDeltas, delta) },
+		OnUsage:     func(usage Usage) { usageEvents = append(usageEvents, usage) },
 	})
 
 	if collected.Text != "Hello zero" {
@@ -260,6 +264,9 @@ func TestCollectStreamWithOptionsEmitsTextAndUsageCallbacks(t *testing.T) {
 	}
 	if len(textDeltas) != 2 || textDeltas[0] != "Hello " || textDeltas[1] != "zero" {
 		t.Fatalf("unexpected text callbacks: %#v", textDeltas)
+	}
+	if len(reasoningDeltas) != 1 || reasoningDeltas[0] != "Thinking. " {
+		t.Fatalf("unexpected reasoning callbacks: %#v", reasoningDeltas)
 	}
 	if len(usageEvents) != 1 {
 		t.Fatalf("expected one usage callback, got %#v", usageEvents)

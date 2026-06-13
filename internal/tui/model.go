@@ -2030,6 +2030,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				onText(delta)
 			}
 		}
+		onReasoning := options.OnReasoning
+		options.OnReasoning = func(delta string) {
+			m.sendAgentText(runID, delta)
+			if onReasoning != nil {
+				onReasoning(delta)
+			}
+		}
 
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {

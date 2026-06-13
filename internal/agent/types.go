@@ -184,6 +184,7 @@ type Options struct {
 	EnabledTools        []string
 	DisabledTools       []string
 	OnText              func(string)
+	OnReasoning         func(string)
 	OnToolCall          func(ToolCall)
 	OnPermissionRequest func(context.Context, PermissionRequest) (PermissionDecision, error)
 	OnPermission        func(PermissionEvent)

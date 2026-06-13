@@ -89,6 +89,39 @@ func TestRunReturnsProviderText(t *testing.T) {
 	assertMessage(t, provider.requests[0].Messages[1], zeroruntime.MessageRoleUser, "say hi")
 }
 
+func TestRunDoesNotPersistReasoningAsAssistantText(t *testing.T) {
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventReasoning, Content: "private reasoning"},
+			{Type: zeroruntime.StreamEventText, Content: "public answer"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+	var reasoning []string
+
+	result, err := Run(context.Background(), "say hi", provider, Options{
+		Registry:    tools.NewRegistry(),
+		OnReasoning: func(delta string) { reasoning = append(reasoning, delta) },
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "public answer" {
+		t.Fatalf("final answer = %q, want public answer", result.FinalAnswer)
+	}
+	if len(result.Messages) == 0 {
+		t.Fatal("expected persisted messages")
+	}
+	last := result.Messages[len(result.Messages)-1]
+	if last.Role != zeroruntime.MessageRoleAssistant || last.Content != "public answer" {
+		t.Fatalf("assistant message = %#v, want answer-only assistant content", last)
+	}
+	if len(reasoning) != 1 || reasoning[0] != "private reasoning" {
+		t.Fatalf("reasoning callbacks = %#v", reasoning)
+	}
+}
+
 func TestRunReportsTruncationFinishReason(t *testing.T) {
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{{

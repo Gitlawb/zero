@@ -229,7 +229,7 @@ func (provider *Provider) emitChunk(
 	for _, choice := range chunk.Choices {
 		if choice.Delta.ReasoningContent != "" {
 			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:    zeroruntime.StreamEventText,
+				Type:    zeroruntime.StreamEventReasoning,
 				Content: choice.Delta.ReasoningContent,
 			})
 		}

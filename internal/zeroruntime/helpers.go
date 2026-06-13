@@ -31,8 +31,9 @@ func (collected CollectedStream) Truncated() bool {
 
 // CollectOptions provides callbacks for consumers that need live stream updates.
 type CollectOptions struct {
-	OnText  func(string)
-	OnUsage func(Usage)
+	OnText      func(string)
+	OnReasoning func(string)
+	OnUsage     func(Usage)
 }
 
 // SeedMessages creates the initial system and user turns for a request. It is a
@@ -113,6 +114,10 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 				collected.Text += event.Content
 				if options.OnText != nil {
 					options.OnText(event.Content)
+				}
+			case StreamEventReasoning:
+				if options.OnReasoning != nil {
+					options.OnReasoning(event.Content)
 				}
 			case StreamEventToolCallStart:
 				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)

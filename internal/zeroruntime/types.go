@@ -34,7 +34,10 @@ const (
 )
 
 const (
-	StreamEventText          StreamEventType = "text"
+	StreamEventText StreamEventType = "text"
+	// StreamEventReasoning carries live reasoning deltas that must never be
+	// folded into answer text or persisted as assistant content.
+	StreamEventReasoning     StreamEventType = "reasoning"
 	StreamEventToolCallStart StreamEventType = "tool-call-start"
 	StreamEventToolCallDelta StreamEventType = "tool-call-delta"
 	StreamEventToolCallEnd   StreamEventType = "tool-call-end"
