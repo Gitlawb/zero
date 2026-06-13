@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -25,7 +27,7 @@ func plainRender(t *testing.T, rendered string) string {
 }
 
 func limeTestModel() model {
-	return newModel(context.Background(), Options{ProviderName: "anthropic", ModelName: "claude-sonnet-4.5"})
+	return newModel(context.Background(), Options{ProviderName: "test-provider", ModelName: "test-model"})
 }
 
 func TestUserRowRendersPromptGutter(t *testing.T) {
@@ -53,6 +55,152 @@ func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 	}
 }
 
+func TestInterimBlockRendersStreamingMarkdownTable(t *testing.T) {
+	m := limeTestModel()
+	m.pending = true
+	m.streamingText = strings.Join([]string{
+		"Here's the comparison:",
+		"",
+		"| Category | System A | System B |",
+		"|---|---|---|",
+		"| **Label** | Alpha | Beta |",
+	}, "\n")
+
+	rendered := m.interimBlock(72)
+	got := plainRender(t, rendered)
+	for _, unwanted := range []string{"|---", "**Label**"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("streaming markdown table leaked source syntax %q in:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{"Category", "Label", " │ ", "─┼─", "▌"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("streaming markdown table missing %q in:\n%s", want, got)
+		}
+	}
+	for index, line := range strings.Split(rendered, "\n") {
+		if gotWidth := lipgloss.Width(line); gotWidth > 72 {
+			t.Fatalf("line %d width = %d, want <= 72: %q", index, gotWidth, line)
+		}
+	}
+}
+
+func TestMarkdownInlineRendersBoldControlCodes(t *testing.T) {
+	got := renderMarkdownInline("plain **h** __there__ `code` *em*")
+	for _, want := range []string{markdownBoldStart + "h" + markdownBoldEnd, markdownBoldStart + "there" + markdownBoldEnd} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("inline markdown render missing bold segment %q in %q", want, got)
+		}
+	}
+	plain := ansiPattern.ReplaceAllString(got, "")
+	if plain != "plain h there code em" {
+		t.Fatalf("inline markdown plain text = %q, want markers stripped", plain)
+	}
+}
+
+func TestMarkdownTableHeaderRendersBold(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"| Feature | System A | System B |",
+		"|---|---|---|",
+		"| Mode | Alpha | Beta |",
+	}, "\n"), 72, 72)
+	got := strings.Join(lines, "\n")
+	for _, want := range []string{
+		markdownBoldStart + "Feature" + markdownBoldEnd,
+		markdownBoldStart + "System A" + markdownBoldEnd,
+		markdownBoldStart + "System B" + markdownBoldEnd,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown table header missing bold segment %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestMarkdownTableAddsBodyRulesForWrappedRows(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"| Feature | System A | System B |",
+		"|---|---|---|",
+		"| Long Description | This cell contains enough neutral words to wrap across multiple lines. | This other cell also wraps across multiple lines for layout testing. |",
+		"| Short Row | Alpha | Beta |",
+	}, "\n"), 72, 72)
+	got := strings.Join(lines, "\n")
+	ruleCount := countMarkdownRuleLines(got)
+	if ruleCount < 2 {
+		t.Fatalf("wrapped markdown table should add body rules, got %d in:\n%s", ruleCount, got)
+	}
+}
+
+func TestMarkdownTableKeepsCompactRowsClean(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"| Feature | System A | System B |",
+		"|---|---|---|",
+		"| Count | one | two |",
+		"| Mode | Alpha | Beta |",
+	}, "\n"), 96, 96)
+	got := strings.Join(lines, "\n")
+	ruleCount := countMarkdownRuleLines(got)
+	if ruleCount != 1 {
+		t.Fatalf("compact markdown table should only have header rule, got %d in:\n%s", ruleCount, got)
+	}
+}
+
+func countMarkdownRuleLines(rendered string) int {
+	count := 0
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "─┼─") {
+			count++
+		}
+	}
+	return count
+}
+
+func TestMarkdownPlainTextStripsRenderControls(t *testing.T) {
+	lines := renderAssistantMarkdownPlainText(strings.Join([]string{
+		"| **Feature** | System A |",
+		"|---|---|",
+		"| **Mode** | Alpha |",
+	}, "\n"), 72, 72)
+	got := strings.Join(lines, "\n")
+	for _, unwanted := range []string{markdownBoldStart, markdownBoldEnd, "**"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("plain markdown render leaked %q in:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{"Feature", "Mode", "│", "─┼─"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("plain markdown render missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestSelectableAssistantRowKeepsMarkdownSemanticsPlain(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowAssistant,
+		text: strings.Join([]string{
+			"| Feature | System A | System B |",
+			"|---|---|---|",
+			"| **Mode** | Alpha | Beta |",
+		}, "\n"),
+		final: true,
+	}
+
+	rendered, selectable := m.renderSelectableAssistantRow(0, row, 72, 0)
+	got := plainRender(t, rendered)
+	for _, want := range []string{"Feature", "System A", "System B", "Mode", "│", "─┼─"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("selectable assistant markdown row missing %q in:\n%s", want, got)
+		}
+	}
+	for _, line := range selectable {
+		for _, unwanted := range []string{markdownBoldStart, markdownBoldEnd, "**"} {
+			if strings.Contains(line.text, unwanted) {
+				t.Fatalf("selectable metadata leaked %q in %#v", unwanted, line)
+			}
+		}
+	}
+}
+
 func TestFinalAnswerRendersRailAndDoneLine(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{
@@ -68,6 +216,156 @@ func TestFinalAnswerRendersRailAndDoneLine(t *testing.T) {
 	}
 	if !strings.Contains(got, "● done · 2 tools · 8.4s") {
 		t.Fatalf("final row = %q, want done line with counters", got)
+	}
+}
+
+func TestFinalAnswerRendersMarkdownTableForTerminal(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowAssistant,
+		text: strings.Join([]string{
+			"Here's the comparison:",
+			"",
+			"| Category | System A | System B |",
+			"|---|---|---|",
+			"| **Label** | Alpha | Beta |",
+			"| **Status** | ready | ready |",
+		}, "\n"),
+		final: true,
+	}
+
+	rendered := m.renderRow(row, 72, buildRowContext(nil))
+	got := plainRender(t, rendered)
+	for _, unwanted := range []string{"|---", "**Label**", "| **Status**"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("markdown table leaked source syntax %q in:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{"Category", "Label", "System A", "System B"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown table render missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, " │ ") || !strings.Contains(got, "─┼─") {
+		t.Fatalf("markdown table should render terminal table separators, got:\n%s", got)
+	}
+	for index, line := range strings.Split(rendered, "\n") {
+		if gotWidth := lipgloss.Width(line); gotWidth > 72 {
+			t.Fatalf("line %d width = %d, want <= 72: %q", index, gotWidth, line)
+		}
+	}
+}
+
+func TestFinalAnswerRendersLongThreeColumnMarkdownTables(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowAssistant,
+		text: strings.Join([]string{
+			"| Aspect | System A | System B |",
+			"|---|---|---|",
+			"| **Long Row** | This cell contains detailed neutral text that should wrap cleanly inside the column. | This cell contains another neutral description that should wrap cleanly too. |",
+		}, "\n"),
+		final: true,
+	}
+
+	rendered := m.renderRow(row, 92, buildRowContext(nil))
+	got := plainRender(t, rendered)
+	for _, want := range []string{
+		"Aspect",
+		"Long Row",
+		"System A",
+		"System B",
+		"detailed neutral",
+		"another neutral",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("long three-column table missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "─┼─") || strings.Contains(got, "  System A:") {
+		t.Fatalf("long three-column table should render as a table, got:\n%s", got)
+	}
+	for index, line := range strings.Split(rendered, "\n") {
+		if gotWidth := lipgloss.Width(line); gotWidth > 92 {
+			t.Fatalf("line %d width = %d, want <= 92: %q", index, gotWidth, line)
+		}
+	}
+}
+
+func TestFinalAnswerCleansTableEmphasisAndInlineBullets(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowAssistant,
+		text: strings.Join([]string{
+			"| Aspect | System A | System B |",
+			"|---|---|---|",
+			"| **Core Detail** | This neutral phrase emphasizes clarity *by design*. | This neutral phrase stays broadly compatible. |",
+			"| **Capabilities** | - First capability: Generally reliable. - Second capability: Supports larger examples. | - Third capability: Broad task coverage. - Fourth capability: Strong integrations. |",
+		}, "\n"),
+		final: true,
+	}
+
+	rendered := m.renderRow(row, 92, buildRowContext(nil))
+	got := plainRender(t, rendered)
+	for _, unwanted := range []string{"*by design*", "Generally reliable. - Second capability:"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("markdown table leaked %q in:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{
+		"neutral phrase emphasizes",
+		"clarity by design.",
+		"- First capability:",
+		"- Second capability:",
+		"- Third capability:",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown table missing %q in:\n%s", want, got)
+		}
+	}
+	for index, line := range strings.Split(rendered, "\n") {
+		if gotWidth := lipgloss.Width(line); gotWidth > 92 {
+			t.Fatalf("line %d width = %d, want <= 92: %q", index, gotWidth, line)
+		}
+	}
+}
+
+func TestFinalAnswerRendersCrowdedMarkdownTablesAsTables(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowAssistant,
+		text: strings.Join([]string{
+			"| Feature | System A | System B | Notes |",
+			"|---|---|---|---|",
+			"| **Long Description** | This neutral cell is intentionally long enough to wrap across lines. | This other neutral cell is also long enough to wrap across lines. | Notes should remain attached to the correct row. |",
+			"| **Short Description** | Alpha | Beta | Both columns stay aligned. |",
+		}, "\n"),
+		final: true,
+	}
+
+	rendered := m.renderRow(row, 92, buildRowContext(nil))
+	got := plainRender(t, rendered)
+	for _, want := range []string{
+		"Feature",
+		"System A",
+		"System B",
+		"Notes",
+		"Long Description",
+		"intentionally long",
+		"other neutral",
+		"correct row",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("crowded markdown table missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "─┼─") || strings.Contains(got, "  Notes:") {
+		t.Fatalf("crowded table should render as a table, got:\n%s", got)
+	}
+	for index, line := range strings.Split(rendered, "\n") {
+		if gotWidth := lipgloss.Width(line); gotWidth > 92 {
+			t.Fatalf("line %d width = %d, want <= 92: %q", index, gotWidth, line)
+		}
 	}
 }
 
@@ -326,7 +624,7 @@ func TestComposerBoxFramesInputAndBottomModelModeLabel(t *testing.T) {
 	m.input.SetValue("add a flag")
 
 	got := plainRender(t, m.composerBox(96))
-	for _, want := range []string{"╭", "│", "❯ add a flag", "╰", "claude-sonnet-4.5", "auto-approve"} {
+	for _, want := range []string{"╭", "│", "❯ add a flag", "╰", "test-model", "auto-approve"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("composer box = %q, missing %q", got, want)
 		}
@@ -370,27 +668,27 @@ func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))
-	for _, want := range []string{"● anthropic"} {
+	for _, want := range []string{"● test-provider"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("status line = %q, missing %q", got, want)
 		}
 	}
-	if strings.Contains(got, "interactive") || strings.Contains(got, "claude-sonnet-4.5") || strings.Contains(got, "auto-approve") {
+	if strings.Contains(got, "interactive") || strings.Contains(got, "test-model") || strings.Contains(got, "auto-approve") {
 		t.Fatalf("status line = %q, should not include surface, model, or permission mode", got)
 	}
 	divider := plainRender(t, m.composerDividerLine(110))
-	for _, want := range []string{"claude-sonnet-4.5", "auto-approve"} {
+	for _, want := range []string{"test-model", "auto-approve"} {
 		if !strings.Contains(divider, want) {
 			t.Fatalf("composer divider = %q, missing %q", divider, want)
 		}
 	}
 }
 
-func TestTitleBarShowsBadgeModelAndContextWindow(t *testing.T) {
+func TestTitleBarShowsBadgeAndModel(t *testing.T) {
 	m := limeTestModel()
 	m.width = 120
 	got := plainRender(t, m.titleBar(120))
-	for _, want := range []string{" 0 ", "zero", "anthropic/claude-sonnet-4.5", "200K"} {
+	for _, want := range []string{" 0 ", "zero", "test-provider/test-model"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("title bar = %q, missing %q", got, want)
 		}
@@ -635,14 +933,14 @@ func TestSpecReviewCardShowsBadgePathAndKeys(t *testing.T) {
 }
 
 func TestPermissionCollapseIsRunScoped(t *testing.T) {
-	// Providers like Gemini synthesize repeating ToolCallIDs (gemini_tool_1 in
+	// Some providers synthesize repeating ToolCallIDs (provider_tool_1 in
 	// every turn). A decision from run 2 must not collapse run 1's undecided
 	// prompt or steal its [auto]/hint attribution.
-	runOnePrompt := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 1, permission: &agent.PermissionEvent{
-		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionPrompt,
+	runOnePrompt := transcriptRow{kind: rowPermission, id: "provider_tool_1", runID: 1, permission: &agent.PermissionEvent{
+		ToolCallID: "provider_tool_1", ToolName: "bash", Action: agent.PermissionActionPrompt,
 	}}
-	runTwoDecision := transcriptRow{kind: rowPermission, id: "gemini_tool_1", runID: 2, permission: &agent.PermissionEvent{
-		ToolCallID: "gemini_tool_1", ToolName: "bash", Action: agent.PermissionActionAllow,
+	runTwoDecision := transcriptRow{kind: rowPermission, id: "provider_tool_1", runID: 2, permission: &agent.PermissionEvent{
+		ToolCallID: "provider_tool_1", ToolName: "bash", Action: agent.PermissionActionAllow,
 	}}
 	rc := buildRowContext([]transcriptRow{runOnePrompt, runTwoDecision})
 

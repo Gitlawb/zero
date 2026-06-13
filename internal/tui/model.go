@@ -1091,23 +1091,36 @@ func (m model) chatPageScrollLines() int {
 	return maxInt(3, m.height-8)
 }
 
-// interimBlock renders the live assistant text while a turn streams: muted
-// prose wrapped to the say measure with a trailing accent cursor. Before the
-// first delta arrives it falls back to the spinner so the surface still shows
-// liveness. The cursor needs no ticker — it appears exactly while pending.
+// interimBlock renders the live assistant text while a turn streams. It uses
+// the same lightweight markdown renderer as completed assistant rows, so
+// tables and simple formatting stabilize as soon as enough tokens arrive.
+// Before the first delta arrives it falls back to the spinner so the surface
+// still shows liveness. The cursor needs no ticker — it appears exactly while
+// pending.
 func (m model) interimBlock(width int) string {
 	text := strings.TrimRight(m.streamingText, "\n")
 	if strings.TrimSpace(text) == "" {
 		return m.spinner.View() + " " + zeroTheme.muted.Render("working…")
 	}
-	lines := wrapPlainText(text, sayMeasure(width))
+	lines := renderAssistantMarkdownText(text, sayMeasure(width), width)
 	for index, line := range lines {
-		lines[index] = zeroTheme.sayText.Render(line)
+		lines[index] = styleAssistantMarkdownLine(line, zeroTheme.sayText)
 	}
-	if len(lines) > 0 {
-		lines[len(lines)-1] += zeroTheme.accent.Render("▌")
-	}
+	lines = appendStreamingCursor(lines, width)
 	return strings.Join(lines, "\n")
+}
+
+func appendStreamingCursor(lines []string, width int) []string {
+	cursor := zeroTheme.accent.Render("▌")
+	if len(lines) == 0 {
+		return []string{cursor}
+	}
+	last := len(lines) - 1
+	if width > 0 && lipgloss.Width(lines[last])+1 > width {
+		return append(lines, cursor)
+	}
+	lines[last] += cursor
+	return lines
 }
 
 // composerLine renders the borderless composer: the styled textinput plus a

@@ -371,15 +371,19 @@ func renderUserRow(row transcriptRow, width int) string {
 // gutter plus its done line; a non-final assistant row (e.g. a rehydrated
 // inline notice) renders as plain interim-style prose.
 func renderAssistantRow(row transcriptRow, width int) string {
-	lines := wrapPlainText(row.text, sayMeasure(width))
+	tableMeasure := width
+	if row.final {
+		tableMeasure = maxInt(16, width-2)
+	}
+	lines := renderAssistantMarkdownText(row.text, sayMeasure(width), tableMeasure)
 	if !row.final {
 		for index := range lines {
-			lines[index] = zeroTheme.sayText.Render(lines[index])
+			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.sayText)
 		}
 		return strings.Join(lines, "\n")
 	}
 	for index := range lines {
-		lines[index] = zeroTheme.finalRail.Render("│ ") + zeroTheme.ink.Render(lines[index])
+		lines[index] = zeroTheme.finalRail.Render("│ ") + styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
 	}
 	lines = append(lines, doneLine(row, false))
 	return strings.Join(lines, "\n")
