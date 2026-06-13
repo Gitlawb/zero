@@ -196,7 +196,13 @@ func (s Schedule) Next(after time.Time) time.Time {
 			// forward search always advances the wall-clock, so this only triggers
 			// on the fall-back repeat — when `after` is the last fire time the
 			// scheduler passes in, this collapses the repeated hour to one fire.
-			if sameWallClockMinute(t, after) {
+			//
+			// Only collapse when `after` sits exactly on the minute boundary (its
+			// "last fire time" form). If `after` carries sub-minute precision
+			// (e.g. 01:30:30 EDT), the first 01:30 fire already preceded it, so the
+			// repeated 01:30 EST is the legitimate next fire and must NOT be skipped
+			// — skipping it would violate the strictly-after contract.
+			if sameWallClockMinute(t, after) && after.Truncate(time.Minute).Equal(after) {
 				t = t.Add(time.Minute)
 			} else {
 				return t

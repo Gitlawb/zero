@@ -221,7 +221,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	// indistinguishable from "unset" and means "use the default".) The CLI flag
 	// rejects 0 too because there an explicit "0" is distinguishable from absent.
 	if raw.MaxTurns < 0 {
-		return fmt.Errorf("invalid maxTurns %d: must be greater than 0", raw.MaxTurns)
+		return fmt.Errorf("invalid maxTurns %d: must be >= 0", raw.MaxTurns)
 	}
 	cfg.MaxTurns = raw.MaxTurns
 	cfg.MCP = raw.MCP

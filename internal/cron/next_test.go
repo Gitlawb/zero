@@ -107,6 +107,27 @@ func TestNextDSTFallBackDoesNotRepeatHour(t *testing.T) {
 	}
 }
 
+func TestNextDSTFallBackReturnsRepeatedMinuteWhenAfterHasSubMinutePrecision(t *testing.T) {
+	// The fall-back collapse must only apply when `after` is exactly on the minute
+	// boundary (its "last fire time" form). If `after` carries sub-minute precision,
+	// the first 01:30 fire already preceded it, so the repeated 01:30 EST is the
+	// legitimate next fire and must be returned (strictly-after contract).
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	// 05:30:30 UTC == 01:30:30 EDT — 30s past the first 01:30 fire (05:30:00 UTC),
+	// which is therefore no longer eligible.
+	afterEDT := time.Date(2026, 11, 1, 5, 30, 30, 0, time.UTC).In(ny)
+
+	got := mustParse(t, "30 1 * * *").Next(afterEDT)
+	// 06:30:00 UTC == 01:30:00 EST, the repeated minute and the next eligible fire.
+	want := time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("sub-minute after: Next = %v, want %v (must return the repeated 01:30 EST, not skip to the next day)", got.UTC(), want)
+	}
+}
+
 func TestNextLeapYearCenturyGap(t *testing.T) {
 	// 2100 is NOT a leap year, so the next Feb 29 after 2096 is 2104 (an 8-year
 	// gap). The search window must be wide enough to find it (not report zero).

@@ -1,4 +1,4 @@
-# Deep-audit status ledger (critical/high re-verified against HEAD on branch fix/audit-critical-high, 2026-06-11)
+# Deep-audit status ledger (re-verified against HEAD on branch fix/audit-batch, 2026-06-13)
 
 Total verified: 175 of 175 extracted findings
 

@@ -163,6 +163,10 @@ func TestDetectInteractiveSegmentBoundary(t *testing.T) {
 		`grep "tail -f" notes.txt`,
 		`echo run docker attach later`,
 		`printf 'kubectl logs -f streams'`,
+		// A literal ')' that does not close a $(...) must not split the command
+		// into a fake `less` segment (regression for unconditional ')' splitting).
+		`echo "a) less"`,
+		`echo "(done) vim later"`,
 	}
 	for _, cmd := range allowed {
 		if got := DetectInteractiveCommand(cmd, "linux"); got.Interactive {
@@ -183,6 +187,33 @@ func TestDetectInteractiveSegmentBoundary(t *testing.T) {
 		got := DetectInteractiveCommand(tc.command, "linux")
 		if !got.Interactive || got.Command != tc.wantCmd {
 			t.Errorf("DetectInteractiveCommand(%q) = (%v,%q), want interactive %q", tc.command, got.Interactive, got.Command, tc.wantCmd)
+		}
+	}
+}
+
+func TestSplitShellSegmentsParenOnlySplitsInsideSubstitution(t *testing.T) {
+	// A literal ')' that does not close a $(...) must not be a segment boundary,
+	// otherwise text like "a) less" splits into a fake `less` segment.
+	if segs := splitShellSegments(`echo "a) less"`); len(segs) != 1 {
+		t.Fatalf(`splitShellSegments(echo "a) less") = %#v, want a single segment`, segs)
+	}
+	// A real $(...) still isolates the substituted command so it can be analyzed.
+	segs := splitShellSegments(`echo $(less foo)`)
+	found := false
+	for _, s := range segs {
+		if s == "less foo" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf(`splitShellSegments(echo $(less foo)) = %#v, want a "less foo" segment`, segs)
+	}
+	// Nested substitutions track depth correctly: the inner ')' closes $(b ...),
+	// the outer ')' closes $(a ...), and neither leaks an empty/garbage segment.
+	nested := splitShellSegments(`a $(b $(c) d) e`)
+	for _, s := range nested {
+		if s == "" {
+			t.Fatalf("nested substitution produced an empty segment: %#v", nested)
 		}
 	}
 }

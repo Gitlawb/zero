@@ -1559,6 +1559,10 @@ func TestResolveRejectsNegativeMaxTurns(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid maxTurns") {
 		t.Fatalf("expected negative maxTurns to be rejected, got %v", err)
 	}
+	// The message must match the accepted range: 0 is allowed (only < 0 is rejected).
+	if !strings.Contains(err.Error(), ">= 0") {
+		t.Fatalf("error message should state the accepted range (>= 0), got %v", err)
+	}
 }
 
 func TestResolveMaxTurnsZeroFallsBackToDefault(t *testing.T) {

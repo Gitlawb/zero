@@ -454,6 +454,7 @@ func splitShellSegments(command string) []string {
 
 	inSingle := false
 	inDouble := false
+	substitutionDepth := 0
 	runes := []rune(command)
 	for i := 0; i < len(runes); i++ {
 		c := runes[i]
@@ -479,15 +480,20 @@ func splitShellSegments(command string) []string {
 
 		// Command substitution is active when unquoted and inside double quotes
 		// (only single quotes suppress it), so split on its boundaries in both.
+		// A literal ')' is only a substitution boundary when it closes an active
+		// $(...) — otherwise text like "a) less" would split into a fake `less`
+		// segment and be misflagged as interactive.
 		switch {
 		case c == '`':
 			flush()
 			continue
 		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
 			flush()
+			substitutionDepth++
 			i++ // consume the '('
 			continue
-		case c == ')':
+		case c == ')' && substitutionDepth > 0:
+			substitutionDepth--
 			flush()
 			continue
 		}

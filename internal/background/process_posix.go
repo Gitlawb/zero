@@ -67,6 +67,20 @@ func terminateProcess(pid int) error {
 	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !processGoneError(err) {
 		return err
 	}
+
+	// SIGKILL is asynchronous: the kernel may not have reaped the group yet.
+	// Poll again so this helper only reports success once the group is actually
+	// gone — otherwise the caller gets nil while descendants are still racing.
+	deadline = time.Now().Add(terminationGracePeriod)
+	for time.Now().Before(deadline) {
+		if !processGroupAlive(pid) {
+			return nil
+		}
+		time.Sleep(terminationPollInterval)
+	}
+	if processGroupAlive(pid) {
+		return fmt.Errorf("process group %d did not exit after SIGKILL", pid)
+	}
 	return nil
 }
 
