@@ -188,7 +188,19 @@ func (s Schedule) Next(after time.Time) time.Time {
 		case !has(s.minute, t.Minute()):
 			t = t.Add(time.Minute)
 		default:
-			return t
+			// DST fall-back guard: if the match has the SAME local wall-clock
+			// minute as `after` but a later absolute time, it is the repeated
+			// hour's duplicate of a minute `after` already represents (e.g. 01:30
+			// EST right after 01:30 EDT). Returning it would fire the same
+			// scheduled minute twice, so step past it and keep searching. Normal
+			// forward search always advances the wall-clock, so this only triggers
+			// on the fall-back repeat — when `after` is the last fire time the
+			// scheduler passes in, this collapses the repeated hour to one fire.
+			if sameWallClockMinute(t, after) {
+				t = t.Add(time.Minute)
+			} else {
+				return t
+			}
 		}
 		// Forward-progress guard: if a wall-clock jump landed on a non-existent
 		// local instant (DST gap) and did not advance, step a minute so the search
@@ -198,6 +210,15 @@ func (s Schedule) Next(after time.Time) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// sameWallClockMinute reports whether two instants share the same local
+// year/month/day/hour/minute (wall-clock representation). Used to detect a DST
+// fall-back repeat of the same scheduled minute.
+func sameWallClockMinute(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd && a.Hour() == b.Hour() && a.Minute() == b.Minute()
 }
 
 func has(set uint64, n int) bool { return set&(1<<uint(n)) != 0 }
