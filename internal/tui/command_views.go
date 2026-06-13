@@ -62,6 +62,51 @@ func (m model) mcpViewState() MCPViewState {
 	})
 }
 
+func (m model) handleMCPCommand(args string) (model, string) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return m, m.mcpText()
+	}
+	if m.mcpCommand == nil {
+		return m, strings.Join([]string{
+			"MCP action unavailable",
+			"Run MCP management commands in your terminal for this build.",
+			"Example: zero mcp " + args,
+			"",
+			m.mcpText(),
+		}, "\n")
+	}
+	result := m.mcpCommand(strings.Fields(args))
+	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
+		m.mcpConfig = result.Config
+	}
+	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" {
+		message := strings.TrimSpace(result.Error)
+		if message == "" {
+			message = strings.TrimSpace(result.Output)
+		}
+		if message == "" {
+			message = "MCP command failed"
+		}
+		return m, strings.Join([]string{
+			"MCP action failed",
+			message,
+			"",
+			m.mcpText(),
+		}, "\n")
+	}
+	output := strings.TrimSpace(result.Output)
+	if output == "" {
+		output = "zero mcp " + args
+	}
+	return m, strings.Join([]string{
+		"MCP action complete",
+		output,
+		"",
+		m.mcpText(),
+	}, "\n")
+}
+
 func (m model) permissionsText() string {
 	stateLines := []string{
 		"Permission mode: " + string(m.permissionMode),

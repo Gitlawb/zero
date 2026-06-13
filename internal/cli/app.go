@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -517,6 +518,20 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		MCPConfig:          mcpConfig,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
+		MCPCommand: func(args []string) tui.MCPCommandResult {
+			var stdout, stderr bytes.Buffer
+			exitCode := runMCP(args, &stdout, &stderr, deps)
+			nextConfig := mcpConfig
+			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
+				nextConfig = refreshed
+			}
+			return tui.MCPCommandResult{
+				Config:   nextConfig,
+				Output:   strings.TrimSpace(stdout.String()),
+				Error:    strings.TrimSpace(stderr.String()),
+				ExitCode: exitCode,
+			}
+		},
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,

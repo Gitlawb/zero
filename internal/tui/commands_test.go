@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,9 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	if next.pending || next.activeRunID != 0 || next.runID != 0 {
 		t.Fatalf("expected /mcp not to mutate agent run state, pending=%v activeRunID=%d runID=%d", next.pending, next.activeRunID, next.runID)
 	}
+	if len(next.transcript) == 0 || next.transcript[len(next.transcript)-1].tool != "mcp" {
+		t.Fatalf("expected /mcp transcript row to use dedicated mcp renderer, got %#v", next.transcript)
+	}
 	text := transcriptText(next.transcript)
 	for _, want := range []string{
 		"Manage MCP servers",
@@ -197,6 +201,49 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected MCP status text to contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestMCPCommandRunsManagerActionAndRefreshesState(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		PermissionMode: agent.PermissionModeAsk,
+		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+			"docs": {Type: "stdio", Command: "zero-docs-mcp"},
+		}},
+		MCPCommand: func(args []string) MCPCommandResult {
+			if !reflect.DeepEqual(args, []string{"disable", "docs"}) {
+				t.Fatalf("MCPCommand args = %#v, want disable docs", args)
+			}
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "MCP server docs is now disabled.",
+				Config: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"docs": {Type: "stdio", Command: "zero-docs-mcp", Disabled: true},
+				}},
+			}
+		},
+	})
+	m.input.SetValue("/mcp disable docs")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /mcp disable to run synchronously")
+	}
+	if !next.mcpConfig.Servers["docs"].Disabled {
+		t.Fatalf("docs server was not disabled in TUI state: %#v", next.mcpConfig.Servers["docs"])
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"MCP action complete",
+		"MCP server docs is now disabled.",
+		"docs · disabled · stdio",
+		"zero mcp enable docs",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("/mcp action text missing %q:\n%s", want, text)
 		}
 	}
 }

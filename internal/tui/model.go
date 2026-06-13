@@ -49,6 +49,7 @@ type model struct {
 	mcpConfig              config.MCPConfig
 	mcpPermissionStore     *internalmcp.PermissionStore
 	mcpTokenStore          *internalmcp.TokenStore
+	mcpCommand             func([]string) MCPCommandResult
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
@@ -325,6 +326,7 @@ func newModel(ctx context.Context, options Options) model {
 		mcpConfig:              options.MCPConfig,
 		mcpPermissionStore:     options.MCPPermissionStore,
 		mcpTokenStore:          options.MCPTokenStore,
+		mcpCommand:             options.MCPCommand,
 		agentOptions:           options.AgentOptions,
 		sessionCompactor:       options.SessionCompactor,
 		runtimeMessageSink:     options.RuntimeMessageSink,
@@ -1416,7 +1418,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
 	case commandMCP:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.mcpText()})
+		text := ""
+		m, text = m.handleMCPCommand(command.text)
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
 		return m, nil
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})

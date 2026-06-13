@@ -195,6 +195,9 @@ func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
 	if launchedOptions.MCPTokenStore != tokenStore {
 		t.Fatalf("launched MCPTokenStore = %#v, want %#v", launchedOptions.MCPTokenStore, tokenStore)
 	}
+	if launchedOptions.MCPCommand == nil {
+		t.Fatal("launched MCPCommand runner is nil")
+	}
 	if !runtimeClosed {
 		t.Fatal("MCP runtime was not closed after TUI exits")
 	}

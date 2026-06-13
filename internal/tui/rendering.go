@@ -201,6 +201,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		if row.tool == "sessions" {
 			return renderSessionsCards(row.text, width)
 		}
+		if row.tool == "mcp" {
+			return renderMCPManagerCard(row.text, width)
+		}
 		if row.id == compactStatusRowID && strings.HasPrefix(strings.TrimSpace(row.text), "Compressing session") {
 			return renderCompactRunningCard(row.text, width)
 		}
@@ -412,6 +415,40 @@ func doneLine(row transcriptRow, failed bool) string {
 // the panel surface inside a line border. Content is passed through unchanged.
 func renderSystemNote(text string, width int) string {
 	return noteBox(text, width, zeroTheme.line, zeroTheme.onPanel(zeroTheme.faint))
+}
+
+func renderMCPManagerCard(text string, width int) string {
+	raw := strings.Split(strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
+	lines := make([]string, 0, len(raw))
+	for index, line := range raw {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			lines = append(lines, "")
+		case index == 0:
+			lines = append(lines, zeroTheme.accent.Bold(true).Render(line))
+		case index == 1:
+			lines = append(lines, zeroTheme.ink.Bold(true).Render(line))
+		case isMCPManagerHeading(trimmed):
+			lines = append(lines, zeroTheme.accent.Bold(true).Render(line))
+		case strings.Contains(trimmed, "zero mcp "):
+			lines = append(lines, zeroTheme.ink.Render(line))
+		case strings.HasPrefix(trimmed, "›") || strings.HasPrefix(trimmed, "- "):
+			lines = append(lines, zeroTheme.ink.Render(line))
+		default:
+			lines = append(lines, zeroTheme.muted.Render(line))
+		}
+	}
+	return styledBlock(width, lines, zeroTheme.accent)
+}
+
+func isMCPManagerHeading(value string) bool {
+	switch value {
+	case "User MCPs", "Built-in MCPs", "Tools", "Permissions", "OAuth", "Actions":
+		return true
+	default:
+		return false
+	}
 }
 
 func renderCompactRunningCard(text string, width int) string {

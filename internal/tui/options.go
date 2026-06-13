@@ -35,6 +35,7 @@ type Options struct {
 	MCPConfig              config.MCPConfig
 	MCPPermissionStore     *mcp.PermissionStore
 	MCPTokenStore          *mcp.TokenStore
+	MCPCommand             func([]string) MCPCommandResult
 	UsageTracker           *usage.Tracker
 	SessionCompactor       SessionCompactor
 
@@ -54,6 +55,13 @@ type Options struct {
 	// Setup configures the first-run/setup takeover. It is shown before the
 	// normal chat surface when Visible is true.
 	Setup SetupOptions
+}
+
+type MCPCommandResult struct {
+	Config   config.MCPConfig
+	Output   string
+	Error    string
+	ExitCode int
 }
 
 // SetupOptions configures the guided first-run provider setup takeover.
