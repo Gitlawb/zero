@@ -186,26 +186,32 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 		"Manage MCP servers",
 		"2 servers",
 		"User MCPs",
-		"docs · enabled · 1 tool · stdio",
-		"zero mcp disable docs",
-		"github · enabled · oauth · http",
-		"zero mcp oauth login github",
-		"Tools",
-		"lookup [network/prompt] - mcp_docs_lookup - docs/lookup - Look up docs",
-		"Permissions",
-		"mode: ask",
-		"persistent grants: 2",
-		"server grants: 1",
-		"tool grants: 1",
-		"docs/* [low] approved 2026-06-13T09:30:00Z",
-		"github/create_issue [medium] approved 2026-06-13T09:30:00Z",
-		"OAuth",
-		"github configured token refresh expires 2026-06-13T11:45:00Z Bearer scopes issues:read,issues:write",
-		"add: zero mcp add <name> --url <url>",
-		"disconnect: zero mcp disable <name>",
+		"docs",
+		"enabled",
+		"github",
+		"oauth",
+		"Add MCP server",
+		"Add local stdio MCP",
+		"List configured",
+		"d disable",
+		"r remove",
+		"Enter action",
+		"Esc close",
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("expected MCP status text to contain %q, got:\n%s", want, text)
+			t.Fatalf("expected clean MCP manager overlay to contain %q, got:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{
+		"lookup [network/prompt]",
+		"persistent grants:",
+		"server grants:",
+		"OAuth",
+		"add: zero mcp add",
+		"disconnect: zero mcp disable",
+	} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("MCP manager overlay should not include old status report text %q:\n%s", unwanted, text)
 		}
 	}
 }

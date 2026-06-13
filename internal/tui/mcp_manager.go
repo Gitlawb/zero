@@ -181,7 +181,7 @@ func mcpManagerServerMeta(server MCPServerView) string {
 		parts = append(parts, pluralCount(server.ToolCount, "tool"))
 	}
 	parts = append(parts, displayValue(strings.TrimSpace(server.Transport), "unknown"))
-	return strings.Join(parts, " Â· ")
+	return strings.Join(parts, " · ")
 }
 
 func (m model) mcpManagerOverlay(width int) string {
@@ -201,32 +201,47 @@ func (m model) mcpManagerOverlay(width int) string {
 		m.mcpManager.selected = clampInt(m.mcpManager.selected, 0, len(items)-1)
 	}
 
+	state := m.mcpViewState()
 	lines := []string{
-		fillPaletteLine(zeroTheme.faint.Render("â†‘/â†“ navigate   Enter action   a add remote   s add stdio   Esc close"), innerWidth, transparentSurface),
+		fillPaletteLine(zeroTheme.ink.Bold(true).Render(pluralCount(len(state.Servers), "server")), innerWidth, transparentSurface),
+		zeroTheme.accent.Bold(true).Render("User MCPs"),
 	}
-	lines = append(lines, m.renderMCPManagerItemLines(innerWidth, items)...)
-	lines = append(lines, zeroTheme.line.Render(strings.Repeat("â”€", innerWidth)))
-	for _, line := range strings.Split(renderMCPView(m.mcpViewState(), innerWidth), "\n") {
-		lines = append(lines, fitStyledLine(m.styleMCPManagerDetailLine(line), innerWidth))
+	if len(state.Servers) == 0 {
+		lines = append(lines, zeroTheme.faint.Render("  No MCP servers configured."))
 	}
+	itemLines, _ := m.renderMCPManagerItemLines(innerWidth, items)
+	lines = append(lines, itemLines...)
+	if detail := m.mcpManagerSelectionDetail(innerWidth); len(detail) > 0 {
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+		lines = append(lines, detail...)
+	}
+	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
+	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("up/down navigate   Enter action   a add remote   s add stdio   Esc close"), innerWidth, transparentSurface))
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, "Manage MCP servers", lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
 }
 
-func (m model) renderMCPManagerItemLines(width int, items []mcpManagerItem) []string {
+func (m model) renderMCPManagerItemLines(width int, items []mcpManagerItem) ([]string, []int) {
 	if len(items) == 0 {
-		return []string{fillPaletteLine(zeroTheme.faint.Render("  no MCP actions"), width, transparentSurface)}
+		return []string{fillPaletteLine(zeroTheme.faint.Render("  no MCP actions"), width, transparentSurface)}, []int{-1}
 	}
 	maxVisible := minInt(mcpManagerMaxVisible, len(items))
 	start := selectableListStart(len(items), maxVisible, m.mcpManager.selected)
 	visible := items[start : start+maxVisible]
 	lines := make([]string, 0, len(visible))
+	itemRows := make([]int, 0, len(visible))
+	lastKind := mcpManagerItemServer
 	for offset, item := range visible {
 		index := start + offset
+		if item.Kind != mcpManagerItemServer && (index == 0 || lastKind == mcpManagerItemServer) {
+			lines = append(lines, zeroTheme.accent.Bold(true).Render("Actions"))
+			itemRows = append(itemRows, -1)
+		}
+		lastKind = item.Kind
 		surface := transparentSurface
 		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == m.mcpManager.selected {
 			surface = zeroTheme.onSel
-			marker = surface(zeroTheme.accent).Render("â¯ ")
+			marker = surface(zeroTheme.accent).Render("› ")
 		}
 		left := marker + surface(zeroTheme.ink).Render(item.Label)
 		right := ""
@@ -236,22 +251,50 @@ func (m model) renderMCPManagerItemLines(width int, items []mcpManagerItem) []st
 		gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 		line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", maxInt(1, gap))) + right
 		lines = append(lines, fillPaletteLine(line, width, surface))
+		itemRows = append(itemRows, index)
 	}
-	return lines
+	return lines, itemRows
 }
 
-func (m model) styleMCPManagerDetailLine(line string) string {
-	trimmed := strings.TrimSpace(line)
-	switch {
-	case trimmed == "":
-		return ""
-	case trimmed == "Manage MCP servers", trimmed == "User MCPs", trimmed == "Tools", trimmed == "Permissions", trimmed == "OAuth", trimmed == "Actions":
-		return zeroTheme.accent.Bold(true).Render(line)
-	case strings.Contains(trimmed, "zero mcp "):
-		return zeroTheme.ink.Render(line)
-	case strings.HasPrefix(trimmed, "â€º") || strings.HasPrefix(trimmed, "- "):
-		return zeroTheme.ink.Render(line)
-	default:
-		return zeroTheme.muted.Render(line)
+func (m model) mcpManagerSelectionDetail(width int) []string {
+	item, ok := m.currentMCPManagerItem()
+	if !ok {
+		return nil
 	}
+	switch item.Kind {
+	case mcpManagerItemServer:
+		server, ok := m.mcpManagerServer(item.Name)
+		if !ok {
+			return nil
+		}
+		lines := []string{
+			fillPaletteLine(zeroTheme.ink.Bold(true).Render(server.Name)+" "+zeroTheme.faint.Render(server.Transport+" · "+server.State), width, transparentSurface),
+		}
+		if target := strings.TrimSpace(server.Target); target != "" {
+			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(target), width))
+		}
+		action := "d disable"
+		if strings.EqualFold(strings.TrimSpace(server.State), "disabled") {
+			action = "e enable"
+		}
+		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("Enter check   c check   "+action+"   r remove"), width, transparentSurface))
+		return lines
+	case mcpManagerItemAddRemote:
+		return []string{fillPaletteLine(zeroTheme.faint.Render("Enter fills composer: /mcp add <name> --url <url>"), width, transparentSurface)}
+	case mcpManagerItemAddStdio:
+		return []string{fillPaletteLine(zeroTheme.faint.Render("Enter fills composer: /mcp add <name> -- <command> [args...]"), width, transparentSurface)}
+	case mcpManagerItemList:
+		return []string{fillPaletteLine(zeroTheme.faint.Render("Enter runs zero mcp list and refreshes this manager."), width, transparentSurface)}
+	default:
+		return nil
+	}
+}
+
+func (m model) mcpManagerServer(name string) (MCPServerView, bool) {
+	for _, server := range m.mcpViewState().Servers {
+		if server.Name == name {
+			return server, true
+		}
+	}
+	return MCPServerView{}, false
 }

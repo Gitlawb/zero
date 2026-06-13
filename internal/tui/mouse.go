@@ -214,14 +214,16 @@ func (m *model) selectMCPManagerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 	if !ok {
 		return mouseSelectionTarget{}, false
 	}
-	maxVisible := minInt(mcpManagerMaxVisible, len(items))
-	selected := clampInt(m.mcpManager.selected, 0, len(items)-1)
-	start := selectableListStart(len(items), maxVisible, selected)
-	row := hit.y - 2
-	if row < 0 || row >= maxVisible {
+	_, itemRows := m.renderMCPManagerItemLines(maxInt(1, chatWidth(m.width)-4), items)
+	baseRow := 2
+	if len(m.mcpViewState().Servers) == 0 {
+		baseRow++
+	}
+	row := hit.y - baseRow
+	if row < 0 || row >= len(itemRows) || itemRows[row] < 0 {
 		return mouseSelectionTarget{}, false
 	}
-	index := start + row
+	index := itemRows[row]
 	m.mcpManager.selected = index
 	return mouseSelectionTarget{Scope: "mcp-manager", Kind: int(items[index].Kind), Value: items[index].Name, Index: index}, true
 }
