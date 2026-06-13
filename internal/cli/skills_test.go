@@ -42,6 +42,25 @@ func TestRunSkillsListText(t *testing.T) {
 	}
 }
 
+func TestRunSkillsListWarnsOnDuplicateNames(t *testing.T) {
+	dir := t.TempDir()
+	// Two directories declare the same frontmatter name; List keeps one and the
+	// other is shadowed. The command must warn instead of silently dropping it.
+	writeSkillFixture(t, dir, "alpha", "---\nname: shared\ndescription: First.\n---\nbody")
+	writeSkillFixture(t, dir, "beta", "---\nname: shared\ndescription: Second.\n---\nbody")
+
+	var stdout, stderr bytes.Buffer
+	exit := runWithDeps([]string{"skills", "list"}, &stdout, &stderr, appDeps{
+		skillsDir: func() string { return dir },
+	})
+	if exit != 0 {
+		t.Fatalf("exit = %d, stderr = %s", exit, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `duplicate skill "shared"`) {
+		t.Fatalf("expected a duplicate-skill warning on stderr, got: %q", stderr.String())
+	}
+}
+
 func TestRunSkillsDefaultsToList(t *testing.T) {
 	dir := t.TempDir()
 	writeSkillFixture(t, dir, "demo", "body")

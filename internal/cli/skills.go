@@ -63,6 +63,17 @@ func runSkillsList(dir string, options skillListOptions, stdout io.Writer, stder
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	// Surface name collisions that List silently resolved (first directory wins),
+	// so a shadowed same-named skill is reported instead of just disappearing.
+	// Warnings go to stderr, keeping stdout (including --json) clean.
+	if dups, derr := skills.Duplicates(dir); derr == nil {
+		for _, dup := range dups {
+			fmt.Fprintf(stderr, "warning: duplicate skill %q: using %s, ignoring %s\n",
+				redaction.RedactString(dup.Name, redaction.Options{}),
+				redaction.RedactString(dup.Winner, redaction.Options{}),
+				redaction.RedactString(dup.Loser, redaction.Options{}))
+		}
+	}
 	if options.json {
 		payload := struct {
 			Skills []skills.Skill `json:"skills"`
