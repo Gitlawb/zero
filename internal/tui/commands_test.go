@@ -216,7 +216,7 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	}
 }
 
-func TestMCPManagerNavigationPrefillsAddCommand(t *testing.T) {
+func TestMCPManagerNavigationOpensAddWizard(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")
 
@@ -243,8 +243,11 @@ func TestMCPManagerNavigationPrefillsAddCommand(t *testing.T) {
 	if next.mcpManager != nil {
 		t.Fatal("expected add command selection to close the MCP manager")
 	}
-	if got, want := next.input.Value(), "/mcp add <name> --url <url>"; got != want {
-		t.Fatalf("composer = %q, want %q", got, want)
+	if next.mcpAddWizard == nil {
+		t.Fatal("expected add command selection to open the MCP wizard")
+	}
+	if got := next.input.Value(); got != "" {
+		t.Fatalf("composer = %q, want empty while wizard is active", got)
 	}
 }
 
@@ -315,6 +318,194 @@ func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
 	}
 	if got, want := next.input.Value(), "/mcp add context7 --url https://mcp.context7.com/mcp"; got != want {
 		t.Fatalf("composer = %q, want %q", got, want)
+	}
+}
+
+func TestMCPManagerAddRemoteOpensWizard(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width = 120
+	m.height = 36
+	m.input.SetValue("/mcp")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true})
+	next = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected MCP add wizard to open synchronously")
+	}
+	if next.mcpManager != nil {
+		t.Fatal("expected MCP manager to close when add wizard opens")
+	}
+	if next.mcpAddWizard == nil {
+		t.Fatal("expected MCP add wizard to be active")
+	}
+	view := plainRender(t, next.View())
+	for _, want := range []string{
+		"Add MCP Server",
+		"Server Name",
+		"HTTP remote",
+		"Enter continue",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("MCP add wizard missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestMCPAddWizardInvalidURLShowsUnsavedResult(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		MCPCommand: func(args []string) MCPCommandResult {
+			t.Fatalf("MCPCommand should not run for invalid URL, got %#v", args)
+			return MCPCommandResult{}
+		},
+	})
+	m.width = 120
+	m.height = 36
+	m.mcpAddWizard = newMCPAddWizard("http")
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("adds")},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune("sxas")},
+		{Type: tea.KeyEnter},
+	} {
+		updated, cmd := m.Update(key)
+		if cmd != nil {
+			t.Fatal("expected MCP add wizard input to update synchronously")
+		}
+		m = updated.(model)
+	}
+
+	if m.mcpAddWizard == nil {
+		t.Fatal("expected wizard result to stay visible")
+	}
+	view := plainRender(t, m.View())
+	for _, want := range []string{
+		"MCP setup issue",
+		"adds",
+		"HTTP remote",
+		"URL could not be parsed",
+		"No config was saved yet.",
+		"Edit URL",
+		"Save disabled",
+		"Discard",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("invalid URL result missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Disable server") {
+		t.Fatalf("unsaved invalid result should not offer Disable server:\n%s", view)
+	}
+}
+
+func TestMCPAddWizardInvalidURLCanSaveDisabledDraft(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		MCPCommand: func(args []string) MCPCommandResult {
+			called = append([]string{}, args...)
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "Added MCP server draft.",
+				Config: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"draft": {Type: "http", URL: "sxas", Disabled: true},
+				}},
+			}
+		},
+	})
+	m.width = 120
+	m.height = 36
+	m.mcpAddWizard = newMCPAddWizard("http")
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("draft")},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune("sxas")},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune("s")},
+	} {
+		updated, cmd := m.Update(key)
+		if cmd != nil {
+			t.Fatal("expected MCP add wizard input to update synchronously")
+		}
+		m = updated.(model)
+	}
+
+	want := []string{"add", "draft", "--type", "http", "--disabled", "--url", "sxas"}
+	if !reflect.DeepEqual(called, want) {
+		t.Fatalf("MCPCommand args = %#v, want %#v", called, want)
+	}
+	if !m.mcpConfig.Servers["draft"].Disabled {
+		t.Fatalf("draft server was not saved disabled: %#v", m.mcpConfig.Servers["draft"])
+	}
+	view := plainRender(t, m.View())
+	for _, want := range []string{"MCP server saved", "disabled", "Edit config"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("disabled draft result missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestMCPAddWizardSavesRemoteWithPastedHeader(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		MCPCommand: func(args []string) MCPCommandResult {
+			called = append([]string{}, args...)
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "Added MCP server docs.",
+				Config: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"docs": {Type: "http", URL: "https://docs.example/mcp", Headers: map[string]string{"Authorization": "Bearer secret"}},
+				}},
+			}
+		},
+	})
+	m.width = 120
+	m.height = 36
+	m.mcpAddWizard = newMCPAddWizard("http")
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("docs")},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune("https://docs.example/mcp")},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune("Authorization: Bearer secret")},
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyEnter},
+	} {
+		updated, cmd := m.Update(key)
+		if cmd != nil {
+			t.Fatal("expected MCP add wizard input to update synchronously")
+		}
+		m = updated.(model)
+	}
+
+	want := []string{"add", "docs", "--type", "http", "--url", "https://docs.example/mcp", "--header", "Authorization=Bearer secret"}
+	if !reflect.DeepEqual(called, want) {
+		t.Fatalf("MCPCommand args = %#v, want %#v", called, want)
+	}
+	if m.mcpAddWizard == nil {
+		t.Fatal("expected saved result card to stay visible")
+	}
+	view := plainRender(t, m.View())
+	for _, want := range []string{
+		"MCP server ready",
+		"docs",
+		"connected",
+		"Use server",
+		"Manage tools",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("saved result missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Bearer secret") {
+		t.Fatalf("saved result leaked header secret:\n%s", view)
 	}
 }
 

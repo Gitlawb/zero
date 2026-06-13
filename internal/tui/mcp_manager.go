@@ -129,9 +129,9 @@ func (m model) handleMCPManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		switch strings.ToLower(string(msg.Runes)) {
 		case "a":
-			return m.prefillMCPManagerCommand("/mcp add <name> --url <url>"), nil
+			return m.openMCPAddWizard("http"), nil
 		case "s":
-			return m.prefillMCPManagerCommand("/mcp add <name> -- <command> [args...]"), nil
+			return m.openMCPAddWizard("stdio"), nil
 		case "l":
 			return m.runMCPManagerCommand([]string{"list"})
 		case "c":
@@ -200,9 +200,9 @@ func (m model) chooseMCPManagerItem() (model, tea.Cmd) {
 	case mcpManagerItemMarketplace:
 		return m.prefillMCPManagerCommand(item.InstallCommand), nil
 	case mcpManagerItemAddRemote:
-		return m.prefillMCPManagerCommand("/mcp add <name> --url <url>"), nil
+		return m.openMCPAddWizard("http"), nil
 	case mcpManagerItemAddStdio:
-		return m.prefillMCPManagerCommand("/mcp add <name> -- <command> [args...]"), nil
+		return m.openMCPAddWizard("stdio"), nil
 	case mcpManagerItemList:
 		return m.runMCPManagerCommand([]string{"list"})
 	default:

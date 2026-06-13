@@ -100,6 +100,45 @@ func TestRunMCPAddHTTPPreservesConfigAndRedactsHeader(t *testing.T) {
 	}
 }
 
+func TestRunMCPAddHTTPAcceptsColonHeader(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"mcp", "add", "remote", "--url", "https://remote.example/mcp", "--header", "Authorization: Bearer secret-header"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	cfg := readMCPCommandConfig(t, configPath)
+	remote := cfg.MCP.Servers["remote"]
+	if got := remote.Headers["Authorization"]; got != "Bearer secret-header" {
+		t.Fatalf("Authorization header = %q, want persisted Bearer secret-header", got)
+	}
+}
+
+func TestRunMCPAddDisabledHTTPAllowsInvalidURL(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"mcp", "add", "draft", "--type", "http", "--url", "sxas", "--disabled"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	cfg := readMCPCommandConfig(t, configPath)
+	draft := cfg.MCP.Servers["draft"]
+	if !draft.Disabled {
+		t.Fatalf("draft server Disabled = false, want true: %#v", draft)
+	}
+	if draft.Type != "http" || draft.URL != "sxas" {
+		t.Fatalf("draft server = %#v, want disabled http with raw invalid URL", draft)
+	}
+}
+
 func TestRunMCPAddUpdatePreservesUnknownServerFields(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeMCPCommandRawConfig(t, configPath, `{

@@ -154,6 +154,7 @@ type model struct {
 	picker                       *commandPicker
 	providerWizard               *providerWizardState
 	mcpManager                   *mcpManagerState
+	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
@@ -459,6 +460,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.providerWizard = nil
 				return m, nil
 			}
+			if m.mcpAddWizard != nil {
+				m.mcpAddWizard = nil
+				return m, nil
+			}
 			if m.mcpManager != nil {
 				m.mcpManager = nil
 				return m, nil
@@ -504,6 +509,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
 			}
@@ -532,7 +540,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpManager == nil && m.picker == nil {
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
@@ -558,6 +566,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
 			}
@@ -582,6 +593,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
+			}
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
 			}
@@ -605,6 +619,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
+			}
+			if m.mcpAddWizard != nil {
+				return m.handleMCPAddWizardKey(msg)
 			}
 			if m.mcpManager != nil {
 				return m.handleMCPManagerKey(msg)
@@ -642,6 +659,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.providerWizard != nil {
 			return m.handleProviderWizardKey(msg)
+		}
+		if m.mcpAddWizard != nil {
+			return m.handleMCPAddWizardKey(msg)
 		}
 		if m.mcpManager != nil {
 			return m.handleMCPManagerKey(msg)
@@ -932,12 +952,15 @@ func (m model) transcriptView() string {
 
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
+	mcpAddOverlay := m.mcpAddWizardOverlay(width)
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	viewportOverlay := ""
 	switch {
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
+	case mcpAddOverlay != "":
+		viewportOverlay = mcpAddOverlay
 	case mcpOverlay != "":
 		viewportOverlay = mcpOverlay
 	case pickerOverlay != "":

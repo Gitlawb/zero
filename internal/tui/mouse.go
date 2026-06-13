@@ -25,6 +25,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.lastMouseSelection = target
 				return m, nil
 			}
+		case m.mcpAddWizard != nil:
+			return m, nil
 		case m.mcpManager != nil:
 			if target, ok := m.selectMCPManagerAtMouse(msg); ok {
 				if m.repeatMouseSelection(target) {
@@ -65,6 +67,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.providerWizard.move(-1)
 			return m, nil
 		}
+		if m.mcpAddWizard != nil {
+			m.mcpAddWizard.move(-1)
+			return m, nil
+		}
 		if m.mcpManager != nil {
 			m.moveMCPManager(-1)
 			return m, nil
@@ -85,6 +91,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.clearMouseSelection()
 		if m.providerWizard != nil {
 			m.providerWizard.move(1)
+			return m, nil
+		}
+		if m.mcpAddWizard != nil {
+			m.mcpAddWizard.move(1)
 			return m, nil
 		}
 		if m.mcpManager != nil {
@@ -117,7 +127,7 @@ func (m *model) clearMouseSelection() {
 }
 
 func (m model) wantsMouseCapture() bool {
-	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
+	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
 }
 
 func (m model) setupWantsMouseCapture() bool {

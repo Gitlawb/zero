@@ -427,10 +427,13 @@ func parseMCPAddArgs(args []string) (mcpAddOptions, bool, error) {
 		return options, false, execUsageError{fmt.Sprintf("unsupported MCP server type %q", options.server.Type)}
 	}
 
-	validationServer := options.server
-	validationServer.Disabled = false
-	if _, err := mcp.NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{options.serverName: validationServer}}); err != nil {
-		return options, false, err
+	if options.server.Auth != "" && options.server.Auth != mcp.ServerAuthOAuth {
+		return options, false, execUsageError{fmt.Sprintf("MCP server %s has unsupported auth %q", options.serverName, options.server.Auth)}
+	}
+	if !options.server.Disabled {
+		if _, err := mcp.NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{options.serverName: options.server}}); err != nil {
+			return options, false, err
+		}
 	}
 	return options, false, nil
 }
@@ -449,8 +452,15 @@ func requiredNextMCPFlagValue(args []string, index *int, flag string) (string, e
 
 func addMCPStringMapValue(target *map[string]string, raw string, flag string) error {
 	key, value, ok := strings.Cut(raw, "=")
+	if !ok && flag == "--header" {
+		key, value, ok = strings.Cut(raw, ":")
+		value = strings.TrimLeft(value, " \t")
+	}
 	key = strings.TrimSpace(key)
 	if !ok || key == "" {
+		if flag == "--header" {
+			return execUsageError{fmt.Sprintf("%s expects KEY=VALUE or \"Key: Value\"", flag)}
+		}
 		return execUsageError{fmt.Sprintf("%s expects KEY=VALUE", flag)}
 	}
 	if *target == nil {
