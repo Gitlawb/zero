@@ -25,6 +25,15 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.lastMouseSelection = target
 				return m, nil
 			}
+		case m.mcpManager != nil:
+			if target, ok := m.selectMCPManagerAtMouse(msg); ok {
+				if m.repeatMouseSelection(target) {
+					m.clearMouseSelection()
+					return m.chooseMCPManagerItem()
+				}
+				m.lastMouseSelection = target
+				return m, nil
+			}
 		case m.picker != nil:
 			if target, ok := m.selectPickerAtMouse(msg); ok {
 				if m.repeatMouseSelection(target) {
@@ -56,6 +65,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.providerWizard.move(-1)
 			return m, nil
 		}
+		if m.mcpManager != nil {
+			m.moveMCPManager(-1)
+			return m, nil
+		}
 		if m.picker != nil {
 			if m.modelPickerIsLoading() {
 				return m, nil
@@ -72,6 +85,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.clearMouseSelection()
 		if m.providerWizard != nil {
 			m.providerWizard.move(1)
+			return m, nil
+		}
+		if m.mcpManager != nil {
+			m.moveMCPManager(1)
 			return m, nil
 		}
 		if m.picker != nil {
@@ -100,7 +117,7 @@ func (m *model) clearMouseSelection() {
 }
 
 func (m model) wantsMouseCapture() bool {
-	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.picker != nil || m.suggestionsActive())
+	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
 }
 
 func (m model) setupWantsMouseCapture() bool {
@@ -182,6 +199,31 @@ func (m *model) selectPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, boo
 		return m.selectModelPickerAtMouse(msg)
 	}
 	return m.selectGenericPickerAtMouse(msg)
+}
+
+func (m *model) selectMCPManagerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
+	if m.mcpManager == nil {
+		return mouseSelectionTarget{}, false
+	}
+	items := m.mcpManagerItems()
+	if len(items) == 0 {
+		return mouseSelectionTarget{}, false
+	}
+	width := chatWidth(m.width)
+	hit, ok := m.overlayMouseHit(msg, m.mcpManagerOverlay(width), width)
+	if !ok {
+		return mouseSelectionTarget{}, false
+	}
+	maxVisible := minInt(mcpManagerMaxVisible, len(items))
+	selected := clampInt(m.mcpManager.selected, 0, len(items)-1)
+	start := selectableListStart(len(items), maxVisible, selected)
+	row := hit.y - 2
+	if row < 0 || row >= maxVisible {
+		return mouseSelectionTarget{}, false
+	}
+	index := start + row
+	m.mcpManager.selected = index
+	return mouseSelectionTarget{Scope: "mcp-manager", Kind: int(items[index].Kind), Value: items[index].Name, Index: index}, true
 }
 
 func (m *model) selectModelPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {

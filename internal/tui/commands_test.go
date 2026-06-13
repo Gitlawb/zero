@@ -162,6 +162,8 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	}}
 	m.mcpPermissionStore = permissionStore
 	m.mcpTokenStore = tokenStore
+	m.width = 220
+	m.height = 42
 	m.input.SetValue("/mcp")
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -173,10 +175,13 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	if next.pending || next.activeRunID != 0 || next.runID != 0 {
 		t.Fatalf("expected /mcp not to mutate agent run state, pending=%v activeRunID=%d runID=%d", next.pending, next.activeRunID, next.runID)
 	}
-	if len(next.transcript) == 0 || next.transcript[len(next.transcript)-1].tool != "mcp" {
-		t.Fatalf("expected /mcp transcript row to use dedicated mcp renderer, got %#v", next.transcript)
+	if next.mcpManager == nil {
+		t.Fatal("expected /mcp to open the selectable MCP manager")
 	}
-	text := transcriptText(next.transcript)
+	if len(next.transcript) != len(m.transcript) {
+		t.Fatalf("/mcp should open a manager overlay without appending transcript rows; before=%d after=%d", len(m.transcript), len(next.transcript))
+	}
+	text := plainRender(t, next.View())
 	for _, want := range []string{
 		"Manage MCP servers",
 		"2 servers",
@@ -201,6 +206,83 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected MCP status text to contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestMCPManagerNavigationPrefillsAddCommand(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("/mcp")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /mcp to open synchronously")
+	}
+	if next.mcpManager == nil {
+		t.Fatal("expected MCP manager to open")
+	}
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected MCP manager selection to prefill synchronously")
+	}
+	if next.mcpManager != nil {
+		t.Fatal("expected add command selection to close the MCP manager")
+	}
+	if got, want := next.input.Value(), "/mcp add <name> --url <url>"; got != want {
+		t.Fatalf("composer = %q, want %q", got, want)
+	}
+}
+
+func TestMCPManagerRunsSelectedServerAction(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		PermissionMode: agent.PermissionModeAsk,
+		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+			"docs": {Type: "stdio", Command: "zero-docs-mcp"},
+		}},
+		MCPCommand: func(args []string) MCPCommandResult {
+			called = append([]string{}, args...)
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "MCP server docs is now disabled.",
+				Config: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"docs": {Type: "stdio", Command: "zero-docs-mcp", Disabled: true},
+				}},
+			}
+		},
+	})
+	m.input.SetValue("/mcp")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.mcpManager == nil {
+		t.Fatal("expected MCP manager to open")
+	}
+
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected MCP action to run synchronously")
+	}
+	if !reflect.DeepEqual(called, []string{"disable", "docs"}) {
+		t.Fatalf("MCPCommand args = %#v, want disable docs", called)
+	}
+	if !next.mcpConfig.Servers["docs"].Disabled {
+		t.Fatalf("docs server was not disabled in TUI state: %#v", next.mcpConfig.Servers["docs"])
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"MCP action complete",
+		"MCP server docs is now disabled.",
+		"docs",
+		"disabled",
+		"stdio",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("MCP manager action output missing %q:\n%s", want, text)
 		}
 	}
 }

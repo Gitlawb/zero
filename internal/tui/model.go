@@ -153,6 +153,7 @@ type model struct {
 	// the chosen value through the existing command handlers.
 	picker                       *commandPicker
 	providerWizard               *providerWizardState
+	mcpManager                   *mcpManagerState
 	favoriteModels               map[string]bool
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
@@ -458,6 +459,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.providerWizard = nil
 				return m, nil
 			}
+			if m.mcpManager != nil {
+				m.mcpManager = nil
+				return m, nil
+			}
 			// An open picker cancels first; then an active suggestion overlay is
 			// dismissed. Neither cancels the run or clears the input.
 			if m.picker != nil {
@@ -499,6 +504,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
 			if m.picker != nil {
 				return m.choosePicker()
 			}
@@ -524,7 +532,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.picker == nil {
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpManager == nil && m.picker == nil {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
@@ -550,6 +558,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
 				return m, nil
@@ -571,6 +582,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
+			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -591,6 +605,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
+			}
+			if m.mcpManager != nil {
+				return m.handleMCPManagerKey(msg)
 			}
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
@@ -625,6 +642,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.providerWizard != nil {
 			return m.handleProviderWizardKey(msg)
+		}
+		if m.mcpManager != nil {
+			return m.handleMCPManagerKey(msg)
 		}
 		// An open picker is modal over the input: swallow remaining keys so they
 		// don't type into the field. ↑/↓/Enter/Esc were already handled above.
@@ -912,11 +932,14 @@ func (m model) transcriptView() string {
 
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)
+	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	viewportOverlay := ""
 	switch {
 	case providerOverlay != "":
 		viewportOverlay = providerOverlay
+	case mcpOverlay != "":
+		viewportOverlay = mcpOverlay
 	case pickerOverlay != "":
 		viewportOverlay = pickerOverlay
 	case suggestionOverlay != "":
@@ -1418,6 +1441,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil
 	case commandMCP:
+		if strings.TrimSpace(command.text) == "" {
+			return m.openMCPManager(), nil
+		}
 		text := ""
 		m, text = m.handleMCPCommand(command.text)
 		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
