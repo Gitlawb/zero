@@ -4,17 +4,21 @@ Total verified: 175 of 175 extracted findings
 
 | Status | Count |
 |---|---|
-| fixed | 88 |
-| open | 69 |
-| partial | 18 |
+| fixed | 97 |
+| open | 64 |
+| partial | 14 |
 | obsolete | 0 |
 
-> Re-verification note (2026-06-13, branch `fix/audit-batch` off current `main`): the
-> counts above reflect a partial re-audit. Some rows the 06-11 snapshot marked `open`
-> were already fixed on current `main` (the ledger was verified on `fix/audit-critical-high`,
-> which has since diverged). Rows re-verified this pass carry a `[reverified 2026-06-13]`
-> tag in their evidence. Remaining `open`/`partial` rows still need per-row re-check
-> against `main` before fixing.
+> **Authoritative re-verification (2026-06-13, branch `fix/audit-batch` off current `main`).**
+> All 87 rows the 06-11 snapshot marked `open`/`partial` were re-checked against the ACTUAL
+> current code by independent agents (the 06-11 ledger was verified on `fix/audit-critical-high`,
+> which has since diverged). Every `already_fixed` verdict was adversarially re-checked by a
+> second agent trying to prove the defect was still present — none were refuted.
+> **Result: 78 genuinely pending** (66 still_open + 12 partial); **9 rows were already fixed on
+> `main`** and are reclassified to `fixed` here. Full per-finding table:
+> [`2026-06-13-reverification.md`](2026-06-13-reverification.md).
+> Pending by severity: **high 2, medium 42, low 34**. Counts above reflect this re-verification
+> plus this branch's own fixes (scanner.go:81, compaction.go:58, worktrees.go:247).
 
 | Sev | Status | Location | Evidence |
 |---|---|---|---|
