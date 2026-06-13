@@ -350,3 +350,25 @@ func TestBubblewrapPlanChdirsToRealPathForExtraRootCwd(t *testing.T) {
 		t.Fatalf("workspace double-bound at real path:\n%s", joined)
 	}
 }
+
+func TestProxyEnv(t *testing.T) {
+	env := map[string]string{}
+	for _, kv := range ProxyEnv("127.0.0.1:8899") {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			env[kv[:i]] = kv[i+1:]
+		}
+	}
+	const proxyURL = "http://127.0.0.1:8899"
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
+		if env[key] != proxyURL {
+			t.Fatalf("ProxyEnv[%s] = %q, want %q", key, env[key], proxyURL)
+		}
+		if lower := strings.ToLower(key); env[lower] != proxyURL {
+			t.Fatalf("ProxyEnv missing lowercase %s=%q", lower, proxyURL)
+		}
+	}
+	// Loopback must bypass the proxy so the proxy itself is reachable directly.
+	if !strings.Contains(env["NO_PROXY"], "127.0.0.1") || !strings.Contains(env["no_proxy"], "127.0.0.1") {
+		t.Fatalf("ProxyEnv NO_PROXY must exclude loopback, got %q/%q", env["NO_PROXY"], env["no_proxy"])
+	}
+}

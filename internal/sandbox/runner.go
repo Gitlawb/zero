@@ -64,12 +64,22 @@ func effectiveNetwork(policy Policy) NetworkMode {
 	return policy.Network
 }
 
-// scopedProxyEnv returns the proxy environment variables that route a sandboxed
-// process's HTTP(S) traffic through the local filtering proxy at addr. Both
-// upper- and lower-case forms are set because different clients read different
-// casings. localhost is excluded so loopback (the proxy itself) is reached
-// directly.
-func scopedProxyEnv(addr string) []string {
+// ProxyEnv returns the proxy environment variables that route a process's
+// HTTP(S) traffic through the local filtering proxy at addr. It is the single
+// source of truth for proxy-env injection so every network-capable child (the
+// sandboxed shell today; MCP spawns and others when wired to a session proxy)
+// uses identical settings. Both upper- and lower-case forms are set because
+// different clients read different casings; loopback is excluded via NO_PROXY so
+// the proxy itself is reached directly.
+//
+// Note: clients that honor these vars include Go's default HTTP transport (so the
+// web_fetch tool, which clones http.DefaultTransport, already routes through a
+// configured proxy) and MCP child processes (mergeProcessEnv inherits os.Environ).
+// Routing those through a SCOPED proxy therefore only needs a session-level proxy
+// whose address is exposed to the agent process — but that must allowlist the
+// active LLM provider's domain first, or the agent's own provider calls would be
+// blocked. That session-proxy lifecycle is intentionally not wired here.
+func ProxyEnv(addr string) []string {
 	proxyURL := "http://" + addr
 	return []string{
 		"HTTP_PROXY=" + proxyURL,
@@ -331,7 +341,7 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 	args = append(args, spec.Args...)
 	env := sandboxEnvironment(policy, BackendSandboxExec, workspaceRoot)
 	if egress != nil {
-		env = append(env, scopedProxyEnv(egress.addr)...)
+		env = append(env, ProxyEnv(egress.addr)...)
 	}
 	plan := CommandPlan{
 		Backend:       backend,
