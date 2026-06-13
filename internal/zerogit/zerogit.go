@@ -232,9 +232,17 @@ func parseStatus(status string) []FileChange {
 		// is taken verbatim (no TrimSpace, which would corrupt names with leading
 		// or trailing spaces).
 		path := entry[3:]
-		// A rename/copy (R or C in the staged column) is followed by a separate
-		// NUL-terminated field holding the original path; consume it so it is not
-		// parsed as its own entry. This entry's own path is the destination.
+		// A rename/copy is followed by a separate NUL-terminated field holding the
+		// original path; consume it so it is not parsed as its own entry. This
+		// entry's own path is the destination.
+		//
+		// Only the INDEX column (code[0]) is checked, never the worktree column
+		// (code[1]): porcelain v1 -z reports a rename/copy (and emits the extra
+		// source field) only in the index column. A worktree-only rename is shown as
+		// a delete + untracked pair (" D old\0?? new\0"), NOT "R" in code[1] — so
+		// consuming on code[1]=='R'/'C' would never match real git output and would
+		// only risk mis-consuming the next entry on malformed input. (Verified
+		// empirically: git mv → "R  new\0old\0"; plain mv → " D old\0?? new\0".)
 		if code[0] == 'R' || code[0] == 'C' {
 			i++
 		}

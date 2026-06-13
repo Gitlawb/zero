@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -156,14 +157,26 @@ func TestRunSandboxGrantsRejectsEmptyPath(t *testing.T) {
 		return runWithDeps(args, &stdout, &stderr, deps)
 	}
 
+	// Seed a tool-wide grant first so a buggy "revoke all for tool" or "allow
+	// tool-wide" from a rejected call would actually change the store and be caught
+	// (a revoke-all on an empty store is a silent no-op).
+	if _, err := store.Grant(sandbox.GrantInput{ToolName: "write_file", Decision: sandbox.GrantAllow, MaxAutonomy: sandbox.AutonomyHigh}); err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
+
 	// An explicit but empty --path must fail closed rather than silently widening
-	// an allow to tool-wide or a revoke to all-grants-for-tool.
+	// an allow to tool-wide or a revoke to all-grants-for-tool. Check immutability
+	// after EACH rejected call so a mutation in one isn't masked by a later call.
 	for _, args := range [][]string{
 		{"sandbox", "grants", "allow", "write_file", "--path", ""},
 		{"sandbox", "grants", "allow", "write_file", "--path="},
 		{"sandbox", "grants", "revoke", "write_file", "--path", ""},
 		{"sandbox", "grants", "revoke", "write_file", "--path="},
 	} {
+		before, err := store.List()
+		if err != nil {
+			t.Fatalf("%v: List before: %v", args, err)
+		}
 		if exit := run(args...); exit == exitSuccess {
 			t.Fatalf("%v: expected a usage error for an empty --path, got success", args)
 		}
@@ -173,15 +186,22 @@ func TestRunSandboxGrantsRejectsEmptyPath(t *testing.T) {
 		if !strings.Contains(stderr.String(), "path") {
 			t.Fatalf("%v: stderr should explain the empty --path, got %q", args, stderr.String())
 		}
+		after, err := store.List()
+		if err != nil {
+			t.Fatalf("%v: List after: %v", args, err)
+		}
+		if !reflect.DeepEqual(after, before) {
+			t.Fatalf("%v: rejected call mutated grants; before=%#v after=%#v", args, before, after)
+		}
 	}
 
-	// No grant should have been created or removed by any of the rejected calls.
+	// Only the seeded grant remains — nothing added or removed by the rejected calls.
 	grants, err := store.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(grants) != 0 {
-		t.Fatalf("expected no grant mutation from rejected --path calls, got %#v", grants)
+	if len(grants) != 1 || grants[0].ScopeKind != sandbox.ScopeToolWide {
+		t.Fatalf("expected only the seeded tool-wide grant to remain, got %#v", grants)
 	}
 }
 
