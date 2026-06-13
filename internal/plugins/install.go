@@ -504,8 +504,8 @@ func hashTreeInto(hasher io.Writer, root string, dir string) error {
 			if info.Mode().Perm()&0o111 != 0 {
 				executable = 1
 			}
-			// Length-prefixed header keeps file boundaries unambiguous so two trees
-			// cannot collide by shifting bytes across the path/content split.
+			// Null-delimited header keeps file boundaries unambiguous (paths cannot
+			// contain null bytes) so two trees cannot collide by shifting bytes.
 			header := fmt.Sprintf("%s\x00%d\x00", filepath.ToSlash(rel), executable)
 			if _, err := io.WriteString(hasher, header); err != nil {
 				return err

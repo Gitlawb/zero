@@ -446,9 +446,7 @@ func formatToolboxList(items []toolboxItem, diagnostics []plugins.Diagnostic, di
 			lines = append(lines, fmt.Sprintf("    command: %s [%s]", item.Command, item.Permission))
 		}
 	}
-	for _, line := range formatToolboxDiagnostics(diagnostics) {
-		lines = append(lines, line)
-	}
+	lines = append(lines, formatToolboxDiagnostics(diagnostics)...)
 	return strings.Join(lines, "\n")
 }
 
