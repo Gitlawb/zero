@@ -264,15 +264,15 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	registry := tools.NewRegistry()
-	runtime, err := deps.registerMCPTools(ctx, registry, scoped, mcp.RegisterOptions{
+	mcpRuntime, err := deps.registerMCPTools(ctx, registry, scoped, mcp.RegisterOptions{
 		PermissionStore: store,
 		Autonomy:        mcp.AutonomyLow,
 	})
 	if err != nil {
-		closeMCPRuntime(stderr, runtime)
+		closeMCPRuntime(stderr, mcpRuntime)
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
-	defer closeMCPRuntime(stderr, runtime)
+	defer closeMCPRuntime(stderr, mcpRuntime)
 
 	items := mcpToolList(registry)
 	if options.json {
@@ -860,16 +860,19 @@ func replaceMCPWritableConfigFile(tmpPath string, path string) error {
 	if err := os.Rename(tmpPath, path); err == nil || runtime.GOOS != "windows" {
 		return err
 	}
-	existing, readErr := os.ReadFile(path)
-	if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-		return removeErr
+	backupPath := tmpPath + ".bak"
+	if err := os.Rename(path, backupPath); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		if readErr == nil {
-			_ = os.WriteFile(path, existing, 0o600)
+		if _, statErr := os.Stat(backupPath); statErr == nil {
+			if restoreErr := os.Rename(backupPath, path); restoreErr != nil {
+				return fmt.Errorf("%w; failed to restore original config: %v", err, restoreErr)
+			}
 		}
 		return err
 	}
+	_ = os.Remove(backupPath)
 	return nil
 }
 

@@ -78,6 +78,7 @@ func newMCPAddWizard(defaultType string) *mcpAddWizardState {
 }
 
 func (m model) openMCPAddWizard(defaultType string) model {
+	m.cancelMCPCommand()
 	m.mcpManager = nil
 	m.mcpAddWizard = newMCPAddWizard(defaultType)
 	m.clearSuggestions()
@@ -85,6 +86,7 @@ func (m model) openMCPAddWizard(defaultType string) model {
 }
 
 func (m model) openMCPAddWizardFromIntent(intent mcpSetupIntent) model {
+	m.cancelMCPCommand()
 	m.mcpManager = nil
 	wizard := newMCPAddWizard(intent.ServerType)
 	wizard.serverName = strings.TrimSpace(intent.ServerName)

@@ -571,6 +571,87 @@ func TestChatMCPSetupStitchURLOpensPrefilledWizard(t *testing.T) {
 	}
 }
 
+func TestChatMCPSetupFalsePositiveSendsPrompt(t *testing.T) {
+	provider := &fakeProvider{}
+	m := newModel(context.Background(), Options{
+		Provider: provider,
+		Registry: tools.NewRegistry(),
+	})
+	m.width = 120
+	m.height = 36
+	prompt := "how do I add a fetch call to my mcp client?"
+	m.input.SetValue(prompt)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if next.mcpAddWizard != nil {
+		t.Fatal("ordinary MCP chat prompt should not open the add wizard")
+	}
+	if cmd == nil {
+		t.Fatal("ordinary MCP chat prompt should be sent to the agent")
+	}
+	if !transcriptContains(next.transcript, prompt) {
+		t.Fatalf("expected original prompt in transcript, got %#v", next.transcript)
+	}
+	_ = applyCommandResult(t, next, cmd)
+	foundPrompt := false
+	for _, request := range provider.requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, prompt) {
+				foundPrompt = true
+				break
+			}
+		}
+	}
+	if !foundPrompt {
+		t.Fatalf("expected prompt to reach provider, got %#v", provider.requests)
+	}
+}
+
+func TestMCPAddWizardOpenCancelsStaleManagerResult(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		MCPCommand: func(_ context.Context, _ []string) MCPCommandResult {
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "checked",
+				Config:   config.MCPConfig{Servers: map[string]config.MCPServerConfig{}},
+			}
+		},
+	})
+	m.mcpManager = &mcpManagerState{selected: 1, query: "docs"}
+	var cmd tea.Cmd
+	m, cmd = m.startMCPCommand(mcpCommandRequest{
+		origin:          mcpCommandOriginManager,
+		args:            []string{"check", "docs"},
+		managerSelected: 1,
+		managerQuery:    "docs",
+	})
+	if cmd == nil {
+		t.Fatal("expected manager command")
+	}
+
+	m = m.openMCPAddWizard("http")
+	if m.mcpAddWizard == nil {
+		t.Fatal("expected add wizard to open")
+	}
+	if m.mcpManager != nil {
+		t.Fatal("expected manager to close when add wizard opens")
+	}
+	resultMsg := execCmd(cmd)
+	msg, ok := resultMsg.(mcpCommandResultMsg)
+	if !ok {
+		t.Fatalf("expected mcpCommandResultMsg, got %T", resultMsg)
+	}
+	m = m.applyMCPCommandResultMessage(msg)
+	if m.mcpManager != nil {
+		t.Fatal("stale manager result should not reopen manager over wizard")
+	}
+	if m.mcpAddWizard == nil {
+		t.Fatal("stale manager result should leave wizard open")
+	}
+}
+
 func TestMCPAddWizardConfirmRedactsSensitiveSourceAndEndpoint(t *testing.T) {
 	wizard := newMCPAddWizard("http")
 	wizard.step = mcpAddWizardStepConfirm

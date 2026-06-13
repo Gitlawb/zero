@@ -30,7 +30,7 @@ func detectMCPSetupIntent(prompt string) (mcpSetupIntent, bool) {
 			continue
 		}
 		intent, ok := mcpSetupIntentFromInstallCommand(entry.Name, entry.InstallCommand)
-		if ok {
+		if ok && promptContainsSetupEndpoint(prompt, intent.Endpoint) {
 			return intent, true
 		}
 	}
@@ -90,6 +90,25 @@ func mcpSetupIntentFromInstallCommand(label string, command string) (mcpSetupInt
 		}
 	}
 	return mcpSetupIntent{}, false
+}
+
+func promptContainsSetupEndpoint(prompt string, endpoint string) bool {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return false
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	normalized := strings.ToLower(prompt)
+	if !strings.Contains(normalized, strings.ToLower(parsed.Host)) {
+		return false
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return true
+	}
+	return strings.Contains(normalized, strings.ToLower(strings.TrimRight(parsed.Path, "/")))
 }
 
 func firstURLWithHost(value string, host string) string {
