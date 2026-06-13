@@ -16,7 +16,6 @@ type RunOptions struct {
 	PermissionMode    string
 	Autonomy          string
 	Sandbox           *sandbox.Engine
-	OnSandboxDecision func(sandbox.Decision)
 	ToolCallID        string
 	SessionID         string
 	Model             string
@@ -110,17 +109,6 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			Reason:            tool.Safety().Reason,
 		})
 		sandboxDecision = &d
-		if options.OnSandboxDecision != nil {
-			go func(dec sandbox.Decision) {
-				defer func() {
-					if r := recover(); r != nil {
-						// Fail-safe: never let a consumer callback panic the tool execution path.
-						// In real use the agent loop or CLI may log this; for now we swallow to keep tools reliable.
-					}
-				}()
-				options.OnSandboxDecision(dec)
-			}(d)
-		}
 		if d.Action == sandbox.ActionDeny {
 			res := errorResult(d.ErrorString())
 			res.SandboxDecision = sandboxDecision
