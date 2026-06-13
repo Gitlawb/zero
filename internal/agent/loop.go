@@ -114,7 +114,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		if err != nil {
 			// REACTIVE compaction: a context-limit failure on the call itself
 			// can be recovered by compacting once and retrying the same turn.
-			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, err.Error()); retried {
+			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, request.Tools, err.Error()); retried {
 				messages = compacted
 				if retryErr != nil {
 					result.Messages = copyMessages(messages)
@@ -155,7 +155,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// REACTIVE compaction: the streamed error may also be a context
 			// limit (some providers surface it mid-stream). Compact and retry
 			// the same turn once before giving up.
-			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, collected.Error); retried {
+			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, request.Tools, collected.Error); retried {
 				messages = compacted
 				if retryErr != nil {
 					result.Messages = copyMessages(messages)

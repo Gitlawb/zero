@@ -702,7 +702,12 @@ func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 			// The per-line scanner cap bounds one line, but many `data:` lines
 			// accumulate before a blank line flushes the event. Cap the aggregate too
 			// so a server can't force unbounded memory by never terminating the event.
-			dataBytes += len(value) + 1 // +1 for the joining newline
+			// Only count the joining newline once there is prior content, mirroring
+			// strings.Join, so a single line isn't over-counted.
+			if dataBytes > 0 {
+				dataBytes++ // joining newline between data lines
+			}
+			dataBytes += len(value)
 			if dataBytes > maxSSEEventBytes {
 				return fmt.Errorf("MCP SSE event exceeds %d bytes", maxSSEEventBytes)
 			}

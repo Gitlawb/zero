@@ -135,10 +135,12 @@ func TestExtractStreamJSONError(t *testing.T) {
 		`{"type":"run_start","runId":"r1"}`,
 		`{"type":"text","delta":"working"}`,
 		`{"type":"error","message":"provider request failed: 500"}`,
+		`{"type":"error","message":"provider request failed: 502"}`,
 		`{"type":"run_end","status":"error","exitCode":1}`,
 	}, "\n")
-	if got := extractStreamJSONError(output); got != "provider request failed: 500" {
-		t.Fatalf("extractStreamJSONError = %q, want the error event message", got)
+	// With two error events the LAST one wins.
+	if got := extractStreamJSONError(output); got != "provider request failed: 502" {
+		t.Fatalf("extractStreamJSONError = %q, want the last error event message", got)
 	}
 	if got := extractStreamJSONError(`{"type":"run_end","status":"success"}`); got != "" {
 		t.Fatalf("no error event should yield empty, got %q", got)

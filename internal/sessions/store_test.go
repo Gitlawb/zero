@@ -714,6 +714,16 @@ func TestEnsureSpecImplementationReusesExistingPromptSession(t *testing.T) {
 	}
 }
 
+func TestTreeMissingRootReturnsNotFoundError(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:45:00Z")})
+	// A syntactically valid but non-existent root must yield a not-found error, not
+	// panic: store.Get returns (nil, nil) for a missing session, so Tree must guard
+	// the nil before dereferencing it.
+	if _, err := store.Tree("missingroot"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("Tree on a missing root = %v, want a not-found error", err)
+	}
+}
+
 func fixedClock(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

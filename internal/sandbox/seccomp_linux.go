@@ -28,6 +28,11 @@ func ApplyUnixSocketBlock() error {
 	for i, f := range filters {
 		kernelFilters[i] = unix.SockFilter{Code: f.Code, Jt: f.Jt, Jf: f.Jf, K: f.K}
 	}
+	if len(kernelFilters) == 0 {
+		// Defensive: &kernelFilters[0] would panic on an empty program. The filter is
+		// a fixed non-empty program today; this only guards a future regression.
+		return fmt.Errorf("seccomp: empty filter from unixSocketBlockFilter")
+	}
 	prog := unix.SockFprog{
 		Len:    uint16(len(kernelFilters)),
 		Filter: &kernelFilters[0],

@@ -136,6 +136,11 @@ func (store *Store) Tree(rootSessionID string) (TreeNode, error) {
 	if err != nil {
 		return TreeNode{}, err
 	}
+	if root == nil {
+		// Get returns (nil, nil) for a session that does not exist; treat that as a
+		// clean not-found rather than dereferencing nil below.
+		return TreeNode{}, fmt.Errorf("zero session not found: %s", rootSessionID)
+	}
 	// Snapshot every session once and index children by parent in memory. The
 	// previous recursion called ListChildren per node, and each ListChildren ran a
 	// full store.List() disk scan (reading every metadata.json), making Tree

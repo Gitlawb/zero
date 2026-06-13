@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -332,7 +333,9 @@ func (proxy *egressProxy) authorizeTarget(target string, defaultPort int) bool {
 	}
 	port := defaultPort
 	if _, portStr, err := net.SplitHostPort(target); err == nil {
-		if parsed, perr := net.LookupPort("tcp", portStr); perr == nil {
+		// Parse the numeric port directly rather than net.LookupPort, which can
+		// consult the (context-unaware) system resolver for named ports.
+		if parsed, perr := strconv.Atoi(portStr); perr == nil && parsed > 0 && parsed <= 65535 {
 			port = parsed
 		}
 	}

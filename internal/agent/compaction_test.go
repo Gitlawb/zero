@@ -539,7 +539,7 @@ func TestRecoverNoopDoesNotConsumeReactiveBudget(t *testing.T) {
 		{Role: zeroruntime.MessageRoleSystem, Content: "sys"},
 		{Role: zeroruntime.MessageRoleUser, Content: "hi"},
 	}
-	_, retried, err := st.recover(context.Background(), provider, tiny, "context length exceeded")
+	_, retried, err := st.recover(context.Background(), provider, tiny, nil, "context length exceeded")
 	if err != nil {
 		t.Fatalf("unexpected error from no-op recover: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestRecoverNoopDoesNotConsumeReactiveBudget(t *testing.T) {
 		{Role: zeroruntime.MessageRoleAssistant, Content: "a2"},
 		{Role: zeroruntime.MessageRoleUser, Content: "u3"},
 	}
-	compacted, retried, err := st.recover(context.Background(), provider, big, "context length exceeded")
+	compacted, retried, err := st.recover(context.Background(), provider, big, nil, "context length exceeded")
 	if err != nil {
 		t.Fatalf("unexpected error from second recover: %v", err)
 	}
@@ -582,7 +582,7 @@ func TestRecoverDisabledIsNoop(t *testing.T) {
 	// context-limit error string.
 	got, retried, err := st.recover(context.Background(), &mockProvider{turns: [][]zeroruntime.StreamEvent{{
 		{Type: zeroruntime.StreamEventText, Content: "should not be called"}, {Type: zeroruntime.StreamEventDone},
-	}}}, msgs, "context length exceeded")
+	}}}, msgs, nil, "context length exceeded")
 	_ = called
 	if retried || err != nil || len(got) != 1 {
 		t.Fatalf("disabled recover must be a no-op, got retried=%v err=%v len=%d", retried, err, len(got))

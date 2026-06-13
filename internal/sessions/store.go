@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -710,7 +711,34 @@ func (store *Store) writeMetadata(session Metadata) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("replace zero session metadata: %w", err)
 	}
+	// fsync the parent directory so the rename itself is durable: the temp file's
+	// contents were synced above, but without syncing the directory a crash can
+	// still lose the rename (the new directory entry), leaving the old/no file.
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync zero session dir: %w", err)
+	}
 	return nil
+}
+
+// syncDir fsyncs a directory so a rename/create within it is durable across a
+// crash. A platform that cannot open a directory for sync (e.g. Windows) reports
+// no error — the rename is best-effort durable there.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		// Windows does not support fsync on a directory handle; the rename is
+		// best-effort durable there.
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
 
 // writeFileSync writes data to path and fsyncs it before returning, so the bytes

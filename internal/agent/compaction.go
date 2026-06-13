@@ -348,6 +348,7 @@ func (state *compactionState) recover(
 	ctx context.Context,
 	provider Provider,
 	messages []zeroruntime.Message,
+	tools []zeroruntime.ToolDefinition,
 	errorMessage string,
 ) (compacted []zeroruntime.Message, retried bool, err error) {
 	if !state.enabled {
@@ -381,9 +382,11 @@ func (state *compactionState) recover(
 	}
 	// Success: a real compaction shrank the history and we will retry. Consume the
 	// one-shot budget now so a provider that keeps returning context-limit errors
-	// after a successful compaction can't loop forever.
+	// after a successful compaction can't loop forever. Store the low-water mark in
+	// the SAME combined (messages + tool-defs) domain maybeCompact uses, so the
+	// proactive shrink-guard compares like with like.
 	state.reactiveAttempted = true
-	state.lowWaterMark = estimateTokens(result)
+	state.lowWaterMark = estimateTokens(result) + estimateToolDefTokens(tools)
 	return result, true, nil
 }
 

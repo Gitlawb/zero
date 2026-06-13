@@ -564,7 +564,7 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, de
 		// Tag denials so the runtime log monitor can attribute them to THIS run; the
 		// message is emitted to the unified log on every deny and StartDenialMonitor
 		// filters `log stream` for this exact (per-plan) tag.
-		denyDefault = `(deny default (with message "` + denialTag + `"))`
+		denyDefault = `(deny default (with message "` + sandboxProfileString(denialTag) + `"))`
 	}
 	return strings.Join([]string{
 		"(version 1)",
