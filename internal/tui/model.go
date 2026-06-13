@@ -292,7 +292,7 @@ func newModel(ctx context.Context, options Options) model {
 	input.PromptStyle = zeroTheme.userPrompt
 	input.TextStyle = zeroTheme.ink
 	input.PlaceholderStyle = zeroTheme.faint
-	input.Placeholder = composerPlaceholderIdle
+	input.Placeholder = composerPlaceholder
 	input.Focus()
 
 	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(zeroTheme.accent))
@@ -336,14 +336,7 @@ func newModel(ctx context.Context, options Options) model {
 	}
 }
 
-const (
-	composerPlaceholderIdle = "describe a task for zero…"
-	// Esc is the run-interrupt key; Ctrl+C quits the whole app (after the
-	// cancelled run's checkpoint flush). The spec mock said "ctrl+c to
-	// interrupt", but advertising a quit keystroke as an interrupt would teach
-	// users to lose their session — the hint follows the actual binding.
-	composerPlaceholderRunning = "running… esc to interrupt"
-)
+const composerPlaceholder = "describe a task for zero…"
 
 func (m model) Init() tea.Cmd {
 	return textinput.Blink
@@ -1128,23 +1121,15 @@ func appendStreamingCursor(lines []string, width int) []string {
 	return lines
 }
 
-// composerLine renders the borderless composer: the styled textinput plus a
-// right-aligned faint key hint that tracks run state.
+// composerLine renders the borderless composer.
 func (m model) composerLine(width int) string {
 	input := m.input
-	if m.pending {
-		input.Placeholder = composerPlaceholderRunning
-	}
 	if m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value())) {
 		input.SetValue("")
 		input.Placeholder = ""
 		input.CursorEnd()
 	}
 	hint := ""
-	switch {
-	case m.pending:
-		hint = zeroTheme.faint.Render("esc stop")
-	}
 	if m.composerActive && strings.Contains(m.composer.text, "\n") {
 		line := renderComposerState(m.composer, m.input.Prompt, width)
 		if hint == "" {

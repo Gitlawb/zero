@@ -673,13 +673,13 @@ func TestComposerLineTracksRunState(t *testing.T) {
 	}
 
 	m.pending = true
-	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "esc stop") {
-		t.Fatalf("pending composer = %q, want esc stop hint", got)
+	if got := plainRender(t, m.composerLine(96)); strings.Contains(got, "esc stop") || strings.Contains(got, "esc to interrupt") {
+		t.Fatalf("pending composer = %q, should not show stop hint", got)
 	}
 
 	m.input.SetValue("")
-	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, composerPlaceholderRunning) {
-		t.Fatalf("pending empty composer = %q, want running placeholder", got)
+	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, composerPlaceholder) || strings.Contains(got, "running") || strings.Contains(got, "stop") || strings.Contains(got, "interrupt") {
+		t.Fatalf("pending empty composer = %q, should show normal placeholder without run status text", got)
 	}
 }
 
