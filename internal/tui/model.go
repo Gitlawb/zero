@@ -1634,6 +1634,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "$ " + cmdText})
 		return m, runBashEscape(m.cwd, cmdText)
 	case commandPrompt:
+		if intent, ok := detectMCPSetupIntent(command.text); ok {
+			return m.openMCPAddWizardFromIntent(intent), nil
+		}
 		return m.launchPrompt(command.text)
 	default:
 		return m, nil

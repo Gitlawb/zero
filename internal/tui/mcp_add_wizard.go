@@ -29,15 +29,18 @@ const (
 )
 
 type mcpAddWizardState struct {
-	step         mcpAddWizardStep
-	serverName   string
-	serverType   string
-	endpoint     string
-	headerInput  string
-	headerKey    string
-	selectedType int
-	err          string
-	result       mcpAddWizardResult
+	step          mcpAddWizardStep
+	serverName    string
+	serverType    string
+	endpoint      string
+	headerInput   string
+	headerKey     string
+	sourceLabel   string
+	sourceURL     string
+	prerequisites []string
+	selectedType  int
+	err           string
+	result        mcpAddWizardResult
 }
 
 type mcpAddWizardResult struct {
@@ -76,6 +79,27 @@ func newMCPAddWizard(defaultType string) *mcpAddWizardState {
 func (m model) openMCPAddWizard(defaultType string) model {
 	m.mcpManager = nil
 	m.mcpAddWizard = newMCPAddWizard(defaultType)
+	m.clearSuggestions()
+	return m
+}
+
+func (m model) openMCPAddWizardFromIntent(intent mcpSetupIntent) model {
+	m.mcpManager = nil
+	wizard := newMCPAddWizard(intent.ServerType)
+	wizard.serverName = strings.TrimSpace(intent.ServerName)
+	wizard.serverType = strings.TrimSpace(intent.ServerType)
+	wizard.endpoint = strings.TrimSpace(intent.Endpoint)
+	wizard.sourceLabel = strings.TrimSpace(intent.SourceLabel)
+	wizard.sourceURL = strings.TrimSpace(intent.SourceURL)
+	wizard.prerequisites = append([]string{}, intent.Prerequisites...)
+	for index, candidate := range mcpAddWizardTypes {
+		if candidate.ID == wizard.serverType {
+			wizard.selectedType = index
+			break
+		}
+	}
+	wizard.step = mcpAddWizardStepConfirm
+	m.mcpAddWizard = wizard
 	m.clearSuggestions()
 	return m
 }

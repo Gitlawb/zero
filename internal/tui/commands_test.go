@@ -509,6 +509,91 @@ func TestMCPAddWizardSavesRemoteWithPastedHeader(t *testing.T) {
 	}
 }
 
+func TestChatMCPSetupStitchURLOpensPrefilledWizard(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width = 120
+	m.height = 36
+	m.input.SetValue("configure this MCP https://stitch.withgoogle.com/docs/mcp/setup")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected MCP setup intent to open synchronously")
+	}
+	if next.pending {
+		t.Fatal("MCP setup intent should not start an agent run before confirmation")
+	}
+	if next.mcpAddWizard == nil {
+		t.Fatal("expected MCP setup intent to open add wizard")
+	}
+	if next.mcpAddWizard.step != mcpAddWizardStepConfirm {
+		t.Fatalf("wizard step = %v, want confirm", next.mcpAddWizard.step)
+	}
+	view := plainRender(t, next.View())
+	for _, want := range []string{
+		"Add MCP Server",
+		"Review setup",
+		"stitch",
+		"STDIO",
+		"npx -y @_davideast/stitch-mcp@latest proxy",
+		"Google Cloud auth",
+		"stitch.withgoogle.com/docs/mcp/setup",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("Stitch setup wizard missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(transcriptText(next.transcript), "No provider configured") {
+		t.Fatalf("MCP setup intent should not fall through to provider error:\n%s", transcriptText(next.transcript))
+	}
+}
+
+func TestChatMCPSetupStitchConfirmSavesServer(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		MCPCommand: func(args []string) MCPCommandResult {
+			called = append([]string{}, args...)
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "Added MCP server stitch.",
+				Config: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"stitch": {Type: "stdio", Command: "npx", Args: []string{"-y", "@_davideast/stitch-mcp@latest", "proxy"}},
+				}},
+			}
+		},
+	})
+	m.width = 120
+	m.height = 36
+	m.input.SetValue("setup stitch mcp from https://stitch.withgoogle.com/docs/mcp/setup")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected MCP setup intent to open synchronously")
+	}
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected MCP setup save to run synchronously")
+	}
+
+	want := []string{"add", "stitch", "--type", "stdio", "--", "npx", "-y", "@_davideast/stitch-mcp@latest", "proxy"}
+	if !reflect.DeepEqual(called, want) {
+		t.Fatalf("MCPCommand args = %#v, want %#v", called, want)
+	}
+	if _, ok := next.mcpConfig.Servers["stitch"]; !ok {
+		t.Fatalf("stitch server was not applied to TUI state: %#v", next.mcpConfig.Servers)
+	}
+	view := plainRender(t, next.View())
+	for _, want := range []string{"MCP server ready", "stitch", "connected", "Use server"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("saved Stitch result missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestMCPManagerRunsSelectedServerAction(t *testing.T) {
 	var called []string
 	m := newModel(context.Background(), Options{

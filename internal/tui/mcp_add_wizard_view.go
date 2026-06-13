@@ -108,6 +108,12 @@ func (wizard *mcpAddWizardState) renderConfirmStep(width int) []string {
 		"server: " + zeroTheme.ink.Render(wizard.serverName),
 		"type: " + zeroTheme.ink.Render(strings.ToUpper(wizard.serverType)),
 	}
+	if source := strings.TrimSpace(wizard.sourceLabel); source != "" {
+		lines = append(lines, "source: "+zeroTheme.ink.Render(source))
+	}
+	if sourceURL := strings.TrimSpace(wizard.sourceURL); sourceURL != "" {
+		lines = append(lines, "docs: "+zeroTheme.ink.Render(sourceURL))
+	}
 	if wizard.isRemote() {
 		lines = append(lines, "url: "+zeroTheme.ink.Render(wizard.endpoint))
 		if wizard.headerKey != "" {
@@ -115,6 +121,12 @@ func (wizard *mcpAddWizardState) renderConfirmStep(width int) []string {
 		}
 	} else {
 		lines = append(lines, "command: "+zeroTheme.ink.Render(wizard.endpoint))
+	}
+	if len(wizard.prerequisites) > 0 {
+		lines = append(lines, "", zeroTheme.accent.Render("Needs"))
+		for _, item := range wizard.prerequisites {
+			lines = append(lines, "  - "+zeroTheme.ink.Render(item))
+		}
 	}
 	lines = append(lines, "", zeroTheme.faint.Render("Enter saves and tests the server."))
 	for index, line := range lines {
