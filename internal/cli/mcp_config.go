@@ -573,7 +573,7 @@ func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerC
 	}
 	_, updated := cfg.file.MCP.Servers[name]
 	cfg.file.MCP.Servers[name] = server
-	data, err := json.Marshal(server)
+	data, err := mergeMCPServerRaw(cfg.serverRaw[name], server)
 	if err != nil {
 		return false, err
 	}
@@ -582,6 +582,34 @@ func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerC
 		return false, err
 	}
 	return updated, nil
+}
+
+func mergeMCPServerRaw(existing json.RawMessage, server config.MCPServerConfig) (json.RawMessage, error) {
+	typed, err := json.Marshal(server)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) == 0 || string(existing) == "null" {
+		return typed, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(existing, &merged); err != nil {
+		return nil, err
+	}
+	if merged == nil {
+		merged = map[string]json.RawMessage{}
+	}
+	for _, key := range []string{"type", "command", "args", "env", "url", "headers", "auth", "oauth", "disabled"} {
+		delete(merged, key)
+	}
+	var typedRaw map[string]json.RawMessage
+	if err := json.Unmarshal(typed, &typedRaw); err != nil {
+		return nil, err
+	}
+	for key, value := range typedRaw {
+		merged[key] = value
+	}
+	return json.Marshal(merged)
 }
 
 func (cfg *mcpWritableConfig) removeServer(name string) (bool, error) {

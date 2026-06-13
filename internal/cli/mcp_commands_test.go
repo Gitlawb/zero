@@ -100,6 +100,53 @@ func TestRunMCPAddHTTPPreservesConfigAndRedactsHeader(t *testing.T) {
 	}
 }
 
+func TestRunMCPAddUpdatePreservesUnknownServerFields(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeMCPCommandRawConfig(t, configPath, `{
+  "mcp": {
+    "servers": {
+      "remote": {
+        "type": "http",
+        "url": "https://old.example/mcp",
+        "headers": {"Authorization": "Bearer old"},
+        "disabled": true,
+        "futureServer": {"keep": true}
+      }
+    }
+  }
+}
+`)
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"mcp", "add", "remote", "--url", "https://new.example/mcp", "--header", "X-Api-Key=new-secret", "--json"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	raw := readMCPCommandRawConfig(t, configPath)
+	mcpRaw := rawMCPCommandObject(t, raw["mcp"])
+	serversRaw := rawMCPCommandObject(t, mcpRaw["servers"])
+	remoteRaw := rawMCPCommandObject(t, serversRaw["remote"])
+	if _, ok := remoteRaw["futureServer"]; !ok {
+		t.Fatalf("updated server unknown field was not preserved: %s", mustMarshalMCPCommandJSON(t, remoteRaw))
+	}
+	if got := string(remoteRaw["url"]); got != `"https://new.example/mcp"` {
+		t.Fatalf("url raw = %s, want new URL in %s", got, mustMarshalMCPCommandJSON(t, remoteRaw))
+	}
+	if _, ok := remoteRaw["disabled"]; ok {
+		t.Fatalf("disabled=false noise/stale disabled field should be removed: %s", mustMarshalMCPCommandJSON(t, remoteRaw))
+	}
+	headersRaw := rawMCPCommandObject(t, remoteRaw["headers"])
+	if _, ok := headersRaw["Authorization"]; ok {
+		t.Fatalf("stale Authorization header should not survive update: %s", mustMarshalMCPCommandJSON(t, headersRaw))
+	}
+	if got := string(headersRaw["X-Api-Key"]); got != `"new-secret"` {
+		t.Fatalf("X-Api-Key raw = %s, want persisted new secret in %s", got, mustMarshalMCPCommandJSON(t, headersRaw))
+	}
+}
+
 func TestRunMCPRemoveDeletesUserConfigServer(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeMCPCommandConfig(t, configPath, config.FileConfig{
@@ -336,7 +383,7 @@ func TestRunMCPRemovePreservesUnrelatedConfigFields(t *testing.T) {
 
 func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 	cwd := t.TempDir()
-	serverURL := "https://user:password@remote.example/mcp?access_token=secret-token&api_key=secret-key&safe=value"
+	serverURL := "https://user:password@remote.example/mcp?access_token=secret-token&api_key=secret-key&safe=value#access_token=fragment-secret"
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
@@ -362,7 +409,7 @@ func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 				t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
 			}
 			output := stdout.String()
-			for _, leaked := range []string{"user:password", "secret-token", "secret-key", "access_token=secret-token", "api_key=secret-key"} {
+			for _, leaked := range []string{"user:password", "secret-token", "secret-key", "fragment-secret", "access_token=secret-token", "api_key=secret-key", "access_token=fragment-secret"} {
 				if strings.Contains(output, leaked) {
 					t.Fatalf("mcp list leaked %q in output:\n%s", leaked, output)
 				}

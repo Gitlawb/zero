@@ -26,6 +26,7 @@ type mcpServerNamedTool interface {
 }
 
 const mcpRegistryToolPrefix = "mcp_"
+const mcpDisplayRedacted = "[REDACTED]"
 
 var mcpStateUnsafeToolNameChars = regexp.MustCompile(`[^A-Za-z0-9_]+`)
 
@@ -241,7 +242,7 @@ func redactedStringMap(values map[string]string) string {
 	sort.Strings(keys)
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
-		parts = append(parts, key+"=[redacted]")
+		parts = append(parts, key+"="+mcpDisplayRedacted)
 	}
 	return strings.Join(parts, " ")
 }
@@ -252,17 +253,25 @@ func redactedCommandArgs(values []string) []string {
 	for _, value := range values {
 		if value = strings.TrimSpace(value); value != "" {
 			if redactNext {
-				trimmed = append(trimmed, "[redacted]")
+				if looksLikeMCPDisplayURLValue(value) {
+					trimmed = append(trimmed, redactMCPDisplayURL(value))
+				} else {
+					trimmed = append(trimmed, mcpDisplayRedacted)
+				}
 				redactNext = false
 				continue
 			}
 			if key, _, ok := strings.Cut(value, "="); ok && isSensitiveMCPDisplayKey(key) {
-				trimmed = append(trimmed, key+"=[redacted]")
+				trimmed = append(trimmed, key+"="+mcpDisplayRedacted)
 				continue
 			}
 			if isSensitiveMCPDisplayFlag(value) {
 				trimmed = append(trimmed, value)
 				redactNext = true
+				continue
+			}
+			if looksLikeMCPDisplayURLValue(value) {
+				trimmed = append(trimmed, redactMCPDisplayURL(value))
 				continue
 			}
 			trimmed = append(trimmed, value)
@@ -278,7 +287,7 @@ func redactMCPDisplayURL(raw string) string {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return raw
+		return fallbackRedactMCPDisplayURL(raw)
 	}
 	if parsed.User != nil {
 		parsed.User = nil
@@ -286,9 +295,12 @@ func redactMCPDisplayURL(raw string) string {
 	if parsed.RawQuery != "" {
 		parsed.RawQuery = redactMCPDisplayRawQuery(parsed.RawQuery)
 	}
+	if parsed.Fragment != "" {
+		parsed.Fragment = redactMCPDisplayRawQuery(parsed.Fragment)
+	}
 	out := parsed.String()
 	if strings.TrimSpace(out) == "" {
-		return raw
+		return fallbackRedactMCPDisplayURL(raw)
 	}
 	return out
 }
@@ -308,12 +320,50 @@ func redactMCPDisplayRawQuery(rawQuery string) string {
 			continue
 		}
 		if hasValue {
-			parts[index] = key + "=[redacted]"
+			parts[index] = key + "=" + mcpDisplayRedacted
 		} else {
 			parts[index] = key
 		}
 	}
 	return strings.Join(parts, "&")
+}
+
+func looksLikeMCPDisplayURLValue(value string) bool {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	return strings.Contains(value, "://") ||
+		strings.HasPrefix(lower, "http:") ||
+		strings.HasPrefix(lower, "https:") ||
+		strings.Contains(value, "?") ||
+		strings.Contains(value, "#")
+}
+
+func fallbackRedactMCPDisplayURL(raw string) string {
+	out := strings.TrimSpace(raw)
+	if out == "" {
+		return ""
+	}
+	if schemeIndex := strings.Index(out, "://"); schemeIndex >= 0 {
+		authorityStart := schemeIndex + len("://")
+		authorityEnd := len(out)
+		for _, marker := range []string{"/", "?", "#"} {
+			if index := strings.Index(out[authorityStart:], marker); index >= 0 && authorityStart+index < authorityEnd {
+				authorityEnd = authorityStart + index
+			}
+		}
+		if at := strings.LastIndex(out[authorityStart:authorityEnd], "@"); at >= 0 {
+			out = out[:authorityStart] + out[authorityStart+at+1:]
+		}
+	}
+	if head, fragment, ok := strings.Cut(out, "#"); ok {
+		fragment = redactMCPDisplayRawQuery(fragment)
+		out = head + "#" + fragment
+	}
+	if head, query, ok := strings.Cut(out, "?"); ok {
+		query = redactMCPDisplayRawQuery(query)
+		out = head + "?" + query
+	}
+	return out
 }
 
 func isSensitiveMCPDisplayFlag(value string) bool {
@@ -324,6 +374,9 @@ func isSensitiveMCPDisplayFlag(value string) bool {
 func isSensitiveMCPDisplayKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(strings.TrimLeft(key, "-")))
 	key = strings.ReplaceAll(key, "-", "_")
+	if key == "key" {
+		return true
+	}
 	for _, token := range []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "auth", "credential"} {
 		if strings.Contains(key, token) {
 			return true

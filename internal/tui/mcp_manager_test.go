@@ -85,7 +85,7 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 			"docs": {
 				Type:    "stdio",
 				Command: "zero-docs-mcp",
-				Args:    []string{"--workspace", ".", "--token", "arg-secret", "--api-key=inline-secret"},
+				Args:    []string{"--workspace", ".", "--token", "arg-secret", "--api-key=inline-secret", "--endpoint", "https://remote.example/mcp?access_token=arg-url-secret#token=frag-secret"},
 				Env:     map[string]string{"ZERO_DOCS_TOKEN": "env-secret"},
 			},
 			"linear": {
@@ -97,11 +97,13 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 			},
 		}},
 	})
-	got := plainRender(t, renderMCPView(state, 180))
+	got := plainRender(t, renderMCPView(state, 260))
 
 	for _, leaked := range []string{
 		"arg-secret",
 		"inline-secret",
+		"arg-url-secret",
+		"frag-secret",
 		"url-secret",
 		"env-secret",
 		"header-secret",
@@ -111,11 +113,12 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"--token [redacted]",
+		"--token [REDACTED]",
 		"--api-key=[REDACTED]",
 		"access_token=[REDACTED]",
+		"token=[REDACTED]",
 		"workspace=public",
-		"ZERO_DOCS_TOKEN=[redacted]",
+		"ZERO_DOCS_TOKEN=[REDACTED]",
 		"Authorization=[REDACTED]",
 	} {
 		if !strings.Contains(got, want) {

@@ -119,6 +119,9 @@ func redactMCPURL(raw string, marker string) string {
 	if parsed.RawQuery != "" {
 		parsed.RawQuery = redactMCPRawQuery(parsed.RawQuery, marker)
 	}
+	if parsed.Fragment != "" {
+		parsed.Fragment = redactMCPRawQuery(parsed.Fragment, marker)
+	}
 	out := parsed.String()
 	if strings.TrimSpace(out) == "" {
 		return raw
@@ -152,6 +155,9 @@ func redactMCPRawQuery(rawQuery string, marker string) string {
 func isSensitiveMCPDisplayKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.ReplaceAll(key, "-", "_")
+	if key == "key" {
+		return true
+	}
 	for _, token := range []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "auth", "credential"} {
 		if strings.Contains(key, token) {
 			return true
