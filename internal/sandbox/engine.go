@@ -65,6 +65,33 @@ func (engine *Engine) Scope() *Scope {
 	return engine.scope
 }
 
+// NetworkHostAllowed reports whether the engine's policy permits a network
+// connection to host, plus the effective network mode that decided it. It is the
+// shared gate so non-shell network tools (e.g. web_fetch) honor the SAME
+// allow/deny/scoped policy the bash egress proxy enforces, rather than each tool
+// reimplementing domain matching. host may include a :port; only the hostname is
+// matched. A disabled policy or nil engine allows everything (network tools keep
+// their pre-sandbox behaviour); deny blocks everything; scoped allows only hosts
+// in AllowedDomains minus DeniedDomains (an empty allowlist collapses to deny).
+func (engine *Engine) NetworkHostAllowed(host string) (bool, NetworkMode) {
+	if engine == nil {
+		return true, NetworkAllow
+	}
+	policy := engine.policy
+	if policy.Mode == ModeDisabled {
+		return true, NetworkAllow
+	}
+	switch mode := effectiveNetwork(policy); mode {
+	case NetworkAllow:
+		return true, mode
+	case NetworkScoped:
+		allowed := domainAllowed(host, normalizeDomains(policy.AllowedDomains), normalizeDomains(policy.DeniedDomains))
+		return allowed, mode
+	default:
+		return false, NetworkDeny
+	}
+}
+
 // scopeFor returns the scope to validate request paths against. The engine's
 // shared scope applies only when the request targets the engine's own
 // workspace root; a per-request override root gets an ad-hoc single-root scope

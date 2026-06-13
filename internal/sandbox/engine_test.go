@@ -710,3 +710,36 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 		t.Fatalf("scope-only engine, in-workspace write Action=%q (%s), want allow", inside.Action, inside.Reason)
 	}
 }
+
+func TestEngineNetworkHostAllowed(t *testing.T) {
+	cases := []struct {
+		name    string
+		policy  Policy
+		host    string
+		allowed bool
+		mode    NetworkMode
+	}{
+		{"deny blocks all", Policy{Mode: ModeEnforce, Network: NetworkDeny}, "example.com", false, NetworkDeny},
+		{"allow permits all", Policy{Mode: ModeEnforce, Network: NetworkAllow}, "example.com", true, NetworkAllow},
+		{"scoped allows listed host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, "api.example.com", true, NetworkScoped},
+		{"scoped blocks unlisted host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, "evil.test", false, NetworkScoped},
+		{"scoped honors denylist", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}, DeniedDomains: []string{"secret.example.com"}}, "secret.example.com", false, NetworkScoped},
+		{"scoped empty allowlist collapses to deny", Policy{Mode: ModeEnforce, Network: NetworkScoped}, "example.com", false, NetworkDeny},
+		{"disabled policy allows all", Policy{Mode: ModeDisabled, Network: NetworkDeny}, "example.com", true, NetworkAllow},
+		{"host with port matched on hostname", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, "example.com:443", true, NetworkScoped},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := NewEngine(EngineOptions{Policy: tc.policy})
+			allowed, mode := engine.NetworkHostAllowed(tc.host)
+			if allowed != tc.allowed || mode != tc.mode {
+				t.Fatalf("NetworkHostAllowed(%q) = (%v, %q), want (%v, %q)", tc.host, allowed, mode, tc.allowed, tc.mode)
+			}
+		})
+	}
+
+	var nilEngine *Engine
+	if allowed, mode := nilEngine.NetworkHostAllowed("example.com"); !allowed || mode != NetworkAllow {
+		t.Fatalf("nil engine NetworkHostAllowed = (%v, %q), want (true, allow)", allowed, mode)
+	}
+}

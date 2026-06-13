@@ -14,7 +14,15 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
+
+// networkPolicyGate decides whether a host may be reached under the active
+// sandbox network policy. *sandbox.Engine satisfies it; a nil gate imposes no
+// scoped restriction (only the built-in SSRF guards apply).
+type networkPolicyGate interface {
+	NetworkHostAllowed(host string) (bool, zeroSandbox.NetworkMode)
+}
 
 const (
 	defaultWebFetchMaxBytes = 64 * 1024
@@ -135,6 +143,20 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 }
 
 func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
+	return tool.run(ctx, args, nil)
+}
+
+// RunWithSandbox runs the fetch under the engine's network policy: when the
+// policy is scoped or deny, only hosts the policy permits are reachable, matching
+// the bash egress proxy. A nil engine falls back to the unrestricted path.
+func (tool webFetchTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+	if engine == nil {
+		return tool.run(ctx, args, nil)
+	}
+	return tool.run(ctx, args, engine)
+}
+
+func (tool webFetchTool) run(ctx context.Context, args map[string]any, gate networkPolicyGate) Result {
 	rawURL, err := stringArg(args, "url", "", true)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error())
@@ -144,7 +166,7 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error())
 	}
 
-	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver)
+	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver, gate)
 	if err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
 	}
@@ -156,7 +178,7 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	request.Header.Set("User-Agent", "zero-web-fetch/0.1")
 	request.Header.Set("Accept", "text/*, application/json, application/xhtml+xml, application/xml;q=0.9, */*;q=0.5")
 
-	client := tool.clientForRun()
+	client := tool.clientForRun(gate)
 	response, err := client.Do(request)
 	if err != nil {
 		return errorResult("Error fetching URL: " + redactWebFetchText(err.Error()))
@@ -217,17 +239,17 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 }
 
-func (tool webFetchTool) clientForRun() http.Client {
+func (tool webFetchTool) clientForRun(gate networkPolicyGate) http.Client {
 	if tool.client == nil {
 		return http.Client{
 			Timeout:       webFetchTimeout,
 			Transport:     webFetchSafeTransport(nil, tool.resolver),
-			CheckRedirect: webFetchRedirectPolicy(nil, tool.resolver),
+			CheckRedirect: webFetchRedirectPolicy(nil, tool.resolver, gate),
 		}
 	}
 	client := *tool.client
 	client.Transport = webFetchSafeTransport(client.Transport, tool.resolver)
-	client.CheckRedirect = webFetchRedirectPolicy(tool.client.CheckRedirect, tool.resolver)
+	client.CheckRedirect = webFetchRedirectPolicy(tool.client.CheckRedirect, tool.resolver, gate)
 	return client
 }
 
@@ -274,12 +296,12 @@ func webFetchSafeDialAddress(ctx context.Context, resolver webFetchResolver, add
 	return net.JoinHostPort(addrs[0].String(), port), nil
 }
 
-func webFetchRedirectPolicy(previous func(*http.Request, []*http.Request) error, resolver webFetchResolver) func(*http.Request, []*http.Request) error {
+func webFetchRedirectPolicy(previous func(*http.Request, []*http.Request) error, resolver webFetchResolver, gate networkPolicyGate) func(*http.Request, []*http.Request) error {
 	return func(request *http.Request, via []*http.Request) error {
 		if len(via) >= webFetchRedirectLimit {
 			return fmt.Errorf("too many redirects: maximum is %d", webFetchRedirectLimit)
 		}
-		if err := validateParsedWebFetchURL(request.Context(), request.URL, resolver); err != nil {
+		if err := validateParsedWebFetchURL(request.Context(), request.URL, resolver, gate); err != nil {
 			return fmt.Errorf("Unsafe redirect URL: %w", err)
 		}
 		if previous != nil {
@@ -301,7 +323,7 @@ func readWebFetchBody(body io.Reader, maxBytes int) (string, bool, error) {
 	return string(raw), truncated, nil
 }
 
-func validateWebFetchURL(ctx context.Context, rawURL string, resolver webFetchResolver) (*url.URL, error) {
+func validateWebFetchURL(ctx context.Context, rawURL string, resolver webFetchResolver, gate networkPolicyGate) (*url.URL, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil, fmt.Errorf("url is required")
@@ -310,13 +332,13 @@ func validateWebFetchURL(ctx context.Context, rawURL string, resolver webFetchRe
 	if err != nil {
 		return nil, err
 	}
-	if err := validateParsedWebFetchURL(ctx, parsed, resolver); err != nil {
+	if err := validateParsedWebFetchURL(ctx, parsed, resolver, gate); err != nil {
 		return nil, err
 	}
 	return parsed, nil
 }
 
-func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver webFetchResolver) error {
+func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver webFetchResolver, gate networkPolicyGate) error {
 	if parsed == nil {
 		return fmt.Errorf("url is required")
 	}
@@ -337,10 +359,36 @@ func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver we
 	if err := validateWebFetchPort(parsed); err != nil {
 		return err
 	}
+	if err := enforceScopedNetworkPolicy(gate, host); err != nil {
+		return err
+	}
 	if err := rejectUnsafeWebFetchHost(ctx, host, resolver); err != nil {
 		return err
 	}
 	return nil
+}
+
+// enforceScopedNetworkPolicy blocks a host the active sandbox network policy does
+// not permit, so the built-in network tools honor the same scoped/deny posture as
+// sandboxed shell egress. A nil gate (no sandbox engine) imposes no restriction.
+// Shared by web_fetch and web_search.
+func enforceScopedNetworkPolicy(gate networkPolicyGate, host string) error {
+	if gate == nil {
+		return nil
+	}
+	allowed, mode := gate.NetworkHostAllowed(host)
+	if allowed {
+		return nil
+	}
+	switch mode {
+	case zeroSandbox.NetworkScoped:
+		if strings.TrimSpace(host) == "" {
+			return fmt.Errorf("the scoped-network allowlist cannot be verified for this request")
+		}
+		return fmt.Errorf("host %q is not in the sandbox scoped-network allowlist", host)
+	default:
+		return fmt.Errorf("network access is disabled by the sandbox policy")
+	}
 }
 
 func validateWebFetchPort(parsed *url.URL) error {

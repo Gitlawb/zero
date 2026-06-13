@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/redaction"
+	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
 const (
@@ -81,6 +83,29 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 		},
 		backend: backend,
 	}
+}
+
+// hostedSearchBackend is implemented by backends that talk to a known HTTP
+// endpoint, so the sandbox network policy can be enforced against that host.
+type hostedSearchBackend interface {
+	endpointHost() string
+}
+
+// RunWithSandbox enforces the engine's network policy against the search
+// backend's endpoint before searching, so web_search honors the same
+// scoped/deny posture as web_fetch and sandboxed shell egress. A nil engine (or
+// an unconfigured backend) falls through to the normal Run path.
+func (tool webSearchTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
+	if engine != nil && tool.backend != nil {
+		host := ""
+		if hosted, ok := tool.backend.(hostedSearchBackend); ok {
+			host = hosted.endpointHost()
+		}
+		if err := enforceScopedNetworkPolicy(engine, host); err != nil {
+			return errorResult("Error: web_search blocked: " + err.Error())
+		}
+	}
+	return tool.Run(ctx, args)
 }
 
 func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
@@ -159,6 +184,16 @@ type httpSearchBackend struct {
 	baseURL  string
 	apiKey   string
 	provider string
+}
+
+// endpointHost returns the hostname of the configured search endpoint, or "" if
+// the base URL cannot be parsed. Used to enforce the sandbox network policy.
+func (backend *httpSearchBackend) endpointHost() string {
+	parsed, err := url.Parse(backend.baseURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func (backend *httpSearchBackend) Search(ctx context.Context, query string, limit int) ([]searchResult, error) {

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -202,7 +204,7 @@ func TestWebFetchToolConfiguresDialTimeSafetyForDefaultTransport(t *testing.T) {
 		t.Fatalf("NewWebFetchTool returned %T, want webFetchTool", NewWebFetchTool())
 	}
 
-	client := tool.clientForRun()
+	client := tool.clientForRun(nil)
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("client transport = %T, want *http.Transport", client.Transport)
@@ -343,4 +345,73 @@ func webFetchTestResponse(request *http.Request, statusCode int, contentType str
 
 func httpStatusLine(statusCode int) string {
 	return strings.TrimSpace(strings.Join([]string{strconv.Itoa(statusCode), http.StatusText(statusCode)}, " "))
+}
+
+type fakeNetworkGate struct {
+	allowed bool
+	mode    zeroSandbox.NetworkMode
+}
+
+func (g fakeNetworkGate) NetworkHostAllowed(string) (bool, zeroSandbox.NetworkMode) {
+	return g.allowed, g.mode
+}
+
+func TestEnforceScopedNetworkPolicy(t *testing.T) {
+	if err := enforceScopedNetworkPolicy(nil, "example.com"); err != nil {
+		t.Fatalf("nil gate must impose no restriction, got %v", err)
+	}
+	if err := enforceScopedNetworkPolicy(fakeNetworkGate{allowed: true, mode: zeroSandbox.NetworkAllow}, "example.com"); err != nil {
+		t.Fatalf("allowed host must pass, got %v", err)
+	}
+	denied := enforceScopedNetworkPolicy(fakeNetworkGate{allowed: false, mode: zeroSandbox.NetworkScoped}, "evil.test")
+	if denied == nil || !strings.Contains(denied.Error(), "allowlist") {
+		t.Fatalf("scoped block must mention the allowlist, got %v", denied)
+	}
+	blocked := enforceScopedNetworkPolicy(fakeNetworkGate{allowed: false, mode: zeroSandbox.NetworkDeny}, "example.com")
+	if blocked == nil || !strings.Contains(blocked.Error(), "disabled") {
+		t.Fatalf("deny block must mention the policy, got %v", blocked)
+	}
+}
+
+func TestWebFetchRunWithSandboxBlocksDeniedHost(t *testing.T) {
+	// A transport that fails the test if it is ever reached: the policy check must
+	// short-circuit before any network call.
+	failingClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("web_fetch must not dial a host the sandbox policy denies")
+		return nil, nil
+	})}
+	tool, ok := newWebFetchToolWithClient(failingClient).(webFetchTool)
+	if !ok {
+		t.Fatalf("newWebFetchToolWithClient returned %T", newWebFetchToolWithClient(failingClient))
+	}
+
+	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny},
+	})
+	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://example.com"}, engine)
+	if result.Status != StatusError {
+		t.Fatalf("denied host must yield an error result, got %q: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "disabled") {
+		t.Fatalf("error must explain the network policy, got %q", result.Output)
+	}
+}
+
+func TestWebFetchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
+	failingClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("web_fetch must not dial a host outside the scoped allowlist")
+		return nil, nil
+	})}
+	tool := newWebFetchToolWithClient(failingClient).(webFetchTool)
+
+	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+	})
+	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://evil.test"}, engine)
+	if result.Status != StatusError {
+		t.Fatalf("unlisted host must yield an error result, got %q: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "allowlist") {
+		t.Fatalf("error must explain the scoped allowlist, got %q", result.Output)
+	}
 }
