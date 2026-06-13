@@ -426,24 +426,90 @@ func programIndex(program string, fields []string) int {
 	return -1
 }
 
-// splitShellSegments splits a command on the common shell operators so each
-// pipeline/list element can be inspected independently.
+// splitShellSegments splits a command on the common shell operators (&&, ||, ;,
+// |) and command-substitution boundaries ($(...), `...`) so each pipeline/list
+// element — and any interactive program hidden inside a substitution (e.g.
+// `echo $(vim x)`) — can be inspected independently.
+//
+// It is quote-aware, which the previous strings.Replacer was not: an operator
+// inside quotes is a literal, not a separator, so `git commit -m "use top | less"`
+// and `echo "a; vim b"` no longer split mid-argument and falsely flag less/vim.
+// The quoting rules mirror the shell:
+//   - single quotes make everything literal (no operator OR substitution inside);
+//   - double quotes keep $(...)/`...` substitution active but make |, ;, &&
+//     literal;
+//   - unquoted text splits on everything.
+//
+// Real, unquoted operators still split, so a genuinely interactive command behind
+// a separator is still caught (no new false negatives).
 func splitShellSegments(command string) []string {
-	// Split on shell operators AND command-substitution boundaries ($(...), `...`)
-	// so an interactive program hidden inside a substitution becomes its own
-	// segment (e.g. `echo $(vim x)` -> segment "vim x").
-	replacer := strings.NewReplacer(
-		"&&", "\n", "||", "\n", ";", "\n", "|", "\n",
-		"$(", "\n", ")", "\n", "`", "\n",
-	)
-	parts := strings.Split(replacer.Replace(command), "\n")
-	segments := make([]string, 0, len(parts))
-	for _, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		if trimmed != "" {
-			segments = append(segments, trimmed)
+	segments := make([]string, 0)
+	var current strings.Builder
+	flush := func() {
+		if seg := strings.TrimSpace(current.String()); seg != "" {
+			segments = append(segments, seg)
 		}
+		current.Reset()
 	}
+
+	inSingle := false
+	inDouble := false
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+
+		// Inside single quotes everything is literal until the closing quote.
+		if inSingle {
+			current.WriteRune(c)
+			if c == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if c == '\'' && !inDouble {
+			inSingle = true
+			current.WriteRune(c)
+			continue
+		}
+		if c == '"' {
+			inDouble = !inDouble
+			current.WriteRune(c)
+			continue
+		}
+
+		// Command substitution is active when unquoted and inside double quotes
+		// (only single quotes suppress it), so split on its boundaries in both.
+		switch {
+		case c == '`':
+			flush()
+			continue
+		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
+			flush()
+			i++ // consume the '('
+			continue
+		case c == ')':
+			flush()
+			continue
+		}
+
+		// Control operators are literal inside double quotes; only split on them
+		// when fully unquoted. Match the original operator set exactly: ;, | (which
+		// also covers ||), and && — never a lone & (background).
+		if !inDouble {
+			switch {
+			case c == ';' || c == '|':
+				flush()
+				continue
+			case c == '&' && i+1 < len(runes) && runes[i+1] == '&':
+				flush()
+				i++
+				continue
+			}
+		}
+
+		current.WriteRune(c)
+	}
+	flush()
 	return segments
 }
 

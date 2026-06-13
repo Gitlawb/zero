@@ -215,6 +215,40 @@ func TestDetectInteractiveBypasses(t *testing.T) {
 	}
 }
 
+// Audit finding (MED): splitShellSegments must be quote-aware. A shell operator
+// inside quotes is a literal argument, not a separator, so it must not split the
+// command and falsely flag a quoted program name — while real, unquoted operators
+// must still split (no new false negatives).
+func TestDetectInteractiveQuoteAwareSeparators(t *testing.T) {
+	allowed := []string{
+		`git commit -m "use top | less"`, // | inside double quotes
+		`echo "a; vim b"`,                // ; inside double quotes
+		`echo 'pipe it: a | less'`,       // | inside single quotes
+		`git commit -m "vim && nano"`,    // && inside double quotes
+	}
+	for _, cmd := range allowed {
+		if got := DetectInteractiveCommand(cmd, "linux"); got.Interactive {
+			t.Errorf("expected %q NOT to be flagged (operator is quoted), got %q", cmd, got.Command)
+		}
+	}
+
+	blocked := []struct {
+		command string
+		wantCmd string
+	}{
+		{`echo hi | less`, "less"},            // real unquoted pipe
+		{`echo "safe" | vim`, "vim"},          // real pipe after a quoted arg
+		{`git commit -m "msg"; vim x`, "vim"}, // real ; after a quoted arg
+		{`echo "$(vim x)"`, "vim"},            // substitution still active in double quotes
+	}
+	for _, tc := range blocked {
+		got := DetectInteractiveCommand(tc.command, "linux")
+		if !got.Interactive || got.Command != tc.wantCmd {
+			t.Errorf("DetectInteractiveCommand(%q) = (%v,%q), want interactive %q", tc.command, got.Interactive, got.Command, tc.wantCmd)
+		}
+	}
+}
+
 func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 	cases := []struct {
 		command     string
