@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/sys v0.38.0
+	mvdan.cc/sh/v3 v3.11.0
 )
 
 require (

