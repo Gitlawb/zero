@@ -79,12 +79,16 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
 
+		// Build the per-turn tool list first so proactive compaction can include
+		// the tool-definition tokens (they ride on every request) in its estimate.
+		// partitionTools depends only on registry/permissions/options/loaded, not on
+		// the messages, so computing it before compaction is safe.
+		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
+
 		// PROACTIVE compaction: if the history is approaching the model's
 		// context window, summarize the oldest middle before building the
 		// request. A no-op when ContextWindow == 0 (compaction disabled).
-		messages = compactor.maybeCompact(ctx, provider, messages)
-
-		exposed, reminder := partitionTools(registry, permissionMode, options, loaded)
+		messages = compactor.maybeCompact(ctx, provider, messages, exposed)
 		request := zeroruntime.CompletionRequest{
 			Messages:        copyMessages(messages),
 			Tools:           exposed,
@@ -569,18 +573,16 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			permissionGranted = true
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
-			// "Always allow" also persists a grant so future calls skip the prompt.
-			// With no sandbox engine there is nowhere to persist it — that is not a
-			// failure, so honor the allow for THIS call and skip remembering it,
-			// rather than denying what the user explicitly allowed.
+			// "Always allow" also persists a grant so FUTURE calls skip the prompt.
+			// With no sandbox engine there is nowhere to persist it, and persistence
+			// can also fail — neither must deny what the user explicitly allowed, so
+			// honor the allow for THIS call regardless and just skip remembering the
+			// grant (the user is re-prompted next time rather than denied now). This
+			// call's permission event is built from the sandbox decision below
+			// (buildPermissionEvent reads decision.GrantMatched/Grant), so the
+			// persisted grant does not need to be recorded on requestEvent here.
 			if options.Sandbox != nil {
-				grant, err := persistPermissionGrant(call.Name, args, decisionReason, options)
-				if err != nil {
-					emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
-					return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent), nil
-				}
-				requestEvent.GrantMatched = true
-				requestEvent.Grant = &grant
+				_, _ = persistPermissionGrant(call.Name, args, decisionReason, options)
 			}
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)

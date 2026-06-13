@@ -206,6 +206,28 @@ func TestEstimateTokensCountsImages(t *testing.T) {
 	}
 }
 
+func TestEstimateToolDefTokensCountsDefinitions(t *testing.T) {
+	if got := estimateToolDefTokens(nil); got != 0 {
+		t.Fatalf("no tools should estimate 0 tokens, got %d", got)
+	}
+	one := []zeroruntime.ToolDefinition{{
+		Name:        "read_file",
+		Description: "Read a file from the workspace and return its contents.",
+		Parameters:  map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}},
+	}}
+	if estimateToolDefTokens(one) <= 0 {
+		t.Fatal("a tool definition (name + description + schema) should estimate > 0 tokens")
+	}
+	two := append(append([]zeroruntime.ToolDefinition{}, one...), zeroruntime.ToolDefinition{
+		Name:        "write_file",
+		Description: "Write contents to a file in the workspace.",
+		Parameters:  map[string]any{"type": "object"},
+	})
+	if estimateToolDefTokens(two) <= estimateToolDefTokens(one) {
+		t.Fatal("the estimate must grow with more tool definitions")
+	}
+}
+
 // --- Loop integration: provider mocks -------------------------------------
 
 // summarizeRecordingProvider returns scripted turns for the main agent loop

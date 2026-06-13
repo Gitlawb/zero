@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -91,6 +92,26 @@ func estimateTokens(messages []zeroruntime.Message) int {
 		}
 		total += len(message.Images) * imageTokenEstimate
 		total += 4 // per-message overhead
+	}
+	return total
+}
+
+// estimateToolDefTokens approximates the input-token cost of the tool definitions
+// sent with every request (~4 chars/token, matching estimateTokens). Compaction
+// must include them: they ride on every turn, so ignoring them under-counts the
+// real context and can let it blow past the model limit while the message-only
+// estimate still looks under threshold.
+func estimateToolDefTokens(tools []zeroruntime.ToolDefinition) int {
+	total := 0
+	for _, tool := range tools {
+		total += len(tool.Name) / 4
+		total += len(tool.Description) / 4
+		if len(tool.Parameters) > 0 {
+			if encoded, err := json.Marshal(tool.Parameters); err == nil {
+				total += len(encoded) / 4
+			}
+		}
+		total += 4 // per-tool overhead
 	}
 	return total
 }
@@ -278,11 +299,16 @@ func (state *compactionState) maybeCompact(
 	ctx context.Context,
 	provider Provider,
 	messages []zeroruntime.Message,
+	tools []zeroruntime.ToolDefinition,
 ) []zeroruntime.Message {
 	if !state.enabled {
 		return messages
 	}
-	size := estimateTokens(messages)
+	// Tool definitions are part of every request's input, so count them alongside
+	// the messages; both the threshold check and the shrink check below use the
+	// same term so they stay consistent.
+	toolTokens := estimateToolDefTokens(tools)
+	size := estimateTokens(messages) + toolTokens
 	if size <= state.threshold {
 		return messages
 	}
@@ -302,7 +328,7 @@ func (state *compactionState) maybeCompact(
 		// later turn) can try again; we never drop messages on failure here.
 		return messages
 	}
-	newSize := estimateTokens(compacted)
+	newSize := estimateTokens(compacted) + toolTokens
 	if newSize >= size {
 		// Compaction did not actually shrink anything (e.g. nothing to
 		// summarize). Leave the history untouched and don't churn next turn.
