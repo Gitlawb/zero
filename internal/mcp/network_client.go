@@ -621,12 +621,22 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 		if value == "" {
 			return true
 		}
+		var candidate rpcMessage
 		decoder := json.NewDecoder(strings.NewReader(value))
 		decoder.UseNumber()
-		if err := decoder.Decode(&decoded); err != nil {
+		if err := decoder.Decode(&candidate); err != nil {
 			decodeErr = fmt.Errorf("decode MCP SSE response: %w", err)
 			return false
 		}
+		// The POST's event stream may carry server-initiated notifications or
+		// requests (which have a method) before the response to our request. Skip
+		// those — the response has no method — and keep scanning. Previously the
+		// first message event was returned unconditionally, so a leading
+		// notification surfaced to the caller as an id mismatch and failed the call.
+		if candidate.Method != "" {
+			return true
+		}
+		decoded = candidate
 		found = true
 		return false
 	}); err != nil {
@@ -641,9 +651,15 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 	return rpcMessage{}, fmt.Errorf("missing MCP SSE response data")
 }
 
+// maxSSEEventBytes bounds a single SSE line/event. The previous 1 MiB cap made a
+// large but legitimate MCP message (e.g. a big tool result) hit bufio.ErrTooLong,
+// which failed the request permanently with no recovery. Raise it to a generous
+// bound that still protects against an unbounded remote server.
+const maxSSEEventBytes = 8 * 1024 * 1024
+
 func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxSSEEventBytes)
 
 	event := sseEvent{Name: "message"}
 	dataLines := []string{}

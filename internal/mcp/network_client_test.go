@@ -179,3 +179,27 @@ func TestNonOAuthServerIsUnaffected(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 }
+
+func TestDecodeSSERPCMessageSkipsNotifications(t *testing.T) {
+	// A leading server notification (has a method) on the POST's event stream must
+	// be skipped so the actual response (no method) is returned, instead of the
+	// notification surfacing as an id mismatch.
+	stream := "event: message\n" +
+		`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}` + "\n\n" +
+		"event: message\n" +
+		`data: {"jsonrpc":"2.0","id":7,"result":{"ok":true}}` + "\n\n"
+
+	msg, err := decodeSSERPCMessage(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("decodeSSERPCMessage: %v", err)
+	}
+	if msg.Method != "" {
+		t.Fatalf("returned a server message (method %q), want the response", msg.Method)
+	}
+	if !rpcIDMatches(msg.ID, 7) {
+		t.Fatalf("expected response id 7, got %#v", msg.ID)
+	}
+	if len(msg.Result) == 0 {
+		t.Fatalf("expected a result payload, got %#v", msg)
+	}
+}
