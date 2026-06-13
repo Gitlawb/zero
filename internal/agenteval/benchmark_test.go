@@ -453,12 +453,13 @@ func TestHarnessTimeoutCancelsBlockedAgent(t *testing.T) {
 		}},
 	}
 
-	// The timeout is far longer than materialization of the small fixture, so
-	// the agent is always reached; it then blocks until the deadline fires.
+	// The timeout is longer than materialization of the small fixture even on
+	// slower Windows CI runners, so the agent is reached before it blocks until
+	// the deadline fires.
 	report := harness.Run(context.Background(), suitePath, suite, BenchmarkInput{
 		TaskID:   "document-stream-json-verify-events",
 		WorkRoot: t.TempDir(),
-		Timeout:  2 * time.Second,
+		Timeout:  10 * time.Second,
 	})
 
 	if !agentReached {
