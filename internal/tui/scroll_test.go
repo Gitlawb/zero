@@ -32,6 +32,29 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	}
 }
 
+func TestMouseWheelOverWrappedComposerMovesComposerCursor(t *testing.T) {
+	text := "Create a book library dashboard page with cards, filters, charts, and responsive behavior."
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 44
+	m.height = 20
+	m.mouseCapture = true
+	m.input.SetValue(text)
+	m.input.CursorEnd()
+	startCursor := len([]rune(text))
+
+	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Y: 14})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("mouse wheel over composer should not return a command")
+	}
+	if next.chatScrollOffset != 0 {
+		t.Fatalf("chatScrollOffset = %d, want unchanged", next.chatScrollOffset)
+	}
+	if got := next.currentComposerState().cursor; got >= startCursor {
+		t.Fatalf("composer cursor = %d, want moved before end cursor %d", got, startCursor)
+	}
+}
+
 func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true, ProviderName: "openai", ModelName: "gpt-4.1"})
 	m.width = 90

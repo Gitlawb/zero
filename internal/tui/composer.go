@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -11,6 +12,13 @@ import (
 type composerState struct {
 	text   string
 	cursor int
+}
+
+type composerPastePreview struct {
+	active bool
+	start  int
+	end    int
+	label  string
 }
 
 func insertComposerText(state composerState, text string) composerState {
@@ -150,12 +158,14 @@ func (m *model) setComposerState(state composerState) {
 func (m *model) clearComposer() {
 	m.composer = composerState{}
 	m.composerActive = false
+	m.composerPastePreview = composerPastePreview{}
 	m.input.SetValue("")
 }
 
 func (m *model) resetComposerFromInput() {
 	m.composer = composerState{}
 	m.composerActive = false
+	m.composerPastePreview = composerPastePreview{}
 }
 
 func (m *model) syncInputFromComposer() {
@@ -177,11 +187,12 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	state := m.currentComposerState()
 	switch {
 	case msg.Type == tea.KeyEnter && msg.Alt:
-		m.setComposerState(insertComposerText(state, "\n"))
+		m = m.insertComposerTextWithPastePreview(state, "\n", "")
 	case msg.Type == tea.KeyCtrlJ:
-		m.setComposerState(insertComposerText(state, "\n"))
+		m = m.insertComposerTextWithPastePreview(state, "\n", "")
 	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "d":
 		m.setComposerState(deleteComposerWordAfter(state))
+		m.composerPastePreview = composerPastePreview{}
 	case (msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlLeft) && msg.Alt:
 		m.setComposerState(moveComposerWordBefore(state))
 	case (msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlRight) && msg.Alt:
@@ -195,22 +206,35 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "f":
 		m.setComposerState(moveComposerWordAfter(state))
 	case msg.Type == tea.KeySpace:
-		m.setComposerState(insertComposerText(state, " "))
+		m = m.insertComposerTextWithPastePreview(state, " ", "")
 	case msg.Type == tea.KeyRunes && !msg.Alt:
 		text := string(msg.Runes)
+		previewLabel := ""
 		if msg.Paste {
 			text = sanitizeComposerPaste(text)
+			previewLabel, _ = composerPastePreviewLabel(text)
 		} else {
 			text = sanitizeComposerInput(text)
 		}
 		if shouldInsertCommandArgumentSpace(state, text) {
 			text = " " + text
+			if previewLabel != "" {
+				previewLabel = " " + previewLabel
+			}
 		}
-		m.setComposerState(insertComposerText(state, text))
+		m = m.insertComposerTextWithPastePreview(state, text, previewLabel)
 	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlB:
+		if nextState, ok := moveComposerPastePreviewBoundary(state, m.composerPastePreview, -1); ok {
+			m.setComposerState(nextState)
+			break
+		}
 		state.cursor--
 		m.setComposerState(state)
 	case msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlF:
+		if nextState, ok := moveComposerPastePreviewBoundary(state, m.composerPastePreview, 1); ok {
+			m.setComposerState(nextState)
+			break
+		}
 		state.cursor++
 		m.setComposerState(state)
 	case msg.Type == tea.KeyHome || msg.Type == tea.KeyCtrlA:
@@ -221,20 +245,35 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		m.setComposerState(state)
 	case msg.Type == tea.KeyCtrlU:
 		m.setComposerState(deleteComposerLineBefore(state))
+		m.composerPastePreview = composerPastePreview{}
 	case msg.Type == tea.KeyCtrlK:
 		m.setComposerState(deleteComposerLineAfter(state))
+		m.composerPastePreview = composerPastePreview{}
 	case msg.Type == tea.KeyCtrlW || (msg.Alt && (msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH)):
 		m.setComposerState(deleteComposerWordBefore(state))
+		m.composerPastePreview = composerPastePreview{}
 	case msg.Alt && msg.Type == tea.KeyDelete:
 		m.setComposerState(deleteComposerWordAfter(state))
+		m.composerPastePreview = composerPastePreview{}
 	case msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH:
-		if nextState, ok := deleteCompletedFileMentionBefore(state); ok && !m.suggestionsActive() {
+		if nextState, ok := deleteComposerPastePreviewBefore(state, m.composerPastePreview); ok && !m.suggestionsActive() {
 			m.setComposerState(nextState)
+			m.composerPastePreview = composerPastePreview{}
+		} else if nextState, ok := deleteCompletedFileMentionBefore(state); ok && !m.suggestionsActive() {
+			m.setComposerState(nextState)
+			m.composerPastePreview = composerPastePreview{}
 		} else {
 			m.setComposerState(deleteComposerRange(state, state.cursor-1, state.cursor))
+			m.composerPastePreview = composerPastePreview{}
 		}
 	case msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlD:
-		m.setComposerState(deleteComposerRange(state, state.cursor, state.cursor+1))
+		if nextState, ok := deleteComposerPastePreviewAfter(state, m.composerPastePreview); ok {
+			m.setComposerState(nextState)
+			m.composerPastePreview = composerPastePreview{}
+		} else {
+			m.setComposerState(deleteComposerRange(state, state.cursor, state.cursor+1))
+			m.composerPastePreview = composerPastePreview{}
+		}
 	default:
 		return m, false
 	}
@@ -245,6 +284,119 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		m.recomputeSuggestions()
 	}
 	return m, true
+}
+
+func (m model) insertComposerTextWithPastePreview(state composerState, text string, previewLabel string) model {
+	state = normalizeComposerState(state)
+	insertStart := state.cursor
+	insertedRunes := len([]rune(text))
+	nextPreview := m.composerPastePreview.afterInsert(insertStart, insertedRunes)
+	m.setComposerState(insertComposerText(state, text))
+	if previewLabel != "" && insertedRunes > 0 {
+		m.composerPastePreview = composerPastePreview{
+			active: true,
+			start:  insertStart,
+			end:    insertStart + insertedRunes,
+			label:  previewLabel,
+		}
+		return m
+	}
+	m.composerPastePreview = nextPreview
+	return m
+}
+
+func composerPastePreviewLabel(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", false
+	}
+	lineCount := strings.Count(text, "\n") + 1
+	runeCount := len([]rune(text))
+	if lineCount < 3 && runeCount < 220 {
+		return "", false
+	}
+	snippet := text
+	if newline := strings.IndexRune(snippet, '\n'); newline >= 0 {
+		snippet = snippet[:newline]
+	}
+	snippet = strings.Join(strings.Fields(snippet), " ")
+	if snippet == "" {
+		snippet = "pasted text"
+	}
+	snippet = truncateComposerPasteSnippet(snippet, 48)
+	if lineCount >= 3 {
+		return "[" + snippet + " · " + strconv.Itoa(lineCount) + " lines]", true
+	}
+	return "[" + snippet + " · " + strconv.Itoa(runeCount) + " chars]", true
+}
+
+func truncateComposerPasteSnippet(text string, limit int) string {
+	runes := []rune(text)
+	if limit <= 3 || len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func (preview composerPastePreview) validFor(state composerState) bool {
+	state = normalizeComposerState(state)
+	if !preview.active || preview.label == "" {
+		return false
+	}
+	return preview.start >= 0 && preview.start < preview.end && preview.end <= len([]rune(state.text))
+}
+
+func (preview composerPastePreview) afterInsert(pos int, length int) composerPastePreview {
+	if !preview.active || length <= 0 {
+		return preview
+	}
+	switch {
+	case pos <= preview.start:
+		preview.start += length
+		preview.end += length
+	case pos < preview.end:
+		return composerPastePreview{}
+	}
+	return preview
+}
+
+func moveComposerPastePreviewBoundary(state composerState, preview composerPastePreview, direction int) (composerState, bool) {
+	if !preview.validFor(state) {
+		return state, false
+	}
+	state = normalizeComposerState(state)
+	switch {
+	case direction < 0 && state.cursor > preview.start && state.cursor <= preview.end:
+		state.cursor = preview.start
+		return state, true
+	case direction > 0 && state.cursor >= preview.start && state.cursor < preview.end:
+		state.cursor = preview.end
+		return state, true
+	default:
+		return state, false
+	}
+}
+
+func deleteComposerPastePreviewBefore(state composerState, preview composerPastePreview) (composerState, bool) {
+	if !preview.validFor(state) {
+		return state, false
+	}
+	state = normalizeComposerState(state)
+	if state.cursor != preview.end {
+		return state, false
+	}
+	return deleteComposerRange(state, preview.start, preview.end), true
+}
+
+func deleteComposerPastePreviewAfter(state composerState, preview composerPastePreview) (composerState, bool) {
+	if !preview.validFor(state) {
+		return state, false
+	}
+	state = normalizeComposerState(state)
+	if state.cursor != preview.start {
+		return state, false
+	}
+	return deleteComposerRange(state, preview.start, preview.end), true
 }
 
 func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
@@ -263,19 +415,6 @@ func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
 		return false
 	}
 	return commandArgumentHintForInput(state.text) != ""
-}
-
-func renderComposerState(state composerState, prompt string, width int) string {
-	state = normalizeComposerState(state)
-	lines := strings.Split(state.text, "\n")
-	for index, line := range lines {
-		prefix := "  "
-		if index == 0 {
-			prefix = prompt
-		}
-		lines[index] = fitStyledLine(prefix+line, width)
-	}
-	return strings.Join(lines, "\n")
 }
 
 func deleteCompletedFileMentionBefore(state composerState) (composerState, bool) {

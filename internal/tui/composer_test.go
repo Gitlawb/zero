@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -128,6 +129,48 @@ func TestSanitizeComposerPastePreservesNewlines(t *testing.T) {
 	}
 }
 
+func TestPastedMultilineComposerContentRendersAsPreview(t *testing.T) {
+	paste := strings.Join([]string{
+		"Create a book library dashboard page with the Bootstrap theme.",
+		"Include cards, search, filters, and progress bars.",
+		"Make the grid responsive across desktop and mobile.",
+		"Keep the sidebar readable.",
+	}, "\n")
+	m := newModel(context.Background(), Options{})
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	next := updated.(model)
+
+	if got := next.composerValue(); got != paste {
+		t.Fatalf("composer value should preserve full paste = %q, want %q", got, paste)
+	}
+	view := plainRender(t, next.composerBox(96))
+	for _, want := range []string{"[Create a book library dashboard page", "4 lines"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("composer preview missing %q in:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Include cards") || strings.Contains(view, "Keep the sidebar") {
+		t.Fatalf("composer preview should not render full pasted content:\n%s", view)
+	}
+}
+
+func TestBackspaceAfterPastedPreviewDeletesWholePaste(t *testing.T) {
+	paste := "first line\nsecond line\nthird line"
+	m := newModel(context.Background(), Options{})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	next := updated.(model)
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	next = updated.(model)
+	if got := next.composerValue(); got != "" {
+		t.Fatalf("composer value after deleting paste preview = %q, want empty", got)
+	}
+	if next.composerPastePreview.active {
+		t.Fatal("paste preview should clear after deleting pasted block")
+	}
+}
+
 func TestModifiedEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 	tests := []struct {
 		name string
@@ -194,6 +237,31 @@ func TestMultilineComposerAcceptsSpaceKey(t *testing.T) {
 	}
 	if !next.composerActive {
 		t.Fatal("space insertion should keep multiline composer state active")
+	}
+}
+
+func TestWrappedComposerArrowKeysMoveByVisualLine(t *testing.T) {
+	text := "Create a book library dashboard page with cards, filters, charts, and responsive behavior."
+	m := newModel(context.Background(), Options{})
+	m.width = 44
+	m.input.SetValue(text)
+	m.input.CursorEnd()
+	startCursor := len([]rune(text))
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next := updated.(model)
+	if got := next.composerValue(); got != text {
+		t.Fatalf("composer value = %q, want unchanged text %q", got, text)
+	}
+	upCursor := next.currentComposerState().cursor
+	if upCursor >= startCursor {
+		t.Fatalf("up cursor = %d, want before end cursor %d", upCursor, startCursor)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next = updated.(model)
+	if got := next.currentComposerState().cursor; got != startCursor {
+		t.Fatalf("down cursor = %d, want restored end cursor %d", got, startCursor)
 	}
 }
 

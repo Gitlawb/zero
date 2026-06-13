@@ -67,6 +67,11 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.moveSuggestion(-1)
 			return m, nil
 		}
+		if m.mouseOverComposer(msg) {
+			if next, ok := m.moveComposerVisualCursor(-1); ok {
+				return next, nil
+			}
+		}
 		return m.scrollChat(chatWheelScrollLines), nil
 	case mouseWheelDown(msg):
 		m.clearMouseSelection()
@@ -84,6 +89,11 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if m.suggestionsActive() {
 			m.moveSuggestion(1)
 			return m, nil
+		}
+		if m.mouseOverComposer(msg) {
+			if next, ok := m.moveComposerVisualCursor(1); ok {
+				return next, nil
+			}
 		}
 		return m.scrollChat(-chatWheelScrollLines), nil
 	default:
@@ -148,6 +158,31 @@ func mouseWheelUp(msg tea.MouseMsg) bool {
 
 func mouseWheelDown(msg tea.MouseMsg) bool {
 	return msg.Button == tea.MouseButtonWheelDown || msg.Type == tea.MouseWheelDown
+}
+
+func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
+	if !m.altScreen || m.height <= 0 {
+		return false
+	}
+	width := chatWidth(m.width)
+	composerLines := viewLines(m.composerBox(width))
+	footerLines := viewLines(m.footerView(width))
+	if len(composerLines) == 0 || len(footerLines) == 0 {
+		return false
+	}
+	composerTop := -1
+	for index := 0; index+len(composerLines) <= len(footerLines); index++ {
+		if footerLines[index] == composerLines[0] {
+			composerTop = index
+			break
+		}
+	}
+	if composerTop < 0 {
+		return false
+	}
+	footerTop := maxInt(0, m.height-len(footerLines))
+	top := footerTop + composerTop
+	return msg.Y >= top && msg.Y < top+len(composerLines)
 }
 
 func (m *model) selectSuggestionAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {

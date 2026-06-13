@@ -67,6 +67,7 @@ type model struct {
 	input                  textinput.Model
 	composer               composerState
 	composerActive         bool
+	composerPastePreview   composerPastePreview
 	altScreen              bool
 	setup                  setupState
 	setupSave              func(SetupSelection) (SetupResult, error)
@@ -336,7 +337,10 @@ func newModel(ctx context.Context, options Options) model {
 	}
 }
 
-const composerPlaceholder = "describe a task for zero…"
+const (
+	composerPlaceholder     = "describe a task for zero…"
+	composerMaxVisibleLines = 4
+)
 
 func (m model) Init() tea.Cmd {
 	return textinput.Blink
@@ -566,6 +570,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSuggestion(1)
 				return m, nil
 			}
+			if next, ok := m.moveComposerVisualCursor(1); ok {
+				return next, nil
+			}
 			if m.historyRecallActive() {
 				return m.recallHistory(1), nil
 			}
@@ -586,6 +593,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.suggestionsActive() {
 				m.moveSuggestion(-1)
 				return m, nil
+			}
+			if next, ok := m.moveComposerVisualCursor(-1); ok {
+				return next, nil
 			}
 			if m.historyRecallActive() {
 				return m.recallHistory(-1), nil
@@ -1124,21 +1134,20 @@ func appendStreamingCursor(lines []string, width int) []string {
 // composerLine renders the borderless composer.
 func (m model) composerLine(width int) string {
 	input := m.input
-	if m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value())) {
+	hideInputForSuggestions := m.suggestionsActive() && (!m.suggestionsAreFiles || fileSuggestionOnlyInput(m.input.Value()))
+	if hideInputForSuggestions {
 		input.SetValue("")
 		input.Placeholder = ""
 		input.CursorEnd()
 	}
-	hint := ""
-	if m.composerActive && strings.Contains(m.composer.text, "\n") {
-		line := renderComposerState(m.composer, m.input.Prompt, width)
-		if hint == "" {
-			return line
-		}
-		lines := strings.Split(line, "\n")
-		lines[len(lines)-1] = joinHeaderLine(fitStyledLine(lines[len(lines)-1], width-lipgloss.Width(hint)-2), hint, width)
-		return strings.Join(lines, "\n")
+	state := composerState{text: input.Value(), cursor: input.Position()}
+	if m.composerActive {
+		state = m.composer
 	}
+	if hideInputForSuggestions {
+		state = composerState{}
+	}
+	hint := ""
 	argumentHint := commandArgumentHintForInput(input.Value())
 	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
 		argumentHint = ""
@@ -1151,11 +1160,231 @@ func (m model) composerLine(width int) string {
 		}
 		return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
 	}
-	line := input.View()
+	displayState := composerDisplayStateForPastePreview(state, m.composerPastePreview)
+	line := renderComposerInput(input, displayState, width)
 	if hint == "" {
-		return fitStyledLine(line, width)
+		return line
 	}
 	return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+}
+
+type composerVisualLine struct {
+	first bool
+	start int
+	end   int
+}
+
+func renderComposerInput(input textinput.Model, state composerState, width int) string {
+	state = normalizeComposerState(state)
+	if width <= 0 {
+		return ""
+	}
+	if state.text == "" {
+		return fitStyledLine(input.View(), width)
+	}
+
+	segments := composerWrappedVisualLines(input, state, width)
+	cursorLine := composerCursorVisualLine(segments, state.cursor)
+	if len(segments) > composerMaxVisibleLines {
+		start := clamp(cursorLine-composerMaxVisibleLines+1, 0, len(segments)-composerMaxVisibleLines)
+		end := start + composerMaxVisibleLines
+		cursorLine -= start
+		segments = segments[start:end]
+		if len(segments) > 0 {
+			segments[0].first = true
+		}
+	}
+
+	lines := make([]string, 0, len(segments))
+	for index, segment := range segments {
+		lines = append(lines, fitStyledLine(renderComposerVisualLine(input, state, segment, index == cursorLine), width))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func composerWrappedVisualLines(input textinput.Model, state composerState, width int) []composerVisualLine {
+	runes := []rune(state.text)
+	segments := []composerVisualLine{}
+	first := true
+	start := 0
+	for index, r := range runes {
+		if r != '\n' {
+			continue
+		}
+		segments = appendComposerWrappedVisualLines(segments, input, runes, start, index, width, &first)
+		start = index + 1
+	}
+	segments = appendComposerWrappedVisualLines(segments, input, runes, start, len(runes), width, &first)
+	return segments
+}
+
+func appendComposerWrappedVisualLines(segments []composerVisualLine, input textinput.Model, runes []rune, start int, end int, width int, first *bool) []composerVisualLine {
+	if start >= end {
+		segments = append(segments, composerVisualLine{first: *first, start: start, end: end})
+		*first = false
+		return segments
+	}
+	for start < end {
+		lineFirst := *first
+		measure := maxInt(1, width-lipgloss.Width(composerVisualLinePrefix(input, lineFirst)))
+		split := start
+		used := 0
+		for split < end {
+			nextWidth := lipgloss.Width(string(runes[split]))
+			if used+nextWidth > measure {
+				break
+			}
+			used += nextWidth
+			split++
+		}
+		if split == start {
+			split++
+		}
+		segments = append(segments, composerVisualLine{first: lineFirst, start: start, end: split})
+		*first = false
+		start = split
+	}
+	return segments
+}
+
+func composerCursorVisualLine(segments []composerVisualLine, cursor int) int {
+	if len(segments) == 0 {
+		return 0
+	}
+	for index, segment := range segments {
+		if cursor < segment.start || cursor > segment.end {
+			continue
+		}
+		if cursor == segment.end && index+1 < len(segments) && segments[index+1].start == cursor {
+			continue
+		}
+		return index
+	}
+	return len(segments) - 1
+}
+
+func renderComposerVisualLine(input textinput.Model, state composerState, segment composerVisualLine, hasCursor bool) string {
+	runes := []rune(state.text)
+	prefix := composerVisualLinePrefix(input, segment.first)
+	textStyle := input.TextStyle.Inline(true)
+	if !hasCursor {
+		return prefix + textStyle.Render(string(runes[segment.start:segment.end]))
+	}
+
+	offset := clamp(state.cursor-segment.start, 0, segment.end-segment.start)
+	cursorIndex := segment.start + offset
+	before := string(runes[segment.start:cursorIndex])
+	cursor := input.Cursor
+	if cursorIndex < segment.end {
+		cursor.SetChar(string(runes[cursorIndex]))
+		after := string(runes[cursorIndex+1 : segment.end])
+		return prefix + textStyle.Render(before) + cursor.View() + textStyle.Render(after)
+	}
+	cursor.SetChar(" ")
+	return prefix + textStyle.Render(before) + cursor.View()
+}
+
+func composerVisualLinePrefix(input textinput.Model, first bool) string {
+	if first {
+		return input.PromptStyle.Render(input.Prompt)
+	}
+	return "  "
+}
+
+func composerDisplayStateForPastePreview(state composerState, preview composerPastePreview) composerState {
+	state = normalizeComposerState(state)
+	if !preview.validFor(state) {
+		return state
+	}
+	runes := []rune(state.text)
+	labelRunes := []rune(preview.label)
+	display := make([]rune, 0, len(runes)-(preview.end-preview.start)+len(labelRunes))
+	display = append(display, runes[:preview.start]...)
+	display = append(display, labelRunes...)
+	display = append(display, runes[preview.end:]...)
+
+	displayCursor := state.cursor
+	switch {
+	case state.cursor <= preview.start:
+		displayCursor = state.cursor
+	case state.cursor <= preview.end:
+		displayCursor = preview.start + len(labelRunes)
+	default:
+		displayCursor = state.cursor - (preview.end - preview.start) + len(labelRunes)
+	}
+	return composerState{text: string(display), cursor: displayCursor}
+}
+
+func (m model) moveComposerVisualCursor(direction int) (model, bool) {
+	if direction == 0 {
+		return m, false
+	}
+	width := chatWidth(m.width)
+	if width < 8 {
+		return m, false
+	}
+	input := m.input
+	state := m.currentComposerState()
+	state = normalizeComposerState(state)
+	if state.text == "" {
+		return m, false
+	}
+	displayState := composerDisplayStateForPastePreview(state, m.composerPastePreview)
+	segments := composerWrappedVisualLines(input, displayState, maxInt(1, width-4))
+	if len(segments) <= 1 {
+		return m, false
+	}
+	cursorLine := composerCursorVisualLine(segments, displayState.cursor)
+	targetLine := clamp(cursorLine+direction, 0, len(segments)-1)
+	if targetLine == cursorLine {
+		return m, true
+	}
+	column := composerVisualCursorColumn(displayState, segments[cursorLine])
+	displayState.cursor = composerCursorForVisualColumn(displayState, segments[targetLine], column)
+	state.cursor = composerOriginalCursorForPastePreview(displayState.cursor, m.composerPastePreview)
+	m.setComposerState(state)
+	return m, true
+}
+
+func composerOriginalCursorForPastePreview(displayCursor int, preview composerPastePreview) int {
+	if !preview.active || preview.label == "" {
+		return displayCursor
+	}
+	labelWidth := len([]rune(preview.label))
+	displayEnd := preview.start + labelWidth
+	switch {
+	case displayCursor <= preview.start:
+		return displayCursor
+	case displayCursor <= displayEnd:
+		return preview.end
+	default:
+		return displayCursor - labelWidth + (preview.end - preview.start)
+	}
+}
+
+func composerVisualCursorColumn(state composerState, segment composerVisualLine) int {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	cursor := clamp(state.cursor, segment.start, segment.end)
+	column := 0
+	for index := segment.start; index < cursor && index < len(runes); index++ {
+		column += lipgloss.Width(string(runes[index]))
+	}
+	return column
+}
+
+func composerCursorForVisualColumn(state composerState, segment composerVisualLine, column int) int {
+	state = normalizeComposerState(state)
+	runes := []rune(state.text)
+	used := 0
+	for index := segment.start; index < segment.end && index < len(runes); index++ {
+		width := lipgloss.Width(string(runes[index]))
+		if used+width > column {
+			return index
+		}
+		used += width
+	}
+	return segment.end
 }
 
 func commandArgumentHintComposerLine(input textinput.Model, argumentHint string) string {

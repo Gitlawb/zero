@@ -733,6 +733,39 @@ func TestComposerBoxFramesInputAndBottomModelModeLabel(t *testing.T) {
 	assertRenderedLineWidths(t, got, 96)
 }
 
+func TestComposerBoxWrapsLongPrompt(t *testing.T) {
+	m := limeTestModel()
+	m.input.SetValue("Create a book library dashboard page with the Bootstrap 5.3 theme displaying a grid of book cards showing cover images, titles, authors, and reading progress bars.")
+	m.input.CursorEnd()
+
+	got := plainRender(t, m.composerBox(72))
+	if !strings.Contains(got, "Bootstrap 5.3") || !strings.Contains(got, "reading progress bars") {
+		t.Fatalf("composer box should show wrapped long prompt, got:\n%s", got)
+	}
+	if lineCount := len(strings.Split(got, "\n")); lineCount < 5 {
+		t.Fatalf("composer box line count = %d, want wrapped multi-line box:\n%s", lineCount, got)
+	}
+	assertRenderedLineWidths(t, got, 72)
+}
+
+func TestComposerBoxCapsLongPromptHeightAroundCursor(t *testing.T) {
+	m := limeTestModel()
+	m.input.SetValue(strings.Repeat("alpha beta gamma delta ", 12) + "final words")
+	m.input.CursorEnd()
+
+	got := plainRender(t, m.composerBox(44))
+	if lineCount := len(strings.Split(got, "\n")); lineCount != composerMaxVisibleLines+2 {
+		t.Fatalf("composer box line count = %d, want %d:\n%s", lineCount, composerMaxVisibleLines+2, got)
+	}
+	if !strings.Contains(got, "final words") {
+		t.Fatalf("composer box should keep cursor-adjacent tail visible, got:\n%s", got)
+	}
+	if !strings.Contains(got, "❯") {
+		t.Fatalf("composer box should keep the prompt marker visible when capped, got:\n%s", got)
+	}
+	assertRenderedLineWidths(t, got, 44)
+}
+
 func TestMalformedAskUserToolResultIsHiddenFromChatSurface(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{
