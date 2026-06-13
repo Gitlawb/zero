@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -355,6 +356,41 @@ func TestEgressProxyDomainPromptTimeoutDenies(t *testing.T) {
 	}
 	if proxy.authorize("slow.test", 443) {
 		t.Fatal("a prompt that exceeds the timeout must deny (fail closed)")
+	}
+}
+
+func TestEgressProxyDeduplicatesConcurrentPrompts(t *testing.T) {
+	var calls int32
+	proxy := &egressProxy{
+		decisionCache: map[string]bool{},
+		inflight:      map[string]chan struct{}{},
+		promptTimeout: time.Second,
+		domainPrompt: func(host string, port int) (bool, error) {
+			atomic.AddInt32(&calls, 1)
+			time.Sleep(40 * time.Millisecond) // hold the prompt so others pile up
+			return true, nil
+		},
+	}
+
+	const n = 25
+	var wg sync.WaitGroup
+	results := make([]bool, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = proxy.authorize("burst.test", 443)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("a burst of concurrent requests for the same target must prompt once, got %d", got)
+	}
+	for i, allowed := range results {
+		if !allowed {
+			t.Fatalf("request %d got deny; all concurrent waiters must see the single allow decision", i)
+		}
 	}
 }
 

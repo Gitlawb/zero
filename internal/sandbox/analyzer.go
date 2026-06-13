@@ -131,6 +131,7 @@ func wordText(word *syntax.Word) string {
 // firstProgram in safe_command.go. An expansion-only program word ($x) yields ""
 // because it cannot be classified statically.
 func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
+	wrapper := ""
 	for index := 0; index < len(args); index++ {
 		text := wordText(args[index])
 		if text == "" {
@@ -140,7 +141,10 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 			continue // env-assignment prefix (e.g. `env FOO=bar cmd`)
 		}
 		if strings.HasPrefix(text, "-") {
-			if wrapperValueOptions[text] && index+1 < len(args) {
+			// Only consume the next token as a value when the ACTIVE wrapper says
+			// this flag takes one; otherwise a valueless flag (e.g. `sudo -n`) would
+			// swallow the real payload command (`rm`/`curl`).
+			if wrapperConsumesValue(wrapper, text) && index+1 < len(args) {
 				index++
 			}
 			continue
@@ -150,6 +154,7 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 		}
 		token := normalizeProgramToken(text)
 		if wrapperPrograms[token] {
+			wrapper = token
 			continue
 		}
 		return token, args[index+1:]

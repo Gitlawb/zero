@@ -43,6 +43,10 @@ type egressProxy struct {
 
 	cacheMu       sync.Mutex
 	decisionCache map[string]bool
+	// inflight tracks an in-progress prompt per host:port so concurrent requests
+	// for the same unknown target wait for the first prompt instead of each firing
+	// their own (a prompt storm) and racing to write the final cached decision.
+	inflight map[string]chan struct{}
 
 	closeOnce sync.Once
 }
@@ -89,6 +93,7 @@ func newEgressProxy(options egressOptions) (*egressProxy, error) {
 		domainPrompt:  options.DomainPrompt,
 		promptTimeout: options.PromptTimeout,
 		decisionCache: map[string]bool{},
+		inflight:      map[string]chan struct{}{},
 	}
 	proxy.server = &http.Server{
 		Handler:           http.HandlerFunc(proxy.handle),
@@ -258,19 +263,37 @@ func (proxy *egressProxy) promptForHost(host string, port int) bool {
 	// specific (host, port), so caching by host would let one "allow" silently
 	// authorize every other port on that host for the proxy's lifetime.
 	key := fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSpace(host)), port)
-	proxy.cacheMu.Lock()
-	if decided, ok := proxy.decisionCache[key]; ok {
+	for {
+		proxy.cacheMu.Lock()
+		if decided, ok := proxy.decisionCache[key]; ok {
+			proxy.cacheMu.Unlock()
+			return decided
+		}
+		if wait, ok := proxy.inflight[key]; ok {
+			// Another goroutine is already prompting for this exact target; wait for
+			// it to finish, then re-read its cached decision instead of prompting
+			// again, so a burst of connections triggers a single prompt.
+			proxy.cacheMu.Unlock()
+			<-wait
+			continue
+		}
+		// We own the prompt for this key. Register an in-flight marker others wait on.
+		wait := make(chan struct{})
+		if proxy.inflight == nil {
+			proxy.inflight = map[string]chan struct{}{}
+		}
+		proxy.inflight[key] = wait
 		proxy.cacheMu.Unlock()
-		return decided
+
+		allow := proxy.runDomainPrompt(host, port)
+
+		proxy.cacheMu.Lock()
+		proxy.decisionCache[key] = allow
+		delete(proxy.inflight, key)
+		close(wait)
+		proxy.cacheMu.Unlock()
+		return allow
 	}
-	proxy.cacheMu.Unlock()
-
-	allow := proxy.runDomainPrompt(host, port)
-
-	proxy.cacheMu.Lock()
-	proxy.decisionCache[key] = allow
-	proxy.cacheMu.Unlock()
-	return allow
 }
 
 // runDomainPrompt invokes the callback with a timeout. A timeout or error denies.

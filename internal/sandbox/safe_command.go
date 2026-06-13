@@ -195,12 +195,30 @@ var wrapperPrograms = map[string]bool{
 	"setsid": true, "ionice": true, "xargs": true,
 }
 
-// wrapperValueOptions are short options of wrapper programs that consume the
-// following token as their value (e.g. `sudo -u root`), so the value must be
-// skipped too rather than being mistaken for the real program.
-var wrapperValueOptions = map[string]bool{
-	"-u": true, "-g": true, "-h": true, "-p": true, "-C": true, "-r": true,
-	"-t": true, "-U": true, "-D": true, "-c": true, "-n": true,
+// wrapperValueOptionsByProg lists, PER wrapper program, the short options that
+// consume the FOLLOWING token as their value (e.g. `sudo -u root`, `timeout -s
+// KILL`). It is keyed by wrapper because the same flag means different things to
+// different launchers — `sudo -n` is valueless (non-interactive) while `nice -n`
+// takes an adjustment — so a single global set would wrongly swallow the real
+// program after a valueless flag (e.g. skip `rm` in `sudo -n rm -rf`).
+var wrapperValueOptionsByProg = map[string]map[string]bool{
+	"sudo":    {"-u": true, "-g": true, "-p": true, "-C": true, "-r": true, "-T": true, "-U": true, "-h": true, "-D": true, "-R": true},
+	"doas":    {"-u": true, "-C": true},
+	"env":     {"-u": true, "-S": true, "-C": true},
+	"timeout": {"-s": true, "-k": true},
+	"nice":    {"-n": true},
+	"ionice":  {"-c": true, "-n": true, "-p": true},
+	"stdbuf":  {"-i": true, "-o": true, "-e": true},
+	"xargs":   {"-a": true, "-d": true, "-E": true, "-I": true, "-L": true, "-n": true, "-P": true, "-s": true},
+}
+
+// wrapperConsumesValue reports whether option is a value-consuming flag of the
+// active wrapper. With no active wrapper (or an unknown one, or a flag not listed
+// for it) it returns false, so token scanning never skips a token that might be
+// the real program.
+func wrapperConsumesValue(wrapper, option string) bool {
+	opts, ok := wrapperValueOptionsByProg[wrapper]
+	return ok && opts[option]
 }
 
 // firstProgram returns the first executable name in a segment, skipping leading
@@ -208,6 +226,7 @@ var wrapperValueOptions = map[string]bool{
 // nice, timeout, stdbuf, setsid, ionice, xargs, ...), and the option tokens that
 // belong to those wrappers (e.g. `sudo -u root`, `env -i`, `timeout 5`).
 func firstProgram(fields []string) string {
+	wrapper := ""
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]
 		if strings.Contains(field, "=") && !strings.HasPrefix(field, "=") {
@@ -216,9 +235,9 @@ func firstProgram(fields []string) string {
 		}
 		// An option token (or a bare numeric argument such as `timeout 5`)
 		// belongs to a preceding wrapper, not the program; skip it, and also
-		// skip the value of an option that consumes the next token.
+		// skip the value of an option that the active wrapper consumes.
 		if strings.HasPrefix(field, "-") {
-			if wrapperValueOptions[field] && index+1 < len(fields) {
+			if wrapperConsumesValue(wrapper, field) && index+1 < len(fields) {
 				index++
 			}
 			continue
@@ -228,7 +247,9 @@ func firstProgram(fields []string) string {
 		}
 		token := normalizeProgramToken(field)
 		if wrapperPrograms[token] {
-			// Wrapper prefix; the real program follows.
+			// Wrapper prefix; the real program follows. Track it so its options'
+			// value-consumption is interpreted in its own context.
+			wrapper = token
 			continue
 		}
 		return token
@@ -243,13 +264,14 @@ func firstProgram(fields []string) string {
 // command boundary (e.g. `sudo git rebase -i` -> "git rebase -i") instead of
 // matching the segment text anywhere as a raw substring.
 func commandBody(fields []string) string {
+	wrapper := ""
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]
 		if strings.Contains(field, "=") && !strings.HasPrefix(field, "=") {
 			continue
 		}
 		if strings.HasPrefix(field, "-") {
-			if wrapperValueOptions[field] && index+1 < len(fields) {
+			if wrapperConsumesValue(wrapper, field) && index+1 < len(fields) {
 				index++
 			}
 			continue
@@ -257,7 +279,8 @@ func commandBody(fields []string) string {
 		if isNumericToken(field) {
 			continue
 		}
-		if wrapperPrograms[normalizeProgramToken(field)] {
+		if token := normalizeProgramToken(field); wrapperPrograms[token] {
+			wrapper = token
 			continue
 		}
 		// First real command token: the body starts here.
@@ -454,7 +477,11 @@ func splitShellSegments(command string) []string {
 
 	inSingle := false
 	inDouble := false
-	substitutionDepth := 0
+	// substStack saves the quoting state at each `$(` so a substitution runs in a
+	// fresh quoting context (POSIX) and restores the outer state on its matching
+	// `)`. Its depth doubles as the substitution-nesting count.
+	type quoteState struct{ inSingle, inDouble bool }
+	var substStack []quoteState
 	runes := []rune(command)
 	for i := 0; i < len(runes); i++ {
 		c := runes[i]
@@ -487,22 +514,25 @@ func splitShellSegments(command string) []string {
 			continue
 		}
 
-		// Command substitution is active when unquoted and inside double quotes
-		// (only single quotes suppress it), so split on its boundaries in both.
-		// A literal ')' is only a substitution boundary when it closes an active
-		// $(...) — otherwise text like "a) less" would split into a fake `less`
-		// segment and be misflagged as interactive.
+		// Command substitution boundaries. `$(` opens a substitution in a fresh
+		// quoting context; its matching `)` closes it and restores the outer
+		// quoting. A `)` is only a boundary when it actually closes an active,
+		// UNQUOTED substitution — a `)` inside quotes (e.g. echo $(printf "a)
+		// less") or a bare "a) less") is literal and must not split.
 		switch {
 		case c == '`':
 			flush()
 			continue
 		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
 			flush()
-			substitutionDepth++
+			substStack = append(substStack, quoteState{inSingle, inDouble})
+			inSingle, inDouble = false, false
 			i++ // consume the '('
 			continue
-		case c == ')' && substitutionDepth > 0:
-			substitutionDepth--
+		case c == ')' && len(substStack) > 0 && !inSingle && !inDouble:
+			prev := substStack[len(substStack)-1]
+			substStack = substStack[:len(substStack)-1]
+			inSingle, inDouble = prev.inSingle, prev.inDouble
 			flush()
 			continue
 		}
