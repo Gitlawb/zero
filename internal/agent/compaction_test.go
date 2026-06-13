@@ -180,6 +180,32 @@ func TestEstimateTokensCountsToolCallsAndResults(t *testing.T) {
 	}
 }
 
+func TestEstimateTokensCountsImages(t *testing.T) {
+	// A tiny image carries far more model tokens than its text content suggests;
+	// the estimate must rise with each image so an image-heavy context still
+	// trends toward compaction instead of reading as ~0.
+	plain := []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "look"}}
+	withImage := []zeroruntime.Message{{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "look",
+		Images:  []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("tiny")}},
+	}}
+	twoImages := []zeroruntime.Message{{
+		Role:    zeroruntime.MessageRoleUser,
+		Content: "look",
+		Images: []zeroruntime.ImageBlock{
+			{MediaType: "image/png", Data: []byte("tiny")},
+			{MediaType: "image/png", Data: []byte("tiny")},
+		},
+	}}
+	if estimateTokens(withImage) <= estimateTokens(plain) {
+		t.Fatal("expected an image to increase the token estimate")
+	}
+	if estimateTokens(twoImages) <= estimateTokens(withImage) {
+		t.Fatal("expected the estimate to grow with image count")
+	}
+}
+
 // --- Loop integration: provider mocks -------------------------------------
 
 // summarizeRecordingProvider returns scripted turns for the main agent loop

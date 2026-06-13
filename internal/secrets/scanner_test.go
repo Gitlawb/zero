@@ -45,6 +45,25 @@ func TestRedactPrivateKeyBlockRemovesBody(t *testing.T) {
 	}
 }
 
+func TestRedactNestedSecretStillRemovesWholeBlock(t *testing.T) {
+	// A PEM body can contain a substring that matches a shorter pattern (here an
+	// AWS key shape, which sorts before private_key_block). Redaction must remove
+	// the WHOLE block: if the inner match were replaced first it would corrupt the
+	// block's exact string and leave the BEGIN/END header in the output.
+	key := "-----BEGIN PRIVATE KEY-----\nAKIAABCDEFGHIJKLMNOP\nMIIEowIBAAKCAQEAbody\n-----END PRIVATE KEY-----"
+	text := "leaked:\n" + key + "\ndone"
+
+	redacted, _ := Redact(text)
+	for _, leaked := range []string{"PRIVATE KEY", "AKIAABCDEFGHIJKLMNOP", "MIIEowIBAAKCAQEAbody"} {
+		if strings.Contains(redacted, leaked) {
+			t.Fatalf("redaction leaked %q from a nested-secret block: %q", leaked, redacted)
+		}
+	}
+	if !strings.Contains(redacted, "[REDACTED:private_key_block]") {
+		t.Fatalf("missing block placeholder: %q", redacted)
+	}
+}
+
 func TestScanIgnoresOrdinaryText(t *testing.T) {
 	clean := []string{
 		"the quick brown fox jumps over the lazy dog",

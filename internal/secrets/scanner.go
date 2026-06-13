@@ -79,8 +79,18 @@ func Redact(text string) (string, []Finding) {
 	if len(findings) == 0 {
 		return text, nil
 	}
+	// Replace longest matches first so a containing secret (e.g. a whole PEM
+	// PRIVATE KEY block) is redacted before any shorter secret nested inside its
+	// body. Redacting the inner match first would corrupt the outer block's exact
+	// string, leaving its BEGIN/END header un-redacted. findings is sorted by
+	// type for the returned API contract, so order replacements on a copy.
+	order := make([]Finding, len(findings))
+	copy(order, findings)
+	sort.SliceStable(order, func(i, j int) bool {
+		return len(order[i].Match) > len(order[j].Match)
+	})
 	redacted := text
-	for _, f := range findings {
+	for _, f := range order {
 		redacted = strings.ReplaceAll(redacted, f.Match, "[REDACTED:"+f.Type+"]")
 	}
 	return redacted, findings

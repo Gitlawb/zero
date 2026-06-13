@@ -68,10 +68,18 @@ type CompactionResult struct {
 	Compacted bool
 }
 
+// imageTokenEstimate is a flat per-image token cost. Vision models tokenize an
+// image by its resolution (tiles), not its byte length, so the raw Data size is
+// a poor proxy — counting len(Data)/4 would overcount by orders of magnitude.
+// A fixed estimate keeps estimateTokens monotonic in the image count so an
+// image-heavy context still trends toward compaction instead of reading as ~0.
+// ~1k tokens is a representative mid-range cost across providers.
+const imageTokenEstimate = 1000
+
 // estimateTokens is a cheap, dependency-free token estimate (~4 chars/token)
-// across message content plus tool call names/arguments. It deliberately uses no
-// real tokenizer; it only needs to be monotonic and roughly proportional so the
-// loop can decide when to compact.
+// across message content plus tool call names/arguments and a flat per-image
+// cost. It deliberately uses no real tokenizer; it only needs to be monotonic
+// and roughly proportional so the loop can decide when to compact.
 func estimateTokens(messages []zeroruntime.Message) int {
 	total := 0
 	for _, message := range messages {
@@ -81,6 +89,7 @@ func estimateTokens(messages []zeroruntime.Message) int {
 			total += len(call.Arguments) / 4
 			total += 4 // small per-call overhead
 		}
+		total += len(message.Images) * imageTokenEstimate
 		total += 4 // per-message overhead
 	}
 	return total
