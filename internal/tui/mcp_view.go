@@ -63,49 +63,54 @@ type MCPOAuthServerView struct {
 }
 
 func renderMCPView(state MCPViewState, width int) string {
-	output := commandOutput{
-		Title:  "MCP",
-		Status: mcpViewStatus(state),
+	lines := []string{
+		"Manage MCP servers",
+		pluralCount(len(state.Servers), "server"),
+		"",
 	}
 
 	if !hasMCPViewContent(state) {
-		output.Sections = []commandSection{{
-			Title: "State",
-			Lines: []string{
-				"No MCP servers configured.",
-				"Add one with zero mcp add, then reopen /mcp.",
-			},
-		}}
-		output.Hints = []string{"zero mcp add <name> --url <url>", "zero mcp list", "zero mcp check <name>"}
-		return fitCommandOutput(output, width)
+		lines = append(lines,
+			"User MCPs",
+			"  No MCP servers configured.",
+			"  › Add MCP server      zero mcp add <name> --url <url>",
+			"  › Add local stdio MCP zero mcp add <name> -- <command> [args...]",
+			"  › List configured     zero mcp list",
+			"",
+			"Actions",
+			"  add remote · add stdio · list configured · check health",
+		)
+		return fitMCPManagerLines(lines, width)
 	}
 
 	if len(state.Servers) > 0 {
-		output.Sections = append(output.Sections, commandSection{
-			Title: "Servers",
-			Lines: mcpServerLines(state.Servers),
-		})
+		lines = append(lines, "User MCPs")
+		lines = append(lines, mcpManagerServerLines(state.Servers)...)
 	}
 	if len(state.Tools) > 0 {
-		output.Sections = append(output.Sections, commandSection{
-			Title: "Tools",
-			Lines: mcpToolLines(state.Tools),
-		})
+		lines = append(lines, "", "Tools")
+		lines = append(lines, mcpToolLines(state.Tools)...)
 	}
 	if hasMCPPermissionSummary(state.Permissions) {
-		output.Sections = append(output.Sections, commandSection{
-			Title: "Permissions",
-			Lines: mcpPermissionLines(state.Permissions),
-		})
+		lines = append(lines, "", "Permissions")
+		for _, line := range mcpPermissionLines(state.Permissions) {
+			lines = append(lines, "  "+line)
+		}
 	}
 	if len(state.OAuth.Servers) > 0 {
-		output.Sections = append(output.Sections, commandSection{
-			Title: "OAuth",
-			Lines: mcpOAuthLines(state.OAuth.Servers),
-		})
+		lines = append(lines, "", "OAuth")
+		lines = append(lines, mcpOAuthLines(state.OAuth.Servers)...)
 	}
 
-	return fitCommandOutput(output, width)
+	lines = append(lines,
+		"",
+		"Actions",
+		"  add: zero mcp add <name> --url <url>",
+		"  disconnect: zero mcp disable <name>",
+		"  reconnect: zero mcp enable <name>",
+		"  remove: zero mcp remove <name>",
+	)
+	return fitMCPManagerLines(lines, width)
 }
 
 func mcpViewStatus(state MCPViewState) commandStatus {
@@ -161,6 +166,36 @@ func mcpServerLines(servers []MCPServerView) []string {
 		lines = append(lines, commandBullet(line))
 		if actions := mcpServerActionLine(server); actions != "" {
 			lines = append(lines, actions)
+		}
+	}
+	return lines
+}
+
+func mcpManagerServerLines(servers []MCPServerView) []string {
+	lines := make([]string, 0, len(servers)*3)
+	for index, server := range servers {
+		name := displayValue(strings.TrimSpace(server.Name), "unnamed")
+		transport := displayValue(strings.TrimSpace(server.Transport), "unknown")
+		state := displayValue(strings.TrimSpace(server.State), "configured")
+		prefix := "  "
+		if index == 0 {
+			prefix = "› "
+		}
+
+		parts := []string{name, state}
+		if auth := strings.TrimSpace(server.Auth); auth != "" {
+			parts = append(parts, auth)
+		}
+		if server.ToolCount > 0 {
+			parts = append(parts, pluralCount(server.ToolCount, "tool"))
+		}
+		parts = append(parts, transport)
+		lines = append(lines, prefix+strings.Join(parts, " · "))
+		if target := strings.TrimSpace(server.Target); target != "" {
+			lines = append(lines, "  "+target)
+		}
+		if actions := strings.TrimSpace(mcpServerActionLine(server)); actions != "" {
+			lines = append(lines, "  "+actions)
 		}
 	}
 	return lines
@@ -351,6 +386,16 @@ func fitCommandOutput(output commandOutput, width int) string {
 		return rendered
 	}
 	lines := strings.Split(rendered, "\n")
+	for index, line := range lines {
+		lines[index] = fitStyledLine(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fitMCPManagerLines(lines []string, width int) string {
+	if width <= 0 {
+		return strings.Join(lines, "\n")
+	}
 	for index, line := range lines {
 		lines[index] = fitStyledLine(line, width)
 	}

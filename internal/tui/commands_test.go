@@ -174,11 +174,13 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	}
 	text := transcriptText(next.transcript)
 	for _, want := range []string{
-		"MCP",
-		"status: ok",
-		"Servers",
-		"docs [stdio] enabled 1 tool - zero-docs-mcp --workspace .",
-		"github [http] enabled oauth - https://mcp.github.example",
+		"Manage MCP servers",
+		"2 servers",
+		"User MCPs",
+		"docs · enabled · 1 tool · stdio",
+		"zero mcp disable docs",
+		"github · enabled · oauth · http",
+		"zero mcp oauth login github",
 		"Tools",
 		"lookup [network/prompt] - mcp_docs_lookup - docs/lookup - Look up docs",
 		"Permissions",
@@ -190,6 +192,8 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 		"github/create_issue [medium] approved 2026-06-13T09:30:00Z",
 		"OAuth",
 		"github configured token refresh expires 2026-06-13T11:45:00Z Bearer scopes issues:read,issues:write",
+		"add: zero mcp add <name> --url <url>",
+		"disconnect: zero mcp disable <name>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected MCP status text to contain %q, got:\n%s", want, text)

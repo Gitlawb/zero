@@ -12,14 +12,22 @@ func TestMCPViewRendersEmptyState(t *testing.T) {
 	got := plainRender(t, renderMCPView(MCPViewState{}, 72))
 
 	for _, want := range []string{
-		"MCP",
-		"status: warning",
+		"Manage MCP servers",
+		"0 servers",
+		"User MCPs",
 		"No MCP servers configured.",
-		"zero mcp list",
+		"Add MCP server",
+		"zero mcp add <name> --url <url>",
+		"Actions",
+		"add remote",
+		"check health",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("empty MCP view = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "status:") {
+		t.Fatalf("empty MCP manager should not render generic status line:\n%s", got)
 	}
 }
 
@@ -29,8 +37,8 @@ func TestMCPViewRendersEmptyStateWhenOnlyPermissionModeExists(t *testing.T) {
 	}, 96))
 
 	for _, want := range []string{
-		"MCP",
-		"status: warning",
+		"Manage MCP servers",
+		"0 servers",
 		"No MCP servers configured.",
 		"zero mcp add",
 	} {
@@ -52,11 +60,16 @@ func TestMCPViewRendersServerRows(t *testing.T) {
 	}, 96))
 
 	for _, want := range []string{
-		"Servers",
-		"filesystem [stdio] connected",
-		"3 tools",
-		"linear [http] disabled oauth",
+		"Manage MCP servers",
+		"2 servers",
+		"User MCPs",
+		"filesystem · connected · 3 tools · stdio",
+		"linear · disabled · oauth · http",
+		"zero mcp disable filesystem",
+		"zero mcp enable linear",
 		"https://mcp.linear.app",
+		"disconnect: zero mcp disable <name>",
+		"remove: zero mcp remove <name>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("MCP server view = %q, missing %q", got, want)
