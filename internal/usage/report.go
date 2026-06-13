@@ -11,13 +11,15 @@ import (
 )
 
 // usageEventPayload mirrors the persisted EventUsage payload written by the exec
-// runtime. Only token counts are stored — model id, cost, and the cached /
-// reasoning split are not persisted — so report cost is reconstructed from each
-// session's Metadata.ModelID and is therefore a labeled estimate.
+// runtime. Token counts are always stored; Model is persisted only on escalation
+// runs (the model in force can change mid-run only under --allow-escalation).
+// When Model is absent, cost is reconstructed from the session's Metadata.ModelID
+// and is a labeled estimate.
 type usageEventPayload struct {
-	PromptTokens     int `json:"promptTokens"`
-	CompletionTokens int `json:"completionTokens"`
-	TotalTokens      int `json:"totalTokens"`
+	PromptTokens     int    `json:"promptTokens"`
+	CompletionTokens int    `json:"completionTokens"`
+	TotalTokens      int    `json:"totalTokens"`
+	Model            string `json:"model,omitempty"`
 }
 
 // DayBucket aggregates usage events sharing the same UTC calendar date.
@@ -99,7 +101,13 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		report.Total.OutputTokens += payload.CompletionTokens
 		report.Total.TotalTokens += payload.TotalTokens
 
-		modelID := modelBySession[event.SessionID]
+		// Prefer the model the event itself recorded (set on escalation runs, where
+		// the model changed mid-run) so that usage is priced at the model actually
+		// used; fall back to the session's model otherwise.
+		modelID := payload.Model
+		if modelID == "" {
+			modelID = modelBySession[event.SessionID]
+		}
 		if modelID == "" || registry == nil {
 			continue
 		}

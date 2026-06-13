@@ -105,6 +105,52 @@ func TestBuildReportReconstructsCostFromMetadataModel(t *testing.T) {
 	}
 }
 
+func TestBuildReportPricesFromEventModelWhenPresent(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	// An escalation-run event carries its own model. The session metadata has no
+	// model id, so cost can only be reconstructed from the event's model — proving
+	// the report prefers payload.Model rather than ignoring it.
+	payload, err := json.Marshal(map[string]any{
+		"promptTokens":     1000,
+		"completionTokens": 200,
+		"totalTokens":      1200,
+		"model":            "gpt-4.1",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	events := []sessions.Event{{
+		SessionID: "s1",
+		Sequence:  1,
+		Type:      sessions.EventUsage,
+		CreatedAt: "2026-06-01T09:00:00Z",
+		Payload:   payload,
+	}}
+	meta := []sessions.Metadata{{SessionID: "s1", ModelID: ""}} // no session-level model
+
+	report, err := BuildReport(events, meta, &registry, 10)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	model, err := registry.Require("gpt-4.1")
+	if err != nil {
+		t.Fatalf("Require: %v", err)
+	}
+	want, err := modelregistry.CalculateCost(model, zeroruntime.Usage{InputTokens: 1000, OutputTokens: 200})
+	if err != nil {
+		t.Fatalf("CalculateCost: %v", err)
+	}
+	if want.TotalCost <= 0 {
+		t.Fatalf("precondition: expected non-zero cost for the event model")
+	}
+	if report.Total.TotalCost != want.TotalCost {
+		t.Fatalf("cost = %v, want %v (must price from the event's model, not the empty session model)", report.Total.TotalCost, want.TotalCost)
+	}
+}
+
 func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
