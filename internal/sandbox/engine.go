@@ -96,6 +96,38 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 	return backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation
 }
 
+// Precheck reports the sandbox violations that would block a tool request BEFORE
+// it executes, so a caller (e.g. a batch confirmation or a "would this run?"
+// check) can fail fast and surface the reason instead of discovering it mid-run.
+// It reuses Evaluate, so policy is never duplicated: a request the engine would
+// allow or merely prompt for yields no violations; a denied request yields its
+// violation. A nil engine (sandbox disabled) yields no violations.
+func (engine *Engine) Precheck(ctx context.Context, request Request) []Violation {
+	if engine == nil {
+		return nil
+	}
+	return violationsFromDecision(engine.Evaluate(ctx, request))
+}
+
+// violationsFromDecision extracts the blocking violations from a decision. Only a
+// deny carries one; Evaluate sets Decision.Violation for policy denials, and the
+// fallback synthesizes one for the rare deny without a structured violation so a
+// caller always gets a reason.
+func violationsFromDecision(decision Decision) []Violation {
+	if decision.Action != ActionDeny {
+		return nil
+	}
+	if decision.Violation != nil {
+		return []Violation{*decision.Violation}
+	}
+	return []Violation{{
+		Code:   ViolationPolicyDenied,
+		Action: ActionDeny,
+		Risk:   decision.Risk,
+		Reason: decision.ErrorString(),
+	}}
+}
+
 func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if ctx == nil {
 		ctx = context.Background()

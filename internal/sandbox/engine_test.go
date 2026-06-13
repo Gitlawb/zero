@@ -163,6 +163,43 @@ func TestEngineDeniesOutOfWorkspacePaths(t *testing.T) {
 	}
 }
 
+func TestEnginePrecheckReportsViolationsBeforeExecution(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	// A denied request reports its violation without running anything.
+	violations := engine.Precheck(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       AutonomyHigh,
+		Args:           map[string]any{"path": outside},
+	})
+	if len(violations) != 1 || violations[0].Code != ViolationOutsideWorkspace {
+		t.Fatalf("Precheck(out-of-workspace) = %#v, want one outside-workspace violation", violations)
+	}
+
+	// An in-workspace read is allowed -> no violations.
+	if v := engine.Precheck(context.Background(), Request{
+		ToolName:       "read_file",
+		SideEffect:     SideEffectRead,
+		Permission:     PermissionAllow,
+		PermissionMode: PermissionUnsafe,
+		Autonomy:       AutonomyLow,
+		Args:           map[string]any{"path": filepath.Join(root, "ok.txt")},
+	}); len(v) != 0 {
+		t.Fatalf("Precheck(allowed read) = %#v, want no violations", v)
+	}
+
+	// A nil engine (sandbox disabled) reports nothing.
+	var disabled *Engine
+	if v := disabled.Precheck(context.Background(), Request{ToolName: "write_file"}); v != nil {
+		t.Fatalf("nil-engine Precheck = %#v, want nil", v)
+	}
+}
+
 func TestEngineDeniesWorkspaceSymlinkTraversal(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

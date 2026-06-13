@@ -92,6 +92,9 @@ const (
 	ViolationNetwork            ViolationCode = "network"
 	ViolationDestructiveCommand ViolationCode = "destructive_command"
 	ViolationPersistentDeny     ViolationCode = "persistent_deny"
+	// ViolationPolicyDenied is the catch-all for a denied decision that carries no
+	// more specific violation code.
+	ViolationPolicyDenied ViolationCode = "policy_denied"
 )
 
 const (
