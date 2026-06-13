@@ -146,6 +146,13 @@ type Policy struct {
 	// Ignored on non-macOS backends, and a no-op where the OS does not deliver
 	// seatbelt denials to the unified log.
 	MonitorDenials bool `json:"monitorDenials,omitempty"`
+	// BlockUnixSockets, when true on the bubblewrap (Linux) backend, prefixes the
+	// sandboxed command with the zero-seccomp helper to install a seccomp filter
+	// that denies AF_UNIX socket creation — closing the Unix-socket gap bubblewrap's
+	// filesystem/network isolation leaves open. Off by default; degrades gracefully
+	// (runs without the filter) when the helper binary is not found. Ignored on
+	// non-bubblewrap backends.
+	BlockUnixSockets bool `json:"blockUnixSockets,omitempty"`
 }
 
 type Request struct {

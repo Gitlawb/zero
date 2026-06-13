@@ -322,8 +322,19 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 			args = append(args, "--setenv", key, value)
 		}
 	}
-	args = append(args, "--", spec.Name)
-	args = append(args, spec.Args...)
+	// Optionally install the seccomp Unix-socket filter by prefixing the command
+	// with the zero-seccomp helper, bound read-only into the sandbox at its host
+	// path. Off by default; if the helper is not found the command runs without
+	// the filter (bubblewrap's filesystem/network isolation still applies).
+	command := append([]string{spec.Name}, spec.Args...)
+	if policy.BlockUnixSockets {
+		if helper := seccompHelper(); helper != "" {
+			args = append(args, "--ro-bind", helper, helper)
+			command = append([]string{helper}, command...)
+		}
+	}
+	args = append(args, "--")
+	args = append(args, command...)
 	return CommandPlan{
 		Backend:       backend,
 		WorkspaceRoot: workspaceRoot,
@@ -333,6 +344,29 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 		Args:          args,
 		SandboxDir:    sandboxDir,
 	}
+}
+
+// seccompHelper resolves the zero-seccomp wrapper used to install the AF_UNIX
+// seccomp filter inside the bubblewrap sandbox (Policy.BlockUnixSockets). It is a
+// package var so tests can stub discovery; it returns "" when the helper is not
+// found, in which case the sandbox runs without the extra filter rather than
+// failing the command.
+var seccompHelper = findSeccompHelper
+
+// findSeccompHelper looks for the zero-seccomp helper next to the running
+// executable first (the expected install layout), then on PATH. It returns ""
+// when no helper is available.
+func findSeccompHelper() string {
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), "zero-seccomp")
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	if path, err := exec.LookPath("zero-seccomp"); err == nil {
+		return path
+	}
+	return ""
 }
 
 func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots []string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {

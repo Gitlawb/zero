@@ -581,6 +581,27 @@ func TestApplyConfiguredAutonomyCeiling(t *testing.T) {
 	}
 }
 
+func TestApplyConfiguredSandboxPolicyHardeningFlags(t *testing.T) {
+	base := sandbox.DefaultPolicy()
+	if base.BlockUnixSockets || base.MonitorDenials {
+		t.Fatalf("precondition: hardening flags must default off, got block=%v monitor=%v", base.BlockUnixSockets, base.MonitorDenials)
+	}
+
+	// Omitted keys leave the (off) defaults untouched.
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.BlockUnixSockets || got.MonitorDenials {
+		t.Fatalf("empty config must not enable hardening flags, got block=%v monitor=%v", got.BlockUnixSockets, got.MonitorDenials)
+	}
+
+	// Each flag opts in independently.
+	got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{BlockUnixSockets: true, MonitorDenials: true})
+	if !got.BlockUnixSockets {
+		t.Fatal("BlockUnixSockets config not applied to policy")
+	}
+	if !got.MonitorDenials {
+		t.Fatal("MonitorDenials config not applied to policy")
+	}
+}
+
 func newSandboxTestStore(t *testing.T) *sandbox.GrantStore {
 	t.Helper()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{

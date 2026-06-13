@@ -317,6 +317,59 @@ func TestBubblewrapPlanBindsExtraWriteRoots(t *testing.T) {
 	}
 }
 
+func TestBubblewrapPlanPrefixesSeccompHelperWhenBlockingUnixSockets(t *testing.T) {
+	const fakeHelper = "/opt/zero/bin/zero-seccomp"
+	original := seccompHelper
+	seccompHelper = func() string { return fakeHelper }
+	defer func() { seccompHelper = original }()
+
+	workspace := t.TempDir()
+	policy := DefaultPolicy()
+	policy.BlockUnixSockets = true
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        policy,
+		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	joined := strings.Join(plan.Args, " ")
+	if !strings.Contains(joined, "--ro-bind "+fakeHelper+" "+fakeHelper) {
+		t.Fatalf("args missing ro-bind for seccomp helper:\n%s", joined)
+	}
+	// The helper must be the argv that follows the bwrap "--" separator, ahead of
+	// the real command, so it wraps execution.
+	if !strings.Contains(joined, "-- "+fakeHelper+" /bin/sh -c true") {
+		t.Fatalf("seccomp helper not prefixed before the command:\n%s", joined)
+	}
+}
+
+func TestBubblewrapPlanNoSeccompHelperByDefault(t *testing.T) {
+	original := seccompHelper
+	seccompHelper = func() string { return "/should/not/be/used/zero-seccomp" }
+	defer func() { seccompHelper = original }()
+
+	workspace := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(), // BlockUnixSockets is false by default
+		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+	})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	joined := strings.Join(plan.Args, " ")
+	if strings.Contains(joined, "zero-seccomp") {
+		t.Fatalf("seccomp helper must not appear when BlockUnixSockets is off:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-- /bin/sh -c true") {
+		t.Fatalf("command not wired as the plain argv after --:\n%s", joined)
+	}
+}
+
 func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()
