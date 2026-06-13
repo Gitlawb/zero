@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type composerState struct {
@@ -192,8 +193,10 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	case msg.Type == tea.KeyCtrlJ:
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")
 	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "d":
-		m.setComposerState(deleteComposerWordAfter(state))
-		m.composerPastePreviews = nil
+		end := deleteComposerWordAfter(state).cursor
+		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, end)
+		m.setComposerState(nextState)
+		m.composerPastePreviews = nextPreviews
 	case (msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlLeft) && msg.Alt:
 		m.setComposerState(moveComposerWordBefore(state))
 	case (msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlRight) && msg.Alt:
@@ -213,7 +216,7 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		previewLabel := ""
 		if msg.Paste {
 			text = sanitizeComposerPaste(text)
-			previewLabel, _ = composerPastePreviewLabel(text)
+			previewLabel, _ = composerPastePreviewLabel(text, m.composerPastePreviewWrapWidth())
 		} else {
 			text = sanitizeComposerInput(text)
 		}
@@ -245,17 +248,23 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		state.cursor = composerLineEnd(state)
 		m.setComposerState(state)
 	case msg.Type == tea.KeyCtrlU:
-		m.setComposerState(deleteComposerLineBefore(state))
-		m.composerPastePreviews = nil
+		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, composerLineStart(state), state.cursor)
+		m.setComposerState(nextState)
+		m.composerPastePreviews = nextPreviews
 	case msg.Type == tea.KeyCtrlK:
-		m.setComposerState(deleteComposerLineAfter(state))
-		m.composerPastePreviews = nil
+		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, composerLineEnd(state))
+		m.setComposerState(nextState)
+		m.composerPastePreviews = nextPreviews
 	case msg.Type == tea.KeyCtrlW || (msg.Alt && (msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH)):
-		m.setComposerState(deleteComposerWordBefore(state))
-		m.composerPastePreviews = nil
+		start := deleteComposerWordBefore(state).cursor
+		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, start, state.cursor)
+		m.setComposerState(nextState)
+		m.composerPastePreviews = nextPreviews
 	case msg.Alt && msg.Type == tea.KeyDelete:
-		m.setComposerState(deleteComposerWordAfter(state))
-		m.composerPastePreviews = nil
+		end := deleteComposerWordAfter(state).cursor
+		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, end)
+		m.setComposerState(nextState)
+		m.composerPastePreviews = nextPreviews
 	case msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH:
 		if nextState, nextPreviews, ok := deleteComposerPastePreviewBefore(state, m.composerPastePreviews); ok && !m.suggestionsActive() {
 			m.setComposerState(nextState)
@@ -264,16 +273,18 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 			m.setComposerState(nextState)
 			m.composerPastePreviews = nil
 		} else {
-			m.setComposerState(deleteComposerRange(state, state.cursor-1, state.cursor))
-			m.composerPastePreviews = nil
+			nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor-1, state.cursor)
+			m.setComposerState(nextState)
+			m.composerPastePreviews = nextPreviews
 		}
 	case msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlD:
 		if nextState, nextPreviews, ok := deleteComposerPastePreviewAfter(state, m.composerPastePreviews); ok {
 			m.setComposerState(nextState)
 			m.composerPastePreviews = nextPreviews
 		} else {
-			m.setComposerState(deleteComposerRange(state, state.cursor, state.cursor+1))
-			m.composerPastePreviews = nil
+			nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, state.cursor+1)
+			m.setComposerState(nextState)
+			m.composerPastePreviews = nextPreviews
 		}
 	default:
 		return m, false
@@ -294,6 +305,7 @@ func (m model) insertComposerTextWithPastePreview(state composerState, text stri
 	nextPreviews := composerPastePreviewsAfterInsert(m.composerPastePreviews, insertStart, insertedRunes)
 	m.setComposerState(insertComposerText(state, text))
 	if previewLabel != "" && insertedRunes > 0 {
+		previewLabel = composerPastePreviewLabelWithIndex(previewLabel, len(nextPreviews))
 		nextPreviews = append(nextPreviews, composerPastePreview{
 			active: true,
 			start:  insertStart,
@@ -308,13 +320,21 @@ func (m model) insertComposerTextWithPastePreview(state composerState, text stri
 	return m
 }
 
-func composerPastePreviewLabel(text string) (string, bool) {
+func (m model) composerPastePreviewWrapWidth() int {
+	width := chatWidth(m.width)
+	if width < 8 {
+		width = defaultStartupWidth
+	}
+	return maxInt(1, width-4-lipgloss.Width(m.input.Prompt))
+}
+
+func composerPastePreviewLabel(text string, wrapWidth int) (string, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", false
 	}
-	lineCount := strings.Count(text, "\n") + 1
 	runeCount := len([]rune(text))
+	lineCount := composerPastePreviewVisualLineCount(text, wrapWidth)
 	if lineCount < 3 && runeCount < 220 {
 		return "", false
 	}
@@ -327,10 +347,28 @@ func composerPastePreviewLabel(text string) (string, bool) {
 		snippet = "pasted text"
 	}
 	snippet = truncateComposerPasteSnippet(snippet, 48)
-	if lineCount >= 3 {
-		return "[" + snippet + " · " + strconv.Itoa(lineCount) + " lines]", true
+	label := "lines"
+	if lineCount == 1 {
+		label = "line"
 	}
-	return "[" + snippet + " · " + strconv.Itoa(runeCount) + " chars]", true
+	return "[" + snippet + " · " + strconv.Itoa(lineCount) + " " + label + "]", true
+}
+
+func composerPastePreviewLabelWithIndex(label string, pasteIndex int) string {
+	if pasteIndex <= 0 || !strings.HasSuffix(label, "]") {
+		return label
+	}
+	return strings.TrimSuffix(label, "]") + ", paste " + strconv.Itoa(pasteIndex) + "]"
+}
+
+func composerPastePreviewVisualLineCount(text string, wrapWidth int) int {
+	wrapWidth = maxInt(1, wrapWidth)
+	total := 0
+	for _, line := range strings.Split(text, "\n") {
+		width := lipgloss.Width(line)
+		total += maxInt(1, (width+wrapWidth-1)/wrapWidth)
+	}
+	return total
 }
 
 func truncateComposerPasteSnippet(text string, limit int) string {
@@ -400,6 +438,61 @@ func deleteComposerPastePreviewAfter(state composerState, previews []composerPas
 		return deleteComposerRange(state, preview.start, preview.end), composerPastePreviewsAfterDelete(valid, index), true
 	}
 	return state, previews, false
+}
+
+func deleteComposerRangeWithPastePreviews(state composerState, previews []composerPastePreview, start int, end int) (composerState, []composerPastePreview) {
+	state = normalizeComposerState(state)
+	runeCount := len([]rune(state.text))
+	start = clamp(start, 0, runeCount)
+	end = clamp(end, 0, runeCount)
+	if end < start {
+		start, end = end, start
+	}
+	if start == end {
+		return state, validComposerPastePreviews(state, previews)
+	}
+
+	valid := validComposerPastePreviews(state, previews)
+	deleteStart, deleteEnd := start, end
+	for {
+		expanded := false
+		for _, preview := range valid {
+			if !composerRangesOverlap(deleteStart, deleteEnd, preview.start, preview.end) {
+				continue
+			}
+			if preview.start < deleteStart {
+				deleteStart = preview.start
+				expanded = true
+			}
+			if preview.end > deleteEnd {
+				deleteEnd = preview.end
+				expanded = true
+			}
+		}
+		if !expanded {
+			break
+		}
+	}
+
+	nextState := deleteComposerRange(state, deleteStart, deleteEnd)
+	delta := deleteEnd - deleteStart
+	nextPreviews := make([]composerPastePreview, 0, len(valid))
+	for _, preview := range valid {
+		switch {
+		case composerRangesOverlap(deleteStart, deleteEnd, preview.start, preview.end):
+			continue
+		case preview.start >= deleteEnd:
+			preview.start -= delta
+			preview.end -= delta
+		}
+		nextPreviews = append(nextPreviews, preview)
+	}
+	sortComposerPastePreviews(nextPreviews)
+	return nextState, nextPreviews
+}
+
+func composerRangesOverlap(leftStart int, leftEnd int, rightStart int, rightEnd int) bool {
+	return leftStart < rightEnd && rightStart < leftEnd
 }
 
 func validComposerPastePreviews(state composerState, previews []composerPastePreview) []composerPastePreview {

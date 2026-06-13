@@ -155,6 +155,30 @@ func TestPastedMultilineComposerContentRendersAsPreview(t *testing.T) {
 	}
 }
 
+func TestPastedLongSingleLineComposerContentRendersWrappedLineCount(t *testing.T) {
+	paste := strings.TrimSpace(strings.Repeat("word ", 37))
+	m := newModel(context.Background(), Options{})
+	m.width = 44
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	next := updated.(model)
+
+	if got := next.composerValue(); got != paste {
+		t.Fatalf("composer value should preserve full paste = %q, want %q", got, paste)
+	}
+	view := plainRender(t, next.composerBox(44))
+	for _, want := range []string{"[word word word", "5 lines"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("composer preview missing %q in:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"1 line", "chars"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("composer preview should use wrapped line count, found %q in:\n%s", unwanted, view)
+		}
+	}
+}
+
 func TestBackspaceAfterPastedPreviewDeletesWholePaste(t *testing.T) {
 	paste := "first line\nsecond line\nthird line"
 	m := newModel(context.Background(), Options{})
@@ -168,6 +192,51 @@ func TestBackspaceAfterPastedPreviewDeletesWholePaste(t *testing.T) {
 	}
 	if len(next.composerPastePreviews) != 0 {
 		t.Fatal("paste preview should clear after deleting pasted block")
+	}
+}
+
+func TestAltBackspaceAfterPastedPreviewDoesNotLeakPaste(t *testing.T) {
+	paste := "first line\nsecond line\nthird line"
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("prefix ")
+	m.input.CursorEnd()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyBackspace, Alt: true})
+	next = updated.(model)
+
+	if got := next.composerValue(); got != "prefix " {
+		t.Fatalf("composer value after alt+backspace = %q, want prefix only", got)
+	}
+	view := plainRender(t, next.composerBox(96))
+	if strings.Contains(view, "second line") || strings.Contains(view, "third line") {
+		t.Fatalf("alt+backspace should not leak hidden pasted content:\n%s", view)
+	}
+}
+
+func TestBackspaceAfterTypedTextKeepsPastedPreviewCollapsed(t *testing.T) {
+	paste := "first line\nsecond line\nthird line"
+	m := newModel(context.Background(), Options{})
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	next = updated.(model)
+
+	if got := next.composerValue(); got != paste {
+		t.Fatalf("composer value after deleting typed suffix = %q, want original paste", got)
+	}
+	view := plainRender(t, next.composerBox(96))
+	for _, want := range []string{"[first line", "3 lines"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("composer preview missing %q after deleting typed suffix:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "second line") || strings.Contains(view, "third line") {
+		t.Fatalf("backspace after typed suffix should keep paste collapsed:\n%s", view)
 	}
 }
 
@@ -196,7 +265,7 @@ func TestPastingTwiceKeepsBothComposerPreviews(t *testing.T) {
 		t.Fatalf("composer value should preserve both pastes = %q", got)
 	}
 	view := plainRender(t, next.composerBox(120))
-	for _, want := range []string{"[Create a dashboard.", "3 lines", "[Log line one", "4 lines"} {
+	for _, want := range []string{"[Create a dashboard.", "3 lines", "[Log line one", "4 lines, paste 1"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("composer preview missing %q in:\n%s", want, view)
 		}
