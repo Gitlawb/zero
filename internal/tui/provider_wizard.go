@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -997,7 +998,19 @@ func providerWizardEndpointError(value string) string {
 	if parsed.Scheme != "https" && parsed.Scheme != "http" {
 		return "endpoint URL must start with http:// or https://"
 	}
+	if parsed.Scheme == "http" && !providerWizardIsLoopbackHost(parsed.Hostname()) {
+		return "endpoint URL must use https:// unless it is local loopback"
+	}
 	return ""
+}
+
+func providerWizardIsLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func providerWizardDisplayName(provider providercatalog.Descriptor, baseURL string, profileName string) string {
@@ -1016,6 +1029,9 @@ func providerWizardNameFromBaseURL(baseURL string) string {
 		return "custom"
 	}
 	host := strings.ToLower(parsed.Hostname())
+	if ip := net.ParseIP(host); ip != nil {
+		return providerWizardSanitizedName("ip-" + ip.String())
+	}
 	host = strings.TrimPrefix(host, "api.")
 	host = strings.TrimPrefix(host, "gateway.")
 	parts := strings.Split(host, ".")
@@ -1026,6 +1042,24 @@ func providerWizardNameFromBaseURL(baseURL string) string {
 		return strings.ReplaceAll(host, ":", "-")
 	}
 	return "custom"
+}
+
+func providerWizardSanitizedName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			builder.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && builder.Len() > 0 {
+			builder.WriteRune('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func providerWizardProviderKind(provider providercatalog.Descriptor) config.ProviderKind {

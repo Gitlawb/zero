@@ -176,3 +176,46 @@ func TestSaveSetupProviderStoresCustomEndpointSelection(t *testing.T) {
 		t.Fatalf("stored provider endpoint/model = %#v", profile)
 	}
 }
+
+func TestSaveSetupProviderCLIOptionsOverrideCustomEndpointSelection(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
+	}, tui.SetupSelection{
+		CatalogID: "custom-openai-compatible",
+		Name:      "selection-name",
+		BaseURL:   "https://selection.example/v1",
+		Model:     "selection-model",
+	}, setupSaveOptions{
+		name:    "cli-name",
+		baseURL: "https://cli.example/v1",
+	})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+
+	if result.Provider.Name != "cli-name" {
+		t.Fatalf("Provider.Name = %q, want CLI name", result.Provider.Name)
+	}
+	if result.Provider.BaseURL != "https://cli.example/v1" {
+		t.Fatalf("Provider.BaseURL = %q, want CLI endpoint", result.Provider.BaseURL)
+	}
+	if result.Provider.Model != "selection-model" {
+		t.Fatalf("Provider.Model = %q, want selection model", result.Provider.Model)
+	}
+
+	cfg := readFileConfig(t, configPath)
+	if cfg.ActiveProvider != "cli-name" {
+		t.Fatalf("ActiveProvider = %q, want cli-name", cfg.ActiveProvider)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("Providers = %#v, want one provider", cfg.Providers)
+	}
+	profile := cfg.Providers[0]
+	if profile.Name != "cli-name" || profile.BaseURL != "https://cli.example/v1" || profile.Model != "selection-model" {
+		t.Fatalf("stored provider = %#v, want CLI name/baseURL and selection model", profile)
+	}
+}

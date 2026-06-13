@@ -441,6 +441,76 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 	}
 }
 
+func TestProviderWizardCustomCompatibleProviderRejectsRemoteHTTP(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.providerWizard.step != providerWizardStepEndpoint {
+		t.Fatalf("custom provider first step = %v, want endpoint", next.providerWizard.step)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("http://api.example.com/v1")})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepEndpoint {
+		t.Fatalf("remote http endpoint advanced to %v, want endpoint", next.providerWizard.step)
+	}
+	assertContains(t, plainRender(t, next.View()), "endpoint URL must use https:// unless it is local loopback")
+}
+
+func TestProviderWizardCustomCompatibleProviderDerivesIPName(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://127.0.0.1:1234/v1")})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepName {
+		t.Fatalf("endpoint step advanced to %v, want name", next.providerWizard.step)
+	}
+	assertContains(t, plainRender(t, next.View()), "ip-127-0-0-1")
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("local-test-model")})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepDone {
+		t.Fatalf("model step advanced to %v, want ready", next.providerWizard.step)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard != nil {
+		t.Fatal("saving custom provider should close the wizard")
+	}
+	if captured.Name != "ip-127-0-0-1" {
+		t.Fatalf("captured Name = %q, want sanitized IP name", captured.Name)
+	}
+	if captured.BaseURL != "https://127.0.0.1:1234/v1" {
+		t.Fatalf("captured BaseURL = %q, want IP endpoint", captured.BaseURL)
+	}
+	if captured.Model != "local-test-model" {
+		t.Fatalf("captured Model = %q, want typed model", captured.Model)
+	}
+}
+
 func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
