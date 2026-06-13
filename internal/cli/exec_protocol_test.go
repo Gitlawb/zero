@@ -618,6 +618,36 @@ func TestRunExecStreamJSONProviderErrorEmitsErrorAndRunEnd(t *testing.T) {
 	}
 }
 
+func TestRunExecJSONInterruptedEmitsTerminalEvents(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--output-format", "json", "hello"}, &stdout, &stderr, appDeps{
+		getwd:         func() (string, error) { return cwd, nil },
+		resolveConfig: func(_ string, _ config.Overrides) (config.ResolvedConfig, error) { return execResolvedConfig(), nil },
+		newProvider:   func(config.ProviderProfile) (zeroruntime.Provider, error) { return canceledExecProvider{}, nil },
+	})
+
+	if exitCode != exitInterrupted {
+		t.Fatalf("expected interrupted exit %d, got %d: %s", exitInterrupted, exitCode, stderr.String())
+	}
+	// -o json must end the stream with a terminal error+done, not just print
+	// "Interrupted." to stderr (which the stream-json path already avoided).
+	events := decodeJSONLines(t, stdout.String())
+	if len(events) < 2 {
+		t.Fatalf("expected a terminal error+done on -o json interruption, got %#v", events)
+	}
+	errEvent := events[len(events)-2]
+	doneEvent := events[len(events)-1]
+	if errEvent["type"] != "error" || errEvent["code"] != "interrupted" {
+		t.Fatalf("expected interrupted error event, got %#v", errEvent)
+	}
+	if doneEvent["type"] != "done" || doneEvent["exit_code"] != float64(exitInterrupted) {
+		t.Fatalf("expected done event with interrupted exit code, got %#v", doneEvent)
+	}
+}
+
 func TestRunExecReadsStreamJSONPromptFromStdin(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	cwd := t.TempDir()

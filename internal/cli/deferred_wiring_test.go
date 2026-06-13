@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -165,6 +166,52 @@ func TestRunExecListToolsAdvertisesMCPToolsWithoutToolSearch(t *testing.T) {
 	// gate runs); the threshold logic is verified by the unit/E2E tests named above.
 	if strings.Contains(out, "tool_search") {
 		t.Fatalf("expected NO tool_search from --list-tools, got %q", out)
+	}
+}
+
+func TestRunExecListToolsHonorsJSONFormat(t *testing.T) {
+	cwd := t.TempDir()
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"exec", "--list-tools", "-o", "json"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+		},
+		resolveMCPConfig: func(string) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
+		newMCPStore:      func() (*mcp.PermissionStore, error) { return nil, nil },
+		registerMCPTools: func(_ context.Context, _ *tools.Registry, _ config.MCPConfig, _ mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return closeFunc(func() error { return nil }), nil
+		},
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("expected exit %d, got %d: %s", exitSuccess, exitCode, stderr.String())
+	}
+	out := strings.TrimSpace(stdout.String())
+	// Must be JSON, NOT the plain-text "Tools visible to model:" listing.
+	if strings.Contains(out, "Tools visible to model:") {
+		t.Fatalf("expected JSON output for -o json, got text listing: %q", out)
+	}
+	var payload struct {
+		Type  string `json:"type"`
+		Tools []struct {
+			Name       string `json:"name"`
+			Permission string `json:"permission"`
+			SideEffect string `json:"side_effect"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("--list-tools -o json must emit valid JSON: %v\n%q", err, out)
+	}
+	if payload.Type != "tools" {
+		t.Fatalf("expected type=tools, got %q", payload.Type)
+	}
+	if len(payload.Tools) == 0 {
+		t.Fatalf("expected at least one tool in the JSON listing")
+	}
+	if payload.Tools[0].Name == "" || payload.Tools[0].Permission == "" {
+		t.Fatalf("tool entries must carry name + permission: %#v", payload.Tools[0])
 	}
 }
 

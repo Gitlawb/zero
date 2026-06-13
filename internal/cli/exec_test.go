@@ -1002,6 +1002,31 @@ func runExecWithEcho(t *testing.T, args []string) (int, string, string) {
 	return exitCode, stdout.String(), stderr.String()
 }
 
+func TestExecSessionRecorderWarnsOnRecordingFailure(t *testing.T) {
+	// A latched session-append failure must be surfaced once to stderr so a user
+	// is not misled into believing the session was persisted; a clean recorder
+	// stays silent.
+	var failed bytes.Buffer
+	(&execSessionRecorder{err: errors.New("disk full")}).warnIfRecordingFailed(&failed)
+	if !strings.Contains(failed.String(), "session not fully recorded") || !strings.Contains(failed.String(), "disk full") {
+		t.Fatalf("expected a recording-failure warning, got %q", failed.String())
+	}
+
+	var clean bytes.Buffer
+	(&execSessionRecorder{}).warnIfRecordingFailed(&clean)
+	if clean.Len() != 0 {
+		t.Fatalf("expected silence when recording succeeded, got %q", clean.String())
+	}
+}
+
+// canceledExecProvider fails its first call with context.Canceled, simulating a
+// signal-interrupted run (agent.Run returns the error verbatim).
+type canceledExecProvider struct{}
+
+func (canceledExecProvider) StreamCompletion(context.Context, zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	return nil, context.Canceled
+}
+
 type echoExecProvider struct{}
 
 func (echoExecProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {

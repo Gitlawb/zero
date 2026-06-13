@@ -97,6 +97,27 @@ func writeExecToolList(w io.Writer, registry *tools.Registry, options execOption
 	return err
 }
 
+// writeExecToolListJSON emits the visible tool list as a single JSON object so
+// `exec --list-tools -o json` honors the requested machine-readable format
+// instead of falling through to the human-readable text listing.
+func writeExecToolListJSON(w io.Writer, registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) error {
+	visible := visibleExecTools(registry, options, permissionMode)
+	infos := make([]map[string]any, 0, len(visible))
+	for _, tool := range visible {
+		safety := tool.Safety()
+		infos = append(infos, map[string]any{
+			"name":        tool.Name(),
+			"description": tool.Description(),
+			"side_effect": string(safety.SideEffect),
+			"permission":  string(safety.Permission),
+		})
+	}
+	return writeJSONLine(w, map[string]any{
+		"type":  "tools",
+		"tools": infos,
+	})
+}
+
 func formatExecToolList(registry *tools.Registry, options execOptions, permissionMode agent.PermissionMode) string {
 	visible := visibleExecTools(registry, options, permissionMode)
 	lines := []string{"Tools visible to model:"}

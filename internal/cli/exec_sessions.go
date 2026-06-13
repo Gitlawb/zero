@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -121,4 +123,14 @@ func (recorder *execSessionRecorder) append(eventType sessions.EventType, payloa
 		Type:    eventType,
 		Payload: payload,
 	})
+}
+
+// warnIfRecordingFailed surfaces a latched session-append failure to stderr.
+// Recording is best-effort (it never fails the run), but a silent drop would let
+// a user believe a session was persisted when it was not — so the first failure
+// is reported once at run end. No-op when recording succeeded.
+func (recorder *execSessionRecorder) warnIfRecordingFailed(stderr io.Writer) {
+	if recorder.err != nil {
+		fmt.Fprintf(stderr, "[zero] WARNING: session not fully recorded: %v\n", recorder.err)
+	}
 }

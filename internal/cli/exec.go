@@ -192,6 +192,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		if options.outputFormat == execOutputStreamJSON {
 			return writeExecStreamJSONFinal(stdout, workspaceRoot, execRunMetadata{}, permissionMode, formatExecToolList(registry, options, permissionMode), exitSuccess)
 		}
+		if options.outputFormat == execOutputJSON {
+			if err := writeExecToolListJSON(stdout, registry, options, permissionMode); err != nil {
+				return exitCrash
+			}
+			return exitSuccess
+		}
 		if err := writeExecToolList(stdout, registry, options, permissionMode); err != nil {
 			return exitCrash
 		}
@@ -433,6 +439,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
+	// Surface a best-effort session-recording failure once, on every exit path.
+	defer sessionRecorder.warnIfRecordingFailed(stderr)
 	sessionRecorder.append(sessions.EventMessage, map[string]any{
 		"role":    "user",
 		"content": prompt,
@@ -532,13 +540,30 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// A Ctrl+C / SIGTERM cancellation is a clean shutdown, not a provider error.
 		if errors.Is(err, context.Canceled) || runCtx.Err() != nil {
 			sessionRecorder.append(sessions.EventError, map[string]any{"message": "interrupted"})
-			if options.outputFormat == execOutputStreamJSON {
+			switch options.outputFormat {
+			case execOutputStreamJSON:
 				writer.errorEvent("interrupted", "run cancelled by signal", false)
 				writer.runEnd("interrupted", exitInterrupted)
 				if writer.err != nil {
 					return exitCrash
 				}
-			} else {
+			case execOutputJSON:
+				// Emit a terminal error+done so a -o json consumer sees a clean end
+				// of stream instead of silence (the stream-json path already did).
+				if writeErr := writeJSONLine(stdout, map[string]any{
+					"type":    "error",
+					"code":    "interrupted",
+					"message": "run cancelled by signal",
+				}); writeErr != nil {
+					return exitCrash
+				}
+				if writeErr := writeJSONLine(stdout, map[string]any{
+					"type":      "done",
+					"exit_code": exitInterrupted,
+				}); writeErr != nil {
+					return exitCrash
+				}
+			default:
 				fmt.Fprintln(stderr, "Interrupted.")
 			}
 			return exitInterrupted
