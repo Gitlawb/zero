@@ -1551,3 +1551,26 @@ func TestMergeProjectConfigIgnoresAdditionalWriteRoots(t *testing.T) {
 		t.Fatalf("AdditionalWriteRoots=%v — project config must NOT be able to add write roots", dst.Sandbox.AdditionalWriteRoots)
 	}
 }
+
+func TestResolveRejectsNegativeMaxTurns(t *testing.T) {
+	path := writeConfig(t, `{"maxTurns": -5}`)
+
+	_, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err == nil || !strings.Contains(err.Error(), "invalid maxTurns") {
+		t.Fatalf("expected negative maxTurns to be rejected, got %v", err)
+	}
+}
+
+func TestResolveMaxTurnsZeroFallsBackToDefault(t *testing.T) {
+	// 0 is indistinguishable from "unset" under omitempty, so it must NOT error
+	// and must fall back to the default rather than being treated as a 0 limit.
+	path := writeConfig(t, `{"maxTurns": 0}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("maxTurns 0 should resolve cleanly, got %v", err)
+	}
+	if resolved.MaxTurns != defaultMaxTurns {
+		t.Fatalf("MaxTurns = %d, want default %d", resolved.MaxTurns, defaultMaxTurns)
+	}
+}

@@ -203,6 +203,14 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	}
 	cfg.ActiveProvider = raw.ActiveProvider
 	cfg.Providers = raw.Providers
+	// A negative maxTurns is unambiguously invalid; without this it would be
+	// silently dropped by the `MaxTurns > 0` merge gates and fall back to the
+	// default, hiding a misconfiguration. (0 is left as-is: with omitempty it is
+	// indistinguishable from "unset" and means "use the default".) The CLI flag
+	// rejects 0 too because there an explicit "0" is distinguishable from absent.
+	if raw.MaxTurns < 0 {
+		return fmt.Errorf("invalid maxTurns %d: must be greater than 0", raw.MaxTurns)
+	}
 	cfg.MaxTurns = raw.MaxTurns
 	cfg.MCP = raw.MCP
 	cfg.Sandbox = raw.Sandbox
