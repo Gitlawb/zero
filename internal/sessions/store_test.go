@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -750,7 +751,12 @@ func TestWriteFileSyncRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("perm = %o, want 600", perm)
+	// Windows does not honor Unix permission bits: Go reports 0o666 for a writable
+	// file regardless of the mode passed to OpenFile, so only assert the exact perm
+	// where the filesystem actually enforces it.
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("perm = %o, want 600", perm)
+		}
 	}
 }
