@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -10,27 +11,91 @@ import (
 const (
 	mcpManagerOverlayMaxWidth = 168
 	mcpManagerOverlayMinWidth = 58
-	mcpManagerMaxVisible      = 7
+	mcpManagerMaxVisible      = 12
 )
 
 type mcpManagerState struct {
 	selected int
+	query    string
 }
 
 type mcpManagerItemKind int
 
 const (
 	mcpManagerItemServer mcpManagerItemKind = iota
+	mcpManagerItemMarketplace
 	mcpManagerItemAddRemote
 	mcpManagerItemAddStdio
 	mcpManagerItemList
 )
 
 type mcpManagerItem struct {
-	Kind  mcpManagerItemKind
-	Name  string
-	Label string
-	Meta  string
+	Kind           mcpManagerItemKind
+	Name           string
+	Label          string
+	Meta           string
+	Detail         string
+	InstallCommand string
+}
+
+type mcpMarketplaceEntry struct {
+	ID             string
+	Name           string
+	Description    string
+	Meta           string
+	InstallCommand string
+	Tags           []string
+}
+
+var mcpMarketplaceCatalog = []mcpMarketplaceEntry{
+	{
+		ID:             "filesystem",
+		Name:           "Filesystem",
+		Description:    "Read and manage files under an explicit workspace path.",
+		Meta:           "stdio · official · files",
+		InstallCommand: "/mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .",
+		Tags:           []string{"files", "local", "official", "workspace"},
+	},
+	{
+		ID:             "memory",
+		Name:           "Memory",
+		Description:    "Persistent knowledge graph memory for long-lived project facts.",
+		Meta:           "stdio · official · memory",
+		InstallCommand: "/mcp add memory -- npx -y @modelcontextprotocol/server-memory",
+		Tags:           []string{"memory", "knowledge", "official"},
+	},
+	{
+		ID:             "fetch",
+		Name:           "Fetch",
+		Description:    "Fetch and convert web content for model-readable context.",
+		Meta:           "stdio · official · web",
+		InstallCommand: "/mcp add fetch -- npx -y @modelcontextprotocol/server-fetch",
+		Tags:           []string{"web", "fetch", "official"},
+	},
+	{
+		ID:             "sequential-thinking",
+		Name:           "Sequential Thinking",
+		Description:    "Structured step-by-step reasoning as an MCP tool.",
+		Meta:           "stdio · official · reasoning",
+		InstallCommand: "/mcp add sequential-thinking -- npx -y @modelcontextprotocol/server-sequential-thinking",
+		Tags:           []string{"reasoning", "planning", "official"},
+	},
+	{
+		ID:             "context7",
+		Name:           "Context7",
+		Description:    "Fresh library documentation and examples over HTTP MCP.",
+		Meta:           "http · docs · remote",
+		InstallCommand: "/mcp add context7 --url https://mcp.context7.com/mcp",
+		Tags:           []string{"docs", "libraries", "context7", "remote"},
+	},
+	{
+		ID:             "playwright",
+		Name:           "Playwright",
+		Description:    "Browser automation and page inspection through Playwright MCP.",
+		Meta:           "stdio · browser · @playwright/mcp",
+		InstallCommand: "/mcp add playwright -- npx -y @playwright/mcp",
+		Tags:           []string{"browser", "automation", "testing", "playwright"},
+	},
 }
 
 func (m model) openMCPManager() model {
@@ -52,7 +117,16 @@ func (m model) handleMCPManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.moveMCPManager(1)
 	case tea.KeyEnter:
 		return m.chooseMCPManagerItem()
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		m.deleteMCPManagerQueryRune()
+	case tea.KeyCtrlU:
+		m.mcpManager.query = ""
+		m.mcpManager.selected = 0
 	case tea.KeyRunes:
+		if !msg.Alt {
+			m.appendMCPManagerQuery(msg.Runes)
+			return m, nil
+		}
 		switch strings.ToLower(string(msg.Runes)) {
 		case "a":
 			return m.prefillMCPManagerCommand("/mcp add <name> --url <url>"), nil
@@ -81,6 +155,28 @@ func (m model) handleMCPManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) appendMCPManagerQuery(runes []rune) {
+	if m.mcpManager == nil {
+		return
+	}
+	for _, r := range runes {
+		if r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r) {
+			continue
+		}
+		m.mcpManager.query += string(r)
+	}
+	m.mcpManager.selected = 0
+}
+
+func (m *model) deleteMCPManagerQueryRune() {
+	if m.mcpManager == nil || m.mcpManager.query == "" {
+		return
+	}
+	runes := []rune(m.mcpManager.query)
+	m.mcpManager.query = string(runes[:len(runes)-1])
+	m.mcpManager.selected = 0
+}
+
 func (m *model) moveMCPManager(delta int) {
 	if m.mcpManager == nil {
 		return
@@ -101,6 +197,8 @@ func (m model) chooseMCPManagerItem() (model, tea.Cmd) {
 	switch item.Kind {
 	case mcpManagerItemServer:
 		return m.runMCPManagerCommand([]string{"check", item.Name})
+	case mcpManagerItemMarketplace:
+		return m.prefillMCPManagerCommand(item.InstallCommand), nil
 	case mcpManagerItemAddRemote:
 		return m.prefillMCPManagerCommand("/mcp add <name> --url <url>"), nil
 	case mcpManagerItemAddStdio:
@@ -123,12 +221,14 @@ func (m model) prefillMCPManagerCommand(command string) model {
 
 func (m model) runMCPManagerCommand(args []string) (model, tea.Cmd) {
 	selected := 0
+	query := ""
 	if m.mcpManager != nil {
 		selected = m.mcpManager.selected
+		query = m.mcpManager.query
 	}
 	text := ""
 	m, text = m.handleMCPCommand(strings.Join(args, " "))
-	m.mcpManager = &mcpManagerState{selected: selected}
+	m.mcpManager = &mcpManagerState{selected: selected, query: query}
 	if items := m.mcpManagerItems(); len(items) > 0 {
 		m.mcpManager.selected = clampInt(m.mcpManager.selected, 0, len(items)-1)
 	}
@@ -152,22 +252,65 @@ func (m model) currentMCPManagerItem() (mcpManagerItem, bool) {
 
 func (m model) mcpManagerItems() []mcpManagerItem {
 	state := m.mcpViewState()
-	items := make([]mcpManagerItem, 0, len(state.Servers)+3)
+	query := ""
+	if m.mcpManager != nil {
+		query = strings.ToLower(strings.TrimSpace(m.mcpManager.query))
+	}
+	installed := make(map[string]bool, len(state.Servers))
+	items := make([]mcpManagerItem, 0, len(state.Servers)+len(mcpMarketplaceCatalog)+3)
 	for _, server := range state.Servers {
 		name := displayValue(strings.TrimSpace(server.Name), "unnamed")
-		items = append(items, mcpManagerItem{
-			Kind:  mcpManagerItemServer,
-			Name:  name,
-			Label: name,
-			Meta:  mcpManagerServerMeta(server),
-		})
+		installed[strings.ToLower(name)] = true
+		item := mcpManagerItem{
+			Kind:   mcpManagerItemServer,
+			Name:   name,
+			Label:  name,
+			Meta:   mcpManagerServerMeta(server),
+			Detail: strings.Join([]string{name, server.Transport, server.State, server.Auth, server.Target}, " "),
+		}
+		if mcpManagerItemMatches(item, query) {
+			items = append(items, item)
+		}
 	}
-	items = append(items,
-		mcpManagerItem{Kind: mcpManagerItemAddRemote, Label: "Add MCP server", Meta: "zero mcp add <name> --url <url>"},
-		mcpManagerItem{Kind: mcpManagerItemAddStdio, Label: "Add local stdio MCP", Meta: "zero mcp add <name> -- <command> [args...]"},
-		mcpManagerItem{Kind: mcpManagerItemList, Label: "List configured", Meta: "zero mcp list"},
-	)
+	for _, entry := range mcpMarketplaceCatalog {
+		if installed[strings.ToLower(entry.ID)] {
+			continue
+		}
+		item := mcpMarketplaceItem(entry)
+		if mcpManagerItemMatches(item, query) {
+			items = append(items, item)
+		}
+	}
+	for _, item := range []mcpManagerItem{
+		{Kind: mcpManagerItemAddRemote, Name: "custom-remote", Label: "Add MCP server", Meta: "zero mcp add <name> --url <url>", Detail: "custom remote http sse url"},
+		{Kind: mcpManagerItemAddStdio, Name: "custom-stdio", Label: "Add local stdio MCP", Meta: "zero mcp add <name> -- <command> [args...]", Detail: "custom local stdio command"},
+		{Kind: mcpManagerItemList, Name: "list", Label: "List configured", Meta: "zero mcp list", Detail: "configured installed servers"},
+	} {
+		if mcpManagerItemMatches(item, query) {
+			items = append(items, item)
+		}
+	}
 	return items
+}
+
+func mcpMarketplaceItem(entry mcpMarketplaceEntry) mcpManagerItem {
+	return mcpManagerItem{
+		Kind:           mcpManagerItemMarketplace,
+		Name:           entry.ID,
+		Label:          entry.Name,
+		Meta:           entry.Meta,
+		Detail:         strings.Join(append([]string{entry.Description, entry.InstallCommand}, entry.Tags...), " "),
+		InstallCommand: entry.InstallCommand,
+	}
+}
+
+func mcpManagerItemMatches(item mcpManagerItem, query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(strings.Join([]string{item.Name, item.Label, item.Meta, item.Detail, item.InstallCommand}, " "))
+	return strings.Contains(haystack, query)
 }
 
 func mcpManagerServerMeta(server MCPServerView) string {
@@ -204,6 +347,7 @@ func (m model) mcpManagerOverlay(width int) string {
 	state := m.mcpViewState()
 	lines := []string{
 		fillPaletteLine(zeroTheme.ink.Bold(true).Render(pluralCount(len(state.Servers), "server")), innerWidth, transparentSurface),
+		fillPaletteLine(renderMCPManagerSearchLine(m.mcpManager.query, innerWidth), innerWidth, transparentSurface),
 		zeroTheme.accent.Bold(true).Render("User MCPs"),
 	}
 	if len(state.Servers) == 0 {
@@ -216,8 +360,17 @@ func (m model) mcpManagerOverlay(width int) string {
 		lines = append(lines, detail...)
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
-	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("up/down navigate   Enter action   a add remote   s add stdio   Esc close"), innerWidth, transparentSurface))
+	lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("type search   up/down navigate   Enter action   Alt+d disable   Esc close"), innerWidth, transparentSurface))
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, "Manage MCP servers", lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+func renderMCPManagerSearchLine(query string, width int) string {
+	query = strings.TrimSpace(query)
+	prompt := zeroTheme.userPrompt.Render("search > ")
+	if query == "" {
+		return fitStyledLine(prompt+zeroTheme.faint.Render("MCP servers, tools, docs..."), width)
+	}
+	return fitStyledLine(prompt+zeroTheme.ink.Render(query), width)
 }
 
 func (m model) renderMCPManagerItemLines(width int, items []mcpManagerItem) ([]string, []int) {
@@ -229,14 +382,14 @@ func (m model) renderMCPManagerItemLines(width int, items []mcpManagerItem) ([]s
 	visible := items[start : start+maxVisible]
 	lines := make([]string, 0, len(visible))
 	itemRows := make([]int, 0, len(visible))
-	lastKind := mcpManagerItemServer
+	lastGroup := ""
 	for offset, item := range visible {
 		index := start + offset
-		if item.Kind != mcpManagerItemServer && (index == 0 || lastKind == mcpManagerItemServer) {
-			lines = append(lines, zeroTheme.accent.Bold(true).Render("Actions"))
+		if group := mcpManagerItemGroup(item.Kind); group != "" && group != lastGroup {
+			lines = append(lines, zeroTheme.accent.Bold(true).Render(group))
 			itemRows = append(itemRows, -1)
+			lastGroup = group
 		}
-		lastKind = item.Kind
 		surface := transparentSurface
 		marker := surface(zeroTheme.faintest).Render("  ")
 		if index == m.mcpManager.selected {
@@ -256,6 +409,17 @@ func (m model) renderMCPManagerItemLines(width int, items []mcpManagerItem) ([]s
 	return lines, itemRows
 }
 
+func mcpManagerItemGroup(kind mcpManagerItemKind) string {
+	switch kind {
+	case mcpManagerItemMarketplace:
+		return "Marketplace"
+	case mcpManagerItemAddRemote, mcpManagerItemAddStdio, mcpManagerItemList:
+		return "Actions"
+	default:
+		return ""
+	}
+}
+
 func (m model) mcpManagerSelectionDetail(width int) []string {
 	item, ok := m.currentMCPManagerItem()
 	if !ok {
@@ -273,11 +437,20 @@ func (m model) mcpManagerSelectionDetail(width int) []string {
 		if target := strings.TrimSpace(server.Target); target != "" {
 			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(target), width))
 		}
-		action := "d disable"
+		action := "Alt+d disable"
 		if strings.EqualFold(strings.TrimSpace(server.State), "disabled") {
-			action = "e enable"
+			action = "Alt+e enable"
 		}
-		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("Enter check   c check   "+action+"   r remove"), width, transparentSurface))
+		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("Enter check   Alt+c check   "+action+"   Alt+r remove"), width, transparentSurface))
+		return lines
+	case mcpManagerItemMarketplace:
+		lines := []string{
+			fillPaletteLine(zeroTheme.ink.Bold(true).Render(item.Label)+" "+zeroTheme.faint.Render(item.Meta), width, transparentSurface),
+		}
+		if detail := firstMCPMarketplaceDetailLine(item); detail != "" {
+			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(detail), width))
+		}
+		lines = append(lines, fillPaletteLine(zeroTheme.faint.Render("Enter fills composer: "+item.InstallCommand), width, transparentSurface))
 		return lines
 	case mcpManagerItemAddRemote:
 		return []string{fillPaletteLine(zeroTheme.faint.Render("Enter fills composer: /mcp add <name> --url <url>"), width, transparentSurface)}
@@ -288,6 +461,17 @@ func (m model) mcpManagerSelectionDetail(width int) []string {
 	default:
 		return nil
 	}
+}
+
+func firstMCPMarketplaceDetailLine(item mcpManagerItem) string {
+	detail := strings.TrimSpace(item.Detail)
+	if detail == "" {
+		return ""
+	}
+	if before, _, ok := strings.Cut(detail, " /mcp add "); ok {
+		return strings.TrimSpace(before)
+	}
+	return detail
 }
 
 func (m model) mcpManagerServer(name string) (MCPServerView, bool) {

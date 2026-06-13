@@ -229,6 +229,12 @@ func TestMCPManagerNavigationPrefillsAddCommand(t *testing.T) {
 		t.Fatal("expected MCP manager to open")
 	}
 
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("custom remote")})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected MCP manager search to update synchronously")
+	}
+
 	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next = updated.(model)
 	if cmd != nil {
@@ -238,6 +244,57 @@ func TestMCPManagerNavigationPrefillsAddCommand(t *testing.T) {
 		t.Fatal("expected add command selection to close the MCP manager")
 	}
 	if got, want := next.input.Value(), "/mcp add <name> --url <url>"; got != want {
+		t.Fatalf("composer = %q, want %q", got, want)
+	}
+}
+
+func TestMCPManagerSearchFiltersMarketplace(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width = 120
+	m.height = 36
+	m.input.SetValue("/mcp")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("playwright")})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected search typing to be synchronous")
+	}
+
+	view := plainRender(t, next.View())
+	for _, want := range []string{
+		"search > playwright",
+		"Marketplace",
+		"Playwright",
+		"@playwright/mcp",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("MCP marketplace search missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Filesystem") {
+		t.Fatalf("MCP marketplace search should filter non-matching entries:\n%s", view)
+	}
+}
+
+func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("/mcp")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("context7")})
+	next = updated.(model)
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected marketplace selection to prefill synchronously")
+	}
+	if next.mcpManager != nil {
+		t.Fatal("expected marketplace install selection to close manager")
+	}
+	if got, want := next.input.Value(), "/mcp add context7 --url https://mcp.context7.com/mcp"; got != want {
 		t.Fatalf("composer = %q, want %q", got, want)
 	}
 }
@@ -268,7 +325,7 @@ func TestMCPManagerRunsSelectedServerAction(t *testing.T) {
 		t.Fatal("expected MCP manager to open")
 	}
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d"), Alt: true})
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected MCP action to run synchronously")

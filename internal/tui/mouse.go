@@ -215,7 +215,7 @@ func (m *model) selectMCPManagerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 		return mouseSelectionTarget{}, false
 	}
 	_, itemRows := m.renderMCPManagerItemLines(maxInt(1, chatWidth(m.width)-4), items)
-	baseRow := 2
+	baseRow := 3
 	if len(m.mcpViewState().Servers) == 0 {
 		baseRow++
 	}
