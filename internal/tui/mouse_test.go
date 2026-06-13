@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
@@ -427,6 +429,62 @@ func TestTranscriptCopyStatusClearsOnlyForLatestCopy(t *testing.T) {
 	m = updated.(model)
 	if m.copyStatus != "" {
 		t.Fatalf("latest expiry left status = %q, want empty", m.copyStatus)
+	}
+}
+
+func TestMCPManagerMouseSelectsFirstItemRow(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+			"docs": {Type: "stdio", Command: "docs-mcp"},
+		}},
+	})
+	m.width = 120
+	m.height = 36
+	m = m.openMCPManager()
+	width := chatWidth(m.width)
+	overlay := m.mcpManagerOverlay(width)
+	lines := viewLines(overlay)
+	left, _, _ := normalizeOverlayBlock(lines, width)
+	y := m.overlayMouseTop(len(lines), width) + mcpManagerFirstItemRow(m.mcpViewState())
+
+	target, ok := m.selectMCPManagerAtMouse(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: left + 2, Y: y})
+	if !ok {
+		t.Fatal("expected click on first manager item row to select")
+	}
+	if target.Index != 0 || m.mcpManager.selected != 0 || target.Value != "docs" {
+		t.Fatalf("selected target = %#v manager=%#v, want first docs item", target, m.mcpManager)
+	}
+}
+
+func TestMCPAddWizardMouseSelectsAndActivatesType(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.width = 120
+	m.height = 36
+	m.mcpAddWizard = newMCPAddWizard("http")
+	m.mcpAddWizard.step = mcpAddWizardStepType
+	width := chatWidth(m.width)
+	overlay := m.mcpAddWizardOverlay(width)
+	lines := viewLines(overlay)
+	left, _, _ := normalizeOverlayBlock(lines, width)
+	y := m.overlayMouseTop(len(lines), width) + 5 // second type row: top border + step + rule + title + first row
+	msg := tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: left + 2, Y: y}
+
+	updated, cmd := m.Update(msg)
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("single click should only select the type")
+	}
+	if next.mcpAddWizard.serverType != "sse" {
+		t.Fatalf("serverType after click = %q, want sse", next.mcpAddWizard.serverType)
+	}
+
+	updated, cmd = next.Update(msg)
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("double-click type activation should advance synchronously")
+	}
+	if next.mcpAddWizard.step != mcpAddWizardStepEndpoint {
+		t.Fatalf("wizard step after double-click = %v, want endpoint", next.mcpAddWizard.step)
 	}
 }
 

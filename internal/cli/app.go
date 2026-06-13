@@ -519,9 +519,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		MCPConfig:          mcpConfig,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
-		MCPCommand: func(args []string) tui.MCPCommandResult {
+		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
+			if ctx == nil {
+				ctx = context.Background()
+			}
 			var stdout, stderr bytes.Buffer
-			exitCode := runMCP(args, &stdout, &stderr, deps)
+			exitCode := runMCPWithContext(ctx, args, &stdout, &stderr, deps)
 			nextConfig := lastKnownMCPConfig
 			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
 				lastKnownMCPConfig = refreshed

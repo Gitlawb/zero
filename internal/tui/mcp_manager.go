@@ -99,6 +99,7 @@ var mcpMarketplaceCatalog = []mcpMarketplaceEntry{
 }
 
 func (m model) openMCPManager() model {
+	m.refreshMCPViewState()
 	m.mcpManager = &mcpManagerState{}
 	m.clearSuggestions()
 	return m
@@ -220,22 +221,12 @@ func (m model) prefillMCPManagerCommand(command string) model {
 }
 
 func (m model) runMCPManagerCommand(args []string) (model, tea.Cmd) {
-	selected := 0
-	query := ""
+	request := mcpCommandRequest{origin: mcpCommandOriginManager, args: append([]string{}, args...)}
 	if m.mcpManager != nil {
-		selected = m.mcpManager.selected
-		query = m.mcpManager.query
+		request.managerSelected = m.mcpManager.selected
+		request.managerQuery = m.mcpManager.query
 	}
-	text := ""
-	m, text = m.handleMCPCommand(strings.Join(args, " "))
-	m.mcpManager = &mcpManagerState{selected: selected, query: query}
-	if items := m.mcpManagerItems(); len(items) > 0 {
-		m.mcpManager.selected = clampInt(m.mcpManager.selected, 0, len(items)-1)
-	}
-	if text != "" {
-		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
-	}
-	return m, nil
+	return m.startMCPCommand(request)
 }
 
 func (m model) currentMCPManagerItem() (mcpManagerItem, bool) {
@@ -291,6 +282,14 @@ func (m model) mcpManagerItems() []mcpManagerItem {
 		}
 	}
 	return items
+}
+
+func mcpManagerFirstItemRow(state MCPViewState) int {
+	baseRow := 4 // top border + server count + search + "User MCPs"
+	if len(state.Servers) == 0 {
+		baseRow++
+	}
+	return baseRow
 }
 
 func mcpMarketplaceItem(entry mcpMarketplaceEntry) mcpManagerItem {

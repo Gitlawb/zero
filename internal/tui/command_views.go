@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -52,40 +55,110 @@ func (m model) mcpText() string {
 	return renderMCPView(m.mcpViewState(), width)
 }
 
-func (m model) mcpViewState() MCPViewState {
-	return BuildMCPViewState(MCPStateOptions{
+func (m *model) refreshMCPViewState() {
+	m.mcpViewStateCache = BuildMCPViewState(MCPStateOptions{
 		Config:          m.mcpConfig,
 		Registry:        m.registry,
 		PermissionStore: m.mcpPermissionStore,
 		PermissionMode:  string(m.permissionMode),
 		TokenStore:      m.mcpTokenStore,
 	})
+	m.mcpViewStateReady = true
 }
 
-func (m model) handleMCPCommand(args string) (model, string) {
+func (m model) mcpViewState() MCPViewState {
+	if m.mcpViewStateReady {
+		return m.mcpViewStateCache
+	}
+	// Older tests may construct a zero-value model; keep that path useful, while
+	// production refreshes the cache before any MCP view can render.
+	m.refreshMCPViewState()
+	return m.mcpViewStateCache
+}
+
+func (m model) startMCPTranscriptCommand(args string) (model, tea.Cmd) {
 	args = strings.TrimSpace(args)
 	if args == "" {
-		return m, m.mcpText()
-	}
-	if m.mcpCommand == nil {
-		return m, strings.Join([]string{
-			"MCP action unavailable",
-			"Run MCP management commands in your terminal for this build.",
-			"Example: zero mcp " + args,
-			"",
-			m.mcpText(),
-		}, "\n")
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: m.mcpText()})
+		return m, nil
 	}
 	parsedArgs, err := splitMCPCommandArgs(args)
 	if err != nil {
-		return m, strings.Join([]string{
+		text := strings.Join([]string{
 			"MCP action failed",
 			err.Error(),
 			"",
 			m.mcpText(),
 		}, "\n")
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
+		return m, nil
 	}
-	result := m.mcpCommand(parsedArgs)
+	return m.startMCPCommand(mcpCommandRequest{origin: mcpCommandOriginTranscript, raw: args, args: parsedArgs})
+}
+
+func (m model) startMCPCommand(request mcpCommandRequest) (model, tea.Cmd) {
+	if m.mcpCommand == nil {
+		result := MCPCommandResult{
+			ExitCode: 1,
+			Error:    "MCP action unavailable",
+			Config:   m.mcpConfig,
+		}
+		return m.applyMCPCommandResultMessage(mcpCommandResultMsg{request: request, result: result}), nil
+	}
+	m.cancelMCPCommand()
+	ctx := m.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	m.mcpCommandSeq++
+	request.id = m.mcpCommandSeq
+	request.args = append([]string{}, request.args...)
+	m.mcpCommandCancel = cancel
+	runner := m.mcpCommand
+	return m, func() tea.Msg {
+		return mcpCommandResultMsg{
+			request: request,
+			result:  runner(ctx, request.args),
+		}
+	}
+}
+
+func (m *model) cancelMCPCommand() {
+	if m.mcpCommandCancel != nil {
+		m.mcpCommandCancel()
+		m.mcpCommandCancel = nil
+		m.mcpCommandSeq++
+	}
+}
+
+func (m model) applyMCPCommandResultMessage(msg mcpCommandResultMsg) model {
+	if msg.request.id != 0 && msg.request.id != m.mcpCommandSeq {
+		return m
+	}
+	m.mcpCommandCancel = nil
+	switch msg.request.origin {
+	case mcpCommandOriginManager:
+		text := ""
+		m, text = m.applyMCPCommandResult(strings.Join(msg.request.args, " "), msg.result)
+		m.mcpManager = &mcpManagerState{selected: msg.request.managerSelected, query: msg.request.managerQuery}
+		if items := m.mcpManagerItems(); len(items) > 0 {
+			m.mcpManager.selected = clampInt(m.mcpManager.selected, 0, len(items)-1)
+		}
+		if text != "" {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
+		}
+	case mcpCommandOriginWizard:
+		m = m.applyMCPAddWizardSaveResult(msg.result, msg.request.wizardDisabled)
+	default:
+		text := ""
+		m, text = m.applyMCPCommandResult(msg.request.raw, msg.result)
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
+	}
+	return m
+}
+
+func (m model) applyMCPCommandResult(args string, result MCPCommandResult) (model, string) {
 	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" {
 		message := strings.TrimSpace(result.Error)
 		if message == "" {
@@ -103,6 +176,7 @@ func (m model) handleMCPCommand(args string) (model, string) {
 	}
 	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
 		m.mcpConfig = result.Config
+		m.refreshMCPViewState()
 	}
 	output := strings.TrimSpace(result.Output)
 	if output == "" {

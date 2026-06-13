@@ -26,7 +26,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case m.mcpAddWizard != nil:
-			return m, nil
+			if target, ok := m.selectMCPAddWizardAtMouse(msg); ok {
+				if m.repeatMouseSelection(target) {
+					m.clearMouseSelection()
+					return m.handleMCPAddWizardMouseActivate()
+				}
+				m.lastMouseSelection = target
+				return m, nil
+			}
 		case m.mcpManager != nil:
 			if target, ok := m.selectMCPManagerAtMouse(msg); ok {
 				if m.repeatMouseSelection(target) {
@@ -225,10 +232,7 @@ func (m *model) selectMCPManagerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 		return mouseSelectionTarget{}, false
 	}
 	_, itemRows := m.renderMCPManagerItemLines(maxInt(1, chatWidth(m.width)-4), items)
-	baseRow := 3
-	if len(m.mcpViewState().Servers) == 0 {
-		baseRow++
-	}
+	baseRow := mcpManagerFirstItemRow(m.mcpViewState())
 	row := hit.y - baseRow
 	if row < 0 || row >= len(itemRows) || itemRows[row] < 0 {
 		return mouseSelectionTarget{}, false
@@ -236,6 +240,70 @@ func (m *model) selectMCPManagerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 	index := itemRows[row]
 	m.mcpManager.selected = index
 	return mouseSelectionTarget{Scope: "mcp-manager", Kind: int(items[index].Kind), Value: items[index].Name, Index: index}, true
+}
+
+func (m *model) selectMCPAddWizardAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
+	if m.mcpAddWizard == nil {
+		return mouseSelectionTarget{}, false
+	}
+	width := chatWidth(m.width)
+	hit, ok := m.overlayMouseHit(msg, m.mcpAddWizardOverlay(width), width)
+	if !ok {
+		return mouseSelectionTarget{}, false
+	}
+	baseRow := 4
+	if m.mcpAddWizard.err != "" {
+		baseRow += 2
+	}
+	switch m.mcpAddWizard.step {
+	case mcpAddWizardStepType:
+		row := hit.y - baseRow
+		if row < 0 || row >= len(mcpAddWizardTypes) {
+			return mouseSelectionTarget{}, false
+		}
+		m.mcpAddWizard.selectedType = row
+		m.mcpAddWizard.serverType = mcpAddWizardTypes[row].ID
+		return mouseSelectionTarget{Scope: "mcp-add-wizard", Kind: int(m.mcpAddWizard.step), Value: m.mcpAddWizard.serverType, Index: row}, true
+	case mcpAddWizardStepResult:
+		actions := m.mcpAddWizard.resultActions()
+		if len(actions) == 0 {
+			return mouseSelectionTarget{}, false
+		}
+		rowStart := m.mcpAddWizard.mcpAddWizardResultActionStartRow()
+		row := hit.y - rowStart
+		if row < 0 || row >= len(actions) {
+			return mouseSelectionTarget{}, false
+		}
+		m.mcpAddWizard.resultSelected = row
+		return mouseSelectionTarget{Scope: "mcp-add-wizard", Kind: int(m.mcpAddWizard.step), Value: actions[row], Index: row}, true
+	default:
+		return mouseSelectionTarget{}, false
+	}
+}
+
+func (m model) handleMCPAddWizardMouseActivate() (tea.Model, tea.Cmd) {
+	if m.mcpAddWizard == nil {
+		return m, nil
+	}
+	if m.mcpAddWizard.step == mcpAddWizardStepResult {
+		return m.handleMCPAddWizardResultEnter()
+	}
+	return m.advanceMCPAddWizard()
+}
+
+func (wizard *mcpAddWizardState) mcpAddWizardResultActionStartRow() int {
+	if wizard == nil {
+		return 0
+	}
+	row := 7 // top border + step + separator + title + server + transport + saved/tools line
+	if wizard.err != "" {
+		row += 2
+	}
+	if wizard.result.Message != "" {
+		row++
+	}
+	row++ // blank line before actions
+	return row
 }
 
 func (m *model) selectModelPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {

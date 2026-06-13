@@ -247,13 +247,17 @@ func TestTUIMCPCommandUsesLastGoodConfigOnRefreshError(t *testing.T) {
 			return closeFunc(func() error { return nil }), nil
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
-			first := options.MCPCommand([]string{"list"})
+			first := options.MCPCommand(ctx, []string{"list"})
 			if _, ok := first.Config.Servers["github"]; !ok {
 				t.Fatalf("first MCP result config = %#v, want refreshed github server", first.Config.Servers)
 			}
-			second := options.MCPCommand([]string{"list"})
+			second := options.MCPCommand(ctx, []string{"list"})
 			if _, ok := second.Config.Servers["github"]; !ok {
-				t.Fatalf("second MCP result config = %#v, want last known github server after refresh error", second.Config.Servers)
+				t.Fatalf("second MCP result config = %#v, want refreshed github server", second.Config.Servers)
+			}
+			third := options.MCPCommand(ctx, []string{"list"})
+			if _, ok := third.Config.Servers["github"]; !ok {
+				t.Fatalf("third MCP result config = %#v, want last known github server after refresh error", third.Config.Servers)
 			}
 			return 0
 		},

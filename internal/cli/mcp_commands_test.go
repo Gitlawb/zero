@@ -516,6 +516,7 @@ func TestRunMCPRemovePreservesUnrelatedConfigFields(t *testing.T) {
 func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 	cwd := t.TempDir()
 	serverURL := "https://user:password@remote.example/mcp?access_token=secret-token&api_key=secret-key&safe=value#access_token=fragment-secret"
+	commandSecret := "sk-proj-" + strings.Repeat("a", 24)
 	deps := appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
@@ -524,6 +525,7 @@ func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 			}
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 				"remote": {Type: "http", URL: serverURL},
+				"stdio":  {Type: "stdio", Command: commandSecret},
 			}}, nil
 		},
 	}
@@ -541,7 +543,7 @@ func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
 				t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
 			}
 			output := stdout.String()
-			for _, leaked := range []string{"user:password", "secret-token", "secret-key", "fragment-secret", "access_token=secret-token", "api_key=secret-key", "access_token=fragment-secret"} {
+			for _, leaked := range []string{"user:password", "secret-token", "secret-key", "fragment-secret", "access_token=secret-token", "api_key=secret-key", "access_token=fragment-secret", commandSecret} {
 				if strings.Contains(output, leaked) {
 					t.Fatalf("mcp list leaked %q in output:\n%s", leaked, output)
 				}

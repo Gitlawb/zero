@@ -217,7 +217,10 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	return exitSuccess
 }
 
-func runMCPCheck(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	options, positional, help, err := parseMCPConfigPositionalCommand(args, "check")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -261,7 +264,7 @@ func runMCPCheck(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	registry := tools.NewRegistry()
-	runtime, err := deps.registerMCPTools(context.Background(), registry, scoped, mcp.RegisterOptions{
+	runtime, err := deps.registerMCPTools(ctx, registry, scoped, mcp.RegisterOptions{
 		PermissionStore: store,
 		Autonomy:        mcp.AutonomyLow,
 	})

@@ -112,15 +112,15 @@ func (wizard *mcpAddWizardState) renderConfirmStep(width int) []string {
 		lines = append(lines, "source: "+zeroTheme.ink.Render(source))
 	}
 	if sourceURL := strings.TrimSpace(wizard.sourceURL); sourceURL != "" {
-		lines = append(lines, "docs: "+zeroTheme.ink.Render(sourceURL))
+		lines = append(lines, "docs: "+zeroTheme.ink.Render(redactMCPWizardDisplayValue(sourceURL)))
 	}
 	if wizard.isRemote() {
-		lines = append(lines, "url: "+zeroTheme.ink.Render(wizard.endpoint))
+		lines = append(lines, "url: "+zeroTheme.ink.Render(redactMCPWizardDisplayValue(wizard.endpoint)))
 		if wizard.headerKey != "" {
 			lines = append(lines, "header: "+zeroTheme.ink.Render(wizard.headerKey+"=[REDACTED]"))
 		}
 	} else {
-		lines = append(lines, "command: "+zeroTheme.ink.Render(wizard.endpoint))
+		lines = append(lines, "command: "+zeroTheme.ink.Render(redactMCPWizardCommand(wizard.endpoint)))
 	}
 	if len(wizard.prerequisites) > 0 {
 		lines = append(lines, "", zeroTheme.accent.Render("Needs"))
@@ -162,17 +162,58 @@ func (wizard *mcpAddWizardState) renderResultStep(width int) []string {
 		lines = append(lines, fmt.Sprintf("Tools: %d discovered", maxInt(0, result.ToolCount)))
 	}
 	lines = append(lines, "")
-	if result.Connected {
-		lines = append(lines, "> Use server", "  Manage tools", "  Edit config", "  Disable server")
-	} else if result.Saved {
-		lines = append(lines, "> Retry connection", "  Edit config", "  Disable server", "  Remove server")
-	} else {
-		lines = append(lines, "> Edit URL", "  Save disabled", "  Discard")
+	for index, action := range wizard.resultActionLabels() {
+		marker := "  "
+		if index == clampInt(wizard.resultSelected, 0, len(wizard.resultActionLabels())-1) {
+			marker = "> "
+		}
+		lines = append(lines, marker+action)
 	}
 	for index, line := range lines {
 		lines[index] = fitStyledLine(line, width)
 	}
 	return lines
+}
+
+func redactMCPWizardDisplayValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if looksLikeMCPDisplayURLValue(value) {
+		return redactMCPDisplayURL(value)
+	}
+	return redaction.RedactString(value, redaction.Options{})
+}
+
+func redactMCPWizardCommand(value string) string {
+	parts, err := splitMCPCommandArgs(value)
+	if err != nil || len(parts) == 0 {
+		return redactMCPWizardDisplayValue(value)
+	}
+	redacted := make([]string, 0, len(parts))
+	head := strings.TrimSpace(parts[0])
+	if looksLikeMCPDisplayURLValue(head) {
+		head = redactMCPDisplayURL(head)
+	} else {
+		head = redaction.RedactString(head, redaction.Options{})
+	}
+	redacted = append(redacted, head)
+	redacted = append(redacted, redactedCommandArgs(parts[1:])...)
+	return strings.Join(redacted, " ")
+}
+
+func (wizard *mcpAddWizardState) resultActionLabels() []string {
+	switch {
+	case wizard == nil:
+		return nil
+	case wizard.result.Connected:
+		return []string{"Use server", "Manage tools", "Edit config", "Disable server"}
+	case wizard.result.Saved:
+		return []string{"Retry connection", "Edit config", "Disable server", "Remove server"}
+	default:
+		return []string{"Edit URL", "Save disabled", "Discard"}
+	}
 }
 
 func (wizard *mcpAddWizardState) footer() string {

@@ -49,7 +49,11 @@ type model struct {
 	mcpConfig              config.MCPConfig
 	mcpPermissionStore     *internalmcp.PermissionStore
 	mcpTokenStore          *internalmcp.TokenStore
-	mcpCommand             func([]string) MCPCommandResult
+	mcpCommand             func(context.Context, []string) MCPCommandResult
+	mcpViewStateCache      MCPViewState
+	mcpViewStateReady      bool
+	mcpCommandSeq          int
+	mcpCommandCancel       context.CancelFunc
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
@@ -204,6 +208,29 @@ type agentRowMsg struct {
 	row   transcriptRow
 }
 
+type mcpCommandOrigin int
+
+const (
+	mcpCommandOriginTranscript mcpCommandOrigin = iota
+	mcpCommandOriginManager
+	mcpCommandOriginWizard
+)
+
+type mcpCommandRequest struct {
+	id              int
+	origin          mcpCommandOrigin
+	args            []string
+	raw             string
+	managerSelected int
+	managerQuery    string
+	wizardDisabled  bool
+}
+
+type mcpCommandResultMsg struct {
+	request mcpCommandRequest
+	result  MCPCommandResult
+}
+
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
@@ -310,7 +337,7 @@ func newModel(ctx context.Context, options Options) model {
 	})
 	notifier.SetFocused(true)
 
-	return model{
+	m := model{
 		ctx:                    ctx,
 		cwd:                    cwd,
 		userConfigPath:         options.UserConfigPath,
@@ -345,6 +372,8 @@ func newModel(ctx context.Context, options Options) model {
 		setup:                  newSetupState(options.Setup),
 		setupSave:              options.Setup.Save,
 	}
+	m.refreshMCPViewState()
+	return m
 }
 
 const (
@@ -443,6 +472,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlO:
 			return m.toggleDetailedTranscript(), nil
 		case tea.KeyEsc:
+			if m.mcpCommandCancel != nil {
+				m.cancelMCPCommand()
+				if m.mcpAddWizard != nil {
+					m.mcpAddWizard.result = mcpAddWizardResult{Title: "MCP setup cancelled", State: "cancelled", Message: "MCP action was cancelled.", ActionHint: "Edit config"}
+					m.mcpAddWizard.step = mcpAddWizardStepResult
+					return m, nil
+				}
+				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: "MCP action cancelled"})
+				return m, nil
+			}
 			if m.transcriptDetailed {
 				m.transcriptDetailed = false
 				return m, nil
@@ -915,6 +954,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySetupModelsDiscovered(msg), nil
 	case modelPickerModelsDiscoveredMsg:
 		return m.applyModelPickerModelsDiscovered(msg), nil
+	case mcpCommandResultMsg:
+		return m.applyMCPCommandResultMessage(msg), nil
 	}
 
 	var cmd tea.Cmd
@@ -1467,10 +1508,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(command.text) == "" {
 			return m.openMCPManager(), nil
 		}
-		text := ""
-		m, text = m.handleMCPCommand(command.text)
-		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "mcp", text: text})
-		return m, nil
+		return m.startMCPTranscriptCommand(command.text)
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil

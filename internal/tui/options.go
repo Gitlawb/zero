@@ -35,7 +35,7 @@ type Options struct {
 	MCPConfig              config.MCPConfig
 	MCPPermissionStore     *mcp.PermissionStore
 	MCPTokenStore          *mcp.TokenStore
-	MCPCommand             func([]string) MCPCommandResult
+	MCPCommand             func(context.Context, []string) MCPCommandResult
 	UsageTracker           *usage.Tracker
 	SessionCompactor       SessionCompactor
 

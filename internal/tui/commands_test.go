@@ -16,6 +16,16 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+func applyCommandResult(t *testing.T, m model, cmd tea.Cmd) model {
+	t.Helper()
+	msg := execCmd(cmd)
+	if msg == nil {
+		t.Fatal("expected command to return a result message")
+	}
+	updated, _ := m.Update(msg)
+	return updated.(model)
+}
+
 func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 	lines := formatCommandHelpLines()
 	help := strings.Join(lines, "\n")
@@ -356,7 +366,7 @@ func TestMCPManagerAddRemoteOpensWizard(t *testing.T) {
 
 func TestMCPAddWizardInvalidURLShowsUnsavedResult(t *testing.T) {
 	m := newModel(context.Background(), Options{
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			t.Fatalf("MCPCommand should not run for invalid URL, got %#v", args)
 			return MCPCommandResult{}
 		},
@@ -405,7 +415,7 @@ func TestMCPAddWizardInvalidURLShowsUnsavedResult(t *testing.T) {
 func TestMCPAddWizardInvalidURLCanSaveDisabledDraft(t *testing.T) {
 	var called []string
 	m := newModel(context.Background(), Options{
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			called = append([]string{}, args...)
 			return MCPCommandResult{
 				ExitCode: 0,
@@ -420,7 +430,8 @@ func TestMCPAddWizardInvalidURLCanSaveDisabledDraft(t *testing.T) {
 	m.height = 36
 	m.mcpAddWizard = newMCPAddWizard("http")
 
-	for _, key := range []tea.KeyMsg{
+	var cmd tea.Cmd
+	for index, key := range []tea.KeyMsg{
 		{Type: tea.KeyRunes, Runes: []rune("draft")},
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyEnter},
@@ -428,12 +439,17 @@ func TestMCPAddWizardInvalidURLCanSaveDisabledDraft(t *testing.T) {
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyRunes, Runes: []rune("s")},
 	} {
-		updated, cmd := m.Update(key)
-		if cmd != nil {
+		updated, nextCmd := m.Update(key)
+		if nextCmd != nil && index != 5 {
 			t.Fatal("expected MCP add wizard input to update synchronously")
 		}
 		m = updated.(model)
+		cmd = nextCmd
 	}
+	if cmd == nil {
+		t.Fatal("expected save disabled action to run asynchronously")
+	}
+	m = applyCommandResult(t, m, cmd)
 
 	want := []string{"add", "draft", "--type", "http", "--disabled", "--url", "sxas"}
 	if !reflect.DeepEqual(called, want) {
@@ -453,7 +469,7 @@ func TestMCPAddWizardInvalidURLCanSaveDisabledDraft(t *testing.T) {
 func TestMCPAddWizardSavesRemoteWithPastedHeader(t *testing.T) {
 	var called []string
 	m := newModel(context.Background(), Options{
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			called = append([]string{}, args...)
 			return MCPCommandResult{
 				ExitCode: 0,
@@ -468,7 +484,8 @@ func TestMCPAddWizardSavesRemoteWithPastedHeader(t *testing.T) {
 	m.height = 36
 	m.mcpAddWizard = newMCPAddWizard("http")
 
-	for _, key := range []tea.KeyMsg{
+	var cmd tea.Cmd
+	for index, key := range []tea.KeyMsg{
 		{Type: tea.KeyRunes, Runes: []rune("docs")},
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyEnter},
@@ -478,12 +495,17 @@ func TestMCPAddWizardSavesRemoteWithPastedHeader(t *testing.T) {
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyEnter},
 	} {
-		updated, cmd := m.Update(key)
-		if cmd != nil {
+		updated, nextCmd := m.Update(key)
+		if nextCmd != nil && index != 7 {
 			t.Fatal("expected MCP add wizard input to update synchronously")
 		}
 		m = updated.(model)
+		cmd = nextCmd
 	}
+	if cmd == nil {
+		t.Fatal("expected MCP add wizard save to run asynchronously")
+	}
+	m = applyCommandResult(t, m, cmd)
 
 	want := []string{"add", "docs", "--type", "http", "--url", "https://docs.example/mcp", "--header", "Authorization=Bearer secret"}
 	if !reflect.DeepEqual(called, want) {
@@ -549,10 +571,33 @@ func TestChatMCPSetupStitchURLOpensPrefilledWizard(t *testing.T) {
 	}
 }
 
+func TestMCPAddWizardConfirmRedactsSensitiveSourceAndEndpoint(t *testing.T) {
+	wizard := newMCPAddWizard("http")
+	wizard.step = mcpAddWizardStepConfirm
+	wizard.serverName = "remote"
+	wizard.serverType = "http"
+	wizard.endpoint = "https://user:password@remote.example/mcp?access_token=endpoint-secret&safe=value#api_key=fragment-secret"
+	wizard.sourceLabel = "Remote Docs"
+	wizard.sourceURL = "https://docs.example/setup?api_key=docs-secret"
+	wizard.headerKey = "Authorization"
+
+	got := plainRender(t, wizard.render(120))
+	for _, leaked := range []string{"user:password", "endpoint-secret", "fragment-secret", "docs-secret"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("wizard confirm leaked %q in:\n%s", leaked, got)
+		}
+	}
+	for _, want := range []string{"remote.example", "safe=value", "access_token=[REDACTED]", "api_key=[REDACTED]", "Authorization=[REDACTED]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("wizard confirm missing redacted context %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestChatMCPSetupStitchConfirmSavesServer(t *testing.T) {
 	var called []string
 	m := newModel(context.Background(), Options{
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			called = append([]string{}, args...)
 			return MCPCommandResult{
 				ExitCode: 0,
@@ -575,9 +620,10 @@ func TestChatMCPSetupStitchConfirmSavesServer(t *testing.T) {
 
 	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next = updated.(model)
-	if cmd != nil {
-		t.Fatal("expected MCP setup save to run synchronously")
+	if cmd == nil {
+		t.Fatal("expected MCP setup save to run asynchronously")
 	}
+	next = applyCommandResult(t, next, cmd)
 
 	want := []string{"add", "stitch", "--type", "stdio", "--", "npx", "-y", "@_davideast/stitch-mcp@latest", "proxy"}
 	if !reflect.DeepEqual(called, want) {
@@ -601,7 +647,7 @@ func TestMCPManagerRunsSelectedServerAction(t *testing.T) {
 		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 			"docs": {Type: "stdio", Command: "zero-docs-mcp"},
 		}},
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			called = append([]string{}, args...)
 			return MCPCommandResult{
 				ExitCode: 0,
@@ -622,9 +668,13 @@ func TestMCPManagerRunsSelectedServerAction(t *testing.T) {
 
 	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d"), Alt: true})
 	next = updated.(model)
-	if cmd != nil {
-		t.Fatal("expected MCP action to run synchronously")
+	if cmd == nil {
+		t.Fatal("expected MCP action to run asynchronously")
 	}
+	if called != nil {
+		t.Fatalf("MCPCommand ran during Update; called=%#v", called)
+	}
+	next = applyCommandResult(t, next, cmd)
 	if !reflect.DeepEqual(called, []string{"disable", "docs"}) {
 		t.Fatalf("MCPCommand args = %#v, want disable docs", called)
 	}
@@ -651,7 +701,7 @@ func TestMCPCommandRunsManagerActionAndRefreshesState(t *testing.T) {
 		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 			"docs": {Type: "stdio", Command: "zero-docs-mcp"},
 		}},
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			if !reflect.DeepEqual(args, []string{"disable", "docs"}) {
 				t.Fatalf("MCPCommand args = %#v, want disable docs", args)
 			}
@@ -669,9 +719,10 @@ func TestMCPCommandRunsManagerActionAndRefreshesState(t *testing.T) {
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("expected /mcp disable to run synchronously")
+	if cmd == nil {
+		t.Fatal("expected /mcp disable to run asynchronously")
 	}
+	next = applyCommandResult(t, next, cmd)
 	if !next.mcpConfig.Servers["docs"].Disabled {
 		t.Fatalf("docs server was not disabled in TUI state: %#v", next.mcpConfig.Servers["docs"])
 	}
@@ -691,7 +742,7 @@ func TestMCPCommandRunsManagerActionAndRefreshesState(t *testing.T) {
 func TestMCPCommandPreservesQuotedArguments(t *testing.T) {
 	var called []string
 	m := newModel(context.Background(), Options{
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			called = append([]string{}, args...)
 			return MCPCommandResult{
 				ExitCode: 0,
@@ -707,9 +758,10 @@ func TestMCPCommandPreservesQuotedArguments(t *testing.T) {
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("expected /mcp add to run synchronously")
+	if cmd == nil {
+		t.Fatal("expected /mcp add to run asynchronously")
 	}
+	next = applyCommandResult(t, next, cmd)
 	want := []string{"add", "docs", "--", `C:\Program Files\docs mcp.exe`, "--label", "Zero Docs"}
 	if !reflect.DeepEqual(called, want) {
 		t.Fatalf("MCPCommand args = %#v, want %#v", called, want)
@@ -724,7 +776,7 @@ func TestMCPCommandDoesNotApplyFailedConfig(t *testing.T) {
 		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 			"docs": {Type: "stdio", Command: "zero-docs-mcp"},
 		}},
-		MCPCommand: func(args []string) MCPCommandResult {
+		MCPCommand: func(_ context.Context, args []string) MCPCommandResult {
 			return MCPCommandResult{
 				ExitCode: 1,
 				Error:    "permission denied",
@@ -737,9 +789,10 @@ func TestMCPCommandDoesNotApplyFailedConfig(t *testing.T) {
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 
-	if cmd != nil {
-		t.Fatal("expected failed /mcp command to resolve synchronously")
+	if cmd == nil {
+		t.Fatal("expected failed /mcp command to run asynchronously")
 	}
+	next = applyCommandResult(t, next, cmd)
 	if _, ok := next.mcpConfig.Servers["docs"]; !ok {
 		t.Fatalf("failed MCP command cleared existing config: %#v", next.mcpConfig.Servers)
 	}

@@ -135,6 +135,13 @@ func runHooks(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 }
 
 func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	return runMCPWithContext(context.Background(), args, stdout, stderr, deps)
+}
+
+func runMCPWithContext(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "mcp subcommand required. Use `zero mcp permissions list`.")
 	}
@@ -153,11 +160,11 @@ func runMCP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 	case "disable":
 		return runMCPToggle(args[1:], stdout, stderr, deps, true)
 	case "check":
-		return runMCPCheck(args[1:], stdout, stderr, deps)
+		return runMCPCheck(ctx, args[1:], stdout, stderr, deps)
 	case "permissions":
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
 	case "tools":
-		return runMCPTools(args[1:], stdout, stderr, deps)
+		return runMCPTools(ctx, args[1:], stdout, stderr, deps)
 	case "oauth":
 		return runMCPOAuth(args[1:], stdout, stderr, deps)
 	case "list":
@@ -183,7 +190,7 @@ func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		if options.json {
 			forwarded = append(forwarded, "--json")
 		}
-		return runMCPTools(forwarded, stdout, stderr, deps)
+		return runMCPTools(context.Background(), forwarded, stdout, stderr, deps)
 	}
 
 	cwd, err := deps.getwd()
@@ -210,7 +217,7 @@ func runMCPLegacyList(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintln(stdout, formatMCPServerList(cfg.Servers)); err != nil {
+	if _, err := fmt.Fprintln(stdout, redaction.RedactString(formatMCPServerList(cfg.Servers), redaction.Options{})); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -240,7 +247,10 @@ func redactMCPServerConfigs(servers map[string]config.MCPServerConfig) map[strin
 	return redacted
 }
 
-func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPTools(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if len(args) == 0 {
 		return writeExecUsageError(stderr, "mcp tools subcommand required. Use `zero mcp tools list`.")
 	}
@@ -268,7 +278,7 @@ func runMCPTools(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 		}
 		registry := tools.NewRegistry()
-		runtime, err := registerMCPToolsForWorkspace(context.Background(), cwd, registry, deps, mcp.AutonomyLow)
+		runtime, err := registerMCPToolsForWorkspace(ctx, cwd, registry, deps, mcp.AutonomyLow)
 		if err != nil {
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
