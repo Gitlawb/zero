@@ -147,6 +147,99 @@ func TestRunMCPAddUpdatePreservesUnknownServerFields(t *testing.T) {
 	}
 }
 
+func TestRunMCPAddUpdatePreservesExistingOAuth(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeMCPCommandRawConfig(t, configPath, `{
+  "mcp": {
+    "servers": {
+      "remote": {
+        "type": "http",
+        "url": "https://old.example/mcp",
+        "auth": "oauth",
+        "oauth": {
+          "clientID": "client-123",
+          "scopes": ["docs:read"]
+        },
+        "futureServer": {"keep": true}
+      }
+    }
+  }
+}
+`)
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"mcp", "add", "remote", "--url", "https://new.example/mcp", "--json"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	cfg := readMCPCommandConfig(t, configPath)
+	remote := cfg.MCP.Servers["remote"]
+	if remote.OAuth == nil || remote.OAuth.ClientID != "client-123" {
+		t.Fatalf("OAuth config was not preserved: %#v", remote.OAuth)
+	}
+	if remote.Auth != "oauth" {
+		t.Fatalf("Auth = %q, want preserved oauth", remote.Auth)
+	}
+	if got := remote.URL; got != "https://new.example/mcp" {
+		t.Fatalf("URL = %q, want updated URL", got)
+	}
+	raw := readMCPCommandRawConfig(t, configPath)
+	remoteRaw := rawMCPCommandObject(t, rawMCPCommandObject(t, rawMCPCommandObject(t, raw["mcp"])["servers"])["remote"])
+	if _, ok := remoteRaw["futureServer"]; !ok {
+		t.Fatalf("unknown server field was not preserved: %s", mustMarshalMCPCommandJSON(t, remoteRaw))
+	}
+	if _, ok := remoteRaw["oauth"]; !ok {
+		t.Fatalf("oauth raw field was not preserved: %s", mustMarshalMCPCommandJSON(t, remoteRaw))
+	}
+	if got := string(remoteRaw["auth"]); got != `"oauth"` {
+		t.Fatalf("auth raw = %s, want preserved oauth in %s", got, mustMarshalMCPCommandJSON(t, remoteRaw))
+	}
+}
+
+func TestRunMCPAddMigratesLegacyServerRawFields(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeMCPCommandRawConfig(t, configPath, `{
+  "mcpServers": {
+    "legacy": {
+      "type": "http",
+      "url": "https://old.example/mcp",
+      "auth": "oauth",
+      "oauth": {"clientID": "legacy-client"},
+      "futureLegacy": {"keep": true}
+    }
+  }
+}
+`)
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"mcp", "add", "legacy", "--url", "https://new.example/mcp", "--json"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	})
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	raw := readMCPCommandRawConfig(t, configPath)
+	if _, ok := raw["mcpServers"]; ok {
+		t.Fatalf("legacy mcpServers entry was not migrated: %s", mustMarshalMCPCommandJSON(t, raw))
+	}
+	legacyRaw := rawMCPCommandObject(t, rawMCPCommandObject(t, rawMCPCommandObject(t, raw["mcp"])["servers"])["legacy"])
+	for _, key := range []string{"oauth", "futureLegacy"} {
+		if _, ok := legacyRaw[key]; !ok {
+			t.Fatalf("legacy raw field %q was not preserved: %s", key, mustMarshalMCPCommandJSON(t, legacyRaw))
+		}
+	}
+	if got := string(legacyRaw["auth"]); got != `"oauth"` {
+		t.Fatalf("auth raw = %s, want preserved oauth in %s", got, mustMarshalMCPCommandJSON(t, legacyRaw))
+	}
+	if got := string(legacyRaw["url"]); got != `"https://new.example/mcp"` {
+		t.Fatalf("url raw = %s, want updated URL in %s", got, mustMarshalMCPCommandJSON(t, legacyRaw))
+	}
+}
+
 func TestRunMCPRemoveDeletesUserConfigServer(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeMCPCommandConfig(t, configPath, config.FileConfig{

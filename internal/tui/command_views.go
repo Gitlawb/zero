@@ -76,10 +76,16 @@ func (m model) handleMCPCommand(args string) (model, string) {
 			m.mcpText(),
 		}, "\n")
 	}
-	result := m.mcpCommand(strings.Fields(args))
-	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
-		m.mcpConfig = result.Config
+	parsedArgs, err := splitMCPCommandArgs(args)
+	if err != nil {
+		return m, strings.Join([]string{
+			"MCP action failed",
+			err.Error(),
+			"",
+			m.mcpText(),
+		}, "\n")
 	}
+	result := m.mcpCommand(parsedArgs)
 	if result.ExitCode != 0 || strings.TrimSpace(result.Error) != "" {
 		message := strings.TrimSpace(result.Error)
 		if message == "" {
@@ -95,6 +101,9 @@ func (m model) handleMCPCommand(args string) (model, string) {
 			m.mcpText(),
 		}, "\n")
 	}
+	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
+		m.mcpConfig = result.Config
+	}
 	output := strings.TrimSpace(result.Output)
 	if output == "" {
 		output = "zero mcp " + args
@@ -105,6 +114,62 @@ func (m model) handleMCPCommand(args string) (model, string) {
 		"",
 		m.mcpText(),
 	}, "\n")
+}
+
+func splitMCPCommandArgs(args string) ([]string, error) {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return nil, nil
+	}
+	out := []string{}
+	var current strings.Builder
+	var quote rune
+	hasToken := false
+	runes := []rune(args)
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				hasToken = true
+				continue
+			}
+			if r == '\\' && index+1 < len(runes) && runes[index+1] == quote {
+				index++
+				current.WriteRune(runes[index])
+				hasToken = true
+				continue
+			}
+			current.WriteRune(r)
+			hasToken = true
+			continue
+		}
+		switch {
+		case r == '\'' || r == '"':
+			quote = r
+			hasToken = true
+		case r == '\\' && index+1 < len(runes) && (runes[index+1] == '\'' || runes[index+1] == '"' || strings.TrimSpace(string(runes[index+1])) == ""):
+			index++
+			current.WriteRune(runes[index])
+			hasToken = true
+		case strings.TrimSpace(string(r)) == "":
+			if hasToken {
+				out = append(out, current.String())
+				current.Reset()
+				hasToken = false
+			}
+		default:
+			current.WriteRune(r)
+			hasToken = true
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote in MCP command")
+	}
+	if hasToken {
+		out = append(out, current.String())
+	}
+	return out, nil
 }
 
 func (m model) permissionsText() string {

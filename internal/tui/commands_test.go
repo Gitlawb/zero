@@ -393,6 +393,67 @@ func TestMCPCommandRunsManagerActionAndRefreshesState(t *testing.T) {
 	}
 }
 
+func TestMCPCommandPreservesQuotedArguments(t *testing.T) {
+	var called []string
+	m := newModel(context.Background(), Options{
+		MCPCommand: func(args []string) MCPCommandResult {
+			called = append([]string{}, args...)
+			return MCPCommandResult{
+				ExitCode: 0,
+				Output:   "Added MCP server docs.",
+				Config: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"docs": {Type: "stdio", Command: `C:\Program Files\docs mcp.exe`, Args: []string{"--label", "Zero Docs"}},
+				}},
+			}
+		},
+	})
+	m.input.SetValue(`/mcp add docs -- "C:\Program Files\docs mcp.exe" --label "Zero Docs"`)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /mcp add to run synchronously")
+	}
+	want := []string{"add", "docs", "--", `C:\Program Files\docs mcp.exe`, "--label", "Zero Docs"}
+	if !reflect.DeepEqual(called, want) {
+		t.Fatalf("MCPCommand args = %#v, want %#v", called, want)
+	}
+	if got := next.mcpConfig.Servers["docs"].Command; got != `C:\Program Files\docs mcp.exe` {
+		t.Fatalf("persisted command = %q", got)
+	}
+}
+
+func TestMCPCommandDoesNotApplyFailedConfig(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		MCPConfig: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+			"docs": {Type: "stdio", Command: "zero-docs-mcp"},
+		}},
+		MCPCommand: func(args []string) MCPCommandResult {
+			return MCPCommandResult{
+				ExitCode: 1,
+				Error:    "permission denied",
+				Config:   config.MCPConfig{},
+			}
+		},
+	})
+	m.input.SetValue("/mcp disable docs")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected failed /mcp command to resolve synchronously")
+	}
+	if _, ok := next.mcpConfig.Servers["docs"]; !ok {
+		t.Fatalf("failed MCP command cleared existing config: %#v", next.mcpConfig.Servers)
+	}
+	text := transcriptText(next.transcript)
+	if !strings.Contains(text, "MCP action failed") || !strings.Contains(text, "permission denied") {
+		t.Fatalf("missing failure output:\n%s", text)
+	}
+}
+
 type commandTestMCPTool struct {
 	name        string
 	serverName  string

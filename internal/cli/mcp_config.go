@@ -571,9 +571,24 @@ func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerC
 	if cfg.file.MCP.Servers == nil {
 		cfg.file.MCP.Servers = map[string]config.MCPServerConfig{}
 	}
-	_, updated := cfg.file.MCP.Servers[name]
-	cfg.file.MCP.Servers[name] = server
-	data, err := mergeMCPServerRaw(cfg.serverRaw[name], server)
+	existingRaw, updated := cfg.serverRaw[name]
+	existingServer := cfg.file.MCP.Servers[name]
+	if !updated {
+		legacyRaw, legacyFound, err := cfg.legacyServerRaw(name)
+		if err != nil {
+			return false, err
+		}
+		if legacyFound {
+			existingRaw = legacyRaw
+			updated = true
+			if len(legacyRaw) > 0 && string(legacyRaw) != "null" {
+				_ = json.Unmarshal(legacyRaw, &existingServer)
+			}
+		}
+	}
+	mergedServer := overlayMCPServer(existingServer, server)
+	cfg.file.MCP.Servers[name] = mergedServer
+	data, err := mergeMCPServerRaw(existingRaw, mergedServer)
 	if err != nil {
 		return false, err
 	}
@@ -582,6 +597,31 @@ func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerC
 		return false, err
 	}
 	return updated, nil
+}
+
+func overlayMCPServer(existing config.MCPServerConfig, next config.MCPServerConfig) config.MCPServerConfig {
+	existing.Type = next.Type
+	existing.Command = next.Command
+	existing.Args = append([]string{}, next.Args...)
+	existing.Env = cloneStringMap(next.Env)
+	existing.URL = next.URL
+	existing.Headers = cloneStringMap(next.Headers)
+	if strings.TrimSpace(next.Auth) != "" {
+		existing.Auth = next.Auth
+	}
+	existing.Disabled = next.Disabled
+	return existing
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func mergeMCPServerRaw(existing json.RawMessage, server config.MCPServerConfig) (json.RawMessage, error) {
@@ -599,14 +639,18 @@ func mergeMCPServerRaw(existing json.RawMessage, server config.MCPServerConfig) 
 	if merged == nil {
 		merged = map[string]json.RawMessage{}
 	}
-	for _, key := range []string{"type", "command", "args", "env", "url", "headers", "auth", "oauth", "disabled"} {
+	for _, key := range []string{"type", "command", "args", "env", "url", "headers", "auth", "disabled"} {
 		delete(merged, key)
 	}
 	var typedRaw map[string]json.RawMessage
 	if err := json.Unmarshal(typed, &typedRaw); err != nil {
 		return nil, err
 	}
+	_, preserveRawOAuth := merged["oauth"]
 	for key, value := range typedRaw {
+		if key == "oauth" && preserveRawOAuth {
+			continue
+		}
 		merged[key] = value
 	}
 	return json.Marshal(merged)
@@ -719,6 +763,25 @@ func (cfg *mcpWritableConfig) takeLegacyServer(name string) (json.RawMessage, bo
 			cfg.raw[key] = next
 		}
 		return raw, true, nil
+	}
+	return nil, false, nil
+}
+
+func (cfg *mcpWritableConfig) legacyServerRaw(name string) (json.RawMessage, bool, error) {
+	cfg.ensureRaw()
+	for _, key := range []string{"mcpServers", "mcp_servers"} {
+		data, ok := cfg.raw[key]
+		if !ok || len(data) == 0 || string(data) == "null" {
+			continue
+		}
+		var servers map[string]json.RawMessage
+		if err := json.Unmarshal(data, &servers); err != nil {
+			return nil, false, err
+		}
+		raw, ok := servers[name]
+		if ok {
+			return raw, true, nil
+		}
 	}
 	return nil, false, nil
 }
