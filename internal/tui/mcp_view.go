@@ -71,9 +71,12 @@ func renderMCPView(state MCPViewState, width int) string {
 	if !hasMCPViewContent(state) {
 		output.Sections = []commandSection{{
 			Title: "State",
-			Lines: []string{"No MCP servers configured."},
+			Lines: []string{
+				"No MCP servers configured.",
+				"Add one with zero mcp add, then reopen /mcp.",
+			},
 		}}
-		output.Hints = []string{"zero mcp list", "zero mcp tools list"}
+		output.Hints = []string{"zero mcp add <name> --url <url>", "zero mcp list", "zero mcp check <name>"}
 		return fitCommandOutput(output, width)
 	}
 
@@ -106,7 +109,7 @@ func renderMCPView(state MCPViewState, width int) string {
 }
 
 func mcpViewStatus(state MCPViewState) commandStatus {
-	if !hasMCPViewContent(state) {
+	if !hasMCPOperationalContent(state) {
 		return commandStatusWarning
 	}
 	for _, server := range state.Servers {
@@ -119,10 +122,23 @@ func mcpViewStatus(state MCPViewState) commandStatus {
 }
 
 func hasMCPViewContent(state MCPViewState) bool {
+	return hasMCPOperationalContent(state) ||
+		hasMCPPermissionActivity(state.Permissions)
+}
+
+func hasMCPOperationalContent(state MCPViewState) bool {
 	return len(state.Servers) > 0 ||
 		len(state.Tools) > 0 ||
-		hasMCPPermissionSummary(state.Permissions) ||
 		len(state.OAuth.Servers) > 0
+}
+
+func hasMCPPermissionActivity(summary MCPPermissionSummary) bool {
+	return summary.GrantCount > 0 ||
+		summary.ServerGrants > 0 ||
+		summary.ToolGrants > 0 ||
+		summary.PromptCount > 0 ||
+		summary.DeniedCount > 0 ||
+		len(summary.Grants) > 0
 }
 
 func mcpServerLines(servers []MCPServerView) []string {

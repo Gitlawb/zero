@@ -23,6 +23,26 @@ func TestMCPViewRendersEmptyState(t *testing.T) {
 	}
 }
 
+func TestMCPViewRendersEmptyStateWhenOnlyPermissionModeExists(t *testing.T) {
+	got := plainRender(t, renderMCPView(MCPViewState{
+		Permissions: MCPPermissionSummary{Mode: "ask"},
+	}, 96))
+
+	for _, want := range []string{
+		"MCP",
+		"status: warning",
+		"No MCP servers configured.",
+		"zero mcp add",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("empty MCP view with permission mode = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "status: ok") {
+		t.Fatalf("empty MCP view should not report ok:\n%s", got)
+	}
+}
+
 func TestMCPViewRendersServerRows(t *testing.T) {
 	got := plainRender(t, renderMCPView(MCPViewState{
 		Servers: []MCPServerView{
