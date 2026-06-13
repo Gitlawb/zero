@@ -281,7 +281,7 @@ func TestPastingTwiceKeepsBothComposerPreviews(t *testing.T) {
 		t.Fatalf("composer value should preserve both pastes = %q", got)
 	}
 	view := plainRender(t, next.composerBox(120))
-	for _, want := range []string{"[Create a dashboard.", "3 lines", "[Log line one", "4 lines, paste 1"} {
+	for _, want := range []string{"[Create a dashboard.", "3 lines", "[Log line one", "4 lines, paste 2"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("composer preview missing %q in:\n%s", want, view)
 		}

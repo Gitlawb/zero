@@ -78,6 +78,8 @@ func newSetupState(options SetupOptions) setupState {
 	apiKey.Placeholder = "paste key or leave blank"
 	apiKey.EchoMode = textinput.EchoPassword
 	apiKey.EchoCharacter = '*'
+	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
+	// terminal bracketed paste (Paste: true) is the single paste path.
 	apiKey.KeyMap.Paste.SetEnabled(false)
 	apiKey.Focus()
 	return setupState{

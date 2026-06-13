@@ -306,7 +306,7 @@ func (m model) insertComposerTextWithPastePreview(state composerState, text stri
 	nextPreviews := composerPastePreviewsAfterInsert(m.composerPastePreviews, insertStart, insertedRunes)
 	m.setComposerState(insertComposerText(state, text))
 	if previewLabel != "" && insertedRunes > 0 {
-		previewLabel = composerPastePreviewLabelWithIndex(previewLabel, len(nextPreviews))
+		previewLabel = composerPastePreviewLabelWithIndex(previewLabel, len(nextPreviews)+1)
 		nextPreviews = append(nextPreviews, composerPastePreview{
 			active: true,
 			start:  insertStart,
@@ -365,11 +365,11 @@ func composerPastePreviewLabel(text string, wrapWidth int) (string, bool) {
 	return "[" + snippet + " · " + strconv.Itoa(lineCount) + " " + label + "]", true
 }
 
-func composerPastePreviewLabelWithIndex(label string, pasteIndex int) string {
-	if pasteIndex <= 0 || !strings.HasSuffix(label, "]") {
+func composerPastePreviewLabelWithIndex(label string, pasteNumber int) string {
+	if pasteNumber <= 1 || !strings.HasSuffix(label, "]") {
 		return label
 	}
-	return strings.TrimSuffix(label, "]") + ", paste " + strconv.Itoa(pasteIndex) + "]"
+	return strings.TrimSuffix(label, "]") + ", paste " + strconv.Itoa(pasteNumber) + "]"
 }
 
 func composerPastePreviewVisualLineCount(text string, wrapWidth int) int {

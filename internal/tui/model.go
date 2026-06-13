@@ -294,6 +294,8 @@ func newModel(ctx context.Context, options Options) model {
 	input.TextStyle = zeroTheme.ink
 	input.PlaceholderStyle = zeroTheme.faint
 	input.Placeholder = composerPlaceholder
+	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
+	// terminal bracketed paste (Paste: true) is the single paste path.
 	input.KeyMap.Paste.SetEnabled(false)
 	input.Focus()
 
