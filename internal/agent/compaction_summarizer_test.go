@@ -81,7 +81,7 @@ func TestSummarizeWithFallbackReSummarizesPartialsIntoOne(t *testing.T) {
 	}
 	provider := &compressingSummarizer{maxMarkers: 2}
 
-	summary, err := summarizeWithFallback(context.Background(), provider, messages)
+	summary, err := summarizeWithFallback(context.Background(), provider, messages, nil)
 	if err != nil {
 		t.Fatalf("summarizeWithFallback failed: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSummarizeWithFallbackChunksOnContextLimit(t *testing.T) {
 	// must be split recursively until each chunk fits.
 	provider := &sizeLimitedSummarizer{maxMarkers: 2}
 
-	summary, err := summarizeWithFallback(context.Background(), provider, messages)
+	summary, err := summarizeWithFallback(context.Background(), provider, messages, nil)
 	if err != nil {
 		t.Fatalf("summarizeWithFallback failed: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestSummarizeWithFallbackPropagatesNonContextErrors(t *testing.T) {
 	_, err := summarizeWithFallback(context.Background(), provider, []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleUser, Content: "msg-0"},
 		{Role: zeroruntime.MessageRoleUser, Content: "msg-1"},
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected a non-context-limit error to propagate")
 	}
@@ -138,8 +138,42 @@ func TestSummarizeWithFallbackSingleMessageContextLimitSurfaces(t *testing.T) {
 	provider := &sizeLimitedSummarizer{maxMarkers: 0}
 	_, err := summarizeWithFallback(context.Background(), provider, []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleUser, Content: "msg-0 too big"},
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected the context-limit error to surface for an unsplittable single message")
+	}
+}
+
+// usageReportingSummarizer emits a usage event so a test can assert the
+// summarizer's token cost is forwarded to OnUsage.
+type usageReportingSummarizer struct{}
+
+func (usageReportingSummarizer) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	ch := make(chan zeroruntime.StreamEvent, 3)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "summary"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{PromptTokens: 100, CompletionTokens: 20}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	return ch, nil
+}
+
+func TestSummarizeForwardsUsageButNotText(t *testing.T) {
+	// Compaction must stay invisible to the user (no OnText), but its token cost
+	// MUST be counted, so OnUsage has to fire for the summarizer call.
+	var got zeroruntime.Usage
+	var calls int
+	summary, err := summarizeWithFallback(context.Background(), usageReportingSummarizer{}, []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleUser, Content: "hello"},
+	}, func(u zeroruntime.Usage) { calls++; got = u })
+	if err != nil {
+		t.Fatalf("summarize failed: %v", err)
+	}
+	if summary != "summary" {
+		t.Fatalf("unexpected summary: %q", summary)
+	}
+	if calls != 1 {
+		t.Fatalf("expected OnUsage to fire once, got %d", calls)
+	}
+	if got.PromptTokens != 100 || got.CompletionTokens != 20 {
+		t.Fatalf("unexpected forwarded usage: %#v", got)
 	}
 }

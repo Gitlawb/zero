@@ -846,6 +846,64 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	}
 }
 
+func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
+	// Choosing "always allow" with NO sandbox engine configured must still allow
+	// THIS call (there is just nowhere to persist a grant for future calls). The
+	// prior code denied it because persistPermissionGrant errors when Sandbox==nil.
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write approved")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox:        nil, // no sandbox engine configured
+		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionAlwaysAllow, Reason: "trust it"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write approved" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	// The tool actually ran: the file exists. Under the bug it would be denied
+	// and never written.
+	if _, statErr := os.Stat(filepath.Join(root, "notes.txt")); statErr != nil {
+		t.Fatalf("write_file should have run under always-allow with no sandbox: %v", statErr)
+	}
+	if len(permissionEvents) != 1 || permissionEvents[0].Action != PermissionActionAllow || !permissionEvents[0].PermissionGranted {
+		t.Fatalf("expected one allow event with permission granted, got %#v", permissionEvents)
+	}
+}
+
+// cancelMidStreamProvider cancels the run while the provider stream is open and
+// never sends a terminal event, so CollectStream returns via ctx.Done().
+type cancelMidStreamProvider struct{ cancel context.CancelFunc }
+
+func (p cancelMidStreamProvider) StreamCompletion(_ context.Context, _ zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	p.cancel()
+	return make(chan zeroruntime.StreamEvent), nil
+}
+
+func TestRunCancellationPreservesContextCanceledIdentity(t *testing.T) {
+	// On cancellation the collected error is the stringified ctx error; the loop
+	// must return ctx.Err() itself so errors.Is(err, context.Canceled) holds for
+	// callers that branch on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := Run(ctx, "hi", cancelMidStreamProvider{cancel: cancel}, Options{Registry: tools.NewRegistry()})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected errors.Is(err, context.Canceled), got %v (%T)", err, err)
+	}
+}
+
 func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

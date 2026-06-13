@@ -255,6 +255,10 @@ type compactionState struct {
 	// (even after compaction) could loop indefinitely; one attempt then the
 	// original error surfaces.
 	reactiveAttempted bool
+	// onUsage forwards the summarizer call's token usage for accounting/budgeting.
+	// OnText is deliberately NOT forwarded (compaction stays invisible to the user),
+	// but its token COST must still be counted so usage reports and budgets include it.
+	onUsage func(Usage)
 }
 
 func newCompactionState(options Options) *compactionState {
@@ -262,6 +266,7 @@ func newCompactionState(options Options) *compactionState {
 		enabled:      options.ContextWindow > 0,
 		threshold:    compactionThreshold(options.ContextWindow),
 		preserveLast: options.CompactionPreserveLast,
+		onUsage:      options.OnUsage,
 	}
 }
 
@@ -290,7 +295,7 @@ func (state *compactionState) maybeCompact(
 
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider),
+		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
 	})
 	if err != nil {
 		// Summarizer failed: keep the original history. The reactive path (or a
@@ -333,7 +338,7 @@ func (state *compactionState) recover(
 
 	result, compactErr := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
-		Summarize:    summarizeClosure(ctx, provider),
+		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
 	})
 	if compactErr != nil {
 		// A genuine compaction attempt was made (and failed): the budget is spent
@@ -357,11 +362,12 @@ func (state *compactionState) recover(
 }
 
 // summarizeClosure builds a Summarize function backed by a focused, tool-less
-// provider call. The summary stream intentionally does NOT forward OnText /
-// OnUsage callbacks, so compaction stays invisible on the user-facing surface.
-func summarizeClosure(ctx context.Context, provider Provider) func([]zeroruntime.Message) (string, error) {
+// provider call. The summary stream intentionally does NOT forward OnText (so
+// compaction stays invisible on the user-facing surface), but it DOES forward
+// OnUsage so the summarizer's token cost is still counted by usage/budgeting.
+func summarizeClosure(ctx context.Context, provider Provider, onUsage func(Usage)) func([]zeroruntime.Message) (string, error) {
 	return func(toSummarize []zeroruntime.Message) (string, error) {
-		return summarizeWithFallback(ctx, provider, toSummarize)
+		return summarizeWithFallback(ctx, provider, toSummarize, onUsage)
 	}
 }
 
@@ -372,8 +378,8 @@ func summarizeClosure(ctx context.Context, provider Provider) func([]zeroruntime
 // working when the elided middle is bigger than the summarizer's own context.
 // Non-context-limit errors (and a single message that still won't fit) surface
 // to the caller unchanged.
-func summarizeWithFallback(ctx context.Context, provider Provider, messages []zeroruntime.Message) (string, error) {
-	summary, err := summarizeMessagesOnce(ctx, provider, messages)
+func summarizeWithFallback(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
+	summary, err := summarizeMessagesOnce(ctx, provider, messages, onUsage)
 	if err == nil {
 		return summary, nil
 	}
@@ -382,11 +388,11 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	}
 
 	mid := len(messages) / 2
-	left, leftErr := summarizeWithFallback(ctx, provider, messages[:mid])
+	left, leftErr := summarizeWithFallback(ctx, provider, messages[:mid], onUsage)
 	if leftErr != nil {
 		return "", leftErr
 	}
-	right, rightErr := summarizeWithFallback(ctx, provider, messages[mid:])
+	right, rightErr := summarizeWithFallback(ctx, provider, messages[mid:], onUsage)
 	if rightErr != nil {
 		return "", rightErr
 	}
@@ -399,7 +405,7 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 	combined := strings.TrimSpace(left + "\n\n" + right)
 	reduced, reduceErr := summarizeMessagesOnce(ctx, provider, []zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleUser, Content: combined},
-	})
+	}, onUsage)
 	if reduceErr != nil {
 		return combined, nil
 	}
@@ -407,7 +413,7 @@ func summarizeWithFallback(ctx context.Context, provider Provider, messages []ze
 }
 
 // summarizeMessagesOnce performs a single tool-less summarization call.
-func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message) (string, error) {
+func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []zeroruntime.Message, onUsage func(Usage)) (string, error) {
 	request := zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{
 			{Role: zeroruntime.MessageRoleSystem, Content: summaryInstructions},
@@ -419,7 +425,9 @@ func summarizeMessagesOnce(ctx context.Context, provider Provider, messages []ze
 	if err != nil {
 		return "", err
 	}
-	collected := zeroruntime.CollectStream(ctx, stream)
+	// Forward OnUsage (token accounting) but not OnText (keep compaction invisible
+	// to the user); a nil onUsage is a no-op.
+	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{OnUsage: onUsage})
 	if collected.Error != "" {
 		return "", errors.New(collected.Error)
 	}

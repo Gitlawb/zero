@@ -191,13 +191,16 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				})
 			}
 		}
-		if collected.Error != "" {
-			result.Messages = copyMessages(messages)
-			return result, errors.New(collected.Error)
-		}
+		// Check ctx first: on cancellation helpers.go sets collected.Error to
+		// ctx.Err().Error(), so returning errors.New(collected.Error) would lose
+		// the wrapped sentinel and break errors.Is(err, context.Canceled).
 		if ctx.Err() != nil {
 			result.Messages = copyMessages(messages)
 			return result, ctx.Err()
+		}
+		if collected.Error != "" {
+			result.Messages = copyMessages(messages)
+			return result, errors.New(collected.Error)
 		}
 
 		// Carry the turn's terminal stop reason so a final answer cut off at the
@@ -566,13 +569,19 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			permissionGranted = true
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
-			grant, err := persistPermissionGrant(call.Name, args, decisionReason, options)
-			if err != nil {
-				emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
-				return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent), nil
+			// "Always allow" also persists a grant so future calls skip the prompt.
+			// With no sandbox engine there is nowhere to persist it — that is not a
+			// failure, so honor the allow for THIS call and skip remembering it,
+			// rather than denying what the user explicitly allowed.
+			if options.Sandbox != nil {
+				grant, err := persistPermissionGrant(call.Name, args, decisionReason, options)
+				if err != nil {
+					emitDeniedPermission(options, call, requestEvent, "failed to persist permission grant: "+err.Error())
+					return deniedPermissionResult(call, "failed to persist permission grant: "+err.Error(), requestEvent), nil
+				}
+				requestEvent.GrantMatched = true
+				requestEvent.Grant = &grant
 			}
-			requestEvent.GrantMatched = true
-			requestEvent.Grant = &grant
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)
 			return deniedPermissionResult(call, decisionReason, requestEvent), nil
@@ -1310,9 +1319,6 @@ func propertyToRuntimeMap(property tools.PropertySchema) map[string]any {
 	}
 	if property.Maximum != nil {
 		schema["maximum"] = *property.Maximum
-	}
-	if property.Items != nil {
-		schema["items"] = propertyToRuntimeMap(*property.Items)
 	}
 	if len(property.Properties) > 0 {
 		properties := make(map[string]any, len(property.Properties))
