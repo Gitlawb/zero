@@ -58,12 +58,20 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 }
 
 // formatLoadDiagnostic renders a plugin load diagnostic into a single warning
-// line, prefixing the diagnostic kind and appending the manifest path (when
-// known) so an operator can locate the offending plugin.
+// line, prefixing the diagnostic kind and appending the most specific locator
+// available (manifest path, then plugin path, then plugin ID) so an operator can
+// locate the offending plugin even when the manifest path is unknown.
 func formatLoadDiagnostic(diagnostic plugins.Diagnostic) string {
 	message := fmt.Sprintf("[%s] %s", diagnostic.Kind, diagnostic.Message)
-	if diagnostic.ManifestPath != "" {
-		message += " (" + diagnostic.ManifestPath + ")"
+	locator := diagnostic.ManifestPath
+	if locator == "" {
+		locator = diagnostic.PluginPath
+	}
+	if locator == "" {
+		locator = diagnostic.PluginID
+	}
+	if locator != "" {
+		message += " (" + locator + ")"
 	}
 	return message
 }
