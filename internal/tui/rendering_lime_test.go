@@ -116,6 +116,20 @@ func TestMarkdownTableHeaderRendersBold(t *testing.T) {
 	}
 }
 
+func TestMarkdownTableRendersOuterBorder(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"| Feature | System A |",
+		"|---|---|",
+		"| Mode | Alpha |",
+	}, "\n"), 80, 80)
+	got := strings.Join(lines, "\n")
+	for _, want := range []string{"╭", "┬", "╮", "├", "┼", "┤", "╰", "┴", "╯"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown table border missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestMarkdownTableAddsBodyRulesForWrappedRows(t *testing.T) {
 	lines := renderAssistantMarkdownText(strings.Join([]string{
 		"| Feature | System A | System B |",
@@ -141,6 +155,41 @@ func TestMarkdownTableKeepsCompactRowsClean(t *testing.T) {
 	ruleCount := countMarkdownRuleLines(got)
 	if ruleCount != 1 {
 		t.Fatalf("compact markdown table should only have header rule, got %d in:\n%s", ruleCount, got)
+	}
+}
+
+func TestMarkdownTableAddsBodyRulesForManyRows(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"| Feature | System A | System B |",
+		"|---|---|---|",
+		"| Count | one | two |",
+		"| Mode | Alpha | Beta |",
+		"| Scope | local | remote |",
+		"| State | ready | done |",
+	}, "\n"), 160, 160)
+	got := strings.Join(lines, "\n")
+	ruleCount := countMarkdownRuleLines(got)
+	if ruleCount < 2 {
+		t.Fatalf("multi-row markdown table should add body rules even when wide, got %d in:\n%s", ruleCount, got)
+	}
+}
+
+func TestMarkdownTableConvertsHtmlBreaks(t *testing.T) {
+	lines := renderAssistantMarkdownText(strings.Join([]string{
+		"| Field | Value |",
+		"|---|---|",
+		"| Price | first<br>second<BR />third<br/>fourth |",
+	}, "\n"), 96, 96)
+	got := strings.Join(lines, "\n")
+	for _, unwanted := range []string{"<br>", "<BR />", "<br/>"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("markdown table leaked html break %q in:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{"first", "second", "third", "fourth"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown table missing break segment %q in:\n%s", want, got)
+		}
 	}
 }
 

@@ -9,9 +9,9 @@ import (
 
 const (
 	markdownTableColumnSeparator = " │ "
-	markdownTableRuleSeparator   = "─┼─"
 	markdownTableMinColumnWidth  = 4
 	markdownTableHeaderMaxWidth  = 18
+	markdownTableRuleBodyRows    = 4
 	markdownBoldStart            = "\x1b[1m"
 	markdownBoldEnd              = "\x1b[22m"
 )
@@ -177,7 +177,7 @@ func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
 
 func markdownDisplayStyleForRune(r rune, current markdownDisplayStyle) markdownDisplayStyle {
 	switch r {
-	case '│', '─', '┼':
+	case '│', '─', '┼', '╭', '╮', '╰', '╯', '├', '┤', '┬', '┴':
 		return markdownDisplayRule
 	default:
 		if current == markdownDisplayRule {
@@ -262,9 +262,21 @@ func parseMarkdownTableRow(line string) []string {
 	parts := strings.Split(trimmed, "|")
 	cells := make([]string, 0, len(parts))
 	for _, part := range parts {
-		cells = append(cells, strings.TrimSpace(part))
+		cells = append(cells, normalizeMarkdownTableCell(part))
 	}
 	return cells
+}
+
+func normalizeMarkdownTableCell(cell string) string {
+	replacer := strings.NewReplacer(
+		"<br />", "\n",
+		"<br/>", "\n",
+		"<br>", "\n",
+		"<BR />", "\n",
+		"<BR/>", "\n",
+		"<BR>", "\n",
+	)
+	return strings.TrimSpace(replacer.Replace(cell))
 }
 
 func isMarkdownTableSeparatorCell(cell string) bool {
@@ -312,7 +324,7 @@ func renderMarkdownTable(rows [][]string, alignments []markdownTableAlignment, m
 		renderedRows[rowIndex] = renderMarkdownTableRow(row, widths, alignments, rowIndex == 0)
 	}
 	separateBodyRows := markdownTableNeedsBodyRules(renderedRows)
-	out := []string{}
+	out := []string{markdownTableTopRule(widths)}
 	for rowIndex, rowLines := range renderedRows {
 		if separateBodyRows && rowIndex > 1 {
 			out = append(out, markdownTableRule(widths))
@@ -322,10 +334,14 @@ func renderMarkdownTable(rows [][]string, alignments []markdownTableAlignment, m
 			out = append(out, markdownTableRule(widths))
 		}
 	}
+	out = append(out, markdownTableBottomRule(widths))
 	return out
 }
 
 func markdownTableNeedsBodyRules(renderedRows [][]string) bool {
+	if len(renderedRows) > markdownTableRuleBodyRows {
+		return true
+	}
 	for _, row := range renderedRows[1:] {
 		if len(row) > 1 {
 			return true
@@ -335,7 +351,19 @@ func markdownTableNeedsBodyRules(renderedRows [][]string) bool {
 }
 
 func wrapMarkdownTableCellPart(prefix string, text string, measure int) []string {
-	return wrapMarkdownInlineWithPrefixes(prefix, strings.Repeat(" ", lipgloss.Width(prefix)), text, measure)
+	continuationPrefix := strings.Repeat(" ", lipgloss.Width(prefix))
+	lines := []string{}
+	for index, segment := range strings.Split(text, "\n") {
+		firstPrefix := prefix
+		if index > 0 {
+			firstPrefix = continuationPrefix
+		}
+		lines = append(lines, wrapMarkdownInlineWithPrefixes(firstPrefix, continuationPrefix, segment, measure)...)
+	}
+	if len(lines) == 0 {
+		return []string{prefix}
+	}
+	return lines
 }
 
 type markdownTableCellPart struct {
@@ -429,7 +457,7 @@ func normalizeMarkdownTableAlignments(alignments []markdownTableAlignment, colum
 }
 
 func markdownTableWidths(rows [][]string, columns int, measure int) []int {
-	separatorWidth := lipgloss.Width(markdownTableColumnSeparator) * maxInt(0, columns-1)
+	separatorWidth := lipgloss.Width(markdownTableColumnSeparator)*maxInt(0, columns-1) + 4
 	contentWidth := maxInt(columns*markdownTableMinColumnWidth, measure-separatorWidth)
 	widths := make([]int, columns)
 	minWidths := make([]int, columns)
@@ -522,7 +550,7 @@ func renderMarkdownTableRow(row []string, widths []int, alignments []markdownTab
 			}
 			parts[column] = alignMarkdownTableCell(cell, width, alignments[column])
 		}
-		lines = append(lines, strings.TrimRight(strings.Join(parts, markdownTableColumnSeparator), " "))
+		lines = append(lines, "│ "+strings.Join(parts, markdownTableColumnSeparator)+" │")
 	}
 	return lines
 }
@@ -535,8 +563,10 @@ func markdownTableCellWidthParts(cell string) []string {
 		if part.bullet {
 			line = "- " + line
 		}
-		if line != "" {
-			lines = append(lines, line)
+		for _, segment := range strings.Split(line, "\n") {
+			if segment != "" {
+				lines = append(lines, segment)
+			}
 		}
 	}
 	if len(lines) == 0 {
@@ -579,11 +609,23 @@ func alignMarkdownTableCell(text string, width int, alignment markdownTableAlign
 }
 
 func markdownTableRule(widths []int) string {
+	return markdownTableBorderRule(widths, "├", "┼", "┤")
+}
+
+func markdownTableTopRule(widths []int) string {
+	return markdownTableBorderRule(widths, "╭", "┬", "╮")
+}
+
+func markdownTableBottomRule(widths []int) string {
+	return markdownTableBorderRule(widths, "╰", "┴", "╯")
+}
+
+func markdownTableBorderRule(widths []int, left string, separator string, right string) string {
 	parts := make([]string, len(widths))
 	for index, width := range widths {
-		parts[index] = strings.Repeat("─", maxInt(1, width))
+		parts[index] = strings.Repeat("─", maxInt(1, width+2))
 	}
-	return strings.Join(parts, markdownTableRuleSeparator)
+	return left + strings.Join(parts, separator) + right
 }
 
 func markdownHeadingText(trimmed string) string {
