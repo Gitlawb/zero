@@ -281,14 +281,14 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 func TestStreamCompletionEmitsTextUsageAndReasoningTokens(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}`)
-		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":" Zero"}]}}],"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":15,"thoughtsTokenCount":3}}`)
+		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":" Zero"}]}}],"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":15,"thoughtsTokenCount":3,"cachedContentTokenCount":7}}`)
 	})
 
 	events := collectProviderEvents(t, provider)
 	want := []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "Hello"},
 		{Type: zeroruntime.StreamEventText, Content: " Zero"},
-		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 25, OutputTokens: 15, PromptTokens: 25, CompletionTokens: 15, ReasoningTokens: 3}},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 25, OutputTokens: 15, PromptTokens: 25, CompletionTokens: 15, ReasoningTokens: 3, CachedInputTokens: 7}},
 		{Type: zeroruntime.StreamEventDone},
 	}
 	if !reflect.DeepEqual(events, want) {

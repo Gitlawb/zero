@@ -101,10 +101,11 @@ type promptFeedback struct {
 }
 
 type usageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	ThoughtsTokenCount   int `json:"thoughtsTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
 }
 
 type apiError struct {

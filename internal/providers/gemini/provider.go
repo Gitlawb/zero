@@ -226,6 +226,7 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 		state.inputTokens = payload.UsageMetadata.PromptTokenCount
 		state.outputTokens = payload.UsageMetadata.CandidatesTokenCount
 		state.reasoningTokens = payload.UsageMetadata.ThoughtsTokenCount
+		state.cachedTokens = payload.UsageMetadata.CachedContentTokenCount
 		state.hasUsage = true
 	}
 	for _, candidate := range payload.Candidates {
@@ -280,9 +281,10 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 func (provider *Provider) emitDone(ctx context.Context, state *streamState, events chan<- zeroruntime.StreamEvent) {
 	if state.hasUsage {
 		usage, err := zeroruntime.NormalizeUsage(zeroruntime.TokenUsage{
-			InputTokens:     state.inputTokens,
-			OutputTokens:    state.outputTokens,
-			ReasoningTokens: state.reasoningTokens,
+			InputTokens:       state.inputTokens,
+			OutputTokens:      state.outputTokens,
+			ReasoningTokens:   state.reasoningTokens,
+			CachedInputTokens: state.cachedTokens,
 		})
 		if err == nil {
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: usage})
@@ -522,6 +524,7 @@ type streamState struct {
 	inputTokens        int
 	outputTokens       int
 	reasoningTokens    int
+	cachedTokens       int
 	hasUsage           bool
 	syntheticToolIndex int
 	finishReason       string // normalized terminal stop reason (empty for normal stop)

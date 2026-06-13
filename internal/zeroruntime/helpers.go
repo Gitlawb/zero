@@ -3,6 +3,7 @@ package zeroruntime
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // CollectedStream is the non-streaming summary of provider events.
@@ -110,7 +111,10 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 
 			switch event.Type {
 			case StreamEventText:
-				collected.Text += event.Content
+				// Accumulate in a Builder rather than `collected.Text +=`, which
+				// reallocated the whole string on every chunk (O(n^2) over a long
+				// streamed response). flush materializes it into collected.Text.
+				collector.text.WriteString(event.Content)
 				if options.OnText != nil {
 					options.OnText(event.Content)
 				}
@@ -157,6 +161,7 @@ type toolCallCollector struct {
 	order       []string
 	openEmptyID []string // stack of synthetic keys for in-flight empty-id calls
 	synthetic   int
+	text        strings.Builder // accumulated assistant text, materialized in flush
 	// pendingEmptyDelta is the synthetic key of an empty-id call that was opened
 	// by a delta arriving before any start (so its buffered arguments aren't
 	// orphaned). The next empty-id start adopts it instead of opening a new call.
@@ -276,4 +281,7 @@ func (collector *toolCallCollector) flush(collected *CollectedStream) {
 	collector.order = collector.order[:0]
 	collector.openEmptyID = collector.openEmptyID[:0]
 	collector.pendingEmptyDelta = ""
+	// flush is the single finalization point hit before every return, so
+	// materialize the accumulated text here exactly once.
+	collected.Text = collector.text.String()
 }
