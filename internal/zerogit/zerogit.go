@@ -116,7 +116,7 @@ func Inspect(ctx context.Context, options InspectOptions) (ChangeSummary, error)
 		}, nil
 	}
 
-	status, err := gitRawOutput(ctx, runGit, root, "status", "--short", "--untracked-files=all")
+	status, err := gitRawOutput(ctx, runGit, root, "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return ChangeSummary{}, fmt.Errorf("inspect git status: %w", err)
 	}
@@ -212,17 +212,32 @@ func ValidateMessage(message string) error {
 	return nil
 }
 
+// parseStatus parses NUL-delimited `git status --porcelain -z` output. The -z
+// form is used instead of the default --short because it never C-quotes paths
+// (so non-ASCII or whitespace filenames arrive verbatim rather than as a
+// "\303\251"-escaped, double-quoted token) and because it emits a rename/copy as
+// two NUL-separated fields — `XY <dest>\0<src>` — letting us record the
+// destination path and skip the source instead of mistaking the whole
+// `dest -> src` string for a single filename.
 func parseStatus(status string) []FileChange {
 	files := []FileChange{}
-	for _, line := range strings.Split(status, "\n") {
-		if strings.TrimSpace(line) == "" {
+	fields := strings.Split(status, "\x00")
+	for i := 0; i < len(fields); i++ {
+		entry := fields[i]
+		if len(entry) < 3 {
 			continue
 		}
-		if len(line) < 3 {
-			continue
+		code := entry[:2]
+		// Format is exactly `XY<space>PATH`; -z never quotes or pads PATH, so it
+		// is taken verbatim (no TrimSpace, which would corrupt names with leading
+		// or trailing spaces).
+		path := entry[3:]
+		// A rename/copy (R or C in the staged column) is followed by a separate
+		// NUL-terminated field holding the original path; consume it so it is not
+		// parsed as its own entry. This entry's own path is the destination.
+		if code[0] == 'R' || code[0] == 'C' {
+			i++
 		}
-		code := line[:2]
-		path := strings.TrimSpace(line[3:])
 		if path == "" {
 			continue
 		}
@@ -417,6 +432,15 @@ func resolveRunners(runGit Runner, runGitEnv EnvRunner) (Runner, EnvRunner) {
 			runGitEnv = defaultRunGitEnv
 		}
 	} else if runGitEnv == nil {
+		// A plain Runner has no env parameter, so an env-bearing call (e.g.
+		// stagedSnapshotDiff's GIT_INDEX_FILE isolation) cannot thread its env
+		// through it; env is intentionally dropped on this adapter. This branch is
+		// reached ONLY when a caller supplies a custom Runner without a matching
+		// EnvRunner — in practice, tests with a fake Runner that intercepts every
+		// git call. Production callers leave both nil and get
+		// defaultRunGit/defaultRunGitEnv above, which honor env, so GIT_INDEX_FILE
+		// isolation holds on the real path. A custom Runner that also needs env
+		// isolation must supply a RunGitEnv alongside it.
 		runGitEnv = func(ctx context.Context, dir string, _ []string, args ...string) (CommandResult, error) {
 			return runGit(ctx, dir, args...)
 		}

@@ -17,7 +17,7 @@ func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
 		{Stdout: root + "\n"},
 		{Stdout: "feature/m5\n"},
 		{Stdout: "abc1234\n"},
-		{Stdout: " M internal/verify/verify.go\n?? internal/zerogit/zerogit.go\n"},
+		{Stdout: " M internal/verify/verify.go\x00?? internal/zerogit/zerogit.go\x00"},
 		{Stdout: "abc1234\n"},
 		{},
 		{},
@@ -55,7 +55,7 @@ func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
 	if !summary.Truncated {
 		t.Fatalf("expected diff to be marked truncated")
 	}
-	if got := runner.commandLine(3); got != "git status --short --untracked-files=all" {
+	if got := runner.commandLine(3); got != "git status --porcelain -z --untracked-files=all" {
 		t.Fatalf("status command = %q", got)
 	}
 	if got := runner.commandLine(6); got != "git add -A" {
@@ -72,7 +72,7 @@ func TestCommitStagesAllChangesAndUsesGeneratedMessage(t *testing.T) {
 		{Stdout: root + "\n"},
 		{Stdout: "main\n"},
 		{Stdout: "abc1234\n"},
-		{Stdout: " M internal/verify/verify.go\n?? internal/zerogit/zerogit.go\n"},
+		{Stdout: " M internal/verify/verify.go\x00?? internal/zerogit/zerogit.go\x00"},
 		{Stdout: "abc1234\n"},
 		{},
 		{},
@@ -111,7 +111,7 @@ func TestCommitDryRunDoesNotMutateRepository(t *testing.T) {
 		{Stdout: root + "\n"},
 		{Stdout: "main\n"},
 		{Stdout: "abc1234\n"},
-		{Stdout: " M README.md\n"},
+		{Stdout: " M README.md\x00"},
 		{Stdout: "abc1234\n"},
 		{},
 		{},
@@ -213,7 +213,7 @@ func TestInspectBaseRefEmptyUsesSnapshotPath(t *testing.T) {
 		{Stdout: root + "\n"},
 		{Stdout: "main\n"},
 		{Stdout: "abc1234\n"},
-		{Stdout: " M README.md\n"},
+		{Stdout: " M README.md\x00"},
 		{Stdout: "abc1234\n"},
 		{},
 		{},
@@ -228,7 +228,7 @@ func TestInspectBaseRefEmptyUsesSnapshotPath(t *testing.T) {
 	if summary.Base != "" {
 		t.Fatalf("Base = %q, want empty for default path", summary.Base)
 	}
-	if got := runner.commandLine(3); got != "git status --short --untracked-files=all" {
+	if got := runner.commandLine(3); got != "git status --porcelain -z --untracked-files=all" {
 		t.Fatalf("default path must use git status, got %q", got)
 	}
 	if got := runner.commandLine(6); got != "git add -A" {
@@ -481,5 +481,43 @@ func TestValidateMessageCountsRunesNotBytes(t *testing.T) {
 	// 73 runes must still be rejected.
 	if err := ValidateMessage(strings.Repeat("é", 73)); err == nil {
 		t.Fatal("73-rune subject should be rejected")
+	}
+}
+
+func TestParseStatusZHandlesRenamesAndSpecialPaths(t *testing.T) {
+	// NUL-delimited `git status --porcelain -z` output: paths are verbatim (never
+	// C-quoted) and a rename is `XY <dest>\0<src>`.
+	status := strings.Join([]string{
+		" M internal/a.go",  // modified in worktree only
+		"R  new name.go",    // staged rename; next field is the source
+		"old name.go",       // rename SOURCE — must be consumed, not its own entry
+		"A  café.go",        // staged add, non-ASCII path (no octal escaping)
+		"?? un tracked.txt", // untracked, embedded space
+		"",                  // trailing empty field after the final NUL
+	}, "\x00")
+
+	files := parseStatus(status)
+	if len(files) != 4 {
+		t.Fatalf("expected 4 entries (rename source consumed), got %d: %#v", len(files), files)
+	}
+
+	if files[0].Path != "internal/a.go" || files[0].Staged || !files[0].Unstaged {
+		t.Fatalf("unexpected modified entry: %#v", files[0])
+	}
+	// Destination of the rename, not the unsplit "new name.go -> old name.go".
+	if files[1].Path != "new name.go" || !files[1].Staged {
+		t.Fatalf("rename should report the destination path staged: %#v", files[1])
+	}
+	// Non-ASCII path arrives verbatim — no `"caf\303\251.go"` quoting/escaping.
+	if files[2].Path != "café.go" || !files[2].Staged {
+		t.Fatalf("non-ASCII path should be verbatim: %#v", files[2])
+	}
+	if files[3].Path != "un tracked.txt" || !files[3].Untracked {
+		t.Fatalf("untracked path with space should be preserved: %#v", files[3])
+	}
+	for _, f := range files {
+		if f.Path == "old name.go" {
+			t.Fatalf("rename source must not surface as its own entry: %#v", files)
+		}
 	}
 }
