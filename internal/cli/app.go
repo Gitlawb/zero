@@ -503,6 +503,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
 		Scope:         scope,
 	})
+	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                workspaceRoot,
 		UserConfigPath:     userConfigPath,
@@ -521,8 +522,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		MCPCommand: func(args []string) tui.MCPCommandResult {
 			var stdout, stderr bytes.Buffer
 			exitCode := runMCP(args, &stdout, &stderr, deps)
-			nextConfig := mcpConfig
+			nextConfig := lastKnownMCPConfig
 			if refreshed, err := deps.resolveMCPConfig(workspaceRoot); err == nil {
+				lastKnownMCPConfig = refreshed
 				nextConfig = refreshed
 			}
 			return tui.MCPCommandResult{

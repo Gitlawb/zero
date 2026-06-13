@@ -93,8 +93,20 @@ func TestServeResourcesListExcludesOutOfScope(t *testing.T) {
 		Resources []Resource `json:"resources"`
 	}
 	decodeServerTestResult(t, readServerTestMessage(t, newMessageReader(&output)), &result)
+	outsideRoot, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		outsideRoot = filepath.Clean(outside)
+	}
 	for _, resource := range result.Resources {
-		if strings.Contains(resource.URI, "secret.txt") || strings.Contains(resource.URI, filepath.Base(outside)) {
+		resourcePath, err := pathFromURI(resource.URI)
+		if err != nil {
+			t.Fatalf("resource URI %q did not decode: %v", resource.URI, err)
+		}
+		resourcePath, err = filepath.EvalSymlinks(resourcePath)
+		if err != nil {
+			resourcePath = filepath.Clean(resourcePath)
+		}
+		if strings.Contains(resource.URI, "secret.txt") || containedInRoot(outsideRoot, resourcePath) {
 			t.Fatalf("resource %#v leaks out-of-scope path", resource)
 		}
 	}

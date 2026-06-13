@@ -278,6 +278,25 @@ func TestMCPManagerSearchFiltersMarketplace(t *testing.T) {
 	}
 }
 
+func TestMCPManagerDeleteEditsSearchQuery(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("/mcp")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("play")})
+	next = updated.(model)
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	next = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected Delete in MCP search to update synchronously")
+	}
+	if next.mcpManager == nil || next.mcpManager.query != "pla" {
+		t.Fatalf("query after Delete = %#v, want pla", next.mcpManager)
+	}
+}
+
 func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")

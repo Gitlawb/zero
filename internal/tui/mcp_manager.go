@@ -117,7 +117,7 @@ func (m model) handleMCPManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.moveMCPManager(1)
 	case tea.KeyEnter:
 		return m.chooseMCPManagerItem()
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case tea.KeyBackspace, tea.KeyDelete, tea.KeyCtrlH:
 		m.deleteMCPManagerQueryRune()
 	case tea.KeyCtrlU:
 		m.mcpManager.query = ""

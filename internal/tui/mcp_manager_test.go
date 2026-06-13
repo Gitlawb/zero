@@ -85,7 +85,7 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 			"docs": {
 				Type:    "stdio",
 				Command: "zero-docs-mcp",
-				Args:    []string{"--workspace", ".", "--token", "arg-secret", "--api-key=inline-secret", "--endpoint", "https://remote.example/mcp?access_token=arg-url-secret#token=frag-secret"},
+				Args:    []string{"--workspace", ".", "--token", "arg-secret", "--api-key=inline-secret", "--endpoint", "https://remote.example/mcp?access_token=arg-url-secret#token=frag-secret", "--inline-endpoint=https://remote.example/mcp?access_token=inline-url-secret#token=inline-frag-secret"},
 				Env:     map[string]string{"ZERO_DOCS_TOKEN": "env-secret"},
 			},
 			"linear": {
@@ -104,6 +104,8 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 		"inline-secret",
 		"arg-url-secret",
 		"frag-secret",
+		"inline-url-secret",
+		"inline-frag-secret",
 		"url-secret",
 		"env-secret",
 		"header-secret",
@@ -117,6 +119,7 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 		"--api-key=[REDACTED]",
 		"access_token=[REDACTED]",
 		"token=[REDACTED]",
+		"--inline-endpoint=https://remote.example/mcp?access_token=[REDACTED]#token=[REDACTED]",
 		"workspace=public",
 		"ZERO_DOCS_TOKEN=[REDACTED]",
 		"Authorization=[REDACTED]",

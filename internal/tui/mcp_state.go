@@ -261,9 +261,15 @@ func redactedCommandArgs(values []string) []string {
 				redactNext = false
 				continue
 			}
-			if key, _, ok := strings.Cut(value, "="); ok && isSensitiveMCPDisplayKey(key) {
-				trimmed = append(trimmed, key+"="+mcpDisplayRedacted)
-				continue
+			if key, rest, ok := strings.Cut(value, "="); ok {
+				switch {
+				case isSensitiveMCPDisplayKey(key):
+					trimmed = append(trimmed, key+"="+mcpDisplayRedacted)
+					continue
+				case looksLikeMCPDisplayURLValue(rest):
+					trimmed = append(trimmed, key+"="+redactMCPDisplayURL(rest))
+					continue
+				}
 			}
 			if isSensitiveMCPDisplayFlag(value) {
 				trimmed = append(trimmed, value)
@@ -302,7 +308,7 @@ func redactMCPDisplayURL(raw string) string {
 	if strings.TrimSpace(out) == "" {
 		return fallbackRedactMCPDisplayURL(raw)
 	}
-	return out
+	return strings.ReplaceAll(out, "%5BREDACTED%5D", mcpDisplayRedacted)
 }
 
 func redactMCPDisplayRawQuery(rawQuery string) string {
@@ -368,6 +374,9 @@ func fallbackRedactMCPDisplayURL(raw string) string {
 
 func isSensitiveMCPDisplayFlag(value string) bool {
 	value = strings.TrimLeft(strings.ToLower(strings.TrimSpace(value)), "-")
+	if key, _, ok := strings.Cut(value, "="); ok {
+		value = key
+	}
 	return isSensitiveMCPDisplayKey(value)
 }
 
