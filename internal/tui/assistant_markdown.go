@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -815,14 +816,14 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 	for index := 0; index < len(text); {
 		switch {
 		case strings.HasPrefix(text[index:], "**"):
-			if !code && (bold || strings.Contains(text[index+2:], "**")) {
+			if !code && ((bold && canCloseMarkdownDelimiter(text, index, "**")) || (!bold && canOpenMarkdownDelimiter(text, index, "**") && hasClosingMarkdownDelimiter(text, index+2, "**"))) {
 				flush()
 				bold = !bold
 				index += 2
 				continue
 			}
 		case strings.HasPrefix(text[index:], "__"):
-			if !code && (bold || strings.Contains(text[index+2:], "__")) {
+			if !code && ((bold && canCloseMarkdownDelimiter(text, index, "__")) || (!bold && canOpenMarkdownDelimiter(text, index, "__") && hasClosingMarkdownDelimiter(text, index+2, "__"))) {
 				flush()
 				bold = !bold
 				index += 2
@@ -836,7 +837,7 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 				continue
 			}
 		case text[index] == '*':
-			if !code && !strings.HasPrefix(text[index:], "**") && (emphasis || hasClosingMarkdownSingleStar(text[index+1:])) {
+			if !code && !strings.HasPrefix(text[index:], "**") && ((emphasis && canCloseMarkdownDelimiter(text, index, "*")) || (!emphasis && canOpenMarkdownDelimiter(text, index, "*") && hasClosingMarkdownDelimiter(text, index+1, "*"))) {
 				flush()
 				emphasis = !emphasis
 				index++
@@ -855,18 +856,85 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 	return segments
 }
 
-func hasClosingMarkdownSingleStar(text string) bool {
-	for index := 0; index < len(text); index++ {
-		if text[index] != '*' {
+func hasClosingMarkdownDelimiter(text string, start int, marker string) bool {
+	for index := start; index < len(text); index++ {
+		if !strings.HasPrefix(text[index:], marker) {
 			continue
 		}
-		if index+1 < len(text) && text[index+1] == '*' {
+		if marker == "*" && index+1 < len(text) && text[index+1] == '*' {
 			index++
 			continue
 		}
-		return true
+		if canCloseMarkdownDelimiter(text, index, marker) {
+			return true
+		}
+		index += len(marker) - 1
 	}
 	return false
+}
+
+func canOpenMarkdownDelimiter(text string, index int, marker string) bool {
+	before, hasBefore := markdownRuneBefore(text, index)
+	after, hasAfter := markdownRuneAfter(text, index+len(marker))
+	if !hasAfter || unicode.IsSpace(after) {
+		return false
+	}
+	if hasBefore && markdownIsWordRune(before) {
+		return false
+	}
+	if marker == "__" && isMarkdownDunderIdentifier(text, index) {
+		return false
+	}
+	return true
+}
+
+func canCloseMarkdownDelimiter(text string, index int, marker string) bool {
+	before, hasBefore := markdownRuneBefore(text, index)
+	after, hasAfter := markdownRuneAfter(text, index+len(marker))
+	if !hasBefore || unicode.IsSpace(before) {
+		return false
+	}
+	if hasAfter && markdownIsWordRune(after) {
+		return false
+	}
+	return true
+}
+
+func isMarkdownDunderIdentifier(text string, index int) bool {
+	end := strings.Index(text[index+2:], "__")
+	if end < 0 {
+		return false
+	}
+	body := text[index+2 : index+2+end]
+	if body == "" {
+		return false
+	}
+	for _, r := range body {
+		if !markdownIsWordRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func markdownRuneBefore(text string, index int) (rune, bool) {
+	if index <= 0 {
+		return 0, false
+	}
+	r, _ := utf8.DecodeLastRuneInString(text[:index])
+	return r, r != utf8.RuneError
+}
+
+func markdownRuneAfter(text string, index int) (rune, bool) {
+	if index >= len(text) {
+		return 0, false
+	}
+	r, _ := utf8.DecodeRuneInString(text[index:])
+	return r, r != utf8.RuneError
+}
+
+func markdownIsWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 func longestMarkdownWordWidth(text string) int {

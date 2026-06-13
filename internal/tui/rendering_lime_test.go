@@ -86,14 +86,14 @@ func TestInterimBlockRendersStreamingMarkdownTable(t *testing.T) {
 }
 
 func TestMarkdownInlineRendersBoldControlCodes(t *testing.T) {
-	got := renderMarkdownInline("plain **h** __there__ `code` *em*")
-	for _, want := range []string{markdownBoldStart + "h" + markdownBoldEnd, markdownBoldStart + "there" + markdownBoldEnd} {
+	got := renderMarkdownInline("plain **h** __bold text__ `code` *em*")
+	for _, want := range []string{markdownBoldStart + "h" + markdownBoldEnd, markdownBoldStart + "bold text" + markdownBoldEnd} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("inline markdown render missing bold segment %q in %q", want, got)
 		}
 	}
 	plain := ansiPattern.ReplaceAllString(got, "")
-	if plain != "plain h there code em" {
+	if plain != "plain h bold text code em" {
 		t.Fatalf("inline markdown plain text = %q, want markers stripped", plain)
 	}
 }
@@ -114,6 +114,25 @@ func TestMarkdownInlinePreservesLiteralStarsAndCodeBoundaries(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("inline markdown render missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestMarkdownInlineKeepsCodingLiterals(t *testing.T) {
+	tests := map[string]string{
+		"`a.*b.*c`":                  "a.*b.*c",
+		"`*.go` and `*.py`":          "*.go and *.py",
+		"`x__y__z`":                  "x__y__z",
+		"the __init__ method":        "the __init__ method",
+		"run as __main__":            "run as __main__",
+		"compute 2 * 3 * 4":          "compute 2 * 3 * 4",
+		"keep a*b*c literal":         "keep a*b*c literal",
+		"glob *.go outside code too": "glob *.go outside code too",
+	}
+	for input, want := range tests {
+		got := ansiPattern.ReplaceAllString(renderMarkdownInline(input), "")
+		if got != want {
+			t.Fatalf("inline markdown for %q = %q, want %q", input, got, want)
 		}
 	}
 }
