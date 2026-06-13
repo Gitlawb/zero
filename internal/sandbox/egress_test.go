@@ -297,3 +297,73 @@ func mustHostPort(t *testing.T, raw string) string {
 	parsed := mustURL(t, raw)
 	return parsed.Host
 }
+
+func TestEgressProxyAuthorizeDomainPrompt(t *testing.T) {
+	var mu sync.Mutex
+	calls := map[string]int{}
+	proxy := &egressProxy{
+		allowed:       normalizeDomains([]string{"allowed.test"}),
+		denied:        normalizeDomains([]string{"denied.test"}),
+		decisionCache: map[string]bool{},
+		promptTimeout: 500 * time.Millisecond,
+		domainPrompt: func(host string, port int) (bool, error) {
+			mu.Lock()
+			calls[host]++
+			mu.Unlock()
+			return host == "ask-allow.test", nil
+		},
+	}
+
+	if !proxy.authorize("allowed.test", 443) {
+		t.Fatal("allowlisted host must pass without prompting")
+	}
+	if proxy.authorize("denied.test", 443) {
+		t.Fatal("explicitly denied host must be refused without prompting")
+	}
+	mu.Lock()
+	if calls["allowed.test"] != 0 || calls["denied.test"] != 0 {
+		t.Fatalf("allow/deny lists must not trigger the prompt: %#v", calls)
+	}
+	mu.Unlock()
+
+	if !proxy.authorize("ask-allow.test", 443) {
+		t.Fatal("an unknown host the prompt allows must pass")
+	}
+	if !proxy.authorize("ask-allow.test", 443) {
+		t.Fatal("a cached allow must still pass")
+	}
+	mu.Lock()
+	if calls["ask-allow.test"] != 1 {
+		t.Fatalf("the prompt decision must be cached (called once), got %d", calls["ask-allow.test"])
+	}
+	mu.Unlock()
+
+	if proxy.authorize("ask-deny.test", 443) {
+		t.Fatal("an unknown host the prompt denies must be refused")
+	}
+}
+
+func TestEgressProxyDomainPromptTimeoutDenies(t *testing.T) {
+	proxy := &egressProxy{
+		allowed:       normalizeDomains([]string{"allowed.test"}),
+		decisionCache: map[string]bool{},
+		promptTimeout: 20 * time.Millisecond,
+		domainPrompt: func(host string, port int) (bool, error) {
+			time.Sleep(250 * time.Millisecond) // exceeds promptTimeout
+			return true, nil
+		},
+	}
+	if proxy.authorize("slow.test", 443) {
+		t.Fatal("a prompt that exceeds the timeout must deny (fail closed)")
+	}
+}
+
+func TestEgressProxyNilPromptFailsClosed(t *testing.T) {
+	proxy := &egressProxy{
+		allowed:       normalizeDomains([]string{"allowed.test"}),
+		decisionCache: map[string]bool{},
+	}
+	if proxy.authorize("unknown.test", 443) {
+		t.Fatal("an unknown host with no prompt callback must fail closed")
+	}
+}

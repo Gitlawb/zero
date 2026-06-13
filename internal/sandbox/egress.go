@@ -34,6 +34,16 @@ type egressProxy struct {
 	denied   []string
 	log      func(string)
 
+	// domainPrompt, when set, is asked to authorize an UNKNOWN host (one neither
+	// allowed nor explicitly denied) instead of failing closed. It must return
+	// within promptTimeout or the request is denied. Decisions are cached for the
+	// proxy's lifetime so a host is prompted at most once.
+	domainPrompt  func(host string, port int) (bool, error)
+	promptTimeout time.Duration
+
+	cacheMu       sync.Mutex
+	decisionCache map[string]bool
+
 	closeOnce sync.Once
 }
 
@@ -46,6 +56,12 @@ type egressOptions struct {
 	Allowed []string
 	Denied  []string
 	Log     func(string)
+	// DomainPrompt, when set, authorizes an unknown host at request time (e.g. by
+	// prompting the user) instead of failing closed. PromptTimeout bounds the wait
+	// (default 60s); a timeout or error denies. Explicitly denied hosts are never
+	// prompted. Leave nil to keep the strict fail-closed behavior.
+	DomainPrompt  func(host string, port int) (bool, error)
+	PromptTimeout time.Duration
 }
 
 // errEmptyAllowlist is returned when a scoped-egress proxy is requested with no
@@ -66,10 +82,13 @@ func newEgressProxy(options egressOptions) (*egressProxy, error) {
 	}
 
 	proxy := &egressProxy{
-		listener: listener,
-		allowed:  allowed,
-		denied:   denied,
-		log:      options.Log,
+		listener:      listener,
+		allowed:       allowed,
+		denied:        denied,
+		log:           options.Log,
+		domainPrompt:  options.DomainPrompt,
+		promptTimeout: options.PromptTimeout,
+		decisionCache: map[string]bool{},
 	}
 	proxy.server = &http.Server{
 		Handler:           http.HandlerFunc(proxy.handle),
@@ -122,8 +141,7 @@ func (proxy *egressProxy) handleConnect(w http.ResponseWriter, r *http.Request) 
 	if target == "" {
 		target = r.URL.Host
 	}
-	host := hostnameOnly(target)
-	if host == "" || !domainAllowed(host, proxy.allowed, proxy.denied) {
+	if !proxy.authorizeTarget(target, 443) {
 		proxy.logDecision("deny", "CONNECT", target)
 		http.Error(w, "scoped egress: host not allowed", http.StatusForbidden)
 		return
@@ -169,8 +187,7 @@ func (proxy *egressProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = r.Host
 	}
-	host := hostnameOnly(target)
-	if host == "" || !domainAllowed(host, proxy.allowed, proxy.denied) {
+	if !proxy.authorizeTarget(target, 80) {
 		proxy.logDecision("deny", r.Method, requestURLString(r))
 		http.Error(w, "scoped egress: host not allowed", http.StatusForbidden)
 		return
@@ -215,6 +232,79 @@ func (proxy *egressProxy) logDecision(decision string, method string, target str
 	}
 	safe := redaction.RedactString(target, redaction.Options{})
 	proxy.log(fmt.Sprintf("scoped-egress %s %s %s", decision, method, safe))
+}
+
+// authorize decides whether a connection to host:port may proceed. An allowed
+// host passes; an explicitly denied host is refused without prompting; an unknown
+// host fails closed unless a domain-prompt callback authorizes it (cached for the
+// proxy's lifetime, bounded by promptTimeout).
+func (proxy *egressProxy) authorize(host string, port int) bool {
+	if domainAllowed(host, proxy.allowed, proxy.denied) {
+		return true
+	}
+	for _, entry := range proxy.denied {
+		if domainMatches(host, entry) {
+			return false // explicit deny never prompts
+		}
+	}
+	if proxy.domainPrompt == nil {
+		return false // fail closed: no way to authorize an unknown host
+	}
+	return proxy.promptForHost(host, port)
+}
+
+func (proxy *egressProxy) promptForHost(host string, port int) bool {
+	key := strings.ToLower(strings.TrimSpace(host))
+	proxy.cacheMu.Lock()
+	if decided, ok := proxy.decisionCache[key]; ok {
+		proxy.cacheMu.Unlock()
+		return decided
+	}
+	proxy.cacheMu.Unlock()
+
+	allow := proxy.runDomainPrompt(host, port)
+
+	proxy.cacheMu.Lock()
+	proxy.decisionCache[key] = allow
+	proxy.cacheMu.Unlock()
+	return allow
+}
+
+// runDomainPrompt invokes the callback with a timeout. A timeout or error denies.
+func (proxy *egressProxy) runDomainPrompt(host string, port int) bool {
+	timeout := proxy.promptTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	done := make(chan bool, 1)
+	go func() {
+		allow, err := proxy.domainPrompt(host, port)
+		done <- allow && err == nil
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case allow := <-done:
+		return allow
+	case <-timer.C:
+		return false
+	}
+}
+
+// authorizeTarget splits a host[:port] target and authorizes it; defaultPort is
+// used when the target carries no port.
+func (proxy *egressProxy) authorizeTarget(target string, defaultPort int) bool {
+	host := hostnameOnly(target)
+	if host == "" {
+		return false
+	}
+	port := defaultPort
+	if _, portStr, err := net.SplitHostPort(target); err == nil {
+		if parsed, perr := net.LookupPort("tcp", portStr); perr == nil {
+			port = parsed
+		}
+	}
+	return proxy.authorize(host, port)
 }
 
 // relay copies bytes in both directions between two connections until either
