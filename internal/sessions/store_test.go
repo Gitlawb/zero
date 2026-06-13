@@ -179,6 +179,42 @@ func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	}
 }
 
+func TestStoreForkSkipsUsageEvents(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:00:00Z")})
+	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "hi"}}); err != nil {
+		t.Fatalf("AppendEvent message: %v", err)
+	}
+	if _, err := store.AppendEvent(parent.SessionID, AppendEventInput{Type: EventUsage, Payload: map[string]any{"promptTokens": 100, "completionTokens": 20, "totalTokens": 120}}); err != nil {
+		t.Fatalf("AppendEvent usage: %v", err)
+	}
+
+	fork, err := store.Fork(parent.SessionID, ForkInput{SessionID: "fork"})
+	if err != nil {
+		t.Fatalf("Fork returned error: %v", err)
+	}
+	events, err := store.ReadEvents(fork.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	// Usage accounting must NOT be copied (else parent + fork double-count); the
+	// message is copied and the fork marker is appended.
+	got := []EventType{}
+	for _, event := range events {
+		if event.Type == EventUsage {
+			t.Fatalf("fork copied a usage event (would double-count): %#v", events)
+		}
+		got = append(got, event.Type)
+	}
+	want := []EventType{EventMessage, EventSessionFork}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fork event types = %#v, want %#v", got, want)
+	}
+}
+
 func TestStoreCreatesChildSessionsAndRecordsLineageEvents(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-06-04T11:30:00Z")})
 	parent, err := store.Create(CreateInput{

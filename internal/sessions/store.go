@@ -425,10 +425,19 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 	if err != nil {
 		return Metadata{}, err
 	}
+	copied := 0
 	for _, event := range events {
+		// Do NOT copy usage accounting into the fork. It already counted against the
+		// parent, and a usage report that aggregates the parent and the fork would
+		// otherwise double-count it. The fork only needs the conversation history
+		// (messages, tool calls, checkpoints) to continue; usage is not replayed.
+		if event.Type == EventUsage {
+			continue
+		}
 		if _, err := store.AppendEvent(fork.SessionID, AppendEventInput{Type: event.Type, Payload: event.Payload}); err != nil {
 			return Metadata{}, err
 		}
+		copied++
 	}
 	// Copy the parent's content-addressed checkpoint blobs into the fork so the
 	// copied EventSessionCheckpoint events resolve to real blobs and a rewind on
@@ -442,7 +451,7 @@ func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, err
 		Payload: map[string]any{
 			"parentSessionId":    parent.SessionID,
 			"parentEventCount":   parent.EventCount,
-			"copiedEventCount":   len(events),
+			"copiedEventCount":   copied,
 			"forkedFromEventId":  last.ID,
 			"forkedFromSequence": last.Sequence,
 		},
