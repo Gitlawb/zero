@@ -71,6 +71,10 @@ func StartDenialMonitor(ctx context.Context, tag string) *DenialMonitor {
 				monitor.record(msg)
 			}
 		}
+		// Reap the `log stream` child once stdout is drained; without Wait the
+		// cancelled process lingers as a zombie across repeated runs. Safe here —
+		// all reads from the pipe are complete.
+		_ = monitor.cmd.Wait()
 	}()
 	return monitor
 }

@@ -37,24 +37,42 @@ var networkPrograms = map[string]bool{
 // AnalyzeCommand parses script and reports interactive/destructive/network usage
 // from the shell AST. A script that cannot be parsed yields TooComplex (with no
 // other flags set) so the caller can decide how to treat an unanalyzable command.
+// maxAnalyzerDepth bounds recursion into `sh -c <payload>` launchers so a
+// pathologically nested script cannot cause unbounded work.
+const maxAnalyzerDepth = 4
+
+// shellPrograms run their `-c` argument as a fresh command, so the analyzer
+// recurses into that payload instead of classifying on the shell name.
+var shellPrograms = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "ksh": true, "dash": true,
+}
+
 func AnalyzeCommand(script string) AnalysisResult {
 	result := AnalysisResult{}
 	if strings.TrimSpace(script) == "" {
 		return result
 	}
+	analyzeInto(script, &result, map[string]bool{}, 0)
+	return result
+}
+
+// analyzeInto parses script and folds its interactive/destructive/network usage
+// into result, sharing seen so program names are de-duplicated across recursion.
+func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, depth int) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(script), "")
 	if err != nil {
 		result.TooComplex = true
-		return result
+		return
 	}
-
-	seen := map[string]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		prog := normalizeProgramToken(wordText(call.Args[0]))
+		// Resolve the real program behind wrapper prefixes (sudo, env, nice, ...)
+		// so `sudo rm -rf`, `env curl …`, and `bash -c 'vim x'` are classified on
+		// the payload, not the launcher — matching DetectInteractiveCommand.
+		prog, rest := effectiveProgram(call.Args)
 		if prog == "" {
 			return true
 		}
@@ -62,18 +80,24 @@ func AnalyzeCommand(script string) AnalysisResult {
 			seen[prog] = true
 			result.Programs = append(result.Programs, prog)
 		}
-		if _, interactive := interactivePrograms[prog]; interactive && !replSuppressed(prog, call.Args[1:]) {
+		// `sh -c <payload>` runs the payload as a fresh command; recurse into it so
+		// a program hidden behind a shell launcher is still classified.
+		if depth < maxAnalyzerDepth && shellPrograms[prog] {
+			if payload := dashCPayload(rest); payload != "" {
+				analyzeInto(payload, result, seen, depth+1)
+			}
+		}
+		if _, interactive := interactivePrograms[prog]; interactive && !replSuppressed(prog, rest) {
 			result.Interactive = true
 		}
 		if networkPrograms[prog] {
 			result.Network = true
 		}
-		if destructivePrograms[prog] || (prog == "rm" && hasRecursiveForce(call.Args[1:])) {
+		if destructivePrograms[prog] || (prog == "rm" && hasRecursiveForce(rest)) {
 			result.Destructive = true
 		}
 		return true
 	})
-	return result
 }
 
 // wordText returns the literal text of a shell word, concatenating its plain and
@@ -99,6 +123,49 @@ func wordText(word *syntax.Word) string {
 		}
 	}
 	return builder.String()
+}
+
+// effectiveProgram resolves the real command behind wrapper prefixes (sudo, env,
+// nice, timeout, ...) and their consumed option values in an AST arg list,
+// returning the program token and the args that follow it. It mirrors
+// firstProgram in safe_command.go. An expansion-only program word ($x) yields ""
+// because it cannot be classified statically.
+func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
+	for index := 0; index < len(args); index++ {
+		text := wordText(args[index])
+		if text == "" {
+			return "", nil
+		}
+		if strings.Contains(text, "=") && !strings.HasPrefix(text, "=") {
+			continue // env-assignment prefix (e.g. `env FOO=bar cmd`)
+		}
+		if strings.HasPrefix(text, "-") {
+			if wrapperValueOptions[text] && index+1 < len(args) {
+				index++
+			}
+			continue
+		}
+		if isNumericToken(text) {
+			continue
+		}
+		token := normalizeProgramToken(text)
+		if wrapperPrograms[token] {
+			continue
+		}
+		return token, args[index+1:]
+	}
+	return "", nil
+}
+
+// dashCPayload returns the literal text of the word following `-c` in an AST arg
+// list (the command a shell launcher will run), or "" when there is none.
+func dashCPayload(args []*syntax.Word) string {
+	for index := 0; index < len(args); index++ {
+		if wordText(args[index]) == "-c" && index+1 < len(args) {
+			return wordText(args[index+1])
+		}
+	}
+	return ""
 }
 
 // replSuppressed reports whether a REPL program (python/node/...) was invoked
@@ -135,6 +202,11 @@ func hasRecursiveForce(args []*syntax.Word) bool {
 	for _, arg := range args {
 		text := wordText(arg)
 		switch {
+		case text == "--":
+			// End-of-options: every later token is an operand (a filename), so a
+			// trailing `-rf`/`--force` is literal. `rm -- -rf` deletes a file named
+			// "-rf" and must not be treated as the destructive recursive-force form.
+			return recursive && force
 		case text == "--recursive":
 			recursive = true
 		case text == "--force":

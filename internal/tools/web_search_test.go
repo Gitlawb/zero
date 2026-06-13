@@ -180,6 +180,10 @@ func TestWebSearchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
 	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+		Backend: zeroSandbox.Backend{
+			Name: zeroSandbox.BackendSandboxExec, Available: true,
+			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
+		},
 	})
 	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
 	if res.Status != StatusError || !strings.Contains(res.Output, "allowlist") {
@@ -195,6 +199,10 @@ func TestWebSearchRunWithSandboxScopedAllowsListedHost(t *testing.T) {
 	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"search.example"}},
+		Backend: zeroSandbox.Backend{
+			Name: zeroSandbox.BackendSandboxExec, Available: true,
+			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
+		},
 	})
 	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
 	if res.Status != StatusOK {
@@ -202,5 +210,25 @@ func TestWebSearchRunWithSandboxScopedAllowsListedHost(t *testing.T) {
 	}
 	if !backend.called {
 		t.Fatal("search backend must be called when the host is allowlisted")
+	}
+}
+
+func TestSameHostRedirectPolicy(t *testing.T) {
+	orig, _ := http.NewRequest(http.MethodGet, "https://search.example/api", nil)
+	same, _ := http.NewRequest(http.MethodGet, "https://search.example/v2/api", nil)
+	cross, _ := http.NewRequest(http.MethodGet, "https://evil.test/x", nil)
+
+	if err := sameHostRedirectPolicy(same, []*http.Request{orig}); err != nil {
+		t.Fatalf("same-host redirect must be allowed, got %v", err)
+	}
+	if err := sameHostRedirectPolicy(cross, []*http.Request{orig}); err == nil {
+		t.Fatal("cross-host redirect must be refused so scoped/deny can't be bypassed via a hop")
+	}
+	chain := make([]*http.Request, webSearchRedirectLimit)
+	for i := range chain {
+		chain[i] = orig
+	}
+	if err := sameHostRedirectPolicy(same, chain); err == nil {
+		t.Fatal("redirect limit must be enforced")
 	}
 }

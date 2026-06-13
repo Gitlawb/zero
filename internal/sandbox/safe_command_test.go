@@ -218,6 +218,22 @@ func TestSplitShellSegmentsParenOnlySplitsInsideSubstitution(t *testing.T) {
 	}
 }
 
+func TestSplitShellSegmentsIsEscapeAware(t *testing.T) {
+	// An escaped operator outside quotes is literal and must not split.
+	if segs := splitShellSegments(`echo foo\|less`); len(segs) != 1 {
+		t.Fatalf(`splitShellSegments(echo foo\|less) = %#v, want a single segment`, segs)
+	}
+	// An escaped quote inside double quotes must not toggle quoting, so the '|'
+	// stays quoted and does not manufacture a fake `less` segment.
+	if segs := splitShellSegments(`printf "use \"| less"`); len(segs) != 1 {
+		t.Fatalf(`splitShellSegments(printf "use \"| less") = %#v, want a single segment`, segs)
+	}
+	// A real, unescaped operator still splits.
+	if segs := splitShellSegments(`a | less`); len(segs) != 2 {
+		t.Fatalf(`splitShellSegments(a | less) = %#v, want two segments`, segs)
+	}
+}
+
 func TestDetectInteractiveBypasses(t *testing.T) {
 	blocked := []string{
 		"/usr/bin/vim file.txt",     // absolute path

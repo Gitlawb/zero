@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	defaultWebSearchLimit = 5
-	maxWebSearchLimit     = 10
-	webSearchTimeout      = 10 * time.Second
-	webSearchBodyLimit    = 256 * 1024
+	defaultWebSearchLimit  = 5
+	maxWebSearchLimit      = 10
+	webSearchTimeout       = 10 * time.Second
+	webSearchBodyLimit     = 256 * 1024
+	webSearchRedirectLimit = 5
 )
 
 // searchResult is one hit returned by a search backend.
@@ -168,11 +169,29 @@ func defaultSearchBackend() searchBackend {
 		return nil
 	}
 	return &httpSearchBackend{
-		client:   &http.Client{Timeout: webSearchTimeout},
+		client: &http.Client{
+			Timeout:       webSearchTimeout,
+			CheckRedirect: sameHostRedirectPolicy,
+		},
 		baseURL:  baseURL,
 		apiKey:   strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_API_KEY")),
 		provider: strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_PROVIDER")),
 	}
+}
+
+// sameHostRedirectPolicy confines the search backend to redirects that stay on
+// the originally-requested host. RunWithSandbox only policy-checks the configured
+// endpoint host, so a cross-host redirect could otherwise egress to a host the
+// sandbox network policy never authorized; refusing it keeps the check
+// fail-closed across redirects.
+func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= webSearchRedirectLimit {
+		return fmt.Errorf("stopped after %d redirects", webSearchRedirectLimit)
+	}
+	if origin := via[0].URL.Hostname(); !strings.EqualFold(req.URL.Hostname(), origin) {
+		return fmt.Errorf("refusing cross-host redirect to %q", req.URL.Hostname())
+	}
+	return nil
 }
 
 // httpSearchBackend is the generic JSON backend: POST {query,limit} to a

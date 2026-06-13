@@ -465,10 +465,20 @@ func parseSandboxPositionalOptions(args []string) (sandboxCommandOptions, []stri
 			if err != nil {
 				return options, positional, false, err
 			}
-			options.path = value
+			// An explicit but empty --path is a user error, not "tool-wide": treating
+			// it as unset would silently widen an allow to the whole tool, or make a
+			// revoke drop every grant for the tool. Fail closed.
+			if strings.TrimSpace(value) == "" {
+				return options, positional, false, execUsageError{"--path requires a non-empty file path"}
+			}
+			options.path = strings.TrimSpace(value)
 			index = next
 		case strings.HasPrefix(arg, "--path="):
-			options.path = strings.TrimSpace(strings.TrimPrefix(arg, "--path="))
+			value := strings.TrimSpace(strings.TrimPrefix(arg, "--path="))
+			if value == "" {
+				return options, positional, false, execUsageError{"--path requires a non-empty file path"}
+			}
+			options.path = value
 		case strings.HasPrefix(arg, "-"):
 			return options, positional, false, execUsageError{fmt.Sprintf("unknown sandbox grants flag %q", arg)}
 		default:

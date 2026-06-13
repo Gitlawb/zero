@@ -145,6 +145,46 @@ func TestRunSandboxGrantsCreateAndRevokeByPath(t *testing.T) {
 	}
 }
 
+func TestRunSandboxGrantsRejectsEmptyPath(t *testing.T) {
+	store := newSandboxTestStore(t)
+	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil }}
+
+	var stdout, stderr bytes.Buffer
+	run := func(args ...string) int {
+		stdout.Reset()
+		stderr.Reset()
+		return runWithDeps(args, &stdout, &stderr, deps)
+	}
+
+	// An explicit but empty --path must fail closed rather than silently widening
+	// an allow to tool-wide or a revoke to all-grants-for-tool.
+	for _, args := range [][]string{
+		{"sandbox", "grants", "allow", "write_file", "--path", ""},
+		{"sandbox", "grants", "allow", "write_file", "--path="},
+		{"sandbox", "grants", "revoke", "write_file", "--path", ""},
+		{"sandbox", "grants", "revoke", "write_file", "--path="},
+	} {
+		if exit := run(args...); exit == exitSuccess {
+			t.Fatalf("%v: expected a usage error for an empty --path, got success", args)
+		}
+		// Either rejection path is acceptable (the `--path=` form hits the
+		// non-empty check; the `--path ""` form is rejected as a missing value) —
+		// what matters is that an empty --path never silently widens scope.
+		if !strings.Contains(stderr.String(), "path") {
+			t.Fatalf("%v: stderr should explain the empty --path, got %q", args, stderr.String())
+		}
+	}
+
+	// No grant should have been created or removed by any of the rejected calls.
+	grants, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("expected no grant mutation from rejected --path calls, got %#v", grants)
+	}
+}
+
 func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 	store := newSandboxTestStore(t)
 	deps := appDeps{

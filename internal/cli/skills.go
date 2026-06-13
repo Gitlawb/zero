@@ -73,6 +73,11 @@ func runSkillsList(dir string, options skillListOptions, stdout io.Writer, stder
 				redaction.RedactString(dup.Winner, redaction.Options{}),
 				redaction.RedactString(dup.Loser, redaction.Options{}))
 		}
+	} else {
+		// Don't silently swallow a scan failure: "no warnings" would then be
+		// ambiguous (no duplicates vs. detection broke). Surface it on stderr.
+		fmt.Fprintf(stderr, "warning: could not check for duplicate skills: %s\n",
+			redaction.ErrorMessage(derr, redaction.Options{}))
 	}
 	if options.json {
 		payload := struct {

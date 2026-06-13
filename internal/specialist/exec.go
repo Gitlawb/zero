@@ -357,7 +357,11 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 			// task errored, and record the stop so it cannot become an untracked
 			// orphan. The dedup in recordSpecialistStop makes the later onExit
 			// accounting a no-op.
-			_ = background.TerminateProcess(pid)
+			if killErr := background.TerminateProcess(pid); killErr != nil {
+				// Don't mask a failed kill: a surviving orphan is worse than the
+				// SetPID error alone, so surface both to the caller.
+				err = errors.Join(err, fmt.Errorf("terminate orphaned pid %d: %w", pid, killErr))
+			}
 			_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 			executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 			executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)

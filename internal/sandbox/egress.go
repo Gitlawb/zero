@@ -254,7 +254,10 @@ func (proxy *egressProxy) authorize(host string, port int) bool {
 }
 
 func (proxy *egressProxy) promptForHost(host string, port int) bool {
-	key := strings.ToLower(strings.TrimSpace(host))
+	// Key the decision cache by host:port, not host alone — the prompt authorizes a
+	// specific (host, port), so caching by host would let one "allow" silently
+	// authorize every other port on that host for the proxy's lifetime.
+	key := fmt.Sprintf("%s:%d", strings.ToLower(strings.TrimSpace(host)), port)
 	proxy.cacheMu.Lock()
 	if decided, ok := proxy.decisionCache[key]; ok {
 		proxy.cacheMu.Unlock()

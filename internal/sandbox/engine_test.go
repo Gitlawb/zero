@@ -712,25 +712,31 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 }
 
 func TestEngineNetworkHostAllowed(t *testing.T) {
+	// scoped enforcement requires a backend that can actually route scoped egress
+	// (only sandbox-exec); otherwise scoped fails closed (collapses to deny).
+	egressBackend := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
+	noEgressBackend := Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"}
 	cases := []struct {
 		name    string
 		policy  Policy
+		backend Backend
 		host    string
 		allowed bool
 		mode    NetworkMode
 	}{
-		{"deny blocks all", Policy{Mode: ModeEnforce, Network: NetworkDeny}, "example.com", false, NetworkDeny},
-		{"allow permits all", Policy{Mode: ModeEnforce, Network: NetworkAllow}, "example.com", true, NetworkAllow},
-		{"scoped allows listed host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, "api.example.com", true, NetworkScoped},
-		{"scoped blocks unlisted host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, "evil.test", false, NetworkScoped},
-		{"scoped honors denylist", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}, DeniedDomains: []string{"secret.example.com"}}, "secret.example.com", false, NetworkScoped},
-		{"scoped empty allowlist collapses to deny", Policy{Mode: ModeEnforce, Network: NetworkScoped}, "example.com", false, NetworkDeny},
-		{"disabled policy allows all", Policy{Mode: ModeDisabled, Network: NetworkDeny}, "example.com", true, NetworkAllow},
-		{"host with port matched on hostname", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, "example.com:443", true, NetworkScoped},
+		{"deny blocks all", Policy{Mode: ModeEnforce, Network: NetworkDeny}, egressBackend, "example.com", false, NetworkDeny},
+		{"allow permits all", Policy{Mode: ModeEnforce, Network: NetworkAllow}, noEgressBackend, "example.com", true, NetworkAllow},
+		{"scoped allows listed host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, egressBackend, "api.example.com", true, NetworkScoped},
+		{"scoped blocks unlisted host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, egressBackend, "evil.test", false, NetworkScoped},
+		{"scoped honors denylist", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}, DeniedDomains: []string{"secret.example.com"}}, egressBackend, "secret.example.com", false, NetworkScoped},
+		{"scoped empty allowlist collapses to deny", Policy{Mode: ModeEnforce, Network: NetworkScoped}, egressBackend, "example.com", false, NetworkDeny},
+		{"scoped without egress-capable backend fails closed", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, noEgressBackend, "example.com", false, NetworkDeny},
+		{"disabled policy allows all", Policy{Mode: ModeDisabled, Network: NetworkDeny}, noEgressBackend, "example.com", true, NetworkAllow},
+		{"host with port matched on hostname", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, egressBackend, "example.com:443", true, NetworkScoped},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			engine := NewEngine(EngineOptions{Policy: tc.policy})
+			engine := NewEngine(EngineOptions{Policy: tc.policy, Backend: tc.backend})
 			allowed, mode := engine.NetworkHostAllowed(tc.host)
 			if allowed != tc.allowed || mode != tc.mode {
 				t.Fatalf("NetworkHostAllowed(%q) = (%v, %q), want (%v, %q)", tc.host, allowed, mode, tc.allowed, tc.mode)

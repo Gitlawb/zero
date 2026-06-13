@@ -23,7 +23,14 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "rm bundled flags reversed", script: "rm -fr ./build", destructive: true},
 		{name: "rm without force", script: "rm file.txt", destructive: false},
 		{name: "rm inside quoted arg", script: `git commit -m "rm -rf /"`, destructive: false},
+		{name: "rm end-of-options literal filename", script: "rm -- -rf", destructive: false},
 		{name: "dd", script: "dd if=/dev/zero of=/dev/disk2", destructive: true},
+
+		// Wrappers are unwrapped to the real payload, not classified on the launcher.
+		{name: "sudo wraps rm -rf", script: "sudo rm -rf /tmp/x", destructive: true},
+		{name: "env wraps curl", script: "env curl https://x.test", network: true},
+		{name: "bash -c wraps editor", script: `bash -c 'vim file'`, interactive: true},
+		{name: "sudo wraps bare repl", script: "sudo python3", interactive: true},
 
 		{name: "curl", script: "curl https://example.com", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},

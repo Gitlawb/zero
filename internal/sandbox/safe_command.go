@@ -467,6 +467,15 @@ func splitShellSegments(command string) []string {
 			}
 			continue
 		}
+		// Outside single quotes a backslash escapes the next rune (the shell treats
+		// \X as a literal X), so an escaped quote or operator must not toggle quoting
+		// or manufacture a segment boundary — e.g. echo foo\|less or "a \" b".
+		if c == '\\' && i+1 < len(runes) {
+			current.WriteRune(c)
+			current.WriteRune(runes[i+1])
+			i++
+			continue
+		}
 		if c == '\'' && !inDouble {
 			inSingle = true
 			current.WriteRune(c)

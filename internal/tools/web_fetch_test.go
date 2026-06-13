@@ -406,6 +406,10 @@ func TestWebFetchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+		Backend: zeroSandbox.Backend{
+			Name: zeroSandbox.BackendSandboxExec, Available: true,
+			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
+		},
 	})
 	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://evil.test"}, engine)
 	if result.Status != StatusError {

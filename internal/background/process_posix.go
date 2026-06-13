@@ -28,13 +28,18 @@ func ConfigureChildProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr.Setpgid = true
 }
 
-// terminateProcess stops a background process group. It first asks politely with
-// SIGTERM (so processes can flush/clean up), then escalates to SIGKILL if the
-// group is still alive after terminationGracePeriod — so a process that traps or
-// ignores SIGTERM cannot leak. Signalling the negative PID targets the whole
-// process group created by ConfigureChildProcessGroup, so forked children die
-// with the leader instead of being orphaned. It returns nil once the group is
-// gone.
+// terminateProcess stops a background process. It first asks politely with
+// SIGTERM (so processes can flush/clean up), then escalates to SIGKILL if it is
+// still alive after terminationGracePeriod — so a process that traps or ignores
+// SIGTERM cannot leak. It returns nil once the target is gone.
+//
+// When pid is its own process-group leader (the invariant ConfigureChildProcessGroup
+// establishes for our children, pgid == pid), the whole group is signalled via the
+// negative PID, so forked children die with the leader instead of being orphaned.
+// If pid is NOT a leader, its group is some other group (possibly OUR OWN), so
+// signalling -pgid there could kill unrelated processes — in that case we fall
+// back to signalling only the individual PID, which also avoids reporting a false
+// success when a non-leader group-signal returns ESRCH.
 func terminateProcess(pid int) error {
 	// Guard pid <= 1: kill(-0) would target our OWN process group and kill(-1)
 	// every process we can signal. A real child PID is always > 1, so never let a
@@ -43,51 +48,59 @@ func terminateProcess(pid int) error {
 		return fmt.Errorf("refusing to terminate invalid pid %d", pid)
 	}
 
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+	// Signal the whole group only when pid leads its own group; otherwise the
+	// individual process. See the doc comment for why a non-leader is signalled
+	// directly rather than via its (foreign) group.
+	target := pid
+	if pgid, err := syscall.Getpgid(pid); err == nil {
+		if pgid == pid {
+			target = -pid
+		}
+	} else if processGoneError(err) {
+		return nil // already gone
+	}
+
+	alive := func() bool { return syscall.Kill(target, syscall.Signal(0)) == nil }
+
+	if err := syscall.Kill(target, syscall.SIGTERM); err != nil {
 		if processGoneError(err) {
 			return nil
 		}
 		return err
 	}
 
-	// Poll liveness so we return promptly once the group exits, rather than
-	// always waiting out the full grace period.
+	// Poll liveness so we return promptly once it exits, rather than always
+	// waiting out the full grace period.
 	deadline := time.Now().Add(terminationGracePeriod)
 	for time.Now().Before(deadline) {
-		if !processGroupAlive(pid) {
+		if !alive() {
 			return nil
 		}
 		time.Sleep(terminationPollInterval)
 	}
-	if !processGroupAlive(pid) {
+	if !alive() {
 		return nil
 	}
 
-	// Still alive after the grace period: force-kill the group.
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !processGoneError(err) {
+	// Still alive after the grace period: force-kill.
+	if err := syscall.Kill(target, syscall.SIGKILL); err != nil && !processGoneError(err) {
 		return err
 	}
 
-	// SIGKILL is asynchronous: the kernel may not have reaped the group yet.
-	// Poll again so this helper only reports success once the group is actually
-	// gone — otherwise the caller gets nil while descendants are still racing.
+	// SIGKILL is asynchronous: the kernel may not have reaped it yet. Poll again
+	// so this helper only reports success once the target is actually gone —
+	// otherwise the caller gets nil while descendants are still racing.
 	deadline = time.Now().Add(terminationGracePeriod)
 	for time.Now().Before(deadline) {
-		if !processGroupAlive(pid) {
+		if !alive() {
 			return nil
 		}
 		time.Sleep(terminationPollInterval)
 	}
-	if processGroupAlive(pid) {
-		return fmt.Errorf("process group %d did not exit after SIGKILL", pid)
+	if alive() {
+		return fmt.Errorf("process %d did not exit after SIGKILL", pid)
 	}
 	return nil
-}
-
-// processGroupAlive reports whether any process in the group still exists (signal
-// 0 performs error checking without delivering a signal).
-func processGroupAlive(pid int) bool {
-	return syscall.Kill(-pid, syscall.Signal(0)) == nil
 }
 
 // processGoneError reports whether an error means the process group has already
