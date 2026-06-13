@@ -426,6 +426,42 @@ var sandboxWritableSubpaths = []string{
 	"/dev/fd",
 }
 
+// sandboxMachServices is the curated allowlist of Mach services a sandboxed
+// command may look up. Under the seatbelt default-deny, XPC to common system
+// daemons is otherwise blocked, so tools that touch the keychain
+// (securityd/trustd), user/group lookup (opendirectoryd), preferences
+// (cfprefsd), network config (SystemConfiguration), launch services, or the
+// pasteboard fail. None of these grant filesystem or network access — those stay
+// governed by the file-write and network rules below — so the workspace boundary
+// is unaffected.
+var sandboxMachServices = []string{
+	"com.apple.system.opendirectoryd.libinfo",
+	"com.apple.system.opendirectoryd.membership",
+	"com.apple.system.opendirectoryd.api",
+	"com.apple.system.logger",
+	"com.apple.logd",
+	"com.apple.cfprefsd.daemon",
+	"com.apple.cfprefsd.agent",
+	"com.apple.securityd",
+	"com.apple.securityd.xpc",
+	"com.apple.SecurityServer",
+	"com.apple.trustd",
+	"com.apple.trustd.agent",
+	"com.apple.SystemConfiguration.configd",
+	"com.apple.SystemConfiguration.DNSConfiguration",
+	"com.apple.lsd.mapdb",
+	"com.apple.coreservices.launchservicesd",
+	"com.apple.pasteboard.1",
+}
+
+func sandboxMachLookupRule() string {
+	filters := make([]string, 0, len(sandboxMachServices))
+	for _, service := range sandboxMachServices {
+		filters = append(filters, `(global-name "`+sandboxProfileString(service)+`")`)
+	}
+	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
+}
+
 func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string) string {
 	networkRule := networkRuleFor(policy, proxyPort)
 	writeRule := "(allow file-write*)"
@@ -450,6 +486,12 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string) st
 		"(deny default)",
 		"(allow process*)",
 		"(allow sysctl-read)",
+		// Let a sandboxed command signal itself and its own process group so scripts
+		// that spawn and kill children (e.g. `sleep 30 & kill %1`, test runners,
+		// timeouts) work. The target restriction keeps it from signalling any
+		// process outside its own group.
+		"(allow signal (target self) (target pgrp))",
+		sandboxMachLookupRule(),
 		"(allow file-read*)",
 		writeRule,
 		networkRule,

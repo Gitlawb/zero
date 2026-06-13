@@ -209,6 +209,18 @@ func TestSandboxExecProfileAllowsDevNullAndTemp(t *testing.T) {
 	if out, err := run("echo ok > probe.txt && cat probe.txt"); err != nil {
 		t.Fatalf("workspace write failed: %v\noutput: %s", err, out)
 	}
+
+	// A sandboxed script must be able to kill the children it spawns; without the
+	// signal allowance seatbelt denies kill() with "Operation not permitted".
+	if out, err := run("sleep 5 & child=$!; sleep 0.2; kill $child"); err != nil {
+		t.Fatalf("sandboxed self-kill failed (signal allowance missing?): %v\noutput: %s", err, out)
+	}
+
+	// A write outside the workspace must still be denied — the richer profile must
+	// not have loosened the boundary.
+	if out, err := run("echo leak > /etc/zero_sandbox_should_fail 2>/dev/null"); err == nil {
+		t.Fatalf("write outside workspace unexpectedly succeeded: output: %s", out)
+	}
 }
 
 func resolvedTestPath(t *testing.T, path string) string {
@@ -235,6 +247,34 @@ func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
 	// backend) are kept alongside the granted roots.
 	if !strings.Contains(profile, `(subpath "/tmp")`) || !strings.Contains(profile, `(literal "/dev/null")`) {
 		t.Fatalf("profile missing baseline temp/device write allowances:\n%s", profile)
+	}
+}
+
+func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
+	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
+
+	// Signalling own process group lets a sandboxed script kill the children it
+	// spawns; without it seatbelt denies kill() with "Operation not permitted".
+	if !strings.Contains(profile, "(allow signal (target self) (target pgrp))") {
+		t.Fatalf("profile missing signal allowance:\n%s", profile)
+	}
+	// Curated mach-lookup so keychain/opendirectory/preferences/network-config
+	// tools work without touching the file or network boundary.
+	if !strings.Contains(profile, "(allow mach-lookup") {
+		t.Fatalf("profile missing mach-lookup rule:\n%s", profile)
+	}
+	for _, service := range []string{
+		"com.apple.securityd",
+		"com.apple.system.opendirectoryd.libinfo",
+		"com.apple.cfprefsd.daemon",
+	} {
+		if !strings.Contains(profile, `(global-name "`+service+`")`) {
+			t.Fatalf("profile missing mach service %q:\n%s", service, profile)
+		}
+	}
+	// The security boundary must remain: default-deny plus scoped file-write.
+	if !strings.Contains(profile, "(deny default)") || !strings.Contains(profile, "(allow file-write*\n") {
+		t.Fatalf("profile lost its default-deny / scoped-write boundary:\n%s", profile)
 	}
 }
 
