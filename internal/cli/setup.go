@@ -230,9 +230,9 @@ type setupSaveOptions struct {
 func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setupSaveOptions) (tui.SetupResult, error) {
 	profile, err := providerProfileForAdd(providerAddOptions{
 		catalogID: selection.CatalogID,
-		name:      options.name,
+		name:      firstNonEmptyCLI(options.name, selection.Name),
 		model:     firstNonEmptyCLI(selection.Model),
-		baseURL:   options.baseURL,
+		baseURL:   firstNonEmptyCLI(options.baseURL, selection.BaseURL),
 		apiKeyEnv: options.apiKeyEnv,
 		setActive: true,
 	})

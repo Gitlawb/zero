@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,13 +22,13 @@ type setupStage int
 const (
 	setupStageWelcome setupStage = iota
 	setupStageProvider
+	setupStageEndpoint
+	setupStageName
 	setupStageCredentials
 	setupStageModel
 	setupStageSafety
 	setupStageReady
 )
-
-const setupStageCount = int(setupStageReady) + 1
 
 type setupState struct {
 	visible    bool
@@ -37,6 +38,8 @@ type setupState struct {
 	selected   int
 	stage      setupStage
 	err        string
+	baseURL    string
+	name       string
 	apiKey     textinput.Model
 	models     []providerWizardModel
 	modelIndex int
@@ -87,6 +90,12 @@ func newSetupState(options SetupOptions) setupState {
 
 func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.clearMouseSelection()
+	if m.setupEndpointInputActive() {
+		return m.handleSetupEndpointKey(msg)
+	}
+	if m.setupNameInputActive() {
+		return m.handleSetupNameKey(msg)
+	}
 	if m.setupCredentialInputActive() {
 		return m.handleSetupCredentialKey(msg)
 	}
@@ -95,7 +104,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case tea.KeyEsc:
 		if m.setup.stage > setupStageWelcome {
-			m.setup.stage--
+			m.setup.stage = m.previousSetupStage()
 			m.setup.err = ""
 			return m, nil
 		}
@@ -105,7 +114,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.exitSetupToChat()
 	case tea.KeyLeft:
 		if m.setup.stage > setupStageWelcome {
-			m.setup.stage--
+			m.setup.stage = m.previousSetupStage()
 			m.setup.err = ""
 		}
 		return m, nil
@@ -257,6 +266,8 @@ func (m *model) selectSetupProviderAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	}
 	m.setup.selected = index
 	m.setup.apiKey.SetValue("")
+	m.setup.baseURL = ""
+	m.setup.name = ""
 	m.setup.modelGen++
 	m.resetSetupModels()
 	return mouseSelectionTarget{Scope: "first-run-provider", Value: m.setup.providers[index].ID, Index: index}, true
@@ -308,6 +319,41 @@ func setupContentTop(height int, contentLines int, hasError bool) int {
 	return maxInt(0, (height-contentLines-3)/2)
 }
 
+func (m model) setupStages() []setupStage {
+	stages := []setupStage{setupStageWelcome, setupStageProvider}
+	if setupProviderNeedsEndpoint(m.setupProvider()) {
+		stages = append(stages, setupStageEndpoint, setupStageName)
+	}
+	stages = append(stages, setupStageCredentials, setupStageModel, setupStageSafety, setupStageReady)
+	return stages
+}
+
+func (m model) nextSetupStage() setupStage {
+	stages := m.setupStages()
+	for index, stage := range stages {
+		if stage == m.setup.stage {
+			if index+1 < len(stages) {
+				return stages[index+1]
+			}
+			return stage
+		}
+	}
+	return m.setup.stage
+}
+
+func (m model) previousSetupStage() setupStage {
+	stages := m.setupStages()
+	for index, stage := range stages {
+		if stage == m.setup.stage {
+			if index > 0 {
+				return stages[index-1]
+			}
+			return stage
+		}
+	}
+	return m.setup.stage
+}
+
 func setupBlockContainsMouseX(x int, width int, blockWidth int) bool {
 	if blockWidth <= 0 {
 		return false
@@ -320,16 +366,28 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 	if m.setup.stage < setupStageReady {
 		if m.setup.stage == setupStageProvider {
 			m.setup.apiKey.SetValue("")
+			m.setup.baseURL = ""
+			m.setup.name = ""
+		}
+		if m.setup.stage == setupStageEndpoint {
+			if err := providerWizardEndpointError(m.setup.baseURL); err != "" {
+				m.setup.err = err
+				return m, nil
+			}
 		}
 		if m.setup.stage == setupStageModel && m.setup.modelLoad {
 			m.setup.err = "Models are still loading."
+			return m, nil
+		}
+		if m.setup.stage == setupStageModel && setupProviderUsesTypedModel(m.setupProvider()) && strings.TrimSpace(m.setup.modelQuery) == "" {
+			m.setup.err = "Enter a model name before continuing."
 			return m, nil
 		}
 		if m.setup.stage == setupStageModel && m.setupCurrentModel().ID == "" {
 			m.setup.err = "Choose a matching model before continuing."
 			return m, nil
 		}
-		m.setup.stage++
+		m.setup.stage = m.nextSetupStage()
 		m.setup.err = ""
 		if m.setup.stage == setupStageModel {
 			m.resetSetupModels()
@@ -350,6 +408,8 @@ func (m *model) moveSetupProvider(delta int) {
 	}
 	m.setup.selected = ((m.setup.selected+delta)%len(m.setup.providers) + len(m.setup.providers)) % len(m.setup.providers)
 	m.setup.apiKey.SetValue("")
+	m.setup.baseURL = ""
+	m.setup.name = ""
 	m.setup.modelGen++
 	m.resetSetupModels()
 }
@@ -366,6 +426,8 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 
 	result, err := m.setupSave(SetupSelection{
 		CatalogID: option.ID,
+		Name:      m.setupProfileName(option),
+		BaseURL:   m.setupBaseURL(option),
 		Model:     m.setupCurrentModel().ID,
 		APIKey:    m.setupCredentialAPIKey(option),
 	})
@@ -394,6 +456,16 @@ func (m model) completeSetup() (tea.Model, tea.Cmd) {
 func (m *model) resetSetupModels() {
 	option := m.setupProvider()
 	provider := setupProviderDescriptor(option)
+	if setupProviderUsesTypedModel(option) {
+		m.setup.models = nil
+		m.setup.modelIndex = 0
+		m.setup.modelQuery = ""
+		m.setup.modelForID = provider.ID
+		m.setup.modelLoad = false
+		m.setup.modelErr = ""
+		m.setup.modelSrc = "manual"
+		return
+	}
 	models := providerWizardModelOptions(provider)
 	m.setup.models = models
 	m.setup.modelIndex = 0
@@ -408,6 +480,9 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 	option := m.setupProvider()
 	provider := setupProviderDescriptor(option)
 	if provider.ID == "" || !providercatalog.RuntimeSupported(provider) {
+		return nil
+	}
+	if setupProviderUsesTypedModel(option) {
 		return nil
 	}
 	profile := providerWizardDiscoveryProfile(provider, m.setupCredentialAPIKey(option))
@@ -496,6 +571,13 @@ func cleanSetupEnvVar(envVar string) []string {
 }
 
 func (m model) setupCurrentModel() providerWizardModel {
+	if setupProviderUsesTypedModel(m.setupProvider()) {
+		modelID := strings.TrimSpace(m.setup.modelQuery)
+		if modelID == "" {
+			return providerWizardModel{Description: "model name required"}
+		}
+		return providerWizardModel{ID: modelID, Description: "custom model"}
+	}
 	m.ensureSetupModels()
 	models := m.setupFilteredModels()
 	if len(models) == 0 {
@@ -579,12 +661,62 @@ func (m model) setupCredentialInputActive() bool {
 	return m.setup.stage == setupStageCredentials && setupProviderAcceptsAPIKey(m.setupProvider())
 }
 
+func (m model) setupEndpointInputActive() bool {
+	return m.setup.stage == setupStageEndpoint && setupProviderNeedsEndpoint(m.setupProvider())
+}
+
+func (m model) setupNameInputActive() bool {
+	return m.setup.stage == setupStageName && setupProviderNeedsProfileName(m.setupProvider())
+}
+
+func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc, tea.KeyLeft:
+		m.setup.stage = m.previousSetupStage()
+		m.setup.err = ""
+		return m, nil
+	case tea.KeyEnter:
+		return m.advanceSetup()
+	case tea.KeyRunes:
+		m.appendSetupBaseURL(msg.Runes)
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		m.deleteSetupBaseURLRune()
+	case tea.KeyCtrlU:
+		m.setup.baseURL = ""
+		m.setup.err = ""
+	}
+	return m, nil
+}
+
+func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc, tea.KeyLeft:
+		m.setup.stage = m.previousSetupStage()
+		m.setup.err = ""
+		return m, nil
+	case tea.KeyEnter:
+		return m.advanceSetup()
+	case tea.KeyRunes:
+		m.appendSetupName(msg.Runes)
+	case tea.KeyBackspace, tea.KeyCtrlH:
+		m.deleteSetupNameRune()
+	case tea.KeyCtrlU:
+		m.setup.name = ""
+		m.setup.err = ""
+	}
+	return m, nil
+}
+
 func (m model) handleSetupCredentialKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyEsc, tea.KeyLeft:
-		m.setup.stage--
+		m.setup.stage = m.previousSetupStage()
 		m.setup.err = ""
 		return m, nil
 	case tea.KeyEnter:
@@ -607,11 +739,75 @@ func setupProviderAcceptsAPIKey(option SetupProviderOption) bool {
 	return option.RequiresAuth && !option.Local
 }
 
+func setupProviderNeedsEndpoint(option SetupProviderOption) bool {
+	return providerWizardNeedsEndpoint(setupProviderDescriptor(option))
+}
+
+func setupProviderNeedsProfileName(option SetupProviderOption) bool {
+	return setupProviderNeedsEndpoint(option)
+}
+
+func setupProviderUsesTypedModel(option SetupProviderOption) bool {
+	return setupProviderNeedsEndpoint(option)
+}
+
 func (m model) setupCredentialAPIKey(option SetupProviderOption) string {
 	if !setupProviderAcceptsAPIKey(option) {
 		return ""
 	}
 	return strings.TrimSpace(m.setup.apiKey.Value())
+}
+
+func (m model) setupBaseURL(option SetupProviderOption) string {
+	if !setupProviderNeedsEndpoint(option) {
+		return ""
+	}
+	return strings.TrimSpace(m.setup.baseURL)
+}
+
+func (m model) setupProfileName(option SetupProviderOption) string {
+	if !setupProviderNeedsProfileName(option) {
+		return ""
+	}
+	return providerWizardDisplayName(setupProviderDescriptor(option), m.setup.baseURL, m.setup.name)
+}
+
+func (m *model) appendSetupBaseURL(runes []rune) {
+	for _, r := range runes {
+		if r < 32 || r == 127 || unicode.IsSpace(r) {
+			continue
+		}
+		m.setup.baseURL += string(r)
+	}
+	m.setup.err = ""
+}
+
+func (m *model) deleteSetupBaseURLRune() {
+	if m.setup.baseURL == "" {
+		return
+	}
+	runes := []rune(m.setup.baseURL)
+	m.setup.baseURL = string(runes[:len(runes)-1])
+	m.setup.err = ""
+}
+
+func (m *model) appendSetupName(runes []rune) {
+	for _, r := range runes {
+		if r < 32 || r == 127 || unicode.IsSpace(r) {
+			continue
+		}
+		m.setup.name += string(r)
+	}
+	m.setup.err = ""
+}
+
+func (m *model) deleteSetupNameRune() {
+	if m.setup.name == "" {
+		return
+	}
+	runes := []rune(m.setup.name)
+	m.setup.name = string(runes[:len(runes)-1])
+	m.setup.err = ""
 }
 
 func (m model) setupProvider() SetupProviderOption {
@@ -631,7 +827,7 @@ func (m model) setupView(width int) string {
 	if m.setup.err != "" {
 		content = append(content, "", zeroTheme.red.Render("error: "+m.setup.err))
 	}
-	progress := setupProgressText(m.setup.stage)
+	progress := m.setupProgressText()
 	footer := m.setupFooter()
 
 	topGap := maxInt(0, (height-len(content)-3)/2)
@@ -653,6 +849,10 @@ func (m model) setupStageLines(width int, height int) []string {
 	switch m.setup.stage {
 	case setupStageProvider:
 		return m.setupProviderLines(width, height)
+	case setupStageEndpoint:
+		return m.setupEndpointLines(width)
+	case setupStageName:
+		return m.setupNameLines(width)
 	case setupStageCredentials:
 		return m.setupCredentialLines(width)
 	case setupStageModel:
@@ -667,19 +867,7 @@ func (m model) setupStageLines(width int, height int) []string {
 			zeroTheme.faint.Render("Default: ask before risky work."),
 		}
 	case setupStageReady:
-		option := m.setupProvider()
-		model := m.setupCurrentModel()
-		return []string{
-			zeroTheme.ink.Bold(true).Render("Ready"),
-			"",
-			"Zero will save this setup and open chat.",
-			"provider: " + displayValue(option.Name, option.ID),
-			"model: " + displayValue(model.ID, option.DefaultModel),
-			"credentials: " + m.setupCredentialSummary(option),
-			"config: " + displayValue(m.setup.configPath, "user config"),
-			"",
-			zeroTheme.faint.Render("Later, use /provider, /doctor, or /help anytime."),
-		}
+		return m.setupReadyLines(width)
 	default:
 		return []string{
 			zeroTheme.accent.Render("Welcome to Zero"),
@@ -690,7 +878,67 @@ func (m model) setupStageLines(width int, height int) []string {
 	}
 }
 
+type setupReadyRow struct {
+	label string
+	value string
+}
+
+func (m model) setupReadyLines(width int) []string {
+	option := m.setupProvider()
+	model := m.setupCurrentModel()
+	providerName := displayValue(option.Name, option.ID)
+	if name := m.setupProfileName(option); name != "" {
+		providerName = name
+	}
+
+	rows := []setupReadyRow{{label: "provider", value: providerName}}
+	if endpoint := m.setupBaseURL(option); endpoint != "" {
+		rows = append(rows, setupReadyRow{label: "endpoint", value: endpoint})
+	}
+	rows = append(rows,
+		setupReadyRow{label: "model", value: displayValue(model.ID, option.DefaultModel)},
+		setupReadyRow{label: "credentials", value: m.setupCredentialSummary(option)},
+		setupReadyRow{label: "config", value: shortenPath(displayValue(m.setup.configPath, "user config"))},
+	)
+
+	lines := []string{
+		zeroTheme.ink.Bold(true).Render("Ready"),
+		"",
+		"Zero will save this setup and open chat.",
+		"",
+	}
+
+	labelWidth := 0
+	for _, row := range rows {
+		labelWidth = maxInt(labelWidth, lipgloss.Width(row.label)+1)
+	}
+	rowWidth := setupReadyRowsWidth(width, labelWidth, rows)
+	for _, row := range rows {
+		label := fmt.Sprintf("%*s", labelWidth, row.label+":")
+		line := "  " + zeroTheme.faint.Render(label) + "  " + zeroTheme.ink.Render(row.value)
+		lines = append(lines, padSetupLine(line, rowWidth))
+	}
+
+	lines = append(lines,
+		"",
+		zeroTheme.faint.Render("Later, use /provider, /doctor, or /help anytime."),
+	)
+	return lines
+}
+
+func setupReadyRowsWidth(terminalWidth int, labelWidth int, rows []setupReadyRow) int {
+	available := maxInt(28, minInt(terminalWidth-8, 86))
+	target := 0
+	for _, row := range rows {
+		target = maxInt(target, 4+labelWidth+lipgloss.Width(row.value))
+	}
+	return minInt(target, available)
+}
+
 func (m model) setupModelLines(width int, height int) []string {
+	if setupProviderUsesTypedModel(m.setupProvider()) {
+		return m.setupTypedModelLines(width)
+	}
 	m.ensureSetupModels()
 	if m.setup.modelLoad {
 		return m.setupModelLoadingLines(width)
@@ -724,6 +972,19 @@ func (m model) setupModelLines(width int, height int) []string {
 	return lines
 }
 
+func (m model) setupTypedModelLines(width int) []string {
+	option := m.setupProvider()
+	rowWidth := setupTextInputBlockWidth(width, option.DefaultModel)
+	return []string{
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Choose a model"), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+zeroTheme.ink.Render("Enter the model ID this endpoint expects."), rowWidth),
+		padSetupLine("  "+zeroTheme.faint.Render("Examples: gpt-4.1, claude-sonnet-4-5, llama-3.3-70b"), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+providerWizardInputLine("model > ", strings.TrimSpace(m.setup.modelQuery), option.DefaultModel, rowWidth-2), rowWidth),
+	}
+}
+
 func (m model) setupModelLoadingLines(width int) []string {
 	rowWidth := setupModelLoadingBlockWidth(width)
 	return []string{
@@ -732,6 +993,17 @@ func (m model) setupModelLoadingLines(width int) []string {
 		padSetupLine("  "+zeroTheme.faint.Render("Checking available models..."), rowWidth),
 		padSetupLine("  "+zeroTheme.faint.Render("Built-in models will be used if discovery fails."), rowWidth),
 	}
+}
+
+func setupTextInputBlockWidth(terminalWidth int, values ...string) int {
+	available := maxInt(34, minInt(terminalWidth-8, 72))
+	target := 42
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			target = maxInt(target, lipgloss.Width("  "+value)+8)
+		}
+	}
+	return minInt(target, available)
 }
 
 func setupModelMaxVisible(height int, total int) int {
@@ -837,6 +1109,35 @@ func (m model) setupProviderLines(width int, height int) []string {
 	return lines
 }
 
+func (m model) setupEndpointLines(width int) []string {
+	option := m.setupProvider()
+	provider := setupProviderDescriptor(option)
+	rowWidth := setupTextInputBlockWidth(width, providerWizardEndpointPlaceholder(provider), m.setup.baseURL)
+	return []string{
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Endpoint URL"), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+zeroTheme.ink.Render("Enter the API base URL for "+displayValue(option.Name, option.ID)+"."), rowWidth),
+		padSetupLine("  "+zeroTheme.faint.Render(providerWizardEndpointHint(provider)), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+providerWizardInputLine("url > ", strings.TrimSpace(m.setup.baseURL), providerWizardEndpointPlaceholder(provider), rowWidth-2), rowWidth),
+	}
+}
+
+func (m model) setupNameLines(width int) []string {
+	option := m.setupProvider()
+	provider := setupProviderDescriptor(option)
+	name := providerWizardDisplayName(provider, m.setup.baseURL, m.setup.name)
+	rowWidth := setupTextInputBlockWidth(width, name, m.setup.name)
+	return []string{
+		padSetupLine("  "+zeroTheme.ink.Bold(true).Render("Provider name"), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+zeroTheme.ink.Render("Choose the short label shown in Zero."), rowWidth),
+		padSetupLine("  "+zeroTheme.faint.Render("Leave blank to use "+name+"."), rowWidth),
+		blankSetupBlockLine(rowWidth),
+		padSetupLine("  "+providerWizardInputLine("name > ", strings.TrimSpace(m.setup.name), name, rowWidth-2), rowWidth),
+	}
+}
+
 func setupProviderMaxVisible(height int, total int) int {
 	if total <= 0 {
 		return 0
@@ -921,6 +1222,10 @@ func (m model) setupFooter() string {
 	switch m.setup.stage {
 	case setupStageReady:
 		return zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" to save and start chat")
+	case setupStageEndpoint:
+		return zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue   left back")
+	case setupStageName:
+		return zeroTheme.faint.Render("name optional   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue   left back")
 	case setupStageCredentials:
 		if m.setupCredentialInputActive() {
 			return zeroTheme.faint.Render("paste key optional   ") + zeroTheme.accent.Render("Enter") + zeroTheme.faint.Render(" continue   left back")
@@ -948,8 +1253,16 @@ func centerSetupLines(lines []string, width int) []string {
 	return fitted
 }
 
-func setupProgressText(stage setupStage) string {
-	return zeroTheme.faint.Render(fmt.Sprintf("%d/%d", int(stage)+1, setupStageCount))
+func (m model) setupProgressText() string {
+	stages := m.setupStages()
+	position := 0
+	for index, stage := range stages {
+		if stage == m.setup.stage {
+			position = index
+			break
+		}
+	}
+	return zeroTheme.faint.Render(fmt.Sprintf("%d/%d", position+1, len(stages)))
 }
 
 func padSetupLine(line string, width int) string {

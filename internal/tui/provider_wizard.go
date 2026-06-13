@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"net/url"
 	"os"
 	"strings"
 	"unicode"
@@ -24,6 +25,8 @@ type providerWizardStep int
 
 const (
 	providerWizardStepProvider providerWizardStep = iota
+	providerWizardStepEndpoint
+	providerWizardStepName
 	providerWizardStepCredential
 	providerWizardStepModel
 	providerWizardStepDone
@@ -42,6 +45,8 @@ type providerWizardState struct {
 	models           []providerWizardModel
 	selectedModel    int
 	modelSearch      string
+	baseURL          string
+	profileName      string
 	apiKey           string
 	err              string
 	modelSource      string
@@ -84,6 +89,13 @@ func (wizard *providerWizardState) currentModel() providerWizardModel {
 	if wizard == nil {
 		return providerWizardModel{}
 	}
+	if providerWizardUsesTypedModel(wizard.currentProvider()) {
+		modelID := strings.TrimSpace(wizard.modelSearch)
+		if modelID == "" {
+			return providerWizardModel{Description: "model name required"}
+		}
+		return providerWizardModel{ID: modelID, Description: "custom model"}
+	}
 	wizard.refreshModels()
 	models := wizard.filteredModels()
 	if len(models) == 0 {
@@ -105,6 +117,8 @@ func (wizard *providerWizardState) move(delta int) {
 		wizard.selectedProvider = ((wizard.selectedProvider+delta)%len(wizard.providers) + len(wizard.providers)) % len(wizard.providers)
 		wizard.selectedModel = 0
 		wizard.modelSearch = ""
+		wizard.baseURL = ""
+		wizard.profileName = ""
 		wizard.apiKey = ""
 		wizard.err = ""
 		wizard.modelSource = ""
@@ -129,6 +143,22 @@ func (wizard *providerWizardState) advance() {
 	case providerWizardStepProvider:
 		wizard.refreshModels()
 		wizard.err = ""
+		if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+			wizard.step = providerWizardStepEndpoint
+		} else if providerWizardNeedsCredential(wizard.currentProvider()) {
+			wizard.step = providerWizardStepCredential
+		} else {
+			wizard.step = providerWizardStepModel
+		}
+	case providerWizardStepEndpoint:
+		wizard.err = ""
+		if err := providerWizardEndpointError(wizard.baseURL); err != "" {
+			wizard.err = err
+			return
+		}
+		wizard.step = providerWizardStepName
+	case providerWizardStepName:
+		wizard.err = ""
 		if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
 		} else {
@@ -139,6 +169,14 @@ func (wizard *providerWizardState) advance() {
 		wizard.step = providerWizardStepModel
 	case providerWizardStepModel:
 		wizard.err = ""
+		if providerWizardUsesTypedModel(wizard.currentProvider()) {
+			if strings.TrimSpace(wizard.modelSearch) == "" {
+				wizard.err = "enter a model name before continuing"
+				return
+			}
+			wizard.step = providerWizardStepDone
+			return
+		}
 		if wizard.modelLoading {
 			wizard.err = "Models are still loading."
 			return
@@ -160,11 +198,23 @@ func (wizard *providerWizardState) retreat() {
 	}
 	wizard.err = ""
 	switch wizard.step {
-	case providerWizardStepCredential:
+	case providerWizardStepEndpoint:
 		wizard.step = providerWizardStepProvider
+	case providerWizardStepName:
+		wizard.step = providerWizardStepEndpoint
+	case providerWizardStepCredential:
+		if providerWizardNeedsProfileName(wizard.currentProvider()) {
+			wizard.step = providerWizardStepName
+		} else if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+			wizard.step = providerWizardStepEndpoint
+		} else {
+			wizard.step = providerWizardStepProvider
+		}
 	case providerWizardStepModel:
 		if providerWizardNeedsCredential(wizard.currentProvider()) {
 			wizard.step = providerWizardStepCredential
+		} else if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+			wizard.step = providerWizardStepEndpoint
 		} else {
 			wizard.step = providerWizardStepProvider
 		}
@@ -178,6 +228,9 @@ func (wizard *providerWizardState) refreshModels() {
 		return
 	}
 	provider := wizard.currentProvider()
+	if providerWizardUsesTypedModel(provider) {
+		return
+	}
 	if wizard.modelSource != "" && wizard.modelSource != "fallback" {
 		wizard.selectedModel = clampInt(wizard.selectedModel, 0, maxInt(0, len(wizard.models)-1))
 		return
@@ -208,9 +261,69 @@ func providerWizardNeedsCredential(provider providercatalog.Descriptor) bool {
 	return provider.RequiresAuth && !provider.Local && len(provider.AuthEnvVars) > 0
 }
 
+func providerWizardNeedsEndpoint(provider providercatalog.Descriptor) bool {
+	switch provider.ID {
+	case "custom-openai-compatible", "custom-anthropic-compatible":
+		return true
+	default:
+		return false
+	}
+}
+
+func providerWizardUsesTypedModel(provider providercatalog.Descriptor) bool {
+	return providerWizardNeedsEndpoint(provider)
+}
+
+func providerWizardNeedsProfileName(provider providercatalog.Descriptor) bool {
+	return providerWizardNeedsEndpoint(provider)
+}
+
 func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
+	}
+	if m.providerWizard.step == providerWizardStepEndpoint {
+		switch msg.Type {
+		case tea.KeyRunes:
+			m.providerWizard.appendBaseURL(msg.Runes)
+			return m, nil
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			m.providerWizard.deleteBaseURLRune()
+			return m, nil
+		case tea.KeyCtrlU:
+			m.providerWizard.baseURL = ""
+			m.providerWizard.err = ""
+			return m, nil
+		case tea.KeyLeft:
+			m.providerWizard.retreat()
+			return m, nil
+		case tea.KeyRight:
+			if m.providerWizard.canAdvanceWithRight() {
+				return m.advanceProviderWizard()
+			}
+			return m, nil
+		case tea.KeyEnter:
+			return m.advanceProviderWizard()
+		}
+	}
+	if m.providerWizard.step == providerWizardStepName {
+		switch msg.Type {
+		case tea.KeyRunes:
+			m.providerWizard.appendProfileName(msg.Runes)
+			return m, nil
+		case tea.KeyBackspace, tea.KeyCtrlH:
+			m.providerWizard.deleteProfileNameRune()
+			return m, nil
+		case tea.KeyCtrlU:
+			m.providerWizard.profileName = ""
+			m.providerWizard.err = ""
+			return m, nil
+		case tea.KeyLeft:
+			m.providerWizard.retreat()
+			return m, nil
+		case tea.KeyRight, tea.KeyEnter:
+			return m.advanceProviderWizard()
+		}
 	}
 	if m.providerWizard.step == providerWizardStepCredential {
 		switch msg.Type {
@@ -282,9 +395,16 @@ func (wizard *providerWizardState) canAdvanceWithRight() bool {
 	switch wizard.step {
 	case providerWizardStepProvider:
 		return strings.TrimSpace(wizard.currentProvider().ID) != ""
+	case providerWizardStepEndpoint:
+		return providerWizardEndpointError(wizard.baseURL) == ""
+	case providerWizardStepName:
+		return true
 	case providerWizardStepCredential:
 		return wizard.credentialReadyForRight()
 	case providerWizardStepModel:
+		if providerWizardUsesTypedModel(wizard.currentProvider()) {
+			return strings.TrimSpace(wizard.modelSearch) != ""
+		}
 		if wizard.modelLoading {
 			return false
 		}
@@ -330,6 +450,44 @@ func (wizard *providerWizardState) deleteAPIKeyRune() {
 	wizard.err = ""
 }
 
+func (wizard *providerWizardState) appendBaseURL(runes []rune) {
+	for _, r := range runes {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			continue
+		}
+		wizard.baseURL += string(r)
+	}
+	wizard.err = ""
+}
+
+func (wizard *providerWizardState) deleteBaseURLRune() {
+	if wizard.baseURL == "" {
+		return
+	}
+	runes := []rune(wizard.baseURL)
+	wizard.baseURL = string(runes[:len(runes)-1])
+	wizard.err = ""
+}
+
+func (wizard *providerWizardState) appendProfileName(runes []rune) {
+	for _, r := range runes {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			continue
+		}
+		wizard.profileName += string(r)
+	}
+	wizard.err = ""
+}
+
+func (wizard *providerWizardState) deleteProfileNameRune() {
+	if wizard.profileName == "" {
+		return
+	}
+	runes := []rune(wizard.profileName)
+	wizard.profileName = string(runes[:len(runes)-1])
+	wizard.err = ""
+}
+
 func (wizard *providerWizardState) appendModelSearch(runes []rune) {
 	for _, r := range runes {
 		if unicode.IsControl(r) {
@@ -356,7 +514,7 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	}
 	provider := wizard.currentProvider()
 	modelChoice := wizard.currentModel()
-	profile := providerWizardProfile(provider, modelChoice.ID, wizard.apiKey)
+	profile := providerWizardProfile(provider, modelChoice.ID, wizard.apiKey, wizard.baseURL, wizard.profileName)
 	runtimeProfile := providerWizardRuntimeProfile(profile)
 	if m.newProvider != nil {
 		nextProvider, err := m.newProvider(runtimeProfile)
@@ -402,7 +560,7 @@ func (wizard *providerWizardState) render(width int) string {
 	innerWidth := maxInt(20, overlayWidth-4)
 
 	lines := []string{
-		zeroTheme.faint.Render(providerWizardStepLine(wizard.step)),
+		zeroTheme.faint.Render(providerWizardStepLine(wizard)),
 		zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
 	}
 	if wizard.err != "" {
@@ -411,6 +569,10 @@ func (wizard *providerWizardState) render(width int) string {
 	switch wizard.step {
 	case providerWizardStepProvider:
 		lines = append(lines, wizard.renderProviderStep(innerWidth)...)
+	case providerWizardStepEndpoint:
+		lines = append(lines, wizard.renderEndpointStep(innerWidth)...)
+	case providerWizardStepName:
+		lines = append(lines, wizard.renderNameStep(innerWidth)...)
 	case providerWizardStepCredential:
 		lines = append(lines, wizard.renderCredentialStep(innerWidth)...)
 	case providerWizardStepModel:
@@ -438,6 +600,13 @@ func (wizard *providerWizardState) footer() string {
 			return "↑/↓ move   Enter/→ continue   Esc close"
 		}
 		return "↑/↓ move   Enter continue   Esc close"
+	case providerWizardStepEndpoint:
+		if canRight {
+			return "Enter/→ continue   ← back   Esc close"
+		}
+		return "Enter continue   ← back   Esc close"
+	case providerWizardStepName:
+		return "Enter/→ continue   ← back   Esc close"
 	case providerWizardStepModel:
 		if canRight {
 			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
@@ -471,15 +640,55 @@ func providerWizardOverlayWidth(width int, step providerWizardStep) int {
 	return target
 }
 
-func providerWizardStepLine(step providerWizardStep) string {
+func providerWizardStepLine(wizard *providerWizardState) string {
+	if wizard == nil {
+		return ""
+	}
+	step := wizard.step
 	steps := []struct {
 		step  providerWizardStep
 		label string
 	}{
 		{providerWizardStepProvider, "1 provider"},
-		{providerWizardStepCredential, "2 key"},
-		{providerWizardStepModel, "3 model"},
-		{providerWizardStepDone, "4 ready"},
+	}
+	if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+		steps = append(steps,
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepEndpoint, "2 endpoint"},
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepName, "3 name"},
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepCredential, "4 key"},
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepModel, "5 model"},
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepDone, "6 ready"},
+		)
+	} else {
+		steps = append(steps,
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepCredential, "2 key"},
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepModel, "3 model"},
+			struct {
+				step  providerWizardStep
+				label string
+			}{providerWizardStepDone, "4 ready"},
+		)
 	}
 	parts := make([]string, 0, len(steps))
 	for _, item := range steps {
@@ -514,6 +723,41 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 	return fitStyledLine(left, width)
 }
 
+func (wizard *providerWizardState) renderEndpointStep(width int) []string {
+	provider := wizard.currentProvider()
+	input := providerWizardInputLine("url > ", wizard.baseURL, providerWizardEndpointPlaceholder(provider), width)
+	return []string{
+		zeroTheme.accent.Render("Endpoint URL"),
+		zeroTheme.ink.Render("Enter the API base URL for " + provider.Name + "."),
+		zeroTheme.faint.Render(providerWizardEndpointHint(provider)),
+		input,
+	}
+}
+
+func providerWizardEndpointPlaceholder(provider providercatalog.Descriptor) string {
+	if provider.Transport == providercatalog.TransportAnthropicCompatible {
+		return "https://api.example.com/anthropic"
+	}
+	return "https://api.example.com/v1"
+}
+
+func providerWizardEndpointHint(provider providercatalog.Descriptor) string {
+	if provider.Transport == providercatalog.TransportAnthropicCompatible {
+		return "Use the base URL before /v1/messages."
+	}
+	return "Use the base URL before /chat/completions."
+}
+
+func (wizard *providerWizardState) renderNameStep(width int) []string {
+	name := providerWizardDisplayName(wizard.currentProvider(), wizard.baseURL, wizard.profileName)
+	return []string{
+		zeroTheme.accent.Render("Provider name"),
+		zeroTheme.ink.Render("Choose the short label shown in the status bar."),
+		zeroTheme.faint.Render("Leave blank to use " + name + "."),
+		providerWizardInputLine("name > ", strings.TrimSpace(wizard.profileName), name, width),
+	}
+}
+
 func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 	provider := wizard.currentProvider()
 	env := firstProviderDisplayValue(provider.AuthEnvVars...)
@@ -538,6 +782,9 @@ func providerWizardCredentialInstruction(env string) string {
 }
 
 func (wizard *providerWizardState) renderModelStep(width int) []string {
+	if providerWizardUsesTypedModel(wizard.currentProvider()) {
+		return wizard.renderTypedModelStep(width)
+	}
 	if wizard.modelLoading {
 		return wizard.renderModelLoadingStep(width)
 	}
@@ -575,12 +822,29 @@ func (wizard *providerWizardState) renderModelLoadingStep(width int) []string {
 
 func (wizard *providerWizardState) renderModelSearch(width int) string {
 	query := strings.TrimSpace(wizard.modelSearch)
+	return providerWizardInputLine("search > ", query, "model name...", width)
+}
+
+func providerWizardInputLine(promptText string, value string, placeholder string, width int) string {
 	prompt := zeroTheme.userPrompt.Render("search > ")
 	cursor := zeroTheme.accent.Render("▌")
-	if query == "" {
-		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render("model name..."), width)
+	if promptText != "" {
+		prompt = zeroTheme.userPrompt.Render(promptText)
 	}
-	return fitStyledLine(prompt+zeroTheme.ink.Render(query)+cursor, width)
+	if value == "" {
+		return fitStyledLine(prompt+cursor+zeroTheme.faint.Render(placeholder), width)
+	}
+	return fitStyledLine(prompt+zeroTheme.ink.Render(value)+cursor, width)
+}
+
+func (wizard *providerWizardState) renderTypedModelStep(width int) []string {
+	provider := wizard.currentProvider()
+	return []string{
+		zeroTheme.accent.Render("Model name"),
+		zeroTheme.ink.Render("Enter the model ID this endpoint expects."),
+		zeroTheme.faint.Render("Examples: gpt-4.1, claude-sonnet-4-5, llama-3.3-70b"),
+		providerWizardInputLine("model > ", strings.TrimSpace(wizard.modelSearch), provider.DefaultModel, width),
+	}
 }
 
 func (wizard *providerWizardState) modelStatusText() string {
@@ -665,15 +929,22 @@ func providerWizardGenericModelDescription(description string) bool {
 func (wizard *providerWizardState) renderDoneStep(width int) []string {
 	provider := wizard.currentProvider()
 	model := wizard.currentModel()
-	return []string{
+	lines := []string{
 		zeroTheme.accent.Render("Ready to connect"),
 		"",
 		zeroTheme.ink.Render("Provider    " + provider.Name),
-		zeroTheme.ink.Render("Model       " + model.ID),
-		zeroTheme.ink.Render("Credential  " + providerWizardCredentialLabel(provider, wizard.apiKey)),
+	}
+	if providerWizardNeedsEndpoint(provider) {
+		lines = append(lines, zeroTheme.ink.Render("Endpoint    "+strings.TrimSpace(wizard.baseURL)))
+	}
+	lines = append(lines,
+		zeroTheme.ink.Render("Name        "+providerWizardDisplayName(provider, wizard.baseURL, wizard.profileName)),
+		zeroTheme.ink.Render("Model       "+model.ID),
+		zeroTheme.ink.Render("Credential  "+providerWizardCredentialLabel(provider, wizard.apiKey)),
 		"",
 		zeroTheme.faint.Render("Press Enter to save and start using this provider."),
-	}
+	)
+	return lines
 }
 
 func providerWizardCredentialLabel(provider providercatalog.Descriptor, apiKey string) string {
@@ -697,12 +968,12 @@ func maskedProviderWizardKey(value string) string {
 	return strings.Repeat("*", count)
 }
 
-func providerWizardProfile(provider providercatalog.Descriptor, model string, apiKey string) config.ProviderProfile {
+func providerWizardProfile(provider providercatalog.Descriptor, model string, apiKey string, baseURL string, profileName string) config.ProviderProfile {
 	profile := config.ProviderProfile{
-		Name:         provider.ID,
+		Name:         providerWizardDisplayName(provider, baseURL, profileName),
 		ProviderKind: providerWizardProviderKind(provider),
 		CatalogID:    provider.ID,
-		BaseURL:      provider.DefaultBaseURL,
+		BaseURL:      firstProviderDisplayValue(strings.TrimSpace(baseURL), provider.DefaultBaseURL),
 		APIFormat:    providerWizardAPIFormat(provider),
 		Model:        firstProviderDisplayValue(model, provider.DefaultModel),
 	}
@@ -712,6 +983,49 @@ func providerWizardProfile(provider providercatalog.Descriptor, model string, ap
 		profile.APIKeyEnv = env
 	}
 	return profile
+}
+
+func providerWizardEndpointError(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "enter an endpoint URL before continuing"
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "enter a valid endpoint URL including https://"
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return "endpoint URL must start with http:// or https://"
+	}
+	return ""
+}
+
+func providerWizardDisplayName(provider providercatalog.Descriptor, baseURL string, profileName string) string {
+	if name := strings.TrimSpace(profileName); name != "" {
+		return name
+	}
+	if providerWizardNeedsProfileName(provider) {
+		return providerWizardNameFromBaseURL(baseURL)
+	}
+	return provider.ID
+}
+
+func providerWizardNameFromBaseURL(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Host == "" {
+		return "custom"
+	}
+	host := strings.ToLower(parsed.Hostname())
+	host = strings.TrimPrefix(host, "api.")
+	host = strings.TrimPrefix(host, "gateway.")
+	parts := strings.Split(host, ".")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2]
+	}
+	if host != "" {
+		return strings.ReplaceAll(host, ":", "-")
+	}
+	return "custom"
 }
 
 func providerWizardProviderKind(provider providercatalog.Descriptor) config.ProviderKind {

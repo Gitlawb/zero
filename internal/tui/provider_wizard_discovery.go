@@ -42,6 +42,9 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 	if !providerWizardCatalogDiscoveryAllowed(provider) {
 		return nil
 	}
+	if providerWizardUsesTypedModel(provider) {
+		return nil
+	}
 	profile := providerWizardDiscoveryProfile(provider, wizard.apiKey)
 	discover := m.discoverProviderModels
 	if discover == nil {
@@ -118,7 +121,7 @@ func providerWizardModelsSource(models []providermodeldiscovery.Model) string {
 }
 
 func providerWizardDiscoveryProfile(provider providercatalog.Descriptor, apiKey string) config.ProviderProfile {
-	profile := providerWizardProfile(provider, provider.DefaultModel, apiKey)
+	profile := providerWizardProfile(provider, provider.DefaultModel, apiKey, "", "")
 	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.APIKeyEnv) != "" {
 		profile.APIKey = strings.TrimSpace(os.Getenv(profile.APIKeyEnv))
 	}

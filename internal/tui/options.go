@@ -74,6 +74,8 @@ type SetupProviderOption struct {
 // SetupSelection is the user's setup choice.
 type SetupSelection struct {
 	CatalogID string
+	Name      string
+	BaseURL   string
 	Model     string
 	APIKey    string
 }

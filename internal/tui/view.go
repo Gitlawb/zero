@@ -102,7 +102,7 @@ func (m model) titleBar(width int) string {
 }
 
 func (m model) titleModelSegment() string {
-	provider := strings.TrimSpace(m.providerName)
+	provider := strings.TrimSpace(m.providerDisplayName())
 	model := strings.TrimSpace(m.modelName)
 	switch {
 	case provider == "" && model == "":
@@ -138,13 +138,14 @@ func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
 	prefix := "  "
+	providerName := displayValue(strings.TrimSpace(m.providerDisplayName()), "no provider")
 
 	if tier == tierTiny {
-		provider := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
+		provider := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
 		return fitStyledLine(provider, width)
 	}
 
-	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(displayValue(strings.TrimSpace(m.providerName), "no provider"))
+	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
 
 	rightGroups := []string{}
 	if usage := m.usageStatusSegment(); usage != "" {
@@ -153,6 +154,34 @@ func (m model) statusLine(width int) string {
 	right := strings.Join(rightGroups, separator)
 
 	return fitStyledLine(joinHeaderLine(left, right, width), width)
+}
+
+func (m model) providerDisplayName() string {
+	provider := strings.TrimSpace(m.providerName)
+	if provider == "" {
+		provider = strings.TrimSpace(m.providerProfile.Name)
+	}
+	if !providerDisplayNameIsGenericCustom(provider) {
+		return provider
+	}
+	baseURL := strings.TrimSpace(m.providerProfile.BaseURL)
+	if baseURL == "" || strings.Contains(strings.ToLower(baseURL), "example.invalid") {
+		return provider
+	}
+	derived := providerWizardNameFromBaseURL(baseURL)
+	if derived == "" || derived == "custom" {
+		return provider
+	}
+	return derived
+}
+
+func providerDisplayNameIsGenericCustom(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "custom-openai-compatible", "custom-anthropic-compatible":
+		return true
+	default:
+		return false
+	}
 }
 
 // nextPermissionMode toggles between the two prompt-respecting modes:

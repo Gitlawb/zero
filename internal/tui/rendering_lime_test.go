@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -789,6 +790,32 @@ func TestTitleBarShowsBadgeAndModel(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("title bar = %q, missing %q", got, want)
 		}
+	}
+}
+
+func TestGenericCustomProviderDisplayUsesEndpointName(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "custom-openai-compatible",
+		ModelName:    "MiniMax-M3",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "custom-openai-compatible",
+			CatalogID: "custom-openai-compatible",
+			BaseURL:   "https://api.minimax.io/v1",
+			Model:     "MiniMax-M3",
+		},
+	})
+
+	title := plainRender(t, m.titleBar(120))
+	if !strings.Contains(title, "minimax/MiniMax-M3") {
+		t.Fatalf("title bar = %q, want derived custom provider label", title)
+	}
+	if strings.Contains(title, "custom-openai-compatible/MiniMax-M3") {
+		t.Fatalf("title bar = %q, should not show generic custom catalog id", title)
+	}
+
+	status := plainRender(t, m.statusLine(100))
+	if !strings.Contains(status, "● minimax") {
+		t.Fatalf("status line = %q, want derived custom provider label", status)
 	}
 }
 

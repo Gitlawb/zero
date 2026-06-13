@@ -133,3 +133,46 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 		t.Fatalf("stored provider credentials = APIKey %q APIKeyEnv %q, want pasted key only", cfg.Providers[0].APIKey, cfg.Providers[0].APIKeyEnv)
 	}
 }
+
+func TestSaveSetupProviderStoresCustomEndpointSelection(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+
+	result, err := saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) {
+			return configPath, nil
+		},
+	}, tui.SetupSelection{
+		CatalogID: "custom-openai-compatible",
+		Name:      "minimax",
+		BaseURL:   "https://api.minimax.io/v1",
+		Model:     "MiniMax-M3",
+	}, setupSaveOptions{})
+	if err != nil {
+		t.Fatalf("saveSetupProvider() error = %v", err)
+	}
+
+	if result.Provider.Name != "minimax" {
+		t.Fatalf("Provider.Name = %q, want minimax", result.Provider.Name)
+	}
+	if result.Provider.BaseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("Provider.BaseURL = %q, want custom endpoint", result.Provider.BaseURL)
+	}
+	if result.Provider.Model != "MiniMax-M3" {
+		t.Fatalf("Provider.Model = %q, want typed model", result.Provider.Model)
+	}
+
+	cfg := readFileConfig(t, configPath)
+	if cfg.ActiveProvider != "minimax" {
+		t.Fatalf("ActiveProvider = %q, want minimax", cfg.ActiveProvider)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("Providers = %#v, want one provider", cfg.Providers)
+	}
+	profile := cfg.Providers[0]
+	if profile.Name != "minimax" || profile.CatalogID != "custom-openai-compatible" {
+		t.Fatalf("stored provider identity = %#v, want minimax custom-openai-compatible", profile)
+	}
+	if profile.BaseURL != "https://api.minimax.io/v1" || profile.Model != "MiniMax-M3" {
+		t.Fatalf("stored provider endpoint/model = %#v", profile)
+	}
+}

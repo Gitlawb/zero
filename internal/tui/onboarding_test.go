@@ -85,6 +85,115 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	}
 }
 
+func TestSetupTakeoverCustomCompatibleCollectsEndpointNameAndModel(t *testing.T) {
+	var saved SetupSelection
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "custom-openai-compatible", Name: "Custom OpenAI-compatible", DefaultModel: "custom-model", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+			Save: func(selection SetupSelection) (SetupResult, error) {
+				saved = selection
+				return SetupResult{
+					ConfigPath: "/tmp/zero/config.json",
+					Provider: config.ProviderProfile{
+						Name:      selection.Name,
+						CatalogID: selection.CatalogID,
+						BaseURL:   selection.BaseURL,
+						Model:     selection.Model,
+					},
+				}, nil
+			},
+		},
+	})
+	m.width = 100
+	m.height = 30
+
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageProvider {
+		t.Fatalf("stage = %v, want provider", m.setup.stage)
+	}
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageEndpoint {
+		t.Fatalf("stage = %v, want endpoint", m.setup.stage)
+	}
+	view := plainRender(t, m.View())
+	assertContains(t, view, "Endpoint URL")
+	assertContains(t, view, "url >")
+	assertContains(t, view, "https://api.example.com/v1")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.setup.stage != setupStageEndpoint {
+		t.Fatalf("blank endpoint advanced to %v, want endpoint", m.setup.stage)
+	}
+	assertContains(t, plainRender(t, m.View()), "enter an endpoint URL")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://api.minimax.io/v1")})
+	m = updated.(model)
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageName {
+		t.Fatalf("stage = %v, want name", m.setup.stage)
+	}
+	view = plainRender(t, m.View())
+	assertContains(t, view, "Provider name")
+	assertContains(t, view, "name >")
+	assertContains(t, view, "minimax")
+
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageCredentials {
+		t.Fatalf("stage = %v, want credentials", m.setup.stage)
+	}
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageModel {
+		t.Fatalf("stage = %v, want model", m.setup.stage)
+	}
+	view = plainRender(t, m.View())
+	assertContains(t, view, "Choose a model")
+	assertContains(t, view, "model >")
+	assertContains(t, view, "custom-model")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.setup.stage != setupStageModel {
+		t.Fatalf("blank model advanced to %v, want model", m.setup.stage)
+	}
+	assertContains(t, plainRender(t, m.View()), "Enter a model name")
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("MiniMax-M3")})
+	m = updated.(model)
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageSafety {
+		t.Fatalf("stage = %v, want safety", m.setup.stage)
+	}
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageReady {
+		t.Fatalf("stage = %v, want ready", m.setup.stage)
+	}
+	view = plainRender(t, m.View())
+	assertContains(t, view, "provider:  minimax")
+	assertContains(t, view, "endpoint:  https://api.minimax.io/v1")
+	assertContains(t, view, "model:  MiniMax-M3")
+
+	m = pressSetupContinue(m)
+	if m.setup.visible {
+		t.Fatal("setup should hide after saving custom provider")
+	}
+	if saved.CatalogID != "custom-openai-compatible" {
+		t.Fatalf("saved CatalogID = %q, want custom-openai-compatible", saved.CatalogID)
+	}
+	if saved.Name != "minimax" {
+		t.Fatalf("saved Name = %q, want minimax", saved.Name)
+	}
+	if saved.BaseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("saved BaseURL = %q, want endpoint", saved.BaseURL)
+	}
+	if saved.Model != "MiniMax-M3" {
+		t.Fatalf("saved Model = %q, want typed model", saved.Model)
+	}
+}
+
 func TestSetupCompletionResetsChatSurfaceInsideAltScreen(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
@@ -1113,7 +1222,7 @@ func TestSetupReadyFooterUsesEnter(t *testing.T) {
 func pressSetupContinue(m model) model {
 	var updated tea.Model
 	var cmd tea.Cmd
-	if m.setup.stage == setupStageProvider || m.setupCredentialInputActive() || m.setup.stage == setupStageModel || m.setup.stage == setupStageReady {
+	if m.setup.stage == setupStageProvider || m.setupEndpointInputActive() || m.setupNameInputActive() || m.setupCredentialInputActive() || m.setup.stage == setupStageModel || m.setup.stage == setupStageReady {
 		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	} else {
 		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})

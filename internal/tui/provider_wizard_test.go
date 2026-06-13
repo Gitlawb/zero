@@ -319,6 +319,128 @@ func TestProviderWizardRightAllowsExistingCredentialEnv(t *testing.T) {
 	}
 }
 
+func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("custom endpoint step should not start model discovery")
+	}
+	if next.providerWizard.step != providerWizardStepEndpoint {
+		t.Fatalf("custom provider first step = %v, want endpoint", next.providerWizard.step)
+	}
+	view := plainRender(t, next.View())
+	for _, want := range []string{
+		"Endpoint URL",
+		"url >",
+		"https://api.example.com/v1",
+		"2 endpoint",
+	} {
+		assertContains(t, view, want)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepEndpoint {
+		t.Fatalf("blank endpoint advanced to %v, want endpoint", next.providerWizard.step)
+	}
+	assertContains(t, plainRender(t, next.View()), "enter an endpoint URL")
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://proxy.example/v1")})
+	next = updated.(model)
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("endpoint step should not start model discovery")
+	}
+	if next.providerWizard.step != providerWizardStepName {
+		t.Fatalf("endpoint step advanced to %v, want name", next.providerWizard.step)
+	}
+	view = plainRender(t, next.View())
+	for _, want := range []string{
+		"Provider name",
+		"name >",
+		"proxy",
+	} {
+		assertContains(t, view, want)
+	}
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("name step should not start model discovery")
+	}
+	if next.providerWizard.step != providerWizardStepCredential {
+		t.Fatalf("name step advanced to %v, want credential", next.providerWizard.step)
+	}
+
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("custom model step should not discover against the placeholder endpoint")
+	}
+	if next.providerWizard.step != providerWizardStepModel {
+		t.Fatalf("credential step advanced to %v, want model", next.providerWizard.step)
+	}
+	view = plainRender(t, next.View())
+	for _, want := range []string{
+		"Model name",
+		"model >",
+		"custom-model",
+	} {
+		assertContains(t, view, want)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepModel {
+		t.Fatalf("blank model advanced to %v, want model", next.providerWizard.step)
+	}
+	assertContains(t, plainRender(t, next.View()), "enter a model name")
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("my-custom-model")})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepDone {
+		t.Fatalf("model step advanced to %v, want ready", next.providerWizard.step)
+	}
+	view = plainRender(t, next.View())
+	assertContains(t, view, "Endpoint    https://proxy.example/v1")
+	assertContains(t, view, "Name        proxy")
+	assertContains(t, view, "Model       my-custom-model")
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.providerWizard != nil {
+		t.Fatal("saving custom provider should close the wizard")
+	}
+	if captured.CatalogID != "custom-openai-compatible" || captured.ProviderKind != config.ProviderKindOpenAICompatible {
+		t.Fatalf("captured provider identity = %#v", captured)
+	}
+	if captured.Name != "proxy" {
+		t.Fatalf("captured Name = %q, want derived endpoint name", captured.Name)
+	}
+	if captured.BaseURL != "https://proxy.example/v1" {
+		t.Fatalf("captured BaseURL = %q, want custom endpoint", captured.BaseURL)
+	}
+	if captured.Model != "my-custom-model" {
+		t.Fatalf("captured Model = %q, want typed model", captured.Model)
+	}
+	if captured.APIKeyEnv != "OPENAI_API_KEY" {
+		t.Fatalf("captured APIKeyEnv = %q, want OPENAI_API_KEY fallback", captured.APIKeyEnv)
+	}
+}
+
 func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
