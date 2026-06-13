@@ -166,23 +166,51 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 	}
 	width := chatWidth(m.width)
 	composerLines := viewLines(m.composerBox(width))
-	footerLines := viewLines(m.footerView(width))
-	if len(composerLines) == 0 || len(footerLines) == 0 {
+	fullFooterLines := viewLines(m.footerView(width))
+	if len(composerLines) == 0 || len(fullFooterLines) == 0 {
 		return false
 	}
-	composerTop := -1
-	for index := 0; index+len(composerLines) <= len(footerLines); index++ {
-		if footerLines[index] == composerLines[0] {
-			composerTop = index
-			break
-		}
-	}
+	composerTop := lineSequenceIndex(fullFooterLines, composerLines)
 	if composerTop < 0 {
 		return false
 	}
+	footerLines := fullFooterLines
+	clippedPrefix := 0
+	maxFooterLines := maxInt(0, m.height-1)
+	if len(footerLines) > maxFooterLines {
+		clippedPrefix = len(footerLines) - maxFooterLines
+		footerLines = footerLines[clippedPrefix:]
+	}
+	if len(footerLines) == 0 {
+		return false
+	}
+	visibleTop := maxInt(composerTop, clippedPrefix)
+	visibleBottom := minInt(composerTop+len(composerLines), clippedPrefix+len(footerLines))
+	if visibleTop >= visibleBottom {
+		return false
+	}
 	footerTop := maxInt(0, m.height-len(footerLines))
-	top := footerTop + composerTop
-	return msg.Y >= top && msg.Y < top+len(composerLines)
+	top := footerTop + visibleTop - clippedPrefix
+	return msg.Y >= top && msg.Y < top+visibleBottom-visibleTop
+}
+
+func lineSequenceIndex(lines []string, sequence []string) int {
+	if len(sequence) == 0 || len(sequence) > len(lines) {
+		return -1
+	}
+	for index := 0; index+len(sequence) <= len(lines); index++ {
+		matched := true
+		for offset := range sequence {
+			if lines[index+offset] != sequence[offset] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return index
+		}
+	}
+	return -1
 }
 
 func (m *model) selectSuggestionAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {

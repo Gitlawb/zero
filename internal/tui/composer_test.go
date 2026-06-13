@@ -166,8 +166,45 @@ func TestBackspaceAfterPastedPreviewDeletesWholePaste(t *testing.T) {
 	if got := next.composerValue(); got != "" {
 		t.Fatalf("composer value after deleting paste preview = %q, want empty", got)
 	}
-	if next.composerPastePreview.active {
+	if len(next.composerPastePreviews) != 0 {
 		t.Fatal("paste preview should clear after deleting pasted block")
+	}
+}
+
+func TestPastingTwiceKeepsBothComposerPreviews(t *testing.T) {
+	firstPaste := strings.Join([]string{
+		"Create a dashboard.",
+		"Use cards and filters.",
+		"Keep it responsive.",
+	}, "\n")
+	secondPaste := strings.Join([]string{
+		"Log line one",
+		"Log line two",
+		"Log line three",
+		"Log line four",
+	}, "\n")
+	m := newModel(context.Background(), Options{})
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(firstPaste), Paste: true})
+	next := updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	next = updated.(model)
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secondPaste), Paste: true})
+	next = updated.(model)
+
+	if got := next.composerValue(); got != firstPaste+"\n"+secondPaste {
+		t.Fatalf("composer value should preserve both pastes = %q", got)
+	}
+	view := plainRender(t, next.composerBox(120))
+	for _, want := range []string{"[Create a dashboard.", "3 lines", "[Log line one", "4 lines"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("composer preview missing %q in:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"Use cards and filters", "Log line two"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("composer preview should keep both pasted blocks compact, found %q in:\n%s", unwanted, view)
+		}
 	}
 }
 

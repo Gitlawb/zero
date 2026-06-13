@@ -67,7 +67,7 @@ type model struct {
 	input                  textinput.Model
 	composer               composerState
 	composerActive         bool
-	composerPastePreview   composerPastePreview
+	composerPastePreviews  []composerPastePreview
 	altScreen              bool
 	setup                  setupState
 	setupSave              func(SetupSelection) (SetupResult, error)
@@ -1147,25 +1147,17 @@ func (m model) composerLine(width int) string {
 	if hideInputForSuggestions {
 		state = composerState{}
 	}
-	hint := ""
 	argumentHint := commandArgumentHintForInput(input.Value())
 	if argumentHint != "" && input.Position() != len([]rune(input.Value())) {
 		argumentHint = ""
 	}
 	if argumentHint != "" {
 		input.Width = 0
-		line := commandArgumentHintComposerLine(input, argumentHint)
-		if hint == "" {
-			return fitStyledLine(line, width)
-		}
-		return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+		return fitStyledLine(commandArgumentHintComposerLine(input, argumentHint), width)
 	}
-	displayState := composerDisplayStateForPastePreview(state, m.composerPastePreview)
-	line := renderComposerInput(input, displayState, width)
-	if hint == "" {
-		return line
-	}
-	return joinHeaderLine(fitStyledLine(line, width-lipgloss.Width(hint)-2), hint, width)
+	previews := validComposerPastePreviews(state, m.composerPastePreviews)
+	displayState := composerDisplayStateForPastePreviews(state, previews)
+	return renderComposerInput(input, displayState, width)
 }
 
 type composerVisualLine struct {
@@ -1291,28 +1283,43 @@ func composerVisualLinePrefix(input textinput.Model, first bool) string {
 	return "  "
 }
 
-func composerDisplayStateForPastePreview(state composerState, preview composerPastePreview) composerState {
+func composerDisplayStateForPastePreviews(state composerState, previews []composerPastePreview) composerState {
 	state = normalizeComposerState(state)
-	if !preview.validFor(state) {
+	valid := validComposerPastePreviews(state, previews)
+	if len(valid) == 0 {
 		return state
 	}
 	runes := []rune(state.text)
-	labelRunes := []rune(preview.label)
-	display := make([]rune, 0, len(runes)-(preview.end-preview.start)+len(labelRunes))
-	display = append(display, runes[:preview.start]...)
-	display = append(display, labelRunes...)
-	display = append(display, runes[preview.end:]...)
-
-	displayCursor := state.cursor
-	switch {
-	case state.cursor <= preview.start:
-		displayCursor = state.cursor
-	case state.cursor <= preview.end:
-		displayCursor = preview.start + len(labelRunes)
-	default:
-		displayCursor = state.cursor - (preview.end - preview.start) + len(labelRunes)
+	display := make([]rune, 0, len(runes))
+	last := 0
+	for _, preview := range valid {
+		display = append(display, runes[last:preview.start]...)
+		display = append(display, []rune(preview.label)...)
+		last = preview.end
 	}
-	return composerState{text: string(display), cursor: displayCursor}
+	display = append(display, runes[last:]...)
+	return composerState{
+		text:   string(display),
+		cursor: composerDisplayCursorForPastePreviews(state.cursor, valid),
+	}
+}
+
+func composerDisplayCursorForPastePreviews(cursor int, previews []composerPastePreview) int {
+	delta := 0
+	for _, preview := range previews {
+		labelLen := len([]rune(preview.label))
+		hiddenLen := preview.end - preview.start
+		displayStart := preview.start + delta
+		switch {
+		case cursor <= preview.start:
+			return cursor + delta
+		case cursor <= preview.end:
+			return displayStart + labelLen
+		default:
+			delta += labelLen - hiddenLen
+		}
+	}
+	return cursor + delta
 }
 
 func (m model) moveComposerVisualCursor(direction int) (model, bool) {
@@ -1329,7 +1336,8 @@ func (m model) moveComposerVisualCursor(direction int) (model, bool) {
 	if state.text == "" {
 		return m, false
 	}
-	displayState := composerDisplayStateForPastePreview(state, m.composerPastePreview)
+	previews := validComposerPastePreviews(state, m.composerPastePreviews)
+	displayState := composerDisplayStateForPastePreviews(state, previews)
 	segments := composerWrappedVisualLines(input, displayState, maxInt(1, width-4))
 	if len(segments) <= 1 {
 		return m, false
@@ -1341,25 +1349,31 @@ func (m model) moveComposerVisualCursor(direction int) (model, bool) {
 	}
 	column := composerVisualCursorColumn(displayState, segments[cursorLine])
 	displayState.cursor = composerCursorForVisualColumn(displayState, segments[targetLine], column)
-	state.cursor = composerOriginalCursorForPastePreview(displayState.cursor, m.composerPastePreview)
+	state.cursor = composerOriginalCursorForPastePreviews(displayState.cursor, previews)
 	m.setComposerState(state)
 	return m, true
 }
 
-func composerOriginalCursorForPastePreview(displayCursor int, preview composerPastePreview) int {
-	if !preview.active || preview.label == "" {
+func composerOriginalCursorForPastePreviews(displayCursor int, previews []composerPastePreview) int {
+	if len(previews) == 0 {
 		return displayCursor
 	}
-	labelWidth := len([]rune(preview.label))
-	displayEnd := preview.start + labelWidth
-	switch {
-	case displayCursor <= preview.start:
-		return displayCursor
-	case displayCursor <= displayEnd:
-		return preview.end
-	default:
-		return displayCursor - labelWidth + (preview.end - preview.start)
+	delta := 0
+	for _, preview := range previews {
+		labelLen := len([]rune(preview.label))
+		hiddenLen := preview.end - preview.start
+		displayStart := preview.start + delta
+		displayEnd := displayStart + labelLen
+		switch {
+		case displayCursor <= displayStart:
+			return displayCursor - delta
+		case displayCursor <= displayEnd:
+			return preview.end
+		default:
+			delta += labelLen - hiddenLen
+		}
 	}
+	return displayCursor - delta
 }
 
 func composerVisualCursorColumn(state composerState, segment composerVisualLine) int {
