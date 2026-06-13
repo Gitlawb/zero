@@ -449,7 +449,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 	mcpTokenStore, err := deps.newMCPTokenStore()
 	if err != nil {
-		return writeAppError(stderr, "failed to initialize MCP OAuth tokens: "+err.Error(), 1)
+		_, _ = fmt.Fprintf(stderr, "[zero] warning: failed to initialize MCP OAuth tokens: %s\n", err)
+		mcpTokenStore = nil
+		err = nil
 	}
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
 	if len(mcpConfig.Servers) > 0 {
@@ -459,6 +461,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		})
 	}
 	if err != nil {
+		closeMCPRuntime(stderr, mcpRuntime)
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)

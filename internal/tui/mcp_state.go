@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -208,7 +209,7 @@ func mcpServerTarget(server config.MCPServerConfig) string {
 	case string(mcp.ServerTypeHTTP), string(mcp.ServerTypeSSE):
 		parts := []string{}
 		if url := strings.TrimSpace(server.URL); url != "" {
-			parts = append(parts, url)
+			parts = append(parts, redactMCPDisplayURL(url))
 		}
 		if headers := redactedStringMap(server.Headers); headers != "" {
 			parts = append(parts, "headers", headers)
@@ -219,7 +220,7 @@ func mcpServerTarget(server config.MCPServerConfig) string {
 		if command := strings.TrimSpace(server.Command); command != "" {
 			parts = append(parts, command)
 		}
-		parts = append(parts, trimmedStrings(server.Args)...)
+		parts = append(parts, redactedCommandArgs(server.Args)...)
 		if env := redactedStringMap(server.Env); env != "" {
 			parts = append(parts, "env", env)
 		}
@@ -245,14 +246,90 @@ func redactedStringMap(values map[string]string) string {
 	return strings.Join(parts, " ")
 }
 
-func trimmedStrings(values []string) []string {
+func redactedCommandArgs(values []string) []string {
 	trimmed := make([]string, 0, len(values))
+	redactNext := false
 	for _, value := range values {
 		if value = strings.TrimSpace(value); value != "" {
+			if redactNext {
+				trimmed = append(trimmed, "[redacted]")
+				redactNext = false
+				continue
+			}
+			if key, _, ok := strings.Cut(value, "="); ok && isSensitiveMCPDisplayKey(key) {
+				trimmed = append(trimmed, key+"=[redacted]")
+				continue
+			}
+			if isSensitiveMCPDisplayFlag(value) {
+				trimmed = append(trimmed, value)
+				redactNext = true
+				continue
+			}
 			trimmed = append(trimmed, value)
 		}
 	}
 	return trimmed
+}
+
+func redactMCPDisplayURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if parsed.User != nil {
+		parsed.User = nil
+	}
+	if parsed.RawQuery != "" {
+		parsed.RawQuery = redactMCPDisplayRawQuery(parsed.RawQuery)
+	}
+	out := parsed.String()
+	if strings.TrimSpace(out) == "" {
+		return raw
+	}
+	return out
+}
+
+func redactMCPDisplayRawQuery(rawQuery string) string {
+	parts := strings.Split(rawQuery, "&")
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		key, _, hasValue := strings.Cut(part, "=")
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+		if !isSensitiveMCPDisplayKey(decodedKey) {
+			continue
+		}
+		if hasValue {
+			parts[index] = key + "=[redacted]"
+		} else {
+			parts[index] = key
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+func isSensitiveMCPDisplayFlag(value string) bool {
+	value = strings.TrimLeft(strings.ToLower(strings.TrimSpace(value)), "-")
+	return isSensitiveMCPDisplayKey(value)
+}
+
+func isSensitiveMCPDisplayKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(strings.TrimLeft(key, "-")))
+	key = strings.ReplaceAll(key, "-", "_")
+	for _, token := range []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "auth", "credential"} {
+		if strings.Contains(key, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func mcpServerTokenMap(cfg config.MCPConfig) map[string]string {

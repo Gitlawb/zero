@@ -405,12 +405,18 @@ func parseMCPAddArgs(args []string) (mcpAddOptions, bool, error) {
 	}
 	switch mcp.ServerType(options.server.Type) {
 	case mcp.ServerTypeStdio:
+		if len(options.server.Headers) > 0 {
+			return options, false, execUsageError{"headers are only supported for http or sse transports"}
+		}
 		if len(command) == 0 {
 			return options, false, execUsageError{"usage: zero mcp add <server> [flags] -- <command> [args...]"}
 		}
 		options.server.Command = command[0]
 		options.server.Args = append([]string{}, command[1:]...)
 	case mcp.ServerTypeHTTP, mcp.ServerTypeSSE:
+		if len(options.server.Env) > 0 {
+			return options, false, execUsageError{"env is only supported for stdio transport"}
+		}
 		if strings.TrimSpace(options.server.URL) == "" {
 			return options, false, execUsageError{fmt.Sprintf("zero mcp add --type %s requires --url", options.server.Type)}
 		}
@@ -602,7 +608,15 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 	cfg.ensureRaw()
 	raw, found := cfg.serverRaw[name]
 	if !found {
-		return false, false, nil
+		legacyRaw, legacyFound, err := cfg.takeLegacyServer(name)
+		if err != nil {
+			return false, false, err
+		}
+		if !legacyFound {
+			return false, false, nil
+		}
+		raw = legacyRaw
+		found = true
 	}
 	var server map[string]json.RawMessage
 	if len(raw) > 0 && string(raw) != "null" {
@@ -636,12 +650,49 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 	}
 	cfg.serverRaw[name] = data
 
-	if cfg.file.MCP.Servers != nil {
-		typed := cfg.file.MCP.Servers[name]
-		typed.Disabled = disabled
-		cfg.file.MCP.Servers[name] = typed
+	if cfg.file.MCP.Servers == nil {
+		cfg.file.MCP.Servers = map[string]config.MCPServerConfig{}
 	}
+	typed := cfg.file.MCP.Servers[name]
+	if len(raw) > 0 && string(raw) != "null" {
+		var decoded config.MCPServerConfig
+		if err := json.Unmarshal(raw, &decoded); err == nil {
+			typed = decoded
+		}
+	}
+	typed.Disabled = disabled
+	cfg.file.MCP.Servers[name] = typed
 	return changed, true, nil
+}
+
+func (cfg *mcpWritableConfig) takeLegacyServer(name string) (json.RawMessage, bool, error) {
+	cfg.ensureRaw()
+	for _, key := range []string{"mcpServers", "mcp_servers"} {
+		data, ok := cfg.raw[key]
+		if !ok || len(data) == 0 || string(data) == "null" {
+			continue
+		}
+		var servers map[string]json.RawMessage
+		if err := json.Unmarshal(data, &servers); err != nil {
+			return nil, false, err
+		}
+		raw, ok := servers[name]
+		if !ok {
+			continue
+		}
+		delete(servers, name)
+		if len(servers) == 0 {
+			delete(cfg.raw, key)
+		} else {
+			next, err := json.Marshal(servers)
+			if err != nil {
+				return nil, false, err
+			}
+			cfg.raw[key] = next
+		}
+		return raw, true, nil
+	}
+	return nil, false, nil
 }
 
 func (cfg *mcpWritableConfig) removeLegacyServer(name string) (bool, error) {
@@ -674,7 +725,7 @@ func (cfg *mcpWritableConfig) removeLegacyServer(name string) (bool, error) {
 	return removed, nil
 }
 
-func (cfg mcpWritableConfig) marshalJSON() ([]byte, error) {
+func (cfg *mcpWritableConfig) marshalJSON() ([]byte, error) {
 	cfg.ensureRaw()
 	if len(cfg.serverRaw) > 0 {
 		data, err := json.Marshal(cfg.serverRaw)

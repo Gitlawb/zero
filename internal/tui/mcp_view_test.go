@@ -54,9 +54,11 @@ func TestMCPViewRendersToolRows(t *testing.T) {
 
 	for _, want := range []string{
 		"Tools",
-		"mcp_filesystem_read_file [read/allow]",
+		"filesystem tools (1)",
+		"read_file [read/allow] - mcp_filesystem_read_file",
 		"filesystem/read_file",
-		"mcp_github_create_issue [network/prompt]",
+		"github tools (1)",
+		"create_issue [network/prompt] - mcp_github_create_issue",
 		"Create an issue in GitHub",
 	} {
 		if !strings.Contains(got, want) {

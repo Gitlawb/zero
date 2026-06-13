@@ -180,7 +180,7 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 		"docs [stdio] enabled 1 tool - zero-docs-mcp --workspace .",
 		"github [http] enabled oauth - https://mcp.github.example",
 		"Tools",
-		"mcp_docs_lookup [network/prompt] - docs/lookup - Look up docs",
+		"lookup [network/prompt] - mcp_docs_lookup - docs/lookup - Look up docs",
 		"Permissions",
 		"mode: ask",
 		"persistent grants: 2",

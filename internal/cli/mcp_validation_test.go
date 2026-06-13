@@ -102,3 +102,54 @@ func TestRunMCPAddJSONRedactsHeaders(t *testing.T) {
 		t.Fatalf("persisted header secret = %q, want original value", got)
 	}
 }
+
+func TestRunMCPAddRejectsTransportSpecificSecrets(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "http rejects env",
+			args: []string{"mcp", "add", "remote", "--url", "https://example.com/mcp", "--env", "REMOTE_TOKEN=secret"},
+			want: "env is only supported for stdio transport",
+		},
+		{
+			name: "sse rejects env",
+			args: []string{"mcp", "add", "events", "--type", "sse", "--url", "https://example.com/sse", "--env", "SSE_TOKEN=secret"},
+			want: "env is only supported for stdio transport",
+		},
+		{
+			name: "stdio rejects header",
+			args: []string{"mcp", "add", "local", "--header", "Authorization=Bearer secret", "--", "local-mcp"},
+			want: "headers are only supported for http or sse transports",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			configPathCalled := false
+
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				userConfigPath: func() (string, error) {
+					configPathCalled = true
+					return filepath.Join(t.TempDir(), "zero", "config.json"), nil
+				},
+			})
+
+			if exitCode != exitUsage {
+				t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+			}
+			if configPathCalled {
+				t.Fatal("user config path was resolved after invalid MCP add arguments")
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr missing %q:\n%s", tc.want, stderr.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), "secret") {
+				t.Fatalf("output leaked secret value:\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+			}
+		})
+	}
+}

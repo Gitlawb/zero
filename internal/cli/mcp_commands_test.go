@@ -210,6 +210,81 @@ func TestRunMCPToggleEnableDisablePreservesConfig(t *testing.T) {
 	}
 }
 
+func TestRunMCPToggleMigratesLegacyServerAliases(t *testing.T) {
+	cases := []struct {
+		name      string
+		aliasName string
+	}{
+		{name: "camel legacy alias", aliasName: "mcpServers"},
+		{name: "snake legacy alias", aliasName: "mcp_servers"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+			writeMCPCommandRawConfig(t, configPath, `{
+  "activeProvider": "fast",
+  "`+tc.aliasName+`": {
+    "docs": {
+      "type": "stdio",
+      "command": "docs-mcp",
+      "futureServer": "keep"
+    }
+  }
+}
+`)
+
+			var disableOut, disableErr bytes.Buffer
+			disableCode := runWithDeps([]string{"mcp", "disable", "docs", "--json"}, &disableOut, &disableErr, appDeps{
+				userConfigPath: func() (string, error) { return configPath, nil },
+			})
+			if disableCode != exitSuccess {
+				t.Fatalf("disable exitCode = %d stdout=%s stderr=%s", disableCode, disableOut.String(), disableErr.String())
+			}
+			var disablePayload struct {
+				ServerName string `json:"serverName"`
+				Disabled   bool   `json:"disabled"`
+				Changed    bool   `json:"changed"`
+			}
+			if err := json.Unmarshal(disableOut.Bytes(), &disablePayload); err != nil {
+				t.Fatalf("decode disable JSON: %v\n%s", err, disableOut.String())
+			}
+			if disablePayload.ServerName != "docs" || !disablePayload.Disabled || !disablePayload.Changed {
+				t.Fatalf("disable payload = %#v, want docs disabled changed", disablePayload)
+			}
+
+			raw := readMCPCommandRawConfig(t, configPath)
+			if _, ok := raw[tc.aliasName]; ok {
+				t.Fatalf("legacy alias %s should be migrated away: %s", tc.aliasName, mustMarshalMCPCommandJSON(t, raw))
+			}
+			mcpRaw := rawMCPCommandObject(t, raw["mcp"])
+			serversRaw := rawMCPCommandObject(t, mcpRaw["servers"])
+			docsRaw := rawMCPCommandObject(t, serversRaw["docs"])
+			if got := string(docsRaw["disabled"]); got != "true" {
+				t.Fatalf("disabled raw = %s, want true in canonical mcp.servers: %s", got, mustMarshalMCPCommandJSON(t, docsRaw))
+			}
+			if _, ok := docsRaw["futureServer"]; !ok {
+				t.Fatalf("server unknown field was not preserved during migration: %s", mustMarshalMCPCommandJSON(t, docsRaw))
+			}
+
+			var enableOut, enableErr bytes.Buffer
+			enableCode := runWithDeps([]string{"mcp", "enable", "docs", "--json"}, &enableOut, &enableErr, appDeps{
+				userConfigPath: func() (string, error) { return configPath, nil },
+			})
+			if enableCode != exitSuccess {
+				t.Fatalf("enable exitCode = %d stdout=%s stderr=%s", enableCode, enableOut.String(), enableErr.String())
+			}
+			raw = readMCPCommandRawConfig(t, configPath)
+			mcpRaw = rawMCPCommandObject(t, raw["mcp"])
+			serversRaw = rawMCPCommandObject(t, mcpRaw["servers"])
+			docsRaw = rawMCPCommandObject(t, serversRaw["docs"])
+			if _, ok := docsRaw["disabled"]; ok {
+				t.Fatalf("enable should remove disabled=false noise after migration: %s", mustMarshalMCPCommandJSON(t, docsRaw))
+			}
+		})
+	}
+}
+
 func TestRunMCPRemovePreservesUnrelatedConfigFields(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	writeMCPCommandRawConfig(t, configPath, `{
@@ -256,6 +331,49 @@ func TestRunMCPRemovePreservesUnrelatedConfigFields(t *testing.T) {
 	otherRaw := rawMCPCommandObject(t, serversRaw["other"])
 	if _, ok := otherRaw["futureServer"]; !ok {
 		t.Fatalf("unrelated server unknown field was not preserved: %s", mustMarshalMCPCommandJSON(t, otherRaw))
+	}
+}
+
+func TestRunMCPListRedactsURLCredentialsAndSensitiveQueryParams(t *testing.T) {
+	cwd := t.TempDir()
+	serverURL := "https://user:password@remote.example/mcp?access_token=secret-token&api_key=secret-key&safe=value"
+	deps := appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
+			if workspaceRoot != cwd {
+				t.Fatalf("workspaceRoot = %q, want %q", workspaceRoot, cwd)
+			}
+			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"remote": {Type: "http", URL: serverURL},
+			}}, nil
+		},
+	}
+
+	for _, args := range [][]string{
+		{"mcp", "list"},
+		{"mcp", "list", "--json"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+
+			exitCode := runWithDeps(args, &stdout, &stderr, deps)
+
+			if exitCode != exitSuccess {
+				t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+			}
+			output := stdout.String()
+			for _, leaked := range []string{"user:password", "secret-token", "secret-key", "access_token=secret-token", "api_key=secret-key"} {
+				if strings.Contains(output, leaked) {
+					t.Fatalf("mcp list leaked %q in output:\n%s", leaked, output)
+				}
+			}
+			if !strings.Contains(output, "remote.example") {
+				t.Fatalf("mcp list dropped non-sensitive URL context:\n%s", output)
+			}
+			if !strings.Contains(output, "[REDACTED]") {
+				t.Fatalf("mcp list did not mark redacted URL parts:\n%s", output)
+			}
+		})
 	}
 }
 

@@ -234,6 +234,7 @@ func redactMCPServerConfigs(servers map[string]config.MCPServerConfig) map[strin
 				clone.Headers[key] = "[REDACTED]"
 			}
 		}
+		clone.URL = redactMCPURL(clone.URL, "[REDACTED]")
 		redacted[name] = clone
 	}
 	return redacted

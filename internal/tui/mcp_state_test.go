@@ -183,6 +183,12 @@ func TestBuildMCPViewStateSummarizesOAuthTokens(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Save(linear) error = %v", err)
 	}
+	if err := store.Save("notion", mcp.StoredToken{
+		AccessToken: "expired-secret",
+		ExpiresAt:   now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("Save(notion) error = %v", err)
+	}
 	if err := store.Save("orphan", mcp.StoredToken{AccessToken: "orphan-secret", ExpiresAt: now.Add(-time.Minute)}); err != nil {
 		t.Fatalf("Save(orphan) error = %v", err)
 	}
@@ -201,8 +207,25 @@ func TestBuildMCPViewStateSummarizesOAuthTokens(t *testing.T) {
 		Scopes:          []string{"issues:read", "issues:write"},
 		ExpiresAt:       expiry,
 	})
-	assertOAuthView(t, state.OAuth.Servers[1], MCPOAuthServerView{ServerName: "notion", Configured: true})
+	assertOAuthView(t, state.OAuth.Servers[1], MCPOAuthServerView{
+		ServerName: "notion",
+		Configured: true,
+		HasToken:   true,
+		Expired:    true,
+		ExpiresAt:  now.Add(-2 * time.Minute),
+	})
 	assertOAuthView(t, state.OAuth.Servers[2], MCPOAuthServerView{ServerName: "orphan", HasToken: true, Expired: true, ExpiresAt: now.Add(-time.Minute)})
+
+	rendered := renderMCPView(state, 160)
+	for _, want := range []string{
+		"linear configured token refresh expires 2026-06-13T13:00:00Z Bearer scopes issues:read,issues:write",
+		"notion configured token expired",
+		"orphan not configured",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered OAuth state = %q, missing %q", rendered, want)
+		}
+	}
 }
 
 func TestBuildMCPViewStateToleratesUnreadableStores(t *testing.T) {

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -96,9 +97,65 @@ func formatMCPServerList(servers map[string]config.MCPServerConfig) string {
 		}
 		identity := strings.TrimSpace(server.Command)
 		if identity == "" {
-			identity = strings.TrimSpace(server.URL)
+			identity = redactMCPURL(server.URL, "[REDACTED]")
 		}
 		lines = append(lines, fmt.Sprintf("  %s [%s] %s %s", name, server.Type, state, identity))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func redactMCPURL(raw string, marker string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if parsed.User != nil {
+		parsed.User = nil
+	}
+	if parsed.RawQuery != "" {
+		parsed.RawQuery = redactMCPRawQuery(parsed.RawQuery, marker)
+	}
+	out := parsed.String()
+	if strings.TrimSpace(out) == "" {
+		return raw
+	}
+	return out
+}
+
+func redactMCPRawQuery(rawQuery string, marker string) string {
+	parts := strings.Split(rawQuery, "&")
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		key, _, hasValue := strings.Cut(part, "=")
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+		if !isSensitiveMCPDisplayKey(decodedKey) {
+			continue
+		}
+		if hasValue {
+			parts[index] = key + "=" + marker
+		} else {
+			parts[index] = key
+		}
+	}
+	return strings.Join(parts, "&")
+}
+
+func isSensitiveMCPDisplayKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "-", "_")
+	for _, token := range []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "auth", "credential"} {
+		if strings.Contains(key, token) {
+			return true
+		}
+	}
+	return false
 }

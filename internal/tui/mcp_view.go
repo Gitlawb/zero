@@ -143,34 +143,58 @@ func mcpServerLines(servers []MCPServerView) []string {
 			line += " - " + target
 		}
 		lines = append(lines, commandBullet(line))
+		if actions := mcpServerActionLine(server); actions != "" {
+			lines = append(lines, actions)
+		}
 	}
 	return lines
 }
 
 func mcpToolLines(tools []MCPToolView) []string {
-	lines := make([]string, 0, len(tools))
+	grouped := map[string][]MCPToolView{}
+	order := []string{}
 	for _, tool := range tools {
-		name := strings.TrimSpace(tool.RegistryName)
-		if name == "" {
-			name = strings.Trim(strings.Join([]string{"mcp", tool.ServerName, tool.Name}, "_"), "_")
+		serverName := displayValue(strings.TrimSpace(tool.ServerName), "unknown")
+		if _, ok := grouped[serverName]; !ok {
+			order = append(order, serverName)
 		}
-		if name == "" {
-			name = "mcp_tool"
-		}
+		grouped[serverName] = append(grouped[serverName], tool)
+	}
 
-		sideEffect := displayValue(strings.TrimSpace(tool.SideEffect), "unknown")
-		permission := displayValue(strings.TrimSpace(tool.Permission), "prompt")
-		line := fmt.Sprintf("%s [%s/%s]", name, sideEffect, permission)
-
-		if target := mcpToolTarget(tool); target != "" {
-			line += " - " + target
+	lines := make([]string, 0, len(tools)+len(order))
+	for _, serverName := range order {
+		serverTools := grouped[serverName]
+		lines = append(lines, commandBullet(fmt.Sprintf("%s tools (%d)", serverName, len(serverTools))))
+		for _, tool := range serverTools {
+			lines = append(lines, "  "+commandBullet(mcpToolLine(tool)))
 		}
-		if description := strings.TrimSpace(tool.Description); description != "" {
-			line += " - " + description
-		}
-		lines = append(lines, commandBullet(line))
 	}
 	return lines
+}
+
+func mcpToolLine(tool MCPToolView) string {
+	name := strings.TrimSpace(tool.RegistryName)
+	if name == "" {
+		name = strings.Trim(strings.Join([]string{"mcp", tool.ServerName, tool.Name}, "_"), "_")
+	}
+	if name == "" {
+		name = "mcp_tool"
+	}
+
+	sideEffect := displayValue(strings.TrimSpace(tool.SideEffect), "unknown")
+	permission := displayValue(strings.TrimSpace(tool.Permission), "prompt")
+	displayName := displayValue(strings.TrimSpace(tool.Name), name)
+	line := fmt.Sprintf("%s [%s/%s]", displayName, sideEffect, permission)
+	if name != "" && name != displayName {
+		line += " - " + name
+	}
+	if target := mcpToolTarget(tool); target != "" && target != displayName {
+		line += " - " + target
+	}
+	if description := strings.TrimSpace(tool.Description); description != "" {
+		line += " - " + description
+	}
+	return line
 }
 
 func mcpToolTarget(tool MCPToolView) string {
@@ -250,8 +274,59 @@ func mcpOAuthLines(servers []MCPOAuthServerView) []string {
 			parts = append(parts, "not configured")
 		}
 		lines = append(lines, commandBullet(strings.Join(parts, " ")))
+		if actions := mcpOAuthActionLine(server); actions != "" {
+			lines = append(lines, actions)
+		}
 	}
 	return lines
+}
+
+func mcpServerActionLine(server MCPServerView) string {
+	name := strings.TrimSpace(server.Name)
+	if name == "" {
+		return ""
+	}
+	actions := []string{"zero mcp check " + name}
+	if strings.EqualFold(strings.TrimSpace(server.State), "disabled") {
+		actions = append(actions, "zero mcp enable "+name)
+	} else {
+		actions = append(actions, "zero mcp disable "+name)
+	}
+	actions = append(actions, "zero mcp remove "+name)
+	if strings.EqualFold(strings.TrimSpace(server.Auth), "oauth") {
+		actions = append(actions, "zero mcp oauth login "+name)
+	}
+	return "    actions: " + strings.Join(actions, " | ")
+}
+
+func mcpOAuthActionLine(server MCPOAuthServerView) string {
+	name := strings.TrimSpace(server.ServerName)
+	if name == "" || !server.Configured {
+		return ""
+	}
+	actions := []string{}
+	if server.HasToken {
+		actions = append(actions, "zero mcp oauth refresh "+name, "zero mcp oauth logout "+name)
+	} else {
+		actions = append(actions, "zero mcp oauth login "+name)
+	}
+	if server.Expired && !server.HasRefreshToken {
+		actions = append(actions, "zero mcp oauth refresh "+name)
+	}
+	return "    actions: " + strings.Join(dedupeStrings(actions), " | ")
+}
+
+func dedupeStrings(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func fitCommandOutput(output commandOutput, width int) string {
