@@ -3,12 +3,21 @@ package specialist
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/background"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
 const specialistAccountingSource = "specialist"
+
+// accountingMu serializes the "check for an existing event, then append" pairs
+// below. Without it two concurrent finishers — e.g. a foreground onExit racing a
+// TaskOutput poll, or a background reaper — can both pass specialistEventExists
+// before either appends, writing duplicate stop/usage events. Accounting is
+// low-frequency, so a single process-wide lock is sufficient (Executor is used by
+// value, so a struct field would not be shared across copies).
+var accountingMu sync.Mutex
 
 type specialistAccountingInput struct {
 	ParentSessionID string
@@ -28,6 +37,8 @@ func (executor Executor) recordSpecialistStart(input specialistAccountingInput) 
 
 func (executor Executor) recordSpecialistStop(input specialistAccountingInput, summary StreamResult, status string, exitCode int, runErr error, usageRolledUp bool) {
 	store := accountingStore(executor.SessionStore)
+	accountingMu.Lock()
+	defer accountingMu.Unlock()
 	if specialistEventExists(store, input.ParentSessionID, sessions.EventSpecialistStop, input.ChildSessionID, summary.RunID) {
 		return
 	}
@@ -77,6 +88,8 @@ func appendSpecialistUsageRollup(store *sessions.Store, input specialistAccounti
 		return false, nil
 	}
 	store = accountingStore(store)
+	accountingMu.Lock()
+	defer accountingMu.Unlock()
 	if specialistEventExists(store, input.ParentSessionID, sessions.EventUsage, input.ChildSessionID, summary.RunID) {
 		return false, nil
 	}

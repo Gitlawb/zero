@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/background"
@@ -276,5 +277,48 @@ func requirePayloadInt(t *testing.T, payload map[string]any, key string, want in
 	}
 	if got != want {
 		t.Fatalf("payload %q = %d, want %d", key, got, want)
+	}
+}
+
+func TestRecordSpecialistStopDedupesUnderConcurrency(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+	executor := Executor{SessionStore: store}
+	input := specialistAccountingInput{
+		ParentSessionID: parent.SessionID,
+		ChildSessionID:  "child_task",
+		SpecialistName:  "worker",
+		Mode:            "background",
+		Background:      true,
+	}
+	summary := StreamResult{RunID: "run_1"}
+
+	// Many finishers race the same (child, run) stop. Exactly one event must land;
+	// run under -race to also catch the check-then-append data race.
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			executor.recordSpecialistStop(input, summary, "success", 0, nil, true)
+		}()
+	}
+	wg.Wait()
+
+	events, err := store.ReadEvents(parent.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	stops := 0
+	for _, event := range events {
+		if event.Type == sessions.EventSpecialistStop {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("expected exactly 1 stop event under concurrency, got %d", stops)
 	}
 }
