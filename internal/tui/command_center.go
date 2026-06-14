@@ -16,6 +16,8 @@ import (
 	zsearch "github.com/Gitlawb/zero/internal/search"
 )
 
+const doctorStatusRowID = "doctor/status"
+
 func (m model) startDoctorCommand(args string) (model, tea.Cmd) {
 	connectivity, fix, help, err := parseDoctorCommandArgs(args)
 	if err != nil {
@@ -37,10 +39,12 @@ func (m model) startDoctorCommand(args string) (model, tea.Cmd) {
 	m.doctorCommandSeq++
 	id := m.doctorCommandSeq
 	snapshot := m
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: doctorConnectivityRunningText()})
-	return m, func() tea.Msg {
+	m.doctorInFlight = true
+	m.doctorFrame = 0
+	m = m.setDoctorStatusRow(m.doctorConnectivityRunningText())
+	return m, tea.Batch(func() tea.Msg {
 		return doctorCommandResultMsg{id: id, text: snapshot.doctorText(true)}
-	}
+	}, m.spinner.Tick)
 }
 
 func (m model) startDoctorFixCommand() (model, tea.Cmd) {
@@ -173,16 +177,31 @@ func doctorFixLines(report doctor.Report) []string {
 	return lines
 }
 
-func doctorConnectivityRunningText() string {
-	return renderCommandOutput(commandOutput{
-		Title:  "Diagnostics",
-		Status: commandStatusInfo,
-		Sections: []commandSection{{
-			Title: "Provider",
-			Lines: []string{"checking provider connectivity..."},
-		}},
-		Hints: []string{"keep typing; Zero will append the result when the probe finishes"},
-	})
+func (m model) doctorConnectivityRunningText() string {
+	return strings.Join([]string{
+		"Checking provider",
+		"Zero is probing the active endpoint. Keep typing; messages will queue until the check finishes.",
+		m.doctorAnimationLine(),
+		"provider: " + displayValue(m.providerName, displayValue(m.providerProfile.Name, "unknown")),
+		"model: " + displayValue(m.modelName, displayValue(m.providerProfile.Model, "unknown")),
+	}, "\n")
+}
+
+func (m model) doctorAnimationLine() string {
+	frame := compactFrames[m.doctorFrame%len(compactFrames)]
+	return frame + " checking provider connectivity..."
+}
+
+func (m model) setDoctorStatusRow(text string) model {
+	row := transcriptRow{kind: rowSystem, id: doctorStatusRowID, tool: "doctor", text: text}
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		if m.transcript[i].id == doctorStatusRowID {
+			m.transcript[i] = row
+			return m
+		}
+	}
+	m.transcript = appendTranscriptRow(m.transcript, row)
+	return m
 }
 
 func (m model) searchText(query string) string {

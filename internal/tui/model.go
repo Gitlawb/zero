@@ -61,6 +61,8 @@ type model struct {
 	mcpCommandSeq          int
 	mcpCommandCancel       context.CancelFunc
 	doctorCommandSeq       int
+	doctorInFlight         bool
+	doctorFrame            int
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
@@ -802,7 +804,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
 		// so no timer fires between runs.
-		if !m.pending && !m.compactInFlight {
+		if !m.pending && !m.compactInFlight && !m.doctorInFlight {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -810,6 +812,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.compactInFlight {
 			m.compactFrame++
 			m = m.setCompactStatusRow(m.compactText(true))
+		}
+		if m.doctorInFlight {
+			m.doctorFrame++
+			m = m.setDoctorStatusRow(m.doctorConnectivityRunningText())
 		}
 		return m, cmd
 	case tea.WindowSizeMsg:
@@ -1001,7 +1007,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case doctorCommandResultMsg:
 		if msg.id == 0 || msg.id == m.doctorCommandSeq {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
+			m.doctorInFlight = false
+			m.doctorFrame = 0
+			m = m.setDoctorStatusRow(msg.text)
 		}
 		return m, nil
 	case bashResultMsg:

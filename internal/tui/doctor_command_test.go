@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -122,7 +123,7 @@ func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
 		t.Fatalf("expected running doctor status, got %#v", next.transcript)
 	}
 
-	msg := cmd()
+	msg := execCmd(cmd)
 	if !called {
 		t.Fatal("provider probe did not run when the async command executed")
 	}
@@ -132,6 +133,62 @@ func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
 		if !transcriptContains(final.transcript, want) {
 			t.Fatalf("expected final doctor transcript to contain %q, got %#v", want, final.transcript)
 		}
+	}
+}
+
+func TestDoctorConnectivityCommandAnimatesAndReplacesStatusRow(t *testing.T) {
+	profile := config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://api.example.com/v1",
+		Model:        "custom-model",
+	}
+	m := newModel(context.Background(), Options{
+		ProviderProfile: profile,
+		ProbeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+			return providerhealth.Result{
+				Status: providerhealth.StatusPass,
+				Checks: []providerhealth.Check{{
+					ID:      "provider.connectivity",
+					Status:  providerhealth.StatusPass,
+					Message: "reachable",
+				}},
+			}
+		},
+	})
+	m.input.SetValue("/doctor --connectivity")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /doctor --connectivity to start an async command")
+	}
+	beforeRows := len(next.transcript)
+	before := newestDoctorStatusText(next.transcript)
+
+	updated, _ = next.Update(next.spinner.Tick())
+	ticked := updated.(model)
+	after := newestDoctorStatusText(ticked.transcript)
+	if before == "" || after == "" {
+		t.Fatalf("expected doctor status row before=%q after=%q", before, after)
+	}
+	if before == after {
+		t.Fatalf("expected doctor status to animate on tick, still %q", after)
+	}
+
+	updated, _ = ticked.Update(execCmd(cmd))
+	final := updated.(model)
+	if len(final.transcript) != beforeRows {
+		t.Fatalf("expected final doctor report to replace the running row, rows before=%d after=%d: %#v", beforeRows, len(final.transcript), final.transcript)
+	}
+	if got := countDoctorDiagnosticRows(final.transcript); got != 1 {
+		t.Fatalf("expected one doctor diagnostic row after completion, got %d: %#v", got, final.transcript)
+	}
+	if transcriptContains(final.transcript, "checking provider connectivity") {
+		t.Fatalf("expected stale running copy to be replaced, got %#v", final.transcript)
+	}
+	if !transcriptContains(final.transcript, "[pass] provider.connectivity") {
+		t.Fatalf("expected completed diagnostics result, got %#v", final.transcript)
 	}
 }
 
@@ -150,6 +207,31 @@ func TestDoctorFixOpensProviderWizardWhenProviderMissing(t *testing.T) {
 	if !transcriptContains(next.transcript, "Opening provider setup") {
 		t.Fatalf("expected doctor fix transcript to explain provider setup, got %#v", next.transcript)
 	}
+}
+
+func newestDoctorStatusText(rows []transcriptRow) string {
+	for i := len(rows) - 1; i >= 0; i-- {
+		row := rows[i]
+		if row.kind != rowSystem {
+			continue
+		}
+		if strings.Contains(row.text, "Checking provider") ||
+			strings.Contains(row.text, "provider.connectivity") ||
+			strings.Contains(row.text, "Diagnostics") {
+			return row.text
+		}
+	}
+	return ""
+}
+
+func countDoctorDiagnosticRows(rows []transcriptRow) int {
+	count := 0
+	for _, row := range rows {
+		if row.kind == rowSystem && strings.Contains(row.text, "Diagnostics") {
+			count++
+		}
+	}
+	return count
 }
 
 func TestDoctorFixRunsConnectivityWhenProviderConfigured(t *testing.T) {
@@ -188,7 +270,7 @@ func TestDoctorFixRunsConnectivityWhenProviderConfigured(t *testing.T) {
 		t.Fatalf("expected running doctor status, got %#v", next.transcript)
 	}
 
-	updated, _ = next.Update(cmd())
+	updated, _ = next.Update(execCmd(cmd))
 	final := updated.(model)
 	if !called {
 		t.Fatal("provider probe did not run when /doctor fix command executed")
