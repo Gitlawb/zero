@@ -264,6 +264,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSpecialists(args[1:], stdout, stderr, deps)
 	case "plugins", "plugin":
 		return runPlugins(args[1:], stdout, stderr, deps)
+	case "backends", "backend":
+		return runBackends(args[1:], stdout, stderr, deps)
 	case "skills", "skill":
 		return runSkills(args[1:], stdout, stderr, deps)
 	case "tools", "tool":
@@ -648,6 +650,7 @@ Commands:
   spec       Review and approve saved spec-mode drafts
   specialist Manage local Zero specialist profiles
   plugins    Inspect, install, and remove local Zero plugins
+  backends   Inspect MCP, hook, and plugin backend lifecycle state
   skills     Inspect, install, and remove local Zero skills
   tools      Scaffold and list local Zero plugin-tools
   hooks      Inspect Zero hook configuration

@@ -91,18 +91,18 @@ type BackendLifecycleSnapshot struct {
 // MCPServerSnapshotFromServer converts a single mcp.Server into its
 // typed snapshot. Secret material in `Env` and `Headers` is never
 // copied; only the key counts are recorded. The URL field is run
-// through stripURLCredentialsFromURL so any userinfo embedded in
-// the URL (https://user:token@host) is removed before the snapshot
-// leaves the runtime. A URL that fails to parse is returned
-// trimmed, not empty, so the operator still sees the configured
-// endpoint when triaging a malformed MCP configuration.
+// through stripURLCredentialsFromURL so userinfo and sensitive
+// query values are removed before the snapshot leaves the runtime.
+// A URL that fails to parse is returned trimmed, not empty, so the
+// operator still sees the configured endpoint when triaging a
+// malformed MCP configuration.
 func MCPServerSnapshotFromServer(server mcp.Server) MCPServerSnapshot {
 	return MCPServerSnapshot{
 		Name:        strings.TrimSpace(server.Name),
 		Type:        string(server.Type),
 		Identity:    strings.TrimSpace(server.Identity),
 		URL:         stripURLCredentialsFromURL(server.URL),
-		Command:     strings.TrimSpace(server.Command),
+		Command:     redactSnapshotString(server.Command),
 		ArgCount:    len(server.Args),
 		EnvKeyCount: len(server.Env),
 		HeaderCount: len(server.Headers),
@@ -159,11 +159,11 @@ type MCPServerCounts struct {
 // snapshot.
 func HookSnapshotFromDefinition(def hooks.Definition, source hooks.ConfigSource) HookSnapshot {
 	return HookSnapshot{
-		ID:      strings.TrimSpace(def.ID),
-		Name:    strings.TrimSpace(def.Name),
+		ID:      redactSnapshotString(def.ID),
+		Name:    redactSnapshotString(def.Name),
 		Event:   string(def.Event),
-		Matcher: strings.TrimSpace(def.Matcher),
-		Command: redaction.RedactString(strings.TrimSpace(def.Command), redaction.Options{}),
+		Matcher: redactSnapshotString(def.Matcher),
+		Command: redactSnapshotString(def.Command),
 		Args:    redactStringSlice(def.Args),
 		Enabled: def.Enabled,
 		Source:  string(source),
@@ -204,19 +204,20 @@ func hookSnapshotsWithSource(definitions []hooks.Definition, source hooks.Config
 // PluginSnapshotFromPlugin converts a plugins.LoadedPlugin into its
 // typed snapshot. The full slice of tools, hooks, prompts, and
 // skills is collapsed to counts so the headless JSON output stays
-// small. The Path fields are preserved verbatim because the
-// operator needs them to triage a load failure.
+// small. Operator-facing path and metadata fields are preserved
+// after trimming and redaction because they help triage a load
+// failure but may include copied token-like strings.
 func PluginSnapshotFromPlugin(plugin plugins.LoadedPlugin) PluginSnapshot {
 	return PluginSnapshot{
-		ID:           strings.TrimSpace(plugin.ID),
-		Name:         strings.TrimSpace(plugin.Name),
-		Version:      strings.TrimSpace(plugin.Version),
-		Description:  strings.TrimSpace(plugin.Description),
+		ID:           redactSnapshotString(plugin.ID),
+		Name:         redactSnapshotString(plugin.Name),
+		Version:      redactSnapshotString(plugin.Version),
+		Description:  redactSnapshotString(plugin.Description),
 		Enabled:      plugin.Enabled,
 		Source:       string(plugin.Source),
-		Root:         strings.TrimSpace(plugin.Root),
-		PluginDir:    strings.TrimSpace(plugin.PluginDir),
-		ManifestPath: strings.TrimSpace(plugin.ManifestPath),
+		Root:         redactSnapshotString(plugin.Root),
+		PluginDir:    redactSnapshotString(plugin.PluginDir),
+		ManifestPath: redactSnapshotString(plugin.ManifestPath),
 		ToolCount:    len(plugin.Tools),
 		PromptCount:  len(plugin.Prompts),
 		SkillCount:   len(plugin.Skills),
@@ -273,13 +274,18 @@ func redactStringSlice(values []string) []string {
 			out[index] = ""
 			continue
 		}
-		out[index] = redaction.RedactString(trimmed, redaction.Options{})
+		out[index] = redactSnapshotString(trimmed)
 	}
 	return out
 }
 
+func redactSnapshotString(value string) string {
+	return redaction.RedactString(strings.TrimSpace(value), redaction.Options{})
+}
+
 // stripURLCredentialsFromURL returns value with any embedded
-// userinfo (https://user:token@host) removed. The helper is
+// userinfo (https://user:token@host) and sensitive query or
+// fragment values removed. The helper is
 // tolerant of malformed input: a URL that fails to parse is
 // returned trimmed, not empty, so the operator still sees the
 // configured endpoint when triaging an MCP configuration that
@@ -293,9 +299,59 @@ func stripURLCredentialsFromURL(value string) string {
 	if err != nil || parsed == nil {
 		return trimmed
 	}
-	if parsed.User == nil {
+	if parsed.Scheme == "" && parsed.Host == "" {
 		return trimmed
 	}
+	if parsed.User == nil {
+		return redactSensitiveURLQuery(parsed, trimmed)
+	}
 	parsed.User = nil
-	return parsed.String()
+	return redactSensitiveURLQuery(parsed, trimmed)
+}
+
+func redactSensitiveURLQuery(parsed *url.URL, fallback string) string {
+	if parsed.RawQuery != "" {
+		parsed.RawQuery = redactSensitiveRawQuery(parsed.RawQuery)
+	}
+	if parsed.Fragment != "" {
+		parsed.Fragment = redactSensitiveRawQuery(parsed.Fragment)
+	}
+	out := parsed.String()
+	if strings.TrimSpace(out) == "" {
+		return fallback
+	}
+	return out
+}
+
+func redactSensitiveRawQuery(rawQuery string) string {
+	parts := strings.Split(rawQuery, "&")
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		key, _, hasValue := strings.Cut(part, "=")
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+		if !isSensitiveURLKey(decodedKey) || !hasValue {
+			continue
+		}
+		parts[index] = key + "=[REDACTED]"
+	}
+	return strings.Join(parts, "&")
+}
+
+func isSensitiveURLKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "-", "_")
+	if key == "key" {
+		return true
+	}
+	for _, token := range []string{"token", "secret", "password", "passwd", "api_key", "apikey", "access_key", "auth", "credential"} {
+		if strings.Contains(key, token) {
+			return true
+		}
+	}
+	return false
 }

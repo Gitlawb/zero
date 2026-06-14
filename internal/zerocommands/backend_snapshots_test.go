@@ -88,6 +88,23 @@ func TestMCPServerSnapshotWithCountsMergesRuntimeCounts(t *testing.T) {
 	}
 }
 
+func TestMCPServerSnapshotRedactsSecretCommand(t *testing.T) {
+	secret := "sk-proj-" + strings.Repeat("d", 24)
+	server := mcp.Server{
+		Name:    "leaky",
+		Type:    mcp.ServerTypeStdio,
+		Command: "mcp-wrapper --token " + secret,
+	}
+
+	snapshot := MCPServerSnapshotFromServer(server)
+	if strings.Contains(snapshot.Command, secret) || strings.Contains(snapshot.Command, "sk-proj-") {
+		t.Fatalf("MCP command should be redacted, got %q", snapshot.Command)
+	}
+	if !strings.Contains(snapshot.Command, "[REDACTED]") {
+		t.Fatalf("expected redaction marker in MCP command, got %q", snapshot.Command)
+	}
+}
+
 func TestMCPServerSnapshotsSortsAndReturnsEmptySliceForEmptyInput(t *testing.T) {
 	servers := []mcp.Server{
 		{Name: "zulu", Type: mcp.ServerTypeHTTP, URL: "https://zulu.test"},
@@ -183,6 +200,24 @@ func TestHookSnapshotFromDefinitionPreservesPositionForRedactedArgs(t *testing.T
 	}
 }
 
+func TestHookSnapshotFromDefinitionRedactsSecretCommand(t *testing.T) {
+	secret := "sk-proj-" + strings.Repeat("c", 24)
+	def := hooks.Definition{
+		ID:      "hook-secret-command",
+		Event:   hooks.EventAfterTool,
+		Command: "curl -H Authorization:Bearer " + secret,
+		Enabled: true,
+	}
+
+	snapshot := HookSnapshotFromDefinition(def, hooks.SourceUser)
+	if strings.Contains(snapshot.Command, secret) || strings.Contains(snapshot.Command, "sk-proj-") {
+		t.Fatalf("hook command should be redacted, got %q", snapshot.Command)
+	}
+	if !strings.Contains(snapshot.Command, "[REDACTED]") {
+		t.Fatalf("expected redaction marker in hook command, got %q", snapshot.Command)
+	}
+}
+
 func TestMCPServerSnapshotStripsURLCredentials(t *testing.T) {
 	server := mcp.Server{
 		Name: "creds",
@@ -201,6 +236,24 @@ func TestMCPServerSnapshotStripsURLCredentials(t *testing.T) {
 	}
 	if snapshot.URL != "https://api.example.com/v1" {
 		t.Fatalf("expected sanitized URL, got %q", snapshot.URL)
+	}
+}
+
+func TestMCPServerSnapshotRedactsSensitiveURLQueryValues(t *testing.T) {
+	server := mcp.Server{
+		Name: "query",
+		Type: mcp.ServerTypeHTTP,
+		URL:  "https://api.example.com/v1?token=secret-token&mode=readonly&api_key=sk-proj-" + strings.Repeat("b", 24),
+	}
+	snapshot := MCPServerSnapshotFromServer(server)
+	if strings.Contains(snapshot.URL, "secret-token") || strings.Contains(snapshot.URL, "sk-proj-") {
+		t.Fatalf("URL query must not contain secret values, got %q", snapshot.URL)
+	}
+	if !strings.Contains(snapshot.URL, "token=[REDACTED]") || !strings.Contains(snapshot.URL, "api_key=[REDACTED]") {
+		t.Fatalf("expected sensitive query values to be redacted, got %q", snapshot.URL)
+	}
+	if !strings.Contains(snapshot.URL, "mode=readonly") {
+		t.Fatalf("expected safe query value to be preserved, got %q", snapshot.URL)
 	}
 }
 
@@ -306,6 +359,33 @@ func TestPluginSnapshotFromPluginCollapsesSlicesToCounts(t *testing.T) {
 	}
 	if snapshot.ToolCount != 2 || snapshot.PromptCount != 1 || snapshot.SkillCount != 1 || snapshot.HookCount != 1 {
 		t.Fatalf("counts wrong: %#v", snapshot)
+	}
+}
+
+func TestPluginSnapshotRedactsOperatorFacingStrings(t *testing.T) {
+	secret := "sk-proj-" + strings.Repeat("e", 24)
+	plugin := plugins.LoadedPlugin{
+		ID:           "plugin-" + secret,
+		Name:         "Docs " + secret,
+		Version:      "1.0.0",
+		Description:  "requires " + secret,
+		Enabled:      true,
+		Source:       plugins.SourceUser,
+		Root:         "/tmp/" + secret,
+		PluginDir:    "/tmp/plugin?api_key=" + secret,
+		ManifestPath: "/tmp/plugin/plugin.json?token=" + secret,
+	}
+
+	snapshot := PluginSnapshotFromPlugin(plugin)
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "sk-proj-") {
+		t.Fatalf("plugin snapshot should redact operator-facing strings, got %s", string(encoded))
+	}
+	if !strings.Contains(string(encoded), "[REDACTED]") {
+		t.Fatalf("expected redaction marker in plugin snapshot, got %s", string(encoded))
 	}
 }
 
