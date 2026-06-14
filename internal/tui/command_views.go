@@ -462,39 +462,58 @@ func (m model) modelText(args string) string {
 
 func (m model) contextText() string {
 	toolCount := len(m.registry.All())
-	return renderCommandOutput(commandOutput{
-		Title:  "Context",
-		Status: commandStatusOK,
-		Sections: []commandSection{
+	return renderCommandCard(commandCard{
+		Title: "Context",
+		Summary: []string{
+			"go runtime",
+			string(m.permissionMode) + " permissions",
+			pluralizeCount(toolCount, "tool", "tools"),
+		},
+		Sections: []commandCardSection{
 			{
 				Title: "Runtime",
-				Lines: []string{
-					"cwd: " + displayValue(m.cwd, "unknown"),
-					"provider: " + displayValue(m.providerName, "none"),
-					"model: " + displayValue(m.modelName, "none"),
-					"permission mode: " + string(m.permissionMode),
-					"effort: " + m.effortDisplay(),
-					"style: " + m.responseStyle,
-					"usage: " + m.usageSummaryText(),
-					fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
+				Fields: []commandField{
+					{Key: "cwd", Value: displayValue(m.cwd, "unknown")},
+					{Key: "provider", Value: displayValue(m.providerName, "none")},
+					{Key: "model", Value: displayValue(m.modelName, "none")},
+					{Key: "effort", Value: m.effortDisplay()},
+					{Key: "style", Value: m.responseStyle},
+					{Key: "usage", Value: m.usageSummaryText()},
+					{Key: "max turns", Value: fmt.Sprint(m.agentOptions.MaxTurns)},
 				},
 			},
 			{
 				Title: "Session",
-				Lines: []string{
-					"active session: " + displayValue(m.activeSession.SessionID, "none"),
-					"session root: " + displayValue(m.sessionStore.RootDir, "unknown"),
-					"compaction: " + m.compactionStatus(),
+				Fields: []commandField{
+					{Key: "active", Value: displayValue(m.activeSession.SessionID, "none")},
+					{Key: "root", Value: displayValue(m.sessionStore.RootDir, "unknown")},
+					{Key: "compaction", Value: contextCompactionStatus(m.compactionStatus())},
 				},
 			},
 			{
 				Title: "Tools",
-				Lines: []string{
-					fmt.Sprintf("registered tools: %d", toolCount),
+				Fields: []commandField{
+					{Key: "registered", Value: fmt.Sprint(toolCount)},
 				},
 			},
 		},
+		Actions: []string{"/permissions manage access", "/tools inspect catalog"},
 	})
+}
+
+func pluralizeCount(count int, singular string, plural string) string {
+	label := plural
+	if count == 1 {
+		label = singular
+	}
+	return fmt.Sprintf("%d %s", count, label)
+}
+
+func contextCompactionStatus(status string) string {
+	if status == "not compacted" {
+		return "idle"
+	}
+	return status
 }
 
 func (m model) configText() string {

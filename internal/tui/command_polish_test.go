@@ -140,9 +140,24 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		t.Fatal("expected /context to be handled without starting an agent run")
 	}
 	contextText := transcriptText(next.transcript)
-	for _, want := range []string{"Context", "status: ok", "Runtime", "Session", "Tools", "cwd: D:\\codings\\Opensource\\Zero", "registered tools: 1"} {
+	for _, want := range []string{
+		"Context",
+		"go runtime | ask permissions | 1 tool",
+		"Runtime",
+		"cwd        D:\\codings\\Opensource\\Zero",
+		"provider   openai",
+		"model      gpt-4.1",
+		"Session",
+		"active      none",
+		"compaction  idle",
+		"Tools",
+		"registered  1",
+		"actions: /permissions manage access | /tools inspect catalog",
+	} {
 		assertContains(t, contextText, want)
 	}
+	assertNotContains(t, contextText, "status: ok")
+	assertNotContains(t, contextText, "permission mode:")
 
 	next.input.SetValue("/permissions")
 	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})

@@ -49,6 +49,44 @@ func TestFormatCommandOutputRendersSectionsFieldsRowsAndHints(t *testing.T) {
 	}
 }
 
+func TestFormatCommandCardRendersBoundedDashboard(t *testing.T) {
+	got := renderCommandCard(commandCard{
+		Title:   "Context",
+		Summary: []string{"go runtime", "ask permissions", "1 tool"},
+		Sections: []commandCardSection{
+			{
+				Title: "Runtime",
+				Fields: []commandField{
+					{Key: "cwd", Value: `D:\repo`},
+					{Key: "provider", Value: "openai"},
+				},
+			},
+			{
+				Title: "Tools",
+				Fields: []commandField{
+					{Key: "registered", Value: "1"},
+				},
+			},
+		},
+		Actions: []string{"/permissions manage access", "/tools inspect catalog"},
+	})
+
+	want := strings.Join([]string{
+		"Context",
+		"go runtime | ask permissions | 1 tool",
+		"Runtime",
+		"  cwd       D:\\repo",
+		"  provider  openai",
+		"Tools",
+		"  registered  1",
+		"actions: /permissions manage access | /tools inspect catalog",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("unexpected command card:\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func TestFormatCommandOutputSupportsAllStatuses(t *testing.T) {
 	tests := []struct {
 		name   string

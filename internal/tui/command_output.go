@@ -39,6 +39,92 @@ type commandRow struct {
 	Text string
 }
 
+type commandCard struct {
+	Title    string
+	Summary  []string
+	Sections []commandCardSection
+	Actions  []string
+}
+
+type commandCardSection struct {
+	Title  string
+	Fields []commandField
+	Lines  []string
+	Rows   []commandRow
+}
+
+func renderCommandCard(card commandCard) string {
+	lines := []string{}
+
+	title := compactCommandOutputText(card.Title)
+	if title == "" {
+		title = "Zero"
+	}
+	lines = append(lines, title)
+
+	if summary := compactCommandCardList(card.Summary); len(summary) > 0 {
+		lines = append(lines, strings.Join(summary, " | "))
+	}
+
+	for _, section := range card.Sections {
+		lines = append(lines, formatCommandCardSection(section)...)
+	}
+
+	if actions := compactCommandCardList(card.Actions); len(actions) > 0 {
+		lines = append(lines, "actions: "+strings.Join(actions, " | "))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func formatCommandCardSection(section commandCardSection) []string {
+	lines := []string{}
+
+	if title := compactCommandOutputText(section.Title); title != "" {
+		lines = append(lines, title)
+	}
+
+	keyWidth := 0
+	fields := make([]commandField, 0, len(section.Fields))
+	for _, field := range section.Fields {
+		key := compactCommandOutputText(field.Key)
+		value := compactCommandOutputText(field.Value)
+		if key == "" || value == "" {
+			continue
+		}
+		if len(key) > keyWidth {
+			keyWidth = len(key)
+		}
+		fields = append(fields, commandField{Key: key, Value: value})
+	}
+	for _, field := range fields {
+		lines = append(lines, "  "+field.Key+strings.Repeat(" ", keyWidth-len(field.Key)+2)+field.Value)
+	}
+
+	for _, line := range section.Lines {
+		if text := compactCommandOutputText(line); text != "" {
+			lines = append(lines, "  "+text)
+		}
+	}
+	for _, row := range section.Rows {
+		if text := compactCommandOutputText(row.Text); text != "" {
+			lines = append(lines, "  - "+text)
+		}
+	}
+
+	return lines
+}
+
+func compactCommandCardList(values []string) []string {
+	compacted := make([]string, 0, len(values))
+	for _, value := range values {
+		if text := compactCommandOutputText(value); text != "" {
+			compacted = append(compacted, text)
+		}
+	}
+	return compacted
+}
+
 func formatCommandOutput(output commandOutput) string {
 	lines := []string{}
 

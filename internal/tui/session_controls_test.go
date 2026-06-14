@@ -541,7 +541,7 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /context to be handled without starting an agent run")
 	}
-	for _, want := range []string{"usage: 1 request, 120 tokens", "style: balanced", "effort: auto", "compaction: not compacted"} {
+	for _, want := range []string{"usage      1 request, 120 tokens", "style      balanced", "effort     auto", "compaction  idle"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected context transcript to contain %q, got %#v", want, next.transcript)
 		}
