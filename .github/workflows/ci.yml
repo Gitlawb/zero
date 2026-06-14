@@ -94,10 +94,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Hard gate: fails the build when code reaches a known vulnerability.
-      # Uses the toolchain pinned in go.mod, so a stdlib CVE is cleared by a
-      # toolchain bump (see go.mod). May also flag a newly published advisory on
-      # an unrelated PR — that is intentional: do not ship known-reachable vulns.
+      # govulncheck and deadcode resolve a toolchain from their own modules, which
+      # can drop below the version go.mod requires and then fail to load our
+      # packages. Pin GOTOOLCHAIN to the go.mod toolchain so both run under it.
+      - name: Pin toolchain from go.mod
+        run: |
+          toolchain="$(awk '/^toolchain /{print $2}' go.mod)"
+          echo "GOTOOLCHAIN=${toolchain:-auto}" >> "$GITHUB_ENV"
+
+      # Hard gate: fails the build when code reaches a known vulnerability. A stdlib
+      # CVE is cleared by a toolchain bump (see go.mod). May also flag a newly
+      # published advisory on an unrelated PR — intentional: do not ship known vulns.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
