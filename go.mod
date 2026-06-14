@@ -2,7 +2,7 @@ module github.com/Gitlawb/zero
 
 go 1.24.2
 
-toolchain go1.24.13
+toolchain go1.26.4
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
