@@ -12,6 +12,20 @@ import (
 // only an explicit truthy value enables it.
 const EnvAutoAllowBash = "ZERO_SANDBOX_AUTO_ALLOW_BASH"
 
+// EnvSandboxed marks a process that zero has already wrapped in a sandbox: every
+// wrapped command carries ZERO_SANDBOXED=1 in its environment. When such a
+// process spawns another command through the engine, the re-entrancy guard
+// returns a pass-through plan instead of double-wrapping it — nested bwrap /
+// sandbox-exec fails, and a second egress proxy would be redundant. Mirrors the
+// already-sandboxed guard used by comparable executor sandboxes. Unset by default.
+const EnvSandboxed = "ZERO_SANDBOXED"
+
+// IsAlreadySandboxed reports whether the current process is already running
+// inside a zero-created sandbox (EnvSandboxed == "1").
+func IsAlreadySandboxed() bool {
+	return os.Getenv(EnvSandboxed) == "1"
+}
+
 type SideEffect string
 type Permission string
 type PermissionMode string
@@ -153,6 +167,27 @@ type Policy struct {
 	// (runs without the filter) when the helper binary is not found. Ignored on
 	// non-bubblewrap backends.
 	BlockUnixSockets bool `json:"blockUnixSockets,omitempty"`
+	// AllowRead/DenyRead/AllowWrite/DenyWrite are fine-grained path lists layered
+	// ON TOP of the workspace + Scope guards; they never bypass the symlink /
+	// out-of-workspace protections. Each entry is home-expanded, made absolute, and
+	// symlink-resolved (an entry that does not exist is dropped). All default empty,
+	// so an unconfigured policy behaves exactly as before. Semantics:
+	//
+	//   - Read: a path readable under the base workspace/Scope guard is denied if it
+	//     falls under a DenyRead entry, UNLESS a more-specific AllowRead entry (one
+	//     nested inside that DenyRead entry) re-includes it. AllowRead only
+	//     re-includes within a DenyRead carve-out; it never extends reads beyond the
+	//     workspace.
+	//   - Write: DenyWrite wins over everything; otherwise a path writable under the
+	//     workspace/Scope guard is allowed; otherwise an absolute path under an
+	//     AllowWrite root is allowed; otherwise it is denied. AllowWrite roots are
+	//     also reflected in the OS backend write binds, and on sandbox-exec DenyWrite
+	//     entries are emitted as explicit deny rules so the precedence holds for
+	//     shell commands too.
+	AllowRead  []string `json:"allowRead,omitempty"`
+	DenyRead   []string `json:"denyRead,omitempty"`
+	AllowWrite []string `json:"allowWrite,omitempty"`
+	DenyWrite  []string `json:"denyWrite,omitempty"`
 }
 
 type Request struct {

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type grepTool struct {
@@ -54,6 +56,18 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
+	return tool.runWith(args, readExcluder{})
+}
+
+// RunWithSandbox runs the search while skipping subtrees the sandbox policy
+// denies reads to (DenyRead), so grep never surfaces content from a read-denied
+// path. With no DenyRead configured the excluder is a no-op and behavior is
+// unchanged.
+func (tool grepTool) RunWithSandbox(_ context.Context, args map[string]any, engine *sandbox.Engine) Result {
+	return tool.runWith(args, sandboxReadExcluder(engine))
+}
+
+func (tool grepTool) runWith(args map[string]any, exclude readExcluder) Result {
 	pattern, err := aliasedStringArg(args, []string{"pattern", "query", "regex", "search", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for grep: " + err.Error())
@@ -124,7 +138,7 @@ func (tool grepTool) Run(_ context.Context, args map[string]any) Result {
 		}
 	}
 
-	files, err := grepFiles(resolvedRoot, target, globMatcher)
+	files, err := grepFiles(resolvedRoot, target, globMatcher, exclude)
 	if err != nil {
 		return errorResult("Error running grep: " + err.Error())
 	}
@@ -225,7 +239,7 @@ func confineGrepFile(resolvedRoot string, path string) (string, string, bool) {
 	return filepath.ToSlash(relative), resolved, true
 }
 
-func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) ([]string, error) {
+func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder) ([]string, error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		return nil, err
@@ -237,6 +251,9 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 			return []string{}, nil
 		}
 		if shouldSkipWorkspaceFile(relative) {
+			return []string{}, nil
+		}
+		if exclude.fileExcluded(target) {
 			return []string{}, nil
 		}
 		// A single explicit file is matched by its base name so a pattern like
@@ -265,6 +282,13 @@ func grepFiles(resolvedRoot string, target string, globMatcher *regexp.Regexp) (
 			return filepath.SkipDir
 		}
 		if entry.IsDir() {
+			// Skip a read-denied subtree (sandbox DenyRead) wholesale.
+			if exclude.dirExcluded(path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if exclude.fileExcluded(path) {
 			return nil
 		}
 		// Confine each candidate through symlinks: a symlink inside the workspace

@@ -99,6 +99,29 @@ func ProxyEnv(addr string) []string {
 	}
 }
 
+// ProxyEnvWithSocks is the SOCKS-aware form of ProxyEnv built ON TOP of it:
+// HTTP_PROXY/HTTPS_PROXY stay on the HTTP listener (httpAddr) for HTTP(S)-aware
+// clients, while ALL_PROXY/all_proxy are re-pointed at the SOCKS5 front-end
+// (socksAddr) so a client that honors ALL_PROXY tunnels arbitrary TCP through the
+// same allow/deny gate. When socksAddr is empty it returns exactly ProxyEnv's
+// output, so the SOCKS upgrade is purely additive and never weakens the default.
+func ProxyEnvWithSocks(httpAddr, socksAddr string) []string {
+	env := ProxyEnv(httpAddr)
+	if socksAddr == "" {
+		return env
+	}
+	socksURL := "socks5://" + socksAddr
+	for i, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "ALL_PROXY="):
+			env[i] = "ALL_PROXY=" + socksURL
+		case strings.HasPrefix(kv, "all_proxy="):
+			env[i] = "all_proxy=" + socksURL
+		}
+	}
+	return env
+}
+
 func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*exec.Cmd, CommandPlan, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -118,10 +141,20 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 // only applies to engines built without a workspace root (NewEngine always
 // builds a scope otherwise); it is kept as defense in depth.
 func (engine *Engine) writeRoots(workspaceRoot string) []string {
+	var roots []string
 	if engine.scope != nil {
-		return engine.scope.Roots()
+		roots = engine.scope.Roots()
+	} else {
+		roots = []string{workspaceRoot}
 	}
-	return []string{workspaceRoot}
+	// Reflect the policy's AllowWrite roots in the OS backend write binds so a
+	// sandboxed shell command may write where the policy grants writes. DenyWrite
+	// is enforced at the policy gate, and on sandbox-exec additionally as an
+	// explicit deny rule (see sandboxExecProfile).
+	if extra := resolveWriteRootPaths(engine.policy.AllowWrite); len(extra) > 0 {
+		roots = dedupeStrings(append(roots, extra...))
+	}
+	return roots
 }
 
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
@@ -145,6 +178,14 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	backend := engine.backend
 	if backend.Name == "" {
 		backend = Backend{Name: BackendPolicyOnly, Message: "policy-only fallback: sandbox backend was not selected"}
+	}
+	// Re-entrancy guard: a command spawned by a process we already wrapped
+	// (ZERO_SANDBOXED=1 in its env) must not be wrapped again — nested bwrap /
+	// sandbox-exec fails and a second egress proxy would be redundant. Return a
+	// pass-through plan. Mirrors the already-sandboxed guard used by comparable
+	// executor sandboxes.
+	if IsAlreadySandboxed() {
+		return directCommandPlan(spec, backend, policy, workspaceRoot), nil
 	}
 	if policy.Mode == ModeDisabled {
 		return directCommandPlan(spec, backend, policy, workspaceRoot), nil
@@ -177,8 +218,12 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 // cleanup that shuts it down. A nil *scopedEgress means scoped egress is not in
 // effect for this command (the network mode is allow or deny-equivalent).
 type scopedEgress struct {
-	addr    string
-	cleanup func()
+	addr string
+	// socksAddr is the loopback address of the proxy's SOCKS5 front-end, used to
+	// set ALL_PROXY=socks5://<socksAddr>. Empty when the proxy exposes no SOCKS
+	// listener, in which case ALL_PROXY falls back to the HTTP proxy.
+	socksAddr string
+	cleanup   func()
 }
 
 // startScopedEgress starts the local filtering proxy when the policy's effective
@@ -202,7 +247,7 @@ func startScopedEgress(policy Policy, backend Backend) (*scopedEgress, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scoped egress unavailable, denying network: %w", err)
 	}
-	return &scopedEgress{addr: proxy.Addr(), cleanup: func() { _ = proxy.Close() }}, nil
+	return &scopedEgress{addr: proxy.Addr(), socksAddr: proxy.SocksAddr(), cleanup: func() { _ = proxy.Close() }}, nil
 }
 
 func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspaceRoot string) CommandPlan {
@@ -374,21 +419,24 @@ func findSeccompHelper() string {
 }
 
 func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots []string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
-	var proxyPort string
+	var proxyPort, socksPort string
 	if egress != nil {
 		if _, port, err := net.SplitHostPort(egress.addr); err == nil {
 			proxyPort = port
+		}
+		if _, port, err := net.SplitHostPort(egress.socksAddr); err == nil {
+			socksPort = port
 		}
 	}
 	denialTag := ""
 	if policy.MonitorDenials {
 		denialTag = nextSandboxDenialTag()
 	}
-	args := []string{"-p", sandboxExecProfile(writeRoots, policy, proxyPort, denialTag), spec.Name}
+	args := []string{"-p", sandboxExecProfile(writeRoots, policy, proxyPort, socksPort, denialTag), spec.Name}
 	args = append(args, spec.Args...)
 	env := sandboxEnvironment(policy, BackendSandboxExec, workspaceRoot)
 	if egress != nil {
-		env = append(env, ProxyEnv(egress.addr)...)
+		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
 	}
 	plan := CommandPlan{
 		Backend:       backend,
@@ -428,6 +476,7 @@ func sandboxEnvironment(policy Policy, backend BackendName, home string) []strin
 		"TERM=" + firstEnv("TERM", "dumb"),
 		"ZERO_SANDBOX_BACKEND=" + string(backend),
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
+		EnvSandboxed + "=1",
 	}
 	if runtime.GOOS == "windows" {
 		env = append(env, "COMSPEC="+firstEnv("COMSPEC", "cmd.exe"))
@@ -540,8 +589,8 @@ func sandboxMachLookupRule() string {
 	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
 }
 
-func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, denialTag string) string {
-	networkRule := networkRuleFor(policy, proxyPort)
+func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, socksPort string, denialTag string) string {
+	networkRule := networkRuleFor(policy, proxyPort, socksPort)
 	writeRule := "(allow file-write*)"
 	if policy.EnforceWorkspace {
 		// The granted write roots are the only writable *project* locations. Temp
@@ -566,7 +615,7 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, de
 		// filters `log stream` for this exact (per-plan) tag.
 		denyDefault = `(deny default (with message "` + sandboxProfileString(denialTag) + `"))`
 	}
-	return strings.Join([]string{
+	rules := []string{
 		"(version 1)",
 		denyDefault,
 		"(allow process*)",
@@ -579,27 +628,67 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, de
 		sandboxMachLookupRule(),
 		"(allow file-read*)",
 		writeRule,
-		networkRule,
-	}, "\n")
+	}
+	// DenyWrite entries are emitted AFTER the write allow so seatbelt's
+	// last-match-wins makes them override the workspace/AllowWrite binds — so
+	// "DenyWrite wins" holds for shell commands too, not just the policy gate.
+	rules = append(rules, denyWriteRules(policy)...)
+	rules = append(rules, networkRule)
+	return strings.Join(rules, "\n")
+}
+
+// denyWriteRules returns seatbelt deny clauses for the policy's resolved
+// DenyWrite paths: a (subpath ...) clause for a directory, a (literal ...) clause
+// for a single file. Empty when DenyWrite is unset.
+func denyWriteRules(policy Policy) []string {
+	resolved := resolvePolicyPaths(policy.DenyWrite)
+	if len(resolved) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(resolved))
+	for _, path := range resolved {
+		filter := `(subpath "` + sandboxProfileString(path) + `")`
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			filter = `(literal "` + sandboxProfileString(path) + `")`
+		}
+		out = append(out, "(deny file-write* "+filter+")")
+	}
+	return out
 }
 
 // networkRuleFor returns the seatbelt network clause for a policy. allow opens
 // all network; deny (and an empty-allowlist scoped policy, which effectiveNetwork
 // collapses to deny) blocks all network; scoped denies general network but
-// permits only outbound to the local proxy port on localhost, so traffic must
-// flow through the filtering proxy. A scoped policy with no resolvable proxy port
-// falls back to a full deny (fail closed).
-func networkRuleFor(policy Policy, proxyPort string) string {
+// permits only outbound to the local proxy ports on localhost, so traffic must
+// flow through the filtering proxy. Both the HTTP proxy port and the SOCKS5
+// front-end port are allowed (a sandboxed process configured with
+// ALL_PROXY=socks5://... must reach the SOCKS listener). A scoped policy with no
+// resolvable proxy port falls back to a full deny (fail closed).
+func networkRuleFor(policy Policy, proxyPort string, socksPort string) string {
 	switch effectiveNetwork(policy) {
 	case NetworkAllow:
 		return "(allow network*)"
 	case NetworkScoped:
-		if strings.TrimSpace(proxyPort) == "" {
+		rules := []string{"(deny network*)"}
+		seen := map[string]struct{}{}
+		// Deny by default, then allow only outbound to each distinct proxy port on
+		// loopback. Duplicate/empty ports are skipped so the clause stays minimal.
+		for _, port := range []string{proxyPort, socksPort} {
+			port = strings.TrimSpace(port)
+			if port == "" {
+				continue
+			}
+			if _, ok := seen[port]; ok {
+				continue
+			}
+			seen[port] = struct{}{}
+			rules = append(rules, `(allow network-outbound (remote ip "localhost:`+sandboxProfileString(port)+`"))`)
+		}
+		if len(rules) == 1 {
+			// No resolvable proxy port: fail closed.
 			return "(deny network*)"
 		}
-		// Deny by default, then allow only outbound to the proxy on loopback.
-		return "(deny network*)\n" +
-			`(allow network-outbound (remote ip "localhost:` + sandboxProfileString(proxyPort) + `"))`
+		return strings.Join(rules, "\n")
 	default:
 		return "(deny network*)"
 	}

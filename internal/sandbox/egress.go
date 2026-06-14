@@ -32,9 +32,14 @@ import (
 type egressProxy struct {
 	listener net.Listener
 	server   *http.Server
-	allowed  []string
-	denied   []string
-	log      func(string)
+	// socksListener serves the SOCKS5 CONNECT front-end on a SEPARATE loopback
+	// port. It runs the same authorize()/domainAllowed() gate as the HTTP proxy, so
+	// a client configured with ALL_PROXY=socks5://<socksAddr> is filtered
+	// identically. Bound to 127.0.0.1:0 like the HTTP listener.
+	socksListener net.Listener
+	allowed       []string
+	denied        []string
+	log           func(string)
 
 	// domainPrompt, when set, is asked to authorize an UNKNOWN host (one neither
 	// allowed nor explicitly denied) instead of failing closed. It must return
@@ -89,9 +94,18 @@ func newEgressProxy(options egressOptions) (*egressProxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bind scoped-egress proxy: %w", err)
 	}
+	// Bind the SOCKS5 front-end on its own loopback port. Fail closed: if it
+	// cannot bind, tear down the HTTP listener and return an error so the caller
+	// treats scoped egress as a full deny rather than starting a partial proxy.
+	socksListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("bind scoped-egress socks proxy: %w", err)
+	}
 
 	proxy := &egressProxy{
 		listener:      listener,
+		socksListener: socksListener,
 		allowed:       allowed,
 		denied:        denied,
 		log:           options.Log,
@@ -108,15 +122,25 @@ func newEgressProxy(options egressOptions) (*egressProxy, error) {
 		// Serve returns ErrServerClosed on Close; nothing else to do.
 		_ = proxy.server.Serve(listener)
 	}()
+	go proxy.serveSocks(socksListener)
 	return proxy, nil
 }
 
-// Addr returns the loopback host:port the proxy is listening on.
+// Addr returns the loopback host:port the HTTP proxy is listening on.
 func (proxy *egressProxy) Addr() string {
 	if proxy == nil || proxy.listener == nil {
 		return ""
 	}
 	return proxy.listener.Addr().String()
+}
+
+// SocksAddr returns the loopback host:port the SOCKS5 front-end is listening on,
+// or "" when no SOCKS listener is active.
+func (proxy *egressProxy) SocksAddr() string {
+	if proxy == nil || proxy.socksListener == nil {
+		return ""
+	}
+	return proxy.socksListener.Addr().String()
 }
 
 // Close stops the proxy and releases its listener. It is safe to call multiple
@@ -129,6 +153,13 @@ func (proxy *egressProxy) Close() error {
 	proxy.closeOnce.Do(func() {
 		if proxy.server != nil {
 			err = proxy.server.Close()
+		}
+		// Closing the SOCKS listener unblocks serveSocks's Accept loop so the
+		// goroutine returns. Report its error only if the HTTP close succeeded.
+		if proxy.socksListener != nil {
+			if cerr := proxy.socksListener.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
 		}
 	})
 	return err

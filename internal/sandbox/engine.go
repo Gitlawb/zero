@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 )
 
@@ -63,6 +64,46 @@ func (engine *Engine) Scope() *Scope {
 		return nil
 	}
 	return engine.scope
+}
+
+// ReadPathExcluded reports whether reading path is excluded by the policy's
+// DenyRead list (honoring more-specific AllowRead re-inclusion). It is the
+// per-file predicate the search tools use to skip read-denied files mid-walk.
+// False when DenyRead is unset (the default) or the engine is nil.
+func (engine *Engine) ReadPathExcluded(path string) bool {
+	if engine == nil {
+		return false
+	}
+	return readDenied(engine.policy, engine.workspaceRoot, path)
+}
+
+// ReadDirExcluded reports whether a directory subtree can be skipped wholesale
+// during a read-walk: it is read-denied AND contains no nested AllowRead root
+// (descending is required to reach a re-included subtree). When it returns false
+// on a denied dir because of a nested allow, the per-file ReadPathExcluded still
+// filters the denied siblings.
+func (engine *Engine) ReadDirExcluded(path string) bool {
+	if engine == nil {
+		return false
+	}
+	if !readDenied(engine.policy, engine.workspaceRoot, path) {
+		return false
+	}
+	abs := path
+	if !filepath.IsAbs(abs) && engine.workspaceRoot != "" {
+		abs = filepath.Join(engine.workspaceRoot, path)
+	}
+	return !hasNestedAllowRead(engine.policy, abs)
+}
+
+// ReadExclusionGlobs returns the ripgrep-style --glob exclusion args for this
+// engine's policy + scope (see the package-level ReadExclusionGlobs). Empty when
+// DenyRead is unset or the engine has no scope.
+func (engine *Engine) ReadExclusionGlobs() []string {
+	if engine == nil {
+		return nil
+	}
+	return ReadExclusionGlobs(engine.policy, engine.scope)
 }
 
 // effectiveNetworkMode is the single source of truth for the engine's active
@@ -223,7 +264,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	if policy.EnforceWorkspace && request.WorkspaceRoot != "" {
 		for _, requested := range requestPaths(request) {
-			if violation := scope.validate(requested); violation != nil {
+			if violation := validatePathWithPolicy(scope, policy, request.SideEffect, request.WorkspaceRoot, requested); violation != nil {
 				return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 			}
 		}

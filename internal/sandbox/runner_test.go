@@ -233,7 +233,7 @@ func resolvedTestPath(t *testing.T, path string) string {
 }
 
 func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "")
+	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
 	if !strings.Contains(profile, "(allow file-write*") {
 		t.Fatalf("profile missing file-write rule:\n%s", profile)
 	}
@@ -251,7 +251,7 @@ func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
 }
 
 func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
-	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "")
+	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
 	if strings.Contains(off, "with message") {
 		t.Fatalf("denials must not be tagged when monitoring is off:\n%s", off)
 	}
@@ -259,7 +259,7 @@ func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
 		t.Fatalf("profile missing the plain default-deny:\n%s", off)
 	}
 
-	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "", "run-tag-123")
+	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "", "", "run-tag-123")
 	if !strings.Contains(on, `(deny default (with message "run-tag-123"))`) {
 		t.Fatalf("denials must be tagged when monitoring is on:\n%s", on)
 	}
@@ -291,7 +291,7 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 }
 
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "")
+	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
 
 	// Signalling own process group lets a sandboxed script kill the children it
 	// spawns; without it seatbelt denies kill() with "Operation not permitted".
@@ -463,5 +463,49 @@ func TestProxyEnv(t *testing.T) {
 	// Loopback must bypass the proxy so the proxy itself is reachable directly.
 	if !strings.Contains(env["NO_PROXY"], "127.0.0.1") || !strings.Contains(env["no_proxy"], "127.0.0.1") {
 		t.Fatalf("ProxyEnv NO_PROXY must exclude loopback, got %q/%q", env["NO_PROXY"], env["no_proxy"])
+	}
+}
+
+func TestProxyEnvWithSocks(t *testing.T) {
+	env := map[string]string{}
+	for _, kv := range ProxyEnvWithSocks("127.0.0.1:8899", "127.0.0.1:1080") {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			env[kv[:i]] = kv[i+1:]
+		}
+	}
+	// HTTP_PROXY/HTTPS_PROXY stay on the HTTP listener...
+	const httpURL = "http://127.0.0.1:8899"
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if env[key] != httpURL {
+			t.Fatalf("ProxyEnvWithSocks[%s] = %q, want %q", key, env[key], httpURL)
+		}
+	}
+	// ...while ALL_PROXY/all_proxy point at the SOCKS5 front-end.
+	const socksURL = "socks5://127.0.0.1:1080"
+	for _, key := range []string{"ALL_PROXY", "all_proxy"} {
+		if env[key] != socksURL {
+			t.Fatalf("ProxyEnvWithSocks[%s] = %q, want %q", key, env[key], socksURL)
+		}
+	}
+	if !strings.Contains(env["NO_PROXY"], "127.0.0.1") {
+		t.Fatalf("ProxyEnvWithSocks NO_PROXY must exclude loopback, got %q", env["NO_PROXY"])
+	}
+}
+
+// TestProxyEnvWithSocksEmptyFallsBackToHTTP verifies the SOCKS upgrade is purely
+// additive: with no SOCKS address, ALL_PROXY falls back to the HTTP proxy exactly
+// as the legacy ProxyEnv produced, never weakening the default.
+func TestProxyEnvWithSocksEmptyFallsBackToHTTP(t *testing.T) {
+	env := map[string]string{}
+	for _, kv := range ProxyEnvWithSocks("127.0.0.1:8899", "") {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			env[kv[:i]] = kv[i+1:]
+		}
+	}
+	const httpURL = "http://127.0.0.1:8899"
+	for _, key := range []string{"ALL_PROXY", "all_proxy"} {
+		if env[key] != httpURL {
+			t.Fatalf("ProxyEnvWithSocks(empty socks)[%s] = %q, want HTTP fallback %q", key, env[key], httpURL)
+		}
 	}
 }

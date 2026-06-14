@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 type globTool struct {
@@ -44,6 +46,17 @@ func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool globTool) Run(_ context.Context, args map[string]any) Result {
+	return tool.runWith(args, readExcluder{})
+}
+
+// RunWithSandbox runs glob while skipping subtrees the sandbox policy denies
+// reads to (DenyRead). With no DenyRead configured the excluder is a no-op and
+// behavior is unchanged.
+func (tool globTool) RunWithSandbox(_ context.Context, args map[string]any, engine *sandbox.Engine) Result {
+	return tool.runWith(args, sandboxReadExcluder(engine))
+}
+
+func (tool globTool) runWith(args map[string]any, exclude readExcluder) Result {
 	pattern, err := aliasedStringArg(args, []string{"pattern", "glob", "match", "query", "expression"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
@@ -75,7 +88,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
 
-	matches, err := scanGlob(root, displayRoot, matcher, includeDirs)
+	matches, err := scanGlob(root, displayRoot, matcher, includeDirs, exclude)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}
@@ -99,7 +112,7 @@ func (tool globTool) Run(_ context.Context, args map[string]any) Result {
 	}
 }
 
-func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool) ([]string, error) {
+func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDirs bool, exclude readExcluder) ([]string, error) {
 	matches := []string{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -117,6 +130,10 @@ func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDi
 		if entry.IsDir() && shouldSkipDirectory(entry.Name()) {
 			return filepath.SkipDir
 		}
+		if entry.IsDir() && exclude.dirExcluded(path) {
+			// Skip a read-denied subtree (sandbox DenyRead) wholesale.
+			return filepath.SkipDir
+		}
 		if entry.IsDir() && !includeDirs {
 			return nil
 		}
@@ -127,6 +144,11 @@ func scanGlob(root string, displayRoot string, matcher *regexp.Regexp, includeDi
 		}
 		normalized := filepath.ToSlash(relative)
 		if !entry.IsDir() && shouldSkipWorkspaceFile(normalized) {
+			return nil
+		}
+		// A read-denied path (even an includeDirs directory with a nested allow we
+		// still descended into) must not appear in results.
+		if exclude.fileExcluded(path) {
 			return nil
 		}
 		if matcher.MatchString(normalized) {
