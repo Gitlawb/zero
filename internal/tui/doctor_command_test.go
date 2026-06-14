@@ -134,3 +134,66 @@ func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
 		}
 	}
 }
+
+func TestDoctorFixOpensProviderWizardWhenProviderMissing(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.input.SetValue("/doctor fix")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /doctor fix provider setup path to be handled synchronously")
+	}
+	if next.providerWizard == nil {
+		t.Fatalf("expected /doctor fix to open provider setup wizard, transcript %#v", next.transcript)
+	}
+	if !transcriptContains(next.transcript, "Opening provider setup") {
+		t.Fatalf("expected doctor fix transcript to explain provider setup, got %#v", next.transcript)
+	}
+}
+
+func TestDoctorFixRunsConnectivityWhenProviderConfigured(t *testing.T) {
+	profile := config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://api.example.com/v1",
+		Model:        "custom-model",
+	}
+	called := false
+	m := newModel(context.Background(), Options{
+		ProviderProfile: profile,
+		ProbeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+			called = true
+			return providerhealth.Result{
+				Status: providerhealth.StatusPass,
+				Checks: []providerhealth.Check{{
+					ID:      "provider.connectivity",
+					Status:  providerhealth.StatusPass,
+					Message: "reachable",
+				}},
+			}
+		},
+	})
+	m.input.SetValue("/doctor fix")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /doctor fix to run provider connectivity asynchronously")
+	}
+	if called {
+		t.Fatal("provider probe ran synchronously before the returned command executed")
+	}
+	if !transcriptContains(next.transcript, "checking provider connectivity") {
+		t.Fatalf("expected running doctor status, got %#v", next.transcript)
+	}
+
+	updated, _ = next.Update(cmd())
+	final := updated.(model)
+	if !called {
+		t.Fatal("provider probe did not run when /doctor fix command executed")
+	}
+	if !transcriptContains(final.transcript, "[pass] provider.connectivity") {
+		t.Fatalf("expected connectivity result in transcript, got %#v", final.transcript)
+	}
+}

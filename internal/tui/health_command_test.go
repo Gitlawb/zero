@@ -29,7 +29,8 @@ func TestDoctorHelpListsHealthAliasAndConnectivity(t *testing.T) {
 	help := strings.Join(formatCommandHelpLines(), "\n")
 
 	for _, want := range []string{
-		"/doctor [--connectivity] (/health)",
+		"/doctor [fix|--connectivity] (/health)",
+		"fix",
 		"connectivity",
 	} {
 		if !strings.Contains(help, want) {

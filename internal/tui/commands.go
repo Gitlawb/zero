@@ -220,9 +220,9 @@ var commandDefinitions = []commandDefinition{
 	{
 		name:        "/doctor",
 		aliases:     []string{"/health"},
-		usage:       "/doctor [--connectivity]",
+		usage:       "/doctor [fix|--connectivity]",
 		group:       commandGroupRuntime,
-		description: "Show local diagnostics, including optional connectivity checks.",
+		description: "Show diagnostics, open safe fixes, or run provider connectivity checks.",
 		kind:        commandDoctor,
 	},
 	{
