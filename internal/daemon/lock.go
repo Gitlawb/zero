@@ -37,7 +37,14 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
-			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+			// A failed PID write would leave a malformed lock file that another
+			// process reads as stale (unparsable PID) and wrongly reclaims, breaking
+			// the single-instance guarantee — so on write failure, remove it and fail.
+			if _, werr := fmt.Fprintf(f, "%d\n", os.Getpid()); werr != nil {
+				_ = f.Close()
+				_ = os.Remove(path)
+				return nil, werr
+			}
 			if cerr := f.Close(); cerr != nil {
 				_ = os.Remove(path)
 				return nil, cerr

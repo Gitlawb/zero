@@ -649,6 +649,7 @@ Usage:
 
 Commands:
   exec       Run a one-shot prompt through the Go agent runtime
+  daemon     Manage the local background worker daemon (start/stop/status/run/attach)
   setup      Guide first-run provider setup
   config     Inspect resolved Go configuration without leaking secrets
   models     List Zero model registry entries

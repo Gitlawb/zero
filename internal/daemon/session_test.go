@@ -114,6 +114,58 @@ func TestSessionAttachAfterFinishSeesBuffer(t *testing.T) {
 	}
 }
 
+func TestSessionManagerEvictsFinishedOverCap(t *testing.T) {
+	launcher, _ := seqLauncher(
+		&fakeWorker{pid: 1, out: []string{"a"}, exitCode: 0},
+		&fakeWorker{pid: 2, out: []string{"b"}, exitCode: 0},
+		&fakeWorker{pid: 3, out: []string{"c"}, exitCode: 0},
+	)
+	pool, _ := NewPool(PoolOptions{Size: 2, Launcher: launcher})
+	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool, MaxSessions: 2})
+
+	for _, id := range []string{"s1", "s2", "s3"} {
+		s, err := mgr.Start(context.Background(), WorkerSpec{Session: id})
+		if err != nil {
+			t.Fatalf("Start(%s): %v", id, err)
+		}
+		<-s.Done() // finish before starting the next so prune can evict it
+	}
+
+	// Past the cap of 2, the oldest FINISHED session (s1) is evicted; the two
+	// newest are retained.
+	if _, ok := mgr.Get("s1"); ok {
+		t.Fatal("oldest finished session must be evicted past the cap")
+	}
+	if _, ok := mgr.Get("s2"); !ok {
+		t.Fatal("s2 must be retained")
+	}
+	if _, ok := mgr.Get("s3"); !ok {
+		t.Fatal("s3 (newest) must be retained")
+	}
+}
+
+func TestSessionManagerKeepsRunningOverCap(t *testing.T) {
+	// All sessions are running (workers block), so none are evicted even past cap.
+	block := make(chan struct{})
+	defer close(block)
+	launcher, _ := seqLauncher(
+		&fakeWorker{pid: 1, waitCh: block},
+		&fakeWorker{pid: 2, waitCh: block},
+	)
+	pool, _ := NewPool(PoolOptions{Size: 2, Launcher: launcher})
+	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool, MaxSessions: 1})
+
+	s1, _ := mgr.Start(context.Background(), WorkerSpec{Session: "r1"})
+	s2, _ := mgr.Start(context.Background(), WorkerSpec{Session: "r2"})
+	waitFor(t, func() bool { return s1.State() == SessionRunning && s2.State() == SessionRunning })
+	if _, ok := mgr.Get("r1"); !ok {
+		t.Fatal("a running session must never be evicted, even past the cap")
+	}
+	if _, ok := mgr.Get("r2"); !ok {
+		t.Fatal("a running session must never be evicted, even past the cap")
+	}
+}
+
 func TestSessionStatuses(t *testing.T) {
 	launcher, _ := seqLauncher(&fakeWorker{pid: 1, out: []string{"l"}, exitCode: 0})
 	pool, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher})

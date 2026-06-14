@@ -175,20 +175,37 @@ func (s *Session) status() SessionStatus {
 	return SessionStatus{ID: s.id, State: string(s.state), Lines: s.lines}
 }
 
+func (s *Session) isFinished() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finished
+}
+
+// defaultMaxSessions bounds the retained session registry so a long-running
+// daemon does not accumulate finished sessions without limit.
+const defaultMaxSessions = 256
+
 // SessionManager owns the live session registry and routes each session to a
-// pool worker. Mirrors session-manager.js + roster.js.
+// pool worker. Mirrors session-manager.js + roster.js. Finished sessions are
+// retained (so a late `attach` sees history) up to MaxSessions, past which the
+// oldest FINISHED ones are evicted; running/queued sessions are never evicted.
 type SessionManager struct {
-	pool      *Pool
-	maxBuffer int
+	pool        *Pool
+	maxBuffer   int
+	maxSessions int
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	order    []string // creation order, for FIFO eviction of finished sessions
 }
 
 // SessionManagerOptions configures a SessionManager.
 type SessionManagerOptions struct {
 	Pool      *Pool
 	MaxBuffer int // per-session output ring size; 0 => default
+	// MaxSessions caps the retained session registry; 0 => default. The oldest
+	// FINISHED sessions are evicted once the cap is exceeded.
+	MaxSessions int
 }
 
 // NewSessionManager builds a manager over pool.
@@ -196,10 +213,15 @@ func NewSessionManager(opts SessionManagerOptions) (*SessionManager, error) {
 	if opts.Pool == nil {
 		return nil, errors.New("daemon: session manager requires a Pool")
 	}
+	maxSessions := opts.MaxSessions
+	if maxSessions <= 0 {
+		maxSessions = defaultMaxSessions
+	}
 	return &SessionManager{
-		pool:      opts.Pool,
-		maxBuffer: opts.MaxBuffer,
-		sessions:  map[string]*Session{},
+		pool:        opts.Pool,
+		maxBuffer:   opts.MaxBuffer,
+		maxSessions: maxSessions,
+		sessions:    map[string]*Session{},
 	}, nil
 }
 
@@ -215,6 +237,8 @@ func (m *SessionManager) Start(ctx context.Context, spec WorkerSpec) (*Session, 
 	}
 	sess := newSession(spec.Session, spec.Cwd, m.maxBuffer)
 	m.sessions[spec.Session] = sess
+	m.order = append(m.order, spec.Session)
+	m.pruneLocked()
 	m.mu.Unlock()
 
 	go func() {
@@ -222,6 +246,29 @@ func (m *SessionManager) Start(ctx context.Context, spec WorkerSpec) (*Session, 
 		sess.finish(code, err)
 	}()
 	return sess, nil
+}
+
+// pruneLocked evicts the oldest FINISHED sessions while the registry exceeds
+// maxSessions, so a long-running daemon does not retain finished sessions without
+// bound. Running/queued sessions are never evicted (a transient burst can exceed
+// the cap until those finish). Caller must hold m.mu.
+func (m *SessionManager) pruneLocked() {
+	if len(m.sessions) <= m.maxSessions {
+		return
+	}
+	kept := m.order[:0]
+	for _, id := range m.order {
+		s, ok := m.sessions[id]
+		if !ok {
+			continue // already removed
+		}
+		if len(m.sessions) > m.maxSessions && s.isFinished() {
+			delete(m.sessions, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	m.order = kept
 }
 
 // Get returns a session by ID.

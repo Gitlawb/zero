@@ -161,6 +161,9 @@ func runDaemonStop(args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpRequested(args) {
 		return writeDaemonUsage(stdout, exitSuccess)
 	}
+	if len(args) > 0 {
+		return writeExecUsageError(stderr, "daemon stop takes no arguments")
+	}
 	paths, err := daemon.DefaultPaths()
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -181,6 +184,9 @@ func runDaemonStop(args []string, stdout io.Writer, stderr io.Writer) int {
 func runDaemonStatus(args []string, stdout io.Writer, stderr io.Writer) int {
 	if helpRequested(args) {
 		return writeDaemonUsage(stdout, exitSuccess)
+	}
+	if len(args) > 0 {
+		return writeExecUsageError(stderr, "daemon status takes no arguments")
 	}
 	paths, err := daemon.DefaultPaths()
 	if err != nil {
@@ -272,16 +278,22 @@ func runDaemonRun(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runDaemonAttach(args []string, stdout io.Writer, stderr io.Writer) int {
 	session := ""
+	extra := 0
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
 			return writeDaemonUsage(stdout, exitSuccess)
 		}
 		if session == "" {
 			session = a
+			continue
 		}
+		extra++
 	}
 	if strings.TrimSpace(session) == "" {
 		return writeExecUsageError(stderr, "daemon attach requires a <session> id")
+	}
+	if extra > 0 {
+		return writeExecUsageError(stderr, "daemon attach accepts exactly one <session> id")
 	}
 	paths, err := daemon.DefaultPaths()
 	if err != nil {

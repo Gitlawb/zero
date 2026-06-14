@@ -106,3 +106,18 @@ func TestDaemonRunWhenNotRunning(t *testing.T) {
 		t.Fatalf("stderr = %q, want 'not running'", errb)
 	}
 }
+
+func TestDaemonSubcommandsRejectExtraArgs(t *testing.T) {
+	isolateDaemonPaths(t)
+	cases := [][]string{
+		{"stop", "oops"},
+		{"status", "oops"},
+		{"attach", "s1", "extra"},
+	}
+	for _, args := range cases {
+		code, _, errb := runDaemonCLI(t, args...)
+		if code != exitUsage {
+			t.Fatalf("%v exit = %d, want exitUsage (reject extra args); stderr=%q", args, code, errb)
+		}
+	}
+}
