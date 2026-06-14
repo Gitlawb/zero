@@ -127,16 +127,6 @@ func (s *session) fileLock(uri string) *sync.Mutex {
 	return lock
 }
 
-func (s *session) didClose(ctx context.Context, absPath string) error {
-	uri := PathToURI(absPath)
-	s.mu.Lock()
-	delete(s.open, uri)
-	s.mu.Unlock()
-	return s.client.Notify(ctx, "textDocument/didClose", map[string]any{
-		"textDocument": map[string]any{"uri": uri},
-	})
-}
-
 func (s *session) diagnosticsFor(uri string) []Diagnostic {
 	s.mu.Lock()
 	defer s.mu.Unlock()
