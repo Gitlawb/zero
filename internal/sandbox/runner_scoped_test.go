@@ -23,8 +23,17 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	}
 	sandboxExec := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true}
 
+	// This test exercises the network GATE for a network tool, so it opts the
+	// in-process tools into the network policy (EnforceToolNetwork); by default
+	// those tools are exempt and would not be gated here.
+	enforcedScoped := func(allowed, denied []string) Policy {
+		p := scopedPolicy(allowed, denied)
+		p.EnforceToolNetwork = true
+		return p
+	}
+
 	// An enforcing backend lets a populated scoped policy permit a network tool.
-	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: sandboxExec})
+	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped([]string{"github.com"}, nil), Backend: sandboxExec})
 	if decision := enforcing.Evaluate(context.Background(), networkRequest); decision.Action == ActionDeny {
 		t.Fatalf("enforcing backend + scoped policy denied a network tool: %#v", decision)
 	}
@@ -35,7 +44,7 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 		"policy-only": {},
 	}
 	for name, backend := range unenforceable {
-		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: backend})
+		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped([]string{"github.com"}, nil), Backend: backend})
 		decision := engine.Evaluate(context.Background(), networkRequest)
 		if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
 			t.Fatalf("%s backend must deny scoped network it cannot enforce, got %#v", name, decision)
@@ -43,7 +52,7 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	}
 
 	// Empty allowlist still fails closed regardless of backend.
-	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy(nil, nil), Backend: sandboxExec})
+	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped(nil, nil), Backend: sandboxExec})
 	decision := empty.Evaluate(context.Background(), networkRequest)
 	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
 		t.Fatalf("empty scoped policy must deny network like NetworkDeny, got %#v", decision)

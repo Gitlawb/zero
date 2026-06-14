@@ -9,6 +9,53 @@ import (
 	"time"
 )
 
+// TestEvaluateExemptsNetworkToolsFromDenyByDefault reproduces the web_search
+// hard-deny: under NetworkDeny, the engine-level network gate must NOT deny a
+// first-party network TOOL (SideEffect=network) by default, so it follows the
+// normal permission flow instead of being blocked outright. EnforceToolNetwork
+// restores the strict deny, and a network SHELL command stays denied either way.
+func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
+	base := Policy{Mode: ModeEnforce, Network: NetworkDeny, MaxAutonomy: AutonomyHigh}
+
+	// Default (EnforceToolNetwork off): web_search is NOT network-denied.
+	engine := NewEngine(EngineOptions{Policy: base})
+	d := engine.Evaluate(context.Background(), Request{
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt,
+	})
+	if d.Action == ActionDeny {
+		t.Fatalf("web_search must not be network-denied by default, got deny: %s", d.ErrorString())
+	}
+
+	// Granted permission → it actually runs (ActionAllow), not blocked.
+	allowed := engine.Evaluate(context.Background(), Request{
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt, PermissionGranted: true,
+	})
+	if allowed.Action != ActionAllow {
+		t.Fatalf("granted web_search must be allowed under deny by default, got %q (%s)", allowed.Action, allowed.ErrorString())
+	}
+
+	// EnforceToolNetwork on → strict: the network tool is denied at the gate.
+	strict := base
+	strict.EnforceToolNetwork = true
+	strictEngine := NewEngine(EngineOptions{Policy: strict})
+	ds := strictEngine.Evaluate(context.Background(), Request{
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt, PermissionGranted: true,
+	})
+	if ds.Action != ActionDeny || ds.Violation == nil || ds.Violation.Code != ViolationNetwork {
+		t.Fatalf("with EnforceToolNetwork, web_search must be network-denied, got %q (%+v)", ds.Action, ds.Violation)
+	}
+
+	// A network SHELL command (SideEffect=shell) stays denied under deny — shell
+	// egress is never exempt, even with EnforceToolNetwork off.
+	shell := engine.Evaluate(context.Background(), Request{
+		ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
+		Args: map[string]any{"command": "curl https://evil.test"},
+	})
+	if shell.Action != ActionDeny || shell.Violation == nil || shell.Violation.Code != ViolationNetwork {
+		t.Fatalf("a network shell command must stay denied under deny, got %q (%+v)", shell.Action, shell.Violation)
+	}
+}
+
 func TestEngineEvaluatesReadPromptAndPersistentDecisions(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewGrantStore(StoreOptions{
@@ -295,7 +342,11 @@ func TestEngineClassifiesNetworkAndDestructiveShellCommands(t *testing.T) {
 }
 
 func TestEngineDeniesNetworkSideEffectWhenPolicyBlocksNetwork(t *testing.T) {
-	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy()})
+	// EnforceToolNetwork opts the in-process network tools into the policy; by
+	// default they are exempt (see TestEvaluateExemptsNetworkToolsFromDenyByDefault).
+	policy := DefaultPolicy()
+	policy.EnforceToolNetwork = true
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: policy})
 
 	decision := engine.Evaluate(context.Background(), Request{
 		ToolName:       "web_fetch",

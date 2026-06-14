@@ -149,6 +149,19 @@ func (engine *Engine) NetworkHostAllowed(host string) (bool, NetworkMode) {
 	}
 }
 
+// toolNetworkExempt reports whether a request is exempt from the engine-level
+// network deny because it is a first-party, in-process network TOOL — one that
+// declares SideEffectNetwork (web_search / web_fetch) — and the operator has not
+// opted into EnforceToolNetwork. Such tools do not use the sandboxed shell's
+// egress; they keep their own SSRF/host safeguards, and NetworkHostAllowed (also
+// gated by EnforceToolNetwork) governs them at run time. A SHELL command merely
+// classified as network (SideEffectShell) is NOT exempt, so shell egress stays
+// blocked under deny. Mirrors the NetworkHostAllowed exemption so the Evaluate
+// gate and the per-tool gate never diverge.
+func (engine *Engine) toolNetworkExempt(policy Policy, request Request) bool {
+	return !policy.EnforceToolNetwork && request.SideEffect == SideEffectNetwork
+}
+
 // scopeFor returns the scope to validate request paths against. The engine's
 // shared scope applies only when the request targets the engine's own
 // workspace root; a per-request override root gets an ad-hoc single-root scope
@@ -281,7 +294,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// than running with unrestricted networking. Shared with NetworkHostAllowed so
 	// the per-tool gate can't diverge from this decision. Allow is unchanged.
 	netMode := engine.effectiveNetworkMode(policy)
-	if netMode == NetworkDeny && HasRiskCategory(risk, "network") {
+	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(policy, request) {
 		return deny(request, risk, ViolationNetwork, "", "network access is blocked by sandbox policy", false)
 	}
 	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {
