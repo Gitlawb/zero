@@ -184,6 +184,40 @@ func defaultedResponseStyle(value string) string {
 	return defaultResponseStyle
 }
 
+func (m model) handleSelfCorrectCommand(args string) (model, string) {
+	args = strings.TrimSpace(strings.ToLower(args))
+	switch args {
+	case "", "status", "list":
+		return m, m.selfCorrectText()
+	case "on", "tests", "full":
+		m.selfCorrectTests = true
+	case "off", "lsp":
+		m.selfCorrectTests = false
+	default:
+		return m, "Self-correct\nUsage: /selfcorrect [on|off]"
+	}
+	return m, m.selfCorrectText()
+}
+
+func (m model) selfCorrectText() string {
+	depth := "LSP diagnostics only — fast, scoped to changed files"
+	if m.selfCorrectTests {
+		depth = "LSP diagnostics + project test plan (e.g. go test ./...) — slower, whole-repo"
+	}
+	return renderCommandOutput(commandOutput{
+		Title:  "Self-correct",
+		Status: commandStatusOK,
+		Sections: []commandSection{{
+			Title: "State",
+			Lines: []string{
+				"post-edit verification: " + depth,
+				"auto-fix vs report-only: follows the active permission mode",
+			},
+		}},
+		Hints: []string{"/selfcorrect on adds the full test suite; /selfcorrect off returns to LSP-only (default)"},
+	})
+}
+
 func responseStyleAllowed(value string) bool {
 	for _, style := range responseStyles {
 		if value == style {

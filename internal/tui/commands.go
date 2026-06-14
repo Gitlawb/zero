@@ -36,6 +36,7 @@ const (
 	commandBash
 	commandImage
 	commandAddDir
+	commandSelfCorrect
 	commandUnknown
 )
 
@@ -200,6 +201,14 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show or set the response style preference.",
 		kind:        commandStyle,
+	},
+	{
+		name:        "/selfcorrect",
+		aliases:     []string{"/sc"},
+		usage:       "/selfcorrect [on|off]",
+		group:       commandGroupSession,
+		description: "Show or set post-edit self-correction depth (LSP-only by default; on adds the project test plan).",
+		kind:        commandSelfCorrect,
 	},
 	{
 		name:        "/doctor",
