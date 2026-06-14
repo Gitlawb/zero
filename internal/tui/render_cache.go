@@ -145,6 +145,7 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 	appendRenderCacheField(&b, row.detail)
 	appendRenderCacheField(&b, row.arg)
 	appendRenderCacheField(&b, strconv.Itoa(row.runID))
+	appendRenderCacheField(&b, strconv.FormatBool(row.expanded))
 	appendRenderCacheField(&b, strconv.FormatBool(row.final))
 	appendRenderCacheField(&b, strconv.Itoa(row.turnTools))
 	appendRenderCacheField(&b, strconv.FormatInt(int64(row.turnElapsed), 10))

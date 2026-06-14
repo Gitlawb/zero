@@ -90,6 +90,7 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 	rc := buildRowContext(m.transcript)
 	width := chatWidth(m.width)
 	batch := []string{}
+	previousKind, havePreviousKind := previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
 	for m.flushed < len(m.transcript) {
 		row := m.transcript[m.flushed]
 		if !m.settledRow(row, rc) {
@@ -106,8 +107,13 @@ func (m model) settleTranscript() (model, tea.Cmd) {
 		if m.flushedAny && startsTurn(row.kind) {
 			rendered = "\n" + rendered
 		}
+		if (m.flushedAny || havePreviousKind) && previousKind == rowUser && row.kind == rowReasoning {
+			rendered = "\n" + rendered
+		}
 		m.flushedAny = true
 		batch = append(batch, rendered)
+		previousKind = row.kind
+		havePreviousKind = true
 	}
 	if len(batch) > 0 {
 		m.flushQueue = append(m.flushQueue, strings.Join(batch, "\n"))

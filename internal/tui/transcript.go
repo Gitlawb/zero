@@ -16,6 +16,7 @@ const (
 	rowWelcome rowKind = iota
 	rowUser
 	rowAssistant
+	rowReasoning
 	rowToolCall
 	rowToolResult
 	rowPermission
@@ -35,6 +36,7 @@ type transcriptRow struct {
 	runID      int          // owning run, for tool call rows (0 = rehydrated/unknown)
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
+	expanded   bool // collapsible transcript rows, e.g. provider thoughts
 
 	// Final-answer metadata, set at append time. Interim assistant text streams
 	// through model.streamingText and never lands in the transcript, so a
@@ -124,6 +126,10 @@ func transcriptRowKey(row transcriptRow) string {
 		if row.id != "" {
 			return fmt.Sprintf("%d:%d:%s", row.kind, row.runID, row.id)
 		}
+	case rowReasoning:
+		if row.id != "" {
+			return fmt.Sprintf("%d:%d:%s", row.kind, row.runID, row.id)
+		}
 	case rowPermission:
 		if row.permission != nil && row.permission.ToolCallID != "" {
 			return fmt.Sprintf("%d:%d:%s:%s", row.kind, row.runID, row.permission.ToolCallID, row.permission.Action)
@@ -139,6 +145,28 @@ func transcriptRowKey(row transcriptRow) string {
 		}
 	}
 	return ""
+}
+
+func reasoningTranscriptRow(id string, runID int, text string) (transcriptRow, bool) {
+	text = strings.TrimRight(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return transcriptRow{}, false
+	}
+	return transcriptRow{kind: rowReasoning, id: id, runID: runID, text: text}, true
+}
+
+func previousVisibleTranscriptKind(rows []transcriptRow, before int, rc rowContext) (rowKind, bool) {
+	if before > len(rows) {
+		before = len(rows)
+	}
+	for index := before - 1; index >= 0; index-- {
+		row := rows[index]
+		if row.kind == rowWelcome || rc.skip(row) {
+			continue
+		}
+		return row.kind, true
+	}
+	return rowWelcome, false
 }
 
 // effectiveToolRowID disambiguates a provider tool-call id that repeats within

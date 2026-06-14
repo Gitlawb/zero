@@ -23,6 +23,7 @@ func (m model) detailedTranscriptView() string {
 	builder.WriteString("\n")
 
 	shownAny := false
+	var previousKind rowKind
 	for _, row := range m.transcript {
 		if rc.skip(row) {
 			continue
@@ -39,9 +40,13 @@ func (m model) detailedTranscriptView() string {
 		if shownAny && startsTurn(row.kind) {
 			builder.WriteString("\n")
 		}
+		if shownAny && previousKind == rowUser && row.kind == rowReasoning {
+			builder.WriteString("\n")
+		}
 		builder.WriteString(rendered)
 		builder.WriteString("\n")
 		shownAny = true
+		previousKind = row.kind
 	}
 
 	if !shownAny {

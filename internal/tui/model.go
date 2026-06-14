@@ -141,7 +141,9 @@ type model struct {
 	historyIdx   int
 	historyDraft string
 
-	streamingText string // live assistant text for the current segment
+	streamingText              string // live assistant text for the current segment
+	streamingReasoning         string // live provider reasoning for the current segment
+	streamingReasoningExpanded bool
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
@@ -199,6 +201,11 @@ type agentTextMsg struct {
 	delta string
 }
 
+type agentReasoningMsg struct {
+	runID int
+	delta string
+}
+
 type agentResponseMsg struct {
 	runID         int
 	rows          []transcriptRow
@@ -207,8 +214,7 @@ type agentResponseMsg struct {
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
-	// Done-line metadata for the error path, where no final assistant row
-	// carries it (the success path marks the row itself).
+	// Turn metadata for settled rows that do not otherwise carry it.
 	turnTools   int
 	turnElapsed time.Duration
 }
@@ -799,6 +805,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamingText += msg.delta
 		return m, nil
+	case agentReasoningMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.streamingReasoning += msg.delta
+		return m, nil
 	case spinner.TickMsg:
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
 		// so no timer fires between runs.
@@ -934,12 +946,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		for _, row := range msg.rows {
+			if row.kind == rowReasoning {
+				m.streamingReasoning = ""
+				m.streamingReasoningExpanded = false
+			}
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if msg.err != nil {
 			// A failed turn has no final answer row to supersede the streamed
 			// text the user already watched — keep the partial answer instead of
 			// letting it vanish from history.
+			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+				m.transcript = appendTranscriptRow(m.transcript, row)
+			}
 			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 			}
@@ -954,6 +973,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.streamingText = ""
+		m.streamingReasoning = ""
+		m.streamingReasoningExpanded = false
 		if msg.specReview != nil {
 			m = m.activateSpecReview(*msg.specReview)
 		}
@@ -987,11 +1008,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		if msg.row.kind == rowReasoning {
+			m.streamingReasoning = ""
+			m.streamingReasoningExpanded = false
+		}
 		// A tool call ends the current streamed text segment. The segment is the
 		// assistant's working narration ("Let me check X…") — append it as a
 		// non-final assistant row so it stays in history instead of silently
 		// vanishing when the tool card replaces the interim block.
 		if msg.row.kind == rowToolCall {
+			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+				m.transcript = appendTranscriptRow(m.transcript, row)
+				m.streamingReasoning = ""
+				m.streamingReasoningExpanded = false
+			}
 			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 			}
@@ -1259,15 +1289,24 @@ func (m model) chatPageScrollLines() int {
 // pending.
 func (m model) interimBlock(width int) string {
 	text := strings.TrimRight(m.streamingText, "\n")
+	reasoning := strings.TrimRight(m.streamingReasoning, "\n")
+	blocks := []string{}
+	if strings.TrimSpace(reasoning) != "" {
+		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0))
+	}
 	if strings.TrimSpace(text) == "" {
+		if len(blocks) > 0 {
+			return strings.Join(blocks, "\n")
+		}
 		return m.spinner.View() + " " + zeroTheme.muted.Render("working…")
 	}
-	lines := renderAssistantMarkdownText(text, sayMeasure(width), width)
+	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
-		lines[index] = styleAssistantMarkdownLine(line, zeroTheme.sayText)
+		lines[index] = styleAssistantMarkdownLine(line, zeroTheme.ink)
 	}
 	lines = appendStreamingCursor(lines, width)
-	return strings.Join(lines, "\n")
+	blocks = append(blocks, strings.Join(lines, "\n"))
+	return strings.Join(blocks, "\n")
 }
 
 func appendStreamingCursor(lines []string, width int) []string {
@@ -2124,6 +2163,9 @@ func (m *model) cancelRun() {
 		// A cancelled run must terminate visibly in the transcript: first the
 		// partial streamed answer (if any), then the cancellation marker — the
 		// session log gets the same marker below.
+		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
+			m.transcript = appendTranscriptRow(m.transcript, row)
+		}
 		if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 		}
@@ -2144,6 +2186,8 @@ func (m *model) cancelRun() {
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
 	m.streamingText = ""
+	m.streamingReasoning = ""
+	m.streamingReasoningExpanded = false
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {
@@ -2222,21 +2266,48 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			})
 		}
 
+		// Some providers synthesize tool-call ids that repeat within a run (e.g.
+		// Gemini restarts its gemini_tool_N numbering on every provider turn).
+		// Transcript rows need distinct ids for dedup and call→result collapse,
+		// so repeats get an ordinal suffix; session payloads keep the provider's
+		// original ids.
+		callSeq := map[string]int{}
+		reasoningText := ""
+		reasoningSeq := 0
+		var reasoningStarted time.Time
+		var reasoningLast time.Time
+		flushReasoning := func(closedAt time.Time) {
+			if row, ok := reasoningTranscriptRow(fmt.Sprintf("reasoning_%d", reasoningSeq+1), runID, reasoningText); ok {
+				if !reasoningStarted.IsZero() {
+					if closedAt.IsZero() {
+						closedAt = reasoningLast
+					}
+					if !reasoningLast.IsZero() && closedAt.Before(reasoningLast) {
+						closedAt = reasoningLast
+					}
+					if elapsed := closedAt.Sub(reasoningStarted); elapsed > 0 {
+						row.turnElapsed = elapsed
+					}
+				}
+				reasoningSeq++
+				rows = append(rows, row)
+				m.sendAgentRow(runID, row)
+			}
+			reasoningText = ""
+			reasoningStarted = time.Time{}
+			reasoningLast = time.Time{}
+		}
+
 		onText := options.OnText
 		options.OnText = func(delta string) {
+			if strings.TrimSpace(reasoningText) != "" {
+				flushReasoning(m.now())
+			}
 			m.sendAgentText(runID, delta)
 			if onText != nil {
 				onText(delta)
 			}
 		}
-		onReasoning := options.OnReasoning
-		options.OnReasoning = func(delta string) {
-			m.sendAgentText(runID, delta)
-			if onReasoning != nil {
-				onReasoning(delta)
-			}
-		}
-
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
 			if onPermissionRequest != nil {
@@ -2313,15 +2384,25 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 		}
 
-		// Some providers synthesize tool-call ids that repeat within a run (e.g.
-		// Gemini restarts its gemini_tool_N numbering on every provider turn).
-		// Transcript rows need distinct ids for dedup and call→result collapse,
-		// so repeats get an ordinal suffix; session payloads keep the provider's
-		// original ids.
-		callSeq := map[string]int{}
+		onReasoning := options.OnReasoning
+		options.OnReasoning = func(delta string) {
+			now := m.now()
+			if strings.TrimSpace(reasoningText) == "" && strings.TrimSpace(delta) != "" {
+				reasoningStarted = now
+			}
+			if strings.TrimSpace(delta) != "" {
+				reasoningLast = now
+			}
+			reasoningText += delta
+			m.sendAgentReasoning(runID, delta)
+			if onReasoning != nil {
+				onReasoning(delta)
+			}
+		}
 
 		onToolCall := options.OnToolCall
 		options.OnToolCall = func(call agent.ToolCall) {
+			flushReasoning(m.now())
 			toolCalls++
 			callSeq[call.ID]++
 			row := transcriptRow{
@@ -2444,6 +2525,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		result, err := agent.Run(runCtx, prompt, m.provider, options)
 		if err != nil {
+			flushReasoning(m.now())
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
@@ -2453,20 +2535,24 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
 				err := fmt.Errorf("spec draft ended without submit_spec")
+				flushReasoning(m.now())
 				sessionEvents = append(sessionEvents, pendingSessionEvent{
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
 				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 			}
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview}
+			flushReasoning(m.now())
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, turnTools: toolCalls, turnElapsed: m.now().Sub(started)}
 		}
+		flushReasoning(m.now())
+		elapsed := m.now().Sub(started)
 		rows = append(rows, transcriptRow{
 			kind:        rowAssistant,
 			text:        result.FinalAnswer,
 			final:       true,
 			turnTools:   toolCalls,
-			turnElapsed: m.now().Sub(started),
+			turnElapsed: elapsed,
 		})
 		if notice := result.TruncationNotice(); notice != "" {
 			rows = append(rows, transcriptRow{kind: rowSystem, text: notice})
@@ -2478,7 +2564,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, turnTools: toolCalls, turnElapsed: elapsed}
 	}
 }
 
@@ -2518,6 +2604,13 @@ func (m model) sendAgentText(runID int, delta string) {
 		return
 	}
 	m.runtimeMessageSink(agentTextMsg{runID: runID, delta: delta})
+}
+
+func (m model) sendAgentReasoning(runID int, delta string) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(agentReasoningMsg{runID: runID, delta: delta})
 }
 
 func toolResultRowText(result agent.ToolResult) string {

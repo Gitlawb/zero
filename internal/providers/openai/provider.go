@@ -170,6 +170,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		return provider.emitPayload(ctx, data, state, events)
 	})
 	if errors.Is(err, providerio.ErrStreamIdle) {
+		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
@@ -178,16 +179,19 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		return
 	}
 	if err != nil {
+		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
+		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctxErr.Error())})
 		return
 	}
 	if !state.done {
+		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
 	}
@@ -199,6 +203,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 func (provider *Provider) emitPayload(ctx context.Context, data string, state *toolState, events chan<- zeroruntime.StreamEvent) bool {
 	var chunk streamChunk
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
@@ -208,6 +213,7 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 		return false
 	}
 	if chunk.Error != nil {
+		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
@@ -234,15 +240,13 @@ func (provider *Provider) emitChunk(
 			})
 		}
 		if choice.Delta.Content != "" {
-			sendEvent(ctx, events, zeroruntime.StreamEvent{
-				Type:    zeroruntime.StreamEventText,
-				Content: choice.Delta.Content,
-			})
+			state.emitContent(ctx, events, choice.Delta.Content)
 		}
 		for _, toolCall := range choice.Delta.ToolCalls {
 			state.applyDelta(ctx, toolCall, events)
 		}
 		if choice.FinishReason == "tool_calls" {
+			state.flushContent(ctx, events)
 			state.closeOpen(ctx, events)
 		}
 		if reason := mapFinishReason(choice.FinishReason); reason != "" {

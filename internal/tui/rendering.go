@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -197,6 +198,8 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		return renderUserRow(row, width)
 	case rowAssistant:
 		return renderAssistantRow(row, width)
+	case rowReasoning:
+		return renderReasoningRow(row, width)
 	case rowSystem:
 		if row.tool == "sessions" {
 			return renderSessionsCards(row.text, width)
@@ -275,12 +278,22 @@ func looksLikePath(value string) bool {
 	return strings.Contains(value, "/") || filepath.Ext(value) != ""
 }
 
-// sayMeasure is the prose wrap width for user/assistant text: min(width-4, 74).
+// sayMeasure is the narrow prose wrap width for compact secondary text.
 func sayMeasure(width int) int {
 	measure := width - 4
 	if measure > 74 {
 		measure = 74
 	}
+	if measure < 16 {
+		measure = 16
+	}
+	return measure
+}
+
+// assistantMeasure is the main answer wrap width. Assistant responses use the
+// available chat width so they visually balance full-width submitted prompts.
+func assistantMeasure(width int) int {
+	measure := width - 2
 	if measure < 16 {
 		measure = 16
 	}
@@ -359,15 +372,48 @@ func splitAtWidth(text string, measure int) (string, string) {
 }
 
 func renderUserRow(row transcriptRow, width int) string {
-	lines := wrapPlainText(row.text, sayMeasure(width))
-	for index, line := range lines {
-		if index == 0 {
-			lines[index] = zeroTheme.userPrompt.Render("❯ ") + zeroTheme.ink.Render(line)
-		} else {
-			lines[index] = "  " + zeroTheme.ink.Render(line)
-		}
+	contentWidth := userPromptContentWidth(width)
+	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
+	lines := make([]string, 0, len(wrapped)+2)
+	lines = append(lines, renderUserPromptHalfLine(width, "▄"))
+	for _, line := range wrapped {
+		lines = append(lines, renderUserPromptStyledLine(zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true)).Render(line), contentWidth))
 	}
+	lines = append(lines, renderUserPromptHalfLine(width, "▀"))
 	return strings.Join(lines, "\n")
+}
+
+const userPromptPrefix = "▌  "
+
+func userPromptContentWidth(width int) int {
+	if width <= 0 {
+		return 0
+	}
+	prefixWidth := lipgloss.Width(userPromptPrefix)
+	return maxInt(0, width-prefixWidth)
+}
+
+func renderUserPromptStyledLine(styledText string, contentWidth int) string {
+	if contentWidth <= 0 {
+		return zeroTheme.userPrompt.Render("▌")
+	}
+	fitted := fitStyledLine(styledText, contentWidth)
+	pad := zeroTheme.userPromptPanel.Render(strings.Repeat(" ", maxInt(0, contentWidth-lipgloss.Width(fitted))))
+	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render("  ") + fitted + pad
+}
+
+func renderUserPromptHalfLine(width int, glyph string) string {
+	if width <= 0 {
+		return ""
+	}
+	capGlyph := glyph
+	switch glyph {
+	case "▄":
+		capGlyph = "▖"
+	case "▀":
+		capGlyph = "▘"
+	}
+	return zeroTheme.userPrompt.Render(capGlyph) + zeroTheme.userPromptHalf.Render(strings.Repeat(glyph, maxInt(0, width-1)))
 }
 
 // renderAssistantRow draws the turn's final answer with the accent rail
@@ -378,7 +424,7 @@ func renderAssistantRow(row transcriptRow, width int) string {
 	if row.final {
 		tableMeasure = maxInt(16, width-2)
 	}
-	lines := renderAssistantMarkdownText(row.text, sayMeasure(width), tableMeasure)
+	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	if !row.final {
 		for index := range lines {
 			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.sayText)
@@ -392,16 +438,75 @@ func renderAssistantRow(row transcriptRow, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderReasoningRow(row transcriptRow, width int) string {
+	return renderReasoningBlock(row.text, row.expanded, width, false, row.turnElapsed)
+}
+
+func renderReasoningBlock(text string, expanded bool, width int, running bool, elapsed time.Duration) string {
+	text = strings.TrimSpace(text)
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	header := reasoningHeaderLine(text, expanded, running, elapsed)
+	if !expanded {
+		return fitStyledLine(header, width)
+	}
+	lines := []string{fitStyledLine(header, width)}
+	for _, line := range renderReasoningBodyLines(text, width) {
+		lines = append(lines, fitStyledLine("  "+styleAssistantMarkdownLine(line, zeroTheme.sayText), width))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderReasoningBodyLines(text string, width int) []string {
+	measure := maxInt(16, sayMeasure(width)-2)
+	return renderAssistantMarkdownText(strings.TrimSpace(text), measure, measure)
+}
+
+func reasoningHeaderLine(text string, expanded bool, running bool, elapsed time.Duration) string {
+	return zeroTheme.faint.Render(reasoningHeaderText(text, expanded, running, elapsed))
+}
+
+func reasoningHeaderText(text string, expanded bool, running bool, elapsed time.Duration) string {
+	icon, label := reasoningHeaderParts(text, expanded, running, elapsed)
+	if icon == "" {
+		return label
+	}
+	return icon + " " + label
+}
+
+func reasoningHeaderParts(_ string, expanded bool, running bool, elapsed time.Duration) (string, string) {
+	if running {
+		return "", "Thinking"
+	}
+	icon := "▸"
+	if expanded {
+		icon = "▾"
+	}
+	label := "Thought"
+	if elapsed > 0 {
+		label = fmt.Sprintf("Thought for %s", formatElapsedSeconds(elapsed))
+	}
+	return icon, label
+}
+
+func formatElapsedSeconds(elapsed time.Duration) string {
+	return fmt.Sprintf("%.1fs", elapsed.Seconds())
+}
+
 // doneLine renders the turn terminator: ● green (red on error) plus faint
 // counters. Segments the turn has no data for are omitted, never invented.
 func doneLine(row transcriptRow, failed bool) string {
 	glyph := zeroTheme.green.Render("●")
-	label := "done"
+	label := "completed"
 	if failed {
 		glyph = zeroTheme.red.Render("●")
 		label = "error"
 	}
 	segments := []string{zeroTheme.faint.Render(label)}
+	if !failed && row.turnElapsed > 0 {
+		segments[0] = zeroTheme.faint.Render(fmt.Sprintf("completed in %s", formatElapsedSeconds(row.turnElapsed)))
+	}
 	if row.turnTools > 0 {
 		noun := "tools"
 		if row.turnTools == 1 {
@@ -409,8 +514,8 @@ func doneLine(row transcriptRow, failed bool) string {
 		}
 		segments = append(segments, zeroTheme.faint.Render(fmt.Sprintf("%d %s", row.turnTools, noun)))
 	}
-	if row.turnElapsed > 0 {
-		segments = append(segments, zeroTheme.faint.Render(fmt.Sprintf("%.1fs", row.turnElapsed.Seconds())))
+	if failed && row.turnElapsed > 0 {
+		segments = append(segments, zeroTheme.faint.Render(formatElapsedSeconds(row.turnElapsed)))
 	}
 	return glyph + " " + strings.Join(segments, zeroTheme.faintest.Render(" · "))
 }

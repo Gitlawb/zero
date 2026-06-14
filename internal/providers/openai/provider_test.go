@@ -244,6 +244,40 @@ func TestStreamCompletionEmitsReasoningBeforeRegularContent(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionSplitsInlineThinkTagsFromContent(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"<think>private reasoning</think>public answer"}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	assertEvent(t, events[0], zeroruntime.StreamEventReasoning, "private reasoning")
+	assertEvent(t, events[1], zeroruntime.StreamEventText, "public answer")
+	if events[2].Type != zeroruntime.StreamEventDone {
+		t.Fatalf("third event = %#v, want done", events[2])
+	}
+}
+
+func TestStreamCompletionSplitsInlineThinkTagsAcrossChunks(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"<thi"}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"nk>reason"}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"ing</"}}]}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"think> answer"}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	reasoning := eventsOfType(events, zeroruntime.StreamEventReasoning)
+	if len(reasoning) != 2 || reasoning[0].Content != "reason" || reasoning[1].Content != "ing" {
+		t.Fatalf("reasoning events = %#v, want split reasoning content", reasoning)
+	}
+	text := eventsOfType(events, zeroruntime.StreamEventText)
+	if len(text) != 1 || text[0].Content != " answer" {
+		t.Fatalf("text events = %#v, want answer-only content", text)
+	}
+}
+
 func TestStreamCompletionBuffersToolArgsUntilIDAndNameArrive(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`)

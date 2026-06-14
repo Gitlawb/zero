@@ -3,12 +3,19 @@ package openai
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+const (
+	thinkOpenTag  = "<think>"
+	thinkCloseTag = "</think>"
+)
+
 type toolState struct {
 	calls map[int]*pendingToolCall
+	think thinkTagSplitter
 	// finishReason holds the normalized terminal stop reason (zeroruntime
 	// FinishReason*) when the response ended abnormally (length/content_filter),
 	// so the provider can attach it to the done event. Empty for a normal finish.
@@ -28,6 +35,99 @@ type pendingToolCall struct {
 
 func newToolState() *toolState {
 	return &toolState{calls: make(map[int]*pendingToolCall)}
+}
+
+type thinkTagSplitter struct {
+	pending    string
+	inThinking bool
+}
+
+func (state *toolState) emitContent(ctx context.Context, events chan<- zeroruntime.StreamEvent, content string) {
+	state.think.push(content, func(eventType zeroruntime.StreamEventType, text string) {
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: eventType, Content: text})
+	})
+}
+
+func (state *toolState) flushContent(ctx context.Context, events chan<- zeroruntime.StreamEvent) {
+	state.think.flush(func(eventType zeroruntime.StreamEventType, text string) {
+		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: eventType, Content: text})
+	})
+}
+
+func (splitter *thinkTagSplitter) push(content string, emit func(zeroruntime.StreamEventType, string)) {
+	if content == "" {
+		return
+	}
+	splitter.pending += content
+	splitter.drain(false, emit)
+}
+
+func (splitter *thinkTagSplitter) flush(emit func(zeroruntime.StreamEventType, string)) {
+	splitter.drain(true, emit)
+}
+
+func (splitter *thinkTagSplitter) drain(final bool, emit func(zeroruntime.StreamEventType, string)) {
+	for {
+		tag := thinkOpenTag
+		if splitter.inThinking {
+			tag = thinkCloseTag
+		}
+		if index := indexFold(splitter.pending, tag); index >= 0 {
+			splitter.emitCurrent(emit, splitter.pending[:index])
+			splitter.pending = splitter.pending[index+len(tag):]
+			splitter.inThinking = !splitter.inThinking
+			continue
+		}
+		if final {
+			splitter.emitCurrent(emit, splitter.pending)
+			splitter.pending = ""
+			return
+		}
+		keep := trailingTagPrefixLen(splitter.pending, tag)
+		if keep == len(splitter.pending) {
+			return
+		}
+		emitText := splitter.pending[:len(splitter.pending)-keep]
+		splitter.emitCurrent(emit, emitText)
+		splitter.pending = splitter.pending[len(splitter.pending)-keep:]
+		return
+	}
+}
+
+func (splitter *thinkTagSplitter) emitCurrent(emit func(zeroruntime.StreamEventType, string), text string) {
+	if text == "" {
+		return
+	}
+	eventType := zeroruntime.StreamEventText
+	if splitter.inThinking {
+		eventType = zeroruntime.StreamEventReasoning
+	}
+	emit(eventType, text)
+}
+
+func trailingTagPrefixLen(text string, tag string) int {
+	maxLen := min(len(text), len(tag)-1)
+	for length := maxLen; length > 0; length-- {
+		if strings.EqualFold(text[len(text)-length:], tag[:length]) {
+			return length
+		}
+	}
+	return 0
+}
+
+func indexFold(text string, needle string) int {
+	if needle == "" {
+		return 0
+	}
+	if len(text) < len(needle) {
+		return -1
+	}
+	for index := 0; index <= len(text)-len(needle); index++ {
+		if strings.EqualFold(text[index:index+len(needle)], needle) {
+			return index
+		}
+	}
+	return -1
 }
 
 func (state *toolState) applyDelta(

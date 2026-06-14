@@ -274,8 +274,8 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 	updated, cmd = next.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		X:      0,
-		Y:      0,
+		X:      3,
+		Y:      1,
 	})
 	next = updated.(model)
 	if cmd != nil {
@@ -294,15 +294,15 @@ func TestTranscriptSelectionExtractsVisibleTextRange(t *testing.T) {
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		X:      0,
-		Y:      0,
+		X:      3,
+		Y:      1,
 	})
 	m = updated.(model)
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionMotion,
-		X:      7,
-		Y:      0,
+		X:      8,
+		Y:      1,
 	})
 	m = updated.(model)
 
@@ -319,15 +319,15 @@ func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		X:      0,
-		Y:      0,
+		X:      3,
+		Y:      1,
 	})
 	m = updated.(model)
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonNone,
 		Action: tea.MouseActionMotion,
-		X:      7,
-		Y:      0,
+		X:      8,
+		Y:      1,
 	})
 	m = updated.(model)
 
@@ -344,8 +344,8 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		X:      0,
-		Y:      0,
+		X:      3,
+		Y:      1,
 	})
 	m = updated.(model)
 	// Bubble Tea marks left-button drag motion as Type MouseLeft for backward
@@ -354,8 +354,8 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionMotion,
 		Type:   tea.MouseLeft,
-		X:      7,
-		Y:      0,
+		X:      8,
+		Y:      1,
 	})
 	m = updated.(model)
 
@@ -372,15 +372,15 @@ func TestTranscriptSelectionReleaseExtendsRangeWithoutMotion(t *testing.T) {
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
-		X:      0,
-		Y:      0,
+		X:      3,
+		Y:      1,
 	})
 	m = updated.(model)
 	updated, cmd := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonNone,
 		Action: tea.MouseActionRelease,
-		X:      7,
-		Y:      0,
+		X:      8,
+		Y:      1,
 	})
 	m = updated.(model)
 	if cmd == nil {
@@ -405,6 +405,83 @@ func TestTranscriptSelectionClearsAfterCopy(t *testing.T) {
 	}
 	if next.copyStatus != "Copied!" {
 		t.Fatalf("copyStatus = %q, want Copied!", next.copyStatus)
+	}
+}
+
+func TestMouseClickTogglesReasoningRow(t *testing.T) {
+	m := mouseTestModel()
+	m.mouseCapture = true
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowReasoning, text: "private thought"})
+
+	width := chatWidth(m.width)
+	body, selectable := m.transcriptBody(width, "")
+	start, _ := m.transcriptViewportStart(body, width)
+	var target transcriptSelectableLine
+	for _, line := range selectable {
+		if line.toggle {
+			target = line
+			break
+		}
+	}
+	if !target.toggle {
+		t.Fatalf("expected reasoning header to be clickable, selectable=%#v", selectable)
+	}
+
+	updated, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		X:      target.textStart,
+		Y:      target.bodyY - start,
+	})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("reasoning toggle click should not return a command")
+	}
+	if !next.transcript[len(next.transcript)-1].expanded {
+		t.Fatalf("reasoning row should expand after click: %#v", next.transcript[len(next.transcript)-1])
+	}
+	if next.transcriptSelection.active {
+		t.Fatal("reasoning toggle should not start transcript selection")
+	}
+}
+
+func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
+	m := mouseTestModel()
+	m.mouseCapture = true
+	m.pending = true
+	m.activeRunID = 1
+	m.streamingReasoning = "private **thought**"
+
+	width := chatWidth(m.width)
+	body, selectable := m.transcriptBody(width, "")
+	start, _ := m.transcriptViewportStart(body, width)
+	var target transcriptSelectableLine
+	for _, line := range selectable {
+		if line.toggle && line.live {
+			target = line
+			break
+		}
+	}
+	if !target.toggle || !target.live {
+		t.Fatalf("expected live reasoning header to be clickable, selectable=%#v", selectable)
+	}
+
+	updated, cmd := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		X:      target.textStart,
+		Y:      target.bodyY - start,
+	})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("streaming reasoning toggle click should not return a command")
+	}
+	if !next.streamingReasoningExpanded {
+		t.Fatal("streaming reasoning should expand after click")
+	}
+	view := plainRender(t, next.interimBlock(width))
+	if !strings.Contains(view, "private thought") || strings.Contains(view, "**") {
+		t.Fatalf("expanded streaming reasoning should render markdown-clean text, got:\n%s", view)
 	}
 }
 

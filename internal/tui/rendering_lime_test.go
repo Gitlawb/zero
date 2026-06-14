@@ -35,8 +35,22 @@ func TestUserRowRendersPromptGutter(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{kind: rowUser, text: "add a --version flag"}
 	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
-	if !strings.HasPrefix(got, "❯ add a --version flag") {
-		t.Fatalf("user row = %q, want ❯-prefixed text", got)
+	if !strings.Contains(got, "\n▌  add a --version flag") {
+		t.Fatalf("user row = %q, want rail-prefixed text", got)
+	}
+}
+
+func TestTranscriptSeparatesUserPromptFromContinuation(t *testing.T) {
+	m := limeTestModel()
+	m.headerPrinted = true
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: "hey"})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowReasoning, text: "private thought"})
+
+	body, _ := m.transcriptBody(96, "")
+	got := plainRender(t, body)
+	lines := strings.Split(got, "\n")
+	if len(lines) < 5 || !strings.HasPrefix(lines[1], "▌  hey") || lines[3] != "" || !strings.HasPrefix(lines[4], "▸ Thought") {
+		t.Fatalf("transcript body should keep a small gap before thought, got:\n%s", got)
 	}
 }
 
@@ -309,8 +323,54 @@ func TestFinalAnswerRendersRailAndDoneLine(t *testing.T) {
 	if !strings.Contains(got, "│ Done — the CLI now prints its version.") {
 		t.Fatalf("final row = %q, want accent-rail gutter", got)
 	}
-	if !strings.Contains(got, "● done · 2 tools · 8.4s") {
-		t.Fatalf("final row = %q, want done line with counters", got)
+	if !strings.Contains(got, "● completed in 8.4s · 2 tools") {
+		t.Fatalf("final row = %q, want completion line with counters", got)
+	}
+}
+
+func TestReasoningRowIsCollapsedByDefaultAndExpands(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{kind: rowReasoning, text: "\n\nprivate **chain**\nsecond line"}
+
+	collapsed := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if !strings.Contains(collapsed, "▸ Thought") {
+		t.Fatalf("collapsed reasoning row missing summary:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "private chain") {
+		t.Fatalf("collapsed reasoning row leaked content:\n%s", collapsed)
+	}
+
+	row.expanded = true
+	expanded := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if !strings.Contains(expanded, "▾ Thought") || !strings.Contains(expanded, "private chain") {
+		t.Fatalf("expanded reasoning row missing content:\n%s", expanded)
+	}
+	if strings.Contains(expanded, "**") {
+		t.Fatalf("expanded reasoning row leaked markdown markers:\n%s", expanded)
+	}
+	lines := strings.Split(expanded, "\n")
+	if len(lines) < 2 || strings.TrimSpace(lines[1]) == "" {
+		t.Fatalf("expanded reasoning row should start content immediately after header:\n%s", expanded)
+	}
+}
+
+func TestReasoningRowShowsElapsedWhenKnown(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind:        rowReasoning,
+		text:        "private thought",
+		turnElapsed: 2300 * time.Millisecond,
+	}
+
+	collapsed := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if !strings.Contains(collapsed, "▸ Thought for 2.3s") {
+		t.Fatalf("collapsed reasoning row missing elapsed:\n%s", collapsed)
+	}
+
+	row.expanded = true
+	expanded := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if !strings.Contains(expanded, "▾ Thought for 2.3s") {
+		t.Fatalf("expanded reasoning row missing elapsed:\n%s", expanded)
 	}
 }
 
@@ -344,8 +404,8 @@ func TestFinalAnswerRendersMarkdownTableForTerminal(t *testing.T) {
 	if !strings.Contains(got, " │ ") || !strings.Contains(got, "─┼─") {
 		t.Fatalf("markdown table should render terminal table separators, got:\n%s", got)
 	}
-	if !strings.Contains(got, "● done") {
-		t.Fatalf("markdown final row = %q, want done line terminator", got)
+	if !strings.Contains(got, "● completed") {
+		t.Fatalf("markdown final row = %q, want completed line terminator", got)
 	}
 	for index, line := range strings.Split(rendered, "\n") {
 		if gotWidth := lipgloss.Width(line); gotWidth > 72 {
@@ -469,8 +529,8 @@ func TestFinalAnswerRendersCrowdedMarkdownTablesAsTables(t *testing.T) {
 
 func TestDoneLineOmitsMissingSegments(t *testing.T) {
 	got := plainRender(t, doneLine(transcriptRow{final: true}, false))
-	if got != "● done" {
-		t.Fatalf("done line without counters = %q, want plain ● done", got)
+	if got != "● completed" {
+		t.Fatalf("done line without counters = %q, want plain ● completed", got)
 	}
 	if got := plainRender(t, doneLine(transcriptRow{final: true, turnTools: 1}, false)); !strings.Contains(got, "1 tool") || strings.Contains(got, "1 tools") {
 		t.Fatalf("done line = %q, want singular tool noun", got)

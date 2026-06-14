@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +27,8 @@ type transcriptSelectableLine struct {
 	rowIndex  int
 	textStart int
 	text      string
+	toggle    bool
+	live      bool
 }
 
 type transcriptCopiedMsg struct {
@@ -63,6 +66,7 @@ func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcr
 	} else {
 		rc := buildRowContext(m.transcript)
 		shownAny := false
+		previousKind, havePreviousKind := previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
 		for index := m.flushed; index < len(m.transcript); index++ {
 			row := m.transcript[index]
 			// A welcome row carries no Lime visual (the empty state replaced it)
@@ -75,11 +79,16 @@ func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcr
 			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
 				appendBlank()
 			}
+			if (shownAny || (m.flushedAny && havePreviousKind)) && previousKind == rowUser && row.kind == rowReasoning {
+				appendBlank()
+			}
 			start := len(lines)
 			rendered, rowSelectable := m.renderTranscriptRow(index, row, width, rc, start)
 			appendBlock(rendered)
 			selectable = append(selectable, rowSelectable...)
 			shownAny = true
+			previousKind = row.kind
+			havePreviousKind = true
 		}
 	}
 
@@ -91,7 +100,8 @@ func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcr
 		case m.pendingAskUser != nil:
 			appendBlock(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
 		default:
-			appendBlock(m.interimBlock(width))
+			start := appendBlock(m.interimBlock(width))
+			selectable = append(selectable, m.renderSelectableStreamingReasoning(width, start)...)
 		}
 	}
 	if m.pendingSpecReview != nil {
@@ -108,29 +118,30 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 		return m.renderSelectableUserRow(rowIndex, row, width, startBodyY)
 	case rowAssistant:
 		return m.renderSelectableAssistantRow(rowIndex, row, width, startBodyY)
+	case rowReasoning:
+		return m.renderSelectableReasoningRow(rowIndex, row, width, startBodyY)
 	default:
 		return m.renderRow(row, width, rc), nil
 	}
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
-	wrapped := wrapPlainText(row.text, sayMeasure(width))
-	lines := make([]string, 0, len(wrapped))
+	contentWidth := userPromptContentWidth(width)
+	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
+	lines := make([]string, 0, len(wrapped)+2)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
+	lines = append(lines, renderUserPromptHalfLine(width, "▄"))
 	for index, line := range wrapped {
-		prefix := "  "
-		if index == 0 {
-			prefix = "❯ "
-		}
 		meta := transcriptSelectableLine{
-			bodyY:     startBodyY + index,
+			bodyY:     startBodyY + index + 1,
 			rowIndex:  rowIndex,
-			textStart: lipgloss.Width(prefix),
+			textStart: lipgloss.Width(userPromptPrefix),
 			text:      line,
 		}
 		selectable = append(selectable, meta)
-		lines = append(lines, zeroTheme.userPrompt.Render(prefix)+m.renderTranscriptSelectableText(meta, zeroTheme.ink))
+		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true))), contentWidth))
 	}
+	lines = append(lines, renderUserPromptHalfLine(width, "▀"))
 	return strings.Join(lines, "\n"), selectable
 }
 
@@ -139,7 +150,7 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 	if row.final {
 		tableMeasure = maxInt(16, width-2)
 	}
-	wrapped := renderAssistantMarkdownText(row.text, sayMeasure(width), tableMeasure)
+	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	lines := make([]string, 0, len(wrapped)+1)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
 	prefix := ""
@@ -167,6 +178,64 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 		lines = append(lines, doneLine(row, false))
 	}
 	return strings.Join(lines, "\n"), selectable
+}
+
+func (m model) renderSelectableReasoningRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
+	lines, selectable := m.renderSelectableReasoningBlock(rowIndex, row.text, row.expanded, false, row.turnElapsed, width, startBodyY)
+	return strings.Join(lines, "\n"), selectable
+}
+
+func (m model) renderSelectableStreamingReasoning(width int, startBodyY int) []transcriptSelectableLine {
+	_, selectable := m.renderSelectableReasoningBlock(-1, m.streamingReasoning, m.streamingReasoningExpanded, true, 0, width, startBodyY)
+	for index := range selectable {
+		selectable[index].live = true
+	}
+	return selectable
+}
+
+func (m model) renderSelectableReasoningBlock(rowIndex int, text string, expanded bool, running bool, elapsed time.Duration, width int, startBodyY int) ([]string, []transcriptSelectableLine) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, nil
+	}
+	headerPlain := reasoningHeaderText(text, expanded, running, elapsed)
+	header := reasoningHeaderLine(text, expanded, running, elapsed)
+	headerMeta := transcriptSelectableLine{
+		bodyY:     startBodyY,
+		rowIndex:  rowIndex,
+		textStart: 0,
+		text:      headerPlain,
+		toggle:    true,
+	}
+	headerRendered := header
+	if _, _, ok := m.selectedColumnsForTranscriptLine(headerMeta); ok {
+		headerRendered = m.renderTranscriptSelectableText(headerMeta, zeroTheme.faint)
+	}
+	lines := []string{headerRendered}
+	selectable := []transcriptSelectableLine{headerMeta}
+	if expanded {
+		renderedLines := renderReasoningBodyLines(text, width)
+		plainLines := renderAssistantMarkdownPlainText(text, maxInt(16, sayMeasure(width)-2), maxInt(16, sayMeasure(width)-2))
+		for index, line := range renderedLines {
+			plainLine := ""
+			if index < len(plainLines) {
+				plainLine = plainLines[index]
+			}
+			meta := transcriptSelectableLine{
+				bodyY:     startBodyY + index + 1,
+				rowIndex:  rowIndex,
+				textStart: 2,
+				text:      plainLine,
+			}
+			selectable = append(selectable, meta)
+			rendered := styleAssistantMarkdownLine(line, zeroTheme.sayText)
+			if _, _, ok := m.selectedColumnsForTranscriptLine(meta); ok {
+				rendered = m.renderTranscriptSelectableText(meta, zeroTheme.sayText)
+			}
+			lines = append(lines, "  "+rendered)
+		}
+	}
+	return lines, selectable
 }
 
 func (m model) renderTranscriptSelectableMarkdownText(line transcriptSelectableLine, styledText string, base lipgloss.Style) string {
@@ -287,6 +356,14 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, false
 		}
+		if line.toggle {
+			if line.live {
+				m.streamingReasoningExpanded = !m.streamingReasoningExpanded
+			} else {
+				m = m.toggleReasoningRow(line.rowIndex)
+			}
+			return m, nil, true
+		}
 		point := transcriptSelectionPointForMouse(line, msg.X)
 		m.copyStatus = ""
 		m.transcriptSelection = transcriptSelectionState{active: true, anchor: point, cursor: point}
@@ -316,6 +393,14 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 	default:
 		return m, nil, false
 	}
+}
+
+func (m model) toggleReasoningRow(rowIndex int) model {
+	if rowIndex < 0 || rowIndex >= len(m.transcript) || m.transcript[rowIndex].kind != rowReasoning {
+		return m
+	}
+	m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+	return m
 }
 
 func (m model) selectedTranscriptText() string {

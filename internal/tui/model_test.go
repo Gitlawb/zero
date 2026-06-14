@@ -103,6 +103,67 @@ func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
 	}
 }
 
+func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventReasoning, Content: "private "},
+		{Type: zeroruntime.StreamEventReasoning, Content: "thought"},
+		{Type: zeroruntime.StreamEventText, Content: "public answer"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	m := newModel(context.Background(), Options{
+		Cwd:          t.TempDir(),
+		ProviderName: "tokenrouter",
+		ModelName:    "MiniMax-M3",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+	})
+	base := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
+	times := []time.Time{
+		base,
+		base.Add(1 * time.Second),
+		base.Add(1800 * time.Millisecond),
+		base.Add(2500 * time.Millisecond),
+		base.Add(6 * time.Second),
+	}
+	m.now = func() time.Time {
+		if len(times) == 0 {
+			return base.Add(6 * time.Second)
+		}
+		next := times[0]
+		times = times[1:]
+		return next
+	}
+	m.input.SetValue("hello")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+
+	reasoning, ok := findTranscriptRow(next.transcript, rowReasoning)
+	if !ok || reasoning.text != "private thought" {
+		t.Fatalf("reasoning row = %#v, ok=%v", reasoning, ok)
+	}
+	if reasoning.turnElapsed != 1500*time.Millisecond {
+		t.Fatalf("reasoning elapsed = %s, want 1.5s", reasoning.turnElapsed)
+	}
+	assistant, ok := findTranscriptRow(next.transcript, rowAssistant)
+	if !ok || assistant.text != "public answer" {
+		t.Fatalf("assistant row = %#v, ok=%v", assistant, ok)
+	}
+	if assistant.turnElapsed != 6*time.Second {
+		t.Fatalf("assistant elapsed = %s, want 6s", assistant.turnElapsed)
+	}
+	if strings.Contains(assistant.text, "private thought") {
+		t.Fatalf("assistant answer leaked reasoning: %#v", assistant)
+	}
+}
+
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
 		input string

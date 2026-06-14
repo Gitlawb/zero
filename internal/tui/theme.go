@@ -65,7 +65,9 @@ type tuiTheme struct {
 	permBorder lipgloss.Style // permission card border (amber-mixed line)
 
 	// Surfaces.
-	panel lipgloss.Style // bare panel background (card padding, body fill)
+	panel           lipgloss.Style // bare panel background (card padding, body fill)
+	userPromptPanel lipgloss.Style // submitted user prompt background
+	userPromptHalf  lipgloss.Style // submitted prompt half-block padding
 
 	// Permission modes.
 	modeAuto   lipgloss.Style
@@ -83,6 +85,7 @@ const (
 	colorPanel    = "#0e0e10" // card backgrounds
 	colorPanel2   = "#121215" // card header rows, picker rows
 	colorPanel3   = "#17171b" // selected/hovered row bg
+	colorPromptBg = "#262626" // submitted user prompt background
 	colorLine     = "#242429" // default borders, rules
 	colorLine2    = "#414147" // emphasized borders
 	colorInk      = "#ececee" // primary text
@@ -151,7 +154,9 @@ var zeroTheme = tuiTheme{
 	permBg:     lipgloss.NewStyle().Background(lipgloss.Color(colorPermBg)),
 	permBorder: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCardPerm)),
 
-	panel: lipgloss.NewStyle().Background(lipgloss.Color(colorPanel)),
+	panel:           lipgloss.NewStyle().Background(lipgloss.Color(colorPanel)),
+	userPromptPanel: lipgloss.NewStyle().Background(lipgloss.Color(colorPromptBg)),
+	userPromptHalf:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorPromptBg)),
 
 	modeAuto:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true),
 	modeAsk:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)).Bold(true),
@@ -164,6 +169,11 @@ var zeroTheme = tuiTheme{
 // wrap their foreground styles through this instead of referencing hex.
 func (t tuiTheme) onPanel(style lipgloss.Style) lipgloss.Style {
 	return style.Background(lipgloss.Color(colorPanel))
+}
+
+// onUserPrompt paints on the submitted user-prompt surface.
+func (t tuiTheme) onUserPrompt(style lipgloss.Style) lipgloss.Style {
+	return style.Background(lipgloss.Color(colorPromptBg))
 }
 
 // onPanel2 paints on the header/picker-row surface.
