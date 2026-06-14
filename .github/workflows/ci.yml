@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -59,6 +61,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -87,6 +91,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -106,11 +112,11 @@ jobs:
       # CVE is cleared by a toolchain bump (see go.mod). May also flag a newly
       # published advisory on an unrelated PR — intentional: do not ship known vulns.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
 
       # Advisory: reports functions unreachable from any cmd/* main so dormant
       # code is visible in CI. Non-blocking while the dormant subsystems are
       # still being wired or removed.
       - name: deadcode (advisory)
         continue-on-error: true
-        run: go run golang.org/x/tools/cmd/deadcode@latest -test=false ./...
+        run: go run golang.org/x/tools/cmd/deadcode@v0.46.0 -test=false ./...

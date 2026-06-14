@@ -802,18 +802,31 @@ func requiredID(obj map[string]any, field string) (string, error) {
 	return value, nil
 }
 
+// KnownEvents returns the hook events Zero recognizes, in dispatch order.
+func KnownEvents() []Event {
+	return []Event{EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd, EventSpecialistStart, EventSpecialistStop}
+}
+
+// IsValidEvent reports whether event is one Zero recognizes.
+func IsValidEvent(event Event) bool {
+	for _, known := range KnownEvents() {
+		if event == known {
+			return true
+		}
+	}
+	return false
+}
+
 func parseEvent(raw any, field string) (Event, error) {
 	text, ok := raw.(string)
 	if !ok || strings.TrimSpace(text) == "" {
 		return "", manifestError{fieldPath: field, message: "Expected a hook event."}
 	}
 	event := Event(strings.TrimSpace(text))
-	switch event {
-	case EventBeforeTool, EventAfterTool, EventSessionStart, EventSessionEnd, EventSpecialistStart, EventSpecialistStop:
-		return event, nil
-	default:
+	if !IsValidEvent(event) {
 		return "", manifestError{fieldPath: field, message: "Expected beforeTool, afterTool, sessionStart, sessionEnd, specialistStart, or specialistStop."}
 	}
+	return event, nil
 }
 
 func optionalArray(raw any, field string) ([]any, error) {
