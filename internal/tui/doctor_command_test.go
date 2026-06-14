@@ -1,0 +1,136 @@
+package tui
+
+import (
+	"context"
+	"reflect"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/doctor"
+	"github.com/Gitlawb/zero/internal/providerhealth"
+)
+
+func TestDoctorOptionsIncludeConfigPaths(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		UserConfigPath:    "C:/zero/user.json",
+		ProjectConfigPath: "C:/repo/.zero/config.json",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			Model:        "gpt-4.1",
+		},
+	})
+
+	options := m.doctorOptions(false)
+
+	if options.UserConfig != "C:/zero/user.json" {
+		t.Fatalf("UserConfig = %q, want %q", options.UserConfig, "C:/zero/user.json")
+	}
+	if options.ProjectConfig != "C:/repo/.zero/config.json" {
+		t.Fatalf("ProjectConfig = %q, want %q", options.ProjectConfig, "C:/repo/.zero/config.json")
+	}
+	if options.Connectivity {
+		t.Fatal("Connectivity = true, want false")
+	}
+	if options.ProviderHealth != nil {
+		t.Fatalf("ProviderHealth = %#v, want nil without connectivity", options.ProviderHealth)
+	}
+}
+
+func TestDoctorOptionsConnectivityInvokesConfiguredProviderHealthProbe(t *testing.T) {
+	profile := config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://api.example.com/v1",
+		Model:        "custom-model",
+	}
+	var called int
+	var gotOptions providerhealth.Options
+	m := newModel(context.Background(), Options{
+		ProviderProfile: profile,
+		UserAgent:       "zero-test",
+		ProbeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			called++
+			gotOptions = options
+			return providerhealth.Result{
+				Status: providerhealth.StatusPass,
+				Checks: []providerhealth.Check{{
+					ID:      "provider.connectivity",
+					Status:  providerhealth.StatusPass,
+					Message: "reachable",
+				}},
+			}
+		},
+	})
+
+	options := m.doctorOptions(true)
+	report := doctor.Run(options)
+
+	if called != 1 {
+		t.Fatalf("probe called %d time(s), want 1", called)
+	}
+	if !gotOptions.Connectivity {
+		t.Fatal("probe Connectivity = false, want true")
+	}
+	if gotOptions.UserAgent != "zero-test" {
+		t.Fatalf("probe UserAgent = %q, want %q", gotOptions.UserAgent, "zero-test")
+	}
+	if !reflect.DeepEqual(gotOptions.Profile, profile) {
+		t.Fatalf("probe Profile = %#v, want %#v", gotOptions.Profile, profile)
+	}
+	check := report.Check("provider.connectivity")
+	if options.ProviderHealth == nil || check == nil || check.Status != doctor.StatusPass {
+		t.Fatalf("connectivity check = %#v, ProviderHealth = %#v; want passing injected health", check, options.ProviderHealth)
+	}
+}
+
+func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
+	profile := config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "https://api.example.com/v1",
+		Model:        "custom-model",
+	}
+	called := false
+	m := newModel(context.Background(), Options{
+		ProviderProfile: profile,
+		ProbeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+			called = true
+			return providerhealth.Result{
+				Status: providerhealth.StatusPass,
+				Checks: []providerhealth.Check{{
+					ID:      "provider.connectivity",
+					Status:  providerhealth.StatusPass,
+					Message: "reachable",
+				}},
+			}
+		},
+	})
+	m.input.SetValue("/doctor --connectivity")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /doctor --connectivity to return an async command")
+	}
+	if called {
+		t.Fatal("provider probe ran synchronously before the returned command executed")
+	}
+	if !transcriptContains(next.transcript, "checking provider connectivity") {
+		t.Fatalf("expected running doctor status, got %#v", next.transcript)
+	}
+
+	msg := cmd()
+	if !called {
+		t.Fatal("provider probe did not run when the async command executed")
+	}
+	updated, _ = next.Update(msg)
+	final := updated.(model)
+	for _, want := range []string{"Diagnostics", "[pass] provider.connectivity", "reachable"} {
+		if !transcriptContains(final.transcript, want) {
+			t.Fatalf("expected final doctor transcript to contain %q, got %#v", want, final.transcript)
+		}
+	}
+}

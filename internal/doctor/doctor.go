@@ -158,6 +158,9 @@ func providerModelCheck(profile config.ProviderProfile) Check {
 	if emptyProviderProfile(profile) {
 		return check("provider.model", "Provider model", StatusWarn, "Model validity was skipped because provider config is unavailable.", nil)
 	}
+	if strings.TrimSpace(profile.Model) == "" {
+		return check("provider.model", "Provider model", StatusFail, "Provider model is required.", map[string]any{"provider": providerName(profile)})
+	}
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		return check("provider.model", "Provider model", StatusFail, "Model registry could not be loaded: "+err.Error(), nil)
@@ -165,7 +168,7 @@ func providerModelCheck(profile config.ProviderProfile) Check {
 	model, err := registry.Require(profile.Model)
 	if err != nil {
 		if profile.ProviderKind == config.ProviderKindOpenAICompatible || profile.ProviderKind == config.ProviderKindAnthropicCompat {
-			return check("provider.model", "Provider model", StatusWarn, fmt.Sprintf("Custom %s model was not found in the Zero registry; runtime will pass it through to the configured provider.", profile.ProviderKind), map[string]any{"model": profile.Model, "provider": providerName(profile)})
+			return check("provider.model", "Provider model", StatusWarn, fmt.Sprintf("Custom %s model was not found in the Zero registry; runtime will pass it through to the configured provider. Run `zero doctor --connectivity` to validate the endpoint and auth.", profile.ProviderKind), map[string]any{"model": profile.Model, "provider": providerName(profile)})
 		}
 		return check("provider.model", "Provider model", StatusFail, "Provider model is invalid: "+err.Error(), map[string]any{"model": profile.Model})
 	}

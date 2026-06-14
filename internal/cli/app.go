@@ -415,6 +415,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config path: "+err.Error(), 1)
 	}
+	doctorUserConfigPath := ""
+	projectConfigPath := ""
+	if resolveOptions, optErr := config.DefaultResolveOptions(workspaceRoot); optErr == nil {
+		doctorUserConfigPath = resolveOptions.UserConfigPath
+		projectConfigPath = resolveOptions.ProjectConfigPath
+	}
 
 	needsSetup := setupRequired(resolved)
 	setupVisible := forceSetup || needsSetup
@@ -507,20 +513,24 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	})
 	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
-		Cwd:                workspaceRoot,
-		UserConfigPath:     userConfigPath,
-		ProviderName:       resolved.Provider.Name,
-		ModelName:          resolved.Provider.Model,
-		ProviderProfile:    resolved.Provider,
-		FavoriteModels:     resolved.Preferences.FavoriteModels,
-		Provider:           provider,
-		NewProvider:        deps.newProvider,
-		Registry:           registry,
-		SessionStore:       deps.newSessionStore(),
-		SandboxStore:       sandboxStore,
-		MCPConfig:          mcpConfig,
-		MCPPermissionStore: mcpPermissionStore,
-		MCPTokenStore:      mcpTokenStore,
+		Cwd:                  workspaceRoot,
+		UserConfigPath:       userConfigPath,
+		DoctorUserConfigPath: doctorUserConfigPath,
+		ProjectConfigPath:    projectConfigPath,
+		ProviderName:         resolved.Provider.Name,
+		ModelName:            resolved.Provider.Model,
+		ProviderProfile:      resolved.Provider,
+		FavoriteModels:       resolved.Preferences.FavoriteModels,
+		Provider:             provider,
+		NewProvider:          deps.newProvider,
+		ProbeProviderHealth:  deps.probeProviderHealth,
+		UserAgent:            userAgent(),
+		Registry:             registry,
+		SessionStore:         deps.newSessionStore(),
+		SandboxStore:         sandboxStore,
+		MCPConfig:            mcpConfig,
+		MCPPermissionStore:   mcpPermissionStore,
+		MCPTokenStore:        mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()

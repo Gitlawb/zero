@@ -211,10 +211,18 @@ var commandDefinitions = []commandDefinition{
 		kind:        commandSelfCorrect,
 	},
 	{
+		name:        "/help",
+		usage:       "/help",
+		group:       commandGroupMeta,
+		description: "Show available commands.",
+		kind:        commandHelp,
+	},
+	{
 		name:        "/doctor",
-		usage:       "/doctor",
+		aliases:     []string{"/health"},
+		usage:       "/doctor [--connectivity]",
 		group:       commandGroupRuntime,
-		description: "Show local diagnostics.",
+		description: "Show local diagnostics, including optional connectivity checks.",
 		kind:        commandDoctor,
 	},
 	{
@@ -245,13 +253,6 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show input style state.",
 		kind:        commandInputStyle,
-	},
-	{
-		name:        "/help",
-		usage:       "/help",
-		group:       commandGroupMeta,
-		description: "Show available commands.",
-		kind:        commandHelp,
 	},
 	{
 		name:        "/exit",

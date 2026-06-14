@@ -86,6 +86,96 @@ func TestRunReportWarnsForUnknownOpenAICompatibleModel(t *testing.T) {
 	}
 }
 
+func TestProviderModelUnknownOpenAICompatibleModelWarnsPassThrough(t *testing.T) {
+	report := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "openrouter",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://openrouter.ai/api/v1",
+			Model:        "vendor/new-dynamic-model",
+		},
+	})
+
+	if !report.OK {
+		t.Fatalf("unknown openai-compatible model should warn, not fail: %#v", report)
+	}
+	check := report.Check("provider.model")
+	if check == nil {
+		t.Fatalf("expected provider.model check: %#v", report.Checks)
+	}
+	if check.Status != StatusWarn {
+		t.Fatalf("provider.model status = %s, want warn: %#v", check.Status, check)
+	}
+	if !strings.Contains(check.Message, "runtime will pass it through") || !strings.Contains(check.Message, "doctor --connectivity") {
+		t.Fatalf("provider.model message should explain pass-through connectivity validation, got %q", check.Message)
+	}
+}
+
+func TestProviderModelMissingModelFails(t *testing.T) {
+	report := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "ollama-cloud",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://ollama.com/v1",
+			Model:        "   ",
+		},
+	})
+
+	if report.OK {
+		t.Fatalf("missing model should fail: %#v", report)
+	}
+	check := report.Check("provider.model")
+	if check == nil || check.Status != StatusFail || !strings.Contains(check.Message, "required") {
+		t.Fatalf("expected missing model failure: %#v", report.Checks)
+	}
+}
+
+func TestProviderModelBuiltInUnknownModelFails(t *testing.T) {
+	report := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			Model:        "vendor/new-dynamic-model",
+		},
+	})
+
+	if report.OK {
+		t.Fatalf("built-in provider unknown model should fail: %#v", report)
+	}
+	check := report.Check("provider.model")
+	if check == nil || check.Status != StatusFail || !strings.Contains(check.Message, "unknown Zero model") {
+		t.Fatalf("expected built-in unknown model failure: %#v", report.Checks)
+	}
+}
+
+func TestProviderModelRegisteredProviderMismatchFails(t *testing.T) {
+	report := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			Model:        "gemini-2.5-pro",
+		},
+	})
+
+	if report.OK {
+		t.Fatalf("registered provider mismatch should fail: %#v", report)
+	}
+	check := report.Check("provider.model")
+	if check == nil || check.Status != StatusFail || !strings.Contains(check.Message, "not available for provider") {
+		t.Fatalf("expected registered provider mismatch failure: %#v", report.Checks)
+	}
+}
+
 func writeDoctorConfig(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()

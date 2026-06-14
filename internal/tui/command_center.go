@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/modelregistry"
@@ -14,13 +16,75 @@ import (
 	zsearch "github.com/Gitlawb/zero/internal/search"
 )
 
-func (m model) doctorText() string {
-	report := doctor.Run(doctor.Options{
-		Now:      m.now,
-		Runtime:  "go",
-		Provider: m.providerProfile,
+func (m model) startDoctorCommand(args string) (model, tea.Cmd) {
+	connectivity, help, err := parseDoctorCommandArgs(args)
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: doctorUsageText(commandStatusBlocked, err.Error())})
+		return m, nil
+	}
+	if help {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: doctorUsageText(commandStatusInfo, "Show local diagnostics for provider, model, sandbox, LSP, and backend setup.")})
+		return m, nil
+	}
+	if !connectivity {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.doctorText(false)})
+		return m, nil
+	}
+
+	m.doctorCommandSeq++
+	id := m.doctorCommandSeq
+	snapshot := m
+	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: doctorConnectivityRunningText()})
+	return m, func() tea.Msg {
+		return doctorCommandResultMsg{id: id, text: snapshot.doctorText(true)}
+	}
+}
+
+func (m model) doctorText(connectivity bool) string {
+	report := doctor.Run(m.doctorOptions(connectivity))
+	return renderCommandOutput(doctorCommandOutput(report, nil))
+}
+
+func parseDoctorCommandArgs(args string) (connectivity bool, help bool, err error) {
+	for _, field := range strings.Fields(args) {
+		switch strings.ToLower(field) {
+		case "--connectivity", "connectivity":
+			connectivity = true
+		case "-h", "--help", "help":
+			help = true
+		default:
+			return false, false, fmt.Errorf("unknown doctor flag %q", field)
+		}
+	}
+	return connectivity, help, nil
+}
+
+func doctorUsageText(status commandStatus, message string) string {
+	return renderCommandOutput(commandOutput{
+		Title:  "Diagnostics",
+		Status: status,
+		Sections: []commandSection{{
+			Title: "Usage",
+			Lines: []string{
+				message,
+				"/doctor",
+				"/doctor --connectivity",
+				"/health",
+			},
+		}},
 	})
-	return doctor.Format(report)
+}
+
+func doctorConnectivityRunningText() string {
+	return renderCommandOutput(commandOutput{
+		Title:  "Diagnostics",
+		Status: commandStatusInfo,
+		Sections: []commandSection{{
+			Title: "Provider",
+			Lines: []string{"checking provider connectivity..."},
+		}},
+		Hints: []string{"keep typing; Zero will append the result when the probe finishes"},
+	})
 }
 
 func (m model) searchText(query string) string {

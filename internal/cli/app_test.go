@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -59,10 +60,38 @@ func TestRunPrintsHelp(t *testing.T) {
 	}
 }
 
+func setCLIUserConfigRoot(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	switch runtime.GOOS {
+	case "windows":
+		t.Setenv("APPDATA", root)
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
+	}
+
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("UserConfigDir() error = %v", err)
+	}
+	return configRoot
+}
+
 func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	projectConfigPath := filepath.Join(cwd, ".zero", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projectConfigPath), 0o700); err != nil {
+		t.Fatalf("create project config parent: %v", err)
+	}
+	if err := os.WriteFile(projectConfigPath, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
 	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
 	var launchedOptions tui.Options
 
@@ -103,6 +132,12 @@ func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *tes
 	}
 	if launchedOptions.UserConfigPath != userConfigPath {
 		t.Fatalf("UserConfigPath = %q, want %q", launchedOptions.UserConfigPath, userConfigPath)
+	}
+	if launchedOptions.DoctorUserConfigPath != "" {
+		t.Fatalf("DoctorUserConfigPath = %q, want empty for missing user config", launchedOptions.DoctorUserConfigPath)
+	}
+	if launchedOptions.ProjectConfigPath != projectConfigPath {
+		t.Fatalf("ProjectConfigPath = %q, want %q", launchedOptions.ProjectConfigPath, projectConfigPath)
 	}
 	if launchedOptions.Provider != nil {
 		t.Fatalf("Provider = %#v, want nil", launchedOptions.Provider)

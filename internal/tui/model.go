@@ -17,10 +17,12 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/doctor"
 	"github.com/Gitlawb/zero/internal/lsp"
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -37,12 +39,15 @@ type model struct {
 	ctx                    context.Context
 	cwd                    string
 	userConfigPath         string
+	doctorUserConfigPath   string
+	projectConfigPath      string
 	gitBranch              string
 	providerName           string
 	modelName              string
 	providerProfile        config.ProviderProfile
 	provider               zeroruntime.Provider
 	newProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
+	probeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	registry               *tools.Registry
 	sessionStore           *sessions.Store
@@ -55,6 +60,7 @@ type model struct {
 	mcpViewStateReady      bool
 	mcpCommandSeq          int
 	mcpCommandCancel       context.CancelFunc
+	doctorCommandSeq       int
 	activeSession          sessions.Metadata
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
@@ -66,6 +72,7 @@ type model struct {
 	selfCorrectTests       bool
 	reasoningEffort        modelregistry.ReasoningEffort
 	responseStyle          string
+	userAgent              string
 	compactRequests        int
 	compactInFlight        bool
 	compactFrame           int
@@ -234,6 +241,11 @@ type mcpCommandResultMsg struct {
 	result  MCPCommandResult
 }
 
+type doctorCommandResultMsg struct {
+	id   int
+	text string
+}
+
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
@@ -315,6 +327,10 @@ func newModel(ctx context.Context, options Options) model {
 	if usageTracker == nil {
 		usageTracker = usage.NewTracker(usage.TrackerOptions{})
 	}
+	doctorUserConfigPath := options.DoctorUserConfigPath
+	if doctorUserConfigPath == "" {
+		doctorUserConfigPath = options.UserConfigPath
+	}
 
 	permissionMode := options.PermissionMode
 	if permissionMode == "" {
@@ -347,6 +363,8 @@ func newModel(ctx context.Context, options Options) model {
 		ctx:                    ctx,
 		cwd:                    cwd,
 		userConfigPath:         options.UserConfigPath,
+		doctorUserConfigPath:   doctorUserConfigPath,
+		projectConfigPath:      options.ProjectConfigPath,
 		gitBranch:              gitBranch(cwd),
 		providerName:           options.ProviderName,
 		modelName:              options.ModelName,
@@ -354,6 +372,7 @@ func newModel(ctx context.Context, options Options) model {
 		favoriteModels:         favoriteModelSet(options.FavoriteModels),
 		provider:               options.Provider,
 		newProvider:            options.NewProvider,
+		probeProviderHealth:    options.ProbeProviderHealth,
 		discoverProviderModels: options.DiscoverProviderModels,
 		registry:               registry,
 		sessionStore:           sessionStore,
@@ -368,6 +387,7 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode:         permissionMode,
 		reasoningEffort:        options.ReasoningEffort,
 		responseStyle:          defaultedResponseStyle(options.ResponseStyle),
+		userAgent:              options.UserAgent,
 		usageTracker:           usageTracker,
 		transcript:             initialTranscript(),
 		input:                  input,
@@ -380,6 +400,32 @@ func newModel(ctx context.Context, options Options) model {
 	}
 	m.refreshMCPViewState()
 	return m
+}
+
+func (m model) doctorOptions(connectivity bool) doctor.Options {
+	var health *providerhealth.Result
+	if connectivity && m.probeProviderHealth != nil && config.HasProviderProfile(m.providerProfile) {
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		result := m.probeProviderHealth(ctx, providerhealth.Options{
+			Profile:      m.providerProfile,
+			Connectivity: true,
+			UserAgent:    m.userAgent,
+		})
+		health = &result
+	}
+
+	return doctor.Options{
+		Now:            m.now,
+		Runtime:        "go",
+		UserConfig:     m.doctorUserConfigPath,
+		ProjectConfig:  m.projectConfigPath,
+		Provider:       m.providerProfile,
+		Connectivity:   connectivity,
+		ProviderHealth: health,
+	}
 }
 
 const (
@@ -952,6 +998,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamingText = ""
 		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
+		return m, nil
+	case doctorCommandResultMsg:
+		if msg.id == 0 || msg.id == m.doctorCommandSeq {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
+		}
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
@@ -1815,8 +1866,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
 		return m, nil
 	case commandDoctor:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.doctorText()})
-		return m, nil
+		return m.startDoctorCommand(command.text)
 	case commandSearch:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.searchText(command.text)})
 		return m, nil

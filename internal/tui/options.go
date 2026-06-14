@@ -9,6 +9,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -21,12 +22,15 @@ import (
 type Options struct {
 	Cwd                    string
 	UserConfigPath         string
+	DoctorUserConfigPath   string
+	ProjectConfigPath      string
 	ProviderName           string
 	ModelName              string
 	ProviderProfile        config.ProviderProfile
 	FavoriteModels         []string
 	Provider               zeroruntime.Provider
 	NewProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
+	ProbeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result
 	DiscoverProviderModels func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	RuntimeMessageSink     func(tea.Msg)
 	Registry               *tools.Registry
@@ -43,6 +47,7 @@ type Options struct {
 	PermissionMode  agent.PermissionMode
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string
+	UserAgent       string
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig
