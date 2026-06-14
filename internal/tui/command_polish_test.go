@@ -161,6 +161,18 @@ func TestToolsCommandRendersCommandCard(t *testing.T) {
 	assertNotContains(t, toolsText, "registered tools:")
 }
 
+func TestToolsCommandCardHandlesNilRegistry(t *testing.T) {
+	text := model{}.toolsText()
+
+	for _, want := range []string{
+		"Tools",
+		"0 registered | no tools available",
+		"registered  0",
+	} {
+		assertContains(t, text, want)
+	}
+}
+
 func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
 	registry := tools.NewRegistry()
 	for _, name := range []string{
@@ -291,6 +303,19 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		assertContains(t, permissionText, want)
 	}
 	assertNotContains(t, permissionText, "sk-proj-sensitive")
+}
+
+func TestContextCommandCardHandlesNilRegistryAndStableStyle(t *testing.T) {
+	text := model{}.contextText()
+
+	for _, want := range []string{
+		"Context",
+		"0 tools",
+		"style      balanced",
+		"root        unknown",
+	} {
+		assertContains(t, text, want)
+	}
 }
 
 func TestCompactCommandAvoidsShellOnlyPlaceholder(t *testing.T) {

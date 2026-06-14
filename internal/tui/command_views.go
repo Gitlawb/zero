@@ -10,11 +10,12 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 )
 
 func (m model) toolsText() string {
-	registered := m.registry.All()
+	registered := m.registeredTools()
 	count := len(registered)
 	if len(registered) == 0 {
 		return renderCommandCardTranscript(commandCard{
@@ -473,7 +474,7 @@ func (m model) modelText(args string) string {
 }
 
 func (m model) contextText() string {
-	toolCount := len(m.registry.All())
+	toolCount := len(m.registeredTools())
 	return renderCommandCardTranscript(commandCard{
 		Title: "Context",
 		Summary: []string{
@@ -489,7 +490,7 @@ func (m model) contextText() string {
 					{Key: "provider", Value: displayValue(m.providerName, "none")},
 					{Key: "model", Value: displayValue(m.modelName, "none")},
 					{Key: "effort", Value: m.effortDisplay()},
-					{Key: "style", Value: m.responseStyle},
+					{Key: "style", Value: displayValue(m.responseStyle, defaultResponseStyle)},
 					{Key: "usage", Value: m.usageSummaryText()},
 					{Key: "max turns", Value: fmt.Sprint(m.agentOptions.MaxTurns)},
 				},
@@ -498,7 +499,7 @@ func (m model) contextText() string {
 				Title: "Session",
 				Fields: []commandField{
 					{Key: "active", Value: displayValue(m.activeSession.SessionID, "none")},
-					{Key: "root", Value: displayValue(m.sessionStore.RootDir, "unknown")},
+					{Key: "root", Value: displayValue(m.sessionRootDir(), "unknown")},
 					{Key: "compaction", Value: contextCompactionStatus(m.compactionStatus())},
 				},
 			},
@@ -511,6 +512,20 @@ func (m model) contextText() string {
 		},
 		Actions: []string{"/permissions manage access", "/tools inspect catalog"},
 	})
+}
+
+func (m model) registeredTools() []tools.Tool {
+	if m.registry == nil {
+		return nil
+	}
+	return m.registry.All()
+}
+
+func (m model) sessionRootDir() string {
+	if m.sessionStore == nil {
+		return ""
+	}
+	return m.sessionStore.RootDir
 }
 
 func pluralizeCount(count int, singular string, plural string) string {
