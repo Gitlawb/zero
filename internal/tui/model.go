@@ -1131,13 +1131,14 @@ func (m model) transcriptView() string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
-	footer.WriteString("\n")
-	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
-		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
-		footer.WriteString("\n")
-	}
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+		footer.WriteString("\n")
+	} else {
+		footer.WriteString("\n")
+	}
+	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
+		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))

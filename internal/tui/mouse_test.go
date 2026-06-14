@@ -565,16 +565,29 @@ func TestMCPAddWizardMouseSelectsAndActivatesType(t *testing.T) {
 	}
 }
 
-func TestTranscriptCopyStatusRendersAboveComposer(t *testing.T) {
+func TestTranscriptCopyStatusUsesComposerSpacerWithoutFooterGrowth(t *testing.T) {
 	m := mouseTestModel()
 	m.providerName = "ollama-cloud"
 	m.modelName = "qwen3-coder:480b"
+
+	normalFooterLines := len(viewLines(plainRender(t, m.footerView(80))))
+	normalViewLines := len(viewLines(plainRender(t, m.View())))
 	m.copyStatus = "Copied!"
 
 	footer := plainRender(t, m.footerView(80))
-	lines := strings.Split(footer, "\n")
-	if len(lines) < 2 || !strings.Contains(lines[1], "Copied!") {
-		t.Fatalf("footer should show copy status above composer, got:\n%s", footer)
+	if got := len(viewLines(footer)); got != normalFooterLines {
+		t.Fatalf("copy status changed footer height from %d to %d:\n%s", normalFooterLines, got, footer)
+	}
+	view := plainRender(t, m.View())
+	if got := len(viewLines(view)); got != normalViewLines {
+		t.Fatalf("copy status changed view height from %d to %d:\n%s", normalViewLines, got, view)
+	}
+	if !strings.Contains(view, "Copied!") {
+		t.Fatalf("view should show copy status, got:\n%s", view)
+	}
+	footerLines := viewLines(footer)
+	if len(footerLines) < 2 || !strings.Contains(footerLines[0], "Copied!") || !strings.HasPrefix(footerLines[1], "╭") {
+		t.Fatalf("copy status should replace the spacer directly above composer, got:\n%s", footer)
 	}
 	if strings.Contains(plainRender(t, m.statusLine(80)), "Copied!") {
 		t.Fatalf("status line should not contain copy feedback: %q", plainRender(t, m.statusLine(80)))
