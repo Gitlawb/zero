@@ -201,6 +201,32 @@ func TestReadDirExcludedDescendsForNestedAllow(t *testing.T) {
 	}
 }
 
+// TestDirExcludedResolvesSymlinkPrefix verifies DirExcluded resolves a symlink
+// in the path prefix before checking for a nested AllowRead root, so a denied dir
+// reached through a symlink is NOT skipped wholesale when it contains a
+// re-included subtree (the resolved allowRoots would otherwise never match).
+func TestDirExcludedResolvesSymlinkPrefix(t *testing.T) {
+	ws := resolvedTempDir(t)
+	real := mkdir(t, filepath.Join(ws, "real"))
+	secret := mkdir(t, filepath.Join(real, "secret"))
+	public := mkdir(t, filepath.Join(secret, "public"))
+	link := filepath.Join(ws, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: ws,
+		Policy:        Policy{Mode: ModeEnforce, EnforceWorkspace: true, DenyRead: []string{secret}, AllowRead: []string{public}},
+	})
+	rx := engine.ReadExclusions()
+	// secret reached THROUGH the symlink still contains the re-included AllowRead
+	// subtree once the prefix is resolved, so it must not be skipped wholesale.
+	if rx.DirExcluded(filepath.Join(link, "secret")) {
+		t.Fatalf("DirExcluded must resolve the symlink prefix and detect the nested AllowRead (must not skip)")
+	}
+}
+
 // TestEvaluateAppliesReadDeny verifies the lists are wired into Evaluate: a read
 // under DenyRead is denied, while a sibling read is not.
 func TestEvaluateAppliesReadDeny(t *testing.T) {
@@ -302,7 +328,9 @@ func TestSandboxExecProfileEmitsDenyWriteRule(t *testing.T) {
 	policy := Policy{Mode: ModeEnforce, EnforceWorkspace: true, DenyWrite: []string{secret}}
 	profile := sandboxExecProfile([]string{ws}, policy, "", "", "")
 
-	wantDeny := `(deny file-write* (subpath "` + secret + `"))`
+	// The path is escaped the same way the profile escapes it (e.g. Windows
+	// backslashes are doubled), so the assertion holds on every platform.
+	wantDeny := `(deny file-write* (subpath "` + sandboxProfileString(secret) + `"))`
 	if !strings.Contains(profile, wantDeny) {
 		t.Fatalf("profile missing DenyWrite rule %q:\n%s", wantDeny, profile)
 	}

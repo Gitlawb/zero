@@ -183,6 +183,14 @@ func (rx *ReadExclusions) DirExcluded(path string) bool {
 	if !filepath.IsAbs(abs) && rx.workspaceRoot != "" {
 		abs = filepath.Join(rx.workspaceRoot, path)
 	}
+	// allowRoots are symlink-resolved (resolvePolicyPaths), so resolve abs the
+	// same way before the prefix comparison — otherwise a dir reached THROUGH a
+	// symlink would fail to match a nested AllowRead root and be wrongly skipped,
+	// dropping a re-included subtree. Best-effort: keep abs if it can't resolve
+	// (e.g. a non-existent path), matching the deny check's tolerant behavior.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	return !hasNestedAllowReadResolved(rx.allowRoots, abs)
 }
 
