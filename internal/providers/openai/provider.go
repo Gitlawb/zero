@@ -170,8 +170,8 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		return provider.emitPayload(ctx, data, state, events)
 	})
 	if errors.Is(err, providerio.ErrStreamIdle) {
-		state.flushContent(ctx, events)
-		state.closeOpen(ctx, events)
+		state.flushBufferedContent(events)
+		state.closeBufferedOpen(events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:  zeroruntime.StreamEventError,
 			Error: provider.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", provider.streamIdleTimeout)),
@@ -179,14 +179,14 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		return
 	}
 	if err != nil {
-		state.flushContent(ctx, events)
-		state.closeOpen(ctx, events)
+		state.flushBufferedContent(events)
+		state.closeBufferedOpen(events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		state.flushContent(ctx, events)
-		state.closeOpen(ctx, events)
+		state.flushBufferedContent(events)
+		state.closeBufferedOpen(events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctxErr.Error())})
 		return
 	}
@@ -315,6 +315,13 @@ func sendEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event
 			}
 		}
 	case events <- event:
+	}
+}
+
+func sendBufferedEvent(events chan<- zeroruntime.StreamEvent, event zeroruntime.StreamEvent) {
+	select {
+	case events <- event:
+	default:
 	}
 }
 

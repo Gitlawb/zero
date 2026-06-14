@@ -419,6 +419,44 @@ func TestStreamCompletionEmitsErrorWhenContextCancels(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionFlushesBufferedContentWhenContextCancels(t *testing.T) {
+	release := make(chan struct{})
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"visible <thi"}}]}`)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned setup error: %v", err)
+	}
+
+	events := []zeroruntime.StreamEvent{}
+	select {
+	case event, ok := <-stream:
+		if !ok {
+			t.Fatal("stream closed before first text event")
+		}
+		events = append(events, event)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first text event")
+	}
+	cancel()
+	events = append(events, readAll(stream)...)
+
+	if text := eventsOfType(events, zeroruntime.StreamEventText); len(text) != 2 || text[0].Content != "visible " || text[1].Content != "<thi" {
+		t.Fatalf("text events = %#v, want visible text plus buffered partial tag", text)
+	}
+	if len(eventsOfType(events, zeroruntime.StreamEventError)) != 1 {
+		t.Fatalf("events = %#v, want one context error after buffered content", events)
+	}
+}
+
 func newTestProvider(t *testing.T, handler http.HandlerFunc) *Provider {
 	t.Helper()
 	return newTestProviderWithKey(t, "", handler)

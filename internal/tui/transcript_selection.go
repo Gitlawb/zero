@@ -232,7 +232,7 @@ func (m model) renderSelectableReasoningBlock(rowIndex int, text string, expande
 			if _, _, ok := m.selectedColumnsForTranscriptLine(meta); ok {
 				rendered = m.renderTranscriptSelectableText(meta, zeroTheme.sayText)
 			}
-			lines = append(lines, "  "+rendered)
+			lines = append(lines, fitStyledLine("  "+rendered, width))
 		}
 	}
 	return lines, selectable

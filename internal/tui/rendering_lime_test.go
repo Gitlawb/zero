@@ -374,6 +374,23 @@ func TestReasoningRowShowsElapsedWhenKnown(t *testing.T) {
 	}
 }
 
+func TestSelectableExpandedReasoningRowsAreClamped(t *testing.T) {
+	m := limeTestModel()
+	const width = 28
+	row := transcriptRow{
+		kind:     rowReasoning,
+		text:     strings.Repeat("unbroken", 10),
+		expanded: true,
+	}
+
+	rendered, _ := m.renderSelectableReasoningRow(0, row, width, 0)
+	for _, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(plainRender(t, line)); got > width {
+			t.Fatalf("line width = %d, want <= %d:\n%s", got, width, rendered)
+		}
+	}
+}
+
 func TestFinalAnswerRendersMarkdownTableForTerminal(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{
