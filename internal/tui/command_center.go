@@ -32,7 +32,7 @@ func (m model) startDoctorCommand(args string) (model, tea.Cmd) {
 		return m.startDoctorFixCommand()
 	}
 	if !connectivity {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.doctorText(false)})
+		m = m.setDoctorStatusRow(m.doctorText(false))
 		return m, nil
 	}
 

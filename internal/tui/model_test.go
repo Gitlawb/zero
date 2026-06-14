@@ -679,9 +679,14 @@ func TestDoctorCommandUsesCurrentProviderProfile(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /doctor to be handled without starting an agent run")
 	}
-	for _, want := range []string{"Diagnostics", "Provider", "provider.config", "provider.model"} {
+	for _, want := range []string{"Diagnostics", "Provider", "provider.connectivity", "Actions"} {
 		if !transcriptContains(next.transcript, want) {
 			t.Fatalf("expected doctor transcript to contain %q, got %#v", want, next.transcript)
+		}
+	}
+	for _, unwanted := range []string{"provider.config", "provider.model", "Generated", "Checks"} {
+		if transcriptContains(next.transcript, unwanted) {
+			t.Fatalf("expected doctor transcript to hide %q, got %#v", unwanted, next.transcript)
 		}
 	}
 }

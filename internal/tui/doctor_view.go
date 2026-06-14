@@ -9,16 +9,10 @@ import (
 )
 
 func doctorCommandOutput(report doctor.Report, backend *zerocommands.BackendLifecycleSnapshot) commandOutput {
-	sections := []commandSection{}
-	if report.GeneratedAt != "" {
-		sections = append(sections, commandSection{
-			Title: "Summary",
-			Fields: []commandField{
-				{Key: "Generated", Value: report.GeneratedAt},
-				{Key: "Checks", Value: fmt.Sprintf("%d", len(report.Checks))},
-			},
-		})
-	}
+	sections := []commandSection{{
+		Title: "Summary",
+		Lines: doctorSummaryLines(report.Checks),
+	}}
 
 	provider, platform, other := doctorCheckSections(report.Checks)
 	sections = appendNonEmptyDoctorSection(sections, "Provider", provider)
@@ -27,12 +21,17 @@ func doctorCommandOutput(report doctor.Report, backend *zerocommands.BackendLife
 	if backend != nil {
 		sections = append(sections, doctorBackendSection(*backend))
 	}
+	if actions := doctorActions(report.Checks, backend); len(actions) > 0 {
+		sections = append(sections, commandSection{
+			Title: "Actions",
+			Lines: actions,
+		})
+	}
 
 	return commandOutput{
 		Title:    "Diagnostics",
 		Status:   doctorCommandStatus(report),
 		Sections: sections,
-		Hints:    doctorHints(report.Checks, backend),
 	}
 }
 
@@ -54,6 +53,9 @@ func doctorCommandStatus(report doctor.Report) commandStatus {
 
 func doctorCheckSections(checks []doctor.Check) (provider []commandRow, platform []commandRow, other []commandRow) {
 	for _, check := range checks {
+		if check.Status == doctor.StatusPass && check.ID != "provider.connectivity" {
+			continue
+		}
 		row := commandRow{Text: doctorCheckRow(check)}
 		switch doctorCheckGroup(check.ID) {
 		case "provider":
@@ -76,6 +78,35 @@ func doctorCheckGroup(id string) string {
 	default:
 		return ""
 	}
+}
+
+func doctorSummaryLines(checks []doctor.Check) []string {
+	pass, warn, fail := doctorStatusCounts(checks)
+	attention := warn + fail
+	if attention == 0 {
+		return []string{
+			fmt.Sprintf("%d checks healthy", pass),
+			"All core systems are ready.",
+		}
+	}
+	return []string{
+		fmt.Sprintf("%d checks need attention", attention),
+		fmt.Sprintf("%d checks healthy", pass),
+	}
+}
+
+func doctorStatusCounts(checks []doctor.Check) (pass int, warn int, fail int) {
+	for _, check := range checks {
+		switch check.Status {
+		case doctor.StatusPass:
+			pass++
+		case doctor.StatusWarn:
+			warn++
+		case doctor.StatusFail:
+			fail++
+		}
+	}
+	return pass, warn, fail
 }
 
 func doctorCheckRow(check doctor.Check) string {
@@ -110,16 +141,16 @@ func doctorBackendSection(backend zerocommands.BackendLifecycleSnapshot) command
 	}
 }
 
-func doctorHints(checks []doctor.Check, backend *zerocommands.BackendLifecycleSnapshot) []string {
+func doctorActions(checks []doctor.Check, backend *zerocommands.BackendLifecycleSnapshot) []string {
 	seen := map[string]bool{}
-	hints := []string{}
-	add := func(hint string) {
-		hint = strings.TrimSpace(hint)
-		if hint == "" || seen[hint] {
+	actions := []string{}
+	add := func(action string) {
+		action = strings.TrimSpace(action)
+		if action == "" || seen[action] {
 			return
 		}
-		seen[hint] = true
-		hints = append(hints, hint)
+		seen[action] = true
+		actions = append(actions, action)
 	}
 
 	for _, check := range checks {
@@ -129,24 +160,25 @@ func doctorHints(checks []doctor.Check, backend *zerocommands.BackendLifecycleSn
 		message := strings.ToLower(check.Message)
 		switch check.ID {
 		case "provider.config", "provider.model":
-			add("use /provider to configure the active provider and model")
+			add("/provider - configure the active provider and model")
+			add("/doctor fix - open guided diagnostics repair")
 		case "provider.connectivity":
-			add("use /doctor --connectivity to retry provider connectivity checks")
+			add("/doctor --connectivity - probe the provider endpoint")
 		case "sandbox.backend":
 			if strings.Contains(message, "windows") || strings.Contains(message, "policy-only") {
-				add("run Zero inside WSL2 or a Linux container for native sandbox isolation on Windows")
+				add("WSL2 or Linux container - enable native sandbox isolation on Windows")
 			}
 		case "lsp.servers":
 			if strings.Contains(message, "missing") {
-				add("install missing language servers so code intelligence is available on PATH")
+				add("install missing language servers - restore code intelligence on PATH")
 			}
 		}
 	}
 
 	if backend != nil {
-		add("use /mcp to inspect MCP servers")
-		add("use /hooks to inspect hooks")
-		add("use /plugins to inspect plugins")
+		add("/mcp - inspect MCP servers")
+		add("/hooks - inspect hooks")
+		add("/plugins - inspect plugins")
 	}
-	return hints
+	return actions
 }

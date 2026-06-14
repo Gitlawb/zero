@@ -543,6 +543,10 @@ func renderDoctorResultCard(text string, width int) string {
 			lines = append(lines, zeroTheme.red.Render(line))
 		case strings.HasPrefix(trimmed, "hint:"):
 			lines = append(lines, zeroTheme.faint.Render(line))
+		case strings.HasPrefix(trimmed, "/") ||
+			strings.HasPrefix(trimmed, "WSL2") ||
+			strings.HasPrefix(trimmed, "install "):
+			lines = append(lines, zeroTheme.ink.Render(line))
 		default:
 			lines = append(lines, zeroTheme.muted.Render(line))
 		}
@@ -568,7 +572,7 @@ func doctorResultBorderStyle(text string) lipgloss.Style {
 
 func isDoctorResultHeading(value string) bool {
 	switch value {
-	case "Summary", "Provider", "Platform", "LSP", "Backend", "Config":
+	case "Summary", "Provider", "Platform", "Other", "Backend", "Actions":
 		return true
 	default:
 		return false

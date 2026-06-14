@@ -136,6 +136,42 @@ func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
 	}
 }
 
+func TestDoctorCommandUsesDiagnosticCenterRow(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderProfile: config.ProviderProfile{
+			Name:         "custom",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://api.example.com/v1",
+			Model:        "custom-model",
+		},
+	})
+	m.input.SetValue("/doctor")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected plain /doctor to render synchronously")
+	}
+	row := newestDoctorStatusRow(next.transcript)
+	if row == nil {
+		t.Fatalf("expected /doctor to render a doctor status row, got %#v", next.transcript)
+	}
+	if row.id != doctorStatusRowID {
+		t.Fatalf("expected /doctor row id %q, got %q", doctorStatusRowID, row.id)
+	}
+	text := row.text
+	for _, want := range []string{"Diagnostics", "checks need attention", "Actions"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("doctor row missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"Generated", "Checks", "[pass]"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("doctor row should hide %q:\n%s", unwanted, text)
+		}
+	}
+}
+
 func TestDoctorConnectivityCommandAnimatesAndReplacesStatusRow(t *testing.T) {
 	profile := config.ProviderProfile{
 		Name:         "custom",
@@ -210,18 +246,28 @@ func TestDoctorFixOpensProviderWizardWhenProviderMissing(t *testing.T) {
 }
 
 func newestDoctorStatusText(rows []transcriptRow) string {
+	if row := newestDoctorStatusRow(rows); row != nil {
+		return row.text
+	}
+	return ""
+}
+
+func newestDoctorStatusRow(rows []transcriptRow) *transcriptRow {
 	for i := len(rows) - 1; i >= 0; i-- {
 		row := rows[i]
 		if row.kind != rowSystem {
 			continue
 		}
+		if row.id == doctorStatusRowID {
+			return &rows[i]
+		}
 		if strings.Contains(row.text, "Checking provider") ||
 			strings.Contains(row.text, "provider.connectivity") ||
 			strings.Contains(row.text, "Diagnostics") {
-			return row.text
+			return &rows[i]
 		}
 	}
-	return ""
+	return nil
 }
 
 func countDoctorDiagnosticRows(rows []transcriptRow) int {
