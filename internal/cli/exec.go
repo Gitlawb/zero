@@ -13,6 +13,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/imageinput"
+	"github.com/Gitlawb/zero/internal/lsp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providers"
@@ -462,10 +463,12 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	defer stopSignals()
 	// --self-correct opts the run into the post-edit verify-and-correct loop. Off
 	// by default the corrector is nil, leaving the agent loop byte-identical. When
-	// on we verify with the workspace test plan (the LSP half stays nil here since
-	// headless exec does not run a language-server manager); the autonomy gate
-	// inside the corrector still decides whether failures auto-fix or just report.
-	selfCorrector := newExecSelfCorrector(options.selfCorrect, workspaceRoot, options.autonomy)
+	// on we verify with both the workspace test plan and LSP diagnostics over the
+	// changed files; the autonomy gate inside the corrector still decides whether
+	// failures auto-fix or just report. lspShutdown tears down any language-server
+	// sessions the LSP half spawned (no-op when self-correct is off).
+	selfCorrector, lspShutdown := newExecSelfCorrector(options.selfCorrect, workspaceRoot, options.autonomy)
+	defer lspShutdown()
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
@@ -616,24 +619,31 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 // population here keeps registration and activation in agreement: tool_search is
 // registered iff the partition will actually go active. Built-ins never implement
 // the Deferred interface, so they never count.
-// newExecSelfCorrector builds the post-edit self-corrector for a headless run,
-// or nil when --self-correct is off. nil is deliberately the disabled state the
-// agent loop treats as a no-op, so a run without the flag stays byte-identical.
-//
-// The headless wiring verifies with the workspace test plan only (IncludeLSP is
-// false: exec does not spin up a language-server manager, and NewSelfCorrector
-// accepts a nil checker). Whether a failure auto-fixes or is merely reported is
-// decided by the corrector's autonomy gate from the run's --auto level.
-func newExecSelfCorrector(enabled bool, workspaceRoot string, autonomy string) *agent.SelfCorrector {
+// newExecSelfCorrector builds the post-edit corrector for a headless run and a
+// cleanup func the caller must defer. When enabled it wires both halves: the
+// workspace test plan AND an LSP diagnostics checker backed by a per-run
+// lsp.Manager. The manager is lazy — Manager.Check degrades a missing/unsupported
+// language server to (nil, nil), so enabling the LSP half never spawns a server
+// unless a changed file's language actually has one installed on PATH. The
+// returned cleanup shuts that manager down (terminating any spawned server
+// sessions); it is a no-op when self-correct is off.
+func newExecSelfCorrector(enabled bool, workspaceRoot string, autonomy string) (*agent.SelfCorrector, func()) {
 	if !enabled {
-		return nil
+		return nil, func() {}
 	}
-	return agent.NewSelfCorrector(workspaceRoot, nil, agent.NewProjectVerifier(workspaceRoot), agent.SelfCorrectConfig{
+	manager := lsp.NewManager(workspaceRoot)
+	corrector := agent.NewSelfCorrector(workspaceRoot, agent.NewLSPDiagnosticsChecker(manager), agent.NewProjectVerifier(workspaceRoot), agent.SelfCorrectConfig{
 		Enabled:      true,
 		IncludeTests: true,
-		IncludeLSP:   false,
+		IncludeLSP:   true,
 		Autonomy:     autonomy,
 	})
+	cleanup := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	}
+	return corrector, cleanup
 }
 
 func deferredEligibleCount(registry *tools.Registry, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) int {
