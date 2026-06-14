@@ -84,6 +84,9 @@ func parseDoctorCommandArgs(args string) (connectivity bool, fix bool, help bool
 			return false, false, false, fmt.Errorf("unknown doctor flag %q", field)
 		}
 	}
+	if connectivity && fix {
+		return false, false, false, fmt.Errorf("choose either %q or %q, not both", "fix", "--connectivity")
+	}
 	return connectivity, fix, help, nil
 }
 
@@ -156,10 +159,12 @@ func doctorFixPlanText(report doctor.Report) string {
 
 func doctorFixLines(report doctor.Report) []string {
 	lines := []string{}
+	hasIssue := false
 	for _, check := range report.Checks {
 		if check.Status == doctor.StatusPass {
 			continue
 		}
+		hasIssue = true
 		switch check.ID {
 		case "sandbox.backend":
 			lines = append(lines, "native sandbox: use WSL2 or a Linux container on Windows")
@@ -172,6 +177,9 @@ func doctorFixLines(report doctor.Report) []string {
 		}
 	}
 	if len(lines) == 0 {
+		if hasIssue {
+			return []string{"No automatic fixes are available for the detected diagnostics."}
+		}
 		return []string{"No automatic fixes are available because diagnostics are already clean."}
 	}
 	return lines

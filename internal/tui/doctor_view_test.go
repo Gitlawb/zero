@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -47,6 +48,39 @@ func TestDoctorCommandOutputMapsOverallStatus(t *testing.T) {
 				t.Fatalf("Status = %q, want %q", output.Status, test.want)
 			}
 		})
+	}
+}
+
+func TestDoctorSummaryLinesUseSingularGrammar(t *testing.T) {
+	healthy := doctorSummaryLines([]doctor.Check{
+		doctorCheck("runtime.go", doctor.StatusPass, "Go runtime is available."),
+	})
+	if got, want := healthy[0], "1 check healthy"; got != want {
+		t.Fatalf("healthy summary = %q, want %q", got, want)
+	}
+
+	attention := doctorSummaryLines([]doctor.Check{
+		doctorCheck("provider.model", doctor.StatusWarn, "Provider model is not configured."),
+	})
+	if got, want := attention[0], "1 check needs attention"; got != want {
+		t.Fatalf("attention summary = %q, want %q", got, want)
+	}
+}
+
+func TestDoctorResultBorderStyleUsesSummaryStatusLine(t *testing.T) {
+	text := strings.Join([]string{
+		"Diagnostics",
+		"",
+		"status: blocked",
+		"",
+		"Summary",
+		"- status: ok appears in detail text only",
+	}, "\n")
+
+	got := fmt.Sprint(doctorResultBorderStyle(text).GetForeground())
+	want := fmt.Sprint(zeroTheme.red.GetForeground())
+	if got != want {
+		t.Fatalf("border foreground = %s, want blocked red %s", got, want)
 	}
 }
 

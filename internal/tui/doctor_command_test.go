@@ -13,6 +13,16 @@ import (
 	"github.com/Gitlawb/zero/internal/providerhealth"
 )
 
+func TestParseDoctorCommandArgsRejectsFixWithConnectivity(t *testing.T) {
+	_, _, _, err := parseDoctorCommandArgs("fix --connectivity")
+	if err == nil {
+		t.Fatal("parseDoctorCommandArgs accepted both fix and --connectivity")
+	}
+	if !strings.Contains(err.Error(), "choose either") {
+		t.Fatalf("error = %q, want mutually exclusive flag guidance", err)
+	}
+}
+
 func TestDoctorOptionsIncludeConfigPaths(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		UserConfigPath:    "C:/zero/user.json",
@@ -245,6 +255,22 @@ func TestDoctorFixOpensProviderWizardWhenProviderMissing(t *testing.T) {
 	}
 }
 
+func TestDoctorFixLinesShowNoAutomaticFixForUnmappedFailure(t *testing.T) {
+	lines := doctorFixLines(doctor.Report{Checks: []doctor.Check{{
+		ID:      "provider.auth",
+		Status:  doctor.StatusFail,
+		Message: "API key rejected.",
+	}}})
+
+	text := strings.Join(lines, "\n")
+	if strings.Contains(text, "already clean") {
+		t.Fatalf("doctorFixLines reported clean diagnostics for an unmapped failure:\n%s", text)
+	}
+	if !strings.Contains(text, "No automatic fixes are available") {
+		t.Fatalf("doctorFixLines = %q, want no automatic fix guidance", text)
+	}
+}
+
 func newestDoctorStatusText(rows []transcriptRow) string {
 	if row := newestDoctorStatusRow(rows); row != nil {
 		return row.text
@@ -255,15 +281,7 @@ func newestDoctorStatusText(rows []transcriptRow) string {
 func newestDoctorStatusRow(rows []transcriptRow) *transcriptRow {
 	for i := len(rows) - 1; i >= 0; i-- {
 		row := rows[i]
-		if row.kind != rowSystem {
-			continue
-		}
-		if row.id == doctorStatusRowID {
-			return &rows[i]
-		}
-		if strings.Contains(row.text, "Checking provider") ||
-			strings.Contains(row.text, "provider.connectivity") ||
-			strings.Contains(row.text, "Diagnostics") {
+		if row.kind == rowSystem && row.id == doctorStatusRowID {
 			return &rows[i]
 		}
 	}
@@ -273,7 +291,7 @@ func newestDoctorStatusRow(rows []transcriptRow) *transcriptRow {
 func countDoctorDiagnosticRows(rows []transcriptRow) int {
 	count := 0
 	for _, row := range rows {
-		if row.kind == rowSystem && strings.Contains(row.text, "Diagnostics") {
+		if row.kind == rowSystem && row.id == doctorStatusRowID {
 			count++
 		}
 	}

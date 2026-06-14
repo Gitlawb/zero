@@ -85,14 +85,28 @@ func doctorSummaryLines(checks []doctor.Check) []string {
 	attention := warn + fail
 	if attention == 0 {
 		return []string{
-			fmt.Sprintf("%d checks healthy", pass),
+			fmt.Sprintf("%s healthy", doctorCheckCountLabel(pass)),
 			"All core systems are ready.",
 		}
 	}
 	return []string{
-		fmt.Sprintf("%d checks need attention", attention),
-		fmt.Sprintf("%d checks healthy", pass),
+		fmt.Sprintf("%s %s attention", doctorCheckCountLabel(attention), doctorAttentionVerb(attention)),
+		fmt.Sprintf("%s healthy", doctorCheckCountLabel(pass)),
 	}
+}
+
+func doctorCheckCountLabel(count int) string {
+	if count == 1 {
+		return "1 check"
+	}
+	return fmt.Sprintf("%d checks", count)
+}
+
+func doctorAttentionVerb(count int) string {
+	if count == 1 {
+		return "needs"
+	}
+	return "need"
 }
 
 func doctorStatusCounts(checks []doctor.Check) (pass int, warn int, fail int) {

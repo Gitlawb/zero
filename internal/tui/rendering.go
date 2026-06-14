@@ -558,16 +558,17 @@ func renderDoctorResultCard(text string, width int) string {
 }
 
 func doctorResultBorderStyle(text string) lipgloss.Style {
-	switch {
-	case strings.Contains(text, "status: ok"):
-		return zeroTheme.green
-	case strings.Contains(text, "status: blocked"):
-		return zeroTheme.red
-	case strings.Contains(text, "status: warning"):
-		return zeroTheme.amber
-	default:
-		return zeroTheme.accent
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		switch strings.TrimSpace(line) {
+		case "status: ok":
+			return zeroTheme.green
+		case "status: blocked":
+			return zeroTheme.red
+		case "status: warning":
+			return zeroTheme.amber
+		}
 	}
+	return zeroTheme.accent
 }
 
 func isDoctorResultHeading(value string) bool {
