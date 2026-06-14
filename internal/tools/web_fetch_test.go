@@ -386,7 +386,9 @@ func TestWebFetchRunWithSandboxBlocksDeniedHost(t *testing.T) {
 	}
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny},
+		// EnforceToolNetwork opts the in-process tool into the network policy; off
+		// (the default) would let web_fetch run despite deny.
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny, EnforceToolNetwork: true},
 	})
 	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://example.com"}, engine)
 	if result.Status != StatusError {
@@ -405,7 +407,7 @@ func TestWebFetchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
 	tool := newWebFetchToolWithClient(failingClient).(webFetchTool)
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
 		Backend: zeroSandbox.Backend{
 			Name: zeroSandbox.BackendSandboxExec, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
@@ -433,7 +435,7 @@ func TestRegistryRoutesWebFetchThroughSandboxScopedPolicy(t *testing.T) {
 	registry.Register(newWebFetchToolWithClient(failingClient))
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
 		Backend: zeroSandbox.Backend{
 			Name: zeroSandbox.BackendSandboxExec, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,

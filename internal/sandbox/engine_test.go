@@ -736,7 +736,11 @@ func TestEngineNetworkHostAllowed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			engine := NewEngine(EngineOptions{Policy: tc.policy, Backend: tc.backend})
+			// This table exercises the ENFORCED tool-network gate; the default
+			// (exempt) posture is covered by TestEngineNetworkHostAllowedToolNetworkDefaultExempt.
+			policy := tc.policy
+			policy.EnforceToolNetwork = true
+			engine := NewEngine(EngineOptions{Policy: policy, Backend: tc.backend})
 			allowed, mode := engine.NetworkHostAllowed(tc.host)
 			if allowed != tc.allowed || mode != tc.mode {
 				t.Fatalf("NetworkHostAllowed(%q) = (%v, %q), want (%v, %q)", tc.host, allowed, mode, tc.allowed, tc.mode)
@@ -747,5 +751,23 @@ func TestEngineNetworkHostAllowed(t *testing.T) {
 	var nilEngine *Engine
 	if allowed, mode := nilEngine.NetworkHostAllowed("example.com"); !allowed || mode != NetworkAllow {
 		t.Fatalf("nil engine NetworkHostAllowed = (%v, %q), want (true, allow)", allowed, mode)
+	}
+}
+
+// TestEngineNetworkHostAllowedToolNetworkDefaultExempt verifies the default
+// posture: with EnforceToolNetwork off, the in-process tool gate is exempt from
+// the network policy, so even a deny / scoped-unlisted host is allowed (the
+// sandboxed-shell egress decision is separate and unaffected).
+func TestEngineNetworkHostAllowedToolNetworkDefaultExempt(t *testing.T) {
+	egressBackend := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
+	policies := []Policy{
+		{Mode: ModeEnforce, Network: NetworkDeny},
+		{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"allowed.test"}},
+	}
+	for _, policy := range policies {
+		engine := NewEngine(EngineOptions{Policy: policy, Backend: egressBackend})
+		if allowed, _ := engine.NetworkHostAllowed("evil.test"); !allowed {
+			t.Fatalf("default (EnforceToolNetwork off) must allow the tool host under network=%q", policy.Network)
+		}
 	}
 }

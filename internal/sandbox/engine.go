@@ -116,12 +116,23 @@ func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 // their pre-sandbox behaviour); deny blocks everything; scoped allows only hosts
 // in AllowedDomains minus DeniedDomains (an empty allowlist, or a backend that
 // can't enforce scoped egress, collapses to deny).
+//
+// By default the first-party, in-process tools that consult this gate are NOT
+// subject to the network policy (EnforceToolNetwork is off): that policy exists
+// to confine the sandboxed SHELL's egress, which these tools don't use, and they
+// retain their own SSRF/port/redirect safeguards. Set EnforceToolNetwork to also
+// hold them to the allow/scoped/deny policy. The sandboxed-shell egress decision
+// lives in Evaluate via effectiveNetworkMode and is unaffected by this flag.
 func (engine *Engine) NetworkHostAllowed(host string) (bool, NetworkMode) {
 	if engine == nil {
 		return true, NetworkAllow
 	}
 	policy := engine.policy
 	if policy.Mode == ModeDisabled {
+		return true, NetworkAllow
+	}
+	if !policy.EnforceToolNetwork {
+		// First-party in-process tools are exempt unless the operator opts in.
 		return true, NetworkAllow
 	}
 	switch mode := engine.effectiveNetworkMode(policy); mode {
