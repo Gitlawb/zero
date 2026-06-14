@@ -92,6 +92,26 @@ func TestCommandCardRowRendersAsTitledCard(t *testing.T) {
 	}
 }
 
+func TestCommandCardRowTrimsIndentedActionsLabel(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowSystem,
+		text: commandCardTranscriptPrefix + strings.Join([]string{
+			"Tools",
+			"2 registered | registered catalog",
+			"  actions: /mcp manage servers | /permissions manage access",
+		}, "\n"),
+	}
+
+	got := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if strings.Contains(got, "actions:  actions:") {
+		t.Fatalf("command card duplicated indented actions label:\n%s", got)
+	}
+	if !strings.Contains(got, "actions: /mcp manage servers | /permissions manage access") {
+		t.Fatalf("command card missing actions line:\n%s", got)
+	}
+}
+
 func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true

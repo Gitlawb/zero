@@ -442,7 +442,7 @@ func renderCommandCardRow(text string, width int) string {
 		case isCommandCardHeading(trimmed):
 			lines = append(lines, zeroTheme.accent.Bold(true).Render(line))
 		case strings.HasPrefix(trimmed, "actions:"):
-			lines = append(lines, zeroTheme.accent.Render("actions:")+zeroTheme.ink.Render(strings.TrimPrefix(line, "actions:")))
+			lines = append(lines, zeroTheme.accent.Render("actions:")+zeroTheme.ink.Render(strings.TrimPrefix(trimmed, "actions:")))
 		case strings.HasPrefix(trimmed, "- "):
 			lines = append(lines, zeroTheme.ink.Render(line))
 		default:
