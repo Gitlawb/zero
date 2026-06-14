@@ -31,8 +31,8 @@ func TestMCPServerSnapshotFromServerStripsSecretsAndCountsMaps(t *testing.T) {
 	if snapshot.Name != "work" {
 		t.Fatalf("Name not trimmed: %q", snapshot.Name)
 	}
-	if snapshot.Identity != "work-fs" {
-		t.Fatalf("Identity not trimmed: %q", snapshot.Identity)
+	if snapshot.Identity != "" {
+		t.Fatalf("Identity should not be exposed in operator snapshots, got %q", snapshot.Identity)
 	}
 	if snapshot.Command != "npx" {
 		t.Fatalf("Command not trimmed: %q", snapshot.Command)
@@ -281,6 +281,43 @@ func TestMCPServerSnapshotKeepsUnparseableURLInsteadOfEmpty(t *testing.T) {
 	}
 	if snapshot.URL != "not a url but still useful" {
 		t.Fatalf("expected trimmed raw URL, got %q", snapshot.URL)
+	}
+}
+
+func TestMCPServerSnapshotRedactsMalformedURLSecretText(t *testing.T) {
+	server := mcp.Server{
+		Name: "broken-secret",
+		Type: mcp.ServerTypeHTTP,
+		URL:  "  not a url token=plain-backend-secret  ",
+	}
+	snapshot := MCPServerSnapshotFromServer(server)
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	if strings.Contains(string(encoded), "plain-backend-secret") {
+		t.Fatalf("malformed URL secret should be redacted, got %s", string(encoded))
+	}
+}
+
+func TestMCPServerSnapshotOmitsSecretDerivedIdentity(t *testing.T) {
+	first := MCPServerSnapshotFromServer(mcp.Server{
+		Name:     "same",
+		Type:     mcp.ServerTypeStdio,
+		Command:  "npx",
+		Identity: "identity-derived-from-secret-one",
+	})
+	second := MCPServerSnapshotFromServer(mcp.Server{
+		Name:     "same",
+		Type:     mcp.ServerTypeStdio,
+		Command:  "npx",
+		Identity: "identity-derived-from-secret-two",
+	})
+	if first.Identity != "" || second.Identity != "" {
+		t.Fatalf("operator snapshots must omit secret-derived identities, got %q and %q", first.Identity, second.Identity)
+	}
+	if first != second {
+		t.Fatalf("snapshots should not differ only because secret-derived identity differs: %#v %#v", first, second)
 	}
 }
 

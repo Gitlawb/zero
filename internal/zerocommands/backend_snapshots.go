@@ -100,7 +100,6 @@ func MCPServerSnapshotFromServer(server mcp.Server) MCPServerSnapshot {
 	return MCPServerSnapshot{
 		Name:        strings.TrimSpace(server.Name),
 		Type:        string(server.Type),
-		Identity:    strings.TrimSpace(server.Identity),
 		URL:         stripURLCredentialsFromURL(server.URL),
 		Command:     redactSnapshotString(server.Command),
 		ArgCount:    len(server.Args),
@@ -297,10 +296,10 @@ func stripURLCredentialsFromURL(value string) string {
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil || parsed == nil {
-		return trimmed
+		return redactSnapshotString(trimmed)
 	}
 	if parsed.Scheme == "" && parsed.Host == "" {
-		return trimmed
+		return redactSnapshotString(trimmed)
 	}
 	if parsed.User == nil {
 		return redactSensitiveURLQuery(parsed, trimmed)
