@@ -15,35 +15,47 @@ import (
 
 func (m model) toolsText() string {
 	registered := m.registry.All()
+	count := len(registered)
 	if len(registered) == 0 {
-		return renderCommandOutput(commandOutput{
-			Title:  "Tools",
-			Status: commandStatusWarning,
-			Sections: []commandSection{{
+		return renderCommandCard(commandCard{
+			Title:   "Tools",
+			Summary: []string{"0 registered", "no tools available"},
+			Sections: []commandCardSection{{
 				Title: "Registry",
-				Lines: []string{"registered tools: 0"},
+				Fields: []commandField{
+					{Key: "registered", Value: "0"},
+				},
 			}},
+			Actions: []string{"/mcp manage servers", "/permissions manage access"},
 		})
 	}
 
-	names := make([]string, 0, len(registered))
+	names := make([]string, 0, count)
 	for _, tool := range registered {
-		names = append(names, commandBullet(tool.Name()))
+		names = append(names, tool.Name())
 	}
 	sort.Strings(names)
-	return renderCommandOutput(commandOutput{
-		Title:  "Tools",
-		Status: commandStatusOK,
-		Sections: []commandSection{
+	available := make([]string, 0, len(names))
+	for _, name := range names {
+		available = append(available, commandBullet(name))
+	}
+
+	return renderCommandCard(commandCard{
+		Title:   "Tools",
+		Summary: []string{fmt.Sprintf("%d registered", count), "registered catalog"},
+		Sections: []commandCardSection{
 			{
 				Title: "Registry",
-				Lines: []string{fmt.Sprintf("registered tools: %d", len(names))},
+				Fields: []commandField{
+					{Key: "registered", Value: fmt.Sprint(count)},
+				},
 			},
 			{
 				Title: "Available",
-				Lines: names,
+				Lines: available,
 			},
 		},
+		Actions: []string{"/mcp manage servers", "/permissions manage access"},
 	})
 }
 

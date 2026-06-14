@@ -107,6 +107,127 @@ func TestProviderCommandRedactsCredentialBearingBaseURL(t *testing.T) {
 	assertContains(t, text, "base url: https://proxy.local/v1?api_key=[REDACTED]")
 }
 
+func TestToolsCommandRendersCommandCard(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Registry: tools.NewRegistry(),
+	})
+	m.input.SetValue("/tools")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /tools to be handled without starting an agent run")
+	}
+	emptyText := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Tools",
+		"0 registered | no tools available",
+		"Registry",
+		"registered  0",
+		"actions: /mcp manage servers | /permissions manage access",
+	} {
+		assertContains(t, emptyText, want)
+	}
+	assertNotContains(t, emptyText, "status: warning")
+	assertNotContains(t, emptyText, "registered tools:")
+
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool("."))
+	m = newModel(context.Background(), Options{
+		Registry: registry,
+	})
+	m.input.SetValue("/tools")
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /tools to be handled without starting an agent run")
+	}
+	toolsText := transcriptText(next.transcript)
+	for _, want := range []string{
+		"Tools",
+		"1 registered | registered catalog",
+		"Registry",
+		"registered  1",
+		"Available",
+		"- read_file",
+		"actions: /mcp manage servers | /permissions manage access",
+	} {
+		assertContains(t, toolsText, want)
+	}
+	assertNotContains(t, toolsText, "status: ok")
+	assertNotContains(t, toolsText, "registered tools:")
+}
+
+func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
+	registry := tools.NewRegistry()
+	for _, name := range []string{
+		"write_file",
+		"read_file",
+		"grep",
+		"glob",
+		"edit_file",
+		"apply_patch",
+		"bash",
+		"web_search",
+		"web_fetch",
+	} {
+		registry.Register(commandTestMCPTool{name: name, description: name + " tool"})
+	}
+
+	m := newModel(context.Background(), Options{
+		Registry: registry,
+	})
+	m.input.SetValue("/tools")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /tools to be handled without starting an agent run")
+	}
+	text := transcriptText(next.transcript)
+	for _, want := range []string{
+		"9 registered | registered catalog",
+		"- apply_patch",
+		"- bash",
+		"- edit_file",
+		"- glob",
+		"- grep",
+		"- read_file",
+		"- web_fetch",
+		"- web_search",
+		"- write_file",
+	} {
+		assertContains(t, text, want)
+	}
+	assertNotContains(t, text, "... 1 more")
+
+	previous := -1
+	for _, want := range []string{
+		"- apply_patch",
+		"- bash",
+		"- edit_file",
+		"- glob",
+		"- grep",
+		"- read_file",
+		"- web_fetch",
+		"- web_search",
+		"- write_file",
+	} {
+		current := strings.Index(text, want)
+		if current < 0 {
+			t.Fatalf("expected tools output to contain %q, got:\n%s", want, text)
+		}
+		if current <= previous {
+			t.Fatalf("expected tools output to keep sorted order at %q, got:\n%s", want, text)
+		}
+		previous = current
+	}
+}
+
 func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool("."))
