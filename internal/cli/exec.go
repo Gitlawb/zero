@@ -704,7 +704,8 @@ func buildExecSandboxEngine(workspaceRoot string, resolved config.ResolvedConfig
 // depth — it guarantees that even a direct/programmatic caller passing a typo
 // can never WIDEN the ceiling back to the High default.
 // applyConfiguredSandboxPolicy overlays every config-sourced sandbox knob onto
-// the default policy: the autonomy ceiling and the network mode.
+// the default policy (the autonomy ceiling and the network mode), plus the
+// ZERO_SANDBOX_AUTO_ALLOW_BASH environment opt-in.
 func applyConfiguredSandboxPolicy(policy sandbox.Policy, cfg config.SandboxConfig) sandbox.Policy {
 	policy = applyConfiguredAutonomyCeiling(policy, cfg.MaxAutonomy)
 	if network := strings.TrimSpace(cfg.Network); network != "" {
@@ -721,6 +722,12 @@ func applyConfiguredSandboxPolicy(policy sandbox.Policy, cfg config.SandboxConfi
 	if cfg.MonitorDenials {
 		policy.MonitorDenials = true
 	}
+	// ZERO_SANDBOX_AUTO_ALLOW_BASH opts into auto-allowing a *sandboxed* shell
+	// command without a prompt — the active sandbox is the safety boundary, and
+	// the engine only honors this when the shell sandbox is actually active. Like
+	// the flags above it only ever turns the opt-in ON; unset/blank stays off
+	// (prompt), and an explicit config opt-in is preserved.
+	policy = sandbox.ApplyAutoAllowBashEnv(policy)
 	return policy
 }
 

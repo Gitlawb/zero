@@ -662,6 +662,19 @@ func TestApplyConfiguredSandboxPolicyHardeningFlags(t *testing.T) {
 	}
 }
 
+func TestApplyConfiguredSandboxPolicyHonorsAutoAllowBashEnv(t *testing.T) {
+	// Unset/blank: the opt-in stays off so a sandboxed bash command still prompts.
+	t.Setenv(sandbox.EnvAutoAllowBash, "")
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.AutoAllowBashWhenSandboxed {
+		t.Fatal("auto-allow-bash must be off when ZERO_SANDBOX_AUTO_ALLOW_BASH is unset")
+	}
+	// Truthy: the env opt-in is wired through the central policy builder.
+	t.Setenv(sandbox.EnvAutoAllowBash, "true")
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); !got.AutoAllowBashWhenSandboxed {
+		t.Fatal("ZERO_SANDBOX_AUTO_ALLOW_BASH=true must enable AutoAllowBashWhenSandboxed")
+	}
+}
+
 func newSandboxTestStore(t *testing.T) *sandbox.GrantStore {
 	t.Helper()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{
