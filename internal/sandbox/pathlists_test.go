@@ -139,7 +139,8 @@ func TestWritePrecedenceMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			violation := validateWritePath(scope, tc.policy, ws, tc.path)
+			// This matrix exercises the workspace-enforced write precedence.
+			violation := validateWritePath(scope, tc.policy, true, ws, tc.path)
 			gotAllow := violation == nil
 			if gotAllow != tc.wantAllow {
 				t.Fatalf("validateWritePath(%q) allow=%v (violation=%v), want allow=%v", tc.path, gotAllow, violation, tc.wantAllow)
@@ -224,6 +225,52 @@ func TestDirExcludedResolvesSymlinkPrefix(t *testing.T) {
 	// subtree once the prefix is resolved, so it must not be skipped wholesale.
 	if rx.DirExcluded(filepath.Join(link, "secret")) {
 		t.Fatalf("DirExcluded must resolve the symlink prefix and detect the nested AllowRead (must not skip)")
+	}
+}
+
+// TestPathListsApplyWithoutWorkspaceEnforcement verifies the explicit path lists
+// (DenyWrite/DenyRead) are honored even when EnforceWorkspace is off, while the
+// workspace boundary itself is not enforced in that mode.
+func TestPathListsApplyWithoutWorkspaceEnforcement(t *testing.T) {
+	ws := resolvedTempDir(t)
+	secret := mkdir(t, filepath.Join(ws, "secret"))
+	outside := resolvedTempDir(t)
+	scope, err := NewScope(ws, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+
+	// DenyWrite still blocks even with workspace enforcement off.
+	denyPolicy := Policy{DenyWrite: []string{secret}}
+	if v := validateWritePath(scope, denyPolicy, false, ws, filepath.Join(secret, "creds")); v == nil {
+		t.Fatal("DenyWrite must block even when EnforceWorkspace is off")
+	}
+	// With enforcement off and no DenyWrite match, an out-of-workspace write is
+	// NOT blocked (the workspace boundary is intentionally not applied).
+	if v := validateWritePath(scope, denyPolicy, false, ws, filepath.Join(outside, "x")); v != nil {
+		t.Fatalf("with EnforceWorkspace off, a non-denied path must be allowed, got %v", v)
+	}
+	// DenyRead still blocks reads even with workspace enforcement off.
+	if v := validatePathWithPolicy(scope, Policy{DenyRead: []string{secret}}, SideEffectRead, false, ws, filepath.Join(secret, "x")); v == nil {
+		t.Fatal("DenyRead must block reads even when EnforceWorkspace is off")
+	}
+}
+
+// TestReadExclusionsInactiveWhenDisabled verifies a disabled policy filters
+// nothing — ReadExclusions/ReadExclusionGlobs are inert under ModeDisabled even
+// when DenyRead is configured.
+func TestReadExclusionsInactiveWhenDisabled(t *testing.T) {
+	ws := resolvedTempDir(t)
+	secret := mkdir(t, filepath.Join(ws, "secret"))
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: ws,
+		Policy:        Policy{Mode: ModeDisabled, DenyRead: []string{secret}},
+	})
+	if rx := engine.ReadExclusions(); rx.Active() {
+		t.Fatal("ReadExclusions must be inactive under a disabled policy")
+	}
+	if globs := engine.ReadExclusionGlobs(); globs != nil {
+		t.Fatalf("ReadExclusionGlobs must be empty under a disabled policy, got %v", globs)
 	}
 }
 

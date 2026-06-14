@@ -205,11 +205,14 @@ func allowWriteScope(policy Policy) *Scope {
 	return &Scope{workspaceRoot: roots[0], extraRoots: roots[1:]}
 }
 
-// validateWritePath enforces the write precedence: DenyWrite wins, then a
-// workspace/Scope-writable path is allowed, then an absolute path under an
-// AllowWrite root is allowed, otherwise the base workspace/Scope violation
-// stands. It never bypasses the symlink/out-of-workspace guards.
-func validateWritePath(scope *Scope, policy Policy, workspaceRoot, path string) *pathViolation {
+// validateWritePath enforces the write precedence: DenyWrite wins, then (when
+// workspace enforcement is on) a workspace/Scope-writable path is allowed, then
+// an absolute path under an AllowWrite root is allowed, otherwise the base
+// workspace/Scope violation stands. The DenyWrite list applies regardless of
+// enforceWorkspace; the workspace boundary itself applies only when
+// enforceWorkspace. It never bypasses the symlink/out-of-workspace guards.
+func validateWritePath(scope *Scope, policy Policy, enforceWorkspace bool, workspaceRoot, path string) *pathViolation {
+	// DenyWrite wins regardless of workspace enforcement.
 	for _, deny := range resolvePolicyPaths(policy.DenyWrite) {
 		if pathUnderPolicyRoot(path, deny, workspaceRoot) {
 			return &pathViolation{
@@ -218,6 +221,10 @@ func validateWritePath(scope *Scope, policy Policy, workspaceRoot, path string) 
 				Reason: path + " is excluded by the sandbox DenyWrite policy",
 			}
 		}
+	}
+	if !enforceWorkspace {
+		// Workspace confinement is off: only the explicit DenyWrite list restricts.
+		return nil
 	}
 	base := scope.validate(path)
 	if base == nil {
@@ -234,10 +241,12 @@ func validateWritePath(scope *Scope, policy Policy, workspaceRoot, path string) 
 }
 
 // validatePathWithPolicy is the single entry point the engine uses to validate a
-// request path: it applies the fine-grained read/write lists for read and write
-// side effects and falls back to the plain workspace/Scope guard for everything
-// else, so behavior is unchanged when the lists are empty.
-func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, workspaceRoot, path string) *pathViolation {
+// request path. The fine-grained read/write lists (DenyRead/DenyWrite, with
+// AllowRead/AllowWrite) apply whenever the sandbox is enforcing, INDEPENDENT of
+// enforceWorkspace, so they match the grep/glob path that also honors DenyRead
+// directly. The workspace boundary (scope.validate) applies only when
+// enforceWorkspace. Behavior is unchanged when the lists are empty.
+func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, enforceWorkspace bool, workspaceRoot, path string) *pathViolation {
 	switch sideEffect {
 	case SideEffectRead:
 		if readDenied(policy, workspaceRoot, path) {
@@ -247,11 +256,17 @@ func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, 
 				Reason: path + " is excluded by the sandbox DenyRead policy",
 			}
 		}
-		return scope.validate(path)
+		if enforceWorkspace {
+			return scope.validate(path)
+		}
+		return nil
 	case SideEffectWrite, SideEffectOutOfWorkspace:
-		return validateWritePath(scope, policy, workspaceRoot, path)
+		return validateWritePath(scope, policy, enforceWorkspace, workspaceRoot, path)
 	default:
-		return scope.validate(path)
+		if enforceWorkspace {
+			return scope.validate(path)
+		}
+		return nil
 	}
 }
 

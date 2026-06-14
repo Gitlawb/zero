@@ -71,7 +71,9 @@ func (engine *Engine) Scope() *Scope {
 // don't re-run Abs/EvalSymlinks per visited path. Returns nil for a nil engine
 // (the matcher's methods treat nil as "exclude nothing").
 func (engine *Engine) ReadExclusions() *ReadExclusions {
-	if engine == nil {
+	// A disabled policy enforces nothing, so it must not filter search results
+	// either (Evaluate already allows every request under ModeDisabled).
+	if engine == nil || engine.policy.Mode == ModeDisabled {
 		return nil
 	}
 	return &ReadExclusions{
@@ -85,7 +87,8 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 // engine's policy + scope (see the package-level ReadExclusionGlobs). Empty when
 // DenyRead is unset or the engine has no scope.
 func (engine *Engine) ReadExclusionGlobs() []string {
-	if engine == nil {
+	// A disabled policy filters nothing (parity with ReadExclusions / Evaluate).
+	if engine == nil || engine.policy.Mode == ModeDisabled {
 		return nil
 	}
 	return ReadExclusionGlobs(engine.policy, engine.scope)
@@ -258,9 +261,15 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if request.Permission == PermissionDeny {
 		return deny(request, risk, ViolationDeniedPermission, "", permissionReason(request), false)
 	}
-	if policy.EnforceWorkspace && request.WorkspaceRoot != "" {
+	// The fine-grained path lists (DenyRead/DenyWrite/AllowRead/AllowWrite) apply
+	// whenever the sandbox is enforcing, independent of EnforceWorkspace, so a
+	// DenyWrite/DenyRead entry is honored even with workspace confinement off (and
+	// consistent with the grep/glob exclusion path). The workspace boundary itself
+	// is still gated by EnforceWorkspace inside validatePathWithPolicy. Mode is
+	// already known to be enforcing here (ModeDisabled returned above).
+	if request.WorkspaceRoot != "" {
 		for _, requested := range requestPaths(request) {
-			if violation := validatePathWithPolicy(scope, policy, request.SideEffect, request.WorkspaceRoot, requested); violation != nil {
+			if violation := validatePathWithPolicy(scope, policy, request.SideEffect, policy.EnforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
 				return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 			}
 		}

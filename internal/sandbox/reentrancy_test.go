@@ -29,13 +29,22 @@ func TestIsAlreadySandboxed(t *testing.T) {
 
 func TestSandboxEnvironmentMarksSandboxed(t *testing.T) {
 	env := sandboxEnvironment(DefaultPolicy(), BackendBubblewrap, "/home/agent")
-	want := EnvSandboxed + "=1"
+	// Both correlated markers must be set: IsAlreadySandboxed requires BOTH, so a
+	// regression that drops either one would silently break re-entrancy detection.
+	wantSandboxed := EnvSandboxed + "=1"
+	wantBackend := EnvSandboxBackend + "=" + string(BackendBubblewrap)
+	var gotSandboxed, gotBackend bool
 	for _, entry := range env {
-		if entry == want {
-			return
+		switch entry {
+		case wantSandboxed:
+			gotSandboxed = true
+		case wantBackend:
+			gotBackend = true
 		}
 	}
-	t.Fatalf("sandboxEnvironment must set %s so a wrapped command is detectable; got %#v", want, env)
+	if !gotSandboxed || !gotBackend {
+		t.Fatalf("sandboxEnvironment must set %q and %q so a wrapped command is detectable; got %#v", wantSandboxed, wantBackend, env)
+	}
 }
 
 func TestBuildCommandPlanWrapsWhenNotAlreadySandboxed(t *testing.T) {
