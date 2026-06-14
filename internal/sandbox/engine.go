@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 )
 
@@ -66,34 +65,20 @@ func (engine *Engine) Scope() *Scope {
 	return engine.scope
 }
 
-// ReadPathExcluded reports whether reading path is excluded by the policy's
-// DenyRead list (honoring more-specific AllowRead re-inclusion). It is the
-// per-file predicate the search tools use to skip read-denied files mid-walk.
-// False when DenyRead is unset (the default) or the engine is nil.
-func (engine *Engine) ReadPathExcluded(path string) bool {
+// ReadExclusions returns the resolved DenyRead/AllowRead exclusion matcher for
+// this engine's policy, resolving each policy entry ONCE. The search tools build
+// it a single time per run and reuse it across the whole walk so the predicates
+// don't re-run Abs/EvalSymlinks per visited path. Returns nil for a nil engine
+// (the matcher's methods treat nil as "exclude nothing").
+func (engine *Engine) ReadExclusions() *ReadExclusions {
 	if engine == nil {
-		return false
+		return nil
 	}
-	return readDenied(engine.policy, engine.workspaceRoot, path)
-}
-
-// ReadDirExcluded reports whether a directory subtree can be skipped wholesale
-// during a read-walk: it is read-denied AND contains no nested AllowRead root
-// (descending is required to reach a re-included subtree). When it returns false
-// on a denied dir because of a nested allow, the per-file ReadPathExcluded still
-// filters the denied siblings.
-func (engine *Engine) ReadDirExcluded(path string) bool {
-	if engine == nil {
-		return false
+	return &ReadExclusions{
+		workspaceRoot: engine.workspaceRoot,
+		denyRoots:     resolvePolicyPaths(engine.policy.DenyRead),
+		allowRoots:    resolvePolicyPaths(engine.policy.AllowRead),
 	}
-	if !readDenied(engine.policy, engine.workspaceRoot, path) {
-		return false
-	}
-	abs := path
-	if !filepath.IsAbs(abs) && engine.workspaceRoot != "" {
-		abs = filepath.Join(engine.workspaceRoot, path)
-	}
-	return !hasNestedAllowRead(engine.policy, abs)
 }
 
 // ReadExclusionGlobs returns the ripgrep-style --glob exclusion args for this

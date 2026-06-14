@@ -14,6 +14,7 @@ import (
 const (
 	socksVersion5          = 0x05
 	socksNoAuth            = 0x00
+	socksNoAcceptable      = 0xFF
 	socksCmdConnect        = 0x01
 	socksAtypIPv4          = 0x01
 	socksAtypDomain        = 0x03
@@ -83,10 +84,24 @@ func socksNegotiate(conn net.Conn) (host string, port int, ok bool) {
 	if _, err := io.ReadFull(conn, greeting); err != nil || greeting[0] != socksVersion5 {
 		return "", 0, false
 	}
-	if _, err := io.ReadFull(conn, make([]byte, int(greeting[1]))); err != nil {
+	methods := make([]byte, int(greeting[1]))
+	if _, err := io.ReadFull(conn, methods); err != nil {
 		return "", 0, false
 	}
-	// Select the no-auth method.
+	// RFC 1928: select a method the client actually offered. We only support
+	// no-auth; if the client did not offer it, reply "no acceptable methods"
+	// (0xFF) and abort rather than forcing a method it never advertised.
+	supportsNoAuth := false
+	for _, method := range methods {
+		if method == socksNoAuth {
+			supportsNoAuth = true
+			break
+		}
+	}
+	if !supportsNoAuth {
+		_, _ = conn.Write([]byte{socksVersion5, socksNoAcceptable})
+		return "", 0, false
+	}
 	if _, err := conn.Write([]byte{socksVersion5, socksNoAuth}); err != nil {
 		return "", 0, false
 	}

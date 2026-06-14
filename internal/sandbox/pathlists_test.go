@@ -189,13 +189,14 @@ func TestReadDirExcludedDescendsForNestedAllow(t *testing.T) {
 	})
 	// The denied dir must be descended (nested allow), but the denied dir's own
 	// files are still excluded per-file.
-	if engine.ReadDirExcluded(secret) {
+	rx := engine.ReadExclusions()
+	if rx.DirExcluded(secret) {
 		t.Fatalf("a denied dir with a nested AllowRead must not be skipped wholesale")
 	}
-	if !engine.ReadPathExcluded(filepath.Join(secret, "creds")) {
+	if !rx.PathExcluded(filepath.Join(secret, "creds")) {
 		t.Fatalf("a denied file outside the re-included subtree must be excluded")
 	}
-	if engine.ReadPathExcluded(filepath.Join(public, "ok")) {
+	if rx.PathExcluded(filepath.Join(public, "ok")) {
 		t.Fatalf("a re-included AllowRead file must not be excluded")
 	}
 }

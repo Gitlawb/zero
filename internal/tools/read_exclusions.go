@@ -15,11 +15,17 @@ func (e readExcluder) fileExcluded(path string) bool { return e.file != nil && e
 func (e readExcluder) dirExcluded(path string) bool  { return e.dir != nil && e.dir(path) }
 
 // sandboxReadExcluder builds a readExcluder from a sandbox engine's DenyRead
-// policy. A nil engine yields the no-op excluder, so the search tools keep their
-// pre-sandbox behavior when no sandbox is active.
+// policy. The engine's read-exclusion matcher resolves the policy paths ONCE here
+// (not per visited path), and the closures reuse it for the whole walk. A nil
+// engine or an inactive (no DenyRead) policy yields the no-op excluder, so the
+// search tools keep their pre-sandbox behavior.
 func sandboxReadExcluder(engine *sandbox.Engine) readExcluder {
 	if engine == nil {
 		return readExcluder{}
 	}
-	return readExcluder{file: engine.ReadPathExcluded, dir: engine.ReadDirExcluded}
+	rx := engine.ReadExclusions()
+	if !rx.Active() {
+		return readExcluder{}
+	}
+	return readExcluder{file: rx.PathExcluded, dir: rx.DirExcluded}
 }

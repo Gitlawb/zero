@@ -109,13 +109,20 @@ func pathUnderPolicyRoot(requestedPath, root, workspaceRoot string) bool {
 // readDenied reports whether path is excluded by the DenyRead list with no
 // more-specific AllowRead re-inclusion. "More specific" means an AllowRead entry
 // nested inside the matched DenyRead entry — that subtree is read back in while
-// the rest of the denied tree stays blocked.
+// the rest of the denied tree stays blocked. It resolves the policy entries on
+// each call, so it suits a one-shot check (the Evaluate gate). A search walk that
+// checks many paths should use ReadExclusions, which resolves the entries once.
 func readDenied(policy Policy, workspaceRoot, path string) bool {
-	denyRoots := resolvePolicyPaths(policy.DenyRead)
+	return readDeniedResolved(workspaceRoot, resolvePolicyPaths(policy.DenyRead), resolvePolicyPaths(policy.AllowRead), path)
+}
+
+// readDeniedResolved is readDenied operating on ALREADY-resolved deny/allow roots,
+// so a caller that resolved the policy entries once can reuse them across many
+// path checks instead of re-running Abs/EvalSymlinks per path.
+func readDeniedResolved(workspaceRoot string, denyRoots, allowRoots []string, path string) bool {
 	if len(denyRoots) == 0 {
 		return false
 	}
-	allowRoots := resolvePolicyPaths(policy.AllowRead)
 	for _, deny := range denyRoots {
 		if !pathUnderPolicyRoot(path, deny, workspaceRoot) {
 			continue
@@ -134,6 +141,49 @@ func readDenied(policy Policy, workspaceRoot, path string) bool {
 		}
 	}
 	return false
+}
+
+// ReadExclusions holds the resolved DenyRead/AllowRead roots for a policy so a
+// search walk resolves each policy entry ONCE (Abs/EvalSymlinks) and reuses the
+// result across every visited path, rather than re-resolving per path. Build it
+// with Engine.ReadExclusions and reuse it for the whole grep/glob walk.
+type ReadExclusions struct {
+	workspaceRoot string
+	denyRoots     []string
+	allowRoots    []string
+}
+
+// Active reports whether any DenyRead root is configured. When false the
+// exclusions are a no-op and the search behaves exactly as before.
+func (rx *ReadExclusions) Active() bool {
+	return rx != nil && len(rx.denyRoots) > 0
+}
+
+// PathExcluded reports whether reading path is excluded by DenyRead, honoring a
+// more-specific AllowRead re-inclusion. It is the per-file predicate for a walk.
+func (rx *ReadExclusions) PathExcluded(path string) bool {
+	if !rx.Active() {
+		return false
+	}
+	return readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path)
+}
+
+// DirExcluded reports whether a directory subtree can be skipped wholesale during
+// a walk: it is read-denied AND contains no nested AllowRead root (descending is
+// required to reach a re-included subtree). When it returns false on a denied dir
+// because of a nested allow, PathExcluded still filters the denied siblings.
+func (rx *ReadExclusions) DirExcluded(path string) bool {
+	if !rx.Active() {
+		return false
+	}
+	if !readDeniedResolved(rx.workspaceRoot, rx.denyRoots, rx.allowRoots, path) {
+		return false
+	}
+	abs := path
+	if !filepath.IsAbs(abs) && rx.workspaceRoot != "" {
+		abs = filepath.Join(rx.workspaceRoot, path)
+	}
+	return !hasNestedAllowReadResolved(rx.allowRoots, abs)
 }
 
 // allowWriteScope builds an ad-hoc Scope from the resolved AllowWrite roots so a
@@ -197,11 +247,12 @@ func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, 
 	}
 }
 
-// hasNestedAllowRead reports whether any AllowRead root sits strictly inside dir
-// (an already-resolved absolute path). When true, a read-denied dir must still be
-// descended during a walk so the re-included subtree is reachable.
-func hasNestedAllowRead(policy Policy, dir string) bool {
-	for _, allow := range resolvePolicyPaths(policy.AllowRead) {
+// hasNestedAllowReadResolved reports whether any already-resolved AllowRead root
+// sits strictly inside dir (an already-resolved absolute path). When true, a
+// read-denied dir must still be descended during a walk so the re-included
+// subtree is reachable.
+func hasNestedAllowReadResolved(allowRoots []string, dir string) bool {
+	for _, allow := range allowRoots {
 		if allow != dir && pathWithinRoot(dir, allow) {
 			return true
 		}
@@ -232,10 +283,10 @@ func workspaceRelGlob(workspaceRoot, target string) (string, bool) {
 // The projection is exclusions-only: a positive ripgrep glob would switch the
 // search into whitelist mode and restrict it to only matching files, so AllowRead
 // re-inclusion is NOT expressed here. The Go-native grep/glob tools honor
-// AllowRead precisely via the per-path predicate (Engine.ReadPathExcluded /
-// ReadDirExcluded); this function is the coarser ripgrep-format export for an
-// external rg-based consumer. Empty when DenyRead is unset (the default), so
-// search behavior is unchanged.
+// AllowRead precisely via the cached predicate (Engine.ReadExclusions); this
+// function is the coarser ripgrep-format export for an external rg-based
+// consumer. Empty when DenyRead is unset (the default), so search behavior is
+// unchanged.
 func ReadExclusionGlobs(policy Policy, scope *Scope) []string {
 	denyRoots := resolvePolicyPaths(policy.DenyRead)
 	if len(denyRoots) == 0 || scope == nil {

@@ -66,6 +66,37 @@ func TestEgressProxySocksAddrBindsLoopback(t *testing.T) {
 	}
 }
 
+// TestEgressProxySocksRejectsUnsupportedAuth verifies the proxy honors SOCKS5
+// method negotiation: a client offering only methods the proxy does not support
+// (here user/pass 0x02, no no-auth) gets the "no acceptable methods" reply (0xFF)
+// rather than the proxy forcing a method the client never advertised.
+func TestEgressProxySocksRejectsUnsupportedAuth(t *testing.T) {
+	proxy, err := newEgressProxy(egressOptions{Allowed: []string{"github.com"}})
+	if err != nil {
+		t.Fatalf("newEgressProxy: %v", err)
+	}
+	defer proxy.Close()
+
+	conn, err := net.DialTimeout("tcp", proxy.SocksAddr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial socks proxy: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// Greeting: VER=5, NMETHODS=1, METHOD=0x02 (user/pass) — no-auth NOT offered.
+	if _, err := conn.Write([]byte{socksVersion5, 0x01, 0x02}); err != nil {
+		t.Fatalf("write greeting: %v", err)
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		t.Fatalf("read method selection: %v", err)
+	}
+	if resp[0] != socksVersion5 || resp[1] != socksNoAcceptable {
+		t.Fatalf("method selection = %v, want [5 0xFF] (no acceptable methods)", resp)
+	}
+}
+
 // TestEgressProxySocksConnectAllowed verifies an allowlisted SOCKS5 CONNECT is
 // authorized through the SAME gate, dialed, and relayed to a fake upstream.
 func TestEgressProxySocksConnectAllowed(t *testing.T) {
