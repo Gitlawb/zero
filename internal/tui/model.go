@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/lsp"
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/notify"
@@ -2093,6 +2094,20 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 	return m.runAgentWithOptions(runID, runCtx, prompt, images, tuiAgentRunOptions{})
 }
 
+// selfCorrectAutonomyForMode maps the active permission mode to the self-correct
+// autonomy gate: more autonomous modes auto-fix after a failed verification,
+// while restrictive modes only surface the failure. Mirrors exec's --auto levels.
+func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
+	switch mode {
+	case agent.PermissionModeUnsafe:
+		return "high"
+	case agent.PermissionModeAuto:
+		return "medium"
+	default: // ask, etc. — report the failure without starting an auto-fix round
+		return "low"
+	}
+}
+
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
 	return func() tea.Msg {
 		started := m.now()
@@ -2126,6 +2141,27 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// Enable agent-loop compaction sized to the active model's context
 		// window. An unknown/custom model resolves to 0, leaving compaction off.
 		options.ContextWindow = modelContextWindow(m.modelName)
+
+		// Post-edit self-correction is on by default in the TUI: after a mutating
+		// edit, the changed files are verified (workspace test plan + LSP
+		// diagnostics) and any failure is fed back to the model. The spec-draft
+		// (planning) path never wires it, matching exec. The per-turn lsp.Manager
+		// is torn down when this run returns; whether a failure auto-fixes or is
+		// only reported follows the active permission mode.
+		if !runOptions.specDraft && options.Cwd != "" {
+			lspManager := lsp.NewManager(options.Cwd)
+			defer func() {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = lspManager.Shutdown(shutdownCtx)
+			}()
+			options.SelfCorrect = agent.NewSelfCorrector(options.Cwd, agent.NewLSPDiagnosticsChecker(lspManager), agent.NewProjectVerifier(options.Cwd), agent.SelfCorrectConfig{
+				Enabled:      true,
+				IncludeTests: true,
+				IncludeLSP:   true,
+				Autonomy:     selfCorrectAutonomyForMode(options.PermissionMode),
+			})
+		}
 
 		onText := options.OnText
 		options.OnText = func(delta string) {
