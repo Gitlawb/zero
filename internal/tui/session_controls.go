@@ -187,14 +187,14 @@ func defaultedResponseStyle(value string) string {
 func (m model) handleSelfCorrectCommand(args string) (model, string) {
 	args = strings.TrimSpace(strings.ToLower(args))
 	switch args {
-	case "", "status", "list":
+	case "", "status":
 		return m, m.selfCorrectText()
 	case "on", "tests", "full":
 		m.selfCorrectTests = true
 	case "off", "lsp":
 		m.selfCorrectTests = false
 	default:
-		return m, "Self-correct\nUsage: /selfcorrect [on|off]"
+		return m, "Self-correct\nUsage: /selfcorrect [status|on|off|tests|full|lsp]"
 	}
 	return m, m.selfCorrectText()
 }
