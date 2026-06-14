@@ -256,6 +256,41 @@ func TestPathListsApplyWithoutWorkspaceEnforcement(t *testing.T) {
 	}
 }
 
+// TestEvaluatePathListsWithoutWorkspaceRoot verifies the path lists are enforced
+// even on an engine built WITHOUT a workspace root: absolute paths are matched
+// against DenyWrite, and an unanchorable relative path fails closed.
+func TestEvaluatePathListsWithoutWorkspaceRoot(t *testing.T) {
+	secret := resolvedTempDir(t)
+	other := resolvedTempDir(t)
+	engine := NewEngine(EngineOptions{
+		Policy: Policy{Mode: ModeEnforce, MaxAutonomy: AutonomyHigh, DenyWrite: []string{secret}},
+	})
+
+	denied := engine.Evaluate(context.Background(), Request{
+		ToolName: "write_file", SideEffect: SideEffectWrite,
+		Args: map[string]any{"path": filepath.Join(secret, "x")},
+	})
+	if denied.Action != ActionDeny {
+		t.Fatalf("absolute DenyWrite path must be denied without a workspace root, got %q", denied.Action)
+	}
+
+	ok := engine.Evaluate(context.Background(), Request{
+		ToolName: "write_file", SideEffect: SideEffectWrite,
+		Args: map[string]any{"path": filepath.Join(other, "x")},
+	})
+	if ok.Action == ActionDeny {
+		t.Fatalf("a non-denied absolute path must not be denied without a workspace root, got deny: %s", ok.ErrorString())
+	}
+
+	rel := engine.Evaluate(context.Background(), Request{
+		ToolName: "write_file", SideEffect: SideEffectWrite,
+		Args: map[string]any{"path": "x"},
+	})
+	if rel.Action != ActionDeny {
+		t.Fatalf("an unanchorable relative path must fail closed when path lists exist, got %q", rel.Action)
+	}
+}
+
 // TestReadExclusionsInactiveWhenDisabled verifies a disabled policy filters
 // nothing — ReadExclusions/ReadExclusionGlobs are inert under ModeDisabled even
 // when DenyRead is configured.

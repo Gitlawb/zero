@@ -247,6 +247,20 @@ func validateWritePath(scope *Scope, policy Policy, enforceWorkspace bool, works
 // directly. The workspace boundary (scope.validate) applies only when
 // enforceWorkspace. Behavior is unchanged when the lists are empty.
 func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, enforceWorkspace bool, workspaceRoot, path string) *pathViolation {
+	// A relative path cannot be anchored without a workspace root, so it cannot be
+	// checked against the (absolute) path lists or workspace boundary. Fail closed
+	// when there is anything to enforce; otherwise it is a no-op (unchanged from the
+	// pre-path-list behavior, where an empty workspace root skipped validation).
+	if workspaceRoot == "" && !filepath.IsAbs(path) {
+		if enforceWorkspace || policyHasPathLists(policy) {
+			return &pathViolation{
+				Code:   ViolationOutsideWorkspace,
+				Path:   path,
+				Reason: path + " cannot be validated without a workspace root",
+			}
+		}
+		return nil
+	}
 	switch sideEffect {
 	case SideEffectRead:
 		if readDenied(policy, workspaceRoot, path) {
@@ -328,6 +342,12 @@ func ReadExclusionGlobs(policy Policy, scope *Scope) []string {
 		globs = append(globs, "--glob", "!"+rel, "--glob", "!"+rel+"/**")
 	}
 	return globs
+}
+
+// policyHasPathLists reports whether any fine-grained path list is configured.
+func policyHasPathLists(policy Policy) bool {
+	return len(policy.DenyRead) > 0 || len(policy.AllowRead) > 0 ||
+		len(policy.DenyWrite) > 0 || len(policy.AllowWrite) > 0
 }
 
 // dedupeStrings returns xs with duplicates removed, preserving first-seen order.

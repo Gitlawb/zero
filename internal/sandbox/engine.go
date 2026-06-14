@@ -262,16 +262,16 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return deny(request, risk, ViolationDeniedPermission, "", permissionReason(request), false)
 	}
 	// The fine-grained path lists (DenyRead/DenyWrite/AllowRead/AllowWrite) apply
-	// whenever the sandbox is enforcing, independent of EnforceWorkspace, so a
-	// DenyWrite/DenyRead entry is honored even with workspace confinement off (and
-	// consistent with the grep/glob exclusion path). The workspace boundary itself
-	// is still gated by EnforceWorkspace inside validatePathWithPolicy. Mode is
+	// whenever the sandbox is enforcing, independent of EnforceWorkspace and even
+	// when there is no workspace root (absolute paths are still resolved and
+	// matched), so they are honored consistently with the grep/glob exclusion path
+	// and can't be bypassed by an engine built without a workspace root. The
+	// workspace boundary itself needs a root, so it is gated on having one. Mode is
 	// already known to be enforcing here (ModeDisabled returned above).
-	if request.WorkspaceRoot != "" {
-		for _, requested := range requestPaths(request) {
-			if violation := validatePathWithPolicy(scope, policy, request.SideEffect, policy.EnforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
-				return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
-			}
+	enforceWorkspace := policy.EnforceWorkspace && request.WorkspaceRoot != ""
+	for _, requested := range requestPaths(request) {
+		if violation := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
+			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 		}
 	}
 	// effectiveNetworkMode collapses an empty-allowlist scoped policy to deny, and
