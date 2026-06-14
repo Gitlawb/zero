@@ -129,6 +129,14 @@ func runHooks(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 			return exitCrash
 		}
 		return exitSuccess
+	case "add":
+		return runHooksAdd(args[1:], stdout, stderr, deps)
+	case "remove", "rm":
+		return runHooksRemove(args[1:], stdout, stderr, deps)
+	case "enable":
+		return runHooksToggle(args[1:], stdout, stderr, deps, false)
+	case "disable":
+		return runHooksToggle(args[1:], stdout, stderr, deps, true)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown hooks subcommand %q", args[0]))
 	}
@@ -563,7 +571,11 @@ func writeHooksHelp(w io.Writer) error {
   zero hooks <command>
 
 Commands:
-  list    List configured Zero hooks
+  list      List configured Zero hooks
+  add       Add or update a hook
+  remove    Remove a hook by id
+  enable    Enable a hook by id
+  disable   Disable a hook by id
 `)
 	return err
 }
