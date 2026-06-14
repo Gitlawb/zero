@@ -205,9 +205,9 @@ var commandDefinitions = []commandDefinition{
 	{
 		name:        "/selfcorrect",
 		aliases:     []string{"/sc"},
-		usage:       "/selfcorrect [on|off]",
+		usage:       "/selfcorrect [on|off|status]",
 		group:       commandGroupSession,
-		description: "Show or set post-edit self-correction depth (LSP-only by default; on adds the project test plan).",
+		description: "Show or set post-edit self-correction depth (LSP-only default; on adds the project test plan, off returns to LSP-only).",
 		kind:        commandSelfCorrect,
 	},
 	{
