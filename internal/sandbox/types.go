@@ -20,10 +20,21 @@ const EnvAutoAllowBash = "ZERO_SANDBOX_AUTO_ALLOW_BASH"
 // already-sandboxed guard used by comparable executor sandboxes. Unset by default.
 const EnvSandboxed = "ZERO_SANDBOXED"
 
+// EnvSandboxBackend records which backend wrapped the command. sandboxEnvironment
+// always sets it alongside EnvSandboxed, so it serves as a corroborating marker:
+// the re-entrancy guard requires BOTH, raising the provenance bar above a single
+// ambient flag (a stray or hand-exported ZERO_SANDBOXED=1 with no backend marker
+// no longer forces an unsandboxed pass-through).
+const EnvSandboxBackend = "ZERO_SANDBOX_BACKEND"
+
 // IsAlreadySandboxed reports whether the current process is already running
-// inside a zero-created sandbox (EnvSandboxed == "1").
+// inside a zero-created sandbox. It requires BOTH correlated markers that
+// sandboxEnvironment sets together — EnvSandboxed == "1" AND a non-empty
+// EnvSandboxBackend — so a single user-set/inherited ZERO_SANDBOXED=1 cannot by
+// itself disable wrapping. zero sets both only on genuinely wrapped commands;
+// pass-through (direct) plans set neither.
 func IsAlreadySandboxed() bool {
-	return os.Getenv(EnvSandboxed) == "1"
+	return os.Getenv(EnvSandboxed) == "1" && strings.TrimSpace(os.Getenv(EnvSandboxBackend)) != ""
 }
 
 type SideEffect string

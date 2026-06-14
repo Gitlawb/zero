@@ -3,13 +3,23 @@ package sandbox
 import "testing"
 
 func TestIsAlreadySandboxed(t *testing.T) {
+	// A lone ZERO_SANDBOXED=1 (no corroborating backend marker) must NOT count as
+	// sandboxed — stronger provenance than a single ambient flag.
+	t.Setenv(EnvSandboxBackend, "")
+	t.Setenv(EnvSandboxed, "1")
+	if IsAlreadySandboxed() {
+		t.Fatalf("IsAlreadySandboxed must be false when only %s=1 is set without %s", EnvSandboxed, EnvSandboxBackend)
+	}
+	// The backend marker alone (no ZERO_SANDBOXED=1) must not count either.
+	t.Setenv(EnvSandboxBackend, string(BackendBubblewrap))
 	t.Setenv(EnvSandboxed, "")
 	if IsAlreadySandboxed() {
-		t.Fatalf("IsAlreadySandboxed must be false when %s is unset", EnvSandboxed)
+		t.Fatalf("IsAlreadySandboxed must be false when only %s is set", EnvSandboxBackend)
 	}
+	// Both correlated markers present (as sandboxEnvironment sets them) → sandboxed.
 	t.Setenv(EnvSandboxed, "1")
 	if !IsAlreadySandboxed() {
-		t.Fatalf("IsAlreadySandboxed must be true when %s=1", EnvSandboxed)
+		t.Fatalf("IsAlreadySandboxed must be true when both %s=1 and %s are set", EnvSandboxed, EnvSandboxBackend)
 	}
 	t.Setenv(EnvSandboxed, "0")
 	if IsAlreadySandboxed() {
@@ -29,7 +39,9 @@ func TestSandboxEnvironmentMarksSandboxed(t *testing.T) {
 }
 
 func TestBuildCommandPlanWrapsWhenNotAlreadySandboxed(t *testing.T) {
-	t.Setenv(EnvSandboxed, "") // ensure we are NOT already inside a sandbox
+	// Ensure neither re-entrancy marker is set so we are NOT seen as sandboxed.
+	t.Setenv(EnvSandboxed, "")
+	t.Setenv(EnvSandboxBackend, "")
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
@@ -46,7 +58,10 @@ func TestBuildCommandPlanWrapsWhenNotAlreadySandboxed(t *testing.T) {
 }
 
 func TestBuildCommandPlanReEntrancyGuardReturnsPassThrough(t *testing.T) {
-	t.Setenv(EnvSandboxed, "1") // simulate running inside an already-sandboxed process
+	// Simulate running inside an already-wrapped process: BOTH correlated markers
+	// that sandboxEnvironment sets together must be present for the guard to fire.
+	t.Setenv(EnvSandboxed, "1")
+	t.Setenv(EnvSandboxBackend, string(BackendBubblewrap))
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,

@@ -179,11 +179,12 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if backend.Name == "" {
 		backend = Backend{Name: BackendPolicyOnly, Message: "policy-only fallback: sandbox backend was not selected"}
 	}
-	// Re-entrancy guard: a command spawned by a process we already wrapped
-	// (ZERO_SANDBOXED=1 in its env) must not be wrapped again — nested bwrap /
-	// sandbox-exec fails and a second egress proxy would be redundant. Return a
-	// pass-through plan. Mirrors the already-sandboxed guard used by comparable
-	// executor sandboxes.
+	// Re-entrancy guard: a command spawned by a process we already wrapped (both
+	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
+	// IsAlreadySandboxed) must not be wrapped again — nested bwrap / sandbox-exec
+	// fails and a second egress proxy would be redundant. Return a pass-through
+	// plan. Mirrors the already-sandboxed guard used by comparable executor
+	// sandboxes.
 	if IsAlreadySandboxed() {
 		return directCommandPlan(spec, backend, policy, workspaceRoot), nil
 	}
@@ -474,7 +475,7 @@ func sandboxEnvironment(policy Policy, backend BackendName, home string) []strin
 		"HOME=" + home,
 		"PATH=" + firstEnv("PATH", defaultPath()),
 		"TERM=" + firstEnv("TERM", "dumb"),
-		"ZERO_SANDBOX_BACKEND=" + string(backend),
+		EnvSandboxBackend + "=" + string(backend),
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
 		EnvSandboxed + "=1",
 	}
