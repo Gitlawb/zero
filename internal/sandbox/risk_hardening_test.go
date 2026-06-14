@@ -235,16 +235,20 @@ func TestClassifyNoneSideEffectIsLowRisk(t *testing.T) {
 
 func TestClassifyASTCatchesDestructiveProgramsRegexMisses(t *testing.T) {
 	// shred/fdisk/parted are irrecoverably destructive but absent from the regex
-	// pattern; the AST analyzer flags them, including behind a sh -c launcher.
+	// pattern; the AST analyzer flags them — including behind a sh -c launcher or
+	// a sudo/env wrapper (effectiveProgram resolves the real program). The escalated
+	// level (Critical) is part of the contract, so assert it alongside the category.
 	for _, command := range []string{
 		"shred -u secret.txt",
 		"fdisk /dev/sda",
 		"parted /dev/sda mklabel gpt",
 		"bash -c 'shred /etc/passwd'",
+		"sudo shred -u secret.txt",
+		"env shred -u secret.txt",
 	} {
 		risk := classifyCommand(command)
-		if !HasRiskCategory(risk, "destructive") {
-			t.Fatalf("Classify(%q) categories = %v, want destructive", command, risk.Categories)
+		if risk.Level != RiskCritical || !HasRiskCategory(risk, "destructive") {
+			t.Fatalf("Classify(%q) = level %s, categories %v; want critical destructive", command, risk.Level, risk.Categories)
 		}
 	}
 }
@@ -254,20 +258,21 @@ func TestClassifyASTCatchesNetworkProgramsRegexMisses(t *testing.T) {
 		"telnet example.com 23",
 		"ftp ftp.example.com",
 		"sftp user@host",
+		"sudo telnet example.com 23",
 	} {
 		risk := classifyCommand(command)
-		if !HasRiskCategory(risk, "network") {
-			t.Fatalf("Classify(%q) categories = %v, want network", command, risk.Categories)
+		if risk.Level != RiskCritical || !HasRiskCategory(risk, "network") {
+			t.Fatalf("Classify(%q) = level %s, categories %v; want critical network", command, risk.Level, risk.Categories)
 		}
 	}
 }
 
 func TestClassifyFlagsUnparseableCommand(t *testing.T) {
 	// An unparseable (e.g. obfuscated) script can't be analyzed statically; the
-	// AST analyzer reports TooComplex so the classifier elevates it.
+	// AST analyzer reports TooComplex so the classifier elevates it to High.
 	risk := classifyCommand(`echo "unterminated`)
-	if !HasRiskCategory(risk, "unparseable_command") {
-		t.Fatalf("Classify of unparseable command = %v, want unparseable_command", risk.Categories)
+	if risk.Level != RiskHigh || !HasRiskCategory(risk, "unparseable_command") {
+		t.Fatalf("Classify of unparseable command = level %s, categories %v; want high unparseable_command", risk.Level, risk.Categories)
 	}
 }
 
