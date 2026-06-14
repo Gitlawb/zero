@@ -229,3 +229,64 @@ func TestClassifyNoneSideEffectIsLowRisk(t *testing.T) {
 		t.Fatalf("control-only tool must not classify as out_of_workspace: %#v", risk)
 	}
 }
+
+// The following tests cover the AST analyzer wired into classifyWithScope as a
+// second opinion to the regex detectors.
+
+func TestClassifyASTCatchesDestructiveProgramsRegexMisses(t *testing.T) {
+	// shred/fdisk/parted are irrecoverably destructive but absent from the regex
+	// pattern; the AST analyzer flags them, including behind a sh -c launcher.
+	for _, command := range []string{
+		"shred -u secret.txt",
+		"fdisk /dev/sda",
+		"parted /dev/sda mklabel gpt",
+		"bash -c 'shred /etc/passwd'",
+	} {
+		risk := classifyCommand(command)
+		if !HasRiskCategory(risk, "destructive") {
+			t.Fatalf("Classify(%q) categories = %v, want destructive", command, risk.Categories)
+		}
+	}
+}
+
+func TestClassifyASTCatchesNetworkProgramsRegexMisses(t *testing.T) {
+	for _, command := range []string{
+		"telnet example.com 23",
+		"ftp ftp.example.com",
+		"sftp user@host",
+	} {
+		risk := classifyCommand(command)
+		if !HasRiskCategory(risk, "network") {
+			t.Fatalf("Classify(%q) categories = %v, want network", command, risk.Categories)
+		}
+	}
+}
+
+func TestClassifyFlagsUnparseableCommand(t *testing.T) {
+	// An unparseable (e.g. obfuscated) script can't be analyzed statically; the
+	// AST analyzer reports TooComplex so the classifier elevates it.
+	risk := classifyCommand(`echo "unterminated`)
+	if !HasRiskCategory(risk, "unparseable_command") {
+		t.Fatalf("Classify of unparseable command = %v, want unparseable_command", risk.Categories)
+	}
+}
+
+func TestClassifyASTDoesNotFlagQuotedProgramName(t *testing.T) {
+	// A program name inside a quoted argument is not a command, so the AST
+	// analyzer must not flag it (documenting a destructive command in an echo).
+	risk := classifyCommand(`echo "shred wipes files"`)
+	if HasRiskCategory(risk, "destructive") {
+		t.Fatalf("Classify(%q) wrongly flagged destructive: %v", `echo "shred wipes files"`, risk.Categories)
+	}
+}
+
+func TestClassifyBenignCommandStaysClean(t *testing.T) {
+	for _, command := range []string{"echo hello", "ls -la", "go build ./..."} {
+		risk := classifyCommand(command)
+		for _, category := range []string{"destructive", "network", "unparseable_command"} {
+			if HasRiskCategory(risk, category) {
+				t.Fatalf("Classify(%q) wrongly flagged %s: %v", command, category, risk.Categories)
+			}
+		}
+	}
+}

@@ -106,6 +106,22 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 		if pipedInstallerPattern.MatchString(command) {
 			add("piped_installer", RiskCritical)
 		}
+		// AST second opinion (analyzer.go): walks the parsed shell tree, so it
+		// catches destructive/network programs the regexes miss — e.g. shred,
+		// fdisk, parted, and commands hidden behind sudo/env wrappers or a
+		// `sh -c <payload>` launcher — and flags an unparseable (obfuscated)
+		// script as elevated risk. It only ADDS categories, so a benign,
+		// parseable command is classified exactly as before.
+		analysis := AnalyzeCommand(command)
+		if analysis.Network {
+			add("network", RiskCritical)
+		}
+		if analysis.Destructive {
+			add("destructive", RiskCritical)
+		}
+		if analysis.TooComplex {
+			add("unparseable_command", RiskHigh)
+		}
 	}
 
 	for _, path := range requestPaths(request) {
