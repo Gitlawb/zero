@@ -63,8 +63,10 @@ func (m model) titleBar(width int) string {
 	}
 	cwd := zeroTheme.faintest.Render(" / ") + zeroTheme.muted.Render(shortenPath(m.cwd))
 	branch := ""
+	branchShort := ""
 	if b := strings.TrimSpace(m.gitBranch); b != "" {
 		branch = " " + zeroTheme.faint.Render(b)
+		branchShort = " " + zeroTheme.faint.Render(middleTruncate(b, 22))
 	}
 	model := m.titleModelSegment()
 	ctx := ""
@@ -78,11 +80,15 @@ func (m model) titleBar(width int) string {
 		candidates = []headerCandidate{
 			{left: badge + cwd + branch, right: model + ctx},
 			{left: badge + cwd + branch, right: model},
+			{left: badge + cwd + branchShort, right: model},
+			{left: badge + cwd, right: model},
 			{left: badge, right: model},
 		}
 	case tierMedium:
 		candidates = []headerCandidate{
 			{left: badge + cwd + branch, right: model},
+			{left: badge + cwd + branchShort, right: model},
+			{left: badge + cwd, right: model},
 			{left: badge, right: model},
 		}
 	case tierNarrow:

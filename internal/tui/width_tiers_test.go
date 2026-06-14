@@ -105,6 +105,27 @@ func TestTinyTierSingleSegmentAndRailLessCards(t *testing.T) {
 	}
 }
 
+func TestTitleBarKeepsWorkspaceWithLongBranchAndModel(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Cwd:          "/workspace/zero",
+		ProviderName: "ollama-cloud",
+		ModelName:    "cogito-2.1:671b-extra-long-model-name",
+	})
+	m.gitBranch = "feat/tui-assistant-response-cleanup"
+
+	got := plainRender(t, m.titleBar(108))
+	for _, want := range []string{"zero", "/workspace/zero", "feat/", "…", "ollama-cloud/cogito-2.1:671b-extra-long-model-name"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("title bar = %q, missing %q", got, want)
+		}
+	}
+	for index, line := range strings.Split(got, "\n") {
+		if width := lipgloss.Width(line); width > 108 {
+			t.Fatalf("title line %d width = %d, want <= 108: %q", index, width, line)
+		}
+	}
+}
+
 func TestComposerDividerRendersMetaAtExactFit(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ModelName:      "m",

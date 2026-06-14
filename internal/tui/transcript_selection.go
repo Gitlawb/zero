@@ -147,16 +147,11 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	tableMeasure := width
-	if row.final {
-		tableMeasure = maxInt(16, width-2)
-	}
 	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	lines := make([]string, 0, len(wrapped)+1)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	prefix := ""
 	textStyle := zeroTheme.sayText
 	if row.final {
-		prefix = "│ "
 		textStyle = zeroTheme.ink
 	}
 	for index, line := range wrapped {
@@ -164,14 +159,11 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index,
 			rowIndex:  rowIndex,
-			textStart: lipgloss.Width(prefix),
+			textStart: 0,
 			text:      plainLine,
 		}
 		selectable = append(selectable, meta)
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
-		if row.final {
-			rendered = zeroTheme.finalRail.Render(prefix) + rendered
-		}
 		lines = append(lines, rendered)
 	}
 	if row.final {

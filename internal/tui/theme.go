@@ -15,7 +15,7 @@ type tuiTheme struct {
 	muted      lipgloss.Style // secondary text, assistant interim prose
 	faint      lipgloss.Style // hints, metadata
 	faintest   lipgloss.Style // line numbers, separators, tool args
-	accent     lipgloss.Style // brand lime: prompts, spinner, focus, final rail
+	accent     lipgloss.Style // brand lime: prompts, spinner, focus
 	green      lipgloss.Style // success, diff add sign, ✓
 	red        lipgloss.Style // errors, diff del sign, ✗, deny
 	amber      lipgloss.Style // permission surfaces, warnings, auto badge
@@ -30,7 +30,6 @@ type tuiTheme struct {
 	// Stream roles.
 	userPrompt lipgloss.Style // ❯ user gutter, accent bold
 	sayText    lipgloss.Style // assistant interim prose, muted
-	finalRail  lipgloss.Style // │ gutter rail on the final answer, accent
 
 	// Tool cards.
 	toolName   lipgloss.Style // head-row tool name, ink bold
@@ -127,8 +126,6 @@ var zeroTheme = tuiTheme{
 
 	userPrompt: lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true),
 	sayText:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
-	finalRail:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)),
-
 	toolName:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk)).Bold(true),
 	toolTarget: lipgloss.NewStyle().Foreground(lipgloss.Color(colorMuted)),
 	toolArg:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorFaintest)),

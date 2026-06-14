@@ -382,7 +382,7 @@ func TestSelectableAssistantRowKeepsMarkdownSemanticsPlain(t *testing.T) {
 	}
 }
 
-func TestFinalAnswerRendersRailAndDoneLine(t *testing.T) {
+func TestFinalAnswerRendersPlainTextAndCompletionLine(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{
 		kind:        rowAssistant,
@@ -392,10 +392,13 @@ func TestFinalAnswerRendersRailAndDoneLine(t *testing.T) {
 		turnElapsed: 8400 * time.Millisecond,
 	}
 	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
-	if !strings.Contains(got, "│ Done — the CLI now prints its version.") {
-		t.Fatalf("final row = %q, want accent-rail gutter", got)
+	if strings.Contains(got, "│") || strings.Contains(got, "●") {
+		t.Fatalf("final row = %q, must not carry assistant rail or done glyph", got)
 	}
-	if !strings.Contains(got, "● completed in 8.4s · 2 tools") {
+	if !strings.Contains(got, "Done — the CLI now prints its version.") {
+		t.Fatalf("final row = %q, want final answer text", got)
+	}
+	if !strings.Contains(got, "completed in 8.4s · 2 tools") {
 		t.Fatalf("final row = %q, want completion line with counters", got)
 	}
 }
@@ -493,7 +496,7 @@ func TestFinalAnswerRendersMarkdownTableForTerminal(t *testing.T) {
 	if !strings.Contains(got, " │ ") || !strings.Contains(got, "─┼─") {
 		t.Fatalf("markdown table should render terminal table separators, got:\n%s", got)
 	}
-	if !strings.Contains(got, "● completed") {
+	if !strings.Contains(got, "completed") {
 		t.Fatalf("markdown final row = %q, want completed line terminator", got)
 	}
 	for index, line := range strings.Split(rendered, "\n") {
@@ -618,8 +621,8 @@ func TestFinalAnswerRendersCrowdedMarkdownTablesAsTables(t *testing.T) {
 
 func TestDoneLineOmitsMissingSegments(t *testing.T) {
 	got := plainRender(t, doneLine(transcriptRow{final: true}, false))
-	if got != "● completed" {
-		t.Fatalf("done line without counters = %q, want plain ● completed", got)
+	if got != "completed" {
+		t.Fatalf("done line without counters = %q, want plain completed", got)
 	}
 	if got := plainRender(t, doneLine(transcriptRow{final: true, turnTools: 1}, false)); !strings.Contains(got, "1 tool") || strings.Contains(got, "1 tools") {
 		t.Fatalf("done line = %q, want singular tool noun", got)
