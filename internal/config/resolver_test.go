@@ -1125,6 +1125,27 @@ func TestResolveProviderProfileExtendedJSONAliases(t *testing.T) {
 	}
 }
 
+func TestResolveProviderProfileParseThinkTagsFalseAlias(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "custom",
+		"providers": [{
+			"name": "custom",
+			"provider_kind": "openai-compatible",
+			"base_url": "https://custom.example/v1",
+			"model_id": "custom-model",
+			"parse_think_tags": false
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Provider.ParseThinkTags == nil || *resolved.Provider.ParseThinkTags {
+		t.Fatalf("ParseThinkTags = %#v, want explicit false", resolved.Provider.ParseThinkTags)
+	}
+}
+
 func TestResolveRejectsUnknownProviderCatalogID(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "bad",
