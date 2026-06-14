@@ -108,6 +108,33 @@ func TestNewSupportsOpenAIProviderKind(t *testing.T) {
 	}
 }
 
+func TestParseThinkTagsForProfileUsesConservativeDefaultsAndOverride(t *testing.T) {
+	openAICompatible := resolvedProfile{providerKind: config.ProviderKindOpenAICompatible, apiModel: "qwen3-coder:480b"}
+	if !parseThinkTagsForProfile(config.ProviderProfile{}, openAICompatible) {
+		t.Fatal("qwen3 OpenAI-compatible model should parse inline think tags by default")
+	}
+
+	generic := resolvedProfile{providerKind: config.ProviderKindOpenAICompatible, apiModel: "factory-model"}
+	if parseThinkTagsForProfile(config.ProviderProfile{}, generic) {
+		t.Fatal("generic OpenAI-compatible model should preserve literal think tags by default")
+	}
+
+	official := resolvedProfile{providerKind: config.ProviderKindOpenAI, apiModel: "gpt-4.1"}
+	if parseThinkTagsForProfile(config.ProviderProfile{}, official) {
+		t.Fatal("official OpenAI model should preserve literal think tags by default")
+	}
+
+	enabled := true
+	if !parseThinkTagsForProfile(config.ProviderProfile{ParseThinkTags: &enabled}, generic) {
+		t.Fatal("explicit parseThinkTags=true should enable inline think parsing")
+	}
+
+	disabled := false
+	if parseThinkTagsForProfile(config.ProviderProfile{ParseThinkTags: &disabled}, openAICompatible) {
+		t.Fatal("explicit parseThinkTags=false should disable inline think parsing")
+	}
+}
+
 func TestNewResolvesKnownModelToAPIModelAndProvider(t *testing.T) {
 	transport := &captureTransport{
 		responseBody: "data: {\"type\":\"message_stop\"}\n\n",

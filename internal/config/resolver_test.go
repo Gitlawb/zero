@@ -1094,7 +1094,8 @@ func TestResolveProviderProfileExtendedJSONAliases(t *testing.T) {
 			"auth_scheme": "raw",
 			"auth_header_value": "header-secret",
 			"custom_headers": {"X-Zero": "1"},
-			"model_id": "custom-model"
+			"model_id": "custom-model",
+			"parse_think_tags": true
 		}]
 	}`)
 
@@ -1118,6 +1119,9 @@ func TestResolveProviderProfileExtendedJSONAliases(t *testing.T) {
 	}
 	if profile.CustomHeaders["X-Zero"] != "1" {
 		t.Fatalf("CustomHeaders = %#v, want X-Zero header", profile.CustomHeaders)
+	}
+	if profile.ParseThinkTags == nil || !*profile.ParseThinkTags {
+		t.Fatalf("ParseThinkTags = %#v, want true", profile.ParseThinkTags)
 	}
 }
 

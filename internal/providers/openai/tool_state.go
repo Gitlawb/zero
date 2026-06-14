@@ -14,8 +14,9 @@ const (
 )
 
 type toolState struct {
-	calls map[int]*pendingToolCall
-	think thinkTagSplitter
+	calls          map[int]*pendingToolCall
+	think          thinkTagSplitter
+	parseThinkTags bool
 	// finishReason holds the normalized terminal stop reason (zeroruntime
 	// FinishReason*) when the response ended abnormally (length/content_filter),
 	// so the provider can attach it to the done event. Empty for a normal finish.
@@ -33,8 +34,8 @@ type pendingToolCall struct {
 	ended     bool
 }
 
-func newToolState() *toolState {
-	return &toolState{calls: make(map[int]*pendingToolCall)}
+func newToolState(parseThinkTags bool) *toolState {
+	return &toolState{calls: make(map[int]*pendingToolCall), parseThinkTags: parseThinkTags}
 }
 
 type streamEventEmitter func(zeroruntime.StreamEvent)
@@ -63,12 +64,19 @@ func (state *toolState) flushBufferedContent(events chan<- zeroruntime.StreamEve
 }
 
 func (state *toolState) emitContentWith(content string, emit streamEventEmitter) {
+	if !state.parseThinkTags {
+		emit(zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: content})
+		return
+	}
 	state.think.push(content, func(eventType zeroruntime.StreamEventType, text string) {
 		emit(zeroruntime.StreamEvent{Type: eventType, Content: text})
 	})
 }
 
 func (state *toolState) flushContentWith(emit streamEventEmitter) {
+	if !state.parseThinkTags {
+		return
+	}
 	state.think.flush(func(eventType zeroruntime.StreamEventType, text string) {
 		emit(zeroruntime.StreamEvent{Type: eventType, Content: text})
 	})

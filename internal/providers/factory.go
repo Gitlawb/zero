@@ -40,6 +40,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
 			UserAgent:       options.UserAgent,
+			ParseThinkTags:  parseThinkTagsForProfile(profile, resolved),
 		})
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
@@ -70,6 +71,40 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 	default:
 		return nil, fmt.Errorf("unsupported provider kind %q", resolved.providerKind)
 	}
+}
+
+func parseThinkTagsForProfile(profile config.ProviderProfile, resolved resolvedProfile) bool {
+	if profile.ParseThinkTags != nil {
+		return *profile.ParseThinkTags
+	}
+	if resolved.providerKind != config.ProviderKindOpenAICompatible {
+		return false
+	}
+	return modelMayEmitThinkTags(resolved.apiModel)
+}
+
+func modelMayEmitThinkTags(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, marker := range []string{
+		"deepseek-r1",
+		"deepseek-reasoner",
+		"gpt-oss",
+		"glm-z1",
+		"kimi-k2-thinking",
+		"magistral",
+		"minimax-m3",
+		"nemotron",
+		"qwen3",
+		"qwq",
+		"reasoner",
+		"reasoning",
+		"thinking",
+	} {
+		if strings.Contains(model, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type resolvedProfile struct {

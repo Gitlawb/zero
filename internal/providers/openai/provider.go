@@ -40,6 +40,9 @@ type Options struct {
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
 	// Zero uses defaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
+	// ParseThinkTags converts streamed <think>...</think> content into reasoning
+	// events for OpenAI-compatible models known to emit that legacy format.
+	ParseThinkTags bool
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
@@ -55,6 +58,7 @@ type Provider struct {
 	httpClient        *http.Client
 	userAgent         string
 	streamIdleTimeout time.Duration
+	parseThinkTags    bool
 }
 
 // New creates an OpenAI-compatible provider.
@@ -100,6 +104,7 @@ func New(options Options) (*Provider, error) {
 		httpClient:        httpClient,
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: idleTimeout,
+		parseThinkTags:    options.ParseThinkTags,
 	}, nil
 }
 
@@ -162,7 +167,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		return
 	}
 
-	state := newToolState()
+	state := newToolState(provider.parseThinkTags)
 	// Use the shared SSE reader (also used by the Anthropic/Gemini providers) so
 	// multi-line "data:" continuation fields are joined into one payload, and the
 	// idle watchdog / context cancellation are handled uniformly.

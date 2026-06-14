@@ -34,6 +34,7 @@ type ProviderProfile struct {
 	AuthHeaderValue string            `json:"authHeaderValue,omitempty"`
 	CustomHeaders   map[string]string `json:"customHeaders,omitempty"`
 	Model           string            `json:"model,omitempty"`
+	ParseThinkTags  *bool             `json:"parseThinkTags,omitempty"`
 	Description     string            `json:"description,omitempty"`
 }
 
@@ -51,6 +52,7 @@ func HasProviderProfile(profile ProviderProfile) bool {
 		strings.TrimSpace(profile.AuthHeaderValue) != "" ||
 		profile.CustomHeaders != nil ||
 		strings.TrimSpace(profile.Model) != "" ||
+		profile.ParseThinkTags != nil ||
 		strings.TrimSpace(profile.Description) != ""
 }
 
@@ -304,6 +306,8 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 		CustomHeadersSnake   map[string]string `json:"custom_headers"`
 		Model                string            `json:"model"`
 		ModelID              string            `json:"model_id"`
+		ParseThinkTags       *bool             `json:"parseThinkTags"`
+		ParseThinkTagsSnake  *bool             `json:"parse_think_tags"`
 		Description          string            `json:"description"`
 	}
 
@@ -325,6 +329,7 @@ func (profile *ProviderProfile) UnmarshalJSON(data []byte) error {
 	profile.AuthHeaderValue = firstNonEmpty(raw.AuthHeaderValue, raw.AuthHeaderValueSnake)
 	profile.CustomHeaders = firstNonNilMap(raw.CustomHeaders, raw.CustomHeadersSnake)
 	profile.Model = strings.TrimSpace(firstNonEmpty(raw.Model, raw.ModelID))
+	profile.ParseThinkTags = firstNonNilBool(raw.ParseThinkTags, raw.ParseThinkTagsSnake)
 	profile.Description = strings.TrimSpace(raw.Description)
 	return nil
 }
@@ -343,6 +348,15 @@ func firstNonNilMap(values ...map[string]string) map[string]string {
 	for _, value := range values {
 		if value != nil {
 			return copyStringMap(value)
+		}
+	}
+	return nil
+}
+
+func firstNonNilBool(values ...*bool) *bool {
+	for _, value := range values {
+		if value != nil {
+			return value
 		}
 	}
 	return nil
