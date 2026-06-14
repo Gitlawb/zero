@@ -240,6 +240,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	case "exec":
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
 		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+	case "daemon":
+		return runDaemon(args[1:], stdout, stderr, deps)
 	case "config":
 		return runConfig(args[1:], stdout, stderr, deps)
 	case "models":
