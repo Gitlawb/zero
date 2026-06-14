@@ -344,10 +344,16 @@ func ReadExclusionGlobs(policy Policy, scope *Scope) []string {
 	return globs
 }
 
-// policyHasPathLists reports whether any fine-grained path list is configured.
+// policyHasPathLists reports whether any fine-grained path list has an
+// ENFORCEABLE entry. It resolves the lists (matching how the rest of this file
+// normalizes them) rather than counting raw config, so a typo or non-existent
+// entry — which resolution drops — doesn't spuriously fail-close relative
+// requests when there is no workspace root.
 func policyHasPathLists(policy Policy) bool {
-	return len(policy.DenyRead) > 0 || len(policy.AllowRead) > 0 ||
-		len(policy.DenyWrite) > 0 || len(policy.AllowWrite) > 0
+	return len(resolvePolicyPaths(policy.DenyRead)) > 0 ||
+		len(resolvePolicyPaths(policy.AllowRead)) > 0 ||
+		len(resolvePolicyPaths(policy.DenyWrite)) > 0 ||
+		len(resolveWriteRootPaths(policy.AllowWrite)) > 0
 }
 
 // dedupeStrings returns xs with duplicates removed, preserving first-seen order.
