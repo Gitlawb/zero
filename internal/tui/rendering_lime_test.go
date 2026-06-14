@@ -40,6 +40,58 @@ func TestUserRowRendersPromptGutter(t *testing.T) {
 	}
 }
 
+func TestCommandCardRowRendersAsTitledCard(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowSystem,
+		text: renderCommandCardTranscript(commandCard{
+			Title:   "Tools",
+			Summary: []string{"2 registered", "registered catalog"},
+			Sections: []commandCardSection{
+				{
+					Title: "Registry",
+					Fields: []commandField{
+						{Key: "registered", Value: "2"},
+					},
+				},
+				{
+					Title: "Available",
+					Lines: []string{
+						commandBullet("bash"),
+						commandBullet("read_file"),
+					},
+				},
+			},
+			Actions: []string{"/mcp manage servers", "/permissions manage access"},
+		}),
+	}
+
+	got := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	lines := strings.Split(got, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("command card rendered too few lines:\n%s", got)
+	}
+	if !strings.Contains(lines[0], "Tools") {
+		t.Fatalf("command card title should render in the border, got:\n%s", got)
+	}
+	if strings.Contains(got, "│ Tools") {
+		t.Fatalf("command card should not render the title as muted body text, got:\n%s", got)
+	}
+	for _, want := range []string{
+		"2 registered | registered catalog",
+		"Registry",
+		"registered  2",
+		"Available",
+		"- bash",
+		"- read_file",
+		"actions: /mcp manage servers | /permissions manage access",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("command card missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true

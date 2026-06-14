@@ -53,6 +53,19 @@ type commandCardSection struct {
 	Rows   []commandRow
 }
 
+const commandCardTranscriptPrefix = "\x00command-card\x00"
+
+func renderCommandCardTranscript(card commandCard) string {
+	return commandCardTranscriptPrefix + renderCommandCard(card)
+}
+
+func commandCardTranscriptPayload(text string) (string, bool) {
+	if !strings.HasPrefix(text, commandCardTranscriptPrefix) {
+		return text, false
+	}
+	return strings.TrimPrefix(text, commandCardTranscriptPrefix), true
+}
+
 func renderCommandCard(card commandCard) string {
 	lines := []string{}
 

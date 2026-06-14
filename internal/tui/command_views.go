@@ -17,7 +17,7 @@ func (m model) toolsText() string {
 	registered := m.registry.All()
 	count := len(registered)
 	if len(registered) == 0 {
-		return renderCommandCard(commandCard{
+		return renderCommandCardTranscript(commandCard{
 			Title:   "Tools",
 			Summary: []string{"0 registered", "no tools available"},
 			Sections: []commandCardSection{{
@@ -40,7 +40,7 @@ func (m model) toolsText() string {
 		available = append(available, commandBullet(name))
 	}
 
-	return renderCommandCard(commandCard{
+	return renderCommandCardTranscript(commandCard{
 		Title:   "Tools",
 		Summary: []string{fmt.Sprintf("%d registered", count), "registered catalog"},
 		Sections: []commandCardSection{
@@ -474,7 +474,7 @@ func (m model) modelText(args string) string {
 
 func (m model) contextText() string {
 	toolCount := len(m.registry.All())
-	return renderCommandCard(commandCard{
+	return renderCommandCardTranscript(commandCard{
 		Title: "Context",
 		Summary: []string{
 			"go runtime",

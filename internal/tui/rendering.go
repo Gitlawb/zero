@@ -198,6 +198,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 	case rowAssistant:
 		return renderAssistantRow(row, width)
 	case rowSystem:
+		if payload, ok := commandCardTranscriptPayload(row.text); ok {
+			return renderCommandCardRow(payload, width)
+		}
 		if row.tool == "sessions" {
 			return renderSessionsCards(row.text, width)
 		}
@@ -419,6 +422,44 @@ func doneLine(row transcriptRow, failed bool) string {
 // the panel surface inside a line border. Content is passed through unchanged.
 func renderSystemNote(text string, width int) string {
 	return noteBox(text, width, zeroTheme.line, zeroTheme.onPanel(zeroTheme.faint))
+}
+
+func renderCommandCardRow(text string, width int) string {
+	raw := strings.Split(strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
+	if len(raw) == 0 {
+		return renderSystemNote(text, width)
+	}
+
+	title := strings.TrimSpace(raw[0])
+	lines := make([]string, 0, len(raw)-1)
+	for index, line := range raw[1:] {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			lines = append(lines, "")
+		case index == 0:
+			lines = append(lines, zeroTheme.ink.Bold(true).Render(line))
+		case isCommandCardHeading(trimmed):
+			lines = append(lines, zeroTheme.accent.Bold(true).Render(line))
+		case strings.HasPrefix(trimmed, "actions:"):
+			lines = append(lines, zeroTheme.accent.Render("actions:")+zeroTheme.ink.Render(strings.TrimPrefix(line, "actions:")))
+		case strings.HasPrefix(trimmed, "- "):
+			lines = append(lines, zeroTheme.ink.Render(line))
+		default:
+			lines = append(lines, zeroTheme.muted.Render(line))
+		}
+	}
+	return styledBlockFillTitle(width, title, lines, zeroTheme.accent, lipgloss.NewStyle())
+}
+
+func isCommandCardHeading(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "- ") || strings.HasPrefix(value, "actions:") {
+		return false
+	}
+	return !strings.Contains(value, " | ") && !strings.Contains(value, "  ")
 }
 
 func renderMCPManagerCard(text string, width int) string {
