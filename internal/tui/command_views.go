@@ -281,8 +281,8 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 					},
 				},
 				{
-					Title:  "Grants",
-					Lines:  []string{"persistent grants: unavailable"},
+					Title: "Grants",
+					Lines: []string{"persistent grants: unavailable"},
 				},
 			},
 		})
