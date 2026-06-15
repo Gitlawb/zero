@@ -64,6 +64,65 @@ func TestBuildArgsCreatesFreshSpecialistExecInvocation(t *testing.T) {
 	}
 }
 
+func TestSpecialistAutonomyByPermissionMode(t *testing.T) {
+	cases := map[string]string{
+		"":           "high", // back-compat: the Task tool omits the mode
+		"unsafe":     "high",
+		"auto":       "low",
+		"ask":        "low",
+		"spec-draft": "low",
+		"whatever":   "low",
+	}
+	for mode, want := range cases {
+		if got := specialistAutonomy(mode); got != want {
+			t.Errorf("specialistAutonomy(%q) = %q, want %q", mode, got, want)
+		}
+	}
+}
+
+func TestBuildArgsAutonomyHonorsPermissionMode(t *testing.T) {
+	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
+	manifest := Manifest{Metadata: Metadata{Name: "reviewer"}, SystemPrompt: "x", ResolvedTools: []string{"read_file"}}
+
+	// A non-unsafe parent mode yields a non-unsafe child (--auto low), so a
+	// swarm member never gains more authority than a non-unsafe orchestrator.
+	res, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "auto"})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if !containsSequence(res.Args, []string{"--auto", "low"}) {
+		t.Fatalf("non-unsafe parent must yield --auto low, got %v", res.Args)
+	}
+	if containsSequence(res.Args, []string{"--auto", "high"}) {
+		t.Fatalf("non-unsafe parent must NOT yield --auto high: %v", res.Args)
+	}
+
+	// An unsafe parent (and the empty back-compat case) keep --auto high.
+	for _, mode := range []string{"unsafe", ""} {
+		out, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: mode})
+		if err != nil {
+			t.Fatalf("BuildArgs(%q): %v", mode, err)
+		}
+		if !containsSequence(out.Args, []string{"--auto", "high"}) {
+			t.Fatalf("mode %q must yield --auto high, got %v", mode, out.Args)
+		}
+	}
+}
+
+func TestBuildResumeArgsAutonomyHonorsPermissionMode(t *testing.T) {
+	executor := Executor{}
+	manifest := Manifest{Metadata: Metadata{Name: "reviewer"}, ResolvedTools: []string{"read_file"}}
+	res, err := executor.BuildResumeArgs(BuildResumeArgsInput{
+		SessionID: "child_session", Prompt: "p", Manifest: manifest, PermissionMode: "auto",
+	})
+	if err != nil {
+		t.Fatalf("BuildResumeArgs: %v", err)
+	}
+	if !containsSequence(res.Args, []string{"--auto", "low"}) || containsSequence(res.Args, []string{"--auto", "high"}) {
+		t.Fatalf("resume non-unsafe parent must yield --auto low, got %v", res.Args)
+	}
+}
+
 func TestBuildArgsSessionTitleFallsBackToNameWithoutDescription(t *testing.T) {
 	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
 	manifest := Manifest{

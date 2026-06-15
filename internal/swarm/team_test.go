@@ -16,25 +16,22 @@ func TestResolveModelInherit(t *testing.T) {
 }
 
 func TestResolvePermissionModeNeverWidens(t *testing.T) {
-	parent := Policy{PermissionMode: "default"}
-	// A definition asking for MORE than the parent is clamped down.
-	if got := resolvePermissionMode(parent, Definition{PermissionMode: "bypassPermissions"}); got != "default" {
-		t.Fatalf("clamp = %q, want default (never widen)", got)
+	parent := Policy{PermissionMode: permissionModeAuto} // "auto"
+	// A definition asking for MORE than the parent (unsafe > auto) is clamped down.
+	if got := resolvePermissionMode(parent, Definition{PermissionMode: permissionModeUnsafe}); got != permissionModeAuto {
+		t.Fatalf("clamp = %q, want auto (never widen)", got)
 	}
-	// A definition asking for LESS keeps its stricter mode.
-	if got := resolvePermissionMode(parent, Definition{PermissionMode: "plan"}); got != "plan" {
-		t.Fatalf("stricter = %q, want plan", got)
+	// A definition asking for LESS keeps its stricter mode (ask < auto).
+	if got := resolvePermissionMode(parent, Definition{PermissionMode: permissionModeAsk}); got != permissionModeAsk {
+		t.Fatalf("stricter = %q, want ask", got)
 	}
 	// Empty inherits the parent.
-	if got := resolvePermissionMode(parent, Definition{PermissionMode: ""}); got != "default" {
-		t.Fatalf("empty = %q, want default", got)
+	if got := resolvePermissionMode(parent, Definition{PermissionMode: ""}); got != permissionModeAuto {
+		t.Fatalf("empty = %q, want auto", got)
 	}
-	// Unknown mode ranks strictest, so it can never widen.
-	if got := resolvePermissionMode(parent, Definition{PermissionMode: "weird"}); got != "weird" {
-		t.Fatalf("unknown = %q, want weird (treated strictest, not widened)", got)
-	}
-	if got := resolvePermissionMode(Policy{PermissionMode: "weird"}, Definition{PermissionMode: "default"}); got != "weird" {
-		t.Fatalf("default vs unknown-parent = %q, want clamp to weird", got)
+	// An unsafe parent still honors a stricter definition (auto < unsafe).
+	if got := resolvePermissionMode(Policy{PermissionMode: permissionModeUnsafe}, Definition{PermissionMode: permissionModeAuto}); got != permissionModeAuto {
+		t.Fatalf("unsafe parent + auto def = %q, want auto (stricter honored)", got)
 	}
 }
 

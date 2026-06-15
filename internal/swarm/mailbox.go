@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -118,16 +119,57 @@ func (m *Mailbox) lockTimeout() time.Duration {
 }
 
 // inboxPath returns the sanitized, base-confined inbox path for (team, agent)
-// and verifies it cannot escape BaseDir (defense in depth on top of sanitize).
+// and verifies it cannot escape BaseDir lexically (defense in depth on top of
+// sanitize). Symlink-aware confinement happens in ensureInboxDir.
 func (m *Mailbox) inboxPath(team, agent string) (string, error) {
 	dir := filepath.Join(m.BaseDir, sanitizeName(team), "inboxes")
 	path := filepath.Join(dir, sanitizeName(agent)+".json")
-	// Confinement check: the resolved path must stay under BaseDir.
-	rel, err := filepath.Rel(m.BaseDir, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+	if within, err := pathWithin(m.BaseDir, path); err != nil || !within {
 		return "", fmt.Errorf("swarm: inbox path escapes base dir (team=%q agent=%q)", team, agent)
 	}
 	return path, nil
+}
+
+// pathWithin reports whether target is base or lives under it (lexically).
+func pathWithin(base, target string) (bool, error) {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false, err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// ensureInboxDir creates the inbox's parent directories owner-only, then
+// verifies — after resolving symlinks — that the real directory stays within the
+// real base dir. This defends against a symlink planted under BaseDir (e.g. a
+// pre-existing "inboxes" -> /etc) that the lexical inboxPath check cannot catch.
+// Only after confinement is confirmed are the directories tightened to 0700, so
+// a chmod can never land outside the base via a symlink.
+func (m *Mailbox) ensureInboxDir(inboxPath string) error {
+	dir := filepath.Dir(inboxPath) // <base>/<team>/inboxes
+	if err := os.MkdirAll(dir, inboxDirMode); err != nil {
+		return fmt.Errorf("swarm: create inbox dir: %w", err)
+	}
+	realBase, err := filepath.EvalSymlinks(m.BaseDir)
+	if err != nil {
+		return fmt.Errorf("swarm: resolve base dir: %w", err)
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("swarm: resolve inbox dir: %w", err)
+	}
+	if within, err := pathWithin(realBase, realDir); err != nil || !within {
+		return fmt.Errorf("swarm: inbox dir escapes base dir via symlink")
+	}
+	// MkdirAll leaves an existing dir's permissions untouched; tighten the team
+	// and inboxes dirs to owner-only so mailbox contents are never group/world
+	// readable even if a dir pre-existed with broad perms.
+	_ = os.Chmod(dir, inboxDirMode)
+	_ = os.Chmod(filepath.Dir(dir), inboxDirMode) // <base>/<team>
+	return nil
 }
 
 // Send appends msg to the recipient's inbox under the team, taking the inbox
@@ -153,8 +195,8 @@ func (m *Mailbox) Send(team, recipient string, msg Message) error {
 	if len(encoded) > m.maxMessageBytes() {
 		return fmt.Errorf("%w: %d > %d bytes", ErrMessageTooLarge, len(encoded), m.maxMessageBytes())
 	}
-	if err := os.MkdirAll(filepath.Dir(path), inboxDirMode); err != nil {
-		return fmt.Errorf("swarm: create inbox dir: %w", err)
+	if err := m.ensureInboxDir(path); err != nil {
+		return err
 	}
 	release, err := acquireLock(path+".lock", m.lockTimeout())
 	if err != nil {
@@ -185,8 +227,8 @@ func (m *Mailbox) ReadAndConsume(team, recipient string) ([]Message, error) {
 	}
 	// The lock file lives beside the inbox; create the dir so it can be taken
 	// even on first read of a not-yet-existing inbox.
-	if err := os.MkdirAll(filepath.Dir(path), inboxDirMode); err != nil {
-		return nil, fmt.Errorf("swarm: create inbox dir: %w", err)
+	if err := m.ensureInboxDir(path); err != nil {
+		return nil, err
 	}
 	release, err := acquireLock(path+".lock", m.lockTimeout())
 	if err != nil {
@@ -281,17 +323,28 @@ func atomicWriteJSON(path string, data any) error {
 	return nil
 }
 
+// lockSeq makes each lock token unique within the process even when two
+// goroutines acquire in the same nanosecond.
+var lockSeq atomic.Uint64
+
 // acquireLock takes an exclusive lock by creating lockPath with O_EXCL. It
 // retries with a short backoff until timeout, breaking a lock whose file is
 // older than lockStaleAfter (so a crashed holder cannot deadlock the swarm).
+//
+// Each holder writes a unique token into the lock file and release is
+// OWNERSHIP-AWARE: it removes the lock only if it still holds our token. After a
+// stale-break another writer may legitimately own the lock; unconditionally
+// removing it would let a third writer in and create split-brain writers that
+// can corrupt or drop mailbox updates.
 func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
+	token := fmt.Sprintf("%d-%d-%d", os.Getpid(), time.Now().UnixNano(), lockSeq.Add(1))
 	deadline := time.Now().Add(timeout)
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, inboxFileMode)
 		if err == nil {
-			// Record the holder for diagnostics; ignore write errors (the lock
-			// itself is held by virtue of the exclusive create).
-			fmt.Fprintf(f, "%d %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+			// Record our ownership token; the exclusive create already holds the
+			// lock, so a write error only weakens diagnostics, not safety.
+			_, _ = f.WriteString(token)
 			f.Close()
 			var released bool
 			return func() {
@@ -299,18 +352,23 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 					return
 				}
 				released = true
-				os.Remove(lockPath)
+				if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == token {
+					os.Remove(lockPath)
+				}
 			}, nil
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
 		}
-		// Lock held: break it if stale, otherwise wait.
-		if info, statErr := os.Stat(lockPath); statErr == nil {
-			if time.Since(info.ModTime()) > lockStaleAfter {
+		// Lock held: break it if stale, otherwise wait. The break is conditional
+		// on the file's content being unchanged since we observed it, so we do not
+		// delete a lock another writer rotated in between.
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
+			stale, _ := os.ReadFile(lockPath)
+			if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == string(stale) {
 				os.Remove(lockPath)
-				continue
 			}
+			continue
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("swarm: timed out acquiring lock %s", filepath.Base(lockPath))

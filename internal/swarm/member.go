@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // MemberSpec is the fully-resolved instruction to launch one member. The swarm
@@ -67,6 +68,14 @@ func (l FuncLauncher) Launch(ctx context.Context, spec MemberSpec) (MemberHandle
 	h := &funcHandle{id: spec.ID, done: make(chan struct{})}
 	go func() {
 		defer close(h.done)
+		// A panic in a member's Run must fail only that member, never crash the
+		// orchestrator process. Recover and surface it as the member's error.
+		defer func() {
+			if r := recover(); r != nil {
+				h.res = MemberResult{}
+				h.err = fmt.Errorf("swarm: member %s panicked: %v", spec.ID, r)
+			}
+		}()
 		h.res, h.err = l.Run(ctx, spec)
 	}()
 	return h, nil

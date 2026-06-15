@@ -58,14 +58,20 @@ type BuildArgsInput struct {
 	CurrentDepth          int
 	Description           string
 	Cwd                   string
+	// PermissionMode is the parent's resolved permission mode. Empty preserves
+	// the historical "--auto high" (the Task tool omits it); a caller that
+	// passes a non-unsafe mode (e.g. the swarm propagating a non-unsafe
+	// orchestrator) gets a non-unsafe child so authority is never widened.
+	PermissionMode string
 }
 
 type BuildResumeArgsInput struct {
-	SessionID    string
-	Prompt       string
-	CurrentDepth int
-	Manifest     Manifest
-	Cwd          string
+	SessionID      string
+	Prompt         string
+	CurrentDepth   int
+	Manifest       Manifest
+	Cwd            string
+	PermissionMode string
 }
 
 type BuildArgsResult struct {
@@ -90,7 +96,31 @@ type TaskRunOptions struct {
 	ParentReasoningEffort string
 	CurrentDepth          int
 	Cwd                   string
+	// PermissionMode propagates the parent's resolved permission mode to the
+	// child. Empty keeps the historical "--auto high"; a non-unsafe value runs
+	// the child non-unsafe so it never gains more authority than the parent.
+	PermissionMode string
 }
+
+// specialistAutonomy maps a parent permission mode to the child's "--auto"
+// level. A headless specialist child cannot answer interactive prompts, so it
+// runs autonomously — but only at "high" (unsafe) when the parent is itself
+// unsafe (or when no mode is provided, preserving the Task tool's behavior).
+// Any other parent mode yields the non-unsafe "low" level, so the child's
+// authority never exceeds the parent's.
+func specialistAutonomy(permissionMode string) string {
+	switch strings.TrimSpace(permissionMode) {
+	case "", string(permissionModeUnsafe):
+		return "high"
+	default:
+		return "low"
+	}
+}
+
+// permissionModeUnsafe mirrors agent.PermissionModeUnsafe without importing the
+// agent package (which would create an import cycle): exec resolves "--auto high"
+// to this mode.
+const permissionModeUnsafe = "unsafe"
 
 type ExecResult struct {
 	Result    tools.Result
@@ -147,7 +177,7 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	args := []string{"exec", "--init-session-id", sessionID}
 	args = append(args, promptArgs...)
 	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
-	args = append(args, "--auto", "high", "--output-format", "stream-json")
+	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -199,7 +229,7 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	}
 	args := []string{"exec", "--resume", sessionID}
 	args = append(args, promptArgs...)
-	args = append(args, "--auto", "high", "--output-format", "stream-json")
+	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -230,6 +260,7 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 		CurrentDepth:          options.CurrentDepth,
 		Description:           params.Description,
 		Cwd:                   options.Cwd,
+		PermissionMode:        options.PermissionMode,
 	})
 	if err != nil {
 		return ExecResult{}, err
@@ -257,11 +288,12 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		return ExecResult{}, err
 	}
 	built, err := executor.BuildResumeArgs(BuildResumeArgsInput{
-		SessionID:    params.Resume,
-		Prompt:       params.Prompt,
-		CurrentDepth: options.CurrentDepth,
-		Manifest:     manifest,
-		Cwd:          options.Cwd,
+		SessionID:      params.Resume,
+		Prompt:         params.Prompt,
+		CurrentDepth:   options.CurrentDepth,
+		Manifest:       manifest,
+		Cwd:            options.Cwd,
+		PermissionMode: options.PermissionMode,
 	})
 	if err != nil {
 		return ExecResult{}, err

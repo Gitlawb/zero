@@ -108,20 +108,19 @@ func (r *Registry) AgentTypes() []string {
 func builtinDefinitions() []Definition {
 	return []Definition{
 		{
-			AgentType:      "teammate",
-			WhenToUse:      "In-process teammate for parallel task execution; delegate work to run alongside the orchestrator.",
-			Model:          modelInherit,
-			PermissionMode: "default",
+			AgentType: "teammate",
+			WhenToUse: "In-process teammate for parallel task execution; delegate work to run alongside the orchestrator.",
+			Model:     modelInherit,
+			// Empty PermissionMode => inherit the orchestrator's mode (never widened).
 			SystemPrompt: func(ctx PromptContext) string {
 				return "You are a teammate agent collaborating with an orchestrator on team " +
 					displayTeam(ctx.Team) + ". Complete your assigned task and report results.\n\nTask: " + ctx.Task
 			},
 		},
 		{
-			AgentType:      "subagent",
-			WhenToUse:      "General-purpose subagent for an isolated, delegated task; starts with zero prior context.",
-			Model:          modelInherit,
-			PermissionMode: "default",
+			AgentType: "subagent",
+			WhenToUse: "General-purpose subagent for an isolated, delegated task; starts with zero prior context.",
+			Model:     modelInherit,
 			SystemPrompt: func(ctx PromptContext) string {
 				return "You are a subagent spawned to complete a specific task. You start with zero context — " +
 					"the briefing below is all you know.\n\nTask: " + ctx.Task

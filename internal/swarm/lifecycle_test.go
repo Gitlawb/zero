@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,7 +115,7 @@ func TestSpawnCompletes(t *testing.T) {
 func TestSpawnInheritsPolicy(t *testing.T) {
 	l := newLauncher(okFor)
 	sw := newSwarmFor(t, l)
-	_, err := sw.Spawn(Policy{Model: "orch-model", PermissionMode: "default"}, "team", "teammate", "task", "/cwd")
+	_, err := sw.Spawn(Policy{Model: "orch-model", PermissionMode: permissionModeAuto}, "team", "teammate", "task", "/cwd")
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -123,8 +124,8 @@ func TestSpawnInheritsPolicy(t *testing.T) {
 	if spec.Model != "orch-model" {
 		t.Fatalf("member model = %q, want inherited orch-model", spec.Model)
 	}
-	if spec.PermissionMode != "default" {
-		t.Fatalf("member permission mode = %q, want inherited default", spec.PermissionMode)
+	if spec.PermissionMode != permissionModeAuto {
+		t.Fatalf("member permission mode = %q, want inherited auto", spec.PermissionMode)
 	}
 	if spec.Cwd != "/cwd" {
 		t.Fatalf("member cwd = %q, want /cwd", spec.Cwd)
@@ -317,6 +318,22 @@ func TestCollectScopesToTeam(t *testing.T) {
 	collected := sw.Collect("alpha")
 	if len(collected) != 1 || collected[0].Team != "alpha" {
 		t.Fatalf("Collect(alpha) = %+v, want one alpha task", collected)
+	}
+}
+
+func TestFuncLauncherRecoversPanic(t *testing.T) {
+	// A panic inside a member's Run must surface as that member's error, never
+	// escape the goroutine and crash the orchestrator.
+	l := FuncLauncher{Run: func(context.Context, MemberSpec) (MemberResult, error) {
+		panic("boom in member")
+	}}
+	h, err := l.Launch(context.Background(), MemberSpec{ID: "m1"})
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	_, err = h.Wait()
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("panic must surface as a member error, got %v", err)
 	}
 }
 

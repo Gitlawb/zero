@@ -4,9 +4,21 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
+
+func TestCollapseRuneSafeTruncation(t *testing.T) {
+	// 300 multi-byte runes: truncation must not split a rune (no invalid UTF-8).
+	got := collapse(strings.Repeat("🚀", 300))
+	if !utf8.ValidString(got) {
+		t.Fatalf("collapse produced invalid UTF-8: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != 201 { // 200 runes + ellipsis
+		t.Fatalf("collapse rune count = %d, want 201", n)
+	}
+}
 
 func newToolSwarm(t *testing.T, l MemberLauncher) (*tools.Registry, *Swarm) {
 	t.Helper()

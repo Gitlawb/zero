@@ -48,6 +48,18 @@ func TestCoordinatorLifecycleTransitions(t *testing.T) {
 	}
 }
 
+func TestCoordinatorRejectsInvalidStatus(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("t1", "a1", "team", "desc")
+	if err := c.SetStatus("t1", TaskStatus("bogus")); err == nil {
+		t.Fatal("SetStatus must reject an unknown status")
+	}
+	// The task stays in its prior (valid) state.
+	if task, _ := c.Get("t1"); task.Status != StatusPending {
+		t.Fatalf("rejected status must not mutate the task, got %v", task.Status)
+	}
+}
+
 func TestCoordinatorUnknownTask(t *testing.T) {
 	c := NewCoordinator()
 	if err := c.SetStatus("missing", StatusRunning); !errors.Is(err, ErrUnknownTask) {

@@ -393,9 +393,10 @@ func renderTasks(coord *Coordinator, tasks []Task, team string) string {
 func collapse(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.Join(strings.Fields(s), " ")
-	const max = 200
-	if len(s) > max {
-		return s[:max] + "…"
+	const max = 200 // runes, not bytes — never slice mid-character
+	runes := []rune(s)
+	if len(runes) > max {
+		return string(runes[:max]) + "…"
 	}
 	return s
 }

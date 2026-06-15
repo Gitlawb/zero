@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestMailbox(t *testing.T) *Mailbox {
@@ -158,6 +159,88 @@ func TestMailboxFileMode(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("inbox file mode = %o, want 600", perm)
 	}
+}
+
+func TestMailboxTightensDirPerms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix file modes")
+	}
+	base := t.TempDir()
+	// Pre-create the team + inboxes dirs with broad perms; ensureInboxDir must
+	// tighten them to 0700 despite MkdirAll leaving existing dirs untouched.
+	broad := filepath.Join(base, "team", "inboxes")
+	if err := os.MkdirAll(broad, 0o755); err != nil {
+		t.Fatalf("pre-create: %v", err)
+	}
+	mb, err := NewMailbox(base)
+	if err != nil {
+		t.Fatalf("NewMailbox: %v", err)
+	}
+	if err := mb.Send("team", "bob", Message{From: "a", Body: "ok"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	for _, dir := range []string{broad, filepath.Join(base, "team")} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat %s: %v", dir, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o700 {
+			t.Fatalf("dir %s mode = %o, want 700", dir, perm)
+		}
+	}
+}
+
+func TestMailboxRejectsSymlinkedInboxDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ")
+	}
+	base := t.TempDir()
+	outside := t.TempDir() // a dir OUTSIDE base
+	// Plant a symlink: <base>/team/inboxes -> <outside>. A lexical check passes,
+	// but the symlink-aware confinement must reject the write.
+	if err := os.MkdirAll(filepath.Join(base, "team"), 0o700); err != nil {
+		t.Fatalf("mkdir team: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(base, "team", "inboxes")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	mb, err := NewMailbox(base)
+	if err != nil {
+		t.Fatalf("NewMailbox: %v", err)
+	}
+	if err := mb.Send("team", "bob", Message{From: "a", Body: "escape"}); err == nil {
+		t.Fatal("Send into a symlinked-out inbox dir must fail closed")
+	}
+	// And nothing was written outside the base.
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("write escaped base via symlink: %d entries in %s", len(entries), outside)
+	}
+}
+
+func TestMailboxLockReleaseIsOwnershipAware(t *testing.T) {
+	mb := newTestMailbox(t)
+	path, _ := mb.inboxPath("team", "bob")
+	if err := mb.ensureInboxDir(path); err != nil {
+		t.Fatalf("ensureInboxDir: %v", err)
+	}
+	lockPath := path + ".lock"
+	// Writer A acquires the lock.
+	releaseA, err := acquireLock(lockPath, time.Second)
+	if err != nil {
+		t.Fatalf("acquire A: %v", err)
+	}
+	// Simulate a stale-break + takeover by writer B: overwrite the lock content
+	// with B's token (as a fresh acquire after a break would).
+	if err := os.WriteFile(lockPath, []byte("writer-B-token"), 0o600); err != nil {
+		t.Fatalf("simulate B takeover: %v", err)
+	}
+	// A's release must NOT delete B's lock (ownership-aware).
+	releaseA()
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("A's release deleted B's lock (split-brain): %v", err)
+	}
+	// B's own release removes it.
+	os.Remove(lockPath)
 }
 
 func TestMailboxConcurrentSends(t *testing.T) {

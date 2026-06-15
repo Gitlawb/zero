@@ -29,6 +29,18 @@ func (s TaskStatus) terminal() bool {
 	return s == StatusDone || s == StatusFailed || s == StatusHandedOff
 }
 
+// valid reports whether a status is one of the known lifecycle states. Unknown
+// statuses are rejected (fail closed) so a task can never enter an undefined
+// state that Summarize and the lifecycle logic cannot reason about.
+func (s TaskStatus) valid() bool {
+	switch s {
+	case StatusPending, StatusRunning, StatusDone, StatusFailed, StatusHandedOff:
+		return true
+	default:
+		return false
+	}
+}
+
 // Task is one unit of work tracked by the coordinator. It is returned by value
 // from snapshots so callers cannot mutate coordinator state without the lock.
 type Task struct {
@@ -102,6 +114,9 @@ func (c *Coordinator) Register(id, agentID, team, description string) (Task, err
 // rejected (fail closed) so a late member update cannot resurrect a finished
 // task.
 func (c *Coordinator) SetStatus(id string, status TaskStatus) error {
+	if !status.valid() {
+		return fmt.Errorf("swarm: invalid task status %q", status)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	t, ok := c.tasks[id]

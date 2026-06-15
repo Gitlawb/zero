@@ -208,18 +208,28 @@ func resolvePermissionMode(pol Policy, def Definition) string {
 	return def.PermissionMode
 }
 
+// Runtime permission modes (mirror internal/agent.PermissionMode without
+// importing it, to avoid an import cycle). These are the actual values that flow
+// through tools.RunOptions.PermissionMode — NOT the TUI display names.
+const (
+	permissionModeAsk       = "ask"        // prompts for every tool (most restrictive)
+	permissionModeSpecDraft = "spec-draft" // spec-drafting only
+	permissionModeAuto      = "auto"       // auto-approve low-risk
+	permissionModeUnsafe    = "unsafe"     // approve everything (most permissive)
+)
+
 // permissionRank orders permission modes from least to most permissive so the
-// swarm can clamp a member to no more than its parent. Unknown modes rank as the
-// strictest (0) so they never accidentally widen access.
+// swarm can clamp a member to no more than its parent. Unknown/empty modes rank
+// as the strictest (0) so they never accidentally widen access.
 func permissionRank(mode string) int {
 	switch strings.TrimSpace(mode) {
-	case "plan":
+	case permissionModeAsk:
 		return 1
-	case "default":
+	case permissionModeSpecDraft:
 		return 2
-	case "acceptEdits":
+	case permissionModeAuto:
 		return 3
-	case "bypassPermissions":
+	case permissionModeUnsafe:
 		return 4
 	default:
 		return 0
