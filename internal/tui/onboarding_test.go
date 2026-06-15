@@ -1349,51 +1349,6 @@ func TestApplySetupOAuthDeviceCodeShowsCodeAndPolls(t *testing.T) {
 	}
 }
 
-func TestSetupProxyEntryRoutesToBrowse(t *testing.T) {
-	m := newModel(context.Background(), Options{Setup: SetupOptions{
-		Visible: true,
-		Providers: []SetupProviderOption{
-			{ID: "openrouter", Name: "OpenRouter", RequiresAuth: true, EnvVar: "OPENROUTER_API_KEY"},
-			{ID: "chatgpt-proxy", Name: "ChatGPT (local OAuth proxy)", DefaultModel: "gpt-5", Local: true},
-			{ID: "openai", Name: "OpenAI", RequiresAuth: true, EnvVar: "OPENAI_API_KEY"},
-		},
-	}})
-	m.width = 100
-	m.height = 30
-
-	m = pressSetupContinueOnce(m) // Welcome → Method
-	m.setup.selectedMethod = 0    // Sign in with OAuth
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(model) // OAuth provider list (incl. proxy entries)
-	for i, p := range m.setup.providers {
-		if p.ID == "chatgpt-proxy" {
-			m.setup.selected = i
-			break
-		}
-	}
-	if m.setupProvider().ID != "chatgpt-proxy" {
-		t.Fatalf("chatgpt-proxy not selectable in the OAuth list (got %q)", m.setupProvider().ID)
-	}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(model)
-	if m.setup.oauthMode {
-		t.Fatal("selecting a proxy entry should leave OAuth mode")
-	}
-	if m.setup.oauthPending || cmd != nil {
-		t.Fatalf("proxy entry must not start an OAuth login (pending=%v cmd!=nil=%v)", m.setup.oauthPending, cmd != nil)
-	}
-	if m.setup.stage != setupStageEndpoint {
-		t.Fatalf("proxy entry should route to the endpoint stage, got %v", m.setup.stage)
-	}
-	if m.setupProvider().ID != "chatgpt-proxy" {
-		t.Fatalf("selected provider after routing = %q, want chatgpt-proxy", m.setupProvider().ID)
-	}
-	if strings.TrimSpace(m.setup.baseURL) == "" {
-		t.Fatal("proxy entry should pre-fill the default proxy URL")
-	}
-}
-
 func TestApplySetupOAuthSuccessAdvancesToModel(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {

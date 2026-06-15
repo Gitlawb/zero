@@ -41,26 +41,24 @@ Running `/provider` opens a **"How do you want to connect?"** chooser:
   Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
 ```
 
-Pick **Sign in with OAuth** → a list of sign-in options → choose one:
+Pick **Sign in with OAuth** → the list of providers that do real OAuth → choose one:
 
 ```
 ❯ OpenRouter    browser sign-in · creates a key
   xAI (Grok)    browser or device code
-  ChatGPT       subscription · needs a local proxy
-  Claude        subscription · needs a local proxy
 ```
 
 - **OpenRouter / xAI** are real OAuth: your browser opens to approve → done (no
-  key to paste). OpenRouter mints a key; xAI stores a refreshable token.
+  key to paste). OpenRouter mints a key; xAI stores a refreshable token. The same
+  chooser appears in first-run onboarding.
 - **Device code (headless / SSH):** for a provider that supports it (xAI), press
   **d** on the list to get a code to enter on another device instead of opening a
   browser. On an SSH session or headless Linux box (no `DISPLAY`) device code is
   used automatically; set `ZERO_OAUTH_DEVICE=1` to force it anywhere. The CLI
   equivalent is `zero auth login xai --device`.
-- **ChatGPT / Claude** can't do in-app OAuth (see §2). Selecting them does **not**
-  fake a login — it drops you into the local-proxy setup (endpoint → model) with
-  the proxy defaults pre-filled, so you point Zero at a proxy you run. The same
-  first-run onboarding chooser offers the identical options.
+- **ChatGPT / Claude are intentionally not in this list** — they can't do in-app
+  OAuth (see §2). Use *Paste an API key / browse providers* + a local proxy
+  (`chatgpt-proxy` / `custom-anthropic-compatible`), as described below.
 
 ### Built-in OAuth providers (no env needed)
 

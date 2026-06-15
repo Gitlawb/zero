@@ -34,7 +34,6 @@ var expectedCatalogIDs = []string{
 	"gitlawb-opengateway",
 	"atomic-chat",
 	"chatgpt-proxy",
-	"claude-proxy",
 	"custom-openai-compatible",
 	"custom-anthropic-compatible",
 }
@@ -221,7 +220,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportGoogle:          {"google"},
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
-		TransportAnthropicCompat: {"minimax", "claude-proxy", "custom-anthropic-compatible"},
+		TransportAnthropicCompat: {"minimax", "custom-anthropic-compatible"},
 		TransportOpenAICompat:    {"ollama-cloud", "ollama", "lmstudio", "openrouter", "groq", "deepseek", "together", "dashscope", "moonshot", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "gitlawb-opengateway", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
@@ -283,27 +282,6 @@ func TestOAuthProviderClassification(t *testing.T) {
 	oauthIDs := descriptorIDs(OAuthProviders())
 	if want := []string{"openrouter", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
 		t.Fatalf("OAuthProviders() = %#v, want %#v", oauthIDs, want)
-	}
-	proxyIDs := descriptorIDs(OAuthProxyProviders())
-	if want := []string{"chatgpt-proxy", "claude-proxy"}; !reflect.DeepEqual(proxyIDs, want) {
-		t.Fatalf("OAuthProxyProviders() = %#v, want %#v", proxyIDs, want)
-	}
-
-	// Proxy entries must not claim real OAuth (no fake login), and real OAuth
-	// providers must not be flagged as proxies.
-	for _, id := range proxyIDs {
-		d, _ := Get(id)
-		if d.OAuth {
-			t.Fatalf("%q is a proxy entry but has OAuth=true", id)
-		}
-		if !d.Local || d.RequiresAuth {
-			t.Fatalf("%q proxy entry should be local and keyless, got Local=%v RequiresAuth=%v", id, d.Local, d.RequiresAuth)
-		}
-	}
-	for _, id := range oauthIDs {
-		if d, _ := Get(id); d.OAuthProxy {
-			t.Fatalf("%q is a real OAuth provider but flagged OAuthProxy", id)
-		}
 	}
 	if d, _ := Get("openrouter"); !d.OAuthMintsKey {
 		t.Fatal("openrouter should mint a key")

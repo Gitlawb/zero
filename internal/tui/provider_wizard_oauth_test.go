@@ -44,49 +44,13 @@ func TestProviderWizardMethodChooserOAuthPath(t *testing.T) {
 	if w.step != providerWizardStepProvider || !w.oauthMode {
 		t.Fatalf("OAuth method should enter the provider step in oauthMode, got step=%v oauth=%v", w.step, w.oauthMode)
 	}
-	want := len(providercatalog.OAuthProviders()) + len(providercatalog.OAuthProxyProviders())
-	if len(w.providers) != want {
-		t.Fatalf("OAuth path should list OAuth + proxy providers, got %d want %d", len(w.providers), want)
+	if len(w.providers) != len(providercatalog.OAuthProviders()) {
+		t.Fatalf("OAuth path should list only OAuth providers, got %d", len(w.providers))
 	}
 	for _, d := range w.providers {
-		if !d.OAuth && !d.OAuthProxy {
-			t.Fatalf("provider %q in the OAuth list is neither OAuth nor a proxy entry", d.ID)
+		if !d.OAuth {
+			t.Fatalf("non-OAuth provider %q in the OAuth list", d.ID)
 		}
-	}
-}
-
-func TestProviderWizardProxyEntryRoutesToBrowse(t *testing.T) {
-	m := mouseTestModel()
-	m.providerWizard = m.newProviderWizard()
-	m.providerWizard.selectedMethod = 0
-	next, _ := m.advanceProviderWizard() // → OAuth provider list
-	found := false
-	for i, d := range next.providerWizard.providers {
-		if d.ID == "chatgpt-proxy" {
-			next.providerWizard.selectedProvider = i
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("chatgpt-proxy proxy entry not offered in the OAuth list")
-	}
-	next, cmd := next.advanceProviderWizard()
-	w := next.providerWizard
-	if w.oauthMode {
-		t.Fatal("selecting a proxy entry should leave OAuth mode")
-	}
-	if w.oauthPending || cmd != nil {
-		t.Fatalf("proxy entry must not start an OAuth login (pending=%v cmd!=nil=%v)", w.oauthPending, cmd != nil)
-	}
-	if w.step != providerWizardStepEndpoint {
-		t.Fatalf("proxy entry should route to the endpoint step, got %v", w.step)
-	}
-	if w.currentProvider().ID != "chatgpt-proxy" {
-		t.Fatalf("selected provider = %q, want chatgpt-proxy", w.currentProvider().ID)
-	}
-	if strings.TrimSpace(w.baseURL) == "" {
-		t.Fatal("proxy entry should pre-fill the default proxy URL")
 	}
 }
 

@@ -30,25 +30,17 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	}
 	// OAuth path: advancing from the OAuth provider list starts the browser/device
 	// login instead of the key/endpoint flow.
-	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode {
+	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode && m.providerWizard.currentProvider().OAuth {
 		provider := m.providerWizard.currentProvider()
-		if provider.OAuth {
-			// Headless/SSH boxes can't open a browser — use device code there by
-			// default (the user can also force it with "d" from the list).
-			if provider.OAuthDeviceFlow && oauthPreferDeviceFlow() {
-				return m.startProviderDeviceLogin()
-			}
-			m.providerWizard.oauthPending = true
-			m.providerWizard.oauthDevice = false
-			m.providerWizard.oauthErr = ""
-			return m, providerWizardOAuthCmdFor(provider)
+		// Headless/SSH boxes can't open a browser — use device code there by
+		// default (the user can also force it with "d" from the list).
+		if provider.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+			return m.startProviderDeviceLogin()
 		}
-		// Subscription proxy entry (ChatGPT / Claude): no real OAuth login —
-		// route into the normal browse setup so the user points at their local
-		// proxy URL, then fall through to the standard advance below.
-		if provider.OAuthProxy {
-			m.providerWizard.selectBrowseProvider(provider.ID)
-		}
+		m.providerWizard.oauthPending = true
+		m.providerWizard.oauthDevice = false
+		m.providerWizard.oauthErr = ""
+		return m, providerWizardOAuthCmdFor(provider)
 	}
 	previous := m.providerWizard.step
 	m.providerWizard.advance()
