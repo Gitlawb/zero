@@ -500,6 +500,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyStatus = ""
 		}
 		return m, nil
+	case providerWizardOAuthMsg:
+		return m.applyProviderWizardOAuth(msg)
 	case tea.KeyMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)

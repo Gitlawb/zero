@@ -1,19 +1,67 @@
 package tui
 
 import (
+	"context"
 	"net"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
+
+// providerWizardOAuthMsg carries the result of an in-wizard browser OAuth login.
+type providerWizardOAuthMsg struct {
+	apiKey string
+	err    error
+}
+
+// applyProviderWizardOAuth folds an OAuth login result into the wizard: on
+// success the minted key fills the credential and the wizard advances; on failure
+// the (redacted) error is shown and the user can retry or paste a key.
+func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.Cmd) {
+	if m.providerWizard == nil {
+		return m, nil
+	}
+	m.providerWizard.oauthPending = false
+	if msg.err != nil {
+		m.providerWizard.oauthErr = redaction.ErrorMessage(msg.err, redaction.Options{})
+		return m, nil
+	}
+	m.providerWizard.apiKey = msg.apiKey
+	return m.advanceProviderWizard()
+}
+
+// providerWizardSupportsOAuth reports whether the credential step should offer a
+// browser "Log in with OAuth" option for this provider. Only providers whose
+// OAuth flow yields a credential usable directly (OpenRouter mints an API key)
+// are offered — subscription providers (ChatGPT/Claude) use the proxy preset, and
+// API-key-only providers just paste a key.
+func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
+	return provider.ID == "openrouter"
+}
+
+// providerWizardOAuthCmd runs the provider's browser OAuth login off the UI
+// goroutine and reports the outcome as a providerWizardOAuthMsg. Currently only
+// OpenRouter (PKCE → minted API key) is supported.
+func providerWizardOAuthCmd() tea.Cmd {
+	return func() tea.Msg {
+		key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
+			OpenBrowser: browser.OpenURL,
+			Timeout:     3 * time.Minute,
+		})
+		return providerWizardOAuthMsg{apiKey: key, err: err}
+	}
+}
 
 const maxProviderWizardProvidersVisible = 8
 const maxProviderWizardModelsVisible = 10
@@ -54,6 +102,8 @@ type providerWizardState struct {
 	modelLoading     bool
 	modelLoadError   string
 	discoveryToken   int
+	oauthPending     bool
+	oauthErr         string
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -125,6 +175,8 @@ func (wizard *providerWizardState) move(delta int) {
 		wizard.modelSource = ""
 		wizard.modelLoading = false
 		wizard.modelLoadError = ""
+		wizard.oauthPending = false
+		wizard.oauthErr = ""
 		wizard.refreshModels()
 	case providerWizardStepModel:
 		wizard.refreshModels()
@@ -327,9 +379,24 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	}
 	if m.providerWizard.step == providerWizardStepCredential {
+		// While a browser OAuth login is in flight, ignore input except Esc (which
+		// abandons the wizard; the background flow simply times out and is dropped).
+		if m.providerWizard.oauthPending {
+			if msg.Type == tea.KeyEsc {
+				m.providerWizard = nil
+			}
+			return m, nil
+		}
 		switch msg.Type {
 		case tea.KeyEsc:
 			m.providerWizard = nil
+			return m, nil
+		case tea.KeyCtrlO:
+			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
+				m.providerWizard.oauthPending = true
+				m.providerWizard.oauthErr = ""
+				return m, providerWizardOAuthCmd()
+			}
 			return m, nil
 		case tea.KeyRunes:
 			m.providerWizard.appendAPIKey(msg.Runes)
@@ -761,18 +828,37 @@ func (wizard *providerWizardState) renderNameStep(width int) []string {
 
 func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 	provider := wizard.currentProvider()
+	oauth := providerWizardSupportsOAuth(provider)
+
+	// In-flight browser OAuth: show a waiting state instead of the key prompt.
+	if wizard.oauthPending {
+		return []string{
+			zeroTheme.accent.Render("Logging in with OAuth"),
+			zeroTheme.ink.Render("Opening your browser to authorize — approve there, then return here."),
+			zeroTheme.faint.Render("If the browser didn't open, run:  zero auth openrouter"),
+			zeroTheme.faint.Render("Esc to cancel."),
+		}
+	}
+
 	env := firstProviderDisplayValue(provider.AuthEnvVars...)
 	value := zeroTheme.accent.Render("▌") + zeroTheme.faint.Render("paste key here")
 	if wizard.apiKey != "" {
 		value = zeroTheme.ink.Render(maskedProviderWizardKey(wizard.apiKey)) + zeroTheme.accent.Render("▌")
 	}
 	input := zeroTheme.userPrompt.Render("api key > ") + value
-	return []string{
+	lines := []string{
 		zeroTheme.accent.Render("Paste API key"),
 		zeroTheme.ink.Render(providerWizardCredentialInstruction(env)),
 		input,
 		zeroTheme.faint.Render("Pasted keys are hidden and saved in your user config."),
 	}
+	if oauth {
+		lines = append(lines, zeroTheme.accent.Render("or  ctrl+o  to log in with OAuth in the browser (no key needed)"))
+	}
+	if wizard.oauthErr != "" {
+		lines = append(lines, zeroTheme.red.Render("OAuth login failed: "+wizard.oauthErr))
+	}
+	return lines
 }
 
 func providerWizardCredentialInstruction(env string) string {
