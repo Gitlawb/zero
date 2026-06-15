@@ -267,9 +267,12 @@ func TestListenAndServeTLSServesAndCloses(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d lines, want 1", len(got))
 	}
-	// Close stops the accept loop.
+	// Close stops the accept loop; a second Close is a no-op (not an error).
 	if err := bridge.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+	if err := bridge.Close(); err != nil {
+		t.Fatalf("second Close should be a no-op, got: %v", err)
 	}
 	select {
 	case <-serveErr: // ListenAndServeTLS returned after Close

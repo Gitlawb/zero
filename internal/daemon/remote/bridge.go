@@ -125,6 +125,7 @@ func (b *Bridge) ListenAndServeTLS(addr string, tlsConfig *tls.Config) error {
 func (b *Bridge) Close() error {
 	b.mu.Lock()
 	listener := b.listener
+	b.listener = nil // clear so a repeat Close is a no-op, not a closed-listener error
 	b.mu.Unlock()
 	if listener != nil {
 		return listener.Close()

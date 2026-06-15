@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -52,7 +53,13 @@ func DialRemote(cfg RemoteConfig) (*daemon.Client, error) {
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", address, tlsConfig)
+	// Context-aware TLS dial (tls.DialWithDialer is deprecated and not
+	// cancellation-aware). The context bounds the dial + TLS handshake only; the
+	// returned conn is independent of it for the subsequent auth/stream I/O.
+	dialCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	dialer := &tls.Dialer{NetDialer: &net.Dialer{}, Config: tlsConfig}
+	conn, err := dialer.DialContext(dialCtx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("remote: dial %s: %w", address, err)
 	}
