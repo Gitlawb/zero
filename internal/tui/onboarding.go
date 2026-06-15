@@ -67,12 +67,13 @@ type setupOAuthMsg struct {
 	err        error
 }
 
-// setupOAuthProviderOptions filters the full provider list to the OAuth-capable
-// ones (using the catalog OAuth flag) for the OAuth method path.
+// setupOAuthProviderOptions filters the full provider list to the entries shown
+// in the OAuth method path: real OAuth providers plus the subscription proxy
+// entries (ChatGPT / Claude). Catalog order puts the real OAuth providers first.
 func setupOAuthProviderOptions(all []SetupProviderOption) []SetupProviderOption {
 	out := []SetupProviderOption{}
 	for _, option := range all {
-		if descriptor, ok := providercatalog.Get(option.ID); ok && descriptor.OAuth {
+		if descriptor, ok := providercatalog.Get(option.ID); ok && (descriptor.OAuth || descriptor.OAuthProxy) {
 			out = append(out, option)
 		}
 	}
@@ -410,6 +411,31 @@ func (m *model) moveSetupMethod(delta int) {
 	m.setup.selectedMethod = ((m.setup.selectedMethod+delta)%len(options) + len(options)) % len(options)
 }
 
+// setupSelectBrowseProvider leaves the OAuth path and switches to the full
+// provider list with the given id selected, pre-filling the catalog defaults.
+// Used to route a subscription proxy entry (ChatGPT / Claude) into the normal
+// endpoint/model setup instead of a real OAuth login.
+func (m model) setupSelectBrowseProvider(id string) model {
+	m.setup.oauthMode = false
+	m.setup.oauthPending = false
+	m.setup.oauthErr = ""
+	m.setup.providers = m.setup.allProviders
+	m.setup.selected = 0
+	for index, option := range m.setup.providers {
+		if option.ID == id {
+			m.setup.selected = index
+			break
+		}
+	}
+	descriptor := m.setupProviderDescriptor()
+	m.resetSetupModels()
+	m.setup.baseURL = descriptor.DefaultBaseURL
+	m.setup.modelQuery = descriptor.DefaultModel
+	m.setup.apiKey.SetValue("")
+	m.setup.name = ""
+	return m
+}
+
 // setupOAuthCmd runs the chosen provider's browser OAuth login off the UI
 // goroutine for first-run setup. Mirrors the /provider wizard's flow.
 func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
@@ -513,6 +539,14 @@ func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 				m.setup.oauthPending = true
 				m.setup.oauthErr = ""
 				return m, setupOAuthCmd(descriptor)
+			}
+			// Subscription proxy entry (ChatGPT / Claude): no real OAuth login —
+			// route into the normal browse setup for the local proxy URL.
+			if descriptor.OAuthProxy {
+				m = m.setupSelectBrowseProvider(descriptor.ID)
+				m.setup.stage = m.nextSetupStage()
+				m.setup.err = ""
+				return m, nil
 			}
 		}
 		if m.setup.stage == setupStageProvider {

@@ -58,6 +58,12 @@ type Descriptor struct {
 	// OAuthDeviceFlow reports that RFC 8628 device-code login is supported (for
 	// headless / SSH use) in addition to the browser flow.
 	OAuthDeviceFlow bool
+	// OAuthProxy reports that this is a subscription-via-local-proxy provider
+	// (ChatGPT / Claude). It appears in the "Sign in with OAuth" chooser as a
+	// proxy entry that routes to local-proxy setup rather than a real OAuth login,
+	// because the vendor's subscription token is not usable as a standard bearer
+	// (Cloudflare-gated / ToS-restricted). See docs/oauth-subscriptions.md.
+	OAuthProxy bool
 }
 
 func RuntimeSupported(descriptor Descriptor) bool {
@@ -113,7 +119,13 @@ var descriptors = []Descriptor{
 	// at a local proxy that holds the OAuth session and exposes an OpenAI-compatible
 	// endpoint. Local (no API key — the proxy authenticates); override the base URL
 	// for your proxy's port. See docs/oauth-subscriptions.md.
-	localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"),
+	oauthProxyProvider(localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt")),
+	// Claude (Pro/Max) subscription via a local Anthropic-compatible proxy. The
+	// same reasoning as chatgpt-proxy applies: a Claude subscription OAuth token is
+	// rejected/ToS-restricted for direct third-party use, so point this at a local
+	// proxy that holds the session. No API key (the proxy authenticates); override
+	// the base URL for your proxy's port. See docs/oauth-subscriptions.md.
+	oauthProxyProvider(localAnthropic("claude-proxy", "Claude (local OAuth proxy)", "http://localhost:8082", "claude-sonnet-4.5", "claude")),
 	openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible"),
 	anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible"),
 }
@@ -256,6 +268,13 @@ func oauthProvider(descriptor Descriptor, mintsKey bool, deviceFlow bool) Descri
 	return descriptor
 }
 
+// oauthProxyProvider marks a descriptor as a subscription-via-local-proxy entry
+// (ChatGPT / Claude) shown in the OAuth chooser; see Descriptor.OAuthProxy.
+func oauthProxyProvider(descriptor Descriptor) Descriptor {
+	descriptor.OAuthProxy = true
+	return descriptor
+}
+
 // OAuthProviders returns the catalog descriptors that support an in-app OAuth
 // login, in catalog order. It is the single source of truth for the wizard's
 // dedicated "Sign in with OAuth" provider list.
@@ -269,8 +288,28 @@ func OAuthProviders() []Descriptor {
 	return out
 }
 
+// OAuthProxyProviders returns the subscription-via-local-proxy descriptors
+// (ChatGPT / Claude) in catalog order. They are listed in the OAuth chooser after
+// the real OAuth providers, routing to local-proxy setup instead of a login.
+func OAuthProxyProviders() []Descriptor {
+	out := []Descriptor{}
+	for _, descriptor := range descriptors {
+		if descriptor.OAuthProxy {
+			out = append(out, descriptor)
+		}
+	}
+	return out
+}
+
 func localOpenAI(id string, name string, baseURL string, model string, aliases ...string) Descriptor {
 	descriptor := openAICompat(id, name, baseURL, model, nil, aliases...)
+	descriptor.RequiresAuth = false
+	descriptor.Local = true
+	return descriptor
+}
+
+func localAnthropic(id string, name string, baseURL string, model string, aliases ...string) Descriptor {
+	descriptor := anthropicCompat(id, name, baseURL, model, nil, aliases...)
 	descriptor.RequiresAuth = false
 	descriptor.Local = true
 	return descriptor

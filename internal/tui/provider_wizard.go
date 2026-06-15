@@ -150,10 +150,11 @@ func providerWizardMethodOptions() []providerWizardMethodOption {
 	return options
 }
 
-// providerWizardOAuthDescriptors returns the OAuth-capable providers as the
-// wizard's provider list (used after the OAuth method is chosen).
+// providerWizardOAuthDescriptors returns the provider list shown after the OAuth
+// method is chosen: the real OAuth providers first, then the subscription
+// proxy entries (ChatGPT / Claude) which route to local-proxy setup.
 func providerWizardOAuthDescriptors() []providercatalog.Descriptor {
-	return providercatalog.OAuthProviders()
+	return append(providercatalog.OAuthProviders(), providercatalog.OAuthProxyProviders()...)
 }
 
 type providerWizardModel struct {
@@ -203,6 +204,35 @@ func providerWizardProviders() []providercatalog.Descriptor {
 		providers = append(providers, descriptor)
 	}
 	return providers
+}
+
+// selectBrowseProvider leaves OAuth mode and switches to the full browse catalog
+// with the given provider id selected, pre-filling the catalog defaults so the
+// user can accept them. Used to route a subscription proxy entry (ChatGPT /
+// Claude) into the normal endpoint/model setup instead of a real OAuth login.
+func (wizard *providerWizardState) selectBrowseProvider(id string) {
+	if wizard == nil {
+		return
+	}
+	wizard.oauthMode = false
+	wizard.oauthPending = false
+	wizard.oauthErr = ""
+	wizard.providers = providerWizardProviders()
+	wizard.selectedProvider = 0
+	for index, provider := range wizard.providers {
+		if provider.ID == id {
+			wizard.selectedProvider = index
+			break
+		}
+	}
+	provider := wizard.currentProvider()
+	wizard.selectedModel = 0
+	wizard.modelSearch = provider.DefaultModel
+	wizard.baseURL = provider.DefaultBaseURL
+	wizard.profileName = ""
+	wizard.apiKey = ""
+	wizard.err = ""
+	wizard.refreshModels()
 }
 
 func (wizard *providerWizardState) currentProvider() providercatalog.Descriptor {
@@ -421,6 +451,11 @@ func providerWizardNeedsCredential(provider providercatalog.Descriptor) bool {
 }
 
 func providerWizardNeedsEndpoint(provider providercatalog.Descriptor) bool {
+	// Subscription proxy entries always need a user-supplied URL (the local
+	// proxy's port varies), as do the fully custom compatible providers.
+	if provider.OAuthProxy {
+		return true
+	}
 	switch provider.ID {
 	case "custom-openai-compatible", "custom-anthropic-compatible":
 		return true
@@ -953,6 +988,9 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 
 // providerWizardOAuthBadge is the faint mode hint shown next to OAuth providers.
 func providerWizardOAuthBadge(provider providercatalog.Descriptor) string {
+	if provider.OAuthProxy {
+		return "subscription · needs a local proxy"
+	}
 	if !provider.OAuth {
 		return ""
 	}

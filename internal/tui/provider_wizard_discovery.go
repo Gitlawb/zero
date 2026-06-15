@@ -27,10 +27,19 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	}
 	// OAuth path: advancing from the OAuth provider list starts the browser/device
 	// login instead of the key/endpoint flow.
-	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode && m.providerWizard.currentProvider().OAuth {
-		m.providerWizard.oauthPending = true
-		m.providerWizard.oauthErr = ""
-		return m, providerWizardOAuthCmdFor(m.providerWizard.currentProvider())
+	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode {
+		provider := m.providerWizard.currentProvider()
+		if provider.OAuth {
+			m.providerWizard.oauthPending = true
+			m.providerWizard.oauthErr = ""
+			return m, providerWizardOAuthCmdFor(provider)
+		}
+		// Subscription proxy entry (ChatGPT / Claude): no real OAuth login —
+		// route into the normal browse setup so the user points at their local
+		// proxy URL, then fall through to the standard advance below.
+		if provider.OAuthProxy {
+			m.providerWizard.selectBrowseProvider(provider.ID)
+		}
 	}
 	previous := m.providerWizard.step
 	m.providerWizard.advance()

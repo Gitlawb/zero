@@ -41,10 +41,21 @@ Running `/provider` opens a **"How do you want to connect?"** chooser:
   Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
 ```
 
-Pick **Sign in with OAuth** → a list of OAuth-capable providers → choose one →
-your browser opens to approve → done (no key to paste). OpenRouter mints a key;
-xAI stores a refreshable token. ChatGPT/Claude aren't here (they can't do in-app
-OAuth) — use "browse" + the proxy setup below.
+Pick **Sign in with OAuth** → a list of sign-in options → choose one:
+
+```
+❯ OpenRouter    browser sign-in · creates a key
+  xAI (Grok)    browser or device code
+  ChatGPT       subscription · needs a local proxy
+  Claude        subscription · needs a local proxy
+```
+
+- **OpenRouter / xAI** are real OAuth: your browser opens to approve → done (no
+  key to paste). OpenRouter mints a key; xAI stores a refreshable token.
+- **ChatGPT / Claude** can't do in-app OAuth (see §2). Selecting them does **not**
+  fake a login — it drops you into the local-proxy setup (endpoint → model) with
+  the proxy defaults pre-filled, so you point Zero at a proxy you run. The same
+  first-run onboarding chooser offers the identical options.
 
 ### Built-in OAuth providers (no env needed)
 
