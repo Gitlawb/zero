@@ -29,6 +29,9 @@ type searchResult struct {
 	Title   string
 	URL     string
 	Snippet string
+	// Score is an optional provider-supplied relevance signal in the [0, 1]
+	// range. Zero (the zero value) is treated as "absent" by the renderer.
+	Score float64
 }
 
 // searchBackend discovers URLs for a query. It is an interface so any hosted
@@ -66,6 +69,11 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 						Default:     defaultWebSearchLimit,
 						Minimum:     intPtr(1),
 						Maximum:     intPtr(maxWebSearchLimit),
+					},
+					"domains": {
+						Type:        "array",
+						Description: "Optional list of allowed hostnames; results outside these hosts are filtered out before they reach the model. Useful as a prompt-injection defense when you only want results from a known set of domains.",
+						Items:       &PropertySchema{Type: "string"},
 					},
 				},
 				Required:             []string{"query"},
@@ -123,6 +131,10 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	if limit > maxWebSearchLimit {
 		limit = maxWebSearchLimit
 	}
+	domains, err := stringListArgWebSearch(args, "domains")
+	if err != nil {
+		return errorResult("Error: Invalid arguments for web_search: " + err.Error())
+	}
 
 	if tool.backend == nil {
 		return errorResult("Error: no search backend configured. Set ZERO_WEBSEARCH_BASE_URL (and ZERO_WEBSEARCH_API_KEY) to enable web_search.")
@@ -135,6 +147,16 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	if err != nil {
 		return errorResult("Error performing web search: " + redactWebSearchText(err.Error()))
 	}
+	// Filter by domains BEFORE the empty-result short-circuit so a non-empty
+	// allowlist that ate every hit surfaces as a clear "no results matched
+	// domains" error rather than a misleading "no results" message.
+	if len(results) > 0 && len(domains) > 0 {
+		filtered, err := filterWebSearchByDomains(results, domains)
+		if err != nil {
+			return errorResult("Error: " + err.Error())
+		}
+		results = filtered
+	}
 	if len(results) == 0 {
 		return okResult("No results for query: " + redactWebSearchText(query))
 	}
@@ -146,6 +168,9 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 
 // formatSearchResults renders results as a compact numbered list:
 // "1. Title — URL" with the snippet indented on the next line.
+// If a result carries a non-zero Score, it is shown as " — score 0.91" after
+// the title; absence (zero value) is rendered without the score to keep the
+// common case tidy.
 func formatSearchResults(results []searchResult) string {
 	lines := make([]string, 0, len(results)*2)
 	for index, result := range results {
@@ -153,7 +178,11 @@ func formatSearchResults(results []searchResult) string {
 		if title == "" {
 			title = "(untitled)"
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s — %s", index+1, title, strings.TrimSpace(result.URL)))
+		header := fmt.Sprintf("%d. %s — %s", index+1, title, strings.TrimSpace(result.URL))
+		if result.Score > 0 {
+			header += fmt.Sprintf(" — score %.2f", result.Score)
+		}
+		lines = append(lines, header)
 		if snippet := strings.TrimSpace(result.Snippet); snippet != "" {
 			lines = append(lines, "   "+snippet)
 		}
@@ -260,13 +289,16 @@ func (backend *httpSearchBackend) Search(ctx context.Context, query string, limi
 	return parseSearchResults(body)
 }
 
-// parseSearchResults accepts either a bare array [{title,url,snippet}] or a
-// wrapped object {"results":[...]}, the two shapes common across providers.
+// parseSearchResults accepts either a bare array [{title,url,snippet,score}] or
+// a wrapped object {"results":[...]}, the two shapes common across providers.
+// The optional "score" field is forwarded when present; providers that omit
+// it leave searchResult.Score at the zero value and the renderer skips it.
 func parseSearchResults(body []byte) ([]searchResult, error) {
 	type rawResult struct {
-		Title   string `json:"title"`
-		URL     string `json:"url"`
-		Snippet string `json:"snippet"`
+		Title   string  `json:"title"`
+		URL     string  `json:"url"`
+		Snippet string  `json:"snippet"`
+		Score   float64 `json:"score,omitempty"`
 	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
@@ -276,7 +308,12 @@ func parseSearchResults(body []byte) ([]searchResult, error) {
 	convert := func(raw []rawResult) []searchResult {
 		out := make([]searchResult, 0, len(raw))
 		for _, item := range raw {
-			out = append(out, searchResult{Title: item.Title, URL: item.URL, Snippet: item.Snippet})
+			out = append(out, searchResult{
+				Title:   item.Title,
+				URL:     item.URL,
+				Snippet: item.Snippet,
+				Score:   item.Score,
+			})
 		}
 		return out
 	}
@@ -299,4 +336,114 @@ func parseSearchResults(body []byte) ([]searchResult, error) {
 
 func redactWebSearchText(value string) string {
 	return redaction.RedactString(value, redaction.Options{})
+}
+
+// stringListArgWebSearch reads an optional []string argument. The conventional
+// `[]any` shape is preferred (matches the rest of the tools package) but some
+// providers' tool-calling shapes emit `[]string` directly; tolerate both.
+func stringListArgWebSearch(args map[string]any, key string) ([]string, error) {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	raw, ok := value.([]any)
+	if !ok {
+		if asString, ok2 := value.([]string); ok2 {
+			return normalizeWebSearchDomainList(asString), nil
+		}
+		return nil, fmt.Errorf("%s must be a list of strings", key)
+	}
+	out := make([]string, 0, len(raw))
+	for index, item := range raw {
+		text, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a string", key, index)
+		}
+		out = append(out, text)
+	}
+	return normalizeWebSearchDomainList(out), nil
+}
+
+// normalizeWebSearchDomainList lowercases, strips scheme/www/path fragments,
+// drops empty entries, and de-duplicates while preserving input order.
+func normalizeWebSearchDomainList(domains []string) []string {
+	seen := make(map[string]struct{}, len(domains))
+	out := make([]string, 0, len(domains))
+	for _, raw := range domains {
+		host := canonicalizeWebSearchHost(raw)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	return out
+}
+
+// canonicalizeWebSearchHost extracts a bare lowercase hostname from a domain
+// string, accepting "react.dev", "https://react.dev/x", and "www.React.dev"
+// forms. Returns "" on empty/whitespace input. The "www." prefix is stripped
+// before lowercasing so case-insensitive matches like "WWW.react.dev" work.
+func canonicalizeWebSearchHost(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.Contains(trimmed, "://") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			return ""
+		}
+		trimmed = parsed.Host
+	}
+	trimmed = strings.TrimSpace(trimmed)
+	if i := strings.IndexAny(trimmed, "/?#"); i >= 0 {
+		trimmed = trimmed[:i]
+	}
+	trimmed = strings.ToLower(trimmed)
+	trimmed = strings.TrimPrefix(trimmed, "www.")
+	if trimmed == "" || strings.ContainsAny(trimmed, " \t\n") {
+		return ""
+	}
+	return trimmed
+}
+
+// filterWebSearchByDomains drops results whose host is not in the allowlist.
+// A result whose URL fails to parse is dropped (fail-closed). When the filter
+// eats every result, the error names the failing allowlist so the caller knows
+// the constraint, not the provider, is the cause.
+func filterWebSearchByDomains(results []searchResult, allowed []string) ([]searchResult, error) {
+	allowSet := make(map[string]struct{}, len(allowed))
+	for _, d := range allowed {
+		allowSet[d] = struct{}{}
+	}
+	out := make([]searchResult, 0, len(results))
+	for _, row := range results {
+		host := hostFromWebSearchURL(row.URL)
+		if host == "" {
+			// Unparseable URL: never let it through when an allowlist is set.
+			continue
+		}
+		if _, ok := allowSet[host]; !ok {
+			continue
+		}
+		out = append(out, row)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no web_search results matched domains=%v; loosen the allowlist or remove the domains argument", allowed)
+	}
+	return out, nil
+}
+
+func hostFromWebSearchURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed == nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	host = strings.TrimPrefix(host, "www.")
+	return host
 }

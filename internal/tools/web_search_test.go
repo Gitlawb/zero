@@ -256,3 +256,230 @@ func TestSameHostRedirectPolicy(t *testing.T) {
 		t.Fatal("redirect limit must be enforced")
 	}
 }
+
+// ---- new: domains allowlist + score field ----------------------------------
+
+func TestWebSearchDomainsFilterKeepsOnlyAllowedHosts(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "RSC", URL: "https://react.dev/rsc", Snippet: "Server components"},
+		{Title: "RFC", URL: "https://github.com/reactjs/rfcs", Snippet: "RFC 0188"},
+		{Title: "Other", URL: "https://stackoverflow.com/q/1", Snippet: "unrelated"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "react server components",
+		"domains": []any{"react.dev", "github.com"},
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, output = %q", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, "stackoverflow.com") {
+		t.Errorf("stackoverflow result must be filtered out, got: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "react.dev/rsc") || !strings.Contains(res.Output, "github.com/reactjs/rfcs") {
+		t.Errorf("allowed-host results missing, got: %s", res.Output)
+	}
+}
+
+func TestWebSearchDomainsFilterEmptyResultIsError(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "x", URL: "https://stackoverflow.com/q/1"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"react.dev"},
+	})
+	if res.Status != StatusError {
+		t.Fatalf("expected error when allowlist eats every result, got %v: %s", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Output, "no web_search results matched domains") {
+		t.Errorf("expected clear allowlist error, got: %s", res.Output)
+	}
+}
+
+func TestWebSearchDomainsFilterToleratesStringSlice(t *testing.T) {
+	// Some providers send []string instead of []any. The tool must accept both.
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://react.dev/x"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []string{"react.dev"},
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("expected ok for []string domains, got %v: %s", res.Status, res.Output)
+	}
+}
+
+func TestWebSearchDomainsFilterNormalizesSchemeAndCase(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://React.Dev/x"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"https://REACT.dev/path?ignored=1", "WWW.react.dev"},
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("expected ok after normalization, got %v: %s", res.Status, res.Output)
+	}
+}
+
+func TestWebSearchDomainsFilterStripsWWWFromResult(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://www.react.dev/x"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+	// Allowlist "react.dev" must still match a result that has www. in the URL.
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"react.dev"},
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("expected ok when result host has www., got %v: %s", res.Status, res.Output)
+	}
+}
+
+func TestWebSearchDomainsFilterRejectsMalformedURLs(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://react.dev/x"},
+		{Title: "bad", URL: "::::not a url::::"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"react.dev"},
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, output = %s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, "not a url") {
+		t.Errorf("malformed URL must be filtered out, got: %s", res.Output)
+	}
+}
+
+func TestWebSearchDomainsFilterRejectsBadArgType(t *testing.T) {
+	tool := newWebSearchToolWithBackend(&fakeSearchBackend{})
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": "react.dev", // string instead of array
+	})
+	if res.Status != StatusError {
+		t.Fatalf("expected error for non-array domains, got %v: %s", res.Status, res.Output)
+	}
+}
+
+func TestWebSearchRendersScoreWhenPresent(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "ranked", URL: "https://react.dev/rsc", Score: 0.91},
+		{Title: "unranked", URL: "https://react.dev/other"}, // zero score, must be omitted
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+	res := tool.Run(context.Background(), map[string]any{"query": "x"})
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v, output = %s", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Output, "score 0.91") {
+		t.Errorf("expected 'score 0.91' in output, got: %s", res.Output)
+	}
+	// The zero-score row must NOT render "score 0.00" — that would be noisy.
+	if strings.Contains(res.Output, "score 0.00") {
+		t.Errorf("zero score must not be rendered, got: %s", res.Output)
+	}
+}
+
+func TestHTTPSearchBackendParsesScoreField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"title":"A","url":"https://a.test","snippet":"sa","score":0.77},{"title":"B","url":"https://b.test","snippet":"sb"}]}`))
+	}))
+	defer server.Close()
+
+	backend := &httpSearchBackend{client: server.Client(), baseURL: server.URL}
+	results, err := backend.Search(context.Background(), "q", 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	if results[0].Score != 0.77 {
+		t.Errorf("first result Score = %v, want 0.77", results[0].Score)
+	}
+	if results[1].Score != 0 {
+		t.Errorf("absent score must be zero, got %v", results[1].Score)
+	}
+}
+
+func TestCanonicalizeWebSearchHost(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"react.dev", "react.dev"},
+		{"  REACT.dev  ", "react.dev"},
+		{"https://react.dev/x", "react.dev"},
+		{"http://www.react.dev", "react.dev"},
+		{"WWW.react.dev", "react.dev"},
+		{"react.dev/path?x=1", "react.dev"},
+		{"", ""},
+		{"   ", ""},
+		{"https://", ""},
+		{"react .dev", ""}, // space inside
+	}
+	for _, c := range cases {
+		if got := canonicalizeWebSearchHost(c.in); got != c.want {
+			t.Errorf("canonicalizeWebSearchHost(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestNormalizeWebSearchDomainList(t *testing.T) {
+	got := normalizeWebSearchDomainList([]string{"  REACT.dev  ", "https://github.com/x", "www.example.com", "react.dev", "", "   "})
+	want := []string{"react.dev", "github.com", "example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("normalizeWebSearchDomainList = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestFilterWebSearchByDomains(t *testing.T) {
+	rows := []searchResult{
+		{URL: "https://react.dev/x"},
+		{URL: "https://github.com/y"},
+		{URL: "https://stackoverflow.com/z"},
+	}
+	filtered, err := filterWebSearchByDomains(rows, []string{"react.dev", "github.com"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("filtered len = %d, want 2; got %v", len(filtered), filtered)
+	}
+	// Empty allowlist must be rejected when called directly with no rows that match.
+	_, err = filterWebSearchByDomains([]searchResult{{URL: "https://x.test"}}, []string{"nope.test"})
+	if err == nil {
+		t.Fatal("expected error when allowlist is non-empty and no rows match")
+	}
+}
+
+func TestWebSearchSchemaHasDomainsField(t *testing.T) {
+	tool := NewWebSearchTool()
+	domains := tool.Parameters().Properties["domains"]
+	if domains.Type != "array" {
+		t.Fatalf("domains.Type = %q, want array", domains.Type)
+	}
+	if domains.Items == nil || domains.Items.Type != "string" {
+		t.Fatalf("domains.Items = %#v, want array of string", domains.Items)
+	}
+	if domains.Description == "" {
+		t.Fatal("domains.Description should explain the prompt-injection defense")
+	}
+}
