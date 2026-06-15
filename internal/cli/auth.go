@@ -355,8 +355,10 @@ Commands:
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
   openrouter                                      Log in to OpenRouter in the browser; mints an API key
 
-A provider is any OAuth 2.0 / OIDC server you configure via env (no providers are
-built in). For a provider named <name>, set:
+A provider is any OAuth 2.0 / OIDC server. A few ship built-in presets you can use
+directly (e.g. "xai" via 'zero auth login xai'; "openrouter" via 'zero auth
+openrouter'); any preset field is overridable via the env vars below. For a custom
+provider named <name>, set:
   ZERO_OAUTH_<NAME>_CLIENT_ID       (required)
   ZERO_OAUTH_<NAME>_CLIENT_SECRET   (optional)
   ZERO_OAUTH_<NAME>_AUTHORIZE_URL   ZERO_OAUTH_<NAME>_TOKEN_URL

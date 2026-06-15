@@ -61,21 +61,29 @@ func (r *Registry) ResolveConfig(name string, env map[string]string) (Config, Fl
 	if err := ValidateProviderName(name); err != nil {
 		return Config{}, "", err
 	}
+	// A baked-in preset (if any) supplies defaults; each field is overridable by
+	// the matching ZERO_OAUTH_<NAME>_* env var (env wins).
+	preset, _ := lookupOAuthPreset(name)
 	cfg := Config{
-		ClientID:                    strings.TrimSpace(envValue(env, envKey(name, "CLIENT_ID"))),
-		ClientSecret:                strings.TrimSpace(envValue(env, envKey(name, "CLIENT_SECRET"))),
-		AuthorizationEndpoint:       strings.TrimSpace(envValue(env, envKey(name, "AUTHORIZE_URL"))),
-		TokenEndpoint:               strings.TrimSpace(envValue(env, envKey(name, "TOKEN_URL"))),
-		DeviceAuthorizationEndpoint: strings.TrimSpace(envValue(env, envKey(name, "DEVICE_URL"))),
-		IssuerURL:                   strings.TrimSpace(envValue(env, envKey(name, "ISSUER_URL"))),
-		Scopes:                      strings.Fields(envValue(env, envKey(name, "SCOPES"))),
+		ClientID:                    firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "CLIENT_ID"))), preset.ClientID),
+		ClientSecret:                firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "CLIENT_SECRET"))), preset.ClientSecret),
+		AuthorizationEndpoint:       firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "AUTHORIZE_URL"))), preset.AuthorizationEndpoint),
+		TokenEndpoint:               firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "TOKEN_URL"))), preset.TokenEndpoint),
+		DeviceAuthorizationEndpoint: firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "DEVICE_URL"))), preset.DeviceAuthorizationEndpoint),
+		IssuerURL:                   firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "ISSUER_URL"))), preset.IssuerURL),
+		Scopes:                      scopesOrPreset(envValue(env, envKey(name, "SCOPES")), preset.Scopes),
 	}
 	if cfg.ClientID == "" {
 		return Config{}, "", fmt.Errorf("oauth: provider %q is not configured; set %s (and its endpoints or an issuer)", name, envKey(name, "CLIENT_ID"))
 	}
 	var flow Flow
 	switch strings.ToLower(strings.TrimSpace(envValue(env, envKey(name, "FLOW")))) {
-	case "", string(FlowLoopback):
+	case "":
+		flow = preset.Flow
+		if flow == "" {
+			flow = FlowLoopback
+		}
+	case string(FlowLoopback):
 		flow = FlowLoopback
 	case string(FlowDevice):
 		flow = FlowDevice
