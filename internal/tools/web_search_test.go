@@ -103,6 +103,9 @@ func TestWebSearchRedactsBackendError(t *testing.T) {
 }
 
 func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
+	// web_search is registered only when a backend is configured.
+	t.Setenv("ZERO_WEBSEARCH_BACKEND", "")
+	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	found := false
 	for _, tool := range CoreNetworkTools() {
 		if tool.Name() == "web_search" {
@@ -110,7 +113,7 @@ func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("web_search should be registered in CoreNetworkTools()")
+		t.Fatal("web_search should be registered in CoreNetworkTools() when a backend is configured")
 	}
 }
 
