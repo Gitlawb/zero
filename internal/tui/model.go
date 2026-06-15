@@ -365,6 +365,10 @@ func newModel(ctx context.Context, options Options) model {
 		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
 		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
 	})
+	// Opt-in webhook fan-out (ZERO_NOTIFY_WEBHOOK_URL). Delivery failures stay
+	// silent here: the TUI owns the alt-screen, so writing to stderr would
+	// corrupt the display.
+	notify.MaybeAddWebhookSink(notifier, os.Getenv, nil)
 	notifier.SetFocused(true)
 
 	m := model{
