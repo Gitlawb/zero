@@ -43,6 +43,11 @@ func TestRequestDeviceCodeDefaultsInterval(t *testing.T) {
 	if auth.Interval != 5*time.Second {
 		t.Fatalf("default interval = %v, want 5s", auth.Interval)
 	}
+	// A response without expires_in must still get a bounded expiry (fail closed),
+	// so the poll loop's expiry gate stays active.
+	if auth.ExpiresAt.IsZero() {
+		t.Fatal("missing expires_in must default to a bounded ExpiresAt, got zero")
+	}
 }
 
 func TestPollDeviceTokenHonorsPendingThenSucceeds(t *testing.T) {
@@ -84,7 +89,9 @@ func TestPollDeviceTokenSlowDown(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := Config{ClientID: "c", TokenEndpoint: server.URL}
-	auth := DeviceAuth{DeviceCode: "dc", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(5 * time.Second)}
+	// Expiry well beyond the slow_down back-off (+5s) so the success path never
+	// depends on polling after the device code has expired.
+	auth := DeviceAuth{DeviceCode: "dc", Interval: 5 * time.Millisecond, ExpiresAt: time.Now().Add(30 * time.Second)}
 	tok, err := PollDeviceToken(context.Background(), server.Client(), cfg, auth, nil)
 	if err != nil {
 		t.Fatalf("PollDeviceToken (slow_down): %v", err)

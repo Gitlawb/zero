@@ -47,7 +47,9 @@ func TestRefreshSchedulerRefreshesBeforeExpiry(t *testing.T) {
 	}
 	// Expiry just past the buffer so the scheduled delay is ~0 and a refresh fires
 	// almost immediately.
-	_ = store.Save(ProviderKey("demo"), Token{AccessToken: "old", RefreshToken: "rt", ExpiresAt: time.Now().Add(15 * time.Millisecond)})
+	if err := store.Save(ProviderKey("demo"), Token{AccessToken: "old", RefreshToken: "rt", ExpiresAt: time.Now().Add(15 * time.Millisecond)}); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
 
 	s := NewRefreshScheduler()
 	s.Start(context.Background(), m, ProviderKey("demo"))
@@ -55,7 +57,11 @@ func TestRefreshSchedulerRefreshesBeforeExpiry(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if stored, _, _ := store.Load(ProviderKey("demo")); stored.AccessToken == "refreshed" {
+		stored, _, err := store.Load(ProviderKey("demo"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if stored.AccessToken == "refreshed" {
 			return // success
 		}
 		time.Sleep(5 * time.Millisecond)

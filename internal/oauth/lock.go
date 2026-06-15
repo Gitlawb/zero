@@ -33,8 +33,18 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 	for {
 		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
-			_, _ = f.WriteString(token)
-			_ = f.Close()
+			// A partial/failed write would leave a lock file without our token, so
+			// the releaser below could never delete it — stranding the lock for
+			// other processes. Fail closed: remove the file and surface the error.
+			if _, werr := f.WriteString(token); werr != nil {
+				_ = f.Close()
+				_ = os.Remove(lockPath)
+				return nil, fmt.Errorf("oauth: write token lock: %w", werr)
+			}
+			if cerr := f.Close(); cerr != nil {
+				_ = os.Remove(lockPath)
+				return nil, fmt.Errorf("oauth: close token lock: %w", cerr)
+			}
 			var released bool
 			return func() {
 				if released {

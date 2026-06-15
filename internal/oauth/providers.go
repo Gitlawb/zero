@@ -73,7 +73,7 @@ func (r *Registry) ResolveConfig(name string, env map[string]string) (Config, Fl
 	if cfg.ClientID == "" {
 		return Config{}, "", fmt.Errorf("oauth: provider %q is not configured; set %s (and its endpoints or an issuer)", name, envKey(name, "CLIENT_ID"))
 	}
-	flow := FlowLoopback
+	var flow Flow
 	switch strings.ToLower(strings.TrimSpace(envValue(env, envKey(name, "FLOW")))) {
 	case "", string(FlowLoopback):
 		flow = FlowLoopback

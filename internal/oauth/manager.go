@@ -135,19 +135,19 @@ func (m *Manager) resolveEndpoints(ctx context.Context, cfg Config) (Config, err
 	if cfg.AuthorizationEndpoint != "" && cfg.TokenEndpoint != "" && cfg.DeviceAuthorizationEndpoint != "" {
 		return cfg, nil
 	}
-	meta, err := m.discover(ctx, cfg.IssuerURL)
-	if err != nil {
-		// Non-fatal: pinned endpoints may already be sufficient for the chosen flow.
-		return cfg, nil
-	}
-	if cfg.AuthorizationEndpoint == "" {
-		cfg.AuthorizationEndpoint = meta.AuthorizationEndpoint
-	}
-	if cfg.TokenEndpoint == "" {
-		cfg.TokenEndpoint = meta.TokenEndpoint
-	}
-	if cfg.DeviceAuthorizationEndpoint == "" {
-		cfg.DeviceAuthorizationEndpoint = meta.DeviceAuthorizationEndpoint
+	// Discovery is best-effort: a failure is non-fatal because pinned endpoints
+	// may already be sufficient for the chosen flow. Only merge on success (and
+	// never return from the error branch, which would trip the nilerr linter).
+	if meta, err := m.discover(ctx, cfg.IssuerURL); err == nil {
+		if cfg.AuthorizationEndpoint == "" {
+			cfg.AuthorizationEndpoint = meta.AuthorizationEndpoint
+		}
+		if cfg.TokenEndpoint == "" {
+			cfg.TokenEndpoint = meta.TokenEndpoint
+		}
+		if cfg.DeviceAuthorizationEndpoint == "" {
+			cfg.DeviceAuthorizationEndpoint = meta.DeviceAuthorizationEndpoint
+		}
 	}
 	return cfg, nil
 }

@@ -77,6 +77,34 @@ func TestBuildAuthorizationURL(t *testing.T) {
 	}
 }
 
+func TestBuildAuthorizationURLIgnoresReservedExtras(t *testing.T) {
+	cfg := Config{
+		ClientID:              "c",
+		AuthorizationEndpoint: "https://auth.example.com/authorize",
+		// A hostile config tries to weaken the flow via extra params.
+		ExtraAuthParams: map[string]string{"state": "attacker", "code_challenge_method": "plain", "login_hint": "keep-me"},
+	}
+	pkce := PKCE{Challenge: "chal", Method: MethodS256}
+	raw, err := BuildAuthorizationURL(cfg, pkce, "real-state", "http://127.0.0.1:9/cb", map[string]string{"redirect_uri": "http://evil/cb"})
+	if err != nil {
+		t.Fatalf("BuildAuthorizationURL: %v", err)
+	}
+	parsed, _ := url.Parse(raw)
+	q := parsed.Query()
+	if q.Get("state") != "real-state" {
+		t.Fatalf("state overridden: %q", q.Get("state"))
+	}
+	if q.Get("code_challenge_method") != "S256" {
+		t.Fatalf("PKCE method downgraded: %q", q.Get("code_challenge_method"))
+	}
+	if q.Get("redirect_uri") != "http://127.0.0.1:9/cb" {
+		t.Fatalf("redirect_uri overridden: %q", q.Get("redirect_uri"))
+	}
+	if q.Get("login_hint") != "keep-me" {
+		t.Fatalf("non-reserved extra param should still apply: %q", q.Get("login_hint"))
+	}
+}
+
 func TestBuildAuthorizationURLRejectsPlain(t *testing.T) {
 	_, err := BuildAuthorizationURL(Config{AuthorizationEndpoint: "https://a/x"}, PKCE{Method: "plain"}, "s", "r", nil)
 	if !errors.Is(err, ErrPKCEDowngrade) {

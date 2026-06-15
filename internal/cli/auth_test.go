@@ -98,6 +98,24 @@ func TestRunAuthRefreshNoToken(t *testing.T) {
 	}
 }
 
+func TestRunAuthRejectsWrongFlags(t *testing.T) {
+	withAuthStore(t)
+	cases := [][]string{
+		{"auth", "login", "demo", "--watch"},       // watch is refresh-only
+		{"auth", "login", "demo", "--json"},        // json not for interactive login
+		{"auth", "status", "demo", "--device"},     // device is login-only
+		{"auth", "logout", "demo", "--scope", "x"}, // scope is login-only
+		{"auth", "refresh", "demo", "--json"},      // json not for refresh
+		{"auth", "login", "demo", "--scope", ""},   // empty scope rejected
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps(args, &stdout, &stderr, appDeps{}); code == exitSuccess {
+			t.Errorf("args %v should be rejected, got success", args)
+		}
+	}
+}
+
 func TestRunAuthHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {

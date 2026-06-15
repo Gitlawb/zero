@@ -6,11 +6,15 @@ import (
 	"time"
 )
 
+// maxSchedulerLoadErrors bounds consecutive token-load failures before the
+// scheduler gives up, so a transient error retries but a permanent one (e.g. a
+// deleted token) does not loop forever.
+const maxSchedulerLoadErrors = 5
+
 // RefreshScheduler proactively refreshes a stored provider token shortly before
-// it expires (mirrors token-refresh.js createTokenRefreshScheduler). It is an
-// OPTIMIZATION over the on-demand GetFresh path, never the source of truth: a
-// failed scheduled refresh is non-fatal and simply retried at the next expiry.
-// It is a no-op for a token with no refresh token or no expiry.
+// it expires. It is an OPTIMIZATION over the on-demand GetFresh path, never the
+// source of truth: a failed scheduled refresh is non-fatal and simply retried at
+// the next expiry. It is a no-op for a token with no refresh token or no expiry.
 type RefreshScheduler struct {
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -44,10 +48,27 @@ func (s *RefreshScheduler) Start(ctx context.Context, m *Manager, key string) {
 
 func (s *RefreshScheduler) loop(ctx context.Context, m *Manager, key string, done chan struct{}) {
 	defer close(done)
+	loadErrors := 0
 	for {
 		token, _, err := m.loadForKey(key)
-		// No token, no refresh token, or no expiry => nothing to schedule.
-		if err != nil || token.RefreshToken == "" || token.ExpiresAt.IsZero() {
+		if err != nil {
+			// A load error may be transient (a concurrent store write, a brief I/O
+			// hiccup): back off and retry rather than permanently stopping proactive
+			// refresh. Give up only after repeated consecutive failures.
+			loadErrors++
+			if loadErrors >= maxSchedulerLoadErrors {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(m.buffer):
+			}
+			continue
+		}
+		loadErrors = 0
+		// No refresh token or no expiry => nothing to schedule on a timer.
+		if token.RefreshToken == "" || token.ExpiresAt.IsZero() {
 			return
 		}
 		delay := s.delayUntilRefresh(token.ExpiresAt, m.buffer, m.now())

@@ -52,14 +52,34 @@ func BuildAuthorizationURL(cfg Config, pkce PKCE, state, redirectURI string, ext
 	if len(cfg.Scopes) > 0 {
 		query.Set("scope", strings.Join(cfg.Scopes, " "))
 	}
+	// Extra params must never override the reserved OAuth/PKCE fields above
+	// (e.g. forcing code_challenge_method=plain or rewriting state/redirect_uri),
+	// which would break the flow's security guarantees.
 	for k, v := range cfg.ExtraAuthParams {
+		if isReservedAuthParam(k) {
+			continue
+		}
 		query.Set(k, v)
 	}
 	for k, v := range extraParams {
+		if isReservedAuthParam(k) {
+			continue
+		}
 		query.Set(k, v)
 	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
+}
+
+// isReservedAuthParam reports whether a query key is one the engine controls and
+// must not be overridable by caller-supplied extra params.
+func isReservedAuthParam(key string) bool {
+	switch key {
+	case "response_type", "client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method":
+		return true
+	default:
+		return false
+	}
 }
 
 // validateTokenEndpoint refuses to send a credential to a token endpoint that is

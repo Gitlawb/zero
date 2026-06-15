@@ -14,6 +14,10 @@ import (
 
 const deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 
+// defaultDeviceCodeLifetime bounds a device authorization that omits expires_in,
+// so the expiry gate in PollDeviceToken is always active (fail closed).
+const defaultDeviceCodeLifetime = 10 * time.Minute
+
 // DeviceAuth is the result of an RFC 8628 device-authorization request.
 type DeviceAuth struct {
 	DeviceCode              string
@@ -92,9 +96,13 @@ func RequestDeviceCode(ctx context.Context, client *http.Client, cfg Config, now
 		VerificationURIComplete: parsed.VerificationURIComplete,
 		Interval:                interval,
 	}
-	if parsed.ExpiresIn > 0 {
-		auth.ExpiresAt = now().Add(time.Duration(parsed.ExpiresIn) * time.Second)
+	lifetime := time.Duration(parsed.ExpiresIn) * time.Second
+	if lifetime <= 0 {
+		// Fail closed: a response without expires_in must still get a bounded
+		// lifetime so the poll loop's expiry gate stays active.
+		lifetime = defaultDeviceCodeLifetime
 	}
+	auth.ExpiresAt = now().Add(lifetime)
 	return auth, nil
 }
 
@@ -118,6 +126,11 @@ func PollDeviceToken(ctx context.Context, client *http.Client, cfg Config, auth 
 		case <-ctx.Done():
 			return Token{}, fmt.Errorf("oauth: device authorization canceled: %w", ctx.Err())
 		case <-time.After(interval):
+		}
+		// Re-check expiry after sleeping: slow_down (or a long interval) can push
+		// the next poll past ExpiresAt, and we must not poll after the deadline.
+		if !auth.ExpiresAt.IsZero() && !auth.ExpiresAt.After(now()) {
+			return Token{}, errors.New("oauth: device code expired before authorization")
 		}
 		token, err := pollDeviceOnce(ctx, client, cfg, auth.DeviceCode, now)
 		switch {

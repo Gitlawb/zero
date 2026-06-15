@@ -303,11 +303,13 @@ func FormatStatuses(statuses []Status) string {
 	return b.String()
 }
 
+// envValue reads a variable. A non-nil env map is authoritative (hermetic): a
+// missing key returns "" rather than falling back to the process environment, so
+// a caller/test that passes a controlled map can never pick up ambient
+// ZERO_OAUTH_* / HOME / XDG_CONFIG_HOME values. Only a nil map uses os.Getenv.
 func envValue(env map[string]string, key string) string {
 	if env != nil {
-		if v, ok := env[key]; ok {
-			return v
-		}
+		return env[key]
 	}
 	return os.Getenv(key)
 }

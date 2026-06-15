@@ -49,8 +49,16 @@ type authArgs struct {
 	help       bool
 }
 
-func parseAuthArgs(args []string) (authArgs, error) {
+func parseAuthArgs(sub string, args []string) (authArgs, error) {
 	var parsed authArgs
+	addScope := func(scope string) error {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			return fmt.Errorf("--scope requires a non-empty value")
+		}
+		parsed.scopes = append(parsed.scopes, scope)
+		return nil
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -67,16 +75,51 @@ func parseAuthArgs(args []string) (authArgs, error) {
 				return authArgs{}, fmt.Errorf("--scope requires a value")
 			}
 			i++
-			parsed.scopes = append(parsed.scopes, strings.TrimSpace(args[i]))
+			if err := addScope(args[i]); err != nil {
+				return authArgs{}, err
+			}
 		case strings.HasPrefix(arg, "--scope="):
-			parsed.scopes = append(parsed.scopes, strings.TrimSpace(strings.TrimPrefix(arg, "--scope=")))
+			if err := addScope(strings.TrimPrefix(arg, "--scope=")); err != nil {
+				return authArgs{}, err
+			}
 		case strings.HasPrefix(arg, "-"):
 			return authArgs{}, fmt.Errorf("unknown flag %q", arg)
 		default:
 			parsed.positional = append(parsed.positional, arg)
 		}
 	}
+	if parsed.help {
+		return parsed, nil // help short-circuits flag validation
+	}
+	if err := validateAuthFlags(sub, parsed); err != nil {
+		return authArgs{}, err
+	}
 	return parsed, nil
+}
+
+// validateAuthFlags rejects flags a subcommand does not accept, so an ambiguous
+// invocation fails fast instead of silently ignoring a flag.
+func validateAuthFlags(sub string, a authArgs) error {
+	allowed := map[string]map[string]bool{
+		"login":   {"device": true, "scope": true},
+		"logout":  {"json": true},
+		"status":  {"json": true},
+		"refresh": {"watch": true},
+	}[sub]
+	bad := func(name string) error { return fmt.Errorf("zero auth %s does not accept %s", sub, name) }
+	if a.json && !allowed["json"] {
+		return bad("--json")
+	}
+	if a.device && !allowed["device"] {
+		return bad("--device")
+	}
+	if a.watch && !allowed["watch"] {
+		return bad("--watch")
+	}
+	if len(a.scopes) > 0 && !allowed["scope"] {
+		return bad("--scope")
+	}
+	return nil
 }
 
 // newAuthManager builds an oauth.Manager backed by the file store, printing the
@@ -100,16 +143,13 @@ func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 }
 
 func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	parsed, err := parseAuthArgs(args)
+	parsed, err := parseAuthArgs("login", args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
 	if parsed.help {
 		_ = writeAuthHelp(stdout)
 		return exitSuccess
-	}
-	if parsed.json {
-		return writeExecUsageError(stderr, "zero auth login does not support --json (it is interactive)")
 	}
 	if len(parsed.positional) != 1 {
 		return writeExecUsageError(stderr, "usage: zero auth login <provider> [--device] [--scope <scope>]")
@@ -133,7 +173,7 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 }
 
 func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	parsed, err := parseAuthArgs(args)
+	parsed, err := parseAuthArgs("logout", args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -174,7 +214,7 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 }
 
 func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	parsed, err := parseAuthArgs(args)
+	parsed, err := parseAuthArgs("status", args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
@@ -212,7 +252,7 @@ func runAuthStatus(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 }
 
 func runAuthRefresh(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
-	parsed, err := parseAuthArgs(args)
+	parsed, err := parseAuthArgs("refresh", args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
 	}
