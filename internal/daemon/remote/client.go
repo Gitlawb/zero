@@ -37,6 +37,23 @@ type RemoteConfig struct {
 // share one protocol. The server certificate is always verified (never
 // InsecureSkipVerify).
 func DialRemote(cfg RemoteConfig) (*daemon.Client, error) {
+	conn, err := dialAuthenticated(cfg, ModeSession)
+	if err != nil {
+		return nil, err
+	}
+	client, err := daemon.NewClientConn(conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
+// dialAuthenticated establishes a verified TLS connection, performs the
+// bearer-token auth handshake for the given mode, and returns the live conn with
+// its deadline cleared (ready for the subsequent daemon handshake or bundle
+// stream). The server certificate is always verified (never InsecureSkipVerify).
+func dialAuthenticated(cfg RemoteConfig, mode string) (net.Conn, error) {
 	address := strings.TrimSpace(cfg.Address)
 	if address == "" {
 		return nil, errors.New("remote: address is required")
@@ -65,7 +82,7 @@ func DialRemote(cfg RemoteConfig) (*daemon.Client, error) {
 	}
 	// Bound the auth handshake; the daemon handshake + stream run without a deadline.
 	_ = conn.SetDeadline(time.Now().Add(timeout))
-	if err := writeAuthRequest(conn, authRequest{Token: token, Version: daemon.ProtoVersion}); err != nil {
+	if err := writeAuthRequest(conn, authRequest{Token: token, Version: daemon.ProtoVersion, Mode: mode}); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("remote: send auth: %w", err)
 	}
@@ -79,7 +96,7 @@ func DialRemote(cfg RemoteConfig) (*daemon.Client, error) {
 		return nil, fmt.Errorf("%w: %s", ErrUnauthorized, resp.Message)
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return daemon.NewClientConn(conn)
+	return conn, nil
 }
 
 // clientTLSConfig builds a verifying client TLS config. It never disables

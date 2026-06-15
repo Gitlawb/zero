@@ -38,6 +38,8 @@ func runDaemon(args []string, stdout io.Writer, stderr io.Writer, _ appDeps) int
 		return runDaemonAttach(rest, stdout, stderr)
 	case "serve-remote":
 		return runDaemonServeRemote(rest, stdout, stderr)
+	case "link":
+		return runDaemonLink(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		return writeDaemonUsage(stdout, exitSuccess)
 	default:
@@ -56,14 +58,20 @@ Commands:
   run --session <id> [--cwd <dir>] [--prompt <text>] [exec flags...]
                             Create/route a session and stream its output.
   attach <session>          Attach to a running session's stream.
-  serve-remote --addr <host:port> --tls-cert <f> --tls-key <f>
+  serve-remote --addr <host:port> --tls-cert <f> --tls-key <f> [--bundle-dir <d>]
                             Serve an opt-in, TLS-only network bridge to this
                             daemon. Requires a bearer token in $ZERO_DAEMON_REMOTE_TOKEN
-                            (or $ZERO_DAEMON_REMOTE_TOKEN_FILE).
+                            (or $ZERO_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
+                            git-bundle uploads, extracted into per-link work trees.
+  link --remote <host:port> --repo <dir> --id <name> [--out <file>]
+                            Upload repo's git history to the remote as a bundle and
+                            print the extracted remote path. --out saves a session
+                            link file (0600). Accepts --token/--ca-cert/--server-name.
+  link --show <file>        Print a saved session link.
 
 run and attach accept --remote <host:port> [--token <t>] [--ca-cert <f>]
 [--server-name <name>] to drive a remote daemon over the bridge instead of the
-local socket.
+local socket. Use the link's remote path as --cwd to run against a linked repo.
 `)
 	return code
 }
@@ -399,7 +407,7 @@ func daemonDialError(flags remoteDialFlags, err error) string {
 // bridge. TLS and a bearer token are mandatory (fail closed): it refuses to
 // start without a cert/key pair and a token from the environment.
 func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int {
-	addr, certFile, keyFile := "", "", ""
+	addr, certFile, keyFile, bundleDir := "", "", "", ""
 	minVersion, maxConns := 0, 0
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -449,6 +457,14 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 				return writeExecUsageError(stderr, "--max-conns requires a value")
 			}
 			maxConns = atoiOrZero(v)
+		case a == "--bundle-dir":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--bundle-dir requires a value")
+			}
+			bundleDir = v
+		case strings.HasPrefix(a, "--bundle-dir="):
+			bundleDir = strings.TrimPrefix(a, "--bundle-dir=")
 		default:
 			return writeExecUsageError(stderr, fmt.Sprintf("unknown flag %q for daemon serve-remote", a))
 		}
@@ -491,7 +507,7 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	bridge, err := remote.NewBridge(remote.BridgeOptions{
-		Server: srv, Authenticator: auth, MinVersion: minVersion, MaxConnections: maxConns, Log: logf,
+		Server: srv, Authenticator: auth, MinVersion: minVersion, MaxConnections: maxConns, BundleDir: bundleDir, Log: logf,
 	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -522,6 +538,75 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 		srv.Shutdown()
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+}
+
+// runDaemonLink uploads a repo's git history to a remote bridge as a bundle
+// (link without --show), or prints a saved session link (--show <file>).
+func runDaemonLink(args []string, stdout io.Writer, stderr io.Writer) int {
+	var addr, repo, id, token, caCert, serverName, out, show string
+	// flags maps each "--name" to the string it sets; both "--name v" and
+	// "--name=v" forms are accepted.
+	flags := map[string]*string{
+		"--remote": &addr, "--repo": &repo, "--id": &id, "--token": &token,
+		"--ca-cert": &caCert, "--server-name": &serverName, "--out": &out, "--show": &show,
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "-h" || a == "--help" {
+			return writeDaemonUsage(stdout, exitSuccess)
+		}
+		name, inlineVal, hasInline := a, "", false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name, inlineVal, hasInline = a[:eq], a[eq+1:], true
+		}
+		dst, ok := flags[name]
+		if !ok {
+			return writeExecUsageError(stderr, fmt.Sprintf("unknown flag %q for daemon link", a))
+		}
+		if hasInline {
+			*dst = inlineVal
+			continue
+		}
+		if i+1 >= len(args) {
+			return writeExecUsageError(stderr, fmt.Sprintf("%s requires a value", name))
+		}
+		i++
+		*dst = args[i]
+	}
+
+	if strings.TrimSpace(show) != "" {
+		link, err := remote.LoadSessionLink(show)
+		if err != nil {
+			return writeAppError(stderr, err.Error(), exitCrash)
+		}
+		fmt.Fprintf(stdout, "link %s -> %s on %s\n", link.LinkID, link.RemotePath, link.Address)
+		return exitSuccess
+	}
+
+	if strings.TrimSpace(addr) == "" || strings.TrimSpace(repo) == "" || strings.TrimSpace(id) == "" {
+		return writeExecUsageError(stderr, "daemon link requires --remote, --repo, and --id (or --show <file>)")
+	}
+	if strings.TrimSpace(token) == "" {
+		token, _ = remote.TokenFromEnv() // best effort; UploadRepoBundle rejects an empty token
+	}
+	link, err := remote.UploadRepoBundle(remote.RemoteConfig{
+		Address:    addr,
+		Token:      token,
+		CACertFile: caCert,
+		ServerName: serverName,
+	}, repo, id)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	fmt.Fprintf(stdout, "uploaded %s; remote repo at %s\n", link.LinkID, link.RemotePath)
+	fmt.Fprintf(stdout, "run it with: zero daemon run --remote %s --cwd %s ...\n", link.Address, link.RemotePath)
+	if strings.TrimSpace(out) != "" {
+		if err := link.Save(out); err != nil {
+			return writeAppError(stderr, err.Error(), exitCrash)
+		}
+		fmt.Fprintf(stdout, "saved session link to %s\n", out)
+	}
+	return exitSuccess
 }
 
 // remoteDialFlags holds the optional flags that redirect run/attach to a remote

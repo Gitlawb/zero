@@ -16,6 +16,9 @@ const (
 	defaultMaxConnections   = 32
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultAuthFailDelay    = 250 * time.Millisecond
+	// defaultMaxBundleBytes caps a single uploaded git bundle (256 MiB) so a
+	// remote peer cannot exhaust the host's disk.
+	defaultMaxBundleBytes = 256 << 20
 )
 
 // Bridge serves authenticated remote connections and drives the local daemon's
@@ -27,6 +30,8 @@ type Bridge struct {
 	minVersion       int
 	handshakeTimeout time.Duration
 	authFailDelay    time.Duration
+	bundleDir        string
+	maxBundleBytes   int64
 	log              func(string)
 	sem              chan struct{}
 
@@ -51,7 +56,13 @@ type BridgeOptions struct {
 	HandshakeTimeout time.Duration
 	// AuthFailDelay slows brute-force attempts; <0 => none, 0 => default.
 	AuthFailDelay time.Duration
-	Log           func(string)
+	// BundleDir is the directory under which uploaded git bundles are extracted
+	// into per-link working trees. Empty disables bundle uploads entirely (a
+	// bundle-mode connection is then refused — opt-in, fail closed).
+	BundleDir string
+	// MaxBundleBytes caps a single uploaded bundle; 0 => default.
+	MaxBundleBytes int64
+	Log            func(string)
 }
 
 // NewBridge validates options and builds a Bridge.
@@ -85,6 +96,10 @@ func NewBridge(opts BridgeOptions) (*Bridge, error) {
 	if attest == nil {
 		attest = noopAttestation{}
 	}
+	maxBundleBytes := opts.MaxBundleBytes
+	if maxBundleBytes <= 0 {
+		maxBundleBytes = defaultMaxBundleBytes
+	}
 	return &Bridge{
 		server:           opts.Server,
 		auth:             opts.Authenticator,
@@ -92,6 +107,8 @@ func NewBridge(opts BridgeOptions) (*Bridge, error) {
 		minVersion:       minVersion,
 		handshakeTimeout: handshakeTimeout,
 		authFailDelay:    authFailDelay,
+		bundleDir:        strings.TrimSpace(opts.BundleDir),
+		maxBundleBytes:   maxBundleBytes,
 		log:              opts.Log,
 		sem:              make(chan struct{}, maxConns),
 	}, nil
@@ -179,13 +196,37 @@ func (b *Bridge) handle(conn net.Conn) {
 		b.deny(conn, "attestation failed")
 		return
 	}
+	// Resolve the connection mode before accepting it. Validating here (before the
+	// success response) lets the bridge fail closed: an unknown mode, or a bundle
+	// upload when bundle transfer is disabled, is denied without side effects.
+	mode := req.Mode
+	if mode == "" {
+		mode = ModeSession
+	}
+	switch mode {
+	case ModeSession:
+	case ModeBundle:
+		if b.bundleDir == "" {
+			b.deny(conn, "bundle transfer not enabled")
+			return
+		}
+	default:
+		b.deny(conn, "unsupported mode")
+		return
+	}
 	if err := writeAuthResponse(conn, authResponse{OK: true, Version: daemon.ProtoVersion}); err != nil {
 		_ = conn.Close()
 		return
 	}
-	// Clear the handshake deadline: a session may stream for a long time.
+	// Clear the handshake deadline: a session may stream, and a bundle upload may
+	// transfer many megabytes, for a long time.
 	_ = conn.SetDeadline(time.Time{})
-	b.server.ServeConn(conn) // performs the daemon handshake + one command, then closes conn
+	switch mode {
+	case ModeBundle:
+		b.handleBundle(conn) // receives + extracts the bundle, then closes conn
+	default:
+		b.server.ServeConn(conn) // performs the daemon handshake + one command, then closes conn
+	}
 }
 
 // deny rejects an unauthenticated connection after a small backoff (to slow

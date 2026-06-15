@@ -96,12 +96,23 @@ type noopAttestation struct{}
 
 func (noopAttestation) Verify(map[string]string) error { return nil }
 
+// Connection modes negotiated in the auth handshake. The default (empty) is a
+// daemon session, preserving the original behavior; "bundle" requests a one-shot
+// git-bundle upload instead of a session.
+const (
+	ModeSession = "session"
+	ModeBundle  = "bundle"
+)
+
 // authRequest is the first frame a remote client sends (before the daemon
 // hello). Token is never logged.
 type authRequest struct {
 	Token   string            `json:"token"`
 	Version int               `json:"version"`
 	Meta    map[string]string `json:"meta,omitempty"`
+	// Mode selects the connection's purpose: "" / "session" => a daemon session
+	// (default), "bundle" => a git-bundle upload. Unknown modes are rejected.
+	Mode string `json:"mode,omitempty"`
 }
 
 // authResponse is the bridge's reply to the auth handshake.
