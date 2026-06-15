@@ -32,6 +32,20 @@ When a login exists for a provider, the **OpenAI and Anthropic** providers send
 before. Tokens are stored 0600 (or the OS keyring with
 `ZERO_OAUTH_STORAGE=keyring`) and never logged. See `zero auth --help`.
 
+### In the setup wizard (`/provider`)
+
+Running `/provider` opens a **"How do you want to connect?"** chooser:
+
+```
+❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI)
+  Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
+```
+
+Pick **Sign in with OAuth** → a list of OAuth-capable providers → choose one →
+your browser opens to approve → done (no key to paste). OpenRouter mints a key;
+xAI stores a refreshable token. ChatGPT/Claude aren't here (they can't do in-app
+OAuth) — use "browse" + the proxy setup below.
+
 ### Built-in OAuth providers (no env needed)
 
 Two providers ship a working browser login out of the box:
