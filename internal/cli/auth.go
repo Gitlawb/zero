@@ -336,6 +336,7 @@ Endpoint URLs must be https (loopback exempt).
 Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
       --scope    Add an OAuth scope (repeatable)
+      --watch    Keep the token fresh in the foreground (refresh only)
       --json     Print result as JSON (status/logout)
   -h, --help     Show this help
 `)

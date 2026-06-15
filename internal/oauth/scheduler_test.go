@@ -14,7 +14,9 @@ import (
 func TestRefreshSchedulerNoRefreshTokenIsNoop(t *testing.T) {
 	m := managerFor(t, map[string]string{"ZERO_OAUTH_DEMO_CLIENT_ID": "c"}, nil)
 	// Token without a refresh token => scheduler must exit promptly (no-op).
-	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour)})
+	if err := m.store.Save(ProviderKey("demo"), Token{AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
 	s := NewRefreshScheduler()
 	s.Start(context.Background(), m, ProviderKey("demo"))
 	// Stop waits for the goroutine; if it didn't exit on its own this still returns
