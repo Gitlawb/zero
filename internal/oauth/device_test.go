@@ -10,6 +10,24 @@ import (
 	"time"
 )
 
+func TestRequestDeviceCodeSendsClientSecret(t *testing.T) {
+	var gotSecret string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotSecret = r.Form.Get("client_secret")
+		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"U","verification_uri":"https://x","expires_in":600,"interval":5}`))
+	}))
+	defer server.Close()
+	// A confidential client must authenticate on the device endpoint too.
+	_, err := RequestDeviceCode(context.Background(), server.Client(), Config{ClientID: "c", ClientSecret: "shh", DeviceAuthorizationEndpoint: server.URL}, nil)
+	if err != nil {
+		t.Fatalf("RequestDeviceCode: %v", err)
+	}
+	if gotSecret != "shh" {
+		t.Fatalf("client_secret = %q, want shh", gotSecret)
+	}
+}
+
 func TestRequestDeviceCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"device_code":"dc","user_code":"WXYZ-1234","verification_uri":"https://x/dev","verification_uri_complete":"https://x/dev?c=WXYZ","expires_in":600,"interval":3}`))

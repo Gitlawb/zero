@@ -57,6 +57,11 @@ func RequestDeviceCode(ctx context.Context, client *http.Client, cfg Config, now
 	}
 	form := url.Values{}
 	form.Set("client_id", cfg.ClientID)
+	if secret := trimmed(cfg.ClientSecret); secret != "" {
+		// Confidential clients must authenticate on the device endpoint too,
+		// consistent with the token poll (pollDeviceOnce).
+		form.Set("client_secret", secret)
+	}
 	if len(cfg.Scopes) > 0 {
 		form.Set("scope", strings.Join(cfg.Scopes, " "))
 	}

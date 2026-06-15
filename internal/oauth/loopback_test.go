@@ -32,6 +32,12 @@ func TestLoopbackCapturesCode(t *testing.T) {
 	}
 }
 
+func TestNewLoopbackListenerRejectsEmptyState(t *testing.T) {
+	if _, err := NewLoopbackListener("   "); err == nil {
+		t.Fatal("an empty CSRF state must be rejected (fail closed)")
+	}
+}
+
 func TestLoopbackRejectsStateMismatch(t *testing.T) {
 	l, err := NewLoopbackListener("expected-state")
 	if err != nil {

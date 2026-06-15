@@ -13,9 +13,8 @@ import (
 )
 
 // LoopbackListener is a single-use loopback HTTP server that captures an OAuth
-// redirect (?code=&state=) on 127.0.0.1 only. It mirrors auth-code-listener.ts /
-// CallbackServer.ts: bind an OS-assigned loopback port, verify the CSRF state,
-// hand back the code, then close.
+// redirect (?code=&state=) on 127.0.0.1 only: bind an OS-assigned loopback port,
+// verify the CSRF state, hand back the code, then close.
 type LoopbackListener struct {
 	listener net.Listener
 	state    string
@@ -32,6 +31,12 @@ type callbackResult struct {
 // begins serving. state is the CSRF value the callback must echo back. Call
 // RedirectURI to build the redirect_uri, then Wait for the code. Always Close.
 func NewLoopbackListener(state string) (*LoopbackListener, error) {
+	// Refuse an empty state: the callback check compares the query's state to this
+	// value, so an empty state would match a callback carrying no state at all,
+	// defeating CSRF protection (fail closed).
+	if strings.TrimSpace(state) == "" {
+		return nil, errors.New("oauth: loopback listener requires a non-empty CSRF state")
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("oauth: start loopback redirect listener: %w", err)
