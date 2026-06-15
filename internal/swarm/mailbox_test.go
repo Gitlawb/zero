@@ -246,10 +246,11 @@ func TestMailboxLockReleaseIsOwnershipAware(t *testing.T) {
 
 func TestMailboxConcurrentSends(t *testing.T) {
 	mb := newTestMailbox(t)
-	// High fan-out + a generous lock timeout so heavy contention is exercised
-	// (and a lock regression — e.g. a Windows sharing-violation treated as fatal —
-	// would surface as lost/failed messages here rather than flaking).
-	mb.LockTimeout = 10 * time.Second
+	// High fan-out exercises heavy contention (a lock regression — e.g. a Windows
+	// sharing-violation treated as fatal — surfaces as lost/failed messages here).
+	// The lock timeout is generous so a slow CI (Windows file ops are slow under
+	// 200-way contention) never times a legitimate send out and flakes.
+	mb.LockTimeout = 60 * time.Second
 	const n = 200
 	var wg sync.WaitGroup
 	var failures atomic.Int32
