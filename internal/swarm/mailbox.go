@@ -378,6 +378,8 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("swarm: timed out acquiring lock %s", filepath.Base(lockPath))
 		}
-		time.Sleep(20 * time.Millisecond)
+		// Short retry so a freed lock is re-acquired promptly under heavy
+		// contention (Windows file ops are slow; a coarse sleep starves waiters).
+		time.Sleep(2 * time.Millisecond)
 	}
 }
