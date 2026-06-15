@@ -1,0 +1,190 @@
+package swarm
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/tools"
+)
+
+func newToolSwarm(t *testing.T, l MemberLauncher) (*tools.Registry, *Swarm) {
+	t.Helper()
+	sw := newSwarmFor(t, l)
+	reg := tools.NewRegistry()
+	RegisterTools(reg, sw)
+	return reg, sw
+}
+
+func TestRegisterToolsRegistersAll(t *testing.T) {
+	reg, _ := newToolSwarm(t, newLauncher(okFor))
+	for _, name := range []string{SpawnToolName, SendToolName, InboxToolName, StatusToolName, HandoffToolName, CollectToolName} {
+		if _, ok := reg.Get(name); !ok {
+			t.Fatalf("tool %q not registered", name)
+		}
+	}
+}
+
+func TestSpawnToolThroughRegistry(t *testing.T) {
+	l := newLauncher(okFor)
+	reg, sw := newToolSwarm(t, l)
+	res := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate",
+		"task":       "do the thing",
+		"team":       "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m1", Cwd: "/work"})
+	if res.Status != tools.StatusOK {
+		t.Fatalf("spawn result status = %v, output=%q", res.Status, res.Output)
+	}
+	id := res.Meta["task_id"]
+	if id == "" {
+		t.Fatal("spawn must return a task_id in Meta")
+	}
+	waitFor(t, "spec recorded", func() bool { return len(l.recorded()) == 1 })
+	spec := l.recorded()[0]
+	if spec.Model != "m1" || spec.Cwd != "/work" {
+		t.Fatalf("policy/cwd not threaded into member: model=%q cwd=%q", spec.Model, spec.Cwd)
+	}
+	if _, ok := sw.Coordinator().Get(id); !ok {
+		t.Fatalf("task %q not tracked by coordinator", id)
+	}
+}
+
+func TestSpawnToolRequiresPermission(t *testing.T) {
+	reg, _ := newToolSwarm(t, newLauncher(okFor))
+	// swarm_spawn is a prompt tool: without a grant the registry refuses it.
+	res := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate", "task": "x",
+	}, tools.RunOptions{})
+	if res.Status != tools.StatusError || !strings.Contains(res.Output, "Permission required") {
+		t.Fatalf("ungranted spawn should be refused, got status=%v output=%q", res.Status, res.Output)
+	}
+}
+
+func TestSpawnToolValidation(t *testing.T) {
+	_, sw := newToolSwarm(t, newLauncher(okFor))
+	tool := &spawnTool{sw: sw}
+	if res := tool.Run(context.Background(), map[string]any{"task": "x"}); res.Status != tools.StatusError {
+		t.Fatal("missing agent_type must error")
+	}
+	if res := tool.Run(context.Background(), map[string]any{"agent_type": "teammate"}); res.Status != tools.StatusError {
+		t.Fatal("missing task must error")
+	}
+}
+
+func TestSendAndInboxTools(t *testing.T) {
+	reg, _ := newToolSwarm(t, newLauncher(okFor))
+	send := reg.RunWithOptions(context.Background(), SendToolName, map[string]any{
+		"to": "bob", "body": "ping", "team": "alpha", "subject": "hi",
+	}, tools.RunOptions{})
+	if send.Status != tools.StatusOK {
+		t.Fatalf("send status = %v output=%q", send.Status, send.Output)
+	}
+	inbox := reg.RunWithOptions(context.Background(), InboxToolName, map[string]any{
+		"agent": "bob", "team": "alpha",
+	}, tools.RunOptions{})
+	if inbox.Status != tools.StatusOK {
+		t.Fatalf("inbox status = %v", inbox.Status)
+	}
+	if !strings.Contains(inbox.Output, "ping") || !strings.Contains(inbox.Output, "[hi]") {
+		t.Fatalf("inbox output missing message: %q", inbox.Output)
+	}
+	if !strings.Contains(inbox.Output, "unread") {
+		t.Fatalf("first inbox read should show unread: %q", inbox.Output)
+	}
+}
+
+func TestSendToolValidation(t *testing.T) {
+	_, sw := newToolSwarm(t, newLauncher(okFor))
+	tool := &sendTool{sw: sw}
+	if res := tool.Run(context.Background(), map[string]any{"body": "x"}); res.Status != tools.StatusError {
+		t.Fatal("missing to must error")
+	}
+	if res := tool.Run(context.Background(), map[string]any{"to": "bob"}); res.Status != tools.StatusError {
+		t.Fatal("missing body must error")
+	}
+}
+
+func TestStatusAndCollectTools(t *testing.T) {
+	reg, sw := newToolSwarm(t, newLauncher(okFor))
+	spawn := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate", "task": "compute", "team": "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
+	id := spawn.Meta["task_id"]
+	waitFor(t, "task done", func() bool {
+		task, ok := sw.Coordinator().Get(id)
+		return ok && task.Status == StatusDone
+	})
+	status := reg.RunWithOptions(context.Background(), StatusToolName, map[string]any{"team": "alpha"}, tools.RunOptions{})
+	if status.Status != tools.StatusOK || !strings.Contains(status.Output, id) {
+		t.Fatalf("status output missing task: %q", status.Output)
+	}
+	collect := reg.RunWithOptions(context.Background(), CollectToolName, map[string]any{"team": "alpha"}, tools.RunOptions{})
+	if collect.Status != tools.StatusOK || !strings.Contains(collect.Output, "ok:compute") {
+		t.Fatalf("collect output missing result: %q", collect.Output)
+	}
+}
+
+func TestSpawnToolUnknownTypeListsAvailable(t *testing.T) {
+	_, sw := newToolSwarm(t, newLauncher(okFor))
+	tool := &spawnTool{sw: sw}
+	res := tool.RunWithOptions(context.Background(), map[string]any{
+		"agent_type": "ghost", "task": "x",
+	}, tools.RunOptions{})
+	if res.Status != tools.StatusError || !strings.Contains(res.Output, "available agent types") {
+		t.Fatalf("unknown type should list available agents, got %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "teammate") {
+		t.Fatalf("available agents should include builtins, got %q", res.Output)
+	}
+}
+
+func TestNewWithUserDefinitions(t *testing.T) {
+	used := false
+	sw, err := New(Options{
+		BaseDir:  t.TempDir(),
+		Launcher: newLauncher(okFor),
+		Definitions: []Definition{{
+			AgentType:    "researcher",
+			SystemPrompt: func(PromptContext) string { used = true; return "research" },
+		}},
+	})
+	if err != nil {
+		t.Fatalf("New with definitions: %v", err)
+	}
+	t.Cleanup(sw.Close)
+	if _, err := sw.Spawn(Policy{Model: "m"}, "team", "researcher", "find things", ""); err != nil {
+		t.Fatalf("Spawn user-defined agent: %v", err)
+	}
+	waitFor(t, "researcher used", func() bool { return used })
+
+	// A bad definition makes New fail closed.
+	if _, err := New(Options{BaseDir: t.TempDir(), Launcher: newLauncher(okFor), Definitions: []Definition{{AgentType: "  "}}}); err == nil {
+		t.Fatal("New with a blank-agentType definition must error")
+	}
+}
+
+func TestHandoffToolThroughRegistry(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate
+	reg, sw := newToolSwarm(t, l)
+	spawn := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate", "task": "long", "team": "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
+	origID := spawn.Meta["task_id"]
+	waitFor(t, "running", func() bool {
+		task, ok := sw.Coordinator().Get(origID)
+		return ok && task.Status == StatusRunning
+	})
+	res := reg.RunWithOptions(context.Background(), HandoffToolName, map[string]any{
+		"task_id": origID, "to_agent_type": "subagent", "note": "carry on", "team": "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
+	if res.Status != tools.StatusOK {
+		t.Fatalf("handoff status = %v output=%q", res.Status, res.Output)
+	}
+	if res.Meta["previous_task_id"] != origID || res.Meta["task_id"] == "" {
+		t.Fatalf("handoff meta wrong: %+v", res.Meta)
+	}
+	close(gate)
+}

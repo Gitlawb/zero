@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/skills"
 	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Gitlawb/zero/internal/swarm"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -594,12 +596,37 @@ func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.R
 	return registry
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) (*specialist.Runtime, error) {
+// agentToolRuntime bundles the specialist runtime with the swarm it backs so
+// their lifetimes (and shutdown) stay paired: registerSpecialistTools brings up
+// both, closeSpecialistRuntime tears down both.
+type agentToolRuntime struct {
+	specialist *specialist.Runtime
+	swarm      *swarm.Swarm
+}
+
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	return specialist.RegisterTools(registry, specialist.Executor{Paths: paths})
+	executor := specialist.Executor{Paths: paths}
+	runtime, err := specialist.RegisterTools(registry, executor)
+	if err != nil {
+		return nil, err
+	}
+	// The swarm reuses the same specialist executor to launch each member, so
+	// every member runs under the orchestrator's sandbox + policy. Mailbox state
+	// lives under the workspace so its files fall within the sandbox write rules.
+	sw, err := swarm.New(swarm.Options{
+		BaseDir:  filepath.Join(workspaceRoot, ".zero", "swarm"),
+		Launcher: swarm.NewSpecialistLauncher(executor),
+	})
+	if err != nil {
+		runtime.Close()
+		return nil, err
+	}
+	swarm.RegisterTools(registry, sw)
+	return &agentToolRuntime{specialist: runtime, swarm: sw}, nil
 }
 
 func shouldRegisterExecSpecialistTools(options execOptions) bool {
@@ -621,12 +648,17 @@ func closeMCPRuntime(stderr io.Writer, runtime mcpToolRuntime) {
 	}
 }
 
-func closeSpecialistRuntime(stderr io.Writer, runtime *specialist.Runtime) {
+func closeSpecialistRuntime(stderr io.Writer, runtime *agentToolRuntime) {
 	if runtime == nil {
 		return
 	}
-	if err := runtime.Close(); err != nil {
-		_, _ = fmt.Fprintf(stderr, "[zero] specialist_cleanup_error: %s\n", err)
+	if runtime.swarm != nil {
+		runtime.swarm.Close()
+	}
+	if runtime.specialist != nil {
+		if err := runtime.specialist.Close(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "[zero] specialist_cleanup_error: %s\n", err)
+		}
 	}
 }
 

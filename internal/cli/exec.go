@@ -19,7 +19,6 @@ import (
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/specialist"
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -163,7 +162,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.allowEscalation {
 		registry.Register(tools.NewEscalateModelTool())
 	}
-	var specialistRuntime *specialist.Runtime
+	var specialistRuntime *agentToolRuntime
 	if shouldRegisterExecSpecialistTools(options) {
 		var err error
 		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot)
