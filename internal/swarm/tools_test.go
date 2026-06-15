@@ -30,7 +30,7 @@ func newToolSwarm(t *testing.T, l MemberLauncher) (*tools.Registry, *Swarm) {
 
 func TestRegisterToolsRegistersAll(t *testing.T) {
 	reg, _ := newToolSwarm(t, newLauncher(okFor))
-	for _, name := range []string{SpawnToolName, SendToolName, InboxToolName, StatusToolName, HandoffToolName, CollectToolName} {
+	for _, name := range []string{SpawnToolName, SendToolName, InboxToolName, StatusToolName, HandoffToolName, CollectToolName, ScheduleToolName} {
 		if _, ok := reg.Get(name); !ok {
 			t.Fatalf("tool %q not registered", name)
 		}

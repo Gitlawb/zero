@@ -1,0 +1,198 @@
+package swarm
+
+import (
+	"testing"
+	"time"
+)
+
+// testTicker returns a ticker factory backed by a single unbounded-handshake
+// channel: each send on ticks unblocks exactly one run-loop iteration, so a test
+// drives fires deterministically with no real time.
+func testTicker(ticks chan time.Time) tickerFunc {
+	return func(time.Duration) (<-chan time.Time, func()) {
+		return ticks, func() {}
+	}
+}
+
+func findJob(jobs []JobStatus, id string) (JobStatus, bool) {
+	for _, j := range jobs {
+		if j.ID == id {
+			return j, true
+		}
+	}
+	return JobStatus{}, false
+}
+
+func TestSchedulerFiresAndCountsRuns(t *testing.T) {
+	l := newLauncher(okFor) // members complete immediately
+	sw := newSwarmFor(t, l)
+	sched := sw.Scheduler()
+	ticks := make(chan time.Time)
+	sched.newTicker = testTicker(ticks)
+
+	id, err := sched.Add(Policy{Model: "m"}, "team", "teammate", "ping", "", Schedule{Every: time.Hour, MaxRuns: 3})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		ticks <- time.Time{}
+		want := i + 1
+		waitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == want })
+	}
+
+	// After MaxRuns the job retires itself.
+	waitFor(t, "job retired", func() bool { _, ok := findJob(sched.List(), id); return !ok })
+	if got := len(l.recorded()); got != 3 {
+		t.Fatalf("spawned %d members, want 3", got)
+	}
+	if done := sw.Coordinator().Summarize().Done; done != 3 {
+		t.Fatalf("done = %d, want 3", done)
+	}
+}
+
+func TestSchedulerSkipsWhilePreviousRuns(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate // members block until released
+	sw := newSwarmFor(t, l)
+	sched := sw.Scheduler()
+	ticks := make(chan time.Time)
+	sched.newTicker = testTicker(ticks)
+
+	id, err := sched.Add(Policy{Model: "m"}, "team", "teammate", "ping", "", Schedule{Every: time.Hour})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Fire 1: spawns and the member stays running (gated).
+	ticks <- time.Time{}
+	waitFor(t, "first spawn", func() bool { return len(l.recorded()) == 1 })
+
+	// Fire 2: previous still running => skipped, no new spawn.
+	ticks <- time.Time{}
+	waitFor(t, "skip recorded", func() bool {
+		j, ok := findJob(sched.List(), id)
+		return ok && j.Skipped == 1
+	})
+	if got := len(l.recorded()); got != 1 {
+		t.Fatalf("a skip must not spawn: recorded %d, want 1", got)
+	}
+
+	// Release the first member, then fire 3: previous terminal => spawns again.
+	close(gate)
+	waitFor(t, "first done", func() bool { return sw.Coordinator().Summarize().Done == 1 })
+	ticks <- time.Time{}
+	waitFor(t, "second spawn", func() bool { return len(l.recorded()) == 2 })
+
+	j, ok := findJob(sched.List(), id)
+	if !ok {
+		t.Fatal("job should still be active (unbounded)")
+	}
+	if j.Runs != 2 || j.Skipped != 1 {
+		t.Fatalf("job runs=%d skipped=%d, want 2/1", j.Runs, j.Skipped)
+	}
+}
+
+func TestSchedulerAddValidation(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	sched := sw.Scheduler()
+
+	if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Millisecond}); err == nil {
+		t.Fatal("sub-second interval should be rejected")
+	}
+	if _, err := sched.Add(Policy{}, "team", "nope", "t", "", Schedule{Every: time.Hour}); err == nil {
+		t.Fatal("unknown agent type should be rejected")
+	}
+	if _, err := sched.Add(Policy{}, "team", "teammate", "   ", "", Schedule{Every: time.Hour}); err == nil {
+		t.Fatal("empty task should be rejected")
+	}
+	if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour, MaxRuns: -1}); err == nil {
+		t.Fatal("negative max_runs should be rejected")
+	}
+}
+
+func TestSchedulerCancel(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	sched := sw.Scheduler()
+	ticks := make(chan time.Time)
+	sched.newTicker = testTicker(ticks) // never ticked => never fires
+
+	id, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if !sched.Cancel(id) {
+		t.Fatal("Cancel of an active job should return true")
+	}
+	if _, ok := findJob(sched.List(), id); ok {
+		t.Fatal("cancelled job should be gone from List")
+	}
+	if sched.Cancel(id) {
+		t.Fatal("Cancel of an unknown job should return false")
+	}
+}
+
+func TestSchedulerCloseStopsJobs(t *testing.T) {
+	sw, err := New(Options{BaseDir: t.TempDir(), Launcher: newLauncher(okFor)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sched := sw.Scheduler()
+	ticks := make(chan time.Time)
+	sched.newTicker = testTicker(ticks)
+	for i := 0; i < 3; i++ {
+		if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour}); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	sw.Close() // must return (wg waits) and leave no active jobs
+	if got := len(sched.List()); got != 0 {
+		t.Fatalf("after Close, %d jobs remain, want 0", got)
+	}
+	if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour}); err == nil {
+		t.Fatal("Add after Close should fail")
+	}
+}
+
+func TestNextDailyDelay(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 6, 15, 10, 0, 0, 0, loc)
+	if got := nextDailyDelay(now, 11, 0); got != time.Hour {
+		t.Fatalf("ahead-today delay = %s, want 1h", got)
+	}
+	if got := nextDailyDelay(now, 9, 0); got != 23*time.Hour {
+		t.Fatalf("passed-today delay = %s, want 23h", got)
+	}
+	// Exactly now => next is tomorrow (strictly-after guard).
+	if got := nextDailyDelay(now, 10, 0); got != 24*time.Hour {
+		t.Fatalf("equal-now delay = %s, want 24h", got)
+	}
+}
+
+func TestParseClock(t *testing.T) {
+	h, m, err := parseClock(" 09:30 ")
+	if err != nil || h != 9 || m != 30 {
+		t.Fatalf("parseClock(09:30) = %d,%d,%v", h, m, err)
+	}
+	for _, bad := range []string{"24:00", "10:60", "9", "x:y", "10:", ":30", "-1:00"} {
+		if _, _, err := parseClock(bad); err == nil {
+			t.Fatalf("parseClock(%q) should error", bad)
+		}
+	}
+}
+
+func TestSwarmInt(t *testing.T) {
+	if v, ok := swarmInt(map[string]any{"n": float64(5)}, "n"); !ok || v != 5 {
+		t.Fatalf("float64 => %d,%v", v, ok)
+	}
+	if v, ok := swarmInt(map[string]any{"n": "7"}, "n"); !ok || v != 7 {
+		t.Fatalf("string => %d,%v", v, ok)
+	}
+	if _, ok := swarmInt(map[string]any{"n": "x"}, "n"); ok {
+		t.Fatal("non-numeric string should not parse")
+	}
+	if _, ok := swarmInt(nil, "n"); ok {
+		t.Fatal("nil args should not parse")
+	}
+}

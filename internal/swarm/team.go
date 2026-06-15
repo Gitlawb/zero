@@ -64,10 +64,11 @@ type Swarm struct {
 	baseCtx context.Context
 	cancel  context.CancelFunc
 
-	mu      sync.Mutex
-	teams   map[string]*Team
-	taskCwd map[string]string // taskID -> cwd, for handoff/adoption relaunch
-	idSeq   atomic.Uint64
+	mu        sync.Mutex
+	teams     map[string]*Team
+	taskCwd   map[string]string // taskID -> cwd, for handoff/adoption relaunch
+	scheduler *Scheduler        // lazily created by Scheduler(); nil until first use
+	idSeq     atomic.Uint64
 }
 
 // Team is a named set of concurrently-running members with a bounded slot count
@@ -136,11 +137,29 @@ func New(opts Options) (*Swarm, error) {
 }
 
 // Close cancels every running member's context and releases resources. It is
-// safe to call more than once.
+// safe to call more than once. The scheduler is closed first so no new spawn
+// fires after shutdown begins.
 func (s *Swarm) Close() {
+	s.mu.Lock()
+	sched := s.scheduler
+	s.mu.Unlock()
+	if sched != nil {
+		sched.Close()
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
+}
+
+// Scheduler returns the swarm's recurring-spawn scheduler, creating it on first
+// use. Scheduling is opt-in: until a job is added the scheduler does nothing.
+func (s *Swarm) Scheduler() *Scheduler {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scheduler == nil {
+		s.scheduler = newScheduler(s)
+	}
+	return s.scheduler
 }
 
 // rememberCwd records a task's working dir so a handoff/adoption relaunch keeps it.

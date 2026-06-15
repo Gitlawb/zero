@@ -30,6 +30,7 @@ func RegisterTools(registry *tools.Registry, sw *Swarm) {
 	registry.Register(&statusTool{sw: sw})
 	registry.Register(&handoffTool{sw: sw})
 	registry.Register(&collectTool{sw: sw})
+	registry.Register(&scheduleTool{sw: sw})
 }
 
 // policyFrom derives the member-inheritance policy from the live tool options so
