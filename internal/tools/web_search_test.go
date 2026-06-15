@@ -483,3 +483,106 @@ func TestWebSearchSchemaHasDomainsField(t *testing.T) {
 		t.Fatal("domains.Description should explain the prompt-injection defense")
 	}
 }
+
+// TestWebSearchDomainsFilterRejectsAllInvalidInputs covers the fail-closed
+// contract: when the caller passes a 'domains' argument but every entry is
+// invalid (e.g. all whitespace, all with embedded spaces), the tool must
+// error rather than silently return unfiltered results. The whole point of
+// the parameter is the prompt-injection defense; an unfiltered result set
+// would defeat it.
+func TestWebSearchDomainsFilterRejectsAllInvalidInputs(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "x", URL: "https://react.dev/x"},
+	}}
+	tool := newWebSearchToolWithBackend(backend)
+
+	cases := []struct {
+		name    string
+		domains []any
+	}{
+		{"all whitespace", []any{"   ", "\t", "\n"}},
+		{"empty strings", []any{"", ""}},
+		{"embedded spaces", []any{"react .dev", "github .com"}},
+		{"mixed invalid", []any{"", "   ", "react .dev"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := tool.Run(context.Background(), map[string]any{
+				"query":   "x",
+				"domains": c.domains,
+			})
+			if res.Status != StatusError {
+				t.Fatalf("expected error when all domains are invalid, got %v: %s", res.Status, res.Output)
+			}
+			if !strings.Contains(res.Output, "no valid hostnames") {
+				t.Errorf("expected 'no valid hostnames' in error, got: %s", res.Output)
+			}
+			if backend.gotQuery != "" {
+				t.Errorf("backend must not have been called when domains are invalid; got query %q", backend.gotQuery)
+			}
+		})
+	}
+}
+
+// TestWebSearchDomainsFilterAcceptsHostPort covers the canonicalization
+// contract: an allowlist entry that includes a port WITH a scheme (e.g. the
+// result of a model passing "https://react.dev:443/path") must still match
+// a result URL on the same hostname. The CodeRabbit-flagged bug was that
+// the canonicalizer was using parsed.Host (which includes ":443") rather
+// than parsed.Hostname() (which strips the port), so a "react.dev" allowlist
+// silently never matched results from "https://react.dev:443/...". The fix
+// uses Hostname(), so this test locks in the corrected contract.
+func TestWebSearchDomainsFilterAcceptsHostPort(t *testing.T) {
+	cases := []struct {
+		name        string
+		allowlist   []any
+		expectMatch bool
+	}{
+		{"with explicit https port", []any{"https://react.dev:443/path"}, true},
+		{"with explicit http port", []any{"http://react.dev:80/x"}, true},
+		{"scheme-less host:port is rejected", []any{"react.dev:9999"}, false}, // not a valid hostname
+		{"port on different host", []any{"github.com:443"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			backend := &fakeSearchBackend{results: []searchResult{
+				{Title: "ok", URL: "https://react.dev/x"},
+			}}
+			tool := newWebSearchToolWithBackend(backend)
+			res := tool.Run(context.Background(), map[string]any{
+				"query":   "x",
+				"domains": c.allowlist,
+			})
+			if c.expectMatch {
+				if res.Status != StatusOK {
+					t.Fatalf("expected match, got %v: %s", res.Status, res.Output)
+				}
+				if !strings.Contains(res.Output, "react.dev/x") {
+					t.Errorf("expected react.dev result, got: %s", res.Output)
+				}
+			} else {
+				if res.Status != StatusError {
+					t.Fatalf("expected no-match error, got %v: %s", res.Status, res.Output)
+				}
+			}
+		})
+	}
+}
+
+func TestCanonicalizeWebSearchHostStripsPort(t *testing.T) {
+	// Lock in the contract that parsed.Host (which includes ":443") is NOT
+	// used; parsed.Hostname() is. CodeRabbit flagged this inconsistency.
+	cases := []struct {
+		in, want string
+	}{
+		{"https://react.dev:443/x", "react.dev"},
+		{"http://react.dev:80", "react.dev"},
+		{"https://api.react.dev:8443/v1", "api.react.dev"},
+		{"https://react.dev", "react.dev"},
+	}
+	for _, c := range cases {
+		if got := canonicalizeWebSearchHost(c.in); got != c.want {
+			t.Errorf("canonicalizeWebSearchHost(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

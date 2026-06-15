@@ -131,9 +131,16 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	if limit > maxWebSearchLimit {
 		limit = maxWebSearchLimit
 	}
-	domains, err := stringListArgWebSearch(args, "domains")
+	domains, domainsProvided, err := stringListArgWebSearch(args, "domains")
 	if err != nil {
 		return errorResult("Error: Invalid arguments for web_search: " + err.Error())
+	}
+	// Fail closed: the caller asked for an allowlist, but every entry was
+	// invalid (or the list was empty). Silently dropping the filter would
+	// turn a constrained search into an unconstrained one, defeating the
+	// prompt-injection defense the parameter exists to provide.
+	if domainsProvided && len(domains) == 0 {
+		return errorResult("Error: web_search 'domains' argument was provided but contained no valid hostnames; remove the argument or pass valid hostnames")
 	}
 
 	if tool.backend == nil {
@@ -341,27 +348,33 @@ func redactWebSearchText(value string) string {
 // stringListArgWebSearch reads an optional []string argument. The conventional
 // `[]any` shape is preferred (matches the rest of the tools package) but some
 // providers' tool-calling shapes emit `[]string` directly; tolerate both.
-func stringListArgWebSearch(args map[string]any, key string) ([]string, error) {
+//
+// The returned provided bool is true when the caller passed a "domains" key at
+// all (even with an empty array or all-invalid entries). That lets Run
+// distinguish "no allowlist" from "allowlist that normalized to empty" — the
+// latter is a fail-closed error, not a silent permission to skip filtering.
+func stringListArgWebSearch(args map[string]any, key string) (domains []string, provided bool, err error) {
 	value, ok := args[key]
 	if !ok || value == nil {
-		return nil, nil
+		return nil, false, nil
 	}
+	provided = true
 	raw, ok := value.([]any)
 	if !ok {
 		if asString, ok2 := value.([]string); ok2 {
-			return normalizeWebSearchDomainList(asString), nil
+			return normalizeWebSearchDomainList(asString), true, nil
 		}
-		return nil, fmt.Errorf("%s must be a list of strings", key)
+		return nil, true, fmt.Errorf("%s must be a list of strings", key)
 	}
 	out := make([]string, 0, len(raw))
 	for index, item := range raw {
 		text, ok := item.(string)
 		if !ok {
-			return nil, fmt.Errorf("%s[%d] must be a string", key, index)
+			return nil, true, fmt.Errorf("%s[%d] must be a string", key, index)
 		}
 		out = append(out, text)
 	}
-	return normalizeWebSearchDomainList(out), nil
+	return normalizeWebSearchDomainList(out), true, nil
 }
 
 // normalizeWebSearchDomainList lowercases, strips scheme/www/path fragments,
@@ -397,7 +410,11 @@ func canonicalizeWebSearchHost(raw string) string {
 		if err != nil {
 			return ""
 		}
-		trimmed = parsed.Host
+		// Hostname() strips the port so allowlist entries like
+		// "https://react.dev:443/path" normalize the same as "react.dev".
+		// Using parsed.Host here would leave ":443" in the string and
+		// silently break every match against a result URL on port 443.
+		trimmed = parsed.Hostname()
 	}
 	trimmed = strings.TrimSpace(trimmed)
 	if i := strings.IndexAny(trimmed, "/?#"); i >= 0 {
