@@ -30,7 +30,13 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode {
 		provider := m.providerWizard.currentProvider()
 		if provider.OAuth {
+			// Headless/SSH boxes can't open a browser — use device code there by
+			// default (the user can also force it with "d" from the list).
+			if provider.OAuthDeviceFlow && oauthPreferDeviceFlow() {
+				return m.startProviderDeviceLogin()
+			}
 			m.providerWizard.oauthPending = true
+			m.providerWizard.oauthDevice = false
 			m.providerWizard.oauthErr = ""
 			return m, providerWizardOAuthCmdFor(provider)
 		}

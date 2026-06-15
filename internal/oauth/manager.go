@@ -132,6 +132,45 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (Status, error) 
 	return m.statusFor(key)
 }
 
+// PrepareDeviceLogin resolves the provider config and requests an RFC 8628
+// device code, returning the user-facing DeviceAuth (verification URI + user
+// code) and the resolved config. It is split from the token poll
+// (CompleteDeviceLogin) so a UI can display the code to the user while waiting
+// for authorization. The CLI's monolithic Login(Device:true) is unaffected.
+func (m *Manager) PrepareDeviceLogin(ctx context.Context, opts LoginOptions) (DeviceAuth, Config, error) {
+	cfg, _, err := m.registry.ResolveConfig(opts.Provider, m.env)
+	if err != nil {
+		return DeviceAuth{}, Config{}, err
+	}
+	if len(opts.ExtraScopes) > 0 {
+		cfg.Scopes = append(append([]string{}, cfg.Scopes...), opts.ExtraScopes...)
+	}
+	cfg, err = m.resolveEndpoints(ctx, cfg)
+	if err != nil {
+		return DeviceAuth{}, Config{}, err
+	}
+	auth, err := RequestDeviceCode(ctx, m.client, cfg, m.now)
+	if err != nil {
+		return DeviceAuth{}, Config{}, err
+	}
+	return auth, cfg, nil
+}
+
+// CompleteDeviceLogin polls for the token authorized via PrepareDeviceLogin and
+// stores it under "provider:<name>", returning a redaction-safe status. Pass the
+// cfg and auth returned by PrepareDeviceLogin.
+func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg Config, auth DeviceAuth) (Status, error) {
+	token, err := PollDeviceToken(ctx, m.client, cfg, auth, m.now)
+	if err != nil {
+		return Status{}, err
+	}
+	key := ProviderKey(provider)
+	if err := m.store.Save(key, token); err != nil {
+		return Status{}, err
+	}
+	return m.statusFor(key)
+}
+
 // resolveEndpoints fills missing authorize/token/device endpoints from issuer
 // discovery (RFC 8414 then OIDC), leaving any explicitly-pinned endpoint intact.
 func (m *Manager) resolveEndpoints(ctx context.Context, cfg Config) (Config, error) {

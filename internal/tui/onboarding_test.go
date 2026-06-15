@@ -1287,6 +1287,68 @@ func TestSetupMethodChooserOAuthPath(t *testing.T) {
 	}
 }
 
+func setupAtOAuthList(t *testing.T) model {
+	t.Helper()
+	m := newModel(context.Background(), Options{Setup: SetupOptions{
+		Visible: true,
+		Providers: []SetupProviderOption{
+			{ID: "openrouter", Name: "OpenRouter", RequiresAuth: true, EnvVar: "OPENROUTER_API_KEY"},
+			{ID: "xai", Name: "xAI", DefaultModel: "grok-4", RequiresAuth: true, EnvVar: "XAI_API_KEY"},
+		},
+	}})
+	m.width = 100
+	m.height = 30
+	m = pressSetupContinueOnce(m) // Welcome → Method
+	m.setup.selectedMethod = 0    // Sign in with OAuth
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return updated.(model)
+}
+
+func TestSetupDeviceShortcutStartsDeviceFlow(t *testing.T) {
+	m := setupAtOAuthList(t)
+	for i, p := range m.setup.providers {
+		if p.ID == "xai" {
+			m.setup.selected = i
+			break
+		}
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m = updated.(model)
+	if !m.setup.oauthPending || !m.setup.oauthDevice {
+		t.Fatalf("'d' should start device login (pending=%v device=%v)", m.setup.oauthPending, m.setup.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("'d' should return the device-prepare command")
+	}
+}
+
+func TestApplySetupOAuthDeviceCodeShowsCodeAndPolls(t *testing.T) {
+	m := setupAtOAuthList(t)
+	for i, p := range m.setup.providers {
+		if p.ID == "xai" {
+			m.setup.selected = i
+			break
+		}
+	}
+	m.setup.oauthPending = true
+	m.setup.oauthDevice = true
+
+	res, cmd := m.applySetupOAuthDeviceCode(setupOAuthDeviceMsg{
+		providerID: "xai", userCode: "WXYZ-9", verifyURL: "https://x.ai/device",
+	})
+	m = res.(model)
+	if m.setup.deviceUserCode != "WXYZ-9" || m.setup.deviceVerificationURI != "https://x.ai/device" {
+		t.Fatalf("device code not stored: %+v", m.setup)
+	}
+	if cmd == nil {
+		t.Fatal("device-code msg should start the poll command")
+	}
+	view := strings.Join(m.setupOAuthWaitingLines(72), "\n")
+	if !strings.Contains(view, "WXYZ-9") || !strings.Contains(view, "x.ai/device") {
+		t.Fatalf("waiting render missing device code/uri:\n%s", view)
+	}
+}
+
 func TestSetupProxyEntryRoutesToBrowse(t *testing.T) {
 	m := newModel(context.Background(), Options{Setup: SetupOptions{
 		Visible: true,

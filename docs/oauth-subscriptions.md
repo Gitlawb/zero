@@ -52,6 +52,11 @@ Pick **Sign in with OAuth** → a list of sign-in options → choose one:
 
 - **OpenRouter / xAI** are real OAuth: your browser opens to approve → done (no
   key to paste). OpenRouter mints a key; xAI stores a refreshable token.
+- **Device code (headless / SSH):** for a provider that supports it (xAI), press
+  **d** on the list to get a code to enter on another device instead of opening a
+  browser. On an SSH session or headless Linux box (no `DISPLAY`) device code is
+  used automatically; set `ZERO_OAUTH_DEVICE=1` to force it anywhere. The CLI
+  equivalent is `zero auth login xai --device`.
 - **ChatGPT / Claude** can't do in-app OAuth (see §2). Selecting them does **not**
   fake a login — it drops you into the local-proxy setup (endpoint → model) with
   the proxy defaults pre-filled, so you point Zero at a proxy you run. The same

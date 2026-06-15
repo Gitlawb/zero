@@ -104,6 +104,95 @@ func TestProviderWizardMethodChooserBrowsePath(t *testing.T) {
 	}
 }
 
+func selectWizardOAuthProvider(t *testing.T, m model, id string) model {
+	t.Helper()
+	for i, d := range m.providerWizard.providers {
+		if d.ID == id {
+			m.providerWizard.selectedProvider = i
+			return m
+		}
+	}
+	t.Fatalf("provider %q not in the OAuth list", id)
+	return m
+}
+
+func TestProviderWizardDeviceShortcutStartsDeviceFlow(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth list
+	m = selectWizardOAuthProvider(t, next, "xai")
+
+	out, cmd := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
+		t.Fatalf("'d' should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
+	}
+	if cmd == nil {
+		t.Fatal("'d' should return the device-prepare command")
+	}
+}
+
+func TestProviderWizardDeviceCodeMsgShowsCodeAndPolls(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard()
+	m = selectWizardOAuthProvider(t, next, "xai")
+	m.providerWizard.oauthPending = true
+	m.providerWizard.oauthDevice = true
+
+	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
+		providerID: "xai", userCode: "ABCD-1234", verifyURL: "https://x.ai/device",
+	})
+	if out.providerWizard.deviceUserCode != "ABCD-1234" || out.providerWizard.deviceVerificationURI != "https://x.ai/device" {
+		t.Fatalf("device code not stored: %+v", out.providerWizard)
+	}
+	if cmd == nil {
+		t.Fatal("device-code msg should start the poll command")
+	}
+	view := strings.Join(out.providerWizard.renderOAuthWaiting(72), "\n")
+	if !strings.Contains(view, "ABCD-1234") || !strings.Contains(view, "x.ai/device") {
+		t.Fatalf("waiting render missing device code/uri:\n%s", view)
+	}
+}
+
+func TestProviderWizardDeviceErrorSurfaced(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.oauthPending = true
+	m.providerWizard.oauthDevice = true
+
+	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
+		providerID: "xai", err: errors.New("device endpoint unreachable"),
+	})
+	if out.providerWizard.oauthPending || out.providerWizard.oauthDevice {
+		t.Fatal("device error should clear pending/device state")
+	}
+	if out.providerWizard.oauthErr == "" {
+		t.Fatal("device error should surface a message")
+	}
+	if cmd != nil {
+		t.Fatal("device error should not start a poll")
+	}
+}
+
+func TestProviderWizardOAuthSuccessClearsDeviceState(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.oauthPending = true
+	m.providerWizard.oauthDevice = true
+	m.providerWizard.deviceUserCode = "X-1"
+	m.providerWizard.deviceVerificationURI = "https://x.ai/device"
+
+	out, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{tokenLogin: true})
+	if out.providerWizard.oauthDevice || out.providerWizard.deviceUserCode != "" || out.providerWizard.deviceVerificationURI != "" {
+		t.Fatalf("success should clear device state: %+v", out.providerWizard)
+	}
+	if out.providerWizard.step != providerWizardStepModel {
+		t.Fatalf("success should advance to the model step, got %v", out.providerWizard.step)
+	}
+}
+
 func TestProviderWizardOAuthDispatchFromList(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()

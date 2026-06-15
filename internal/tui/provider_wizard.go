@@ -51,8 +51,29 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 	// selection.
 	m.providerWizard.err = ""
 	m.providerWizard.oauthErr = ""
+	m.providerWizard.oauthDevice = false
+	m.providerWizard.deviceUserCode = ""
+	m.providerWizard.deviceVerificationURI = ""
 	m.providerWizard.step = providerWizardStepModel
 	return m, m.providerModelDiscoveryCmd()
+}
+
+// applyProviderWizardDeviceCode handles phase 1 of device-code login: show the
+// user_code + verification URI, then kick off phase 2 (the token poll). On error
+// the redacted message is surfaced and the login is abandoned.
+func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (model, tea.Cmd) {
+	if m.providerWizard == nil || !m.providerWizard.oauthPending {
+		return m, nil
+	}
+	if msg.err != nil {
+		m.providerWizard.oauthPending = false
+		m.providerWizard.oauthDevice = false
+		m.providerWizard.oauthErr = redaction.ErrorMessage(msg.err, redaction.Options{})
+		return m, nil
+	}
+	m.providerWizard.deviceUserCode = msg.userCode
+	m.providerWizard.deviceVerificationURI = msg.verifyURL
+	return m, providerWizardDevicePollCmd(msg.providerID, msg.cfg, msg.auth)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -103,6 +124,58 @@ func runProviderTokenLogin(name string) error {
 	defer cancel()
 	_, err = manager.Login(ctx, oauth.LoginOptions{Provider: name})
 	return err
+}
+
+// providerWizardDeviceCodeMsg carries the result of phase 1 (RequestDeviceCode):
+// the user_code + verification URI to display, plus the cfg/auth to poll with.
+type providerWizardDeviceCodeMsg struct {
+	providerID string
+	userCode   string
+	verifyURL  string
+	cfg        oauth.Config
+	auth       oauth.DeviceAuth
+	err        error
+}
+
+// providerWizardDevicePrepareCmd runs phase 1 of the device-code login off the UI
+// goroutine and reports the code to display (or an error).
+func providerWizardDevicePrepareCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		auth, cfg, err := oauthDevicePrepare(name)
+		if err != nil {
+			return providerWizardDeviceCodeMsg{providerID: name, err: err}
+		}
+		return providerWizardDeviceCodeMsg{
+			providerID: name,
+			userCode:   auth.UserCode,
+			verifyURL:  oauthDeviceVerifyTarget(auth),
+			cfg:        cfg,
+			auth:       auth,
+		}
+	}
+}
+
+// providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
+// UI goroutine and reports completion as a regular OAuth result.
+func providerWizardDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+	return func() tea.Msg {
+		return providerWizardOAuthMsg{tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
+	}
+}
+
+// startProviderDeviceLogin begins the device-code flow for the selected OAuth
+// provider (phase 1). Used by the headless default and the "d" shortcut.
+func (m model) startProviderDeviceLogin() (model, tea.Cmd) {
+	provider := m.providerWizard.currentProvider()
+	if !provider.OAuth || !provider.OAuthDeviceFlow {
+		return m, nil
+	}
+	m.providerWizard.oauthPending = true
+	m.providerWizard.oauthDevice = true
+	m.providerWizard.oauthErr = ""
+	m.providerWizard.deviceUserCode = ""
+	m.providerWizard.deviceVerificationURI = ""
+	return m, providerWizardDevicePrepareCmd(provider.ID)
 }
 
 const maxProviderWizardProvidersVisible = 8
@@ -182,6 +255,10 @@ type providerWizardState struct {
 	oauthMode        bool
 	oauthPending     bool
 	oauthErr         string
+	// Device-code login (RFC 8628) state while an OAuth login is in flight.
+	oauthDevice           bool
+	deviceUserCode        string
+	deviceVerificationURI string
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -483,6 +560,13 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.providerWizard = nil
 		}
 		return m, nil
+	}
+	// On the OAuth provider list, "d" forces device-code login for a device-capable
+	// provider (xAI) — useful on a desktop when the browser flow won't work.
+	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode &&
+		msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'd' || msg.Runes[0] == 'D') &&
+		m.providerWizard.currentProvider().OAuthDeviceFlow {
+		return m.startProviderDeviceLogin()
 	}
 	if m.providerWizard.step == providerWizardStepEndpoint {
 		switch msg.Type {
@@ -823,6 +907,9 @@ func (wizard *providerWizardState) footer() string {
 	case providerWizardStepMethod:
 		return "↑/↓ move   Enter/→ continue   Esc close"
 	case providerWizardStepProvider:
+		if wizard.oauthMode && wizard.currentProvider().OAuthDeviceFlow {
+			return "↑/↓ move   Enter sign in   d device code   ← back   Esc close"
+		}
 		if canRight {
 			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
 		}
@@ -937,6 +1024,21 @@ func (wizard *providerWizardState) renderOAuthWaiting(width int) []string {
 	name := provider.Name
 	if name == "" {
 		name = "the provider"
+	}
+	if wizard.oauthDevice {
+		lines := []string{
+			zeroTheme.accent.Render("Device-code sign-in for " + name),
+			"",
+		}
+		if wizard.deviceUserCode == "" {
+			return append(lines, fitStyledLine(zeroTheme.faint.Render("Requesting a device code..."), width))
+		}
+		return append(lines,
+			fitStyledLine(zeroTheme.ink.Render("1. On any device, visit:  ")+zeroTheme.accent.Render(wizard.deviceVerificationURI), width),
+			fitStyledLine(zeroTheme.ink.Render("2. Enter the code:  ")+zeroTheme.accent.Bold(true).Render(wizard.deviceUserCode), width),
+			"",
+			fitStyledLine(zeroTheme.faint.Render("Waiting for authorization..."), width),
+		)
 	}
 	return []string{
 		zeroTheme.accent.Render("Signing in with " + name),
