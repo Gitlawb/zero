@@ -74,6 +74,29 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) e
 	return err
 }
 
+// oauthStoredToken returns a fresh access token for a provider that was logged in
+// via OAuth (token stored under provider:<id>), refreshing on demand. Empty when
+// there is no stored login or the refresh fails. Used to authenticate the model
+// discovery /models call so the wizard can show the live model list after login.
+func oauthStoredToken(ctx context.Context, providerID string) string {
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return ""
+	}
+	manager, err := oauth.NewManager(oauth.ManagerOptions{
+		Store:      store,
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+	})
+	if err != nil {
+		return ""
+	}
+	token, err := manager.GetFresh(ctx, oauth.ProviderKey(providerID))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(token)
+}
+
 // oauthDeviceVerifyTarget picks the best URL to show the user: the complete URI
 // (code pre-filled) when present, else the bare verification URI.
 func oauthDeviceVerifyTarget(auth oauth.DeviceAuth) string {

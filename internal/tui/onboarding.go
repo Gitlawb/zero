@@ -766,8 +766,12 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 	if setupProviderUsesTypedModel(option) {
 		return nil
 	}
-	profile := providerWizardDiscoveryProfile(provider, m.setupCredentialAPIKey(option))
-	redactionSecrets := []string{m.setup.apiKey.Value(), profile.APIKey}
+	pastedKey := m.setupCredentialAPIKey(option)
+	// A token-login provider (e.g. xAI) keeps its bearer in the OAuth store, not as
+	// a pasted key; resolve it so /models is authenticated and the live list shows
+	// after sign-in. (OpenRouter mints a key into the credential already.)
+	needOAuthToken := strings.TrimSpace(pastedKey) == "" && provider.OAuth && !provider.OAuthMintsKey
+	baseSecrets := []string{m.setup.apiKey.Value()}
 	discover := m.discoverProviderModels
 	if discover == nil {
 		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
@@ -776,10 +780,18 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 	}
 	providerID := provider.ID
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 8*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx, 12*time.Second)
 		defer cancel()
+		apiKey := pastedKey
+		if needOAuthToken {
+			if resolved := oauthStoredToken(ctx, providerID); resolved != "" {
+				apiKey = resolved
+			}
+		}
+		profile := providerWizardDiscoveryProfile(provider, apiKey)
+		secrets := append(append([]string{}, baseSecrets...), apiKey, profile.APIKey)
 		models, err := discover(ctx, profile)
-		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: redactionSecrets, models: models, err: err}
+		return setupModelsDiscoveredMsg{providerID: providerID, gen: gen, redactionSecrets: secrets, models: models, err: err}
 	}
 }
 
