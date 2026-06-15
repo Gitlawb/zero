@@ -1,0 +1,90 @@
+package providerio
+
+import (
+	"context"
+	"net/http"
+	"strings"
+)
+
+// TokenResolver yields a fresh OAuth credential for one request, or ok=false to
+// fall back to the API key (e.g. there is no OAuth login for this provider).
+// header is the header name to set ("" => Authorization); value is the full
+// header value (for example "Bearer abc"). forceRefresh asks the resolver to
+// bypass any cached token; it is set only on the single retry after a 401.
+type TokenResolver func(ctx context.Context, forceRefresh bool) (header string, value string, ok bool, err error)
+
+// SendWithAuthRetry issues a request authenticated with an OAuth bearer (when the
+// resolver yields one) or the API key, retrying ONCE with a force-refreshed token
+// after an upstream 401. A 401 means the server rejected the request (auth
+// failed) WITHOUT processing a completion, so replaying it after a refresh is
+// safe — the same "no duplicate billable work" guarantee SendWithRetry relies on
+// for 429/503. With a nil resolver (or one that yields ok=false) this behaves
+// exactly like SendWithRetry with API-key auth.
+//
+// base carries the API-key auth config (key + default header/scheme). setExtra
+// (optional) sets the provider's non-auth headers on every attempt. Transient
+// retries (429/503/529) are handled by the inner SendWithRetry.
+func SendWithAuthRetry(
+	ctx context.Context,
+	client *http.Client,
+	method string,
+	url string,
+	body []byte,
+	base AuthHeaders,
+	resolver TokenResolver,
+	setExtra func(*http.Request),
+	maxAttempts int,
+) (*http.Response, error) {
+	forceRefresh := false
+	for authTry := 0; ; authTry++ {
+		var resolveErr error
+		response, err := SendWithRetry(ctx, client, method, url, body, func(request *http.Request) {
+			if setExtra != nil {
+				setExtra(request)
+			}
+			headers := base
+			if resolver != nil {
+				header, value, ok, rerr := resolver(request.Context(), forceRefresh)
+				if rerr != nil {
+					resolveErr = rerr
+					return
+				}
+				if ok {
+					headers = withBearer(base, header, value)
+				}
+			}
+			ApplyAuthHeaders(request, headers)
+		}, maxAttempts)
+
+		if resolveErr != nil {
+			if response != nil {
+				_ = response.Body.Close()
+			}
+			return nil, resolveErr
+		}
+		if err != nil {
+			return response, err
+		}
+		// One retry on 401 with a forced token refresh (rejected request → safe).
+		if resolver != nil && response.StatusCode == http.StatusUnauthorized && authTry == 0 {
+			_ = response.Body.Close()
+			forceRefresh = true
+			continue
+		}
+		return response, nil
+	}
+}
+
+// withBearer overrides base to use the OAuth credential: the given header
+// (default Authorization) carries value verbatim, and the API key is cleared so
+// the two auth methods can never both be sent.
+func withBearer(base AuthHeaders, header, value string) AuthHeaders {
+	if strings.TrimSpace(header) == "" {
+		header = "Authorization"
+	}
+	base.APIKey = ""
+	base.AuthHeader = header
+	base.AuthScheme = ""
+	base.AuthHeaderValue = value
+	return base
+}

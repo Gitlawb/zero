@@ -2,12 +2,18 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrNoToken reports that no token is stored for a key. Callers (e.g. a request
+// path that prefers OAuth but can fall back to an API key) match it with
+// errors.Is to distinguish "not logged in" from a real refresh failure.
+var ErrNoToken = errors.New("oauth: no stored token")
 
 // defaultRefreshBuffer refreshes a token this long before its hard expiry.
 const defaultRefreshBuffer = 60 * time.Second
@@ -255,7 +261,7 @@ func (m *Manager) loadForKey(key string) (Token, Config, error) {
 		return Token{}, Config{}, err
 	}
 	if !ok {
-		return Token{}, Config{}, fmt.Errorf("oauth: no stored token for %q", key)
+		return Token{}, Config{}, fmt.Errorf("%w for %q", ErrNoToken, key)
 	}
 	name := strings.TrimPrefix(key, KeyPrefixProvider)
 	if name == key {

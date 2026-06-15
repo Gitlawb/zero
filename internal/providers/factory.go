@@ -10,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providers/anthropic"
 	"github.com/Gitlawb/zero/internal/providers/gemini"
 	"github.com/Gitlawb/zero/internal/providers/openai"
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -18,6 +19,10 @@ type Options struct {
 	UserAgent     string
 	HTTPClient    *http.Client
 	ModelRegistry *modelregistry.Registry
+	// OAuthResolver, when set, lets the provider authenticate model calls with an
+	// OAuth bearer token (preferred over the API key). nil => API-key auth only.
+	// Applied to the OpenAI and Anthropic providers.
+	OAuthResolver providerio.TokenResolver
 }
 
 // New creates a runtime provider for a resolved provider profile.
@@ -37,6 +42,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			AuthScheme:      profile.AuthScheme,
 			AuthHeaderValue: profile.AuthHeaderValue,
 			CustomHeaders:   profile.CustomHeaders,
+			OAuthResolver:   options.OAuthResolver,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
 			UserAgent:       options.UserAgent,
@@ -51,6 +57,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			AuthScheme:      profile.AuthScheme,
 			AuthHeaderValue: profile.AuthHeaderValue,
 			CustomHeaders:   profile.CustomHeaders,
+			OAuthResolver:   options.OAuthResolver,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
 			UserAgent:       options.UserAgent,

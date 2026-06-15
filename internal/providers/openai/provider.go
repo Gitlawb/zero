@@ -34,6 +34,10 @@ type Options struct {
 	CustomHeaders   map[string]string
 	HTTPClient      *http.Client
 	UserAgent       string
+	// OAuthResolver, when set, supplies an OAuth bearer credential per request and
+	// is preferred over APIKey; a nil resolver (or one that yields ok=false) uses
+	// the API key. See providerio.SendWithAuthRetry.
+	OAuthResolver providerio.TokenResolver
 	// MaxTokens caps the model's output tokens. Zero omits the cap (the model's
 	// own default applies). Resolved from the model registry by the factory.
 	MaxTokens int
@@ -54,6 +58,7 @@ type Provider struct {
 	authScheme        string
 	authHeaderValue   string
 	customHeaders     map[string]string
+	oauthResolver     providerio.TokenResolver
 	maxTokens         int
 	httpClient        *http.Client
 	userAgent         string
@@ -100,6 +105,7 @@ func New(options Options) (*Provider, error) {
 		authScheme:        strings.TrimSpace(options.AuthScheme),
 		authHeaderValue:   strings.TrimSpace(options.AuthHeaderValue),
 		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
+		oauthResolver:     options.OAuthResolver,
 		maxTokens:         maxTokens,
 		httpClient:        httpClient,
 		userAgent:         options.UserAgent,
@@ -139,12 +145,8 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 	// Retry transient failures (network errors, 429, and 5xx) before surfacing
 	// them — hosted gateways return intermittent 500s and rate limits that
 	// succeed on a quick retry. Shared with the Anthropic/Gemini providers.
-	response, err := providerio.SendWithRetry(streamCtx, provider.httpClient, http.MethodPost, endpoint, body, func(request *http.Request) {
-		request.Header.Set("Content-Type", "application/json")
-		if provider.userAgent != "" {
-			request.Header.Set("User-Agent", provider.userAgent)
-		}
-		providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+	response, err := providerio.SendWithAuthRetry(streamCtx, provider.httpClient, http.MethodPost, endpoint, body,
+		providerio.AuthHeaders{
 			APIKey:            provider.apiKey,
 			DefaultAuthHeader: "Authorization",
 			DefaultAuthScheme: "Bearer",
@@ -152,8 +154,14 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 			AuthScheme:        provider.authScheme,
 			AuthHeaderValue:   provider.authHeaderValue,
 			CustomHeaders:     provider.customHeaders,
-		})
-	}, 0)
+		},
+		provider.oauthResolver,
+		func(request *http.Request) {
+			request.Header.Set("Content-Type", "application/json")
+			if provider.userAgent != "" {
+				request.Header.Set("User-Agent", provider.userAgent)
+			}
+		}, 0)
 	if err != nil {
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return

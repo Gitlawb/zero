@@ -105,7 +105,10 @@ func defaultAppDeps() appDeps {
 			return config.ResolveMCP(options)
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
-			return providers.New(profile, providers.Options{UserAgent: userAgent()})
+			return providers.New(profile, providers.Options{
+				UserAgent:     userAgent(),
+				OAuthResolver: oauthResolverForProfile(profile),
+			})
 		},
 		probeProviderHealth: providerhealth.Probe,
 		newSessionStore: func() *sessions.Store {
