@@ -299,10 +299,51 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		t.Fatal("expected /permissions to be handled without starting an agent run")
 	}
 	permissionText := transcriptText(next.transcript)
-	for _, want := range []string{"Permissions", "status: ok", "Permission mode: ask", "persistent grants: 1", "bash [allow/high]", "[REDACTED]"} {
+	for _, want := range []string{
+		"Permissions",
+		"ask permissions",
+		"1 persistent grant",
+		"State",
+		"mode  ask",
+		"Grants",
+		"bash [allow/high]",
+		"[REDACTED]",
+	} {
 		assertContains(t, permissionText, want)
 	}
 	assertNotContains(t, permissionText, "sk-proj-sensitive")
+	assertNotContains(t, permissionText, "status: ok")
+	assertNotContains(t, permissionText, "Permission mode:")
+}
+
+func TestPermissionsCommandCardHandlesNilStoreAndEmptyGrants(t *testing.T) {
+	nilStore := model{permissionMode: agent.PermissionModeAuto}.permissionsText()
+	for _, want := range []string{
+		"Permissions",
+		"auto permissions",
+		"grants unavailable",
+		"mode  auto",
+		"persistent grants: unavailable",
+	} {
+		assertContains(t, nilStore, want)
+	}
+	assertNotContains(t, nilStore, "status: warning")
+
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "empty-grants.json")})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	emptyText := model{permissionMode: agent.PermissionModeAsk, sandboxStore: store}.permissionsText()
+	for _, want := range []string{
+		"Permissions",
+		"ask permissions",
+		"no persistent grants",
+		"mode  ask",
+		"none",
+	} {
+		assertContains(t, emptyText, want)
+	}
+	assertNotContains(t, emptyText, "status: info")
 }
 
 func TestContextCommandCardHandlesNilRegistryAndStableStyle(t *testing.T) {

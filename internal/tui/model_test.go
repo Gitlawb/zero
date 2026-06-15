@@ -388,8 +388,10 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 	}
 	text := transcriptText(next.transcript)
 	for _, want := range []string{
-		"Permission mode: ask",
-		"Sandbox grants:",
+		"Permissions",
+		"ask permissions",
+		"mode  ask",
+		"Grants",
 		"bash [allow/high]",
 		"write_file [deny/low]",
 		"[REDACTED]",
@@ -397,6 +399,8 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 		assertContains(t, text, want)
 	}
 	assertNotContains(t, text, "sk-proj-sensitive")
+	assertNotContains(t, text, "status: ok")
+	assertNotContains(t, text, "Permission mode:")
 }
 
 func TestPlanCommandShowsCurrentPlan(t *testing.T) {
