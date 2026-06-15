@@ -333,6 +333,10 @@ built in). For a provider named <name>, set:
   ZERO_OAUTH_<NAME>_SCOPES          ZERO_OAUTH_<NAME>_FLOW (loopback|device)
 Endpoint URLs must be https (loopback exempt).
 
+Storage: tokens are kept in a 0600 file by default. Set ZERO_OAUTH_STORAGE=keyring
+to use the OS keyring instead (macOS Keychain / Linux secret-tool); MCP server
+tokens share the same store.
+
 Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
       --scope    Add an OAuth scope (repeatable)

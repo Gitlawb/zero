@@ -1,16 +1,20 @@
 package oauth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/keyring"
 )
 
 const (
@@ -54,14 +58,35 @@ type StoreOptions struct {
 	FilePath string
 	Env      map[string]string
 	Now      func() time.Time
+	// Storage selects the backend: "" / "file" => a 0600 JSON file (default);
+	// "keyring" => the OS keyring. When empty it falls back to ZERO_OAUTH_STORAGE.
+	Storage string
+	// Keyring is the client used when Storage=="keyring"; nil => keyring.New().
+	// Injected by tests to avoid touching a real keychain.
+	Keyring KeyringClient
 }
 
-// Store persists OAuth tokens (provider + MCP namespaces) in a 0600 JSON file,
-// guarded by a cross-process lock and written atomically.
+// KeyringClient is the minimal OS-keyring surface the store needs. *keyring.Keyring
+// satisfies it; tests inject a fake.
+type KeyringClient interface {
+	Get(service, account string) (string, bool, error)
+	Set(service, account, secret string) error
+	Delete(service, account string) (bool, error)
+}
+
+// Keyring storage stores the whole token blob under one fixed entry.
+const (
+	keyringService = "zero"
+	keyringAccount = "oauth-tokens"
+)
+
+// Store persists OAuth tokens (provider + MCP namespaces) as one JSON blob,
+// written atomically through a pluggable backend (a 0600 file guarded by a
+// cross-process lock, or the OS keyring).
 type Store struct {
-	filePath string
-	now      func() time.Time
-	mu       sync.Mutex
+	blob blobStore
+	now  func() time.Time
+	mu   sync.Mutex
 }
 
 type storeFile struct {
@@ -99,31 +124,61 @@ func ResolveStorePath(env map[string]string) (string, error) {
 	return filepath.Join(configHome, "zero", "oauth-tokens.json"), nil
 }
 
-// NewStore builds a file-backed token store.
+// NewStore builds a token store with the configured backend (file by default,
+// or the OS keyring when Storage/ZERO_OAUTH_STORAGE selects it).
 func NewStore(options StoreOptions) (*Store, error) {
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	storage := strings.TrimSpace(options.Storage)
+	if storage == "" {
+		storage = strings.TrimSpace(envValue(options.Env, "ZERO_OAUTH_STORAGE"))
+	}
+	switch storage {
+	case "", "file":
+		path, err := resolveStoreFilePath(options)
+		if err != nil {
+			return nil, err
+		}
+		return &Store{blob: fileBlob{path: path}, now: now}, nil
+	case "keyring":
+		kr := options.Keyring
+		if kr == nil {
+			osKeyring := keyring.New()
+			if !osKeyring.Available() {
+				return nil, fmt.Errorf("oauth: keyring storage requested but not available on %s; use file storage", runtime.GOOS)
+			}
+			kr = osKeyring
+		}
+		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount}, now: now}, nil
+	default:
+		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\" or \"keyring\")", storage)
+	}
+}
+
+// resolveStoreFilePath resolves the absolute file path for the file backend.
+func resolveStoreFilePath(options StoreOptions) (string, error) {
 	filePath := options.FilePath
 	var err error
 	if strings.TrimSpace(filePath) == "" {
 		filePath, err = ResolveStorePath(options.Env)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 	}
 	if !filepath.IsAbs(filePath) {
 		filePath, err = filepath.Abs(filePath)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 	}
-	now := options.Now
-	if now == nil {
-		now = time.Now
-	}
-	return &Store{filePath: filepath.Clean(filePath), now: now}, nil
+	return filepath.Clean(filePath), nil
 }
 
-// FilePath returns the resolved token store path.
-func (s *Store) FilePath() string { return s.filePath }
+// FilePath returns the resolved token store location (a path for the file
+// backend, or a "keyring:..." identifier for the keyring backend).
+func (s *Store) FilePath() string { return s.blob.location() }
 
 // Save persists a token under key, replacing any existing entry.
 func (s *Store) Save(key string, token Token) error {
@@ -132,17 +187,14 @@ func (s *Store) Save(key string, token Token) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	unlock, err := acquireFileLock(s.filePath+".lockfile", s.now)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	state, err := s.readState()
-	if err != nil {
-		return err
-	}
-	state.Tokens[key] = token
-	return s.writeState(state)
+	return s.blob.withLock(s.now, func() error {
+		state, err := s.readState()
+		if err != nil {
+			return err
+		}
+		state.Tokens[key] = token
+		return s.writeState(state)
+	})
 }
 
 // Load returns the token for key; the bool is false when none is stored.
@@ -167,23 +219,20 @@ func (s *Store) Delete(key string) (bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	unlock, err := acquireFileLock(s.filePath+".lockfile", s.now)
-	if err != nil {
-		return false, err
-	}
-	defer unlock()
-	state, err := s.readState()
-	if err != nil {
-		return false, err
-	}
-	if _, ok := state.Tokens[key]; !ok {
-		return false, nil
-	}
-	delete(state.Tokens, key)
-	if err := s.writeState(state); err != nil {
-		return false, err
-	}
-	return true, nil
+	var removed bool
+	err := s.blob.withLock(s.now, func() error {
+		state, err := s.readState()
+		if err != nil {
+			return err
+		}
+		if _, ok := state.Tokens[key]; !ok {
+			return nil
+		}
+		delete(state.Tokens, key)
+		removed = true
+		return s.writeState(state)
+	})
+	return removed, err
 }
 
 // Status returns redaction-safe summaries of every stored token, sorted by key.
@@ -221,53 +270,128 @@ func (s *Store) Status(prefix string) ([]Status, error) {
 }
 
 func (s *Store) readState() (storeFile, error) {
-	data, err := os.ReadFile(s.filePath)
+	data, ok, err := s.blob.read()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return emptyStoreFile(), nil
-		}
 		return storeFile{}, err
+	}
+	if !ok {
+		return emptyStoreFile(), nil
 	}
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
-		return storeFile{}, fmt.Errorf("oauth: invalid token file at %s: %w", s.filePath, err)
+		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", s.blob.location(), err)
 	}
 	if state.SchemaVersion != storeSchemaVersion {
-		return storeFile{}, fmt.Errorf("oauth: invalid token file at %s: unsupported schemaVersion", s.filePath)
+		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: unsupported schemaVersion", s.blob.location())
 	}
 	if state.Tokens == nil {
 		state.Tokens = map[string]Token{}
 	}
 	for key := range state.Tokens {
 		if err := ValidateKey(key); err != nil {
-			return storeFile{}, fmt.Errorf("oauth: invalid token file at %s: %w", s.filePath, err)
+			return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", s.blob.location(), err)
 		}
 	}
 	return state, nil
 }
 
 func (s *Store) writeState(state storeFile) error {
-	if err := os.MkdirAll(filepath.Dir(s.filePath), 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d-%d", s.filePath, os.Getpid(), s.now().UnixNano())
-	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
+	return s.blob.write(append(data, '\n'))
+}
+
+func emptyStoreFile() storeFile {
+	return storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{}}
+}
+
+// blobStore abstracts the persistence of the whole token blob behind the Store,
+// so the same store logic backs either a 0600 file or the OS keyring.
+type blobStore interface {
+	// read returns the stored blob; ok is false when nothing is stored yet.
+	read() (data []byte, ok bool, err error)
+	// write replaces the stored blob.
+	write(data []byte) error
+	// withLock runs fn under whatever cross-process exclusion the backend offers
+	// (a lock file for the file backend; none for the keyring, which is the
+	// authoritative store and is serialized within the process by Store.mu).
+	withLock(now func() time.Time, fn func() error) error
+	// location is a human-readable identifier for diagnostics/errors.
+	location() string
+}
+
+// fileBlob persists the blob as a 0600 JSON file, written atomically and guarded
+// by a cross-process lock file. Behavior matches the original file store.
+type fileBlob struct{ path string }
+
+func (b fileBlob) read() ([]byte, bool, error) {
+	data, err := os.ReadFile(b.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func (b fileBlob) write(data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, s.filePath); err != nil {
+	tempPath := fmt.Sprintf("%s.tmp-%d-%d", b.path, os.Getpid(), time.Now().UnixNano())
+	if err := os.WriteFile(tempPath, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, b.path); err != nil {
 		_ = os.Remove(tempPath)
 		return err
 	}
 	return nil
 }
 
-func emptyStoreFile() storeFile {
-	return storeFile{SchemaVersion: storeSchemaVersion, Tokens: map[string]Token{}}
+func (b fileBlob) withLock(now func() time.Time, fn func() error) error {
+	unlock, err := acquireFileLock(b.path+".lockfile", now)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
 }
+
+func (b fileBlob) location() string { return b.path }
+
+// keyringBlob persists the blob in the OS keyring as a single base64 entry
+// (base64 keeps the multi-line JSON a single, control-character-free value).
+type keyringBlob struct {
+	kr      KeyringClient
+	service string
+	account string
+}
+
+func (b keyringBlob) read() ([]byte, bool, error) {
+	enc, ok, err := b.kr.Get(b.service, b.account)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(enc))
+	if err != nil {
+		return nil, false, fmt.Errorf("oauth: decode keyring token blob: %w", err)
+	}
+	return data, true, nil
+}
+
+func (b keyringBlob) write(data []byte) error {
+	return b.kr.Set(b.service, b.account, base64.StdEncoding.EncodeToString(data))
+}
+
+// withLock relies on Store.mu for within-process serialization; the keyring is
+// the single source of truth, so no cross-process lock file is used.
+func (b keyringBlob) withLock(_ func() time.Time, fn func() error) error { return fn() }
+
+func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.account }
 
 // FormatStatuses renders a human-readable status table without leaking token
 // material.
