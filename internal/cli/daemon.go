@@ -13,6 +13,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/background"
 	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Gitlawb/zero/internal/daemon/remote"
 )
 
 // runDaemon dispatches the `zero daemon ...` subcommands. The daemon supervises a
@@ -35,6 +36,8 @@ func runDaemon(args []string, stdout io.Writer, stderr io.Writer, _ appDeps) int
 		return runDaemonRun(rest, stdout, stderr)
 	case "attach":
 		return runDaemonAttach(rest, stdout, stderr)
+	case "serve-remote":
+		return runDaemonServeRemote(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		return writeDaemonUsage(stdout, exitSuccess)
 	default:
@@ -53,6 +56,14 @@ Commands:
   run --session <id> [--cwd <dir>] [--prompt <text>] [exec flags...]
                             Create/route a session and stream its output.
   attach <session>          Attach to a running session's stream.
+  serve-remote --addr <host:port> --tls-cert <f> --tls-key <f>
+                            Serve an opt-in, TLS-only network bridge to this
+                            daemon. Requires a bearer token in $ZERO_DAEMON_REMOTE_TOKEN
+                            (or $ZERO_DAEMON_REMOTE_TOKEN_FILE).
+
+run and attach accept --remote <host:port> [--token <t>] [--ca-cert <f>]
+[--server-name <name>] to drive a remote daemon over the bridge instead of the
+local socket.
 `)
 	return code
 }
@@ -212,6 +223,7 @@ func runDaemonStatus(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runDaemonRun(args []string, stdout io.Writer, stderr io.Writer) int {
 	session, cwd, prompt := "", "", ""
+	var remoteFlags remoteDialFlags
 	var forward []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -225,6 +237,38 @@ func runDaemonRun(args []string, stdout io.Writer, stderr io.Writer) int {
 		switch {
 		case a == "-h" || a == "--help":
 			return writeDaemonUsage(stdout, exitSuccess)
+		case a == "--remote":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--remote requires a value")
+			}
+			remoteFlags.Addr = v
+		case strings.HasPrefix(a, "--remote="):
+			remoteFlags.Addr = strings.TrimPrefix(a, "--remote=")
+		case a == "--token":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--token requires a value")
+			}
+			remoteFlags.Token = v
+		case strings.HasPrefix(a, "--token="):
+			remoteFlags.Token = strings.TrimPrefix(a, "--token=")
+		case a == "--ca-cert":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--ca-cert requires a value")
+			}
+			remoteFlags.CACert = v
+		case strings.HasPrefix(a, "--ca-cert="):
+			remoteFlags.CACert = strings.TrimPrefix(a, "--ca-cert=")
+		case a == "--server-name":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--server-name requires a value")
+			}
+			remoteFlags.ServerName = v
+		case strings.HasPrefix(a, "--server-name="):
+			remoteFlags.ServerName = strings.TrimPrefix(a, "--server-name=")
 		case a == "--session":
 			v, ok := value()
 			if !ok {
@@ -261,13 +305,9 @@ func runDaemonRun(args []string, stdout io.Writer, stderr io.Writer) int {
 	if prompt == "" && len(forward) == 0 {
 		return writeExecUsageError(stderr, "daemon run requires --prompt <text> or exec args")
 	}
-	paths, err := daemon.DefaultPaths()
+	client, err := dialForCLI(remoteFlags)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	client, err := daemon.Dial(paths.Socket)
-	if err != nil {
-		return writeAppError(stderr, "zero daemon is not running (start it with `zero daemon start`)", exitCrash)
+		return writeAppError(stderr, daemonDialError(remoteFlags, err), exitCrash)
 	}
 	defer client.Close()
 	if err := client.Run(session, cwd, prompt, forward, func(line string) { fmt.Fprintln(stdout, line) }); err != nil {
@@ -278,16 +318,57 @@ func runDaemonRun(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func runDaemonAttach(args []string, stdout io.Writer, stderr io.Writer) int {
 	session := ""
+	var remoteFlags remoteDialFlags
 	extra := 0
-	for _, a := range args {
-		if a == "-h" || a == "--help" {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		value := func() (string, bool) {
+			if i+1 >= len(args) {
+				return "", false
+			}
+			i++
+			return args[i], true
+		}
+		switch {
+		case a == "-h" || a == "--help":
 			return writeDaemonUsage(stdout, exitSuccess)
-		}
-		if session == "" {
+		case a == "--remote":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--remote requires a value")
+			}
+			remoteFlags.Addr = v
+		case strings.HasPrefix(a, "--remote="):
+			remoteFlags.Addr = strings.TrimPrefix(a, "--remote=")
+		case a == "--token":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--token requires a value")
+			}
+			remoteFlags.Token = v
+		case strings.HasPrefix(a, "--token="):
+			remoteFlags.Token = strings.TrimPrefix(a, "--token=")
+		case a == "--ca-cert":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--ca-cert requires a value")
+			}
+			remoteFlags.CACert = v
+		case strings.HasPrefix(a, "--ca-cert="):
+			remoteFlags.CACert = strings.TrimPrefix(a, "--ca-cert=")
+		case a == "--server-name":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--server-name requires a value")
+			}
+			remoteFlags.ServerName = v
+		case strings.HasPrefix(a, "--server-name="):
+			remoteFlags.ServerName = strings.TrimPrefix(a, "--server-name=")
+		case session == "":
 			session = a
-			continue
+		default:
+			extra++
 		}
-		extra++
 	}
 	if strings.TrimSpace(session) == "" {
 		return writeExecUsageError(stderr, "daemon attach requires a <session> id")
@@ -295,19 +376,194 @@ func runDaemonAttach(args []string, stdout io.Writer, stderr io.Writer) int {
 	if extra > 0 {
 		return writeExecUsageError(stderr, "daemon attach accepts exactly one <session> id")
 	}
-	paths, err := daemon.DefaultPaths()
+	client, err := dialForCLI(remoteFlags)
 	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	client, err := daemon.Dial(paths.Socket)
-	if err != nil {
-		return writeAppError(stderr, "zero daemon is not running (start it with `zero daemon start`)", exitCrash)
+		return writeAppError(stderr, daemonDialError(remoteFlags, err), exitCrash)
 	}
 	defer client.Close()
 	if err := client.Attach(session, func(line string) { fmt.Fprintln(stdout, line) }); err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	return exitSuccess
+}
+
+// daemonDialError tailors the connect-failure message for local vs remote.
+func daemonDialError(flags remoteDialFlags, err error) string {
+	if strings.TrimSpace(flags.Addr) != "" {
+		return "failed to reach remote daemon at " + flags.Addr + ": " + err.Error()
+	}
+	return "zero daemon is not running (start it with `zero daemon start`)"
+}
+
+// runDaemonServeRemote starts the local daemon plus an opt-in, TLS-only network
+// bridge. TLS and a bearer token are mandatory (fail closed): it refuses to
+// start without a cert/key pair and a token from the environment.
+func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int {
+	addr, certFile, keyFile := "", "", ""
+	minVersion, maxConns := 0, 0
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		value := func() (string, bool) {
+			if i+1 >= len(args) {
+				return "", false
+			}
+			i++
+			return args[i], true
+		}
+		switch {
+		case a == "-h" || a == "--help":
+			return writeDaemonUsage(stdout, exitSuccess)
+		case a == "--addr":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--addr requires a value")
+			}
+			addr = v
+		case strings.HasPrefix(a, "--addr="):
+			addr = strings.TrimPrefix(a, "--addr=")
+		case a == "--tls-cert":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--tls-cert requires a value")
+			}
+			certFile = v
+		case strings.HasPrefix(a, "--tls-cert="):
+			certFile = strings.TrimPrefix(a, "--tls-cert=")
+		case a == "--tls-key":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--tls-key requires a value")
+			}
+			keyFile = v
+		case strings.HasPrefix(a, "--tls-key="):
+			keyFile = strings.TrimPrefix(a, "--tls-key=")
+		case a == "--min-version":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--min-version requires a value")
+			}
+			minVersion = atoiOrZero(v)
+		case a == "--max-conns":
+			v, ok := value()
+			if !ok {
+				return writeExecUsageError(stderr, "--max-conns requires a value")
+			}
+			maxConns = atoiOrZero(v)
+		default:
+			return writeExecUsageError(stderr, fmt.Sprintf("unknown flag %q for daemon serve-remote", a))
+		}
+	}
+	if strings.TrimSpace(addr) == "" {
+		return writeExecUsageError(stderr, "daemon serve-remote requires --addr <host:port>")
+	}
+	// Fail closed: TLS cert/key + a bearer token are mandatory.
+	tlsConfig, err := remote.ServerTLSConfig(certFile, keyFile)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	token, err := remote.TokenFromEnv()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	auth, err := remote.NewTokenAuthenticator(token)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	paths, err := daemon.DefaultPaths()
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	launcher, err := daemon.NewExecLauncher(daemon.ExecLauncherConfig{})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	logf := func(line string) { fmt.Fprintln(stderr, "[daemon] "+line) }
+	pool, err := daemon.NewPool(daemon.PoolOptions{Launcher: launcher, Log: logf})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	mgr, err := daemon.NewSessionManager(daemon.SessionManagerOptions{Pool: pool})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	srv, err := daemon.NewServer(daemon.ServerOptions{Paths: paths, Manager: mgr, Pool: pool, Log: logf})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	bridge, err := remote.NewBridge(remote.BridgeOptions{
+		Server: srv, Authenticator: auth, MinVersion: minVersion, MaxConnections: maxConns, Log: logf,
+	})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+
+	// Serve the local control socket too, so local clients keep working.
+	go func() {
+		if serveErr := srv.Serve(); serveErr != nil {
+			logf("local serve error: " + serveErr.Error())
+		}
+	}()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- bridge.ListenAndServeTLS(addr, tlsConfig) }()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	fmt.Fprintf(stdout, "zero daemon remote bridge listening on %s (TLS)\n", addr)
+	select {
+	case <-sigCh:
+		srv.Shutdown()
+		_ = bridge.Close()
+		<-serveErr // wait for the accept loop to unwind
+		return exitSuccess
+	case err := <-serveErr:
+		// Bind/serve failed before any signal (e.g. address in use).
+		srv.Shutdown()
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+}
+
+// remoteDialFlags holds the optional flags that redirect run/attach to a remote
+// daemon. When Addr is empty the local control socket is used.
+type remoteDialFlags struct {
+	Addr       string
+	Token      string
+	CACert     string
+	ServerName string
+}
+
+// dialForCLI returns a daemon.Client for either the local socket (Addr empty) or
+// a remote bridge (Addr set). For remote, the token falls back to the env.
+func dialForCLI(flags remoteDialFlags) (*daemon.Client, error) {
+	if strings.TrimSpace(flags.Addr) == "" {
+		paths, err := daemon.DefaultPaths()
+		if err != nil {
+			return nil, err
+		}
+		return daemon.Dial(paths.Socket)
+	}
+	token := strings.TrimSpace(flags.Token)
+	if token == "" {
+		token, _ = remote.TokenFromEnv() // best effort; DialRemote rejects an empty token
+	}
+	return remote.DialRemote(remote.RemoteConfig{
+		Address:    flags.Addr,
+		Token:      token,
+		CACertFile: flags.CACert,
+		ServerName: flags.ServerName,
+	})
+}
+
+func atoiOrZero(s string) int {
+	n := 0
+	for _, r := range strings.TrimSpace(s) {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
 }
 
 // daemonReachable reports whether a daemon is accepting connections (a successful

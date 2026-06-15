@@ -167,6 +167,13 @@ func (s *Server) writeStatusFile() error {
 	return nil
 }
 
+// ServeConn runs the control protocol (handshake + one command) on an
+// already-established connection, reusing the exact local dispatch path. The
+// remote bridge calls it AFTER authenticating a TLS connection, so a remote
+// session is handled identically to a local one (same SessionManager/Pool, same
+// sandbox/risk model) — remote never bypasses the local controls. It closes conn.
+func (s *Server) ServeConn(conn net.Conn) { s.handleConn(conn) }
+
 // handleConn performs the handshake then dispatches a single control command.
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()

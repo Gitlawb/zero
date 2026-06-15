@@ -26,6 +26,19 @@ func Dial(socketPath string) (*Client, error) {
 	return c, nil
 }
 
+// NewClientConn completes the control handshake on an already-connected
+// transport (e.g. a TLS connection the remote bridge has authenticated) and
+// returns a Client ready for Run/Attach/Status. It takes ownership of conn and
+// closes it on handshake failure.
+func NewClientConn(conn net.Conn) (*Client, error) {
+	c := &Client{conn: conn}
+	if err := c.handshake(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
 func (c *Client) handshake() error {
 	if err := WriteControl(c.conn, Ctrl{Type: CtrlHello, Version: ProtoVersion}); err != nil {
 		return err
