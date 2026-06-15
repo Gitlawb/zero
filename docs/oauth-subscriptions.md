@@ -32,6 +32,25 @@ When a login exists for a provider, the **OpenAI and Anthropic** providers send
 before. Tokens are stored 0600 (or the OS keyring with
 `ZERO_OAUTH_STORAGE=keyring`) and never logged. See `zero auth --help`.
 
+### Built-in OAuth providers (no env needed)
+
+Two providers ship a working browser login out of the box:
+
+- **OpenRouter** — `zero auth openrouter` opens a browser, you approve, and it
+  **mints an OpenRouter API key** (public PKCE flow, no client_id). In the
+  interactive setup wizard, pick **OpenRouter** and press **ctrl+o** at the key
+  step to do the same inline ("Log in with OAuth"). The minted key is saved to the
+  provider profile and used normally.
+- **xAI (Grok)** — `zero auth login xai` (browser, or `--device` for headless).
+  The token is used directly on `api.x.ai/v1`; configure an `xai` provider profile
+  and it's picked up automatically. Requires a SuperGrok / X Premium+ subscription;
+  the client_id is an undocumented public Grok-CLI client (override via
+  `ZERO_OAUTH_XAI_*` if it changes).
+
+Any field of a preset is overridable via `ZERO_OAUTH_<NAME>_*`. For a fully custom
+OAuth/OIDC provider, set those env vars (see `zero auth --help`) and
+`zero auth login <name>`.
+
 ---
 
 ## 2. ChatGPT / Claude subscriptions — why a proxy is required
