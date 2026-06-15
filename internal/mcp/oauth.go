@@ -2,9 +2,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,20 +11,56 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/oauth"
 )
 
 // ServerAuthOAuth is the value of an MCP server's auth field that selects the
 // OAuth 2.0 + PKCE authorization-code flow.
 const ServerAuthOAuth = "oauth"
 
-const (
-	wellKnownAuthServerPath = "/.well-known/oauth-authorization-server"
-	defaultLoginTimeout     = 3 * time.Minute
-	// pkceVerifierBytes yields a 43-character base64url verifier, the minimum
-	// length permitted by the PKCE spec while remaining high-entropy.
-	pkceVerifierBytes = 32
-	stateBytes        = 32
-)
+const defaultLoginTimeout = 3 * time.Minute
+
+// MCP OAuth delegates its transport/identity-agnostic engine to internal/oauth
+// (PKCE, RFC 8414 discovery, authorize-URL build, token exchange/refresh) so the
+// two share one implementation. MCP keeps its own LoginOptions/Login
+// orchestration, OAuthConfig/StoredToken types, loopback handling, CLI, and
+// on-disk token format — all behavior-preserving. The shared engine also adds an
+// https-only token-endpoint guard (loopback exempt), a hardening MCP inherits.
+
+// pkceToParams converts the shared PKCE pair to MCP's local type.
+func pkceToParams(p oauth.PKCE) pkceParams {
+	return pkceParams{Verifier: p.Verifier, Challenge: p.Challenge, Method: p.Method}
+}
+
+// pkceToOAuth converts MCP's local PKCE type back to the shared type.
+func pkceToOAuth(p pkceParams) oauth.PKCE {
+	return oauth.PKCE{Verifier: p.Verifier, Challenge: p.Challenge, Method: p.Method}
+}
+
+// configFor builds the shared oauth.Config from MCP's OAuthConfig + resolved
+// endpoints for a flow.
+func configFor(cfg OAuthConfig, metadata authServerMetadata) oauth.Config {
+	return oauth.Config{
+		ClientID:              cfg.ClientID,
+		ClientSecret:          cfg.ClientSecret,
+		Scopes:                cfg.Scopes,
+		AuthorizationEndpoint: metadata.AuthorizationEndpoint,
+		TokenEndpoint:         metadata.TokenEndpoint,
+	}
+}
+
+// tokenToStored converts a shared oauth.Token to MCP's StoredToken (MCP does not
+// use the Account field).
+func tokenToStored(t oauth.Token) StoredToken {
+	return StoredToken{
+		AccessToken:  t.AccessToken,
+		RefreshToken: t.RefreshToken,
+		TokenType:    t.TokenType,
+		Scopes:       t.Scopes,
+		ExpiresAt:    t.ExpiresAt,
+	}
+}
 
 // OAuthConfig describes how to authenticate to a remote MCP server using OAuth.
 // Endpoints may be discovered from the server's metadata document; explicit
@@ -84,34 +117,20 @@ type authorizationFlow struct {
 	now        func() time.Time
 }
 
-// discoverAuthorizationServer fetches the OAuth 2.0 authorization server
-// metadata document published at the well-known path under the given base URL.
+// discoverAuthorizationServer fetches the RFC 8414 authorization server metadata
+// at the well-known path under baseURL, via the shared engine.
 func discoverAuthorizationServer(ctx context.Context, client *http.Client, baseURL string) (authServerMetadata, error) {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	metadataURL, err := joinWellKnown(baseURL)
+	meta, err := oauth.DiscoverAuthorizationServer(ctx, client, baseURL)
 	if err != nil {
 		return authServerMetadata{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
-	if err != nil {
-		return authServerMetadata{}, err
-	}
-	request.Header.Set("Accept", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		return authServerMetadata{}, fmt.Errorf("fetch authorization server metadata: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return authServerMetadata{}, fmt.Errorf("authorization server metadata returned HTTP %d", response.StatusCode)
-	}
-	var metadata authServerMetadata
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&metadata); err != nil {
-		return authServerMetadata{}, fmt.Errorf("decode authorization server metadata: %w", err)
-	}
-	return metadata, nil
+	return authServerMetadata{
+		Issuer:                meta.Issuer,
+		AuthorizationEndpoint: meta.AuthorizationEndpoint,
+		TokenEndpoint:         meta.TokenEndpoint,
+		RegistrationEndpoint:  meta.RegistrationEndpoint,
+		ScopesSupported:       meta.ScopesSupported,
+	}, nil
 }
 
 // resolveAuthorizationServer discovers metadata and applies explicit config
@@ -149,44 +168,23 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 	return metadata, nil
 }
 
-// newPKCE generates a high-entropy code verifier and its S256 challenge.
+// newPKCE generates a high-entropy code verifier and its S256 challenge via the
+// shared engine.
 func newPKCE() (pkceParams, error) {
-	verifierRaw := make([]byte, pkceVerifierBytes)
-	if _, err := rand.Read(verifierRaw); err != nil {
-		return pkceParams{}, fmt.Errorf("generate PKCE verifier: %w", err)
+	p, err := oauth.NewPKCE()
+	if err != nil {
+		return pkceParams{}, err
 	}
-	verifier := base64.RawURLEncoding.EncodeToString(verifierRaw)
-	sum := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	return pkceParams{Verifier: verifier, Challenge: challenge, Method: "S256"}, nil
+	return pkceToParams(p), nil
 }
 
 func newState() (string, error) {
-	raw := make([]byte, stateBytes)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate state: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
+	return oauth.NewState()
 }
 
-// authorizationURL builds the authorization request URL.
+// authorizationURL builds the authorization request URL via the shared engine.
 func (flow *authorizationFlow) authorizationURL(redirectURI string) (string, error) {
-	parsed, err := url.Parse(flow.metadata.AuthorizationEndpoint)
-	if err != nil {
-		return "", fmt.Errorf("parse authorization endpoint: %w", err)
-	}
-	query := parsed.Query()
-	query.Set("response_type", "code")
-	query.Set("client_id", flow.config.ClientID)
-	query.Set("redirect_uri", redirectURI)
-	query.Set("state", flow.state)
-	query.Set("code_challenge", flow.pkce.Challenge)
-	query.Set("code_challenge_method", flow.pkce.Method)
-	if len(flow.config.Scopes) > 0 {
-		query.Set("scope", strings.Join(flow.config.Scopes, " "))
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String(), nil
+	return oauth.BuildAuthorizationURL(configFor(flow.config, flow.metadata), pkceToOAuth(flow.pkce), flow.state, redirectURI, nil)
 }
 
 // parseCallback validates the redirect query and returns the authorization
@@ -209,117 +207,30 @@ func (flow *authorizationFlow) parseCallback(values url.Values) (string, error) 
 	return code, nil
 }
 
-// exchangeCode swaps an authorization code + PKCE verifier for tokens.
+// exchangeCode swaps an authorization code + PKCE verifier for tokens via the
+// shared engine.
 func (flow *authorizationFlow) exchangeCode(ctx context.Context, code string, redirectURI string) (StoredToken, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("redirect_uri", redirectURI)
-	form.Set("client_id", flow.config.ClientID)
-	form.Set("code_verifier", flow.pkce.Verifier)
-	if secret := strings.TrimSpace(flow.config.ClientSecret); secret != "" {
-		form.Set("client_secret", secret)
+	token, err := oauth.ExchangeCode(ctx, flow.httpClient, configFor(flow.config, flow.metadata), code, flow.pkce.Verifier, redirectURI, flow.now)
+	if err != nil {
+		return StoredToken{}, err
 	}
-	return postTokenRequest(ctx, flow.httpClient, flow.metadata.TokenEndpoint, form, StoredToken{Scopes: flow.config.Scopes}, flow.now)
+	return tokenToStored(token), nil
 }
 
-// refreshAccessToken exchanges a refresh token for a fresh access token. A
-// response that omits a new refresh token preserves the previous one.
+// refreshAccessToken exchanges a refresh token for a fresh access token via the
+// shared engine. A response that omits a new refresh token preserves the
+// previous one.
 func refreshAccessToken(ctx context.Context, client *http.Client, cfg OAuthConfig, current StoredToken, now func() time.Time) (StoredToken, error) {
-	refresh := strings.TrimSpace(current.RefreshToken)
-	if refresh == "" {
-		return StoredToken{}, errors.New("no refresh token available")
-	}
-	tokenEndpoint := strings.TrimSpace(cfg.TokenEndpoint)
-	if tokenEndpoint == "" {
-		return StoredToken{}, errors.New("no token endpoint configured for refresh")
-	}
-	form := url.Values{}
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", refresh)
-	form.Set("client_id", cfg.ClientID)
-	if secret := strings.TrimSpace(cfg.ClientSecret); secret != "" {
-		form.Set("client_secret", secret)
-	}
-	if len(cfg.Scopes) > 0 {
-		form.Set("scope", strings.Join(cfg.Scopes, " "))
-	}
-	refreshed, err := postTokenRequest(ctx, client, tokenEndpoint, form, StoredToken{Scopes: current.Scopes, RefreshToken: refresh}, now)
+	token, err := oauth.Refresh(ctx, client, oauth.Config{
+		ClientID:      cfg.ClientID,
+		ClientSecret:  cfg.ClientSecret,
+		Scopes:        cfg.Scopes,
+		TokenEndpoint: cfg.TokenEndpoint,
+	}, oauth.Token{AccessToken: current.AccessToken, RefreshToken: current.RefreshToken, TokenType: current.TokenType, Scopes: current.Scopes, ExpiresAt: current.ExpiresAt}, now)
 	if err != nil {
 		return StoredToken{}, err
 	}
-	return refreshed, nil
-}
-
-// tokenResponse is the JSON returned by the token endpoint.
-type tokenResponse struct {
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	TokenType        string `json:"token_type"`
-	ExpiresIn        int64  `json:"expires_in"`
-	Scope            string `json:"scope"`
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
-}
-
-// postTokenRequest performs a token endpoint POST and maps the response onto a
-// StoredToken. The base token supplies values to preserve (e.g. an existing
-// refresh token or scope set) when the response omits them.
-func postTokenRequest(ctx context.Context, client *http.Client, tokenEndpoint string, form url.Values, base StoredToken, now func() time.Time) (StoredToken, error) {
-	if client == nil {
-		client = http.DefaultClient
-	}
-	if now == nil {
-		now = time.Now
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return StoredToken{}, err
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.Header.Set("Accept", "application/json")
-
-	response, err := client.Do(request)
-	if err != nil {
-		return StoredToken{}, fmt.Errorf("token request failed: %w", err)
-	}
-	defer response.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	var parsed tokenResponse
-	if len(body) > 0 {
-		// A malformed body on an error status is reported as a status error below.
-		_ = json.Unmarshal(body, &parsed)
-	}
-
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		if parsed.Error != "" {
-			if parsed.ErrorDescription != "" {
-				return StoredToken{}, fmt.Errorf("token endpoint error %q: %s", parsed.Error, parsed.ErrorDescription)
-			}
-			return StoredToken{}, fmt.Errorf("token endpoint error %q", parsed.Error)
-		}
-		return StoredToken{}, fmt.Errorf("token endpoint returned HTTP %d", response.StatusCode)
-	}
-	if strings.TrimSpace(parsed.AccessToken) == "" {
-		return StoredToken{}, errors.New("token endpoint returned no access token")
-	}
-
-	token := base
-	token.AccessToken = parsed.AccessToken
-	if strings.TrimSpace(parsed.RefreshToken) != "" {
-		token.RefreshToken = parsed.RefreshToken
-	}
-	if strings.TrimSpace(parsed.TokenType) != "" {
-		token.TokenType = parsed.TokenType
-	}
-	if parsed.ExpiresIn > 0 {
-		token.ExpiresAt = now().Add(time.Duration(parsed.ExpiresIn) * time.Second).UTC()
-	}
-	if scope := strings.TrimSpace(parsed.Scope); scope != "" {
-		token.Scopes = strings.Fields(scope)
-	}
-	return token, nil
+	return tokenToStored(token), nil
 }
 
 // registerClient performs dynamic client registration against the registration
@@ -504,23 +415,4 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 	case <-loginCtx.Done():
 		return StoredToken{}, fmt.Errorf("timed out waiting for OAuth authorization callback: %w", loginCtx.Err())
 	}
-}
-
-func joinWellKnown(baseURL string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || parsed.Host == "" {
-		return "", fmt.Errorf("invalid base URL for metadata discovery: %q", baseURL)
-	}
-	// RFC 8414: the well-known segment is inserted between the host and any issuer
-	// path component, so a path-based issuer (https://host/tenant-a) is probed at
-	// https://host/.well-known/oauth-authorization-server/tenant-a — not at the
-	// host root (which would break tenant-scoped discovery).
-	issuerPath := strings.Trim(parsed.Path, "/")
-	parsed.Path = wellKnownAuthServerPath
-	if issuerPath != "" {
-		parsed.Path = strings.TrimRight(wellKnownAuthServerPath, "/") + "/" + issuerPath
-	}
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
 }
