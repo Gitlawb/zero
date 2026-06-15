@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -316,6 +317,17 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	assertNotContains(t, permissionText, "Permission mode:")
 }
 
+// stubGrantStore is a minimal test double for sandbox.GrantStore. It only
+// implements List, which is enough to exercise the error path of
+// permissionsText().
+type stubGrantStore struct {
+	listErr error
+}
+
+func (store *stubGrantStore) List() ([]sandbox.Grant, error) {
+	return nil, store.listErr
+}
+
 func TestPermissionsCommandCardHandlesNilStoreAndEmptyGrants(t *testing.T) {
 	nilStore := model{permissionMode: agent.PermissionModeAuto}.permissionsText()
 	for _, want := range []string{
@@ -344,6 +356,19 @@ func TestPermissionsCommandCardHandlesNilStoreAndEmptyGrants(t *testing.T) {
 		assertContains(t, emptyText, want)
 	}
 	assertNotContains(t, emptyText, "status: info")
+
+	errStore := &stubGrantStore{listErr: errors.New("storage failure")}
+	errText := model{permissionMode: agent.PermissionModeAsk}.permissionsTextWithStore(errStore)
+	for _, want := range []string{
+		"Permissions",
+		"ask permissions",
+		"grants error",
+		"mode  ask",
+		"error: storage failure",
+	} {
+		assertContains(t, errText, want)
+	}
+	assertNotContains(t, errText, "status: blocked")
 }
 
 func TestContextCommandCardHandlesNilRegistryAndStableStyle(t *testing.T) {

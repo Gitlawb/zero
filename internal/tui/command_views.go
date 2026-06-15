@@ -10,6 +10,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zerocommands"
 )
@@ -260,8 +261,15 @@ func splitMCPCommandArgs(args string) ([]string, error) {
 }
 
 func (m model) permissionsText() string {
-	mode := string(m.permissionMode)
 	if m.sandboxStore == nil {
+		return m.permissionsTextWithStore(nil)
+	}
+	return m.permissionsTextWithStore(m.sandboxStore)
+}
+
+func (m model) permissionsTextWithStore(store grantLister) string {
+	mode := string(m.permissionMode)
+	if store == nil {
 		return renderCommandCardTranscript(commandCard{
 			Title:   "Permissions",
 			Summary: []string{mode + " permissions", "grants unavailable"},
@@ -280,7 +288,7 @@ func (m model) permissionsText() string {
 		})
 	}
 
-	grants, err := m.sandboxStore.List()
+	grants, err := store.List()
 	if err != nil {
 		return renderCommandCardTranscript(commandCard{
 			Title:   "Permissions",
@@ -333,6 +341,13 @@ func (m model) permissionsText() string {
 			},
 		},
 	})
+}
+
+// grantLister is the subset of sandbox.GrantStore used by permissionsText().
+// It exists to let tests inject error-stub stores without reaching for a real
+// filesystem path.
+type grantLister interface {
+	List() ([]sandbox.Grant, error)
 }
 
 func formatGrantCount(count int) string {
