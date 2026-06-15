@@ -96,6 +96,13 @@ var descriptors = []Descriptor{
 	openAICompat("zai", "Z.ai", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5", []string{"ZAI_API_KEY", "ZHIPU_API_KEY"}),
 	openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://gateway.gitlawb.com/v1", "gpt-4.1", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway"),
 	openAICompat("atomic-chat", "Atomic Chat", "https://api.atomic.chat/v1", "gpt-4.1", []string{"ATOMIC_CHAT_API_KEY"}),
+	// ChatGPT subscription via a local OAuth proxy. A ChatGPT (Plus/Pro) OAuth
+	// token only works against ChatGPT's own backend (which is Cloudflare-gated to
+	// the official client), so zero does not call it directly; instead point this
+	// at a local proxy that holds the OAuth session and exposes an OpenAI-compatible
+	// endpoint. Local (no API key — the proxy authenticates); override the base URL
+	// for your proxy's port. See docs/oauth-subscriptions.md.
+	localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"),
 	openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible"),
 	anthropicCompat("custom-anthropic-compatible", "Custom Anthropic-compatible", "https://example.invalid/anthropic", "custom-model", []string{"ANTHROPIC_API_KEY"}, "custom anthropic compatible"),
 }
