@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
@@ -34,9 +36,37 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return runAuthStatus(args[1:], stdout, stderr, deps)
 	case "refresh":
 		return runAuthRefresh(args[1:], stdout, stderr, deps)
+	case "openrouter":
+		return runAuthOpenRouter(args[1:], stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown auth subcommand %q", args[0]))
 	}
+}
+
+// runAuthOpenRouter runs OpenRouter's browser PKCE login and prints the freshly
+// minted API key. Unlike `auth login` (which stores an OAuth bearer token),
+// OpenRouter's flow mints a normal API key; the setup wizard saves it to a
+// provider profile, while this command prints it for manual configuration.
+func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appDeps) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" {
+			_ = writeAuthHelp(stdout)
+			return exitSuccess
+		}
+	}
+	key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
+		Out:        stdout,
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		// ZERO_OPENROUTER_BASE_URL overrides the endpoint (self-hosted gateway or tests).
+		BaseURL: strings.TrimSpace(os.Getenv("ZERO_OPENROUTER_BASE_URL")),
+	})
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted.\nUse it with zero, e.g.:\n  export OPENROUTER_API_KEY=%s\n(or add it to a provider profile with catalogID \"openrouter\").\n", key); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
 }
 
 // authArgs is the parsed form of an auth subcommand's arguments.
@@ -323,6 +353,7 @@ Commands:
   logout <provider>                               Delete a provider's stored login
   status [provider]                               Show login presence/expiry (never the token)
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
+  openrouter                                      Log in to OpenRouter in the browser; mints an API key
 
 A provider is any OAuth 2.0 / OIDC server you configure via env (no providers are
 built in). For a provider named <name>, set:
