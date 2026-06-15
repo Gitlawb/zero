@@ -1,0 +1,112 @@
+package oauth
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+	"time"
+)
+
+func newTestStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	s, err := NewStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	return s, path
+}
+
+func TestStoreSaveLoadDelete(t *testing.T) {
+	s, _ := newTestStore(t)
+	tok := Token{AccessToken: "at", RefreshToken: "rt", Account: "me@x"}
+	if err := s.Save(ProviderKey("demo"), tok); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s.Save(KeyPrefixMCP+"server1", Token{AccessToken: "mcp-at"}); err != nil {
+		t.Fatalf("Save mcp: %v", err)
+	}
+	got, ok, err := s.Load(ProviderKey("demo"))
+	if err != nil || !ok || got.AccessToken != "at" || got.Account != "me@x" {
+		t.Fatalf("Load = %+v ok=%v err=%v", got, ok, err)
+	}
+	removed, err := s.Delete(ProviderKey("demo"))
+	if err != nil || !removed {
+		t.Fatalf("Delete = %v %v", removed, err)
+	}
+	if _, ok, _ := s.Load(ProviderKey("demo")); ok {
+		t.Fatal("token should be gone after delete")
+	}
+	// The mcp-namespaced token is untouched.
+	if _, ok, _ := s.Load(KeyPrefixMCP + "server1"); !ok {
+		t.Fatal("mcp token should survive provider delete")
+	}
+}
+
+func TestStoreRejectsInvalidKeys(t *testing.T) {
+	s, _ := newTestStore(t)
+	for _, bad := range []string{"demo", "provider:", "provider:../escape", "mcp:bad/key", "other:x", ""} {
+		if err := s.Save(bad, Token{AccessToken: "x"}); err == nil {
+			t.Errorf("Save(%q) should be rejected", bad)
+		}
+	}
+	for _, ok := range []string{"provider:demo", "mcp:server-1", "provider:two-svc"} {
+		if err := ValidateKey(ok); err != nil {
+			t.Errorf("ValidateKey(%q) = %v, want nil", ok, err)
+		}
+	}
+}
+
+func TestStoreStatusFiltersByPrefix(t *testing.T) {
+	s, _ := newTestStore(t)
+	_ = s.Save(ProviderKey("demo"), Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: time.Now().Add(time.Hour)})
+	_ = s.Save(KeyPrefixMCP+"srv", Token{AccessToken: "m"})
+	statuses, err := s.Status(KeyPrefixProvider)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(statuses) != 1 || statuses[0].Key != ProviderKey("demo") {
+		t.Fatalf("provider status = %+v", statuses)
+	}
+	if !statuses[0].HasRefreshToken {
+		t.Fatal("status should report a refresh token")
+	}
+}
+
+func TestStoreFileMode0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix file modes")
+	}
+	s, path := newTestStore(t)
+	if err := s.Save(ProviderKey("x"), Token{AccessToken: "a"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("token file mode = %o, want 600", perm)
+	}
+}
+
+func TestStoreMalformedFailsClosed(t *testing.T) {
+	s, path := newTestStore(t)
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	if _, _, err := s.Load(ProviderKey("x")); err == nil {
+		t.Fatal("malformed store must fail closed")
+	}
+}
+
+func TestResolveStorePathHonorsOverride(t *testing.T) {
+	path, err := ResolveStorePath(map[string]string{"ZERO_OAUTH_TOKENS_PATH": "/tmp/custom/tok.json"})
+	if err != nil {
+		t.Fatalf("ResolveStorePath: %v", err)
+	}
+	if path != "/tmp/custom/tok.json" {
+		t.Fatalf("path = %q, want override", path)
+	}
+}

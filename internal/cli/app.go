@@ -278,6 +278,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runHooks(args[1:], stdout, stderr, deps)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr, deps)
+	case "auth":
+		return runAuth(args[1:], stdout, stderr, deps)
 	case "sandbox":
 		return runSandbox(args[1:], stdout, stderr, deps)
 	case "update":
@@ -700,6 +702,7 @@ Commands:
   tools      Scaffold and list local Zero plugin-tools
   hooks      Inspect Zero hook configuration
   mcp        Manage MCP backend settings
+  auth       Log in to model providers via OAuth
   sandbox    Inspect sandbox policy and persistent grants
   update     Check for Zero CLI updates
   worktrees  Prepare isolated git worktrees

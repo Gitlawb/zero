@@ -1,0 +1,182 @@
+package oauth
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// fakeProvider is an httptest server that plays a token + device endpoint.
+type fakeProvider struct {
+	server    *httptest.Server
+	tokenHits atomic.Int32
+}
+
+func newFakeProvider(t *testing.T, tokenJSON string) *fakeProvider {
+	t.Helper()
+	fp := &fakeProvider{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		fp.tokenHits.Add(1)
+		_, _ = io.WriteString(w, tokenJSON)
+	})
+	mux.HandleFunc("/device", func(w http.ResponseWriter, _ *http.Request) {
+		// Approve immediately on poll; short interval so the test is fast.
+		_, _ = io.WriteString(w, `{"device_code":"dc","user_code":"U-1","verification_uri":"https://example/dev","expires_in":600,"interval":1}`)
+	})
+	fp.server = httptest.NewServer(mux)
+	t.Cleanup(fp.server.Close)
+	return fp
+}
+
+func managerFor(t *testing.T, env map[string]string, openBrowser func(string) error) *Manager {
+	t.Helper()
+	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	m, err := NewManager(ManagerOptions{
+		Store:       store,
+		Env:         env,
+		OpenBrowser: openBrowser,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
+}
+
+func TestManagerLoginLoopback(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID":     "client",
+		"ZERO_OAUTH_DEMO_AUTHORIZE_URL": "https://auth.example.com/authorize",
+		"ZERO_OAUTH_DEMO_TOKEN_URL":     fp.server.URL + "/token",
+	}
+	// The fake browser drives the loopback redirect with the captured state.
+	openBrowser := func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		redirect := u.Query().Get("redirect_uri")
+		state := u.Query().Get("state")
+		_, err = http.Get(redirect + "?code=the-code&state=" + url.QueryEscape(state))
+		return err
+	}
+	m := managerFor(t, env, openBrowser)
+
+	status, err := m.Login(context.Background(), LoginOptions{Provider: "demo"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if !status.HasToken || status.Key != ProviderKey("demo") {
+		t.Fatalf("status = %+v", status)
+	}
+	// The token is persisted and GetFresh returns it without a needless refresh.
+	access, err := m.GetFresh(context.Background(), ProviderKey("demo"))
+	if err != nil {
+		t.Fatalf("GetFresh: %v", err)
+	}
+	if access != "at" {
+		t.Fatalf("access = %q, want at", access)
+	}
+}
+
+func TestManagerLoginDevice(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"dev-at","token_type":"Bearer","expires_in":3600}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMODEV_CLIENT_ID":  "client",
+		"ZERO_OAUTH_DEMODEV_TOKEN_URL":  fp.server.URL + "/token",
+		"ZERO_OAUTH_DEMODEV_DEVICE_URL": fp.server.URL + "/device",
+	}
+	m := managerFor(t, env, nil)
+	status, err := m.Login(context.Background(), LoginOptions{Provider: "demodev", Device: true})
+	if err != nil {
+		t.Fatalf("device Login: %v", err)
+	}
+	if !status.HasToken {
+		t.Fatalf("device status = %+v", status)
+	}
+}
+
+func TestManagerGetFreshRefreshesExpired(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"fresh-at","expires_in":3600}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+	}
+	m := managerFor(t, env, nil)
+	// Seed an expired token with a refresh token.
+	if err := m.store.Save(ProviderKey("demo"), Token{AccessToken: "stale", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	access, err := m.GetFresh(context.Background(), ProviderKey("demo"))
+	if err != nil {
+		t.Fatalf("GetFresh: %v", err)
+	}
+	if access != "fresh-at" {
+		t.Fatalf("access = %q, want fresh-at (refreshed)", access)
+	}
+	if fp.tokenHits.Load() != 1 {
+		t.Fatalf("token endpoint hit %d times, want 1 refresh", fp.tokenHits.Load())
+	}
+	// The refreshed token is persisted.
+	stored, _, _ := m.store.Load(ProviderKey("demo"))
+	if stored.AccessToken != "fresh-at" {
+		t.Fatalf("stored token not updated: %+v", stored)
+	}
+}
+
+func TestManagerGetFreshSkipsValidToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"should-not-be-used"}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+	}
+	m := managerFor(t, env, nil)
+	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "valid", RefreshToken: "rt", ExpiresAt: time.Now().Add(time.Hour)})
+	access, err := m.GetFresh(context.Background(), ProviderKey("demo"))
+	if err != nil {
+		t.Fatalf("GetFresh: %v", err)
+	}
+	if access != "valid" || fp.tokenHits.Load() != 0 {
+		t.Fatalf("a valid token must not be refreshed (access=%q hits=%d)", access, fp.tokenHits.Load())
+	}
+}
+
+func TestManagerHandle401ForcesRefresh(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"after-401"}`)
+	env := map[string]string{
+		"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+		"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+	}
+	m := managerFor(t, env, nil)
+	// Token is still valid by clock, but Handle401 forces a refresh anyway.
+	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "valid", RefreshToken: "rt", ExpiresAt: time.Now().Add(time.Hour)})
+	access, err := m.Handle401(context.Background(), ProviderKey("demo"))
+	if err != nil {
+		t.Fatalf("Handle401: %v", err)
+	}
+	if access != "after-401" || fp.tokenHits.Load() != 1 {
+		t.Fatalf("Handle401 must force a refresh (access=%q hits=%d)", access, fp.tokenHits.Load())
+	}
+}
+
+func TestManagerLogout(t *testing.T) {
+	m := managerFor(t, map[string]string{"ZERO_OAUTH_DEMO_CLIENT_ID": "c"}, nil)
+	_ = m.store.Save(ProviderKey("demo"), Token{AccessToken: "a"})
+	removed, err := m.Logout("demo")
+	if err != nil || !removed {
+		t.Fatalf("Logout = %v %v", removed, err)
+	}
+	if removed2, _ := m.Logout("demo"); removed2 {
+		t.Fatal("second logout should report nothing removed")
+	}
+}
