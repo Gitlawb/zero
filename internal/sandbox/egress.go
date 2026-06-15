@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +43,13 @@ type egressProxy struct {
 	denied        []string
 	log           func(string)
 
+	// mitm, when non-nil (Policy.InspectTLS), makes handleConnect TERMINATE TLS
+	// using a locally generated CA so the decrypted Host can be re-checked against
+	// the allow/deny gate. mitmTransport dials upstreams with full validation
+	// (system roots unless upstreamRoots is set for tests) — never InsecureSkipVerify.
+	mitm          *mitmCA
+	mitmTransport *http.Transport
+
 	// domainPrompt, when set, is asked to authorize an UNKNOWN host (one neither
 	// allowed nor explicitly denied) instead of failing closed. It must return
 	// within promptTimeout — the passed context is cancelled on timeout so a
@@ -76,6 +85,14 @@ type egressOptions struct {
 	// fail-closed behavior.
 	DomainPrompt  func(ctx context.Context, host string, port int) (bool, error)
 	PromptTimeout time.Duration
+	// InspectTLS enables TLS termination (MITM) so the proxy can enforce the
+	// allow/deny gate on the decrypted request Host. Off => pure CONNECT
+	// passthrough (the default, byte-for-byte unchanged).
+	InspectTLS bool
+	// upstreamRoots overrides the root CAs used to validate UPSTREAM TLS. nil =
+	// system roots (production). Tests set it to an httptest server's pool so
+	// validation is exercised WITHOUT InsecureSkipVerify.
+	upstreamRoots *x509.CertPool
 }
 
 // errEmptyAllowlist is returned when a scoped-egress proxy is requested with no
@@ -114,6 +131,23 @@ func newEgressProxy(options egressOptions) (*egressProxy, error) {
 		decisionCache: map[string]bool{},
 		inflight:      map[string]chan struct{}{},
 	}
+	if options.InspectTLS {
+		ca, err := newMITMCA()
+		if err != nil {
+			_ = listener.Close()
+			_ = socksListener.Close()
+			return nil, err
+		}
+		proxy.mitm = ca
+		proxy.mitmTransport = &http.Transport{
+			// Upstream TLS is validated normally; upstreamRoots is nil in production
+			// (system roots) and set only by tests. NEVER InsecureSkipVerify.
+			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: options.upstreamRoots},
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   30 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		}
+	}
 	proxy.server = &http.Server{
 		Handler:           http.HandlerFunc(proxy.handle),
 		ReadHeaderTimeout: 30 * time.Second,
@@ -143,6 +177,16 @@ func (proxy *egressProxy) SocksAddr() string {
 	return proxy.socksListener.Addr().String()
 }
 
+// CACertPEM returns the MITM CA's public certificate (PEM) when TLS inspection
+// is active, or nil for a plain passthrough proxy. The runner writes this to a
+// file and surfaces it via ZERO_SANDBOX_CA_CERT.
+func (proxy *egressProxy) CACertPEM() []byte {
+	if proxy == nil || proxy.mitm == nil {
+		return nil
+	}
+	return proxy.mitm.caPEM()
+}
+
 // Close stops the proxy and releases its listener. It is safe to call multiple
 // times.
 func (proxy *egressProxy) Close() error {
@@ -161,12 +205,19 @@ func (proxy *egressProxy) Close() error {
 				err = cerr
 			}
 		}
+		if proxy.mitmTransport != nil {
+			proxy.mitmTransport.CloseIdleConnections()
+		}
 	})
 	return err
 }
 
 func (proxy *egressProxy) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
+		if proxy.mitm != nil {
+			proxy.handleConnectMITM(w, r)
+			return
+		}
 		proxy.handleConnect(w, r)
 		return
 	}

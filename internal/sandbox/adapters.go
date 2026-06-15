@@ -23,15 +23,26 @@ type Backend struct {
 	// under a seatbelt profile that restricts outbound to the proxy port);
 	// bubblewrap isolates the network namespace with no bridge to the host proxy,
 	// so scoped egress there collapses to deny until a real relay exists.
-	ScopedEgress bool   `json:"scopedEgress,omitempty"`
-	Executable   string `json:"executable,omitempty"`
-	Message      string `json:"message,omitempty"`
+	ScopedEgress bool `json:"scopedEgress,omitempty"`
+	// ProxyEgress reports a backend that routes scoped egress through the local
+	// filtering proxy on a BEST-EFFORT basis (the child must honor the proxy env)
+	// rather than via OS-level network isolation. The WSL policy-only fallback uses
+	// this: there is no netns/seatbelt to enforce egress, but the proxy still
+	// applies the allow/deny gate to well-behaved clients.
+	ProxyEgress bool   `json:"proxyEgress,omitempty"`
+	Executable  string `json:"executable,omitempty"`
+	Message     string `json:"message,omitempty"`
 }
 
 // EnforcesScopedEgress reports whether a populated NetworkScoped allowlist can be
-// enforced by this backend. When false, scoped egress must fail closed (collapse
-// to deny) rather than silently run with unrestricted networking.
+// routed through the filtering proxy by this backend. When false, scoped egress
+// must fail closed (collapse to deny) rather than silently run with unrestricted
+// networking. A native backend needs an executable; the WSL fallback uses
+// best-effort proxy egress (ProxyEgress) with no native isolation.
 func (backend Backend) EnforcesScopedEgress() bool {
+	if backend.ProxyEgress {
+		return true
+	}
 	return backend.Available && backend.Executable != "" && backend.ScopedEgress
 }
 
@@ -65,6 +76,12 @@ func SelectBackend(options BackendOptions) Backend {
 		if path, err := lookup("bwrap"); err == nil && path != "" {
 			return nativeBackend(goos, BackendBubblewrap, path, "bubblewrap sandbox available")
 		}
+		// Under WSL (no bubblewrap), do NOT silently degrade to a plain policy-only
+		// runner: select the WSL backend, which still routes egress through the
+		// filtering proxy and is gated on AllowPolicyOnlyRunner in the runner.
+		if info := detectWSL(); info.IsWSL {
+			return wslBackend(goos, info)
+		}
 		return policyOnlyBackend(goos, "policy-only fallback: bubblewrap is not installed")
 	case "darwin":
 		if path, err := lookup("sandbox-exec"); err == nil && path != "" {
@@ -91,6 +108,26 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 		ScopedEgress: name == BackendSandboxExec,
 		Executable:   executable,
 		Message:      message,
+	}
+}
+
+// wslBackend is the policy-only WSL fallback: no native isolation, but scoped
+// egress is routed best-effort through the filtering proxy (ProxyEgress). The
+// runner gates it on Policy.AllowPolicyOnlyRunner and records a downgrade note.
+func wslBackend(goos string, info WSLInfo) Backend {
+	msg := "policy-only WSL fallback: bubblewrap unavailable under WSL; egress routed through the filtering proxy"
+	if info.IsWSL2 {
+		msg = "policy-only WSL2 fallback: bubblewrap unavailable/unreliable under WSL2; egress routed through the filtering proxy"
+	}
+	return Backend{
+		Name:            BackendWSL,
+		Available:       false,
+		Platform:        goos,
+		Fallback:        true,
+		CommandWrapping: false,
+		NativeIsolation: false,
+		ProxyEgress:     true,
+		Message:         msg,
 	}
 }
 

@@ -131,6 +131,11 @@ const (
 	BackendBubblewrap  BackendName = "bubblewrap"
 	BackendSandboxExec BackendName = "sandbox-exec"
 	BackendPolicyOnly  BackendName = "policy-only"
+	// BackendWSL is the policy-only fallback used under WSL when bubblewrap is
+	// unavailable/unreliable: there is no native OS isolation, but network egress
+	// is still routed through the local filtering proxy and the command runs under
+	// the full policy engine. It is surfaced via ZERO_SANDBOX_BACKEND=wsl.
+	BackendWSL BackendName = "wsl"
 )
 
 const (
@@ -207,6 +212,19 @@ type Policy struct {
 	DenyRead   []string `json:"denyRead,omitempty"`
 	AllowWrite []string `json:"allowWrite,omitempty"`
 	DenyWrite  []string `json:"denyWrite,omitempty"`
+	// InspectTLS, when true, lets the in-process scoped-egress proxy TERMINATE TLS
+	// (using a locally generated, ephemeral CA) so it can enforce the per-host
+	// allow/deny rules on the DECRYPTED request Host — today a CONNECT tunnel only
+	// reveals the host once. OFF by default: the proxy stays a pure CONNECT
+	// passthrough, byte-for-byte unchanged. SECURITY/TRUST: enabling this means the
+	// sandbox can read the plaintext of the sandboxed process's TLS traffic. The
+	// MITM only re-signs toward the sandboxed client; the upstream connection is
+	// ALWAYS validated against the system roots (never InsecureSkipVerify), and the
+	// decrypted Host still passes the SAME authorize()/domainAllowed() gate — MITM
+	// widens visibility, never authority. The generated CA's public cert is written
+	// to the sandbox runtime dir and surfaced via ZERO_SANDBOX_CA_CERT so the
+	// sandboxed client can trust it.
+	InspectTLS bool `json:"inspectTLS,omitempty"`
 }
 
 type Request struct {

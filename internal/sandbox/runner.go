@@ -17,6 +17,13 @@ const bubblewrapWorkspace = "/workspace"
 
 var errPolicyOnlyRunnerDisabled = errors.New("policy-only sandbox runner is disabled")
 
+// errWSLPolicyOnlyDisabled is returned when running under WSL without bubblewrap
+// and the policy has NOT opted into the policy-only runner — fail closed rather
+// than run with no native isolation.
+var errWSLPolicyOnlyDisabled = errors.New("bubblewrap is unavailable under WSL and Policy.AllowPolicyOnlyRunner is disabled: " +
+	"enable AllowPolicyOnlyRunner to run under the policy-only WSL fallback (engine policy + proxy egress, no native isolation), " +
+	"or install/enable bubblewrap")
+
 type CommandSpec struct {
 	Name string
 	Args []string
@@ -39,6 +46,10 @@ type CommandPlan struct {
 	// StartDenialMonitor to capture what the sandbox blocked. Empty unless
 	// Policy.MonitorDenials is set on a macOS sandbox-exec plan.
 	MonitorTag string `json:"monitorTag,omitempty"`
+	// Notes records auditable least-privilege downgrade notes — e.g. the WSL
+	// policy-only fallback noting that native isolation was unavailable. Surfaced to
+	// the operator; never affects enforcement.
+	Notes []string `json:"notes,omitempty"`
 	// cleanup releases resources tied to the plan's lifetime — currently the
 	// scoped-egress proxy, which must outlive the command run and be shut down
 	// afterwards. It is never serialized; callers invoke it via Cleanup() once the
@@ -208,11 +219,54 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 			}
 			return sandboxExecCommandPlan(spec, workspaceRoot, engine.writeRoots(workspaceRoot), policy, backend, egress), nil
 		}
+	case BackendWSL:
+		// WSL fallback: no native isolation available. Fail closed unless the policy
+		// opted into the policy-only runner; otherwise run policy-only with the
+		// command's egress routed through the filtering proxy and an auditable note.
+		if !policy.AllowPolicyOnlyRunner {
+			return CommandPlan{}, errWSLPolicyOnlyDisabled
+		}
+		egress, err := startScopedEgress(policy, backend)
+		if err != nil {
+			return CommandPlan{}, err
+		}
+		return wslCommandPlan(spec, workspaceRoot, policy, backend, egress), nil
 	}
 	if !policy.AllowPolicyOnlyRunner {
 		return CommandPlan{}, errPolicyOnlyRunnerDisabled
 	}
 	return directCommandPlan(spec, backend, policy, workspaceRoot), nil
+}
+
+// wslCommandPlan builds the WSL policy-only fallback plan: the command runs
+// DIRECTLY (no native wrap, since bubblewrap is unavailable under WSL) but with
+// the sandbox env markers (ZERO_SANDBOXED=1, ZERO_SANDBOX_BACKEND=wsl) and, when
+// a scoped-egress proxy was started, the proxy env so well-behaved clients route
+// through the allow/deny gate. It carries a least-privilege downgrade note.
+func wslCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
+	env := sandboxEnvironment(policy, BackendWSL, workspaceRoot)
+	if egress != nil {
+		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
+		env = appendCACertEnv(env, egress)
+	}
+	plan := CommandPlan{
+		Backend:       backend,
+		WorkspaceRoot: workspaceRoot,
+		Policy:        policy,
+		Wrapped:       false,
+		Name:          spec.Name,
+		Args:          cloneStrings(spec.Args),
+		Dir:           spec.Dir,
+		Env:           env,
+		Notes: []string{
+			"WSL: native process isolation (bubblewrap) is unavailable; downgraded to the policy-only runner " +
+				"with proxy egress (least privilege). The engine still enforces the full policy.",
+		},
+	}
+	if egress != nil {
+		plan.cleanup = egress.cleanup
+	}
+	return plan
 }
 
 // scopedEgress holds the address of a started scoped-egress proxy and the
@@ -224,7 +278,25 @@ type scopedEgress struct {
 	// set ALL_PROXY=socks5://<socksAddr>. Empty when the proxy exposes no SOCKS
 	// listener, in which case ALL_PROXY falls back to the HTTP proxy.
 	socksAddr string
-	cleanup   func()
+	// caCertPath is the path to the MITM CA's public cert (PEM), set only when
+	// Policy.InspectTLS started a TLS-terminating proxy. Surfaced to the sandboxed
+	// client via ZERO_SANDBOX_CA_CERT so it can trust the minted leaves.
+	caCertPath string
+	cleanup    func()
+}
+
+// EnvCACert is the env var pointing the sandboxed client at the MITM CA's public
+// cert so it can trust the proxy's minted leaf certificates (only set when
+// Policy.InspectTLS is on).
+const EnvCACert = "ZERO_SANDBOX_CA_CERT"
+
+// appendCACertEnv adds ZERO_SANDBOX_CA_CERT when the egress proxy is terminating
+// TLS (InspectTLS). It is a no-op for a plain passthrough proxy.
+func appendCACertEnv(env []string, egress *scopedEgress) []string {
+	if egress == nil || egress.caCertPath == "" {
+		return env
+	}
+	return append(env, EnvCACert+"="+egress.caCertPath)
 }
 
 // startScopedEgress starts the local filtering proxy when the policy's effective
@@ -242,13 +314,32 @@ func startScopedEgress(policy Policy, backend Backend) (*scopedEgress, error) {
 		return nil, nil
 	}
 	proxy, err := startEgressProxy(egressOptions{
-		Allowed: policy.AllowedDomains,
-		Denied:  policy.DeniedDomains,
+		Allowed:    policy.AllowedDomains,
+		Denied:     policy.DeniedDomains,
+		InspectTLS: policy.InspectTLS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scoped egress unavailable, denying network: %w", err)
 	}
-	return &scopedEgress{addr: proxy.Addr(), socksAddr: proxy.SocksAddr(), cleanup: func() { _ = proxy.Close() }}, nil
+	se := &scopedEgress{addr: proxy.Addr(), socksAddr: proxy.SocksAddr(), cleanup: func() { _ = proxy.Close() }}
+	if policy.InspectTLS {
+		// Write the MITM CA's PUBLIC cert so the sandboxed client can trust the
+		// minted leaves; surface it via ZERO_SANDBOX_CA_CERT and clean it up with
+		// the proxy. Reuses no new bind path: sandbox-exec already allows file-read,
+		// and the WSL policy-only runner shares the host filesystem.
+		caPath, werr := writeMITMCAFile(proxy.CACertPEM())
+		if werr != nil {
+			_ = proxy.Close()
+			return nil, werr
+		}
+		se.caCertPath = caPath
+		base := se.cleanup
+		se.cleanup = func() {
+			base()
+			_ = os.Remove(caPath)
+		}
+	}
+	return se, nil
 }
 
 func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspaceRoot string) CommandPlan {
@@ -438,6 +529,7 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 	env := sandboxEnvironment(policy, BackendSandboxExec, workspaceRoot)
 	if egress != nil {
 		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
+		env = appendCACertEnv(env, egress)
 	}
 	plan := CommandPlan{
 		Backend:       backend,
