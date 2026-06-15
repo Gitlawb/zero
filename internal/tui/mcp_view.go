@@ -113,19 +113,6 @@ func renderMCPView(state MCPViewState, width int) string {
 	return fitMCPManagerLines(lines, width)
 }
 
-func mcpViewStatus(state MCPViewState) commandStatus {
-	if !hasMCPOperationalContent(state) {
-		return commandStatusWarning
-	}
-	for _, server := range state.Servers {
-		status := strings.ToLower(strings.TrimSpace(server.State))
-		if strings.Contains(status, "error") || strings.Contains(status, "failed") {
-			return commandStatusBlocked
-		}
-	}
-	return commandStatusOK
-}
-
 func hasMCPViewContent(state MCPViewState) bool {
 	return hasMCPOperationalContent(state) ||
 		hasMCPPermissionActivity(state.Permissions)
@@ -144,31 +131,6 @@ func hasMCPPermissionActivity(summary MCPPermissionSummary) bool {
 		summary.PromptCount > 0 ||
 		summary.DeniedCount > 0 ||
 		len(summary.Grants) > 0
-}
-
-func mcpServerLines(servers []MCPServerView) []string {
-	lines := make([]string, 0, len(servers))
-	for _, server := range servers {
-		name := displayValue(strings.TrimSpace(server.Name), "unnamed")
-		transport := displayValue(strings.TrimSpace(server.Transport), "unknown")
-		state := displayValue(strings.TrimSpace(server.State), "configured")
-
-		line := fmt.Sprintf("%s [%s] %s", name, transport, state)
-		if auth := strings.TrimSpace(server.Auth); auth != "" {
-			line += " " + auth
-		}
-		if server.ToolCount > 0 {
-			line += " " + pluralCount(server.ToolCount, "tool")
-		}
-		if target := strings.TrimSpace(server.Target); target != "" {
-			line += " - " + target
-		}
-		lines = append(lines, commandBullet(line))
-		if actions := mcpServerActionLine(server); actions != "" {
-			lines = append(lines, actions)
-		}
-	}
-	return lines
 }
 
 func mcpManagerServerLines(servers []MCPServerView) []string {
@@ -378,18 +340,6 @@ func dedupeStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
-}
-
-func fitCommandOutput(output commandOutput, width int) string {
-	rendered := renderCommandOutput(output)
-	if width <= 0 {
-		return rendered
-	}
-	lines := strings.Split(rendered, "\n")
-	for index, line := range lines {
-		lines[index] = fitStyledLine(line, width)
-	}
-	return strings.Join(lines, "\n")
 }
 
 func fitMCPManagerLines(lines []string, width int) string {

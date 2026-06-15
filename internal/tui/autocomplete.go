@@ -333,16 +333,6 @@ func completePathQueryWithTrailingSpace(value string, cursorPos int, selectedPat
 	return string(out), query.StartIndex + len(replacement)
 }
 
-func removeTrailingAtToken(value string) string {
-	if _, ok := trailingAtToken(value); !ok {
-		return value
-	}
-	if i := strings.LastIndexAny(value, " \t\n"); i >= 0 {
-		return value[:i+1]
-	}
-	return ""
-}
-
 // maxFileWalk bounds how many filesystem entries the "@file" picker visits per
 // keystroke so a large workspace tree can't stall the TUI.
 const maxFileWalk = 4000

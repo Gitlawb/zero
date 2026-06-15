@@ -186,10 +186,6 @@ func validateFileList(taskPath string, field string, files []string, required bo
 	return problems
 }
 
-func validateExpectedChangedFiles(taskPath string, files []string) []string {
-	return validateFileList(taskPath, "expectedChangedFiles", files, true)
-}
-
 func validateStringList(taskPath string, field string, values []string) []string {
 	problems := []string{}
 	seen := map[string]int{}

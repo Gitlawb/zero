@@ -176,11 +176,6 @@ func (t tuiTheme) onUserPrompt(style lipgloss.Style) lipgloss.Style {
 	return style.Background(lipgloss.Color(colorPromptBg))
 }
 
-// onPanel2 paints on the header/picker-row surface.
-func (t tuiTheme) onPanel2(style lipgloss.Style) lipgloss.Style {
-	return style.Background(lipgloss.Color(colorPanel2))
-}
-
 // onSel paints on the selected-row tint.
 func (t tuiTheme) onSel(style lipgloss.Style) lipgloss.Style {
 	return style.Background(lipgloss.Color(colorSelBg))

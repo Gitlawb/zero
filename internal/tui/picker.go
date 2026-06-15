@@ -85,11 +85,6 @@ func (p *commandPicker) deleteQueryRune() {
 	p.applyQuery()
 }
 
-func (p *commandPicker) clearQuery() {
-	p.query = ""
-	p.applyQuery()
-}
-
 func (p *commandPicker) applyQuery() {
 	source := p.allItems
 	if len(source) == 0 {

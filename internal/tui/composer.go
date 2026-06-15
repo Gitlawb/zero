@@ -72,16 +72,6 @@ func deleteComposerWordAfter(state composerState) composerState {
 	return deleteComposerRange(state, state.cursor, end)
 }
 
-func deleteComposerLineBefore(state composerState) composerState {
-	state = normalizeComposerState(state)
-	return deleteComposerRange(state, composerLineStart(state), state.cursor)
-}
-
-func deleteComposerLineAfter(state composerState) composerState {
-	state = normalizeComposerState(state)
-	return deleteComposerRange(state, state.cursor, composerLineEnd(state))
-}
-
 func moveComposerWordBefore(state composerState) composerState {
 	state = normalizeComposerState(state)
 	runes := []rune(state.text)
@@ -578,14 +568,6 @@ func shouldInsertCommandArgumentSpace(state composerState, text string) bool {
 		return false
 	}
 	return commandArgumentHintForInput(state.text) != ""
-}
-
-func deleteCompletedFileMentionBefore(state composerState) (composerState, bool) {
-	start, end, ok := completedFileMentionRangeBefore(state)
-	if !ok {
-		return state, false
-	}
-	return deleteComposerRange(state, start, end), true
 }
 
 func completedFileMentionRangeBefore(state composerState) (int, int, bool) {

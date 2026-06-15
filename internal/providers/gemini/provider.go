@@ -19,10 +19,6 @@ import (
 const defaultBaseURL = "https://generativelanguage.googleapis.com"
 const defaultMaxTokens = 8192
 
-// providerName tags reasoning signatures this adapter binds to a tool call so
-// only it replays them.
-const providerName = "gemini"
-
 // thinkingBudgetForEffort maps a requested reasoning effort to a Gemini thinking
 // token budget, capped at 24576 (the lowest per-model ceiling among 2.5 models).
 // 0 means "no thinking config" (leave the request unchanged).

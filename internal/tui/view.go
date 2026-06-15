@@ -790,15 +790,6 @@ func firstArgValue(raw string, keys []string) string {
 	return ""
 }
 
-func indentText(text string, spaces int) string {
-	prefix := strings.Repeat(" ", spaces)
-	lines := strings.Split(text, "\n")
-	for index, line := range lines {
-		lines[index] = prefix + line
-	}
-	return strings.Join(lines, "\n")
-}
-
 // looksLikeDiff reports whether output should be rendered as a diff card: a
 // real hunk header, or both old/new file headers. A single line starting with
 // "---" (a Markdown rule, YAML document marker, log separator…) must NOT

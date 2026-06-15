@@ -343,12 +343,6 @@ func (defaultModelSwitchCompactionPolicy) BeforeModelSwitch(request modelSwitchC
 	}
 }
 
-type noopModelSwitchCompactionPolicy struct{}
-
-func (noopModelSwitchCompactionPolicy) BeforeModelSwitch(modelSwitchCompactionRequest) modelSwitchCompactionDecision {
-	return modelSwitchCompactionDecision{}
-}
-
 var modelSwitchCompactionGuard modelSwitchCompactionPolicy = defaultModelSwitchCompactionPolicy{}
 
 // sanitizeCardField strips the card protocol's separator bytes from

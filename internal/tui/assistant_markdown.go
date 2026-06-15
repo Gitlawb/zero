@@ -666,10 +666,6 @@ func renderMarkdownStandaloneLine(line string) string {
 	return strings.TrimRight(line, " ")
 }
 
-func stripMarkdownInline(text string) string {
-	return markdownInlinePlain(text)
-}
-
 type markdownInlineSegment struct {
 	text string
 	bold bool
