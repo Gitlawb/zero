@@ -170,28 +170,28 @@ func (m model) syncMouseCapture() (model, tea.Cmd) {
 	return m, tea.DisableMouse
 }
 
-// Bubble Tea's Type field is deprecated, but its parser still populates it for
-// compatibility cases such as left-button drag events. Keep these helpers
-// tolerant of both the current Button/Action pair and legacy Type values.
+// Mouse classification uses the current Button/Action pair only. Bubble Tea's
+// parser always populates Button+Action and merely derives the deprecated Type
+// field from them, so checking Type adds nothing — and a left-button drag is
+// Action==Motion (which mouseMotion already covers), not a press.
 func mouseLeftPress(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress ||
-		msg.Type == tea.MouseLeft && msg.Action == tea.MouseActionPress
+	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress
 }
 
 func mouseMotion(msg tea.MouseMsg) bool {
-	return msg.Action == tea.MouseActionMotion || msg.Type == tea.MouseMotion
+	return msg.Action == tea.MouseActionMotion
 }
 
 func mouseRelease(msg tea.MouseMsg) bool {
-	return msg.Action == tea.MouseActionRelease || msg.Type == tea.MouseRelease
+	return msg.Action == tea.MouseActionRelease
 }
 
 func mouseWheelUp(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonWheelUp || msg.Type == tea.MouseWheelUp
+	return msg.Button == tea.MouseButtonWheelUp
 }
 
 func mouseWheelDown(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonWheelDown || msg.Type == tea.MouseWheelDown
+	return msg.Button == tea.MouseButtonWheelDown
 }
 
 func (m model) mouseOverComposer(msg tea.MouseMsg) bool {

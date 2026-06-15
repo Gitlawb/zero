@@ -348,12 +348,11 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 		Y:      1,
 	})
 	m = updated.(model)
-	// Bubble Tea marks left-button drag motion as Type MouseLeft for backward
-	// compatibility; this must update the cursor without resetting the anchor.
+	// A left-button drag is Action==Motion with Button==Left; this must update the
+	// cursor without resetting the selection anchor.
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionMotion,
-		Type:   tea.MouseLeft,
 		X:      8,
 		Y:      1,
 	})
