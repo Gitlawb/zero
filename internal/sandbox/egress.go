@@ -139,11 +139,19 @@ func newEgressProxy(options egressOptions) (*egressProxy, error) {
 			return nil, err
 		}
 		proxy.mitm = ca
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 		proxy.mitmTransport = &http.Transport{
+			// Bound the TCP connect phase so a blackholed upstream cannot park a
+			// handler+goroutine for the OS default (minutes) — mirrors the
+			// net.DialTimeout the passthrough CONNECT path uses.
+			DialContext: dialer.DialContext,
 			// Upstream TLS is validated normally; upstreamRoots is nil in production
 			// (system roots) and set only by tests. NEVER InsecureSkipVerify.
-			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: options.upstreamRoots},
-			ForceAttemptHTTP2:     true,
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: options.upstreamRoots},
+			// Keep upstream on HTTP/1.1: the decrypted client side is HTTP/1.1, so an
+			// HTTP/2 upstream response would serialize an invalid status line back to
+			// the client. (handleConnectMITM also normalizes the response proto.)
+			ForceAttemptHTTP2:     false,
 			TLSHandshakeTimeout:   30 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		}

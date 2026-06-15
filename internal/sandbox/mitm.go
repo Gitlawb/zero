@@ -40,6 +40,11 @@ type mitmCA struct {
 	leaves map[string]*tls.Certificate
 }
 
+// maxMITMLeafCacheEntries caps the per-host leaf cache so an attacker cannot grow
+// it without bound. Combined with minting for the AUTHORIZED host (not arbitrary
+// client SNI), this keeps the cache size to roughly the allowlist size.
+const maxMITMLeafCacheEntries = 512
+
 func randomSerial() (*big.Int, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
@@ -97,6 +102,9 @@ func (ca *mitmCA) leafFor(host string) (*tls.Certificate, error) {
 	if leaf, ok := ca.leaves[host]; ok {
 		return leaf, nil
 	}
+	// Bound the cache: past the cap, mint without caching so memory stays bounded
+	// (a small per-request cost rather than unbounded growth).
+	cacheable := len(ca.leaves) < maxMITMLeafCacheEntries
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -124,7 +132,9 @@ func (ca *mitmCA) leafFor(host string) (*tls.Certificate, error) {
 		return nil, fmt.Errorf("mitm: mint leaf for %s: %w", host, err)
 	}
 	leaf := &tls.Certificate{Certificate: [][]byte{der, ca.certDER}, PrivateKey: leafKey}
-	ca.leaves[host] = leaf
+	if cacheable {
+		ca.leaves[host] = leaf
+	}
 	return leaf, nil
 }
 
@@ -184,12 +194,11 @@ func (proxy *egressProxy) handleConnectMITM(w http.ResponseWriter, r *http.Reque
 	host := hostnameOnly(target)
 	tlsConn := tls.Server(clientConn, &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			name := hello.ServerName
-			if name == "" {
-				name = host
-			}
-			return proxy.mitm.leafFor(name)
+		GetCertificate: func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			// Mint for the AUTHORIZED CONNECT host, never the arbitrary client SNI:
+			// honoring SNI would let an attacker churn distinct names to force
+			// unbounded key generation and cache growth.
+			return proxy.mitm.leafFor(host)
 		},
 	})
 	if err := tlsConn.Handshake(); err != nil {
@@ -208,8 +217,9 @@ func (proxy *egressProxy) handleConnectMITM(w http.ResponseWriter, r *http.Reque
 			reqHost = host
 		}
 		// MITM widens VISIBILITY, never authority: the decrypted Host passes the
-		// SAME authorize()/domainAllowed() gate (deny-wins, empty allowlist => deny).
-		if !domainAllowed(hostnameOnly(reqHost), proxy.allowed, proxy.denied) {
+		// SAME full authorize() gate as the CONNECT check (deny-wins, empty allowlist
+		// => deny, and an interactive DomainPrompt is honored consistently).
+		if !proxy.authorizeTarget(reqHost, 443) {
 			proxy.logDecision("deny", req.Method, reqHost)
 			writeMITMResponse(tlsConn, http.StatusForbidden, "scoped egress: host not allowed")
 			return
@@ -224,6 +234,9 @@ func (proxy *egressProxy) handleConnectMITM(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		proxy.logDecision("allow", req.Method, reqHost)
+		// Re-frame the response as HTTP/1.1 for the decrypted (HTTP/1.1) client
+		// connection, regardless of how the upstream replied.
+		resp.Proto, resp.ProtoMajor, resp.ProtoMinor = "HTTP/1.1", 1, 1
 		writeErr := resp.Write(tlsConn)
 		_ = resp.Body.Close()
 		if writeErr != nil || req.Close || resp.Close {

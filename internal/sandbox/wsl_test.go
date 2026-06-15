@@ -67,7 +67,7 @@ func TestWSLPolicyOnlyPlanCarriesProxyAndMarkers(t *testing.T) {
 	// so the WSL fallback starts the filtering proxy and runs policy-only.
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: wslBackendForTest()})
 
-	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root, Env: []string{}})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
@@ -92,12 +92,36 @@ func TestWSLPolicyOnlyPlanCarriesProxyAndMarkers(t *testing.T) {
 	}
 }
 
+func TestWSLPlanPreservesCallerEnv(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: wslBackendForTest()})
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: root,
+		Env: []string{"FOO=bar", "PATH=/custom/bin"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	defer plan.Cleanup()
+	env := strings.Join(plan.Env, "\n")
+	// The WSL direct-run inherits the caller's env (it is not OS-wrapped)...
+	if !strings.Contains(env, "FOO=bar") || !strings.Contains(env, "PATH=/custom/bin") {
+		t.Fatalf("WSL plan must preserve caller env, got:\n%s", env)
+	}
+	// ...with the sandbox markers appended (so they win over caller env).
+	if !strings.Contains(env, EnvSandboxed+"=1") || !strings.Contains(env, EnvSandboxBackend+"=wsl") {
+		t.Fatalf("WSL plan must append sandbox markers:\n%s", env)
+	}
+}
+
 func TestWSLPolicyOnlyDenyPlanHasMarkersNoProxy(t *testing.T) {
 	root := t.TempDir()
 	// Default policy (NetworkDeny) → no proxy started, but the WSL markers + note
 	// still apply and the plan still runs (AllowPolicyOnlyRunner default true).
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: wslBackendForTest()})
-	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
+	// Explicit empty env so the assertion below is not confused by a dev/CI
+	// HTTP_PROXY inherited via os.Environ().
+	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root, Env: []string{}})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
@@ -106,7 +130,10 @@ func TestWSLPolicyOnlyDenyPlanHasMarkersNoProxy(t *testing.T) {
 	if !strings.Contains(env, EnvSandboxBackend+"=wsl") || !strings.Contains(env, EnvSandboxed+"=1") {
 		t.Fatalf("WSL deny plan must still carry sandbox markers:\n%s", env)
 	}
-	if strings.Contains(env, "HTTP_PROXY=") {
-		t.Fatalf("WSL deny plan must NOT export a proxy (network denied):\n%s", env)
+	if len(plan.Notes) == 0 || !strings.Contains(strings.Join(plan.Notes, " "), "policy-only") {
+		t.Fatalf("WSL deny plan must record a least-privilege downgrade note, got %v", plan.Notes)
+	}
+	if strings.Contains(env, "HTTP_PROXY=") || strings.Contains(env, "HTTPS_PROXY=") || strings.Contains(env, "ALL_PROXY=") {
+		t.Fatalf("WSL deny plan must NOT export any proxy env vars (network denied):\n%s", env)
 	}
 }

@@ -244,10 +244,27 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 // a scoped-egress proxy was started, the proxy env so well-behaved clients route
 // through the allow/deny gate. It carries a least-privilege downgrade note.
 func wslCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
-	env := sandboxEnvironment(policy, BackendWSL, workspaceRoot)
+	// The WSL fallback runs the command DIRECTLY (no native wrap), so it inherits
+	// the caller's environment like the generic policy-only runner; the sandbox
+	// markers are appended last so they cannot be shadowed by the caller's env.
+	var env []string
+	if spec.Env != nil {
+		env = cloneStrings(spec.Env)
+	} else {
+		env = append(env, os.Environ()...)
+	}
+	env = append(env,
+		EnvSandboxBackend+"="+string(BackendWSL),
+		"ZERO_SANDBOX_NETWORK="+string(policy.Network),
+		EnvSandboxed+"=1",
+	)
+	note := "WSL: native process isolation (bubblewrap) is unavailable; downgraded to the policy-only runner " +
+		"(least privilege). The engine still enforces the full policy."
 	if egress != nil {
 		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
 		env = appendCACertEnv(env, egress)
+		note = "WSL: native process isolation (bubblewrap) is unavailable; downgraded to the policy-only runner " +
+			"with proxy egress (least privilege). The engine still enforces the full policy."
 	}
 	plan := CommandPlan{
 		Backend:       backend,
@@ -258,10 +275,7 @@ func wslCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backe
 		Args:          cloneStrings(spec.Args),
 		Dir:           spec.Dir,
 		Env:           env,
-		Notes: []string{
-			"WSL: native process isolation (bubblewrap) is unavailable; downgraded to the policy-only runner " +
-				"with proxy egress (least privilege). The engine still enforces the full policy.",
-		},
+		Notes:         []string{note},
 	}
 	if egress != nil {
 		plan.cleanup = egress.cleanup

@@ -66,6 +66,11 @@ func mitmConnect(t *testing.T, proxyAddr, target string, caPEM []byte, serverNam
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
 	}
+	// Bound the whole exchange (CONNECT read + TLS handshake + request/response) so
+	// a regression cannot hang the test indefinitely.
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
 	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
@@ -114,9 +119,17 @@ func TestEgressProxyMITMForwardsAllowlistedHost(t *testing.T) {
 	tlsConn := mitmConnect(t, proxy.Addr(), target, proxy.CACertPEM(), host)
 	defer tlsConn.Close()
 	fmt.Fprintf(tlsConn, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host)
-	body, err := io.ReadAll(tlsConn)
+	resp, err := http.ReadResponse(bufio.NewReader(tlsConn), &http.Request{Method: http.MethodGet})
 	if err != nil {
 		t.Fatalf("read decrypted response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("allowlisted forwarded request status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read decrypted body: %v", err)
 	}
 	if !strings.Contains(string(body), "upstream-ok") {
 		t.Fatalf("MITM did not forward the allowlisted request, got %q", string(body))
