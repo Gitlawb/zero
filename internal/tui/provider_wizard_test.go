@@ -31,24 +31,30 @@ func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
 	if next.providerWizard == nil {
 		t.Fatal("expected provider wizard to be open")
 	}
-	if next.providerWizard.step != providerWizardStepProvider {
-		t.Fatalf("wizard step = %v, want provider catalog", next.providerWizard.step)
+	if next.providerWizard.step != providerWizardStepMethod {
+		t.Fatalf("wizard step = %v, want connect-method chooser", next.providerWizard.step)
 	}
 	if len(next.transcript) != len(m.transcript) {
 		t.Fatalf("/provider should not append transcript output when opening wizard")
 	}
+	// The wizard opens on the connect-method chooser, with OAuth listed first.
 	view := plainRender(t, next.View())
 	for _, want := range []string{
 		"Provider setup",
-		"Choose provider",
-		"OpenAI",
-		"Anthropic",
-		"Google",
-		"Groq",
-		"OpenRouter",
-		"Ollama",
+		"How do you want to connect?",
+		"Sign in with OAuth",
+		"Paste an API key",
 	} {
 		assertContains(t, view, want)
+	}
+
+	// Choosing the API-key method reveals the full provider catalog.
+	next.providerWizard.selectedMethod = len(providerWizardMethodOptions()) - 1
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	listView := plainRender(t, next.View())
+	for _, want := range []string{"Choose provider", "OpenAI", "Anthropic", "Google", "Groq", "OpenRouter", "Ollama"} {
+		assertContains(t, listView, want)
 	}
 }
 
@@ -343,7 +349,7 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 		"Endpoint URL",
 		"url >",
 		"https://api.example.com/v1",
-		"2 endpoint",
+		"3 endpoint",
 	} {
 		assertContains(t, view, want)
 	}
@@ -978,6 +984,18 @@ func openProviderWizardForTest(t *testing.T, m model) model {
 	next := updated.(model)
 	if next.providerWizard == nil {
 		t.Fatal("expected provider wizard to be open")
+	}
+	// The wizard now opens on the connect-method chooser. These tests exercise the
+	// API-key / browse path, so select that method and advance into the provider
+	// list (the OAuth path is covered by the OAuth-specific tests).
+	if next.providerWizard.step == providerWizardStepMethod {
+		options := providerWizardMethodOptions()
+		next.providerWizard.selectedMethod = len(options) - 1 // last = "browse / API key"
+		u2, _ := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		next = u2.(model)
+		if next.providerWizard == nil || next.providerWizard.step != providerWizardStepProvider {
+			t.Fatalf("expected provider step after choosing API-key method, got %#v", next.providerWizard)
+		}
 	}
 	return next
 }

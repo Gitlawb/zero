@@ -25,6 +25,13 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
 	}
+	// OAuth path: advancing from the OAuth provider list starts the browser/device
+	// login instead of the key/endpoint flow.
+	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode && m.providerWizard.currentProvider().OAuth {
+		m.providerWizard.oauthPending = true
+		m.providerWizard.oauthErr = ""
+		return m, providerWizardOAuthCmdFor(m.providerWizard.currentProvider())
+	}
 	previous := m.providerWizard.step
 	m.providerWizard.advance()
 	if m.providerWizard.step == providerWizardStepModel && previous != providerWizardStepModel {

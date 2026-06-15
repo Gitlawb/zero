@@ -47,6 +47,17 @@ type Descriptor struct {
 	Local               bool
 	SupportedAPIFormats []APIFormat
 	Aliases             []string
+
+	// OAuth reports that this provider offers an in-app OAuth login that yields a
+	// credential usable for model calls (browser PKCE and/or device code). Only
+	// set for providers where this actually works (not subscription-via-proxy).
+	OAuth bool
+	// OAuthMintsKey reports that the OAuth flow returns/mints a normal API key
+	// (e.g. OpenRouter) rather than a bearer token used directly.
+	OAuthMintsKey bool
+	// OAuthDeviceFlow reports that RFC 8628 device-code login is supported (for
+	// headless / SSH use) in addition to the browser flow.
+	OAuthDeviceFlow bool
 }
 
 func RuntimeSupported(descriptor Descriptor) bool {
@@ -77,7 +88,7 @@ var descriptors = []Descriptor{
 	openAICompat("ollama-cloud", "Ollama Cloud", "https://ollama.com/v1", "qwen3-coder:480b", []string{"OLLAMA_API_KEY"}, "ollama.com", "ollama cloud"),
 	localOpenAI("ollama", "Ollama Local", "http://localhost:11434/v1", "llama3.1", "ollama local"),
 	localOpenAI("lmstudio", "LM Studio", "http://localhost:1234/v1", "local-model", "lm-studio", "lm studio"),
-	openAICompat("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4.1", []string{"OPENROUTER_API_KEY"}),
+	oauthProvider(openAICompat("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4.1", []string{"OPENROUTER_API_KEY"}), true, false),
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
 	openAICompat("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", []string{"DEEPSEEK_API_KEY"}),
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),
@@ -89,7 +100,7 @@ var descriptors = []Descriptor{
 	openAICompat("github", "GitHub Models", "https://models.inference.ai.azure.com", "openai/gpt-4.1", []string{"GITHUB_TOKEN"}, "github-models"),
 	transportDescriptor("bedrock", "Amazon Bedrock", TransportBedrock, "https://bedrock-runtime.${AWS_REGION}.amazonaws.com", "anthropic.claude-3-5-sonnet-20241022-v2:0", []string{"AWS_ACCESS_KEY_ID", "AWS_PROFILE"}, []APIFormat{APIFormatBedrockConverse}, true),
 	transportDescriptor("vertex", "Vertex AI", TransportVertex, "https://aiplatform.googleapis.com", "gemini-2.5-pro", []string{"GOOGLE_APPLICATION_CREDENTIALS"}, []APIFormat{APIFormatVertexGenerateContent}, true),
-	openAICompat("xai", "xAI", "https://api.x.ai/v1", "grok-4", []string{"XAI_API_KEY"}),
+	oauthProvider(openAICompat("xai", "xAI", "https://api.x.ai/v1", "grok-4", []string{"XAI_API_KEY"}), false, true),
 	openAICompat("venice", "Venice AI", "https://api.venice.ai/api/v1", "qwen-2.5-qwq-32b", []string{"VENICE_API_KEY"}),
 	openAICompat("xiaomi-mimo", "Xiaomi MiMo", "https://api.mimo.xiaomi.com/openai/v1", "mimo-vl", []string{"MIMO_API_KEY", "XIAOMI_API_KEY"}, "xiaomi mimo"),
 	openAICompat("bankr", "Bankr", "https://api.bankr.bot/v1", "bankr-large", []string{"BANKR_API_KEY"}),
@@ -234,6 +245,28 @@ func google(id string, name string, baseURL string, model string, env []string, 
 		SupportedAPIFormats: []APIFormat{APIFormatGoogleGenerateContent},
 		Aliases:             aliases,
 	}
+}
+
+// oauthProvider marks a descriptor as OAuth-capable. mintsKey => the flow returns
+// an API key (OpenRouter); deviceFlow => RFC 8628 device code is also supported.
+func oauthProvider(descriptor Descriptor, mintsKey bool, deviceFlow bool) Descriptor {
+	descriptor.OAuth = true
+	descriptor.OAuthMintsKey = mintsKey
+	descriptor.OAuthDeviceFlow = deviceFlow
+	return descriptor
+}
+
+// OAuthProviders returns the catalog descriptors that support an in-app OAuth
+// login, in catalog order. It is the single source of truth for the wizard's
+// dedicated "Sign in with OAuth" provider list.
+func OAuthProviders() []Descriptor {
+	out := []Descriptor{}
+	for _, descriptor := range descriptors {
+		if descriptor.OAuth {
+			out = append(out, descriptor)
+		}
+	}
+	return out
 }
 
 func localOpenAI(id string, name string, baseURL string, model string, aliases ...string) Descriptor {

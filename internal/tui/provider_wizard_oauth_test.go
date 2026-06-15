@@ -32,6 +32,76 @@ func wizardModelAt(t *testing.T, providerID string, step providerWizardStep) mod
 	return m
 }
 
+func TestProviderWizardMethodChooserOAuthPath(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	if m.providerWizard.step != providerWizardStepMethod {
+		t.Fatalf("wizard should open on the method chooser, got %v", m.providerWizard.step)
+	}
+	m.providerWizard.selectedMethod = 0 // "Sign in with OAuth" (default, first)
+	next, _ := m.advanceProviderWizard()
+	w := next.providerWizard
+	if w.step != providerWizardStepProvider || !w.oauthMode {
+		t.Fatalf("OAuth method should enter the provider step in oauthMode, got step=%v oauth=%v", w.step, w.oauthMode)
+	}
+	if len(w.providers) != len(providercatalog.OAuthProviders()) {
+		t.Fatalf("OAuth path should list only OAuth providers, got %d", len(w.providers))
+	}
+	for _, d := range w.providers {
+		if !d.OAuth {
+			t.Fatalf("non-OAuth provider %q in the OAuth list", d.ID)
+		}
+	}
+}
+
+func TestProviderWizardMethodChooserBrowsePath(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = len(providerWizardMethodOptions()) - 1 // "browse / API key"
+	next, _ := m.advanceProviderWizard()
+	w := next.providerWizard
+	if w.step != providerWizardStepProvider || w.oauthMode {
+		t.Fatalf("browse method should enter the provider step (not oauthMode), got step=%v oauth=%v", w.step, w.oauthMode)
+	}
+	if len(w.providers) <= len(providercatalog.OAuthProviders()) {
+		t.Fatalf("browse path should list the full catalog, got %d", len(w.providers))
+	}
+}
+
+func TestProviderWizardOAuthDispatchFromList(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth provider list
+	// select openrouter
+	for i, d := range next.providerWizard.providers {
+		if d.ID == "openrouter" {
+			next.providerWizard.selectedProvider = i
+		}
+	}
+	next, cmd := next.advanceProviderWizard()
+	if !next.providerWizard.oauthPending {
+		t.Fatal("advancing from the OAuth list should start the login (oauthPending)")
+	}
+	if cmd == nil {
+		t.Fatal("advancing from the OAuth list should return the OAuth command")
+	}
+}
+
+func TestProviderWizardRetreatFromProviderToMethod(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard() // → OAuth provider list (oauthMode)
+	next.providerWizard.retreat()
+	if next.providerWizard.step != providerWizardStepMethod {
+		t.Fatalf("retreat from provider should return to method, got %v", next.providerWizard.step)
+	}
+	if next.providerWizard.oauthMode {
+		t.Fatal("retreat to method should clear oauthMode")
+	}
+}
+
 func TestProviderWizardSupportsOAuth(t *testing.T) {
 	or, _ := providercatalog.Get("openrouter")
 	if !providerWizardSupportsOAuth(or) {
@@ -105,7 +175,7 @@ func TestRenderCredentialStepShowsOAuthHintAndPending(t *testing.T) {
 		t.Fatal("credential step should show the ctrl+o OAuth hint for openrouter")
 	}
 	w.oauthPending = true
-	if !strings.Contains(strings.Join(w.renderCredentialStep(80), "\n"), "Opening your browser") {
+	if !strings.Contains(strings.Join(w.renderOAuthWaiting(80), "\n"), "Waiting for authorization") {
 		t.Fatal("pending state should show the browser-waiting message")
 	}
 }

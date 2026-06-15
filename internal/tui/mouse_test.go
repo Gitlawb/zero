@@ -97,6 +97,7 @@ func TestMouseClickSelectsThenAppliesPickerRow(t *testing.T) {
 func TestMouseClickSelectsProviderWizardRow(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.step = providerWizardStepProvider // skip the new method chooser
 	if m.providerWizard == nil || len(m.providerWizard.providers) < 2 {
 		t.Fatalf("expected multiple providers, got %#v", m.providerWizard)
 	}
@@ -133,6 +134,7 @@ func TestMouseClickSelectsProviderWizardRow(t *testing.T) {
 func TestMouseWheelMovesProviderWizardRows(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.step = providerWizardStepProvider // skip the new method chooser
 	m.mouseCapture = true
 
 	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})

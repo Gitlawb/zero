@@ -421,7 +421,7 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 }
 
 func (m *model) selectProviderWizardAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
-	if m.providerWizard == nil {
+	if m.providerWizard == nil || m.providerWizard.oauthPending {
 		return mouseSelectionTarget{}, false
 	}
 	width := chatWidth(m.width)

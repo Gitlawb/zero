@@ -1,0 +1,37 @@
+package providercatalog
+
+import "testing"
+
+func TestOAuthProviders(t *testing.T) {
+	providers := OAuthProviders()
+	if len(providers) != 2 {
+		t.Fatalf("OAuthProviders() = %d, want 2 (openrouter, xai)", len(providers))
+	}
+	byID := map[string]Descriptor{}
+	for _, d := range providers {
+		if !d.OAuth {
+			t.Fatalf("OAuthProviders() returned a non-OAuth descriptor %q", d.ID)
+		}
+		byID[d.ID] = d
+	}
+	or, ok := byID["openrouter"]
+	if !ok || !or.OAuthMintsKey || or.OAuthDeviceFlow {
+		t.Fatalf("openrouter oauth flags wrong: %+v", or)
+	}
+	xai, ok := byID["xai"]
+	if !ok || xai.OAuthMintsKey || !xai.OAuthDeviceFlow {
+		t.Fatalf("xai oauth flags wrong: %+v", xai)
+	}
+}
+
+func TestNonOAuthProvidersNotFlagged(t *testing.T) {
+	for _, d := range All() {
+		switch d.ID {
+		case "openrouter", "xai":
+			continue
+		}
+		if d.OAuth {
+			t.Fatalf("provider %q should not be flagged OAuth-capable", d.ID)
+		}
+	}
+}

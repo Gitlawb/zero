@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -14,15 +15,20 @@ import (
 
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 // providerWizardOAuthMsg carries the result of an in-wizard browser OAuth login.
+// apiKey is set when the flow mints a key (OpenRouter); tokenLogin is set when the
+// flow stored an OAuth token in the oauth store (xAI) that the runtime resolver
+// will attach — in that case no key is needed on the profile.
 type providerWizardOAuthMsg struct {
-	apiKey string
-	err    error
+	apiKey     string
+	tokenLogin bool
+	err        error
 }
 
 // applyProviderWizardOAuth folds an OAuth login result into the wizard: on
@@ -37,8 +43,16 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 		m.providerWizard.oauthErr = redaction.ErrorMessage(msg.err, redaction.Options{})
 		return m, nil
 	}
-	m.providerWizard.apiKey = msg.apiKey
-	return m.advanceProviderWizard()
+	if msg.apiKey != "" {
+		m.providerWizard.apiKey = msg.apiKey
+	}
+	// OAuth succeeded (key minted, or a refreshable token stored for the runtime
+	// resolver). Skip the endpoint/credential steps and go straight to model
+	// selection.
+	m.providerWizard.err = ""
+	m.providerWizard.oauthErr = ""
+	m.providerWizard.step = providerWizardStepModel
+	return m, m.providerModelDiscoveryCmd()
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -47,20 +61,48 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 // are offered — subscription providers (ChatGPT/Claude) use the proxy preset, and
 // API-key-only providers just paste a key.
 func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
-	return provider.ID == "openrouter"
+	return provider.OAuth
 }
 
-// providerWizardOAuthCmd runs the provider's browser OAuth login off the UI
-// goroutine and reports the outcome as a providerWizardOAuthMsg. Currently only
-// OpenRouter (PKCE → minted API key) is supported.
-func providerWizardOAuthCmd() tea.Cmd {
-	return func() tea.Msg {
-		key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
-			OpenBrowser: browser.OpenURL,
-			Timeout:     3 * time.Minute,
-		})
-		return providerWizardOAuthMsg{apiKey: key, err: err}
+// providerWizardOAuthCmdFor runs the chosen provider's browser OAuth login off the
+// UI goroutine and reports the outcome. OpenRouter mints an API key; other OAuth
+// providers (xAI) run the generic engine login which stores a refreshable token.
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor) tea.Cmd {
+	if provider.OAuthMintsKey {
+		return func() tea.Msg {
+			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
+				OpenBrowser: browser.OpenURL,
+				Timeout:     3 * time.Minute,
+			})
+			return providerWizardOAuthMsg{apiKey: key, err: err}
+		}
 	}
+	name := provider.ID
+	return func() tea.Msg {
+		return providerWizardOAuthMsg{tokenLogin: true, err: runProviderTokenLogin(name)}
+	}
+}
+
+// runProviderTokenLogin runs the generic OAuth engine login for a provider that
+// has a built-in preset (e.g. xAI), storing a refreshable token under
+// provider:<name>. The runtime resolver then attaches it to model calls.
+func runProviderTokenLogin(name string) error {
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return err
+	}
+	manager, err := oauth.NewManager(oauth.ManagerOptions{
+		Store:       store,
+		HTTPClient:  &http.Client{Timeout: 60 * time.Second},
+		OpenBrowser: browser.OpenURL,
+	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	_, err = manager.Login(ctx, oauth.LoginOptions{Provider: name})
+	return err
 }
 
 const maxProviderWizardProvidersVisible = 8
@@ -73,13 +115,46 @@ const providerWizardModelWidth = 92
 type providerWizardStep int
 
 const (
-	providerWizardStepProvider providerWizardStep = iota
+	providerWizardStepMethod providerWizardStep = iota
+	providerWizardStepProvider
 	providerWizardStepEndpoint
 	providerWizardStepName
 	providerWizardStepCredential
 	providerWizardStepModel
 	providerWizardStepDone
 )
+
+// providerWizardMethodOption is a row in the "How do you want to connect?" step.
+type providerWizardMethodOption struct {
+	oauth    bool
+	label    string
+	subtitle string
+}
+
+// providerWizardMethodOptions returns the connect-method rows. OAuth is listed
+// first (and is the default) when any OAuth-capable provider exists.
+func providerWizardMethodOptions() []providerWizardMethodOption {
+	options := []providerWizardMethodOption{}
+	if len(providercatalog.OAuthProviders()) > 0 {
+		options = append(options, providerWizardMethodOption{
+			oauth:    true,
+			label:    "Sign in with OAuth",
+			subtitle: "One-click browser login, no API key to copy (OpenRouter, xAI).",
+		})
+	}
+	options = append(options, providerWizardMethodOption{
+		oauth:    false,
+		label:    "Paste an API key / browse providers",
+		subtitle: "Any of 20+ providers, a local model, or a subscription via proxy.",
+	})
+	return options
+}
+
+// providerWizardOAuthDescriptors returns the OAuth-capable providers as the
+// wizard's provider list (used after the OAuth method is chosen).
+func providerWizardOAuthDescriptors() []providercatalog.Descriptor {
+	return providercatalog.OAuthProviders()
+}
 
 type providerWizardModel struct {
 	ID          string
@@ -102,6 +177,8 @@ type providerWizardState struct {
 	modelLoading     bool
 	modelLoadError   string
 	discoveryToken   int
+	selectedMethod   int
+	oauthMode        bool
 	oauthPending     bool
 	oauthErr         string
 }
@@ -109,7 +186,7 @@ type providerWizardState struct {
 func (m model) newProviderWizard() *providerWizardState {
 	providers := providerWizardProviders()
 	wizard := &providerWizardState{
-		step:             providerWizardStepProvider,
+		step:             providerWizardStepMethod,
 		providers:        providers,
 		selectedProvider: 0,
 	}
@@ -161,6 +238,12 @@ func (wizard *providerWizardState) move(delta int) {
 		return
 	}
 	switch wizard.step {
+	case providerWizardStepMethod:
+		options := providerWizardMethodOptions()
+		if len(options) == 0 {
+			return
+		}
+		wizard.selectedMethod = ((wizard.selectedMethod+delta)%len(options) + len(options)) % len(options)
 	case providerWizardStepProvider:
 		if len(wizard.providers) == 0 {
 			return
@@ -193,7 +276,26 @@ func (wizard *providerWizardState) advance() {
 		return
 	}
 	switch wizard.step {
+	case providerWizardStepMethod:
+		options := providerWizardMethodOptions()
+		wizard.selectedMethod = clampInt(wizard.selectedMethod, 0, maxInt(0, len(options)-1))
+		wizard.err = ""
+		if len(options) > 0 && options[wizard.selectedMethod].oauth {
+			wizard.oauthMode = true
+			wizard.providers = providerWizardOAuthDescriptors()
+		} else {
+			wizard.oauthMode = false
+			wizard.providers = providerWizardProviders()
+		}
+		wizard.selectedProvider = 0
+		wizard.refreshModels()
+		wizard.step = providerWizardStepProvider
 	case providerWizardStepProvider:
+		// In OAuth mode, advancing starts the browser/device login (dispatched by
+		// advanceProviderWizard at the model level), not the key/endpoint flow.
+		if wizard.oauthMode {
+			return
+		}
 		wizard.refreshModels()
 		wizard.err = ""
 		if providerWizardNeedsEndpoint(wizard.currentProvider()) {
@@ -251,6 +353,10 @@ func (wizard *providerWizardState) retreat() {
 	}
 	wizard.err = ""
 	switch wizard.step {
+	case providerWizardStepProvider:
+		wizard.oauthMode = false
+		wizard.oauthErr = ""
+		wizard.step = providerWizardStepMethod
 	case providerWizardStepEndpoint:
 		wizard.step = providerWizardStepProvider
 	case providerWizardStepName:
@@ -335,6 +441,14 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.providerWizard == nil {
 		return m, nil
 	}
+	// While a browser/device OAuth login is in flight, ignore input except Esc,
+	// which abandons the wizard (the background flow times out and is dropped).
+	if m.providerWizard.oauthPending {
+		if msg.Type == tea.KeyEsc {
+			m.providerWizard = nil
+		}
+		return m, nil
+	}
 	if m.providerWizard.step == providerWizardStepEndpoint {
 		switch msg.Type {
 		case tea.KeyRunes:
@@ -379,14 +493,6 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	}
 	if m.providerWizard.step == providerWizardStepCredential {
-		// While a browser OAuth login is in flight, ignore input except Esc (which
-		// abandons the wizard; the background flow simply times out and is dropped).
-		if m.providerWizard.oauthPending {
-			if msg.Type == tea.KeyEsc {
-				m.providerWizard = nil
-			}
-			return m, nil
-		}
 		switch msg.Type {
 		case tea.KeyEsc:
 			m.providerWizard = nil
@@ -395,7 +501,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
 				m.providerWizard.oauthPending = true
 				m.providerWizard.oauthErr = ""
-				return m, providerWizardOAuthCmd()
+				return m, providerWizardOAuthCmdFor(m.providerWizard.currentProvider())
 			}
 			return m, nil
 		case tea.KeyRunes:
@@ -461,6 +567,8 @@ func (wizard *providerWizardState) canAdvanceWithRight() bool {
 		return false
 	}
 	switch wizard.step {
+	case providerWizardStepMethod:
+		return len(providerWizardMethodOptions()) > 0
 	case providerWizardStepProvider:
 		return strings.TrimSpace(wizard.currentProvider().ID) != ""
 	case providerWizardStepEndpoint:
@@ -634,7 +742,21 @@ func (wizard *providerWizardState) render(width int) string {
 	if wizard.err != "" {
 		lines = append(lines, zeroTheme.red.Render("error: "+wizard.err), "")
 	}
+	if wizard.oauthPending {
+		lines = append(lines, wizard.renderOAuthWaiting(innerWidth)...)
+		lines = append(lines,
+			zeroTheme.line.Render(strings.Repeat("─", innerWidth)),
+			zeroTheme.faint.Render("Esc cancel"),
+		)
+		block := styledBlockFillTitle(overlayWidth, "Provider setup", lines, zeroTheme.lineStrong, lipgloss.NewStyle())
+		if width > overlayWidth {
+			return indentBlock(block, (width-overlayWidth)/2)
+		}
+		return block
+	}
 	switch wizard.step {
+	case providerWizardStepMethod:
+		lines = append(lines, wizard.renderMethodStep(innerWidth)...)
 	case providerWizardStepProvider:
 		lines = append(lines, wizard.renderProviderStep(innerWidth)...)
 	case providerWizardStepEndpoint:
@@ -663,11 +785,13 @@ func (wizard *providerWizardState) render(width int) string {
 func (wizard *providerWizardState) footer() string {
 	canRight := wizard.canAdvanceWithRight()
 	switch wizard.step {
+	case providerWizardStepMethod:
+		return "↑/↓ move   Enter/→ continue   Esc close"
 	case providerWizardStepProvider:
 		if canRight {
-			return "↑/↓ move   Enter/→ continue   Esc close"
+			return "↑/↓ move   Enter/→ continue   ← back   Esc close"
 		}
-		return "↑/↓ move   Enter continue   Esc close"
+		return "↑/↓ move   Enter continue   ← back   Esc close"
 	case providerWizardStepEndpoint:
 		if canRight {
 			return "Enter/→ continue   ← back   Esc close"
@@ -713,49 +837,34 @@ func providerWizardStepLine(wizard *providerWizardState) string {
 		return ""
 	}
 	step := wizard.step
-	steps := []struct {
+	type stepLabel struct {
 		step  providerWizardStep
 		label string
-	}{
-		{providerWizardStepProvider, "1 provider"},
 	}
-	if providerWizardNeedsEndpoint(wizard.currentProvider()) {
+	steps := []stepLabel{
+		{providerWizardStepMethod, "1 method"},
+		{providerWizardStepProvider, "2 provider"},
+	}
+	switch {
+	case wizard.oauthMode:
+		// OAuth path skips endpoint/name/key entirely.
 		steps = append(steps,
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepEndpoint, "2 endpoint"},
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepName, "3 name"},
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepCredential, "4 key"},
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepModel, "5 model"},
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepDone, "6 ready"},
+			stepLabel{providerWizardStepModel, "3 model"},
+			stepLabel{providerWizardStepDone, "4 ready"},
 		)
-	} else {
+	case providerWizardNeedsEndpoint(wizard.currentProvider()):
 		steps = append(steps,
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepCredential, "2 key"},
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepModel, "3 model"},
-			struct {
-				step  providerWizardStep
-				label string
-			}{providerWizardStepDone, "4 ready"},
+			stepLabel{providerWizardStepEndpoint, "3 endpoint"},
+			stepLabel{providerWizardStepName, "4 name"},
+			stepLabel{providerWizardStepCredential, "5 key"},
+			stepLabel{providerWizardStepModel, "6 model"},
+			stepLabel{providerWizardStepDone, "7 ready"},
+		)
+	default:
+		steps = append(steps,
+			stepLabel{providerWizardStepCredential, "3 key"},
+			stepLabel{providerWizardStepModel, "4 model"},
+			stepLabel{providerWizardStepDone, "5 ready"},
 		)
 	}
 	parts := make([]string, 0, len(steps))
@@ -769,8 +878,56 @@ func providerWizardStepLine(wizard *providerWizardState) string {
 	return strings.Join(parts, "  ")
 }
 
+// renderMethodStep renders the "How do you want to connect?" chooser.
+func (wizard *providerWizardState) renderMethodStep(width int) []string {
+	options := providerWizardMethodOptions()
+	wizard.selectedMethod = clampInt(wizard.selectedMethod, 0, maxInt(0, len(options)-1))
+	lines := []string{zeroTheme.accent.Render("How do you want to connect?")}
+	for index, option := range options {
+		surface := transparentSurface
+		marker := surface(zeroTheme.faintest).Render("  ")
+		if index == wizard.selectedMethod {
+			surface = zeroTheme.onSel
+			marker = surface(zeroTheme.accent).Render("❯ ")
+		}
+		lines = append(lines, fitStyledLine(marker+surface(zeroTheme.ink).Render(option.label), width))
+		lines = append(lines, fitStyledLine("    "+zeroTheme.faint.Render(option.subtitle), width))
+	}
+	return lines
+}
+
+// renderOAuthWaiting renders the in-flight browser/device login screen.
+func (wizard *providerWizardState) renderOAuthWaiting(width int) []string {
+	provider := wizard.currentProvider()
+	name := provider.Name
+	if name == "" {
+		name = "the provider"
+	}
+	return []string{
+		zeroTheme.accent.Render("Signing in with " + name),
+		"",
+		fitStyledLine(zeroTheme.ink.Render("Opening your browser — approve there, then return here."), width),
+		fitStyledLine(zeroTheme.faint.Render("Waiting for authorization..."), width),
+		"",
+		fitStyledLine(zeroTheme.faint.Render("If your browser didn't open, run:  "+providerWizardOAuthCLIHint(provider)), width),
+	}
+}
+
+// providerWizardOAuthCLIHint gives the equivalent CLI command for a provider's
+// OAuth login (fallback when the browser doesn't open).
+func providerWizardOAuthCLIHint(provider providercatalog.Descriptor) string {
+	if provider.OAuthMintsKey {
+		return "zero auth openrouter"
+	}
+	return "zero auth login " + provider.ID
+}
+
 func (wizard *providerWizardState) renderProviderStep(width int) []string {
-	lines := []string{zeroTheme.accent.Render("Choose provider")}
+	header := "Choose provider"
+	if wizard.oauthMode {
+		header = "Choose an OAuth provider"
+	}
+	lines := []string{zeroTheme.accent.Render(header)}
 	maxVisible := minInt(maxProviderWizardProvidersVisible, len(wizard.providers))
 	start := selectableListStart(len(wizard.providers), maxVisible, wizard.selectedProvider)
 	for offset, provider := range wizard.providers[start : start+maxVisible] {
@@ -788,7 +945,24 @@ func (wizard *providerWizardState) renderSelectableProvider(width int, index int
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
 	left := marker + surface(zeroTheme.ink).Render(provider.Name)
+	if badge := providerWizardOAuthBadge(provider); badge != "" {
+		left += surface(zeroTheme.faint).Render("   " + badge)
+	}
 	return fitStyledLine(left, width)
+}
+
+// providerWizardOAuthBadge is the faint mode hint shown next to OAuth providers.
+func providerWizardOAuthBadge(provider providercatalog.Descriptor) string {
+	if !provider.OAuth {
+		return ""
+	}
+	if provider.OAuthMintsKey {
+		return "browser sign-in · creates a key"
+	}
+	if provider.OAuthDeviceFlow {
+		return "browser or device code"
+	}
+	return "browser sign-in"
 }
 
 func (wizard *providerWizardState) renderEndpointStep(width int) []string {
@@ -829,16 +1003,6 @@ func (wizard *providerWizardState) renderNameStep(width int) []string {
 func (wizard *providerWizardState) renderCredentialStep(width int) []string {
 	provider := wizard.currentProvider()
 	oauth := providerWizardSupportsOAuth(provider)
-
-	// In-flight browser OAuth: show a waiting state instead of the key prompt.
-	if wizard.oauthPending {
-		return []string{
-			zeroTheme.accent.Render("Logging in with OAuth"),
-			zeroTheme.ink.Render("Opening your browser to authorize — approve there, then return here."),
-			zeroTheme.faint.Render("If the browser didn't open, run:  zero auth openrouter"),
-			zeroTheme.faint.Render("Esc to cancel."),
-		}
-	}
 
 	env := firstProviderDisplayValue(provider.AuthEnvVars...)
 	value := zeroTheme.accent.Render("▌") + zeroTheme.faint.Render("paste key here")
