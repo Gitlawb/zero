@@ -60,8 +60,7 @@ type Task struct {
 var agentColors = []string{"cyan", "magenta", "green", "yellow", "blue", "red"}
 
 // Coordinator is the in-memory task registry + team color assigner shared by an
-// orchestrator and its members. Mirrors swarm/coordinator.js (tasks map +
-// createColorAssigner) and is safe for concurrent use.
+// orchestrator and its members. It is safe for concurrent use.
 type Coordinator struct {
 	mu         sync.RWMutex
 	tasks      map[string]*Task

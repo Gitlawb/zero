@@ -220,12 +220,15 @@ const (
 
 // permissionRank orders permission modes from least to most permissive so the
 // swarm can clamp a member to no more than its parent. Unknown/empty modes rank
-// as the strictest (0) so they never accidentally widen access.
+// as the strictest (0) so they never accidentally widen access. spec-draft
+// (which scopes a child to spec tooling) ranks below ask: it never grants more
+// authority than prompting-for-everything, so a spec-draft parent clamps members
+// hardest among the known modes.
 func permissionRank(mode string) int {
 	switch strings.TrimSpace(mode) {
-	case permissionModeAsk:
-		return 1
 	case permissionModeSpecDraft:
+		return 1
+	case permissionModeAsk:
 		return 2
 	case permissionModeAuto:
 		return 3

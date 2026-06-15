@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -245,16 +246,26 @@ func TestMailboxLockReleaseIsOwnershipAware(t *testing.T) {
 
 func TestMailboxConcurrentSends(t *testing.T) {
 	mb := newTestMailbox(t)
-	const n = 30
+	// High fan-out + a generous lock timeout so heavy contention is exercised
+	// (and a lock regression — e.g. a Windows sharing-violation treated as fatal —
+	// would surface as lost/failed messages here rather than flaking).
+	mb.LockTimeout = 10 * time.Second
+	const n = 200
 	var wg sync.WaitGroup
+	var failures atomic.Int32
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = mb.Send("team", "bob", Message{From: "a", Body: "concurrent"})
+			if err := mb.Send("team", "bob", Message{From: "a", Body: "concurrent"}); err != nil {
+				failures.Add(1)
+			}
 		}()
 	}
 	wg.Wait()
+	if f := failures.Load(); f != 0 {
+		t.Fatalf("%d concurrent Sends failed (lock contention not handled)", f)
+	}
 	msgs, err := mb.ReadAndConsume("team", "bob")
 	if err != nil {
 		t.Fatalf("ReadAndConsume: %v", err)

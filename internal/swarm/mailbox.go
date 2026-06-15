@@ -13,9 +13,8 @@ import (
 )
 
 // Mailbox is a per-agent, per-team message inbox persisted as a JSON array on
-// disk. It mirrors reference-swarm-code-agent-js/communication/mailbox.js
-// (inbox path <baseDir>/<team>/inboxes/<agent>.json, lock file, atomic write,
-// {from,type,read} message shape) and hardens it for untrusted input:
+// disk at <baseDir>/<team>/inboxes/<agent>.json, written atomically under a
+// lock file. It is hardened for untrusted input:
 //
 //   - inbox files and their parent dirs are owner-only (0600/0700);
 //   - every write takes an exclusive lock file (bounded retry, stale-break);
@@ -50,8 +49,7 @@ var ErrMailboxFull = errors.New("swarm: mailbox is full")
 // ErrMessageTooLarge is returned when a single message exceeds MaxMessageBytes.
 var ErrMessageTooLarge = errors.New("swarm: message exceeds size cap")
 
-// Message is one inbox entry. Mirrors the reference message shape
-// ({from, type, read, ...}); Time is RFC3339 and set on Send if empty.
+// Message is one inbox entry. Time is RFC3339 and set on Send if empty.
 type Message struct {
 	From    string `json:"from"`
 	To      string `json:"to"`
@@ -81,10 +79,9 @@ func NewMailbox(baseDir string) (*Mailbox, error) {
 
 var nameUnsafe = regexp.MustCompile(`[^a-zA-Z0-9\-_]`)
 
-// sanitizeName mirrors mailbox.js sanitizeTeamName: replace any char outside
-// [A-Za-z0-9-_] with '-', defaulting empty input to "default" and an all-unsafe
-// result to "unknown". This guarantees the name is a single safe path segment
-// (no '/', '\\', '.', '..').
+// sanitizeName replaces any char outside [A-Za-z0-9-_] with '-', defaulting
+// empty input to "default" and an all-unsafe result to "unknown". This
+// guarantees the name is a single safe path segment (no '/', '\\', '.', '..').
 func sanitizeName(name string) string {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -174,6 +171,11 @@ func (m *Mailbox) ensureInboxDir(inboxPath string) error {
 
 // Send appends msg to the recipient's inbox under the team, taking the inbox
 // lock. It fails closed on oversize messages or a full inbox.
+//
+// Each send rewrites the whole inbox (read all → append one → write all), so it
+// is O(N) in the inbox size. That is intentional given the small bounds
+// (MaxMessages × MaxMessageBytes); if those caps are raised substantially,
+// switch to an append-only log with periodic compaction.
 func (m *Mailbox) Send(team, recipient string, msg Message) error {
 	path, err := m.inboxPath(team, recipient)
 	if err != nil {
@@ -276,7 +278,10 @@ func (m *Mailbox) readLocked(path string) ([]Message, error) {
 		return nil, nil
 	}
 	// Reject an oversized inbox file outright rather than decoding untrusted,
-	// unbounded JSON into memory.
+	// unbounded JSON into memory. The bound is the cap on total message bytes
+	// (maxMessages × maxMessageBytes) doubled to allow for pretty-printed JSON
+	// (indentation, field names, brackets) overhead versus the compact bytes the
+	// per-message cap measures.
 	if maxFile := m.maxMessages() * m.maxMessageBytes() * 2; len(raw) > maxFile {
 		return nil, fmt.Errorf("swarm: inbox file too large (%d bytes)", len(raw))
 	}
@@ -357,7 +362,7 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 				}
 			}, nil
 		}
-		if !errors.Is(err, os.ErrExist) {
+		if !isLockContended(err) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
 		}
 		// Lock held: break it if stale, otherwise wait. The break is conditional

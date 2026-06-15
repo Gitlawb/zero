@@ -295,7 +295,7 @@ func (t *handoffTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect:      tools.SideEffectShell,
 		Permission:      tools.PermissionPrompt,
-		Reason:          "Spawns a replacement swarm member to take over a task.",
+		Reason:          "Spawns a replacement swarm member to take over a task, and writes the handoff note to the new member's inbox.",
 		AdvertiseInAuto: true,
 	}
 }

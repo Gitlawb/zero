@@ -21,14 +21,12 @@ import (
 var ErrUnknownAgentType = errors.New("swarm: unknown agent type")
 
 // modelInherit is the sentinel meaning "use the orchestrator's model" — members
-// never silently pick a different (e.g. more capable) model. Mirrors the
-// reference roster's model:"inherit".
+// never silently pick a different (e.g. more capable) model.
 const modelInherit = "inherit"
 
 // Definition is one entry in the agent roster: how a member of a given type
-// behaves. Mirrors reference-swarm-code-agent-js/definitions/swarm.js
-// (TEAMMATE_AGENT/SUBAGENT_AGENT: agentType, whenToUse, model:"inherit",
-// permissionMode, getSystemPrompt).
+// behaves (agent type, when to use it, model — "inherit" by default —,
+// permission mode, and a system-prompt builder).
 type Definition struct {
 	AgentType      string
 	WhenToUse      string
@@ -46,8 +44,7 @@ type PromptContext struct {
 }
 
 // Registry is the agent roster: definitions looked up by agent type. Built-ins
-// are seeded at construction; user-defined definitions (loaded from disk) extend
-// or override them. Mirrors definitions/index.js (lookup) + storage.js.
+// are seeded at construction; user-defined definitions extend or override them.
 type Registry struct {
 	mu   sync.RWMutex
 	defs map[string]Definition
@@ -102,9 +99,8 @@ func (r *Registry) AgentTypes() []string {
 	return types
 }
 
-// builtinDefinitions returns the seeded roster. Mirrors definitions/swarm.js
-// (teammate, subagent) — kept minimal and provider-neutral; user-defined agents
-// extend it via Register.
+// builtinDefinitions returns the seeded roster (teammate, subagent) — kept
+// minimal; user-defined agents extend it via Register.
 func builtinDefinitions() []Definition {
 	return []Definition{
 		{

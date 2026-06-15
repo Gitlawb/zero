@@ -53,6 +53,11 @@ func (s *Swarm) launch(t *Team, spec MemberSpec) {
 
 // watch awaits a member, applies bounded relaunch on temporary failures, records
 // the terminal outcome, then frees the slot and drains the queue.
+//
+// The relaunch counter is per-member (m.restarts) and the same spec is reused on
+// retry. This is sound because a Member is bound 1:1 to its spec for its whole
+// life (Member.ID == MemberSpec.ID); a retry never reuses the struct for a
+// different spec.
 func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 	res, err := m.handle.Wait()
 	if err != nil {
