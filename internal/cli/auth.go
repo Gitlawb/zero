@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -124,9 +125,14 @@ func validateAuthFlags(sub string, a authArgs) error {
 
 // newAuthManager builds an oauth.Manager backed by the file store, printing the
 // authorization URL / device code to stdout. The store path honors
-// ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it.
+// ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
+// ZERO_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
+// backend (a per-user secret is created beside the token file).
 func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
-	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now})
+	store, err := oauth.NewStore(oauth.StoreOptions{
+		Now:       deps.now,
+		Encrypted: strings.EqualFold(strings.TrimSpace(os.Getenv("ZERO_OAUTH_STORAGE")), "encrypted-file"),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +338,10 @@ built in). For a provider named <name>, set:
   ZERO_OAUTH_<NAME>_DEVICE_URL      ZERO_OAUTH_<NAME>_ISSUER_URL (for discovery)
   ZERO_OAUTH_<NAME>_SCOPES          ZERO_OAUTH_<NAME>_FLOW (loopback|device)
 Endpoint URLs must be https (loopback exempt).
+
+Storage: tokens are written 0600 under $XDG_CONFIG_HOME/zero (override with
+ZERO_OAUTH_TOKENS_PATH). Set ZERO_OAUTH_STORAGE=encrypted-file to encrypt them
+at rest with AES-256-GCM (a per-user secret is created beside the token file).
 
 Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
