@@ -102,11 +102,15 @@ func TestStoreMalformedFailsClosed(t *testing.T) {
 }
 
 func TestResolveStorePathHonorsOverride(t *testing.T) {
-	path, err := ResolveStorePath(map[string]string{"ZERO_OAUTH_TOKENS_PATH": "/tmp/custom/tok.json"})
+	// Use an OS-appropriate absolute path: a unix-style "/tmp/..." literal is not
+	// absolute on Windows (no drive), so it would be resolved against the current
+	// drive and a verbatim comparison would fail there.
+	override := filepath.Join(t.TempDir(), "custom", "tok.json")
+	path, err := ResolveStorePath(map[string]string{"ZERO_OAUTH_TOKENS_PATH": override})
 	if err != nil {
 		t.Fatalf("ResolveStorePath: %v", err)
 	}
-	if path != "/tmp/custom/tok.json" {
-		t.Fatalf("path = %q, want override", path)
+	if path != override {
+		t.Fatalf("path = %q, want %q", path, override)
 	}
 }
