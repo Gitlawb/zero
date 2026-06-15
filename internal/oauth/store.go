@@ -122,6 +122,9 @@ func NewStore(options StoreOptions) (*Store, error) {
 	return &Store{filePath: filepath.Clean(filePath), now: now}, nil
 }
 
+// FilePath returns the resolved token store path.
+func (s *Store) FilePath() string { return s.filePath }
+
 // Save persists a token under key, replacing any existing entry.
 func (s *Store) Save(key string, token Token) error {
 	if err := ValidateKey(key); err != nil {

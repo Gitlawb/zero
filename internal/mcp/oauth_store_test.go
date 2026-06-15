@@ -158,6 +158,101 @@ func TestTokenStoreStatusReportsPresenceWithoutToken(t *testing.T) {
 	}
 }
 
+func TestTokenStoreMigratesLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "mcp-oauth-tokens.json")
+	unified := filepath.Join(dir, "oauth-tokens.json")
+	legacyData := `{"schemaVersion":1,"tokens":{"demo":{"access_token":"a","refresh_token":"r","token_type":"Bearer"}}}`
+	if err := os.WriteFile(legacy, []byte(legacyData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy})
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+
+	tok, ok, err := store.Load("demo")
+	if err != nil || !ok {
+		t.Fatalf("migrated token not loadable: ok=%v err=%v", ok, err)
+	}
+	if tok.AccessToken != "a" || tok.RefreshToken != "r" {
+		t.Fatalf("migrated token = %#v", tok)
+	}
+
+	// The unified file keys the token under the mcp: namespace.
+	raw, err := os.ReadFile(unified)
+	if err != nil {
+		t.Fatalf("read unified: %v", err)
+	}
+	if !contains(string(raw), "mcp:demo") {
+		t.Fatalf("unified file should key under mcp: namespace:\n%s", raw)
+	}
+
+	// The legacy file is renamed to a .migrated backup (non-destructive, one-time).
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy file should be renamed away; stat err = %v", err)
+	}
+	if _, err := os.Stat(legacy + ".migrated"); err != nil {
+		t.Fatalf("legacy backup missing: %v", err)
+	}
+
+	// Idempotent: a second construction (legacy now absent) keeps the token.
+	store2, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy})
+	if err != nil {
+		t.Fatalf("NewTokenStore#2: %v", err)
+	}
+	if _, ok, _ := store2.Load("demo"); !ok {
+		t.Fatal("token lost after second construction")
+	}
+}
+
+func TestTokenStoreMigrationPreservesNewerUnified(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "mcp-oauth-tokens.json")
+	unified := filepath.Join(dir, "oauth-tokens.json")
+	if err := os.WriteFile(legacy, []byte(`{"schemaVersion":1,"tokens":{"demo":{"access_token":"OLD"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-seed the unified store with a newer token (no migration: FilePath set, no LegacyPath).
+	pre, err := NewTokenStore(TokenStoreOptions{FilePath: unified})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pre.Save("demo", StoredToken{AccessToken: "NEW"}); err != nil {
+		t.Fatal(err)
+	}
+	// Migrating must not overwrite the newer unified entry.
+	store, err := NewTokenStore(TokenStoreOptions{FilePath: unified, LegacyPath: legacy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, _ := store.Load("demo")
+	if tok.AccessToken != "NEW" {
+		t.Fatalf("migration overwrote a newer token: %q", tok.AccessToken)
+	}
+}
+
+func TestTokenStoreNamespacedFromProvider(t *testing.T) {
+	// An MCP token and a provider login of the same name coexist in one file.
+	dir := t.TempDir()
+	unified := filepath.Join(dir, "oauth-tokens.json")
+	mcpStore, err := NewTokenStore(TokenStoreOptions{FilePath: unified})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mcpStore.Save("shared", StoredToken{AccessToken: "mcp-token"}); err != nil {
+		t.Fatal(err)
+	}
+	statuses, err := mcpStore.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 1 || statuses[0].ServerName != "shared" {
+		t.Fatalf("status = %#v, want one entry for 'shared'", statuses)
+	}
+}
+
 func TestResolveTokenStorePathUsesXDG(t *testing.T) {
 	// Use a real temp dir so the base is absolute on every OS (a literal
 	// "/tmp/..." isn't absolute on Windows, where ResolveTokenStorePath would

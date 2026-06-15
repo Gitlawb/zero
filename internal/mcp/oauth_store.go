@@ -6,17 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/oauth"
 )
 
-const (
-	tokenStoreSchemaVersion = 1
-	tokenStoreLockTimeout   = 5 * time.Second
-	tokenStoreLockRetry     = 10 * time.Millisecond
-)
+// tokenStoreSchemaVersion is the schema of the legacy mcp-oauth-tokens.json file,
+// retained so migration can recognize a file it understands.
+const tokenStoreSchemaVersion = 1
 
 // StoredToken holds the credentials issued by an OAuth 2.0 authorization server
 // for a single MCP server. The token fields are sensitive: they are tagged so
@@ -42,29 +40,37 @@ type TokenStatus struct {
 	Expired         bool      `json:"expired"`
 }
 
-// TokenStoreOptions configures where OAuth tokens are persisted. When FilePath
-// is empty the path is resolved under the user config dir, mirroring how MCP
-// permissions are stored.
+// TokenStoreOptions configures the unified token store backing MCP OAuth tokens.
+// FilePath overrides the store path (default: the shared oauth store path).
+// LegacyPath overrides the pre-unification file migrated on construction; when
+// empty it defaults to the conventional mcp-oauth-tokens.json only for the
+// default (FilePath-unset) store, so an explicit FilePath never triggers an
+// unexpected migration from the real user config.
 type TokenStoreOptions struct {
-	FilePath string
-	Env      map[string]string
-	Now      func() time.Time
+	FilePath   string
+	LegacyPath string
+	Env        map[string]string
+	Now        func() time.Time
 }
 
-// TokenStore persists OAuth tokens per MCP server in a 0600 JSON file.
+// TokenStore persists MCP OAuth tokens in the unified oauth store
+// (internal/oauth) under the "mcp:" namespace, sharing one file with provider
+// logins. On construction it transparently and non-destructively migrates a
+// legacy mcp-oauth-tokens.json into the unified store.
 type TokenStore struct {
-	filePath string
-	now      func() time.Time
-	mu       sync.Mutex
+	store *oauth.Store
 }
 
+// tokenFile is the legacy on-disk format, retained only to read a
+// pre-unification mcp-oauth-tokens.json during migration.
 type tokenFile struct {
 	SchemaVersion int                    `json:"schemaVersion"`
 	Tokens        map[string]StoredToken `json:"tokens"`
 }
 
-// ResolveTokenStorePath determines the on-disk location for OAuth tokens,
-// honoring an explicit override, XDG_CONFIG_HOME, then the user home dir.
+// ResolveTokenStorePath determines the on-disk location of the LEGACY OAuth token
+// file, honoring an explicit override, XDG_CONFIG_HOME, then the user home dir.
+// It is used to locate a pre-unification file for migration.
 func ResolveTokenStorePath(env map[string]string) (string, error) {
 	override := strings.TrimSpace(envValue(env, "ZERO_MCP_OAUTH_TOKENS_PATH"))
 	if override != "" {
@@ -95,215 +101,159 @@ func ResolveTokenStorePath(env map[string]string) (string, error) {
 	return filepath.Join(configHome, "zero", "mcp-oauth-tokens.json"), nil
 }
 
-// NewTokenStore builds a file-backed token store.
+// NewTokenStore builds the unified-store-backed token store and runs a one-time
+// migration from a legacy file when applicable.
 func NewTokenStore(options TokenStoreOptions) (*TokenStore, error) {
-	filePath := options.FilePath
-	var err error
-	if strings.TrimSpace(filePath) == "" {
-		filePath, err = ResolveTokenStorePath(options.Env)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !filepath.IsAbs(filePath) {
-		filePath, err = filepath.Abs(filePath)
-		if err != nil {
-			return nil, err
-		}
-	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &TokenStore{filePath: filepath.Clean(filePath), now: now}, nil
+	unified, err := oauth.NewStore(oauth.StoreOptions{
+		FilePath: options.FilePath,
+		Env:      options.Env,
+		Now:      now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	store := &TokenStore{store: unified}
+
+	legacyPath := strings.TrimSpace(options.LegacyPath)
+	if legacyPath == "" && strings.TrimSpace(options.FilePath) == "" {
+		// Default (production) construction: migrate from the conventional path.
+		legacyPath, err = ResolveTokenStorePath(options.Env)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if legacyPath != "" {
+		if err := store.migrateLegacy(legacyPath); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
 }
 
-// FilePath returns the resolved token store path.
+// FilePath returns the resolved unified store path.
 func (store *TokenStore) FilePath() string {
-	return store.filePath
+	return store.store.FilePath()
 }
 
 // Save persists the token for a server, replacing any existing entry.
 func (store *TokenStore) Save(serverName string, token StoredToken) error {
-	if err := ValidateServerName(serverName); err != nil {
-		return err
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	unlock, err := store.lockStateFile()
+	key, err := mcpKey(serverName)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-
-	state, err := store.readState()
-	if err != nil {
-		return err
-	}
-	state.Tokens[serverName] = token
-	return store.writeState(state)
+	return store.store.Save(key, storedToOAuth(token))
 }
 
 // Load returns the stored token for a server. The second return value is false
 // when no token has been stored for the server.
 func (store *TokenStore) Load(serverName string) (StoredToken, bool, error) {
-	if err := ValidateServerName(serverName); err != nil {
-		return StoredToken{}, false, err
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	state, err := store.readState()
+	key, err := mcpKey(serverName)
 	if err != nil {
 		return StoredToken{}, false, err
 	}
-	token, ok := state.Tokens[serverName]
-	return token, ok, nil
+	token, ok, err := store.store.Load(key)
+	if err != nil || !ok {
+		return StoredToken{}, ok, err
+	}
+	return tokenToStored(token), true, nil
 }
 
 // Delete removes the stored token for a server. It reports whether an entry was
 // present before deletion.
 func (store *TokenStore) Delete(serverName string) (bool, error) {
-	if err := ValidateServerName(serverName); err != nil {
-		return false, err
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	unlock, err := store.lockStateFile()
+	key, err := mcpKey(serverName)
 	if err != nil {
 		return false, err
 	}
-	defer unlock()
-
-	state, err := store.readState()
-	if err != nil {
-		return false, err
-	}
-	if _, ok := state.Tokens[serverName]; !ok {
-		return false, nil
-	}
-	delete(state.Tokens, serverName)
-	if err := store.writeState(state); err != nil {
-		return false, err
-	}
-	return true, nil
+	return store.store.Delete(key)
 }
 
-// Status returns a redaction-safe summary of every stored token, sorted by
+// Status returns a redaction-safe summary of every stored MCP token, sorted by
 // server name. It never includes the token material.
 func (store *TokenStore) Status() ([]TokenStatus, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-
-	state, err := store.readState()
+	statuses, err := store.store.Status(oauth.KeyPrefixMCP)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(state.Tokens))
-	for name := range state.Tokens {
-		names = append(names, name)
+	out := make([]TokenStatus, 0, len(statuses))
+	for _, s := range statuses {
+		out = append(out, TokenStatus{
+			ServerName:      strings.TrimPrefix(s.Key, oauth.KeyPrefixMCP),
+			HasToken:        s.HasToken,
+			HasRefreshToken: s.HasRefreshToken,
+			TokenType:       s.TokenType,
+			Scopes:          s.Scopes,
+			ExpiresAt:       s.ExpiresAt,
+			Expired:         s.Expired,
+		})
 	}
-	sort.Strings(names)
-
-	now := store.now()
-	statuses := make([]TokenStatus, 0, len(names))
-	for _, name := range names {
-		token := state.Tokens[name]
-		status := TokenStatus{
-			ServerName:      name,
-			HasToken:        strings.TrimSpace(token.AccessToken) != "",
-			HasRefreshToken: strings.TrimSpace(token.RefreshToken) != "",
-			TokenType:       token.TokenType,
-			Scopes:          token.Scopes,
-			ExpiresAt:       token.ExpiresAt,
-		}
-		if !token.ExpiresAt.IsZero() && !token.ExpiresAt.After(now) {
-			status.Expired = true
-		}
-		statuses = append(statuses, status)
-	}
-	return statuses, nil
+	return out, nil
 }
 
-func (store *TokenStore) readState() (tokenFile, error) {
-	data, err := os.ReadFile(store.filePath)
+// migrateLegacy imports tokens from a legacy mcp-oauth-tokens.json into the
+// unified store (under "mcp:" keys), then renames the legacy file to a
+// ".migrated" backup. It is non-destructive and idempotent: a newer unified
+// entry is never overwritten, a missing/unreadable/foreign-schema legacy file is
+// left untouched, and the rename ensures it is imported at most once.
+func (store *TokenStore) migrateLegacy(legacyPath string) error {
+	legacyPath = filepath.Clean(legacyPath)
+	if legacyPath == store.store.FilePath() {
+		return nil // legacy and unified resolve to the same file; nothing to migrate
+	}
+	data, err := os.ReadFile(legacyPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return emptyTokenFile(), nil
+			return nil
 		}
-		return tokenFile{}, err
-	}
-	var state tokenFile
-	if err := json.Unmarshal(data, &state); err != nil {
-		return tokenFile{}, fmt.Errorf("invalid MCP OAuth token file at %s: %w", store.filePath, err)
-	}
-	if state.SchemaVersion != tokenStoreSchemaVersion {
-		return tokenFile{}, fmt.Errorf("invalid MCP OAuth token file at %s: unsupported schemaVersion", store.filePath)
-	}
-	if state.Tokens == nil {
-		state.Tokens = map[string]StoredToken{}
-	}
-	for serverName := range state.Tokens {
-		if err := ValidateServerName(serverName); err != nil {
-			return tokenFile{}, fmt.Errorf("invalid MCP OAuth token file at %s: %w", store.filePath, err)
-		}
-	}
-	return state, nil
-}
-
-func (store *TokenStore) writeState(state tokenFile) error {
-	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
+	var legacy tokenFile
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return nil // unreadable legacy file: leave it in place, don't block startup
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d-%d", store.filePath, os.Getpid(), store.now().UnixNano())
-	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
-		return err
+	if legacy.SchemaVersion != tokenStoreSchemaVersion {
+		return nil // unknown legacy schema: leave it untouched
 	}
-	if err := os.Rename(tempPath, store.filePath); err != nil {
-		_ = os.Remove(tempPath)
-		return err
-	}
-	return nil
-}
-
-func (store *TokenStore) lockStateFile() (func(), error) {
-	lockPath := store.filePath + ".lockfile"
-	if err := os.MkdirAll(filepath.Dir(store.filePath), 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	deadline := time.Now().Add(tokenStoreLockTimeout)
-	for {
-		locked, err := tryLockPermissionFile(file)
+	for serverName, token := range legacy.Tokens {
+		key, err := mcpKey(serverName)
 		if err != nil {
-			_ = file.Close()
-			return nil, err
+			continue // a name that cannot form a valid unified key is skipped
 		}
-		if locked {
-			return func() {
-				_ = unlockPermissionFile(file)
-				_ = file.Close()
-			}, nil
+		if _, ok, loadErr := store.store.Load(key); loadErr == nil && ok {
+			continue // a unified entry already exists; never overwrite
 		}
-		if time.Now().After(deadline) {
-			_ = file.Close()
-			return nil, fmt.Errorf("timed out waiting for MCP OAuth token lock at %s", lockPath)
+		if err := store.store.Save(key, storedToOAuth(token)); err != nil {
+			return err
 		}
-		time.Sleep(tokenStoreLockRetry)
 	}
+	return os.Rename(legacyPath, legacyPath+".migrated")
 }
 
-func emptyTokenFile() tokenFile {
-	return tokenFile{
-		SchemaVersion: tokenStoreSchemaVersion,
-		Tokens:        map[string]StoredToken{},
+// mcpKey builds and validates the unified store key for an MCP server token.
+func mcpKey(serverName string) (string, error) {
+	if err := ValidateServerName(serverName); err != nil {
+		return "", err
+	}
+	key := oauth.KeyPrefixMCP + strings.TrimSpace(serverName)
+	if err := oauth.ValidateKey(key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// storedToOAuth converts an MCP StoredToken to the shared oauth.Token (the
+// inverse of tokenToStored). MCP never sets the oauth Account field.
+func storedToOAuth(s StoredToken) oauth.Token {
+	return oauth.Token{
+		AccessToken:  s.AccessToken,
+		RefreshToken: s.RefreshToken,
+		TokenType:    s.TokenType,
+		Scopes:       s.Scopes,
+		ExpiresAt:    s.ExpiresAt,
 	}
 }
 
