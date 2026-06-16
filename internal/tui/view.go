@@ -50,23 +50,20 @@ func widthTier(width int) layoutTier {
 	}
 }
 
-// titleBar renders the top zone of the chat surface: the brand badge, cwd and
-// branch on the left, provider/model and context window on the right, then a
-// rule. Segments drop with the width tier (full → no ctx → no cwd → bare
-// badge + model only), reusing the startupHeaderLine candidate fallback.
+// titleBar renders the top zone of the chat surface: git branch and cwd on the
+// left, provider/model and context window on the right, then a rule. Segments
+// drop with the width tier (full → no ctx → no cwd → branch/path only), reusing
+// the startupHeaderLine candidate fallback.
 func (m model) titleBar(width int) string {
 	tier := widthTier(width)
 
-	badge := zeroTheme.badge.Render(" 0 ") + " " + zeroTheme.ink.Bold(true).Render("zero")
-	if tier <= tierNarrow {
-		badge = zeroTheme.accent.Render("0") + " " + zeroTheme.ink.Bold(true).Render("zero")
-	}
-	cwd := zeroTheme.faintest.Render(" / ") + zeroTheme.muted.Render(shortenPath(m.cwd))
-	branch := ""
-	branchShort := ""
-	if b := strings.TrimSpace(m.gitBranch); b != "" {
-		branch = " " + zeroTheme.faint.Render(b)
-		branchShort = " " + zeroTheme.faint.Render(middleTruncate(b, 22))
+	workspace := m.titleWorkspaceSegment()
+	workspaceShort := m.titleWorkspaceSegmentShort()
+	branchOnly := m.titleBranchSegment()
+	cwdOnly := zeroTheme.muted.Render(shortenPath(m.cwd))
+	compactLeft := cwdOnly
+	if branchOnly != "" {
+		compactLeft = branchOnly
 	}
 	model := m.titleModelSegment()
 	ctx := ""
@@ -78,33 +75,61 @@ func (m model) titleBar(width int) string {
 	switch tier {
 	case tierFull:
 		candidates = []headerCandidate{
-			{left: badge + cwd + branch, right: model + ctx},
-			{left: badge + cwd + branch, right: model},
-			{left: badge + cwd + branchShort, right: model},
-			{left: badge + cwd, right: model},
-			{left: badge, right: model},
+			{left: workspace, right: model + ctx},
+			{left: workspace, right: model},
+			{left: workspaceShort, right: model},
+			{left: cwdOnly, right: model},
+			{left: compactLeft, right: model},
 		}
 	case tierMedium:
 		candidates = []headerCandidate{
-			{left: badge + cwd + branch, right: model},
-			{left: badge + cwd + branchShort, right: model},
-			{left: badge + cwd, right: model},
-			{left: badge, right: model},
+			{left: workspace, right: model},
+			{left: workspaceShort, right: model},
+			{left: cwdOnly, right: model},
+			{left: compactLeft, right: model},
 		}
 	case tierNarrow:
 		candidates = []headerCandidate{
-			{left: badge, right: model},
+			{left: branchOnly, right: model},
+			{left: "", right: model},
 		}
 	default:
 		// Tiny: one segment, no right column.
 		candidates = []headerCandidate{
-			{left: badge, right: ""},
+			{left: compactLeft, right: ""},
+			{left: cwdOnly, right: ""},
 		}
 	}
 
 	line := startupHeaderLine(width, candidates)
 	rule := zeroTheme.line.Render(strings.Repeat("─", width))
 	return line + "\n" + rule
+}
+
+func (m model) titleWorkspaceSegment() string {
+	cwd := zeroTheme.muted.Render(shortenPath(m.cwd))
+	if branch := m.titleBranchSegment(); branch != "" {
+		return branch + "  " + cwd
+	}
+	return cwd
+}
+
+func (m model) titleWorkspaceSegmentShort() string {
+	cwd := zeroTheme.muted.Render(shortenPath(m.cwd))
+	branch := strings.TrimSpace(m.gitBranch)
+	if branch == "" {
+		return cwd
+	}
+	icon := zeroTheme.faint.Render("")
+	return icon + " " + zeroTheme.faint.Render(middleTruncate(branch, 22)) + "  " + cwd
+}
+
+func (m model) titleBranchSegment() string {
+	branch := strings.TrimSpace(m.gitBranch)
+	if branch == "" {
+		return ""
+	}
+	return zeroTheme.faint.Render("") + " " + zeroTheme.faint.Render(branch)
 }
 
 func (m model) titleModelSegment() string {

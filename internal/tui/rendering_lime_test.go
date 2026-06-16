@@ -967,13 +967,20 @@ func TestStatusLineGroups(t *testing.T) {
 	}
 }
 
-func TestTitleBarShowsBadgeAndModel(t *testing.T) {
+func TestTitleBarShowsWorkspaceAndModel(t *testing.T) {
 	m := limeTestModel()
 	m.width = 120
+	m.cwd = "/workspace/zero"
+	m.gitBranch = "main"
 	got := plainRender(t, m.titleBar(120))
-	for _, want := range []string{" 0 ", "zero", "test-provider/test-model"} {
+	for _, want := range []string{" main", "/workspace/zero", "test-provider/test-model"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("title bar = %q, missing %q", got, want)
+		}
+	}
+	for _, notWant := range []string{" 0 ", "zero /"} {
+		if strings.Contains(got, notWant) {
+			t.Fatalf("title bar = %q, should not include old brand cluster %q", got, notWant)
 		}
 	}
 }

@@ -114,10 +114,13 @@ func TestTitleBarKeepsWorkspaceWithLongBranchAndModel(t *testing.T) {
 	m.gitBranch = "feat/tui-assistant-response-cleanup"
 
 	got := plainRender(t, m.titleBar(108))
-	for _, want := range []string{"zero", "/workspace/zero", "feat/", "…", "ollama-cloud/cogito-2.1:671b-extra-long-model-name"} {
+	for _, want := range []string{"", "/workspace/zero", "feat/tui-assistant-response-cleanup", "ollama-cloud/cogito-2.1:671b-extra-long-model-name"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("title bar = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, " 0 ") {
+		t.Fatalf("title bar = %q, should not include old badge", got)
 	}
 	for index, line := range strings.Split(got, "\n") {
 		if width := lipgloss.Width(line); width > 108 {
