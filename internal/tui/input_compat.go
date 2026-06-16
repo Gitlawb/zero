@@ -58,10 +58,6 @@ func mouseY(msg tea.MouseMsg) int {
 	return mouseEvent(msg).Y
 }
 
-func mouseButton(msg tea.MouseMsg) tea.MouseButton {
-	return mouseEvent(msg).Button
-}
-
 func mouseLeftPress(msg tea.MouseMsg) bool {
 	event := mouseEvent(msg)
 	return event.Button == tea.MouseLeft && isMouseClick(msg)
