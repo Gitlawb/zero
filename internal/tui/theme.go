@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 // tuiTheme is the single source of truth for Zero's terminal palette — the
 // Lime design: a near-black chat surface with one lime accent (the terminal

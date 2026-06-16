@@ -1,6 +1,6 @@
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import tea "charm.land/bubbletea/v2"
 
 type mouseOverlayHit struct {
 	y int
@@ -170,34 +170,7 @@ func (m model) syncMouseCapture() (model, tea.Cmd) {
 		return m, nil
 	}
 	m.mouseCapture = want
-	if want {
-		return m, tea.EnableMouseCellMotion
-	}
-	return m, tea.DisableMouse
-}
-
-// Mouse classification uses the current Button/Action pair only. Bubble Tea's
-// parser always populates Button+Action and merely derives the deprecated Type
-// field from them, so checking Type adds nothing — and a left-button drag is
-// Action==Motion (which mouseMotion already covers), not a press.
-func mouseLeftPress(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress
-}
-
-func mouseMotion(msg tea.MouseMsg) bool {
-	return msg.Action == tea.MouseActionMotion
-}
-
-func mouseRelease(msg tea.MouseMsg) bool {
-	return msg.Action == tea.MouseActionRelease
-}
-
-func mouseWheelUp(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonWheelUp
-}
-
-func mouseWheelDown(msg tea.MouseMsg) bool {
-	return msg.Button == tea.MouseButtonWheelDown
+	return m, nil
 }
 
 func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
@@ -231,7 +204,7 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 	}
 	footerTop := maxInt(0, m.height-len(footerLines))
 	top := footerTop + visibleTop - clippedPrefix
-	return msg.Y >= top && msg.Y < top+visibleBottom-visibleTop
+	return mouseY(msg) >= top && mouseY(msg) < top+visibleBottom-visibleTop
 }
 
 func lineSequenceIndex(lines []string, sequence []string) int {
@@ -494,13 +467,13 @@ func (m model) overlayMouseHit(msg tea.MouseMsg, overlay string, width int) (mou
 		return mouseOverlayHit{}, false
 	}
 	top := m.overlayMouseTop(len(lines), width)
-	if msg.Y < top || msg.Y >= top+len(lines) {
+	if mouseY(msg) < top || mouseY(msg) >= top+len(lines) {
 		return mouseOverlayHit{}, false
 	}
-	if msg.X < left || msg.X >= left+overlayWidth {
+	if mouseX(msg) < left || mouseX(msg) >= left+overlayWidth {
 		return mouseOverlayHit{}, false
 	}
-	return mouseOverlayHit{y: msg.Y - top}, true
+	return mouseOverlayHit{y: mouseY(msg) - top}, true
 }
 
 func (m model) overlayMouseTop(overlayHeight int, width int) int {

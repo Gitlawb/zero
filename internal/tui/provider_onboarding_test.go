@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
@@ -102,7 +102,7 @@ func renderProviderCommand(t *testing.T, options Options) string {
 	m := newModel(context.Background(), options)
 	m.input.SetValue("/provider status")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {

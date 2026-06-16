@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
@@ -523,7 +523,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	// While a browser/device OAuth login is in flight, ignore input except Esc,
 	// which abandons the wizard (the background flow times out and is dropped).
 	if m.providerWizard.oauthPending {
-		if msg.Type == tea.KeyEsc {
+		if keyIs(msg, tea.KeyEsc) {
 			m.providerWizard = nil
 		}
 		return m, nil
@@ -531,115 +531,115 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	// On the OAuth provider list, "d" forces device-code login for a device-capable
 	// provider (xAI) — useful on a desktop when the browser flow won't work.
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode &&
-		msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'd' || msg.Runes[0] == 'D') &&
+		(keyText(msg) == "d" || keyText(msg) == "D") &&
 		m.providerWizard.currentProvider().OAuthDeviceFlow {
 		return m.startProviderDeviceLogin()
 	}
 	if m.providerWizard.step == providerWizardStepEndpoint {
-		switch msg.Type {
-		case tea.KeyRunes:
-			m.providerWizard.appendBaseURL(msg.Runes)
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendBaseURL(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteBaseURLRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.baseURL = ""
 			m.providerWizard.err = ""
 			return m, nil
-		case tea.KeyLeft:
+		case keyIs(msg, tea.KeyLeft):
 			m.providerWizard.retreat()
 			return m, nil
-		case tea.KeyRight:
+		case keyIs(msg, tea.KeyRight):
 			if m.providerWizard.canAdvanceWithRight() {
 				return m.advanceProviderWizard()
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case keyIs(msg, tea.KeyEnter):
 			return m.advanceProviderWizard()
 		}
 	}
 	if m.providerWizard.step == providerWizardStepName {
-		switch msg.Type {
-		case tea.KeyRunes:
-			m.providerWizard.appendProfileName(msg.Runes)
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendProfileName(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteProfileNameRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.profileName = ""
 			m.providerWizard.err = ""
 			return m, nil
-		case tea.KeyLeft:
+		case keyIs(msg, tea.KeyLeft):
 			m.providerWizard.retreat()
 			return m, nil
-		case tea.KeyRight, tea.KeyEnter:
+		case keyIs(msg, tea.KeyRight) || keyIs(msg, tea.KeyEnter):
 			return m.advanceProviderWizard()
 		}
 	}
 	if m.providerWizard.step == providerWizardStepCredential {
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch {
+		case keyIs(msg, tea.KeyEsc):
 			m.providerWizard = nil
 			return m, nil
-		case tea.KeyCtrlO:
+		case keyCtrl(msg, 'o'):
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
 				m.providerWizard.oauthPending = true
 				m.providerWizard.oauthErr = ""
 				return m, providerWizardOAuthCmdFor(m.providerWizard.currentProvider())
 			}
 			return m, nil
-		case tea.KeyRunes:
-			m.providerWizard.appendAPIKey(msg.Runes)
+		case keyText(msg) != "":
+			m.providerWizard.appendAPIKey(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteAPIKeyRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.apiKey = ""
 			return m, nil
-		case tea.KeyLeft:
+		case keyIs(msg, tea.KeyLeft):
 			m.providerWizard.retreat()
 			return m, nil
-		case tea.KeyRight:
+		case keyIs(msg, tea.KeyRight):
 			if m.providerWizard.canAdvanceWithRight() {
 				return m.advanceProviderWizard()
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case keyIs(msg, tea.KeyEnter):
 			return m.advanceProviderWizard()
 		}
 		return m, nil
 	}
 	if m.providerWizard.step == providerWizardStepModel {
-		switch msg.Type {
-		case tea.KeyRunes:
-			m.providerWizard.appendModelSearch(msg.Runes)
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendModelSearch(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteModelSearchRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.modelSearch = ""
 			m.providerWizard.selectedModel = 0
 			return m, nil
 		}
 	}
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch {
+	case keyIs(msg, tea.KeyEsc):
 		m.providerWizard = nil
-	case tea.KeyUp:
+	case keyIs(msg, tea.KeyUp):
 		m.providerWizard.move(-1)
-	case tea.KeyDown, tea.KeyTab:
+	case keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
 		m.providerWizard.move(1)
-	case tea.KeyLeft:
+	case keyIs(msg, tea.KeyLeft):
 		m.providerWizard.retreat()
-	case tea.KeyRight:
+	case keyIs(msg, tea.KeyRight):
 		if m.providerWizard.canAdvanceWithRight() {
 			return m.advanceProviderWizard()
 		}
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		if m.providerWizard.step == providerWizardStepDone {
 			return m.applyProviderWizard()
 		}

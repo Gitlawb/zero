@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
@@ -19,7 +19,7 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel should not return a command")
@@ -42,7 +42,7 @@ func TestMouseWheelOverWrappedComposerMovesComposerCursor(t *testing.T) {
 	m.input.CursorEnd()
 	startCursor := len([]rune(text))
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Y: 14})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 14))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel over composer should not return a command")
@@ -65,7 +65,7 @@ func TestMouseWheelOnClippedFooterStatusDoesNotMoveComposerCursor(t *testing.T) 
 	m.input.CursorEnd()
 	startCursor := len([]rune(text))
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Y: m.height - 1})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, m.height-1))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel on clipped footer should not return a command")
@@ -147,13 +147,13 @@ func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m.width = 90
 	m.height = 20
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	updated, _ := m.Update(testKey(tea.KeyPgUp))
 	m = updated.(model)
 	if m.chatScrollOffset != m.chatPageScrollLines() {
 		t.Fatalf("page up offset = %d, want %d", m.chatScrollOffset, m.chatPageScrollLines())
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	updated, _ = m.Update(testKey(tea.KeyPgDown))
 	m = updated.(model)
 	if m.chatScrollOffset != 0 {
 		t.Fatalf("page down should return to bottom, got offset %d", m.chatScrollOffset)

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -176,7 +176,7 @@ func TestMCPCommandRendersConfiguredStateWithoutAgentRun(t *testing.T) {
 	m.height = 42
 	m.input.SetValue("/mcp")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -230,7 +230,7 @@ func TestMCPManagerNavigationOpensAddWizard(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /mcp to open synchronously")
@@ -239,13 +239,13 @@ func TestMCPManagerNavigationOpensAddWizard(t *testing.T) {
 		t.Fatal("expected MCP manager to open")
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("custom remote")})
+	updated, cmd = next.Update(testKeyText("custom remote"))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected MCP manager search to update synchronously")
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected MCP manager selection to prefill synchronously")
@@ -267,9 +267,9 @@ func TestMCPManagerSearchFiltersMarketplace(t *testing.T) {
 	m.height = 36
 	m.input.SetValue("/mcp")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("playwright")})
+	updated, cmd := next.Update(testKeyText("playwright"))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected search typing to be synchronous")
@@ -295,11 +295,11 @@ func TestMCPManagerDeleteEditsSearchQuery(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("play")})
+	updated, _ = next.Update(testKeyText("play"))
 	next = updated.(model)
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	updated, cmd := next.Update(testKey(tea.KeyDelete))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -314,11 +314,11 @@ func TestMCPManagerMarketplaceSelectionPrefillsInstallCommand(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/mcp")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("context7")})
+	updated, _ = next.Update(testKeyText("context7"))
 	next = updated.(model)
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected marketplace selection to prefill synchronously")
@@ -337,9 +337,9 @@ func TestMCPManagerAddRemoteOpensWizard(t *testing.T) {
 	m.height = 36
 	m.input.SetValue("/mcp")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a"), Alt: true})
+	updated, cmd := next.Update(testKeyAltText("a"))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -375,12 +375,12 @@ func TestMCPAddWizardInvalidURLShowsUnsavedResult(t *testing.T) {
 	m.height = 36
 	m.mcpAddWizard = newMCPAddWizard("http")
 
-	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("adds")},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune("sxas")},
-		{Type: tea.KeyEnter},
+	for _, key := range []tea.Msg{
+		testKeyText("adds"),
+		testKey(tea.KeyEnter),
+		testKey(tea.KeyEnter),
+		testKeyText("sxas"),
+		testKey(tea.KeyEnter),
 	} {
 		updated, cmd := m.Update(key)
 		if cmd != nil {
@@ -431,13 +431,13 @@ func TestMCPAddWizardInvalidURLCanSaveDisabledDraft(t *testing.T) {
 	m.mcpAddWizard = newMCPAddWizard("http")
 
 	var cmd tea.Cmd
-	for index, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("draft")},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune("sxas")},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune("s")},
+	for index, key := range []tea.Msg{
+		testKeyText("draft"),
+		testKey(tea.KeyEnter),
+		testKey(tea.KeyEnter),
+		testKeyText("sxas"),
+		testKey(tea.KeyEnter),
+		testKeyText("s"),
 	} {
 		updated, nextCmd := m.Update(key)
 		if nextCmd != nil && index != 5 {
@@ -485,15 +485,15 @@ func TestMCPAddWizardSavesRemoteWithPastedHeader(t *testing.T) {
 	m.mcpAddWizard = newMCPAddWizard("http")
 
 	var cmd tea.Cmd
-	for index, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune("docs")},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune("https://docs.example/mcp")},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune("Authorization: Bearer secret")},
-		{Type: tea.KeyEnter},
-		{Type: tea.KeyEnter},
+	for index, key := range []tea.Msg{
+		testKeyText("docs"),
+		testKey(tea.KeyEnter),
+		testKey(tea.KeyEnter),
+		testKeyText("https://docs.example/mcp"),
+		testKey(tea.KeyEnter),
+		testKeyText("Authorization: Bearer secret"),
+		testKey(tea.KeyEnter),
+		testKey(tea.KeyEnter),
 	} {
 		updated, nextCmd := m.Update(key)
 		if nextCmd != nil && index != 7 {
@@ -537,7 +537,7 @@ func TestChatMCPSetupStitchURLOpensPrefilledWizard(t *testing.T) {
 	m.height = 36
 	m.input.SetValue("configure this MCP https://stitch.withgoogle.com/docs/mcp/setup")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -582,7 +582,7 @@ func TestChatMCPSetupFalsePositiveSendsPrompt(t *testing.T) {
 	prompt := "how do I add a fetch call to my mcp client?"
 	m.input.SetValue(prompt)
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if next.mcpAddWizard != nil {
@@ -693,13 +693,13 @@ func TestChatMCPSetupStitchConfirmSavesServer(t *testing.T) {
 	m.height = 36
 	m.input.SetValue("setup stitch mcp from https://stitch.withgoogle.com/docs/mcp/setup")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected MCP setup intent to open synchronously")
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd == nil {
 		t.Fatal("expected MCP setup save to run asynchronously")
@@ -741,13 +741,13 @@ func TestMCPManagerRunsSelectedServerAction(t *testing.T) {
 	})
 	m.input.SetValue("/mcp")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.mcpManager == nil {
 		t.Fatal("expected MCP manager to open")
 	}
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d"), Alt: true})
+	updated, cmd := next.Update(testKeyAltText("d"))
 	next = updated.(model)
 	if cmd == nil {
 		t.Fatal("expected MCP action to run asynchronously")
@@ -797,7 +797,7 @@ func TestMCPCommandRunsManagerActionAndRefreshesState(t *testing.T) {
 	})
 	m.input.SetValue("/mcp disable docs")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd == nil {
@@ -836,7 +836,7 @@ func TestMCPCommandPreservesQuotedArguments(t *testing.T) {
 	})
 	m.input.SetValue(`/mcp add docs -- "C:\Program Files\docs mcp.exe" --label "Zero Docs"`)
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd == nil {
@@ -867,7 +867,7 @@ func TestMCPCommandDoesNotApplyFailedConfig(t *testing.T) {
 	})
 	m.input.SetValue("/mcp disable docs")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd == nil {

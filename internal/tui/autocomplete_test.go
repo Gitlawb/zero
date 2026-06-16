@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -17,7 +17,7 @@ import (
 func typeRunes(t *testing.T, m model, s string) model {
 	t.Helper()
 	for _, r := range s {
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		updated, _ := m.Update(testKeyText(string(r)))
 		m = updated.(model)
 	}
 	return m
@@ -83,7 +83,7 @@ func TestTabCyclesSuggestions(t *testing.T) {
 	m = typeRunes(t, m, "/mo")
 	start := m.suggestionIdx
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(testKey(tea.KeyTab))
 	m = updated.(model)
 	if m.suggestionIdx == start {
 		t.Fatal("Tab should advance the selected suggestion")
@@ -91,7 +91,7 @@ func TestTabCyclesSuggestions(t *testing.T) {
 
 	// Tab past the end wraps to 0.
 	for i := 0; i < len(m.suggestions); i++ {
-		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		updated, _ = m.Update(testKey(tea.KeyTab))
 		m = updated.(model)
 	}
 	if m.suggestionIdx != m.suggestionIdx%len(m.suggestions) {
@@ -103,15 +103,15 @@ func TestUpDownMoveSuggestions(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/mo")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ := m.Update(testKey(tea.KeyDown))
 	m = updated.(model)
 	if m.suggestionIdx != 1 {
 		t.Fatalf("Down should select index 1, got %d", m.suggestionIdx)
 	}
 	// Up from index 0 wraps to the last suggestion.
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = m.Update(testKey(tea.KeyUp))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = m.Update(testKey(tea.KeyUp))
 	m = updated.(model)
 	if m.suggestionIdx != len(m.suggestions)-1 {
 		t.Fatalf("Up past the top should wrap to last (%d), got %d", len(m.suggestions)-1, m.suggestionIdx)
@@ -122,13 +122,13 @@ func TestMouseWheelMovesSuggestions(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/")
 
-	updated, _ := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	updated, _ := m.Update(testMouseWheel(tea.MouseWheelDown, 0, 0))
 	m = updated.(model)
 	if m.suggestionIdx != 1 {
 		t.Fatalf("wheel down should select index 1, got %d", m.suggestionIdx)
 	}
 
-	updated, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	updated, _ = m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
 	m = updated.(model)
 	if m.suggestionIdx != 0 {
 		t.Fatalf("wheel up should select index 0, got %d", m.suggestionIdx)
@@ -139,7 +139,7 @@ func TestEnterRunsCommandSuggestion(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/he") // selects /help
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if cmd != nil {
@@ -160,7 +160,7 @@ func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/sp") // selects /spec
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if cmd != nil {
@@ -173,7 +173,7 @@ func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
 		t.Fatalf("prefilled command should show argument hint, got %q", got)
 	}
 
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("fix")})
+	updated, cmd = m.Update(testKeyText("fix"))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("typing the argument should not start an agent run")
@@ -182,7 +182,7 @@ func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
 		t.Fatalf("typing after the hint should insert one argument separator, got %q", got)
 	}
 	for range "fix" {
-		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		updated, cmd = m.Update(testKey(tea.KeyBackspace))
 		m = updated.(model)
 		if cmd != nil {
 			t.Fatal("backspacing the argument should not start an agent run")
@@ -191,7 +191,7 @@ func TestEnterPrefillsCommandSuggestionRequiringInput(t *testing.T) {
 	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") || strings.Contains(got, "/spec  [task]") {
 		t.Fatalf("empty argument command should render one visual separator, got %q", got)
 	}
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	updated, cmd = m.Update(testKeyText("x"))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("typing after deleting the argument should not start an agent run")
@@ -227,7 +227,7 @@ func TestTabCompletesAfterSelection(t *testing.T) {
 
 	// Move to /mode, then Tab again -> per spec Tab cycles, so we use Down then
 	// Enter to lock the selection; verify Tab keeps cycling not completing.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(testKey(tea.KeyTab))
 	m = updated.(model)
 	if m.input.Value() != "/mo" {
 		t.Fatalf("Tab should cycle, not yet complete; input=%q", m.input.Value())
@@ -238,7 +238,7 @@ func TestEscDismissesCommandSuggestionsAndClearsInput(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/mo")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 
 	if m.suggestionsActive() {
@@ -253,7 +253,7 @@ func TestEscWithoutSuggestionsClearsInputAsBefore(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "hello") // no suggestions
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 	if m.input.Value() != "" {
 		t.Fatalf("Esc with no suggestions should clear input, got %q", m.input.Value())
@@ -264,7 +264,7 @@ func TestEnterWithNoSuggestionStillSubmits(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("hello zero") // plain prompt, no suggestions
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if next.input.Value() != "" {
@@ -399,7 +399,7 @@ func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
 	}
 
 	for range suggestionPaletteMaxVisible + 1 {
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		updated, _ := m.Update(testKey(tea.KeyDown))
 		m = updated.(model)
 	}
 	plain = plainRender(t, m.View())
@@ -438,7 +438,7 @@ func TestEnterOnNoMatchCommandPaletteDoesNotSubmit(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = typeRunes(t, m, "/,")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if cmd != nil {
@@ -481,7 +481,7 @@ func TestEscDismissesFilePaletteAndRemovesTrailingToken(t *testing.T) {
 	m := newModel(context.Background(), Options{Cwd: t.TempDir()})
 	m = typeRunes(t, m, "read @missing")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 
 	if m.suggestionsActive() {
@@ -501,7 +501,7 @@ func TestEscDismissesFilePaletteAndRemovesTrailingToken(t *testing.T) {
 	m.input.SetCursor(len([]rune("compare @old")))
 	m.recomputeSuggestions()
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 
 	if m.suggestionsActive() {
@@ -589,7 +589,7 @@ func TestEnterOnDirectorySuggestionKeepsFilePaletteOpen(t *testing.T) {
 		t.Fatalf("expected internal directory first, got %q from %v", got, suggestionNames(m))
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if cmd != nil {
@@ -616,7 +616,7 @@ func TestEnterOnFileSuggestionClosesFilePalette(t *testing.T) {
 		t.Fatalf("expected file suggestion first, got %q from %v", got, suggestionNames(m))
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if cmd != nil {
@@ -637,17 +637,17 @@ func TestFileSuggestionCompletionKeepsPastePreviewCollapsed(t *testing.T) {
 	m := newModel(context.Background(), Options{Cwd: root})
 	m.width = 44
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	updated, _ = m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@guide")})
+	updated, _ = m.Update(testKeyText("@guide"))
 	m = updated.(model)
 
 	if !m.suggestionsActive() || !m.suggestionsAreFiles {
 		t.Fatalf("expected file suggestions after @guide, got suggestions=%v files=%v", m.suggestionsActive(), m.suggestionsAreFiles)
 	}
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if cmd != nil {
@@ -674,17 +674,17 @@ func TestFileSuggestionDismissKeepsPastePreviewCollapsed(t *testing.T) {
 	m := newModel(context.Background(), Options{Cwd: root})
 	m.width = 44
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	updated, _ = m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@guide")})
+	updated, _ = m.Update(testKeyText("@guide"))
 	m = updated.(model)
 
 	if !m.suggestionsActive() || !m.suggestionsAreFiles {
 		t.Fatalf("expected file suggestions after @guide, got suggestions=%v files=%v", m.suggestionsActive(), m.suggestionsAreFiles)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 
 	if got := m.composerValue(); got != paste+" " {
@@ -711,19 +711,19 @@ func TestBackspaceAfterCompletedFileSuggestionKeepsPastePreviewCollapsed(t *test
 	m := newModel(context.Background(), Options{Cwd: root})
 	m.width = 44
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	updated, _ = m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@guide")})
+	updated, _ = m.Update(testKeyText("@guide"))
 	m = updated.(model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if got := m.composerValue(); got != paste+" @docs/guide.md " {
 		t.Fatalf("composer value after file completion = %q", got)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated, _ = m.Update(testKey(tea.KeyBackspace))
 	m = updated.(model)
 
 	if got := m.composerValue(); got != paste+" " {

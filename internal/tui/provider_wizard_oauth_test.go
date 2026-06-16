@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -87,7 +85,7 @@ func TestProviderWizardDeviceShortcutStartsDeviceFlow(t *testing.T) {
 	next, _ := m.advanceProviderWizard() // → OAuth list
 	m = selectWizardOAuthProvider(t, next, "xai")
 
-	out, cmd := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	out, cmd := m.handleProviderWizardKey(testKeyText("d"))
 	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
 		t.Fatalf("'d' should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
 	}
@@ -210,7 +208,7 @@ func TestProviderWizardSupportsOAuth(t *testing.T) {
 
 func TestProviderWizardCtrlOStartsOAuthForOpenRouter(t *testing.T) {
 	m := wizardModelAt(t, "openrouter", providerWizardStepCredential)
-	next, cmd := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	next, cmd := m.handleProviderWizardKey(testKeyCtrl('o'))
 	if next.providerWizard == nil || !next.providerWizard.oauthPending {
 		t.Fatal("ctrl+o should mark the wizard oauthPending")
 	}
@@ -221,7 +219,7 @@ func TestProviderWizardCtrlOStartsOAuthForOpenRouter(t *testing.T) {
 
 func TestProviderWizardCtrlONoopForNonOAuthProvider(t *testing.T) {
 	m := wizardModelAt(t, "openai", providerWizardStepCredential)
-	next, _ := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	next, _ := m.handleProviderWizardKey(testKeyCtrl('o'))
 	if next.providerWizard != nil && next.providerWizard.oauthPending {
 		t.Fatal("ctrl+o must not start OAuth for a provider that doesn't support it")
 	}

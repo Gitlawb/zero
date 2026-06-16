@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/doctor"
@@ -121,7 +121,7 @@ func TestDoctorConnectivityCommandRunsProbeAsynchronously(t *testing.T) {
 	})
 	m.input.SetValue("/doctor --connectivity")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected /doctor --connectivity to return an async command")
@@ -157,7 +157,7 @@ func TestDoctorCommandUsesDiagnosticCenterRow(t *testing.T) {
 	})
 	m.input.SetValue("/doctor")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected plain /doctor to render synchronously")
@@ -204,7 +204,7 @@ func TestDoctorConnectivityCommandAnimatesAndReplacesStatusRow(t *testing.T) {
 	})
 	m.input.SetValue("/doctor --connectivity")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected /doctor --connectivity to start an async command")
@@ -242,7 +242,7 @@ func TestDoctorFixOpensProviderWizardWhenProviderMissing(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/doctor fix")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /doctor fix provider setup path to be handled synchronously")
@@ -322,7 +322,7 @@ func TestDoctorFixRunsConnectivityWhenProviderConfigured(t *testing.T) {
 	})
 	m.input.SetValue("/doctor fix")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected /doctor fix to run provider connectivity asynchronously")
