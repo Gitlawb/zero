@@ -215,6 +215,9 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	// fade will start naturally.
 	m.resetStreamingFade()
 	m.fadeActive = true
+	// Reset the working-verb rotation so the user sees the brand word
+	// first when the implementation session starts.
+	m.workingVerb.Reset()
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, nil), m.spinner.Tick)
 }
 

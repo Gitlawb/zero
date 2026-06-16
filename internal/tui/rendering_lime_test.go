@@ -138,8 +138,8 @@ func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 
 	// Before the first delta the block falls back to the liveness spinner.
 	m.streamingText = ""
-	if got := plainRender(t, m.interimBlock(96)); !strings.Contains(got, "working…") {
-		t.Fatalf("empty interim block = %q, want working…", got)
+	if got := plainRender(t, m.interimBlock(96)); !strings.Contains(got, "gitlawbmaxxing") {
+		t.Fatalf("empty interim block = %q, want first brand verb", got)
 	}
 }
 

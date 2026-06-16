@@ -97,7 +97,11 @@ type model struct {
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
-	spinner       spinner.Model
+	spinner spinner.Model
+	// workingVerb holds the rotating "gitlawbmaxxing / zeroling / …" label the
+	// assistant interim block displays while pending. It advances on every
+	// spinner tick (see TickMsg branch) so its cadence matches the glyph.
+	workingVerb   *workingWords
 	pending       bool
 	queuedMessage string
 	exiting       bool
@@ -435,6 +439,7 @@ func newModel(ctx context.Context, options Options) model {
 		prState:                prService.GetState(),
 		input:                  input,
 		spinner:                runSpinner,
+		workingVerb:            newWorkingWords(),
 		now:                    time.Now,
 		notifier:               notifier,
 		altScreen:              options.AltScreen,
@@ -927,6 +932,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		// workingVerb shares the spinner's cadence so the verb and the glyph
+		// stay in lockstep (one new word per glyph frame). Nil-safe; nil check
+		// is unnecessary because the type's methods handle a nil receiver.
+		m.workingVerb.Tick()
 		if m.compactInFlight {
 			m.compactFrame++
 			m = m.setCompactStatusRow(m.compactText(true))
@@ -1557,7 +1566,7 @@ func (m model) interimBlock(width int) string {
 		if len(blocks) > 0 {
 			return strings.Join(blocks, "\n")
 		}
-		return zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render("working…")
+		return zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
 	}
 	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
@@ -2351,6 +2360,9 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
+	// the new run starts (instead of mid-rotation from a prior turn).
+	m.workingVerb.Reset()
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
 }
 
