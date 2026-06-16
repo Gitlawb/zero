@@ -85,14 +85,26 @@ func TestStreamingFadePaletteLength(t *testing.T) {
 }
 
 func TestStreamingFadePaletteHandlesBadHex(t *testing.T) {
-	// An unparseable endpoint must not panic and must still produce a
-	// length-correct palette (every bucket gets a no-op style). We don't
-	// assert on color content because the fallback path uses the
-	// supplied (unparseable) base, which is whatever lipgloss does with
-	// an invalid color string.
-	palette := buildStreamingFadePalette(streamingFadeSteps, "not-a-color", "also-not")
-	if len(palette) != streamingFadeSteps {
-		t.Fatalf("bad-hex palette length = %d, want %d", len(palette), streamingFadeSteps)
+	// An unparseable endpoint must not panic and must produce a fallback
+	// palette where every bucket's foreground equals the (unparseable)
+	// base string. The fallback path in buildStreamingFadePalette
+	// short-circuits the interpolation when hexToRGB returns ok=false
+	// and uses the supplied base directly for every bucket.
+	bad := lipgloss.Color("not-a-color")
+	palette := buildStreamingFadePalette(streamingFadeSteps, bad, bad)
+	// The fix in CodeRabbit's review: don't assert on len (a constant
+	// for a fixed-size array); assert that EVERY bucket's foreground
+	// is the unparseable base. This catches a regression where the
+	// fallback was changed to interpolate from a zero value or to
+	// skip the loop entirely.
+	for i, s := range palette {
+		fg, ok := s.GetForeground().(lipgloss.Color)
+		if !ok {
+			t.Fatalf("palette[%d] foreground is not a static lipgloss.Color: %T", i, s.GetForeground())
+		}
+		if string(fg) != string(bad) {
+			t.Errorf("palette[%d] foreground = %q, want %q (fallback base)", i, string(fg), string(bad))
+		}
 	}
 }
 
@@ -269,14 +281,36 @@ func TestStreamingLineBornAtMapsVisualToLogical(t *testing.T) {
 	}
 }
 
-func TestStreamingLineBornAtOutOfRangeReturnsZero(t *testing.T) {
-	// A visual line beyond the lineAges slice should return zero (the
-	// defensive case: streamingText was pre-populated without tracking
-	// lineAges, or a wrap produced more visual lines than lineAges
-	// entries).
-	got := streamingLineBornAt(5, 6, []time.Time{{}, {}}, time.Time{})
+func TestStreamingLineBornAtOutOfRangeClampsToLast(t *testing.T) {
+	// A wrapped middle line: the markdown renderer produced more
+	// visual lines than the number of logical lines (a single
+	// logical line that wrapped into multiple visual lines). The
+	// out-of-range visual index must clamp to the last known
+	// logical age so the wrapped continuation lines keep fading
+	// in step with their siblings instead of snapping to the zero
+	// time (which would render as base ink).
+	//
+	// Setup: lineAges has 2 entries; visualCount=5. Visual lines
+	// 0,1 map to lineAges[0,1] (the MappingVisualToLogical branch).
+	// Visual line 4 is the last visual (uses lastActivity). Visual
+	// line 3 is the wrapped middle line — out of lineAges range,
+	// not the last visual — and must clamp to lineAges[1].
+	earlier := time.Unix(0, 1)
+	last := time.Unix(0, 5)
+	activity := time.Unix(0, 9)
+	got := streamingLineBornAt(3, 5, []time.Time{earlier, last}, activity)
+	if !got.Equal(last) {
+		t.Errorf("out-of-range bornAt = %v, want %v (clamp to last logical age)", got, last)
+	}
+}
+
+func TestStreamingLineBornAtEmptyLineAgesReturnsZero(t *testing.T) {
+	// The truly-empty case (no logical lines at all) has nothing to
+	// clamp to; returning zero is correct so ageDimLine short-circuits
+	// to base ink via its zero-time path.
+	got := streamingLineBornAt(0, 1, nil, time.Time{})
 	if !got.IsZero() {
-		t.Errorf("out-of-range bornAt = %v, want zero", got)
+		t.Errorf("empty lineAges bornAt = %v, want zero", got)
 	}
 }
 

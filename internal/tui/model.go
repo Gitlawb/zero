@@ -887,10 +887,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// re-stamps the in-progress last entry so the line that's still
 		// being filled stays visibly fresh.
 		m.recordStreamingDelta(msg.delta)
-		// The fade short-circuits when fadeActive is false, so a 0-byte
-		// delta is a no-op (the tick is still scheduled harmlessly).
+		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
+		// case schedules the next one). Schedule the FIRST tick only on
+		// the inactive→active transition; subsequent deltas just refresh
+		// state and rely on the existing tick chain.
+		startTick := !m.fadeActive
 		m.fadeActive = true
-		return m, streamingFadeTick()
+		if startTick {
+			return m, streamingFadeTick()
+		}
+		return m, nil
 	case agentReasoningMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -1029,11 +1035,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pending = false
-		// The fade is hard-stopped on stream end: the next render emits
-		// the final row in solid ink (no settling animation), and the
-		// pending streamingFadeTickMsg that lands after this point
-		// short-circuits because fadeActive is false.
-		m.fadeActive = false
+		// Fully reset the fade state at stream end. The next render
+		// emits the final row in solid ink (no settling animation), and
+		// the pending streamingFadeTickMsg that lands after this point
+		// short-circuits because fadeActive is false. Clearing lineAges
+		// and lastStreamActivity here too prevents stale age data from
+		// carrying over to the next turn (and stops lineAges from
+		// growing indefinitely across many runs).
+		m.resetStreamingFade()
 		// The run is complete: release its context now instead of waiting for the
 		// parent context — every prompt leaked a CancelFunc (and its timer
 		// resources) until app exit otherwise.

@@ -226,8 +226,20 @@ func streamingLineBornAt(visualIndex, visualCount int, lineAges []time.Time, las
 	// exact for lines that don't wrap and conservative for lines that do.
 	// The visual line numbering is dominated by lines that don't wrap,
 	// so a one-line-at-a-time mapping is correct for the majority case.
-	if visualIndex < 0 || visualIndex >= len(lineAges) {
+	//
+	// For wrapped lines (a single logical line that produced multiple
+	// visual lines), the second-and-later visual lines fall out of the
+	// `visualIndex >= len(lineAges)` branch. Clamp to the last known
+	// logical age so wrapped middle lines keep fading in step with their
+	// siblings instead of snapping to the zero time (= base ink).
+	if visualIndex < 0 {
 		return time.Time{}
+	}
+	if visualIndex >= len(lineAges) {
+		if len(lineAges) == 0 {
+			return time.Time{}
+		}
+		return lineAges[len(lineAges)-1]
 	}
 	return lineAges[visualIndex]
 }
