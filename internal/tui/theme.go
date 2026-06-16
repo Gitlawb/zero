@@ -68,7 +68,6 @@ type tuiTheme struct {
 	// Surfaces.
 	panel           lipgloss.Style // bare panel background (card padding, body fill)
 	userPromptPanel lipgloss.Style // submitted user prompt background
-	userPromptHalf  lipgloss.Style // submitted prompt half-block padding
 
 	// Permission modes.
 	modeAuto   lipgloss.Style
@@ -159,7 +158,6 @@ var zeroTheme = tuiTheme{
 
 	panel:           lipgloss.NewStyle().Background(lipgloss.Color(colorPanel)),
 	userPromptPanel: lipgloss.NewStyle().Background(lipgloss.Color(colorPromptBg)),
-	userPromptHalf:  lipgloss.NewStyle().Foreground(lipgloss.Color(colorPromptBg)),
 
 	modeAuto:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorGreen)).Bold(true),
 	modeAsk:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)).Bold(true),

@@ -384,11 +384,11 @@ func renderUserRow(row transcriptRow, width int) string {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
 	lines := make([]string, 0, len(wrapped)+2)
-	lines = append(lines, renderUserPromptHalfLine(width, "▄"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	for _, line := range wrapped {
 		lines = append(lines, renderUserPromptStyledLine(zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true)).Render(line), contentWidth))
 	}
-	lines = append(lines, renderUserPromptHalfLine(width, "▀"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	return strings.Join(lines, "\n")
 }
 
@@ -411,18 +411,11 @@ func renderUserPromptStyledLine(styledText string, contentWidth int) string {
 	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render("  ") + fitted + pad
 }
 
-func renderUserPromptHalfLine(width int, glyph string) string {
+func renderUserPromptPaddingLine(width int) string {
 	if width <= 0 {
 		return ""
 	}
-	capGlyph := glyph
-	switch glyph {
-	case "▄":
-		capGlyph = "▖"
-	case "▀":
-		capGlyph = "▘"
-	}
-	return zeroTheme.userPrompt.Render(capGlyph) + zeroTheme.userPromptHalf.Render(strings.Repeat(glyph, maxInt(0, width-1)))
+	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render(strings.Repeat(" ", maxInt(0, width-1)))
 }
 
 // renderAssistantRow draws final answers as plain response text plus completion

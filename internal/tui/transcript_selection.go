@@ -130,7 +130,7 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
 	lines := make([]string, 0, len(wrapped)+2)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	lines = append(lines, renderUserPromptHalfLine(width, "▄"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	for index, line := range wrapped {
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index + 1,
@@ -141,7 +141,7 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 		selectable = append(selectable, meta)
 		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true))), contentWidth))
 	}
-	lines = append(lines, renderUserPromptHalfLine(width, "▀"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	return strings.Join(lines, "\n"), selectable
 }
 
