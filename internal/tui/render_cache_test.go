@@ -158,6 +158,26 @@ func TestRenderRowCacheSkipsPendingPermissionPromptRows(t *testing.T) {
 	}
 }
 
+func TestSelectableAssistantRowsUseRenderCacheWhenSelectionInactive(t *testing.T) {
+	cache := replaceDefaultRenderCache(t, newStaticRenderCache(8, 1000))
+	m := newModel(context.Background(), Options{})
+	row := transcriptRow{kind: rowAssistant, text: "Done with **markdown**.", final: true, turnTools: 1}
+
+	first, firstSelectable := m.renderSelectableAssistantRow(0, row, 80, 0)
+	second, secondSelectable := m.renderSelectableAssistantRow(0, row, 80, 0)
+
+	if first == "" || first != second {
+		t.Fatalf("rendered rows = %q and %q, want stable cached output", first, second)
+	}
+	if len(firstSelectable) == 0 || len(secondSelectable) != len(firstSelectable) {
+		t.Fatalf("selectable metadata = %#v then %#v, want stable selectable lines", firstSelectable, secondSelectable)
+	}
+	stats := cache.stats()
+	if stats.Misses != 1 || stats.Hits != 1 {
+		t.Fatalf("cache stats = %#v, want one miss and one hit", stats)
+	}
+}
+
 func replaceDefaultRenderCache(t *testing.T, cache *staticRenderCache) *staticRenderCache {
 	t.Helper()
 	previous := defaultRenderCache

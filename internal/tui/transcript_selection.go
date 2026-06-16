@@ -247,9 +247,7 @@ func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, wi
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
-	lines := make([]string, 0, len(wrapped)+2)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	lines = append(lines, renderUserPromptPaddingLine(width))
 	for index, line := range wrapped {
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index + 1,
@@ -258,6 +256,13 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 			text:      line,
 		}
 		selectable = append(selectable, meta)
+	}
+	if !m.transcriptSelection.active {
+		return m.renderRow(row, width, rowContext{}), selectable
+	}
+	lines := make([]string, 0, len(wrapped)+2)
+	lines = append(lines, renderUserPromptPaddingLine(width))
+	for _, meta := range selectable {
 		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true))), contentWidth))
 	}
 	lines = append(lines, renderUserPromptPaddingLine(width))
@@ -267,12 +272,7 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	tableMeasure := width
 	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
-	lines := make([]string, 0, len(wrapped)+1)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	textStyle := zeroTheme.sayText
-	if row.final {
-		textStyle = zeroTheme.ink
-	}
 	for index, line := range wrapped {
 		plainLine := stripMarkdownRenderControls(line)
 		meta := transcriptSelectableLine{
@@ -282,6 +282,17 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 			text:      plainLine,
 		}
 		selectable = append(selectable, meta)
+	}
+	if !m.transcriptSelection.active {
+		return m.renderRow(row, width, rowContext{}), selectable
+	}
+	lines := make([]string, 0, len(wrapped)+1)
+	textStyle := zeroTheme.sayText
+	if row.final {
+		textStyle = zeroTheme.ink
+	}
+	for index, line := range wrapped {
+		meta := selectable[index]
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
 		lines = append(lines, rendered)
 	}
