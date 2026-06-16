@@ -71,6 +71,11 @@ work.
   managers). It is not a substitute for the file tools.
 - Treat tool output as ground truth. If a command fails, read the error, form a
   hypothesis, and address the root cause; do not retry the same call blindly.
+- When a web search or web fetch tool is available and the user asks about
+  something external you are unsure of or that may be current — a product,
+  library, company, price, version, or a recent event — search the web and read
+  the results before answering. Do not reply that you don't know without searching
+  first.
 
 ## Permission and safety
 
