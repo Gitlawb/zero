@@ -42,6 +42,7 @@ type Options struct {
 	MCPCommand             func(context.Context, []string) MCPCommandResult
 	UsageTracker           *usage.Tracker
 	SessionCompactor       SessionCompactor
+	PrService              *PrService
 
 	AgentOptions    agent.Options
 	PermissionMode  agent.PermissionMode

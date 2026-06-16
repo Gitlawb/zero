@@ -67,6 +67,8 @@ type model struct {
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
 	sessionCompactor       SessionCompactor
+	prService              *PrService
+	prState                PrState
 	runtimeMessageSink     func(tea.Msg)
 	agentOptions           agent.Options
 	notifier               *notify.Notifier
@@ -254,6 +256,10 @@ type doctorCommandResultMsg struct {
 	text string
 }
 
+type prStateMsg struct {
+	state PrState
+}
+
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
@@ -335,6 +341,10 @@ func newModel(ctx context.Context, options Options) model {
 	if usageTracker == nil {
 		usageTracker = usage.NewTracker(usage.TrackerOptions{})
 	}
+	prService := options.PrService
+	if prService == nil {
+		prService = NewPrService(cwd)
+	}
 	doctorUserConfigPath := options.DoctorUserConfigPath
 	if doctorUserConfigPath == "" {
 		doctorUserConfigPath = options.UserConfigPath
@@ -398,6 +408,8 @@ func newModel(ctx context.Context, options Options) model {
 		userAgent:              options.UserAgent,
 		usageTracker:           usageTracker,
 		transcript:             initialTranscript(),
+		prService:              prService,
+		prState:                prService.GetState(),
 		input:                  input,
 		spinner:                runSpinner,
 		now:                    time.Now,
@@ -442,7 +454,22 @@ const (
 )
 
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	if m.prService != nil && m.runtimeMessageSink != nil {
+		service := m.prService
+		sink := m.runtimeMessageSink
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		cmds = append(cmds, func() tea.Msg {
+			WatchPRStateContext(ctx, service, func(state PrState) {
+				sink(prStateMsg{state: state})
+			})
+			return nil
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update routes every message through updateModel, then advances the flush
@@ -1041,6 +1068,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doctorFrame = 0
 			m = m.setDoctorStatusRow(msg.text)
 		}
+		return m, nil
+	case prStateMsg:
+		m.prState = msg.state
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})

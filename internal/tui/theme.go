@@ -20,6 +20,8 @@ type tuiTheme struct {
 	red        lipgloss.Style // errors, diff del sign, ✗, deny
 	amber      lipgloss.Style // permission surfaces, warnings, auto badge
 	blue       lipgloss.Style // grep file locations, local-model dot
+	gitAdd     lipgloss.Style // PR/local diff additions
+	gitDel     lipgloss.Style // PR/local diff deletions
 	line       lipgloss.Style // default borders, rules, status separators
 	lineStrong lipgloss.Style // emphasized borders
 	selection  lipgloss.Style // transcript selection highlight
@@ -96,6 +98,8 @@ const (
 	colorRed      = "#ff7a7a" // errors, diff del
 	colorAmber    = "#ffc25c" // permission, warnings
 	colorBlue     = "#7db4ff" // grep locations, local-model dot
+	colorGitAdd   = "#7db87a" // footer PR diff additions
+	colorGitDel   = "#b87a7a" // footer PR diff deletions
 	colorAddBg    = "#15201d" // diff added-line bg (green @9% over panel)
 	colorDelBg    = "#241819" // diff deleted-line bg (red @9%)
 	colorPermBg   = "#1c1915" // permission card bg (amber @6%)
@@ -118,6 +122,8 @@ var zeroTheme = tuiTheme{
 	red:        lipgloss.NewStyle().Foreground(lipgloss.Color(colorRed)),
 	amber:      lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
 	blue:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorBlue)),
+	gitAdd:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorGitAdd)),
+	gitDel:     lipgloss.NewStyle().Foreground(lipgloss.Color(colorGitDel)),
 	line:       lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine)),
 	lineStrong: lipgloss.NewStyle().Foreground(lipgloss.Color(colorLine2)),
 	selection:  lipgloss.NewStyle().Background(lipgloss.Color(colorAccent)).Foreground(lipgloss.Color(colorOnAccent)),

@@ -60,7 +60,7 @@ func (m model) titleBar(width int) string {
 	workspace := m.titleWorkspaceSegment()
 	workspaceShort := m.titleWorkspaceSegmentShort()
 	branchOnly := m.titleBranchSegment()
-	cwdOnly := zeroTheme.muted.Render(shortenPath(m.cwd))
+	cwdOnly := zeroTheme.faint.Render(shortenPath(m.cwd))
 	compactLeft := cwdOnly
 	if branchOnly != "" {
 		compactLeft = branchOnly
@@ -107,21 +107,35 @@ func (m model) titleBar(width int) string {
 }
 
 func (m model) titleWorkspaceSegment() string {
-	cwd := zeroTheme.muted.Render(shortenPath(m.cwd))
+	cwd := zeroTheme.faint.Render(shortenPath(m.cwd))
+	parts := []string{}
 	if branch := m.titleBranchSegment(); branch != "" {
-		return branch + "  " + cwd
+		parts = append(parts, branch)
+	}
+	if pr := m.titlePRSegment(); pr != "" {
+		parts = append(parts, pr)
+	}
+	if len(parts) > 0 {
+		return strings.Join(append(parts, cwd), "  ")
 	}
 	return cwd
 }
 
 func (m model) titleWorkspaceSegmentShort() string {
-	cwd := zeroTheme.muted.Render(shortenPath(m.cwd))
+	cwd := zeroTheme.faint.Render(shortenPath(m.cwd))
+	parts := []string{}
 	branch := strings.TrimSpace(m.gitBranch)
-	if branch == "" {
-		return cwd
+	if branch != "" {
+		icon := zeroTheme.muted.Render("")
+		parts = append(parts, icon+" "+zeroTheme.muted.Render(middleTruncate(branch, 22)))
 	}
-	icon := zeroTheme.faint.Render("")
-	return icon + " " + zeroTheme.faint.Render(middleTruncate(branch, 22)) + "  " + cwd
+	if pr := m.titlePRSegment(); pr != "" {
+		parts = append(parts, pr)
+	}
+	if len(parts) > 0 {
+		return strings.Join(append(parts, cwd), "  ")
+	}
+	return cwd
 }
 
 func (m model) titleBranchSegment() string {
@@ -129,7 +143,11 @@ func (m model) titleBranchSegment() string {
 	if branch == "" {
 		return ""
 	}
-	return zeroTheme.faint.Render("") + " " + zeroTheme.faint.Render(branch)
+	return zeroTheme.muted.Render("") + " " + zeroTheme.muted.Render(branch)
+}
+
+func (m model) titlePRSegment() string {
+	return renderPRSegments(BuildPRSegments(m.prState, false))
 }
 
 func (m model) titleModelSegment() string {
