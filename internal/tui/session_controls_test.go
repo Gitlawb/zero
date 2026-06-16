@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -19,7 +19,7 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.input.SetValue("/effort list")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -32,7 +32,7 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	}
 
 	next.input.SetValue("/effort high")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -50,7 +50,7 @@ func TestEffortCommandRejectsUnsupportedActiveModel(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
 	m.input.SetValue("/effort high")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if next.reasoningEffort != "" {
@@ -65,7 +65,7 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/style")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -76,7 +76,7 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	}
 
 	next.input.SetValue("/style concise")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -102,7 +102,7 @@ func TestCompactStatusShowsManualFlowState(t *testing.T) {
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("abcd ", 80)})
 	m.input.SetValue("/compact status")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -147,7 +147,7 @@ func TestCompactCommandCallsInjectedCompactorAndReportsResult(t *testing.T) {
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
 	m.input.SetValue("/compact")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd == nil {
@@ -224,7 +224,7 @@ func TestCompactSpinnerTickRefreshesProgressFrame(t *testing.T) {
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
 	m.input.SetValue("/compact")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd == nil || !next.compactInFlight {
@@ -258,7 +258,7 @@ func TestCompactRunningRowRendersAsAmberCompressionCard(t *testing.T) {
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
 	m.input.SetValue("/compact")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	rendered := plainRender(t, next.renderRow(transcriptRow{
 		kind: rowSystem,
@@ -350,7 +350,7 @@ func TestCompactCommandRecordsSessionCompactionAndShrinksReplayContext(t *testin
 	eventsBefore := len(m.sessionEvents)
 	m.input.SetValue("/compact")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd == nil {
@@ -423,7 +423,7 @@ func TestCompactCommandUsesProviderSummaryWhenAvailable(t *testing.T) {
 	}
 	m.input.SetValue("/compact")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected /compact to start an async provider-backed compaction command")
@@ -457,7 +457,7 @@ func TestCompactCommandRecordsRequestWhenNoCompactorIsAvailable(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/compact")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -476,7 +476,7 @@ func TestCompactCommandRecordsRequestWhenNoCompactorIsAvailable(t *testing.T) {
 	}
 
 	next.input.SetValue("/compact status")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -519,7 +519,7 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	})
 	m.input.SetValue("track usage")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
@@ -535,7 +535,7 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	}
 
 	next.input.SetValue("/context")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -568,7 +568,7 @@ func TestUsageEventsForwardExistingAgentCallback(t *testing.T) {
 	})
 	m.input.SetValue("track usage")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
@@ -599,7 +599,7 @@ func TestUsageEventsForCustomModelUseTokenOnlyFallback(t *testing.T) {
 	})
 	m.input.SetValue("track usage")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
@@ -632,7 +632,7 @@ func TestInvalidUsageEventsAppendTranscriptError(t *testing.T) {
 	})
 	m.input.SetValue("track usage")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt to start agent run")
@@ -680,7 +680,7 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -710,7 +710,7 @@ func TestModelSwitchRedirectsDeprecatedModelWithNotice(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4-turbo")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -740,7 +740,7 @@ func TestModelSwitchUnknownModelReportsError(t *testing.T) {
 	})
 	m.input.SetValue("/model totally-unknown-model")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if next.modelName != "gpt-4.1" {
@@ -776,7 +776,7 @@ func TestModeCommandListsPresets(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.input.SetValue("/mode list")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -794,7 +794,7 @@ func TestModeCommandNoArgOpensPicker(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.input.SetValue("/mode")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -825,7 +825,7 @@ func TestModeCommandSwitchesModelEffortAndTurns(t *testing.T) {
 	})
 	m.input.SetValue("/mode deep")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -863,7 +863,7 @@ func TestModeCommandUnknownReportsError(t *testing.T) {
 	})
 	m.input.SetValue("/mode turbo")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if next.modelName != "claude-sonnet-4.5" {

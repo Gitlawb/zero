@@ -5,8 +5,12 @@ import "testing"
 func TestSyncChatScrollPinsWhileScrolledUp(t *testing.T) {
 	m := transcriptViewTestModel()
 	m.altScreen = true
-	m.transcript = []transcriptRow{{kind: rowAssistant, text: numberedLines(40)}}
+	m.height = 12
+	m.transcript = []transcriptRow{{kind: rowAssistant, text: numberedLines(120)}}
 	m.chatScrollOffset = 5
+	if maxOffset := m.chatMaxScrollOffset(); maxOffset < m.chatScrollOffset {
+		t.Fatalf("test transcript should be scrollable, maxOffset=%d", maxOffset)
+	}
 
 	m = m.syncChatScroll() // establishes the baseline, no adjustment yet
 	if m.chatBodyLines == 0 {

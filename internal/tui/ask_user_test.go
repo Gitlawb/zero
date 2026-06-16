@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -62,7 +62,7 @@ func TestAskUserPromptCollectsAnswersInOrder(t *testing.T) {
 
 	// Answer the first question.
 	next.input.SetValue("React")
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected first answer to advance synchronously")
@@ -76,7 +76,7 @@ func TestAskUserPromptCollectsAnswersInOrder(t *testing.T) {
 
 	// Answer the second (final) question.
 	next.input.SetValue("yes")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected final answer to resolve synchronously")
@@ -109,7 +109,7 @@ func TestAskUserPromptEscDeliversCollectedAnswers(t *testing.T) {
 
 	// Esc while an ask_user prompt is active cancels the questionnaire and must
 	// still deliver a (partial/empty) answer set so the run never deadlocks.
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
 
 	if next.pendingAskUser != nil {
@@ -137,7 +137,7 @@ func TestAskUserPromptBlocksNormalSubmit(t *testing.T) {
 	next := updated.(model)
 	next.input.SetValue("/help")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if transcriptContains(next.transcript, "Available commands") {
@@ -174,7 +174,7 @@ func TestAskUserRequestClearsComposerDraft(t *testing.T) {
 		t.Fatalf("ask_user should clear composer draft, active=%v value=%q", next.composerActive, next.composerValue())
 	}
 	next.input.SetValue("yes")
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if len(answers) != 1 || answers[0][0] != "yes" {
 		t.Fatalf("expected answer to use ask_user input only, got %#v", answers)
@@ -205,7 +205,7 @@ func TestAskUserRequestClearsStaleSuggestions(t *testing.T) {
 	if len(next.suggestions) != 0 || next.suggestionsAreFiles {
 		t.Fatalf("ask_user should clear stale suggestions, got suggestions=%#v files=%v", next.suggestions, next.suggestionsAreFiles)
 	}
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if len(next.suggestions) != 0 || next.suggestionsAreFiles {
 		t.Fatalf("ask_user resolve should keep suggestions clear, got suggestions=%#v files=%v", next.suggestions, next.suggestionsAreFiles)

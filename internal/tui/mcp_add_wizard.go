@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	internalmcp "github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -112,37 +112,37 @@ func (m model) handleMCPAddWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 	wizard := m.mcpAddWizard
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch {
+	case keyIs(msg, tea.KeyEsc):
 		m.cancelMCPCommand()
 		m.mcpAddWizard = nil
 		return m, nil
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case keyBackspace(msg):
 		wizard.deleteRune()
 		return m, nil
-	case tea.KeyCtrlU:
+	case keyCtrl(msg, 'u'):
 		wizard.clearCurrentInput()
 		return m, nil
-	case tea.KeyLeft:
+	case keyIs(msg, tea.KeyLeft):
 		wizard.back()
 		return m, nil
-	case tea.KeyUp:
+	case keyIs(msg, tea.KeyUp):
 		if wizard.step == mcpAddWizardStepType || wizard.step == mcpAddWizardStepResult {
 			wizard.move(-1)
 		}
 		return m, nil
-	case tea.KeyDown, tea.KeyTab:
+	case keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
 		if wizard.step == mcpAddWizardStepType || wizard.step == mcpAddWizardStepResult {
 			wizard.move(1)
 		}
 		return m, nil
-	case tea.KeyRunes:
+	case keyText(msg) != "":
 		if wizard.step == mcpAddWizardStepResult {
 			return m.handleMCPAddWizardResultShortcut(msg)
 		}
-		wizard.appendRunes(msg.Runes)
+		wizard.appendRunes(keyRunes(msg))
 		return m, nil
-	case tea.KeyEnter, tea.KeyRight:
+	case keyIs(msg, tea.KeyEnter) || keyIs(msg, tea.KeyRight):
 		if wizard.step == mcpAddWizardStepResult {
 			return m.handleMCPAddWizardResultEnter()
 		}
@@ -235,7 +235,7 @@ func (m model) handleMCPAddWizardResultShortcut(msg tea.KeyMsg) (model, tea.Cmd)
 	if m.mcpAddWizard == nil {
 		return m, nil
 	}
-	switch strings.ToLower(string(msg.Runes)) {
+	switch strings.ToLower(keyText(msg)) {
 	case "e", "r":
 		m.mcpAddWizard.step = mcpAddWizardStepEndpoint
 		m.mcpAddWizard.err = ""

@@ -6,9 +6,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -316,15 +316,15 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
 	start, available, top := m.transcriptViewportStart(body, width)
-	if msg.Y < top || msg.Y >= top+available {
+	if mouseY(msg) < top || mouseY(msg) >= top+available {
 		return transcriptSelectableLine{}, false
 	}
-	bodyY := start + msg.Y - top
+	bodyY := start + mouseY(msg) - top
 	for _, line := range selectable {
 		if line.bodyY != bodyY {
 			continue
 		}
-		if msg.X < 0 {
+		if mouseX(msg) < 0 {
 			return transcriptSelectableLine{}, false
 		}
 		return line, true
@@ -369,7 +369,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			}
 			return m, nil, true
 		}
-		point := transcriptSelectionPointForMouse(line, msg.X)
+		point := transcriptSelectionPointForMouse(line, mouseX(msg))
 		m.copyStatus = ""
 		m.transcriptSelection = transcriptSelectionState{active: true, anchor: point, cursor: point}
 		return m, nil, true
@@ -379,7 +379,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 		}
 		line, ok := m.transcriptLineAtMouse(msg)
 		if ok {
-			m.transcriptSelection.cursor = transcriptSelectionPointForMouse(line, msg.X)
+			m.transcriptSelection.cursor = transcriptSelectionPointForMouse(line, mouseX(msg))
 		}
 		return m, nil, true
 	case mouseRelease(msg):
@@ -387,7 +387,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			return m, nil, false
 		}
 		if line, ok := m.transcriptLineAtMouse(msg); ok {
-			m.transcriptSelection.cursor = transcriptSelectionPointForMouse(line, msg.X)
+			m.transcriptSelection.cursor = transcriptSelectionPointForMouse(line, mouseX(msg))
 		}
 		text := m.selectedTranscriptText()
 		if strings.TrimSpace(text) == "" {

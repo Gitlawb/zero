@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 func TestEmptyStateShowsBrandAndTaglineOnly(t *testing.T) {
@@ -26,7 +26,7 @@ func TestEmptyStateDisappearsAfterFirstRow(t *testing.T) {
 	m.width, m.height = 100, 30
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "hello"})
 
-	view := m.View()
+	view := viewString(m.View())
 	if strings.Contains(view, emptyStateTagline) {
 		t.Fatal("empty state must disappear once the transcript has content")
 	}

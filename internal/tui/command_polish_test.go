@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -19,7 +19,7 @@ func TestHelpCommandRendersGroupedSections(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/help")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -57,7 +57,7 @@ func TestProviderAndConfigCommandsUseStableStatusOutput(t *testing.T) {
 	})
 
 	m.input.SetValue("/provider status")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /provider to be handled without starting an agent run")
@@ -69,7 +69,7 @@ func TestProviderAndConfigCommandsUseStableStatusOutput(t *testing.T) {
 	assertNotContains(t, providerText, "sk-sensitive")
 
 	next.input.SetValue("/config")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /config to be handled without starting an agent run")
@@ -95,7 +95,7 @@ func TestProviderCommandRedactsCredentialBearingBaseURL(t *testing.T) {
 	})
 	m.input.SetValue("/provider status")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -114,7 +114,7 @@ func TestToolsCommandRendersCommandCard(t *testing.T) {
 	})
 	m.input.SetValue("/tools")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -140,7 +140,7 @@ func TestToolsCommandRendersCommandCard(t *testing.T) {
 	})
 	m.input.SetValue("/tools")
 
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = m.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -195,7 +195,7 @@ func TestToolsCommandShowsFullSortedCatalog(t *testing.T) {
 	})
 	m.input.SetValue("/tools")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -268,7 +268,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	})
 
 	m.input.SetValue("/context")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /context to be handled without starting an agent run")
@@ -294,7 +294,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 	assertNotContains(t, contextText, "permission mode:")
 
 	next.input.SetValue("/permissions")
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /permissions to be handled without starting an agent run")
@@ -388,7 +388,7 @@ func TestCompactCommandAvoidsShellOnlyPlaceholder(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/compact")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {

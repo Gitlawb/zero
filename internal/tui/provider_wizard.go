@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
@@ -26,6 +26,8 @@ import (
 // flow stored an OAuth token in the oauth store (xAI) that the runtime resolver
 // will attach — in that case no key is needed on the profile.
 type providerWizardOAuthMsg struct {
+	providerID string
+	attemptID  int
 	apiKey     string
 	tokenLogin bool
 	err        error
@@ -35,7 +37,7 @@ type providerWizardOAuthMsg struct {
 // success the minted key fills the credential and the wizard advances; on failure
 // the (redacted) error is shown and the user can retry or paste a key.
 func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.Cmd) {
-	if m.providerWizard == nil {
+	if m.providerWizard == nil || !m.providerWizard.oauthResultMatches(msg.providerID, msg.attemptID) {
 		return m, nil
 	}
 	m.providerWizard.oauthPending = false
@@ -62,7 +64,7 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 // user_code + verification URI, then kick off phase 2 (the token poll). On error
 // the redacted message is surfaced and the login is abandoned.
 func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (model, tea.Cmd) {
-	if m.providerWizard == nil || !m.providerWizard.oauthPending {
+	if m.providerWizard == nil || !m.providerWizard.oauthResultMatches(msg.providerID, msg.attemptID) {
 		return m, nil
 	}
 	if msg.err != nil {
@@ -73,7 +75,7 @@ func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (m
 	}
 	m.providerWizard.deviceUserCode = msg.userCode
 	m.providerWizard.deviceVerificationURI = msg.verifyURL
-	return m, providerWizardDevicePollCmd(msg.providerID, msg.cfg, msg.auth)
+	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -88,19 +90,19 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 // providerWizardOAuthCmdFor runs the chosen provider's browser OAuth login off the
 // UI goroutine and reports the outcome. OpenRouter mints an API key; other OAuth
 // providers (xAI) run the generic engine login which stores a refreshable token.
-func providerWizardOAuthCmdFor(provider providercatalog.Descriptor) tea.Cmd {
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
+	providerID := provider.ID
 	if provider.OAuthMintsKey {
 		return func() tea.Msg {
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
 				Timeout:     3 * time.Minute,
 			})
-			return providerWizardOAuthMsg{apiKey: key, err: err}
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, apiKey: key, err: err}
 		}
 	}
-	name := provider.ID
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{tokenLogin: true, err: runProviderTokenLogin(name)}
+		return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
 	}
 }
 
@@ -130,6 +132,7 @@ func runProviderTokenLogin(name string) error {
 // the user_code + verification URI to display, plus the cfg/auth to poll with.
 type providerWizardDeviceCodeMsg struct {
 	providerID string
+	attemptID  int
 	userCode   string
 	verifyURL  string
 	cfg        oauth.Config
@@ -139,14 +142,15 @@ type providerWizardDeviceCodeMsg struct {
 
 // providerWizardDevicePrepareCmd runs phase 1 of the device-code login off the UI
 // goroutine and reports the code to display (or an error).
-func providerWizardDevicePrepareCmd(name string) tea.Cmd {
+func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 	return func() tea.Msg {
 		auth, cfg, err := oauthDevicePrepare(name)
 		if err != nil {
-			return providerWizardDeviceCodeMsg{providerID: name, err: err}
+			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
 		}
 		return providerWizardDeviceCodeMsg{
 			providerID: name,
+			attemptID:  attemptID,
 			userCode:   auth.UserCode,
 			verifyURL:  oauthDeviceVerifyTarget(auth),
 			cfg:        cfg,
@@ -157,9 +161,9 @@ func providerWizardDevicePrepareCmd(name string) tea.Cmd {
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
 // UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
+		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
 	}
 }
 
@@ -170,12 +174,8 @@ func (m model) startProviderDeviceLogin() (model, tea.Cmd) {
 	if !provider.OAuth || !provider.OAuthDeviceFlow {
 		return m, nil
 	}
-	m.providerWizard.oauthPending = true
-	m.providerWizard.oauthDevice = true
-	m.providerWizard.oauthErr = ""
-	m.providerWizard.deviceUserCode = ""
-	m.providerWizard.deviceVerificationURI = ""
-	return m, providerWizardDevicePrepareCmd(provider.ID)
+	attemptID := m.providerWizard.beginOAuthAttempt(true)
+	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID)
 }
 
 const maxProviderWizardProvidersVisible = 8
@@ -255,6 +255,7 @@ type providerWizardState struct {
 	selectedMethod   int
 	oauthMode        bool
 	oauthPending     bool
+	oauthAttemptID   int
 	oauthErr         string
 	// Device-code login (RFC 8628) state while an OAuth login is in flight.
 	oauthDevice           bool
@@ -290,6 +291,23 @@ func (wizard *providerWizardState) currentProvider() providercatalog.Descriptor 
 	}
 	wizard.selectedProvider = clampInt(wizard.selectedProvider, 0, len(wizard.providers)-1)
 	return wizard.providers[wizard.selectedProvider]
+}
+
+func (wizard *providerWizardState) beginOAuthAttempt(device bool) int {
+	wizard.oauthAttemptID++
+	wizard.oauthPending = true
+	wizard.oauthDevice = device
+	wizard.oauthErr = ""
+	wizard.deviceUserCode = ""
+	wizard.deviceVerificationURI = ""
+	return wizard.oauthAttemptID
+}
+
+func (wizard *providerWizardState) oauthResultMatches(providerID string, attemptID int) bool {
+	if wizard == nil || !wizard.oauthPending || strings.TrimSpace(providerID) == "" {
+		return false
+	}
+	return wizard.currentProvider().ID == providerID && wizard.oauthAttemptID == attemptID
 }
 
 func (wizard *providerWizardState) currentModel() providerWizardModel {
@@ -523,7 +541,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	// While a browser/device OAuth login is in flight, ignore input except Esc,
 	// which abandons the wizard (the background flow times out and is dropped).
 	if m.providerWizard.oauthPending {
-		if msg.Type == tea.KeyEsc {
+		if keyIs(msg, tea.KeyEsc) {
 			m.providerWizard = nil
 		}
 		return m, nil
@@ -531,115 +549,115 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	// On the OAuth provider list, "d" forces device-code login for a device-capable
 	// provider (xAI) — useful on a desktop when the browser flow won't work.
 	if m.providerWizard.step == providerWizardStepProvider && m.providerWizard.oauthMode &&
-		msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'd' || msg.Runes[0] == 'D') &&
+		(keyText(msg) == "d" || keyText(msg) == "D") &&
 		m.providerWizard.currentProvider().OAuthDeviceFlow {
 		return m.startProviderDeviceLogin()
 	}
 	if m.providerWizard.step == providerWizardStepEndpoint {
-		switch msg.Type {
-		case tea.KeyRunes:
-			m.providerWizard.appendBaseURL(msg.Runes)
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendBaseURL(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteBaseURLRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.baseURL = ""
 			m.providerWizard.err = ""
 			return m, nil
-		case tea.KeyLeft:
+		case keyIs(msg, tea.KeyLeft):
 			m.providerWizard.retreat()
 			return m, nil
-		case tea.KeyRight:
+		case keyIs(msg, tea.KeyRight):
 			if m.providerWizard.canAdvanceWithRight() {
 				return m.advanceProviderWizard()
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case keyIs(msg, tea.KeyEnter):
 			return m.advanceProviderWizard()
 		}
 	}
 	if m.providerWizard.step == providerWizardStepName {
-		switch msg.Type {
-		case tea.KeyRunes:
-			m.providerWizard.appendProfileName(msg.Runes)
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendProfileName(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteProfileNameRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.profileName = ""
 			m.providerWizard.err = ""
 			return m, nil
-		case tea.KeyLeft:
+		case keyIs(msg, tea.KeyLeft):
 			m.providerWizard.retreat()
 			return m, nil
-		case tea.KeyRight, tea.KeyEnter:
+		case keyIs(msg, tea.KeyRight) || keyIs(msg, tea.KeyEnter):
 			return m.advanceProviderWizard()
 		}
 	}
 	if m.providerWizard.step == providerWizardStepCredential {
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch {
+		case keyIs(msg, tea.KeyEsc):
 			m.providerWizard = nil
 			return m, nil
-		case tea.KeyCtrlO:
+		case keyCtrl(msg, 'o'):
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
-				m.providerWizard.oauthPending = true
-				m.providerWizard.oauthErr = ""
-				return m, providerWizardOAuthCmdFor(m.providerWizard.currentProvider())
+				provider := m.providerWizard.currentProvider()
+				attemptID := m.providerWizard.beginOAuthAttempt(false)
+				return m, providerWizardOAuthCmdFor(provider, attemptID)
 			}
 			return m, nil
-		case tea.KeyRunes:
-			m.providerWizard.appendAPIKey(msg.Runes)
+		case keyText(msg) != "":
+			m.providerWizard.appendAPIKey(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteAPIKeyRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.apiKey = ""
 			return m, nil
-		case tea.KeyLeft:
+		case keyIs(msg, tea.KeyLeft):
 			m.providerWizard.retreat()
 			return m, nil
-		case tea.KeyRight:
+		case keyIs(msg, tea.KeyRight):
 			if m.providerWizard.canAdvanceWithRight() {
 				return m.advanceProviderWizard()
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case keyIs(msg, tea.KeyEnter):
 			return m.advanceProviderWizard()
 		}
 		return m, nil
 	}
 	if m.providerWizard.step == providerWizardStepModel {
-		switch msg.Type {
-		case tea.KeyRunes:
-			m.providerWizard.appendModelSearch(msg.Runes)
+		switch {
+		case keyText(msg) != "":
+			m.providerWizard.appendModelSearch(keyRunes(msg))
 			return m, nil
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			m.providerWizard.deleteModelSearchRune()
 			return m, nil
-		case tea.KeyCtrlU:
+		case keyCtrl(msg, 'u'):
 			m.providerWizard.modelSearch = ""
 			m.providerWizard.selectedModel = 0
 			return m, nil
 		}
 	}
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch {
+	case keyIs(msg, tea.KeyEsc):
 		m.providerWizard = nil
-	case tea.KeyUp:
+	case keyIs(msg, tea.KeyUp):
 		m.providerWizard.move(-1)
-	case tea.KeyDown, tea.KeyTab:
+	case keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
 		m.providerWizard.move(1)
-	case tea.KeyLeft:
+	case keyIs(msg, tea.KeyLeft):
 		m.providerWizard.retreat()
-	case tea.KeyRight:
+	case keyIs(msg, tea.KeyRight):
 		if m.providerWizard.canAdvanceWithRight() {
 			return m.advanceProviderWizard()
 		}
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		if m.providerWizard.step == providerWizardStepDone {
 			return m.applyProviderWizard()
 		}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -37,10 +37,8 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 		if provider.OAuthDeviceFlow && oauthPreferDeviceFlow() {
 			return m.startProviderDeviceLogin()
 		}
-		m.providerWizard.oauthPending = true
-		m.providerWizard.oauthDevice = false
-		m.providerWizard.oauthErr = ""
-		return m, providerWizardOAuthCmdFor(provider)
+		attemptID := m.providerWizard.beginOAuthAttempt(false)
+		return m, providerWizardOAuthCmdFor(provider, attemptID)
 	}
 	previous := m.providerWizard.step
 	m.providerWizard.advance()

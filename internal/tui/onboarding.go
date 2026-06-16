@@ -7,9 +7,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/browser"
 	"github.com/Gitlawb/zero/internal/config"
@@ -106,9 +106,6 @@ func newSetupState(options SetupOptions) setupState {
 	}
 	apiKey := textinput.New()
 	apiKey.Prompt = ""
-	apiKey.PromptStyle = zeroTheme.faint
-	apiKey.TextStyle = zeroTheme.ink
-	apiKey.PlaceholderStyle = zeroTheme.faint
 	apiKey.Placeholder = "paste key or leave blank"
 	apiKey.EchoMode = textinput.EchoPassword
 	apiKey.EchoCharacter = '*'
@@ -131,10 +128,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// While a browser OAuth login is in flight, ignore input except Ctrl+C (quit)
 	// and Esc (cancel back to the OAuth provider list).
 	if m.setup.oauthPending {
-		switch msg.Type {
-		case tea.KeyCtrlC:
+		switch {
+		case keyCtrl(msg, 'c'):
 			return m, tea.Quit
-		case tea.KeyEsc:
+		case keyIs(msg, tea.KeyEsc):
 			m.setup.oauthPending = false
 			m.setup.oauthDevice = false
 		}
@@ -149,10 +146,10 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.setupCredentialInputActive() {
 		return m.handleSetupCredentialKey(msg)
 	}
-	switch msg.Type {
-	case tea.KeyCtrlC:
+	switch {
+	case keyCtrl(msg, 'c'):
 		return m, tea.Quit
-	case tea.KeyEsc:
+	case keyIs(msg, tea.KeyEsc):
 		if m.setup.stage > setupStageWelcome {
 			prev := m.previousSetupStage()
 			if prev == setupStageMethod {
@@ -166,7 +163,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m.exitSetupToChat()
-	case tea.KeyLeft:
+	case keyIs(msg, tea.KeyLeft):
 		if m.setup.stage > setupStageWelcome {
 			prev := m.previousSetupStage()
 			if prev == setupStageMethod {
@@ -176,17 +173,17 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setup.err = ""
 		}
 		return m, nil
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		if m.setup.stage == setupStageMethod || m.setup.stage == setupStageProvider || m.setup.stage == setupStageModel || m.setup.stage == setupStageReady {
 			return m.advanceSetup()
 		}
 		return m, nil
-	case tea.KeySpace:
+	case keyIs(msg, tea.KeySpace):
 		if m.setup.stage < setupStageReady && m.setup.stage != setupStageProvider && m.setup.stage != setupStageModel {
 			return m.advanceSetup()
 		}
 		return m, nil
-	case tea.KeyUp:
+	case keyIs(msg, tea.KeyUp):
 		if m.setup.stage == setupStageMethod {
 			m.moveSetupMethod(-1)
 		} else if m.setup.stage == setupStageProvider {
@@ -195,7 +192,7 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSetupModel(-1)
 		}
 		return m, nil
-	case tea.KeyDown:
+	case keyIs(msg, tea.KeyDown):
 		if m.setup.stage == setupStageMethod {
 			m.moveSetupMethod(1)
 		} else if m.setup.stage == setupStageProvider {
@@ -204,12 +201,12 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.moveSetupModel(1)
 		}
 		return m, nil
-	case tea.KeyRunes:
+	case keyText(msg) != "":
 		if m.setup.stage == setupStageModel {
-			m.appendSetupModelQuery(msg.Runes)
+			m.appendSetupModelQuery(keyRunes(msg))
 			return m, nil
 		}
-		switch msg.String() {
+		switch keyText(msg) {
 		case "q":
 			return m, tea.Quit
 		case "k":
@@ -227,12 +224,12 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case keyBackspace(msg):
 		if m.setup.stage == setupStageModel {
 			m.deleteSetupModelQueryRune()
 		}
 		return m, nil
-	case tea.KeyCtrlU:
+	case keyCtrl(msg, 'u'):
 		if m.setup.stage == setupStageModel {
 			m.setup.modelQuery = ""
 			m.setup.modelIndex = 0
@@ -316,7 +313,7 @@ func (m *model) selectSetupProviderAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	width := chatWidth(m.width)
 	height := normalizedStartupHeight(m.height)
 	rowWidth := setupProviderBlockWidth(width, m.setup.providers)
-	if !setupBlockContainsMouseX(msg.X, width, rowWidth) {
+	if !setupBlockContainsMouseX(mouseX(msg), width, rowWidth) {
 		return mouseSelectionTarget{}, false
 	}
 	maxVisible := setupProviderMaxVisible(height, len(m.setup.providers))
@@ -325,7 +322,7 @@ func (m *model) selectSetupProviderAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	}
 	content := m.setupProviderLines(width, height)
 	top := setupContentTop(height, len(content), m.setup.err != "")
-	row := msg.Y - top - 2
+	row := mouseY(msg) - top - 2
 	if row < 0 || row >= maxVisible {
 		return mouseSelectionTarget{}, false
 	}
@@ -355,7 +352,7 @@ func (m *model) selectSetupModelAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 	width := chatWidth(m.width)
 	height := normalizedStartupHeight(m.height)
 	rowWidth := setupModelBlockWidth(width, m.setup.models)
-	if !setupBlockContainsMouseX(msg.X, width, rowWidth) {
+	if !setupBlockContainsMouseX(mouseX(msg), width, rowWidth) {
 		return mouseSelectionTarget{}, false
 	}
 	maxVisible := setupModelMaxVisible(height, len(models))
@@ -369,7 +366,7 @@ func (m *model) selectSetupModelAtMouse(msg tea.MouseMsg) (mouseSelectionTarget,
 	if m.setupModelStatus() != "" {
 		rowStart++
 	}
-	row := msg.Y - top - rowStart
+	row := mouseY(msg) - top - rowStart
 	if row < 0 || row >= maxVisible {
 		return mouseSelectionTarget{}, false
 	}
@@ -958,20 +955,20 @@ func (m model) setupNameInputActive() bool {
 }
 
 func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
+	switch {
+	case keyCtrl(msg, 'c'):
 		return m, tea.Quit
-	case tea.KeyEsc, tea.KeyLeft:
+	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
 		m.setup.err = ""
 		return m, nil
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		return m.advanceSetup()
-	case tea.KeyRunes:
-		m.appendSetupBaseURL(msg.Runes)
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case keyText(msg) != "":
+		m.appendSetupBaseURL(keyRunes(msg))
+	case keyBackspace(msg):
 		m.deleteSetupBaseURLRune()
-	case tea.KeyCtrlU:
+	case keyCtrl(msg, 'u'):
 		m.setup.baseURL = ""
 		m.setup.err = ""
 	}
@@ -979,20 +976,20 @@ func (m model) handleSetupEndpointKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
+	switch {
+	case keyCtrl(msg, 'c'):
 		return m, tea.Quit
-	case tea.KeyEsc, tea.KeyLeft:
+	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
 		m.setup.err = ""
 		return m, nil
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		return m.advanceSetup()
-	case tea.KeyRunes:
-		m.appendSetupName(msg.Runes)
-	case tea.KeyBackspace, tea.KeyCtrlH:
+	case keyText(msg) != "":
+		m.appendSetupName(keyRunes(msg))
+	case keyBackspace(msg):
 		m.deleteSetupNameRune()
-	case tea.KeyCtrlU:
+	case keyCtrl(msg, 'u'):
 		m.setup.name = ""
 		m.setup.err = ""
 	}
@@ -1000,16 +997,16 @@ func (m model) handleSetupNameKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSetupCredentialKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyCtrlC:
+	switch {
+	case keyCtrl(msg, 'c'):
 		return m, tea.Quit
-	case tea.KeyEsc, tea.KeyLeft:
+	case keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyLeft):
 		m.setup.stage = m.previousSetupStage()
 		m.setup.err = ""
 		return m, nil
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		return m.advanceSetup()
-	case tea.KeyUp, tea.KeyDown:
+	case keyIs(msg, tea.KeyUp) || keyIs(msg, tea.KeyDown):
 		return m, nil
 	}
 	previousAPIKey := m.setup.apiKey.Value()
@@ -1563,13 +1560,13 @@ func (m model) setupCredentialLines(width int) []string {
 func (m model) setupAPIKeyInputLine(width int) string {
 	input := m.setup.apiKey
 	if strings.TrimSpace(input.Value()) == "" {
-		return input.PlaceholderStyle.Render(input.Placeholder)
+		return zeroTheme.faint.Render(input.Placeholder)
 	}
 	contentWidth := lipgloss.Width(input.Value())
 	if contentWidth == 0 {
 		contentWidth = lipgloss.Width(input.Placeholder)
 	}
-	input.Width = minInt(maxInt(contentWidth, 1), maxInt(1, width-lipgloss.Width(input.Prompt)))
+	input.SetWidth(minInt(maxInt(contentWidth, 1), maxInt(1, width-lipgloss.Width(input.Prompt))))
 	return input.View()
 }
 

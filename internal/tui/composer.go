@@ -7,8 +7,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type composerState struct {
@@ -178,84 +178,70 @@ func composerDisplayCursor(state composerState) int {
 func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 	state := m.currentComposerState()
 	switch {
-	case msg.Type == tea.KeyEnter && msg.Alt:
+	case keyIs(msg, tea.KeyEnter) && keyAlt(msg):
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")
-	case msg.Type == tea.KeyCtrlJ:
+	case keyCtrl(msg, 'j'):
 		m = m.insertComposerTextWithPastePreview(state, "\n", "")
-	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "d":
+	case keyAlt(msg) && keyText(msg) == "d":
 		end := deleteComposerWordAfter(state).cursor
 		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, end)
 		m.setComposerState(nextState)
 		m.composerPastePreviews = nextPreviews
-	case (msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlLeft) && msg.Alt:
+	case keyAlt(msg) && keyIs(msg, tea.KeyLeft):
 		m.setComposerState(moveComposerWordBefore(state))
-	case (msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlRight) && msg.Alt:
+	case keyAlt(msg) && keyIs(msg, tea.KeyRight):
 		m.setComposerState(moveComposerWordAfter(state))
-	case msg.Type == tea.KeyCtrlLeft:
+	case keyCtrlArrow(msg, tea.KeyLeft):
 		m.setComposerState(moveComposerWordBefore(state))
-	case msg.Type == tea.KeyCtrlRight:
+	case keyCtrlArrow(msg, tea.KeyRight):
 		m.setComposerState(moveComposerWordAfter(state))
-	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "b":
+	case keyAlt(msg) && keyText(msg) == "b":
 		m.setComposerState(moveComposerWordBefore(state))
-	case msg.Type == tea.KeyRunes && msg.Alt && string(msg.Runes) == "f":
+	case keyAlt(msg) && keyText(msg) == "f":
 		m.setComposerState(moveComposerWordAfter(state))
-	case msg.Type == tea.KeySpace:
+	case keyIs(msg, tea.KeySpace):
 		m = m.insertComposerTextWithPastePreview(state, " ", "")
-	case msg.Type == tea.KeyRunes && !msg.Alt:
-		text := string(msg.Runes)
-		previewLabel := ""
-		if msg.Paste {
-			text = sanitizeComposerPaste(text)
-			previewLabel, _ = composerPastePreviewLabel(text, m.composerPastePreviewWrapWidth())
-		} else {
-			text = sanitizeComposerInput(text)
-		}
-		if shouldInsertCommandArgumentSpace(state, text) {
-			text = " " + text
-			if previewLabel != "" {
-				previewLabel = " " + previewLabel
-			}
-		}
-		m = m.insertComposerTextWithPastePreview(state, text, previewLabel)
-	case msg.Type == tea.KeyLeft || msg.Type == tea.KeyCtrlB:
+	case keyPrintable(msg):
+		m = m.applyComposerText(state, keyText(msg), false)
+	case keyIs(msg, tea.KeyLeft) || keyCtrl(msg, 'b'):
 		if nextState, ok := moveComposerPastePreviewBoundary(state, m.composerPastePreviews, -1); ok {
 			m.setComposerState(nextState)
 			break
 		}
 		state.cursor--
 		m.setComposerState(state)
-	case msg.Type == tea.KeyRight || msg.Type == tea.KeyCtrlF:
+	case keyIs(msg, tea.KeyRight) || keyCtrl(msg, 'f'):
 		if nextState, ok := moveComposerPastePreviewBoundary(state, m.composerPastePreviews, 1); ok {
 			m.setComposerState(nextState)
 			break
 		}
 		state.cursor++
 		m.setComposerState(state)
-	case msg.Type == tea.KeyHome || msg.Type == tea.KeyCtrlA:
+	case keyIs(msg, tea.KeyHome) || keyCtrl(msg, 'a'):
 		state.cursor = composerLineStart(state)
 		m.setComposerState(state)
-	case msg.Type == tea.KeyEnd || msg.Type == tea.KeyCtrlE:
+	case keyIs(msg, tea.KeyEnd) || keyCtrl(msg, 'e'):
 		state.cursor = composerLineEnd(state)
 		m.setComposerState(state)
-	case msg.Type == tea.KeyCtrlU:
+	case keyCtrl(msg, 'u'):
 		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, composerLineStart(state), state.cursor)
 		m.setComposerState(nextState)
 		m.composerPastePreviews = nextPreviews
-	case msg.Type == tea.KeyCtrlK:
+	case keyCtrl(msg, 'k'):
 		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, composerLineEnd(state))
 		m.setComposerState(nextState)
 		m.composerPastePreviews = nextPreviews
-	case msg.Type == tea.KeyCtrlW || (msg.Alt && (msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH)):
+	case keyCtrl(msg, 'w') || (keyAlt(msg) && keyBackspace(msg)):
 		start := deleteComposerWordBefore(state).cursor
 		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, start, state.cursor)
 		m.setComposerState(nextState)
 		m.composerPastePreviews = nextPreviews
-	case msg.Alt && msg.Type == tea.KeyDelete:
+	case keyAlt(msg) && keyIs(msg, tea.KeyDelete):
 		end := deleteComposerWordAfter(state).cursor
 		nextState, nextPreviews := deleteComposerRangeWithPastePreviews(state, m.composerPastePreviews, state.cursor, end)
 		m.setComposerState(nextState)
 		m.composerPastePreviews = nextPreviews
-	case msg.Type == tea.KeyBackspace || msg.Type == tea.KeyCtrlH:
+	case keyBackspace(msg):
 		if nextState, nextPreviews, ok := deleteComposerPastePreviewBefore(state, m.composerPastePreviews); ok && !m.suggestionsActive() {
 			m.setComposerState(nextState)
 			m.composerPastePreviews = nextPreviews
@@ -268,7 +254,7 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 			m.setComposerState(nextState)
 			m.composerPastePreviews = nextPreviews
 		}
-	case msg.Type == tea.KeyDelete || msg.Type == tea.KeyCtrlD:
+	case keyIs(msg, tea.KeyDelete) || keyCtrl(msg, 'd'):
 		if nextState, nextPreviews, ok := deleteComposerPastePreviewAfter(state, m.composerPastePreviews); ok {
 			m.setComposerState(nextState)
 			m.composerPastePreviews = nextPreviews
@@ -287,6 +273,23 @@ func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {
 		m.recomputeSuggestions()
 	}
 	return m, true
+}
+
+func (m model) applyComposerText(state composerState, text string, paste bool) model {
+	previewLabel := ""
+	if paste {
+		text = sanitizeComposerPaste(text)
+		previewLabel, _ = composerPastePreviewLabel(text, m.composerPastePreviewWrapWidth())
+	} else {
+		text = sanitizeComposerInput(text)
+	}
+	if shouldInsertCommandArgumentSpace(state, text) {
+		text = " " + text
+		if previewLabel != "" {
+			previewLabel = " " + previewLabel
+		}
+	}
+	return m.insertComposerTextWithPastePreview(state, text, previewLabel)
 }
 
 func (m model) insertComposerTextWithPastePreview(state composerState, text string, previewLabel string) model {
