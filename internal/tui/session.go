@@ -200,7 +200,9 @@ func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
 	}
 	raw, rawErr := m.sessionStore.ReadEvents(sessionID)
 	if rawErr != nil {
-		return nil, err
+		// Surface the raw-read failure (the actual fallback error), not the earlier
+		// rehydration error, so the caller sees why the fallback itself failed.
+		return nil, rawErr
 	}
 	return raw, nil
 }

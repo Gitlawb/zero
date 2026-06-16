@@ -90,23 +90,32 @@ func toolFailureStopAnswer(toolName string, count int) string {
 		"Please check the request or adjust the tool arguments."
 }
 
-// noOutputStopMarker is the stable substring of the no-output stop answer; it is
-// shared with IsNoProgressStop so callers can recognize such a run from its
-// recorded message without depending on the exact turn count.
-const noOutputStopMarker = "with no output (no visible text and no tool calls)"
+// The no-output stop answer is assembled from these fixed parts (only the turn
+// count varies). IsNoProgressStop matches all three so a legitimate message that
+// merely quotes the marker substring is not misclassified as a failed empty run.
+const (
+	noOutputStopPrefix = "Agent stopped after "
+	noOutputStopMarker = "with no output (no visible text and no tool calls)"
+	noOutputStopSuffix = "to avoid consuming tokens without making progress."
+)
 
 // noOutputStopAnswer is the final answer returned when the no-output guard
 // stops the run. The turn count is interpolated at the call site.
 func noOutputStopAnswer(turns int) string {
-	return "Agent stopped after " + strconv.Itoa(turns) + " turns " + noOutputStopMarker +
-		" to avoid consuming tokens without making progress."
+	return noOutputStopPrefix + strconv.Itoa(turns) + " turns " + noOutputStopMarker + " " + noOutputStopSuffix
 }
 
-// IsNoProgressStop reports whether content is the no-output guardrail stop answer
-// (a run that produced no visible text and no tool calls). Used to recognize
-// empty/failed sessions that aren't worth resuming.
+// IsNoProgressStop reports whether content IS the no-output guardrail stop answer
+// (a run that produced no visible text and no tool calls). It requires the full
+// prefix + marker + suffix structure — not just the marker substring — so a
+// genuine assistant/tool message that quotes the marker can't be misread as a
+// failed empty run (which would wrongly hide a real session from /resume and skip
+// its title generation).
 func IsNoProgressStop(content string) bool {
-	return strings.Contains(content, noOutputStopMarker)
+	trimmed := strings.TrimSpace(content)
+	return strings.HasPrefix(trimmed, noOutputStopPrefix) &&
+		strings.Contains(trimmed, noOutputStopMarker) &&
+		strings.HasSuffix(trimmed, noOutputStopSuffix)
 }
 
 // Reminder markers are stable substrings used both to build the reminder text

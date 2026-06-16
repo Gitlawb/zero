@@ -233,6 +233,18 @@ func (m model) searchText(query string) string {
 // the store-error message (the interactive picker handles the populated case). It
 // also still backs the stacked-card list rendering as a defensive fallback.
 func (m model) resumeText() string {
+	// Defensive: a model without a session store (some fallback/test paths) must
+	// render a safe message rather than panic on the nil dereference below.
+	if m.sessionStore == nil {
+		return renderCommandOutput(commandOutput{
+			Title:  "Sessions",
+			Status: commandStatusBlocked,
+			Sections: []commandSection{{
+				Title: "Store",
+				Lines: []string{"session store unavailable"},
+			}},
+		})
+	}
 	// Only standalone conversations — not child/spec sub-runs, which an agent
 	// spawns by the dozen and would otherwise flood the picker (the "… N more").
 	sessions, err := m.sessionStore.ListResumable()
