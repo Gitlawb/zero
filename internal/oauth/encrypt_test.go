@@ -6,8 +6,35 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func TestLoadOrCreateSecretConcurrentConverges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tok.json.secret")
+	const n = 16
+	secrets := make([][]byte, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			secrets[i], errs[i] = loadOrCreateSecret(path, true)
+		}(i)
+	}
+	wg.Wait()
+	// Exactly one creator wins; every racer must converge on the same on-disk
+	// secret rather than orphaning its own (the O_EXCL + bounded-retry path).
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d: %v", i, errs[i])
+		}
+		if !bytes.Equal(secrets[i], secrets[0]) {
+			t.Fatalf("goroutine %d got a divergent secret; concurrent create did not converge", i)
+		}
+	}
+}
 
 func TestAESGCMCrypterRoundTripAndTamper(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "tok.json.secret")

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // secretBytes is the AES-256 key length kept in the per-user secret file.
@@ -101,7 +102,19 @@ func loadOrCreateSecret(path string, create bool) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return readSecretFile(path)
+			// The winner may not have finished writing yet, so a read here can see a
+			// short/absent file. Retry briefly so concurrent first-run invocations
+			// converge on the winner's secret instead of failing transiently.
+			var lastErr error
+			for attempt := 0; attempt < 50; attempt++ {
+				secret, rerr := readSecretFile(path)
+				if rerr == nil {
+					return secret, nil
+				}
+				lastErr = rerr
+				time.Sleep(2 * time.Millisecond)
+			}
+			return nil, lastErr
 		}
 		return nil, fmt.Errorf("oauth: create token secret: %w", err)
 	}
