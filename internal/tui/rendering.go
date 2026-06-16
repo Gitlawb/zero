@@ -302,7 +302,7 @@ func sayMeasure(width int) int {
 // assistantMeasure is the main answer wrap width. Assistant responses use the
 // available chat width so they visually balance full-width submitted prompts.
 func assistantMeasure(width int) int {
-	measure := width - 2
+	measure := width
 	if measure < 16 {
 		measure = 16
 	}
@@ -384,11 +384,11 @@ func renderUserRow(row transcriptRow, width int) string {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
 	lines := make([]string, 0, len(wrapped)+2)
-	lines = append(lines, renderUserPromptHalfLine(width, "▄"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	for _, line := range wrapped {
 		lines = append(lines, renderUserPromptStyledLine(zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true)).Render(line), contentWidth))
 	}
-	lines = append(lines, renderUserPromptHalfLine(width, "▀"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	return strings.Join(lines, "\n")
 }
 
@@ -411,28 +411,18 @@ func renderUserPromptStyledLine(styledText string, contentWidth int) string {
 	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render("  ") + fitted + pad
 }
 
-func renderUserPromptHalfLine(width int, glyph string) string {
+func renderUserPromptPaddingLine(width int) string {
 	if width <= 0 {
 		return ""
 	}
-	capGlyph := glyph
-	switch glyph {
-	case "▄":
-		capGlyph = "▖"
-	case "▀":
-		capGlyph = "▘"
-	}
-	return zeroTheme.userPrompt.Render(capGlyph) + zeroTheme.userPromptHalf.Render(strings.Repeat(glyph, maxInt(0, width-1)))
+	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render(strings.Repeat(" ", maxInt(0, width-1)))
 }
 
-// renderAssistantRow draws the turn's final answer with the accent rail
-// gutter plus its done line; a non-final assistant row (e.g. a rehydrated
-// inline notice) renders as plain interim-style prose.
+// renderAssistantRow draws final answers as plain response text plus completion
+// metadata; a non-final assistant row (e.g. a rehydrated inline notice) renders
+// as interim-style prose.
 func renderAssistantRow(row transcriptRow, width int) string {
 	tableMeasure := width
-	if row.final {
-		tableMeasure = maxInt(16, width-2)
-	}
 	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	if !row.final {
 		for index := range lines {
@@ -441,7 +431,7 @@ func renderAssistantRow(row transcriptRow, width int) string {
 		return strings.Join(lines, "\n")
 	}
 	for index := range lines {
-		lines[index] = zeroTheme.finalRail.Render("│ ") + styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
+		lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
 	}
 	lines = append(lines, doneLine(row, false))
 	return strings.Join(lines, "\n")
@@ -503,13 +493,11 @@ func formatElapsedSeconds(elapsed time.Duration) string {
 	return fmt.Sprintf("%.1fs", elapsed.Seconds())
 }
 
-// doneLine renders the turn terminator: ● green (red on error) plus faint
-// counters. Segments the turn has no data for are omitted, never invented.
+// doneLine renders the turn terminator and faint counters. Normal completions
+// stay text-only; errors keep a red marker so failures remain easy to scan.
 func doneLine(row transcriptRow, failed bool) string {
-	glyph := zeroTheme.green.Render("●")
 	label := "completed"
 	if failed {
-		glyph = zeroTheme.red.Render("●")
 		label = "error"
 	}
 	segments := []string{zeroTheme.faint.Render(label)}
@@ -526,7 +514,11 @@ func doneLine(row transcriptRow, failed bool) string {
 	if failed && row.turnElapsed > 0 {
 		segments = append(segments, zeroTheme.faint.Render(formatElapsedSeconds(row.turnElapsed)))
 	}
-	return glyph + " " + strings.Join(segments, zeroTheme.faintest.Render(" · "))
+	line := strings.Join(segments, zeroTheme.faintest.Render(" · "))
+	if failed {
+		return zeroTheme.red.Render("●") + " " + line
+	}
+	return line
 }
 
 // renderSystemNote draws a system notice as a bordered note: faint text on
@@ -948,9 +940,52 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		borderStyle = zeroTheme.cardErr
 	}
 	key := rcKey(row.runID, row.id)
+	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
+	// transcript stays scannable; the model still received the full output. Click
+	// the card to expand (▸ → ▾) while it is live; collapsed rows flush to
+	// scrollback clean. Skipped for: the uncapped detailed view (opts.bodyCap==0),
+	// diff tools whose body must stay reviewable, and short output.
+	collapsedFooter := ""
+	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) {
+		collapsedFooter = collapsedToolFooter(row.detail)
+	}
+	if collapsedFooter != "" && !row.expanded {
+		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
+		return toolCard(head, nil, collapsedFooter, borderStyle, width)
+	}
 	body := toolCardBody(name, rc.hints[key], row.detail, width, opts)
 	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width, opts)
-	return toolCard(head, body.lines, body.footer, borderStyle, width)
+	footer := body.footer
+	if collapsedFooter != "" && row.expanded && footer == "" {
+		footer = "▾ collapse"
+	}
+	return toolCard(head, body.lines, footer, borderStyle, width)
+}
+
+// toolCardAlwaysExpands reports tools whose body is a code diff that must stay
+// visible for review (mirrors the deeper flush cap intent) rather than collapse.
+func toolCardAlwaysExpands(name string) bool {
+	switch name {
+	case "edit_file", "apply_patch", "write_file":
+		return true
+	}
+	return false
+}
+
+// collapsedToolFooter summarizes the hidden output for a collapsed tool card, or
+// "" when the output is short enough to render inline. Only output longer than
+// the live body cap (the noisy "… N more lines" case, e.g. a web-search dump)
+// collapses by default.
+func collapsedToolFooter(detail string) string {
+	trimmed := strings.TrimRight(detail, "\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return ""
+	}
+	n := strings.Count(trimmed, "\n") + 1
+	if n <= cardBodyMaxLines {
+		return ""
+	}
+	return fmt.Sprintf("▸ %d lines — click to expand", n)
 }
 
 func toolRowName(row transcriptRow) string {
@@ -961,11 +996,34 @@ func toolRowName(row transcriptRow) string {
 	return strings.TrimPrefix(name, "tool result: ")
 }
 
+// toolDisplayName is the human-facing label for a tool card head. MCP tools are
+// exposed as "mcp_<server>_<tool>", which is noise in the UI — show a clean
+// "<tool>" (e.g. mcp_exa_web_search_exa → "web search"); the search query/target
+// is shown beside it. Built-in tool names are left as-is.
+func toolDisplayName(name string) string {
+	if !strings.HasPrefix(name, "mcp_") {
+		return name
+	}
+	rest := strings.TrimPrefix(name, "mcp_")
+	server := rest
+	if i := strings.Index(rest, "_"); i >= 0 {
+		server = rest[:i]
+		rest = rest[i+1:]
+	} else {
+		rest = ""
+	}
+	rest = strings.TrimSuffix(rest, "_"+server) // exa: web_search_exa → web_search
+	if rest == "" {
+		rest = server
+	}
+	return strings.ReplaceAll(rest, "_", " ")
+}
+
 // toolCardHead composes the border-embedded head: tool name, middle-truncated
 // target (hyperlinked when it names a file), the faintest arg column, optional
 // extra tag, the auto marker, and the status glyph.
 func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
-	head := zeroTheme.toolName.Render(name)
+	head := zeroTheme.toolName.Render(toolDisplayName(name))
 	if target = strings.TrimSpace(target); target != "" {
 		styled := zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
 		if looksLikePath(target) {

@@ -71,6 +71,17 @@ work.
   managers). It is not a substitute for the file tools.
 - Treat tool output as ground truth. If a command fails, read the error, form a
   hypothesis, and address the root cause; do not retry the same call blindly.
+- When a web search or fetch tool is available, search the web before answering
+  about an external entity, product, library, model, company, version, or recent
+  release you do not recognize. Do not guess, and do not assume the most common
+  meaning of an ambiguous name — use the conversation's domain (this is an AI /
+  software tool) to disambiguate. If the first results look off-topic, refine the
+  query and search again before answering; never reply that you don't know without
+  searching first.
+- Do not web-search timeless facts, fundamentals, or anything answerable from the
+  workspace — read the code with the file tools instead. Keep queries short (a few
+  words), start broad then narrow, and scale the number of searches to the
+  question: one for a single fact, a few for a deeper answer.
 
 ## Permission and safety
 

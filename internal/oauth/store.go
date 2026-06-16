@@ -54,12 +54,18 @@ type StoreOptions struct {
 	FilePath string
 	Env      map[string]string
 	Now      func() time.Time
+	// Encrypted selects the AES-256-GCM encrypted-at-rest backend (a per-user
+	// secret is created beside the token file). Default (false) writes the 0600
+	// plaintext JSON unchanged.
+	Encrypted bool
 }
 
-// Store persists OAuth tokens (provider + MCP namespaces) in a 0600 JSON file,
-// guarded by a cross-process lock and written atomically.
+// Store persists OAuth tokens (provider + MCP namespaces) in a 0600 file,
+// guarded by a cross-process lock and written atomically. The file is plaintext
+// JSON by default, or AES-256-GCM ciphertext when the encrypted backend is on.
 type Store struct {
 	filePath string
+	crypter  *aesGCMCrypter // nil => plaintext backend
 	now      func() time.Time
 	mu       sync.Mutex
 }
@@ -119,7 +125,11 @@ func NewStore(options StoreOptions) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{filePath: filepath.Clean(filePath), now: now}, nil
+	store := &Store{filePath: filepath.Clean(filePath), now: now}
+	if options.Encrypted {
+		store.crypter = newAESGCMCrypter(store.filePath + ".secret")
+	}
+	return store, nil
 }
 
 // Save persists a token under key, replacing any existing entry.
@@ -225,6 +235,12 @@ func (s *Store) readState() (storeFile, error) {
 		}
 		return storeFile{}, err
 	}
+	if s.crypter != nil {
+		data, err = s.crypter.open(data)
+		if err != nil {
+			return storeFile{}, err
+		}
+	}
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return storeFile{}, fmt.Errorf("oauth: invalid token file at %s: %w", s.filePath, err)
@@ -251,8 +267,16 @@ func (s *Store) writeState(state storeFile) error {
 	if err != nil {
 		return err
 	}
+	payload := append(data, '\n')
+	if s.crypter != nil {
+		// Encrypted backend: the on-disk file is opaque ciphertext, not JSON.
+		payload, err = s.crypter.seal(data)
+		if err != nil {
+			return err
+		}
+	}
 	tempPath := fmt.Sprintf("%s.tmp-%d-%d", s.filePath, os.Getpid(), s.now().UnixNano())
-	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(tempPath, payload, 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tempPath, s.filePath); err != nil {

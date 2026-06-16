@@ -17,6 +17,20 @@ func withAuthStore(t *testing.T) string {
 	return path
 }
 
+func TestRunAuthRejectsInvalidStorageMode(t *testing.T) {
+	withAuthStore(t)
+	// A mistyped value must fail fast, not silently fall back to plaintext while
+	// the user believes encryption is active.
+	t.Setenv("ZERO_OAUTH_STORAGE", "encryptd")
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatalf("invalid ZERO_OAUTH_STORAGE should fail, got success; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "ZERO_OAUTH_STORAGE") {
+		t.Fatalf("error should name the offending env var, stderr=%q", stderr.String())
+	}
+}
+
 func TestRunAuthStatusEmpty(t *testing.T) {
 	withAuthStore(t)
 	var stdout, stderr bytes.Buffer

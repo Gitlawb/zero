@@ -103,6 +103,8 @@ func TestWebSearchRedactsBackendError(t *testing.T) {
 }
 
 func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
+	// web_search is registered only when a backend is configured.
+	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	found := false
 	for _, tool := range CoreNetworkTools() {
 		if tool.Name() == "web_search" {
@@ -110,7 +112,7 @@ func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("web_search should be registered in CoreNetworkTools()")
+		t.Fatal("web_search should be registered in CoreNetworkTools() when a backend is configured")
 	}
 }
 
@@ -584,5 +586,124 @@ func TestCanonicalizeWebSearchHostStripsPort(t *testing.T) {
 		if got := canonicalizeWebSearchHost(c.in); got != c.want {
 			t.Errorf("canonicalizeWebSearchHost(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// Test added to verify mixed-type array handling
+func TestStringListArgWebSearchRejectsMixedTypes(t *testing.T) {
+	args := map[string]any{
+		"domains": []any{"react.dev", 123, "github.com"},
+	}
+
+	domains, provided, err := stringListArgWebSearch(args, "domains")
+
+	if err == nil {
+		t.Fatal("Expected error for mixed-type array, but got nil")
+	}
+	if !provided {
+		t.Fatal("Expected provided=true since the argument was passed")
+	}
+	if err.Error() != "domains[1] must be a string" {
+		t.Fatalf("Expected 'domains[1] must be a string', got '%v'", err)
+	}
+	if domains != nil {
+		t.Fatalf("Expected nil domains on error, got %v", domains)
+	}
+	t.Logf("Test passed: got expected error: %v", err)
+}
+
+func TestWebSearchRejectsMixedTypeDomainsE2E(t *testing.T) {
+	// End-to-end test: web_search tool rejects mixed-type array
+	tool := newWebSearchToolWithBackend(&fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://react.dev/x"},
+	}})
+
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"react.dev", 123, "github.com"},
+	})
+
+	if res.Status != StatusError {
+		t.Fatalf("Expected error for mixed-type domains, got %v: %s", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Output, "domains[1] must be a string") {
+		t.Fatalf("Expected 'domains[1] must be a string' in error message, got: %s", res.Output)
+	}
+}
+
+// ---- fix/web-search-209: robustness + rendering + normalization -------------
+
+// #1: a stringified or malformed score must not discard the whole response.
+func TestParseSearchResultsToleratesNonNumericScore(t *testing.T) {
+	body := []byte(`{"results":[
+		{"title":"num","url":"https://a.test","snippet":"s","score":0.77},
+		{"title":"str","url":"https://b.test","snippet":"s","score":"0.5"},
+		{"title":"bad","url":"https://c.test","snippet":"s","score":"high"},
+		{"title":"obj","url":"https://d.test","snippet":"s","score":{"x":1}},
+		{"title":"null","url":"https://e.test","snippet":"s","score":null},
+		{"title":"nan","url":"https://f.test","snippet":"s","score":"NaN"},
+		{"title":"inf","url":"https://g.test","snippet":"s","score":"Inf"}
+	]}`)
+	results, err := parseSearchResults(body)
+	if err != nil {
+		t.Fatalf("a single odd score must not fail the parse: %v", err)
+	}
+	if len(results) != 7 {
+		t.Fatalf("want 7 results (none dropped), got %d", len(results))
+	}
+	if results[0].Score != 0.77 {
+		t.Errorf("numeric score = %v, want 0.77", results[0].Score)
+	}
+	if results[1].Score != 0.5 {
+		t.Errorf("numeric-string score = %v, want 0.5", results[1].Score)
+	}
+	// Indices 5 and 6 cover ParseFloat-accepted non-finite values ("NaN"/"Inf"),
+	// which must be rejected so the documented filter holds and the renderer never
+	// emits a non-finite score.
+	for _, i := range []int{2, 3, 4, 5, 6} {
+		if results[i].Score != 0 {
+			t.Errorf("unparseable/null/non-finite score[%d] = %v, want 0 (absent)", i, results[i].Score)
+		}
+	}
+}
+
+// #2: tiny positive and negative scores must not render; >=0.005 rounds in.
+func TestWebSearchScoreRenderingGate(t *testing.T) {
+	backend := &fakeSearchBackend{results: []searchResult{
+		{Title: "tiny", URL: "https://a.test/1", Score: 0.0001},
+		{Title: "neg", URL: "https://a.test/2", Score: -0.5},
+		{Title: "round-in", URL: "https://a.test/3", Score: 0.005},
+		{Title: "shown", URL: "https://a.test/4", Score: 0.91},
+	}}
+	res := newWebSearchToolWithBackend(backend).Run(context.Background(), map[string]any{"query": "x"})
+	if res.Status != StatusOK {
+		t.Fatalf("status = %v: %s", res.Status, res.Output)
+	}
+	if strings.Contains(res.Output, "score 0.00") {
+		t.Errorf("tiny/negative score must not render 'score 0.00', got: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "score 0.01") {
+		t.Errorf("0.005 should round to 'score 0.01', got: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "score 0.91") {
+		t.Errorf("0.91 should render, got: %s", res.Output)
+	}
+}
+
+// #4: trailing-dot FQDN entries/results normalize symmetrically.
+func TestWebSearchDomainsFilterTrailingDotSymmetry(t *testing.T) {
+	// allowlist has the dot, result does not
+	res := newWebSearchToolWithBackend(&fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://react.dev/x"},
+	}}).Run(context.Background(), map[string]any{"query": "x", "domains": []any{"react.dev."}})
+	if res.Status != StatusOK {
+		t.Fatalf("allowlist 'react.dev.' should match 'react.dev' result, got %v: %s", res.Status, res.Output)
+	}
+	// result has the dot, allowlist does not
+	res = newWebSearchToolWithBackend(&fakeSearchBackend{results: []searchResult{
+		{Title: "ok", URL: "https://react.dev./x"},
+	}}).Run(context.Background(), map[string]any{"query": "x", "domains": []any{"react.dev"}})
+	if res.Status != StatusOK {
+		t.Fatalf("allowlist 'react.dev' should match 'react.dev.' result, got %v: %s", res.Status, res.Output)
 	}
 }

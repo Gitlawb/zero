@@ -67,6 +67,9 @@ type model struct {
 	sessionEvents          []sessions.Event
 	usageTracker           *usage.Tracker
 	sessionCompactor       SessionCompactor
+	prService              *PrService
+	prState                PrState
+	prWatcherStop          func()
 	runtimeMessageSink     func(tea.Msg)
 	agentOptions           agent.Options
 	notifier               *notify.Notifier
@@ -123,6 +126,10 @@ type model struct {
 	height            int
 	now               func() time.Time
 	chatScrollOffset  int
+	// chatBodyLines is the live body's line count at the last update; used to pin
+	// the viewport (hold the read position) when content streams in while the user
+	// has scrolled up. 0 means "at the bottom / not pinned".
+	chatBodyLines int
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
 	// is already in native scrollback; in alt-screen mode this frontier stays
@@ -254,6 +261,14 @@ type doctorCommandResultMsg struct {
 	text string
 }
 
+type prStateMsg struct {
+	state PrState
+}
+
+type prWatcherStartedMsg struct {
+	stop func()
+}
+
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
@@ -335,6 +350,10 @@ func newModel(ctx context.Context, options Options) model {
 	if usageTracker == nil {
 		usageTracker = usage.NewTracker(usage.TrackerOptions{})
 	}
+	prService := options.PrService
+	if prService == nil {
+		prService = NewPrService(cwd)
+	}
 	doctorUserConfigPath := options.DoctorUserConfigPath
 	if doctorUserConfigPath == "" {
 		doctorUserConfigPath = options.UserConfigPath
@@ -398,6 +417,8 @@ func newModel(ctx context.Context, options Options) model {
 		userAgent:              options.UserAgent,
 		usageTracker:           usageTracker,
 		transcript:             initialTranscript(),
+		prService:              prService,
+		prState:                prService.GetState(),
 		input:                  input,
 		spinner:                runSpinner,
 		now:                    time.Now,
@@ -442,7 +463,35 @@ const (
 )
 
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	if m.prService != nil && m.runtimeMessageSink != nil {
+		service := m.prService
+		sink := m.runtimeMessageSink
+		ctx := m.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		cmds = append(cmds, func() tea.Msg {
+			stop := WatchPRStateContext(ctx, service, func(state PrState) {
+				sink(prStateMsg{state: state})
+			})
+			return prWatcherStartedMsg{stop: stop}
+		})
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *model) stopPRWatcher() {
+	if m.prWatcherStop == nil {
+		return
+	}
+	m.prWatcherStop()
+	m.prWatcherStop = nil
+}
+
+func (m model) quit() (tea.Model, tea.Cmd) {
+	m.stopPRWatcher()
+	return m, tea.Quit
 }
 
 // Update routes every message through updateModel, then advances the flush
@@ -458,6 +507,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
+	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
 	return nm, batchCommands(cmd, mouseCmd, flushCmd)
@@ -488,9 +538,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleMouse(msg)
 	case transcriptCopiedMsg:
-		m.transcriptSelection = transcriptSelectionState{}
 		m.copyStatusSeq++
-		m.copyStatus = "Copied!"
+		if msg.err != nil {
+			// Keep the selection so the user can retry; just surface the failure.
+			m.copyStatus = "Copy failed"
+		} else {
+			m.transcriptSelection = transcriptSelectionState{}
+			m.copyStatus = "Copied!"
+		}
 		seq := m.copyStatusSeq
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 			return transcriptCopyStatusExpiredMsg{seq: seq}
@@ -528,7 +583,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.flushRunIDs) > 0 {
 				return m, nil
 			}
-			return m, tea.Quit
+			return m.quit()
 		case tea.KeyCtrlO:
 			return m.toggleDetailedTranscript(), nil
 		case tea.KeyEsc:
@@ -927,7 +982,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// checkpoint session events have been flushed (above). Now that the
 				// last pending flush is drained, fire the deferred quit.
 				if m.exiting && len(m.flushRunIDs) == 0 {
-					return m, tea.Quit
+					return m.quit()
 				}
 			}
 			return m, nil
@@ -1046,6 +1101,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.setDoctorStatusRow(msg.text)
 		}
 		return m, nil
+	case prStateMsg:
+		m.prState = msg.state
+		return m, nil
+	case prWatcherStartedMsg:
+		if msg.stop == nil {
+			return m, nil
+		}
+		if m.prWatcherStop != nil {
+			m.prWatcherStop()
+		}
+		m.prWatcherStop = msg.stop
+		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
 		return m, nil
@@ -1139,13 +1206,14 @@ func (m model) transcriptView() string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
-	footer.WriteString("\n")
-	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
-		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
-		footer.WriteString("\n")
-	}
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
+		footer.WriteString("\n")
+	} else {
+		footer.WriteString("\n")
+	}
+	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
+		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))
@@ -1288,6 +1356,40 @@ func (m model) scrollChat(delta int) model {
 	}
 	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+delta)
 	return m
+}
+
+// syncChatScroll pins the viewport to what the user is reading. The scroll offset
+// is measured from the bottom, so when the transcript grows (streaming) the window
+// would otherwise follow the new bottom and drag the user off their spot. While
+// the user has scrolled up, shift the offset by however many lines the body changed
+// so the absolute view holds; at the bottom (offset 0) it follows normally. Only the
+// scrolled-up path renders the body, so the common case stays cheap.
+func (m model) syncChatScroll() model {
+	if !m.altScreen || m.chatScrollOffset <= 0 {
+		// At the bottom (or inline mode): follow the tail; reset the pin baseline.
+		m.chatBodyLines = 0
+		return m
+	}
+	current := m.chatBodyLineCount()
+	if m.chatBodyLines == 0 {
+		// Just scrolled up: establish the baseline, no adjustment this frame.
+		m.chatBodyLines = current
+		return m
+	}
+	// Shift by the signed delta so the absolute view holds whether the body grew
+	// (streaming appended lines) or shrank (a tool card collapsed, transcript
+	// cleared). Clamp at zero so a large shrink lands the user back at the tail
+	// rather than underflowing past it.
+	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+current-m.chatBodyLines)
+	m.chatBodyLines = current
+	return m
+}
+
+// chatBodyLineCount renders the live transcript body and returns its line count.
+// Only called while the user is scrolled up (see syncChatScroll).
+func (m model) chatBodyLineCount() int {
+	body, _ := m.transcriptBody(chatWidth(m.width), "")
+	return len(viewLines(body))
 }
 
 func (m model) chatPageScrollLines() int {
@@ -1854,7 +1956,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		if len(m.flushRunIDs) > 0 {
 			return m, nil
 		}
-		return m, tea.Quit
+		return m.quit()
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil

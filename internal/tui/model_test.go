@@ -247,7 +247,7 @@ func TestTranscriptReducer(t *testing.T) {
 
 func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	model := newModel(context.Background(), Options{
-		Cwd:          `D:\codings\Opensource\Zero`,
+		Cwd:          `/workspace/zero`,
 		ProviderName: "openai",
 		ModelName:    "gpt-4.1",
 	})
@@ -255,11 +255,11 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	model.height = 34
 
 	view := model.View()
-	assertContains(t, view, " 0 ")
-	assertContains(t, view, "zero")
+	assertContains(t, view, `/workspace/zero`)
 	assertContains(t, view, "openai/gpt-4.1")
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "running zero against ")
+	assertNotContains(t, view, " 0 ")
 	assertContains(t, view, composerPlaceholder)
 	assertNotContains(t, view, "interactive")
 	if strings.Contains(view, "Welcome to Zero") {
