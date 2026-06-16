@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -232,6 +233,25 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	})
 }
 
+// sessionWhen formats a session's RFC3339 timestamp for the picker: a precise
+// clock time (with seconds) for today so same-minute sessions stay distinct, the
+// month/day and time earlier this year, else the date. Empty on a parse error.
+func sessionWhen(timestamp string, now time.Time) string {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
+	if err != nil {
+		return ""
+	}
+	parsed, now = parsed.Local(), now.Local()
+	switch {
+	case parsed.Year() == now.Year() && parsed.YearDay() == now.YearDay():
+		return parsed.Format("15:04:05")
+	case parsed.Year() == now.Year():
+		return parsed.Format("Jan _2 15:04")
+	default:
+		return parsed.Format("2006-01-02")
+	}
+}
+
 // newSessionPicker builds the interactive /resume picker (mirrors /model & /provider):
 // one row per resumable session — title (Label) + id and relative age (Meta). Returns
 // nil when there are no resumable sessions so the caller falls back to the text path.
@@ -246,10 +266,17 @@ func (m model) newSessionPicker() *commandPicker {
 	now := m.now()
 	items := make([]pickerItem, 0, len(metas))
 	for _, meta := range metas {
+		// Lead with the timestamp so same-titled sessions (e.g. the same first
+		// prompt run several times) are visually distinct; the id (right, faint)
+		// stays for reference and is what selection actually resolves.
+		label := displayValue(meta.Title, "untitled")
+		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
+			label = when + "  " + label
+		}
 		items = append(items, pickerItem{
-			Label: displayValue(meta.Title, "untitled"),
+			Label: label,
 			Value: meta.SessionID,
-			Meta:  meta.SessionID + " · " + relativeAge(meta.UpdatedAt, now),
+			Meta:  meta.SessionID,
 		})
 	}
 	return &commandPicker{

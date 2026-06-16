@@ -826,18 +826,23 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got picker=%#v", next.picker)
 	}
-	// Every row carries the session title (Label) and id (Meta), for both sessions.
-	byTitle := map[string]pickerItem{}
-	for _, item := range next.picker.items {
-		byTitle[item.Label] = item
+	// Every row carries the session title (in the Label, after the timestamp) and
+	// resolves to / shows the session id (Value + Meta), for both sessions.
+	findByID := func(id string) (pickerItem, bool) {
+		for _, item := range next.picker.items {
+			if item.Value == id {
+				return item, true
+			}
+		}
+		return pickerItem{}, false
 	}
 	for _, want := range []struct{ title, id string }{{"Newer", second.SessionID}, {"Older", first.SessionID}} {
-		item, ok := byTitle[want.title]
+		item, ok := findByID(want.id)
 		if !ok {
-			t.Fatalf("picker missing session %q; items=%#v", want.title, next.picker.items)
+			t.Fatalf("picker missing session id %q; items=%#v", want.id, next.picker.items)
 		}
-		if item.Value != want.id {
-			t.Fatalf("picker %q Value = %q, want session id %q", want.title, item.Value, want.id)
+		if !strings.Contains(item.Label, want.title) {
+			t.Fatalf("picker Label %q should contain the title %q", item.Label, want.title)
 		}
 		if !strings.Contains(item.Meta, want.id) {
 			t.Fatalf("picker %q Meta should show the id %q, got %q", want.title, want.id, item.Meta)
