@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -222,6 +223,54 @@ func TestAutoTitleSkipsAlreadyNamedSession(t *testing.T) {
 
 	if _, cmd := m.maybeAutoTitleActiveSession(); cmd != nil {
 		t.Fatal("a session with a distinct title must not be auto-titled")
+	}
+}
+
+func TestMaybeAutoTitleSkipsWhenStoreNil(t *testing.T) {
+	store := testSessionStore(t)
+	session := createAutoTitledSession(t, store, "how do I add a fetch call", "Use the fetch tool.")
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+
+	// A session that WOULD be auto-titled, but the store is gone. Without the
+	// nil-store guard the returned cmd would nil-deref in store.UpdateTitle.
+	m := newModel(context.Background(), Options{Provider: titleProvider("Add Fetch Call")})
+	m.activeSession = session
+	m.sessionEvents = events
+	m.sessionStore = nil
+
+	if _, cmd := m.maybeAutoTitleActiveSession(); cmd != nil {
+		t.Fatal("auto-title must be skipped when the session store is nil")
+	}
+}
+
+func TestAutoTitleFailureReleasesRetryGate(t *testing.T) {
+	const id = "sess-retry"
+
+	// A failed generation must clear the optimistic gate so a later turn can retry.
+	failed := newModel(context.Background(), Options{})
+	failed.titledSessions = map[string]bool{id: true}
+	failed, _ = failed.handleSessionTitleGenerated(sessionTitleGeneratedMsg{sessionID: id, err: errors.New("provider down")})
+	if failed.titledSessions[id] {
+		t.Fatal("a failed title generation must release the retry gate")
+	}
+
+	// An empty title (model returned nothing usable) counts as failure too.
+	empty := newModel(context.Background(), Options{})
+	empty.titledSessions = map[string]bool{id: true}
+	empty, _ = empty.handleSessionTitleGenerated(sessionTitleGeneratedMsg{sessionID: id, title: ""})
+	if empty.titledSessions[id] {
+		t.Fatal("an empty generated title must release the retry gate")
+	}
+
+	// A successful generation keeps the session gated (one-shot, no re-fire).
+	ok := newModel(context.Background(), Options{})
+	ok.titledSessions = map[string]bool{id: true}
+	ok, _ = ok.handleSessionTitleGenerated(sessionTitleGeneratedMsg{sessionID: id, title: "Real Title"})
+	if !ok.titledSessions[id] {
+		t.Fatal("a successful title generation must keep the session gated")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -980,9 +981,12 @@ func TestResumeHonorsPriorCompaction(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: store})
 	next, _ := m.handleResumeCommand(session.SessionID)
 	// Resume must load the rehydrated (compaction-aware) context, not the raw log —
-	// matching the CLI's --resume and the in-TUI /compact reload.
-	if len(next.sessionEvents) != len(rehydrated) {
-		t.Fatalf("resumed sessionEvents = %d, want rehydrated %d (not raw %d): resume must honor prior compaction", len(next.sessionEvents), len(rehydrated), len(raw))
+	// matching the CLI's --resume and the in-TUI /compact reload. Compare contents,
+	// not just length: a regression that returned a same-length but reordered or
+	// substituted slice (e.g. a dropped original in place of the summary) would
+	// slip past a length check.
+	if !reflect.DeepEqual(next.sessionEvents, rehydrated) {
+		t.Fatalf("resumed sessionEvents do not match the rehydrated context (resume must honor prior compaction)\nresumed:    %+v\nrehydrated: %+v\nraw:        %+v", next.sessionEvents, rehydrated, raw)
 	}
 }
 

@@ -235,7 +235,10 @@ func sessionTitleIsAuto(currentTitle string, events []sessions.Event) bool {
 // title and we have not already attempted it this process. It is a no-op when
 // there is no provider, no session, or nothing worth titling.
 func (m model) maybeAutoTitleActiveSession() (model, tea.Cmd) {
-	if m.provider == nil {
+	// Both are required: the title cmd captures the provider AND calls
+	// store.UpdateTitle, so a nil store (e.g. a fallback model in tests) would
+	// nil-deref on the auto-title path. Mirrors the nil-store guards on resume.
+	if m.provider == nil || m.sessionStore == nil {
 		return m, nil
 	}
 	sessionID := m.activeSession.SessionID
@@ -305,15 +308,26 @@ func (m model) startSessionRetitle() (model, tea.Cmd, string) {
 // handleSessionTitleGenerated applies a finished title and, for the /retitle
 // backfill, advances the sequential queue and reports completion.
 func (m model) handleSessionTitleGenerated(msg sessionTitleGeneratedMsg) (model, tea.Cmd) {
-	if msg.err == nil && msg.title != "" && msg.sessionID == m.activeSession.SessionID {
-		m.activeSession.Title = msg.title
+	titleOK := msg.err == nil && msg.title != ""
+	if titleOK {
+		if msg.sessionID == m.activeSession.SessionID {
+			m.activeSession.Title = msg.title
+		}
+	} else {
+		// titledSessions is marked optimistically when the cmd is scheduled (so a
+		// second turn can't double-fire a title for the same session while the
+		// first is in flight). A FAILED generation — provider error, empty title,
+		// or store write error — must not leave that gate set forever, so release
+		// it here; a later turn or /retitle can then retry. Success keeps the gate.
+		delete(m.titledSessions, msg.sessionID)
 	}
 	if !msg.backfill {
-		// Auto-title is silent: on failure the first-message title simply stays.
+		// Auto-title is silent: on failure the first-message title simply stays
+		// (and the retry gate above was released).
 		return m, nil
 	}
 	m.retitleDone++
-	if msg.err == nil && msg.title != "" {
+	if titleOK {
 		m.retitleOK++
 	}
 	if len(m.retitleQueue) > 0 {
