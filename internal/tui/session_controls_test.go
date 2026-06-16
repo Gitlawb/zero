@@ -61,6 +61,69 @@ func TestEffortCommandRejectsUnsupportedActiveModel(t *testing.T) {
 	}
 }
 
+// The Ctrl+T cycle walks the active model's supported ring opencode-style:
+// auto ("") -> first supported -> ... -> last supported -> auto. These cover
+// every branch of cycleReasoningEffort: empty/auto start, mid-ring advance,
+// last-slot wrap, an effort the model doesn't support, and a model with no
+// effort controls at all.
+
+func TestCycleReasoningEffortAutoToFirst(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	if m.reasoningEffort != "" {
+		t.Fatalf("expected default effort auto, got %q", m.reasoningEffort)
+	}
+	next, cmd := m.cycleReasoningEffort()
+	if cmd != nil {
+		t.Fatal("expected cycle to produce no command")
+	}
+	if next.reasoningEffort != modelregistry.ReasoningEffortLow {
+		t.Fatalf("expected cycle from auto to land on first supported effort (low), got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortAdvancesToNext(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	m.reasoningEffort = modelregistry.ReasoningEffortLow
+	next, _ := m.cycleReasoningEffort()
+	if next.reasoningEffort != modelregistry.ReasoningEffortMedium {
+		t.Fatalf("expected cycle low -> medium, got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortWrapsToAuto(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	next, _ := m.cycleReasoningEffort()
+	if next.reasoningEffort != "" {
+		t.Fatalf("expected cycle from last supported (high) to wrap to auto, got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortUnknownResetsToAuto(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	// minimal is a valid ReasoningEffort but not in claude-sonnet-4.5's supported
+	// set, so the ring can't place it — cycle falls back to auto rather than guess.
+	m.reasoningEffort = modelregistry.ReasoningEffortMinimal
+	next, _ := m.cycleReasoningEffort()
+	if next.reasoningEffort != "" {
+		t.Fatalf("expected unknown effort to reset to auto, got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortNoOpOnUnsupportedModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	// gpt-4.1 exposes no effort controls; set a value directly (the /effort command
+	// would reject this) to prove the cycle is a true no-op and leaves it untouched.
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	next, cmd := m.cycleReasoningEffort()
+	if cmd != nil {
+		t.Fatal("expected cycle on unsupported model to produce no command")
+	}
+	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
+		t.Fatalf("expected cycle to be a no-op on a model without effort controls, got %q", next.reasoningEffort)
+	}
+}
+
 func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/style")

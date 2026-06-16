@@ -740,6 +740,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
+		case keyCtrl(msg, 't'):
+			// Ctrl+T cycles reasoning effort opencode-style (auto -> low ->
+			// medium -> high -> auto), but only when nothing modal is up — the
+			// same gate shift+tab uses above. Not gated on m.pending: cycling
+			// mid-run is allowed and takes effect on the next turn, matching
+			// /effort. cycleReasoningEffort is a silent no-op on models with no
+			// effort controls.
+			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil {
+				return m.cycleReasoningEffort()
+			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {

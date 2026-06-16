@@ -12,6 +12,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -964,6 +965,27 @@ func TestStatusLineGroups(t *testing.T) {
 	for _, want := range []string{"test-model", "auto-approve"} {
 		if !strings.Contains(divider, want) {
 			t.Fatalf("composer divider = %q, missing %q", divider, want)
+		}
+	}
+}
+
+func TestComposerDividerShowsEffortWhenSet(t *testing.T) {
+	m := limeTestModel()
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	divider := plainRender(t, m.composerDividerLine(110))
+	if !strings.Contains(divider, "high") {
+		t.Fatalf("composer divider = %q, missing effort segment when set", divider)
+	}
+}
+
+func TestComposerDividerOmitsEffortWhenAuto(t *testing.T) {
+	m := limeTestModel()
+	// reasoningEffort == "" (auto) by default — the segment is omitted entirely,
+	// matching opencode hiding the variant when unset.
+	divider := plainRender(t, m.composerDividerLine(110))
+	for _, effort := range []string{"low", "medium", "high", "minimal", "xhigh", "none"} {
+		if strings.Contains(divider, effort) {
+			t.Fatalf("composer divider = %q, should omit effort segment when auto", divider)
 		}
 	}
 }

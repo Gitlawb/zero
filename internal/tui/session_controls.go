@@ -128,6 +128,31 @@ func (m model) effortDisplay() string {
 	return string(m.reasoningEffort)
 }
 
+// cycleReasoningEffort advances the reasoning-effort ring opencode-style:
+// auto ("") -> first supported -> ... -> last supported -> auto. No-op (model
+// unchanged) when the active model exposes no effort controls, so Ctrl+T stays
+// quiet on non-reasoning models. Called from the Ctrl+T key case — a rare
+// keypress — so the DefaultRegistry() lookup inside availableReasoningEfforts
+// is fine here, but MUST NOT be called from the render path (the registry is
+// rebuilt on every call).
+func (m model) cycleReasoningEffort() (model, tea.Cmd) {
+	efforts := m.availableReasoningEfforts()
+	if len(efforts) == 0 {
+		return m, nil
+	}
+	if m.reasoningEffort == "" {
+		m.reasoningEffort = efforts[0]
+		return m, nil
+	}
+	idx := reasoningEffortIndex(efforts, m.reasoningEffort)
+	if idx == -1 || idx == len(efforts)-1 {
+		m.reasoningEffort = "" // wrap to auto
+		return m, nil
+	}
+	m.reasoningEffort = efforts[idx+1]
+	return m, nil
+}
+
 func reasoningEffortAllowed(efforts []modelregistry.ReasoningEffort, want modelregistry.ReasoningEffort) bool {
 	for _, effort := range efforts {
 		if effort == want {
@@ -135,6 +160,18 @@ func reasoningEffortAllowed(efforts []modelregistry.ReasoningEffort, want modelr
 		}
 	}
 	return false
+}
+
+// reasoningEffortIndex returns the position of want in efforts, or -1. Sibling
+// to reasoningEffortAllowed; used by cycleReasoningEffort to find the current
+// slot in the model's supported ring.
+func reasoningEffortIndex(efforts []modelregistry.ReasoningEffort, want modelregistry.ReasoningEffort) int {
+	for index, effort := range efforts {
+		if effort == want {
+			return index
+		}
+	}
+	return -1
 }
 
 func joinReasoningEfforts(efforts []modelregistry.ReasoningEffort) string {
