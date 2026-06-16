@@ -442,14 +442,14 @@ func (m model) overlayMouseHit(msg tea.MouseMsg, overlay string, width int) (mou
 	if overlayWidth <= 0 || len(lines) == 0 {
 		return mouseOverlayHit{}, false
 	}
-	top := m.overlayMouseTop(len(lines), width)
-	if mouseY(msg) < top || mouseY(msg) >= top+len(lines) {
+	rect := m.overlayMouseRect(len(lines), width)
+	if rect.height <= 0 || mouseY(msg) < rect.y || mouseY(msg) >= rect.y+rect.height {
 		return mouseOverlayHit{}, false
 	}
 	if mouseX(msg) < left || mouseX(msg) >= left+overlayWidth {
 		return mouseOverlayHit{}, false
 	}
-	return mouseOverlayHit{x: mouseX(msg) - left, y: mouseY(msg) - top}, true
+	return mouseOverlayHit{x: mouseX(msg) - left, y: mouseY(msg) - rect.y}, true
 }
 
 func (m model) overlayMouseTop(overlayHeight int, width int) int {
@@ -462,10 +462,14 @@ func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {
 	}
 	if m.altScreen && m.height > 0 {
 		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+		visibleHeight := minInt(overlayHeight, frame.bodyRect.height)
+		if visibleHeight <= 0 {
+			return tuiRect{}
+		}
 		return tuiRect{
-			y:      frame.bodyRect.y + maxInt(0, (frame.bodyRect.height-overlayHeight)/2),
+			y:      frame.bodyRect.y + maxInt(0, (frame.bodyRect.height-visibleHeight)/2),
 			width:  width,
-			height: overlayHeight,
+			height: visibleHeight,
 		}
 	}
 	return tuiRect{

@@ -486,6 +486,24 @@ func TestMCPAddWizardMouseSelectsAndActivatesType(t *testing.T) {
 	}
 }
 
+func TestMCPAddWizardBlocksTranscriptSelectionBehindOverlay(t *testing.T) {
+	m := mouseTestModel()
+	m.mouseCapture = true
+	m.transcript = appendRow(m.transcript, rowUser, "hidden behind wizard")
+	textY := firstTranscriptTextMouseY(t, m)
+	m.mcpAddWizard = newMCPAddWizard("http")
+	m.mcpAddWizard.step = mcpAddWizardStepType
+
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, 0, textY))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("click behind MCP add wizard should not return a command")
+	}
+	if next.transcriptSelection.active {
+		t.Fatal("MCP add wizard should block transcript selection behind the overlay")
+	}
+}
+
 func TestTranscriptCopyStatusUsesComposerSpacerWithoutFooterGrowth(t *testing.T) {
 	m := mouseTestModel()
 	m.providerName = "ollama-cloud"

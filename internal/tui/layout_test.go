@@ -29,7 +29,9 @@ func TestTranscriptFrameLayoutPinsMainRegions(t *testing.T) {
 	if frame.footerRect.y+frame.footerRect.height != m.height {
 		t.Fatalf("footer bottom = %d, want terminal height %d", frame.footerRect.y+frame.footerRect.height, m.height)
 	}
-	if frame.composerRect.height <= 0 || !frame.footerRect.contains(frame.composerRect.x, frame.composerRect.y) {
+	if frame.composerRect.height <= 0 ||
+		!frame.footerRect.contains(frame.composerRect.x, frame.composerRect.y) ||
+		!frame.footerRect.contains(frame.composerRect.x+frame.composerRect.width-1, frame.composerRect.y+frame.composerRect.height-1) {
 		t.Fatalf("composer rect should be visible inside footer, frame=%#v", frame)
 	}
 	if frame.statusRect.height != 1 || frame.statusRect.y != frame.footerRect.y+frame.footerRect.height-1 {
@@ -61,6 +63,35 @@ func TestTranscriptFrameLayoutClipsFooterInTinyTerminal(t *testing.T) {
 	}
 	if len(frame.footerLines) >= len(frame.fullFooterLines) {
 		t.Fatalf("footer lines were not clipped: visible=%d full=%d", len(frame.footerLines), len(frame.fullFooterLines))
+	}
+}
+
+func TestTranscriptFrameLayoutHandlesDegenerateDimensions(t *testing.T) {
+	for _, size := range []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{name: "zero", width: 0, height: 0},
+		{name: "negative", width: -10, height: -4},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			m := mouseTestModel()
+			m.width = size.width
+			m.height = size.height
+
+			width := chatWidth(m.width)
+			frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+			if width <= 0 {
+				t.Fatalf("chatWidth(%d) = %d, want positive fallback", size.width, width)
+			}
+			if frame.bodyRect.height < 1 {
+				t.Fatalf("body rect = %#v, want protected body height", frame.bodyRect)
+			}
+			if frame.width != width {
+				t.Fatalf("frame width = %d, want chat width %d", frame.width, width)
+			}
+		})
 	}
 }
 
@@ -98,6 +129,27 @@ func TestOverlayMouseRectCentersInsideTranscriptBody(t *testing.T) {
 	}
 	if !frame.bodyRect.contains(rect.x, rect.y) || !frame.bodyRect.contains(rect.x, rect.y+rect.height-1) {
 		t.Fatalf("overlay rect %#v should be inside body rect %#v", rect, frame.bodyRect)
+	}
+}
+
+func TestOverlayMouseHitClampsToVisibleBody(t *testing.T) {
+	m := mouseTestModel()
+	m.width = 80
+	m.height = 8
+
+	width := chatWidth(m.width)
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	overlay := strings.Join([]string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"}, "\n")
+	rect := m.overlayMouseRect(len(viewLines(overlay)), width)
+	if rect.height != frame.bodyRect.height {
+		t.Fatalf("overlay rect = %#v, want height clamped to body rect %#v", rect, frame.bodyRect)
+	}
+
+	if _, ok := m.overlayMouseHit(testMouseClick(tea.MouseLeft, 1, rect.y+rect.height-1), overlay, width); !ok {
+		t.Fatalf("click inside visible overlay rect %#v should hit", rect)
+	}
+	if _, ok := m.overlayMouseHit(testMouseClick(tea.MouseLeft, 1, rect.y+rect.height), overlay, width); ok {
+		t.Fatalf("click below visible overlay rect %#v should not hit invisible overlay rows", rect)
 	}
 }
 

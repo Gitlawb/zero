@@ -395,7 +395,7 @@ func splitPlainAtDisplayWidth(text string, width int) (string, string) {
 }
 
 func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine, bool) {
-	if !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+	if !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
 		return transcriptSelectableLine{}, false
 	}
 	width := chatWidth(m.width)

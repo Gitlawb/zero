@@ -33,6 +33,45 @@ func TestTranscriptViewportKeepsNonScrollableOffsetAtZero(t *testing.T) {
 	}
 }
 
+func TestTranscriptViewportHandlesZeroAndNegativeInputs(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		totalLines int
+		height     int
+		offset     int
+		want       transcriptViewportWindow
+	}{
+		{
+			name:       "zero lines",
+			totalLines: 0,
+			height:     5,
+			offset:     10,
+			want:       transcriptViewportWindow{start: 0, end: 0, height: 5, maxOffset: 0, offset: 0},
+		},
+		{
+			name:       "zero height",
+			totalLines: 3,
+			height:     0,
+			offset:     2,
+			want:       transcriptViewportWindow{start: 0, end: 1, height: 1, maxOffset: 2, offset: 2},
+		},
+		{
+			name:       "negative values",
+			totalLines: -10,
+			height:     -4,
+			offset:     -20,
+			want:       transcriptViewportWindow{start: 0, end: 0, height: 1, maxOffset: 0, offset: 0},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			window := newTranscriptViewport(tt.totalLines, tt.height, tt.offset).window()
+			if window != tt.want {
+				t.Fatalf("window = %#v, want %#v", window, tt.want)
+			}
+		})
+	}
+}
+
 func TestTranscriptViewportClampsInflatedOffsetBeforeScrollingDown(t *testing.T) {
 	viewport := newTranscriptViewport(20, 5, 100)
 	if viewport.offset != 15 {
