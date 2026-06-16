@@ -79,9 +79,27 @@ type transcriptBodyLayout struct {
 	spans      []transcriptBodyItemSpan
 }
 
+func (m model) transcriptBodyLayout(width int, emptyOverlay string) transcriptBodyLayout {
+	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay))
+}
+
 func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
-	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay))
-	return strings.Join(layout.lines, "\n"), layout.selectable
+	layout := m.transcriptBodyLayout(width, emptyOverlay)
+	return layout.String(), layout.selectable
+}
+
+func (l transcriptBodyLayout) String() string {
+	return strings.Join(l.lines, "\n")
+}
+
+func (l transcriptBodyLayout) totalLines() int {
+	return len(l.lines)
+}
+
+func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []string {
+	start := clampInt(window.start, 0, len(l.lines))
+	end := clampInt(window.end, start, len(l.lines))
+	return append([]string(nil), l.lines[start:end]...)
 }
 
 func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
@@ -399,15 +417,15 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 		return transcriptSelectableLine{}, false
 	}
 	width := chatWidth(m.width)
-	body, selectable := m.transcriptBody(width, "")
+	layout := m.transcriptBodyLayout(width, "")
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	start, _, _ := transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
+	start, _, _ := transcriptViewportStartForLayout(layout, frame, m.chatScrollOffset)
 	_, localY, ok := frame.bodyRect.local(mouseX(msg), mouseY(msg))
 	if !ok {
 		return transcriptSelectableLine{}, false
 	}
 	bodyY := start + localY
-	for _, line := range selectable {
+	for _, line := range layout.selectable {
 		if line.bodyY != bodyY {
 			continue
 		}
@@ -422,6 +440,11 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	return transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
+}
+
+func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
+	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
+	return window.start, window.height, frame.bodyRect.y
 }
 
 func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
@@ -502,9 +525,9 @@ func (m model) toggleTranscriptRow(rowIndex int) model {
 
 func (m model) selectedTranscriptText() string {
 	width := chatWidth(m.width)
-	_, selectable := m.transcriptBody(width, "")
+	layout := m.transcriptBodyLayout(width, "")
 	parts := []string{}
-	for _, line := range selectable {
+	for _, line := range layout.selectable {
 		start, end, ok := m.selectedColumnsForTranscriptLine(line)
 		if !ok {
 			continue

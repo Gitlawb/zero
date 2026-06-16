@@ -1264,7 +1264,7 @@ func (m model) transcriptView() string {
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
 	}
-	body, _ := m.transcriptBody(width, emptyOverlay)
+	bodyLayout := m.transcriptBodyLayout(width, emptyOverlay)
 
 	footer := m.footerView(width)
 
@@ -1274,9 +1274,10 @@ func (m model) transcriptView() string {
 	}
 
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptView(m.pinnedTitleBar(width), body, footer, width, overlayForViewport)
+		return m.scrollableTranscriptLayoutView(m.pinnedTitleBar(width), bodyLayout, footer, width, overlayForViewport)
 	}
 
+	body := bodyLayout.String()
 	if overlayForViewport != "" {
 		body += "\n" + overlayForViewport + "\n"
 	}
@@ -1428,14 +1429,14 @@ func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
 }
 
 func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
-	bodyLines := viewLines(body)
-	frame := m.scrollableTranscriptFrame(header, footer)
-	window := newTranscriptViewport(len(bodyLines), frame.bodyRect.height, m.chatScrollOffset).window()
+	return m.scrollableTranscriptLayoutView(header, transcriptBodyLayout{lines: viewLines(body)}, footer, width, overlay)
+}
 
-	bodyWindow := make([]string, 0, window.height)
-	if window.start < window.end {
-		bodyWindow = append(bodyWindow, bodyLines[window.start:window.end]...)
-	}
+func (m model) scrollableTranscriptLayoutView(header string, body transcriptBodyLayout, footer string, width int, overlay string) string {
+	frame := m.scrollableTranscriptFrame(header, footer)
+	window := transcriptViewportForLayout(body, frame, m.chatScrollOffset).window()
+
+	bodyWindow := body.visibleLines(window)
 	for len(bodyWindow) < window.height {
 		bodyWindow = append(bodyWindow, "")
 	}
@@ -1577,9 +1578,9 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 		return transcriptViewport{}, false
 	}
 	width := chatWidth(m.width)
-	body, _ := m.transcriptBody(width, "")
+	body := m.transcriptBodyLayout(width, "")
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	return transcriptViewportForBody(body, frame, m.chatScrollOffset), true
+	return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
 }
 
 // syncChatScroll pins the viewport to what the user is reading. The scroll offset

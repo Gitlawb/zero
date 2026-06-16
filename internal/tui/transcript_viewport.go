@@ -29,6 +29,10 @@ func transcriptViewportForBody(body string, frame transcriptFrameLayout, offset 
 	return newTranscriptViewport(len(viewLines(body)), frame.bodyRect.height, offset)
 }
 
+func transcriptViewportForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, offset int) transcriptViewport {
+	return newTranscriptViewport(layout.totalLines(), frame.bodyRect.height, offset)
+}
+
 func (v transcriptViewport) maxOffset() int {
 	return maxInt(0, v.totalLines-v.height)
 }

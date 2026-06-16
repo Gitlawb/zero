@@ -70,3 +70,17 @@ func TestTranscriptBodyItemsKeepPendingInterimSelectableLocal(t *testing.T) {
 		t.Fatalf("streaming selectable bodyY = %d, want pending item start %d", layout.selectable[0].bodyY, pendingSpan.startY)
 	}
 }
+
+func TestTranscriptBodyLayoutVisibleLinesUsesViewportWindow(t *testing.T) {
+	layout := transcriptBodyLayout{lines: []string{"zero", "one", "two", "three"}}
+	window := newTranscriptViewport(layout.totalLines(), 2, 1).window()
+
+	got := layout.visibleLines(window)
+	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Fatalf("visible lines = %#v, want [one two]", got)
+	}
+	got[0] = "mutated"
+	if layout.lines[1] != "one" {
+		t.Fatalf("visibleLines should return a copy, layout lines = %#v", layout.lines)
+	}
+}
