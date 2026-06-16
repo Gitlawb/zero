@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // secretBytes is the AES-256 key length kept in the per-user secret file.
@@ -23,21 +22,17 @@ const secretBytes = 32
 // 0600 plaintext JSON unchanged.
 type aesGCMCrypter struct {
 	secretPath string
-	now        func() time.Time
 }
 
-func newAESGCMCrypter(secretPath string, now func() time.Time) *aesGCMCrypter {
-	if now == nil {
-		now = time.Now
-	}
-	return &aesGCMCrypter{secretPath: secretPath, now: now}
+func newAESGCMCrypter(secretPath string) *aesGCMCrypter {
+	return &aesGCMCrypter{secretPath: secretPath}
 }
 
 // aead loads (or, when create is set, generates) the secret and returns the GCM
 // AEAD. open passes create=false so a missing secret is a hard error rather than
 // silently minting a new key that could never decrypt the existing file.
 func (c *aesGCMCrypter) aead(create bool) (cipher.AEAD, error) {
-	secret, err := loadOrCreateSecret(c.secretPath, create, c.now)
+	secret, err := loadOrCreateSecret(c.secretPath, create)
 	if err != nil {
 		return nil, err
 	}
@@ -81,18 +76,13 @@ func (c *aesGCMCrypter) open(blob []byte) ([]byte, error) {
 }
 
 // loadOrCreateSecret reads the 32-byte secret at path. When create is set and
-// the file is absent, it generates a random secret and writes it atomically
-// 0600. A wrong-sized existing secret fails closed (corruption).
-func loadOrCreateSecret(path string, create bool, now func() time.Time) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err == nil {
-		if len(data) != secretBytes {
-			return nil, fmt.Errorf("oauth: token secret at %s has unexpected size %d", path, len(data))
-		}
+// the file is absent, it generates a random secret and creates the file
+// exclusively (0600). A wrong-sized existing secret fails closed (corruption).
+func loadOrCreateSecret(path string, create bool) ([]byte, error) {
+	if data, err := readSecretFile(path); err == nil {
 		return data, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("oauth: read token secret: %w", err)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	if !create {
 		return nil, fmt.Errorf("oauth: token secret %s is missing; cannot decrypt the token file", path)
@@ -104,13 +94,41 @@ func loadOrCreateSecret(path string, create bool, now func() time.Time) ([]byte,
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	tmp := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), now().UnixNano())
-	if err := os.WriteFile(tmp, secret, 0o600); err != nil {
-		return nil, fmt.Errorf("oauth: write token secret: %w", err)
+	// Create exclusively: an os.Rename publish would clobber on POSIX, so two
+	// concurrent first-run processes could each generate a secret and the loser
+	// would silently orphan the tokens it encrypts. O_EXCL lets exactly one
+	// process win; everyone else adopts the winner's on-disk secret.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return readSecretFile(path)
+		}
+		return nil, fmt.Errorf("oauth: create token secret: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("oauth: commit token secret: %w", err)
+	if _, werr := f.Write(secret); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("oauth: write token secret: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("oauth: write token secret: %w", cerr)
 	}
 	return secret, nil
+}
+
+// readSecretFile reads and validates the secret at path, returning a wrapped
+// os.ErrNotExist when it is absent so callers can branch on creation.
+func readSecretFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("oauth: read token secret: %w", err)
+	}
+	if len(data) != secretBytes {
+		return nil, fmt.Errorf("oauth: token secret at %s has unexpected size %d", path, len(data))
+	}
+	return data, nil
 }

@@ -7,12 +7,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestAESGCMCrypterRoundTripAndTamper(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "tok.json.secret")
-	c := newAESGCMCrypter(secretPath, time.Now)
+	c := newAESGCMCrypter(secretPath)
 	plaintext := []byte(`{"schemaVersion":1,"tokens":{}}`)
 	blob, err := c.seal(plaintext)
 	if err != nil {
@@ -39,10 +38,10 @@ func TestAESGCMCrypterRoundTripAndTamper(t *testing.T) {
 func TestLoadOrCreateSecret(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tok.json.secret")
 	// Missing + create=false => fail closed (can't decrypt without the secret).
-	if _, err := loadOrCreateSecret(path, false, time.Now); err == nil {
+	if _, err := loadOrCreateSecret(path, false); err == nil {
 		t.Fatal("missing secret with create=false must error")
 	}
-	secret, err := loadOrCreateSecret(path, true, time.Now)
+	secret, err := loadOrCreateSecret(path, true)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -50,12 +49,15 @@ func TestLoadOrCreateSecret(t *testing.T) {
 		t.Fatalf("secret length = %d, want %d", len(secret), secretBytes)
 	}
 	// Stable across reads.
-	again, err := loadOrCreateSecret(path, false, time.Now)
+	again, err := loadOrCreateSecret(path, false)
 	if err != nil || !bytes.Equal(again, secret) {
 		t.Fatalf("secret not stable: %v", err)
 	}
 	if runtime.GOOS != "windows" {
-		info, _ := os.Stat(path)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat secret: %v", err)
+		}
 		if perm := info.Mode().Perm(); perm != 0o600 {
 			t.Fatalf("secret file mode = %o, want 600", perm)
 		}
@@ -64,7 +66,7 @@ func TestLoadOrCreateSecret(t *testing.T) {
 	if err := os.WriteFile(path, []byte("short"), 0o600); err != nil {
 		t.Fatalf("corrupt secret: %v", err)
 	}
-	if _, err := loadOrCreateSecret(path, true, time.Now); err == nil {
+	if _, err := loadOrCreateSecret(path, true); err == nil {
 		t.Fatal("wrong-sized secret must error")
 	}
 }
@@ -121,7 +123,13 @@ func TestEncryptedStoreTamperFailsClosed(t *testing.T) {
 	if err := s.Save(ProviderKey("demo"), Token{AccessToken: "a"}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	raw, _ := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("encrypted token file is empty")
+	}
 	raw[len(raw)-1] ^= 0xff
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("rewrite: %v", err)

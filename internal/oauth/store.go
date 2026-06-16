@@ -127,7 +127,7 @@ func NewStore(options StoreOptions) (*Store, error) {
 	}
 	store := &Store{filePath: filepath.Clean(filePath), now: now}
 	if options.Encrypted {
-		store.crypter = newAESGCMCrypter(store.filePath+".secret", now)
+		store.crypter = newAESGCMCrypter(store.filePath + ".secret")
 	}
 	return store, nil
 }
