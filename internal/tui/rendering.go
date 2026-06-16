@@ -1003,11 +1003,34 @@ func toolRowName(row transcriptRow) string {
 	return strings.TrimPrefix(name, "tool result: ")
 }
 
+// toolDisplayName is the human-facing label for a tool card head. MCP tools are
+// exposed as "mcp_<server>_<tool>", which is noise in the UI — show a clean
+// "<tool>" (e.g. mcp_exa_web_search_exa → "web search"); the search query/target
+// is shown beside it. Built-in tool names are left as-is.
+func toolDisplayName(name string) string {
+	if !strings.HasPrefix(name, "mcp_") {
+		return name
+	}
+	rest := strings.TrimPrefix(name, "mcp_")
+	server := rest
+	if i := strings.Index(rest, "_"); i >= 0 {
+		server = rest[:i]
+		rest = rest[i+1:]
+	} else {
+		rest = ""
+	}
+	rest = strings.TrimSuffix(rest, "_"+server) // exa: web_search_exa → web_search
+	if rest == "" {
+		rest = server
+	}
+	return strings.ReplaceAll(rest, "_", " ")
+}
+
 // toolCardHead composes the border-embedded head: tool name, middle-truncated
 // target (hyperlinked when it names a file), the faintest arg column, optional
 // extra tag, the auto marker, and the status glyph.
 func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
-	head := zeroTheme.toolName.Render(name)
+	head := zeroTheme.toolName.Render(toolDisplayName(name))
 	if target = strings.TrimSpace(target); target != "" {
 		styled := zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
 		if looksLikePath(target) {
