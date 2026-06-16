@@ -561,12 +561,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
 	case tea.PasteMsg:
-		if m.setup.visible || m.pendingAskUser != nil {
+		if m.setup.visible {
+			return m.handleSetupPaste(msg)
+		}
+		if m.pendingAskUser != nil {
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-		if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
+		if m.providerWizard != nil {
+			return m.handleProviderWizardPaste(msg.Content)
+		}
+		if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
 			return m, nil
 		}
 		state := m.currentComposerState()

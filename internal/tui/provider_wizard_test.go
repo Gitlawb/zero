@@ -447,6 +447,30 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 	}
 }
 
+func TestProviderWizardAcceptsPastedEndpointURL(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.providerWizard.step != providerWizardStepEndpoint {
+		t.Fatalf("custom provider first step = %v, want endpoint", next.providerWizard.step)
+	}
+
+	updated, _ = next.Update(testPaste("https://proxy.example/v1\n"))
+	next = updated.(model)
+	if next.providerWizard.baseURL != "https://proxy.example/v1" {
+		t.Fatalf("wizard baseURL = %q, want pasted endpoint", next.providerWizard.baseURL)
+	}
+
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepName {
+		t.Fatalf("endpoint step advanced to %v, want name", next.providerWizard.step)
+	}
+}
+
 func TestProviderWizardCustomCompatibleProviderRejectsRemoteHTTP(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
@@ -556,7 +580,7 @@ func TestProviderWizardAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T) {
 		t.Fatalf("wizard step = %v, want credential", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(testKeyText(secret))
+	updated, _ = next.Update(testPaste(secret))
 	next = updated.(model)
 	if next.providerWizard.apiKey != secret {
 		t.Fatalf("wizard api key was not captured from paste")
@@ -582,7 +606,7 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(testKeyText(secret))
+	updated, _ = next.Update(testPaste(secret))
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
@@ -631,7 +655,7 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(testKeyText(secret))
+	updated, _ = next.Update(testPaste(secret))
 	next = updated.(model)
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
