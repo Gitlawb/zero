@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode"
@@ -301,6 +302,15 @@ func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderPro
 		if !config.HasProviderProfile(profile) {
 			continue
 		}
+		// A profile whose catalog entry no longer resolves AND that has no explicit
+		// BaseURL has no endpoint to talk to, so it cannot become a working
+		// provider — skip it rather than picking a fallback that fails at first use.
+		// (A stale CatalogID with a BaseURL still works as a custom endpoint.)
+		if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" && strings.TrimSpace(profile.BaseURL) == "" {
+			if _, err := providercatalog.Require(catalogID); err != nil {
+				continue
+			}
+		}
 		if _, missing := setupMissingCredentialEnv(profile); missing {
 			continue
 		}
@@ -328,8 +338,19 @@ func providerProfileIsLocal(profile config.ProviderProfile) bool {
 			return true
 		}
 	}
-	host := strings.ToLower(profile.BaseURL)
-	return strings.Contains(host, "localhost") || strings.Contains(host, "127.0.0.1") || strings.Contains(host, "[::1]")
+	base := strings.TrimSpace(profile.BaseURL)
+	if base == "" {
+		return false
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 func formatSetupComplete(result tui.SetupResult) string {

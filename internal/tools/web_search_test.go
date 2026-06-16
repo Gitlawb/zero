@@ -104,7 +104,6 @@ func TestWebSearchRedactsBackendError(t *testing.T) {
 
 func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 	// web_search is registered only when a backend is configured.
-	t.Setenv("ZERO_WEBSEARCH_BACKEND", "")
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	found := false
 	for _, tool := range CoreNetworkTools() {
@@ -641,14 +640,16 @@ func TestParseSearchResultsToleratesNonNumericScore(t *testing.T) {
 		{"title":"str","url":"https://b.test","snippet":"s","score":"0.5"},
 		{"title":"bad","url":"https://c.test","snippet":"s","score":"high"},
 		{"title":"obj","url":"https://d.test","snippet":"s","score":{"x":1}},
-		{"title":"null","url":"https://e.test","snippet":"s","score":null}
+		{"title":"null","url":"https://e.test","snippet":"s","score":null},
+		{"title":"nan","url":"https://f.test","snippet":"s","score":"NaN"},
+		{"title":"inf","url":"https://g.test","snippet":"s","score":"Inf"}
 	]}`)
 	results, err := parseSearchResults(body)
 	if err != nil {
 		t.Fatalf("a single odd score must not fail the parse: %v", err)
 	}
-	if len(results) != 5 {
-		t.Fatalf("want 5 results (none dropped), got %d", len(results))
+	if len(results) != 7 {
+		t.Fatalf("want 7 results (none dropped), got %d", len(results))
 	}
 	if results[0].Score != 0.77 {
 		t.Errorf("numeric score = %v, want 0.77", results[0].Score)
@@ -656,9 +657,12 @@ func TestParseSearchResultsToleratesNonNumericScore(t *testing.T) {
 	if results[1].Score != 0.5 {
 		t.Errorf("numeric-string score = %v, want 0.5", results[1].Score)
 	}
-	for _, i := range []int{2, 3, 4} {
+	// Indices 5 and 6 cover ParseFloat-accepted non-finite values ("NaN"/"Inf"),
+	// which must be rejected so the documented filter holds and the renderer never
+	// emits a non-finite score.
+	for _, i := range []int{2, 3, 4, 5, 6} {
 		if results[i].Score != 0 {
-			t.Errorf("unparseable/null score[%d] = %v, want 0 (absent)", i, results[i].Score)
+			t.Errorf("unparseable/null/non-finite score[%d] = %v, want 0 (absent)", i, results[i].Score)
 		}
 	}
 }

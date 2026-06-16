@@ -51,3 +51,41 @@ func TestFirstUsableProviderAcceptsKeylessLocalProxy(t *testing.T) {
 		t.Fatalf("want keyless local proxy fallback, got %q ok=%v", got.Name, ok)
 	}
 }
+
+// A profile whose catalog entry no longer resolves and that carries no explicit
+// BaseURL has no endpoint, so it must be skipped rather than selected as a
+// fallback that fails at first use. A stale CatalogID with a BaseURL still works.
+func TestFirstUsableProviderSkipsUnresolvableCatalogWithoutBaseURL(t *testing.T) {
+	providers := []config.ProviderProfile{
+		{Name: "ghost", CatalogID: "no-such-catalog-entry", APIKey: "k"}, // unusable: no endpoint
+		{Name: "custom", CatalogID: "no-such-catalog-entry", BaseURL: "https://api.custom.test/v1", APIKey: "k"},
+	}
+	got, ok := firstUsableProvider(providers)
+	if !ok || got.Name != "custom" {
+		t.Fatalf("want custom-endpoint fallback, got %q ok=%v", got.Name, ok)
+	}
+}
+
+func TestProviderProfileIsLocal(t *testing.T) {
+	cases := []struct {
+		name    string
+		baseURL string
+		want    bool
+	}{
+		{"loopback name", "http://localhost:11434/v1", true},
+		{"loopback v4", "http://127.0.0.1:8080", true},
+		{"loopback v6", "http://[::1]:10531/v1", true},
+		{"remote", "https://api.moonshot.ai/v1", false},
+		{"contains-localhost-substring", "https://notlocalhost.com/v1", false},
+		{"host-with-127-substring", "https://api127.0.0.1.example.com", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerProfileIsLocal(config.ProviderProfile{BaseURL: tc.baseURL})
+			if got != tc.want {
+				t.Fatalf("providerProfileIsLocal(%q) = %v, want %v", tc.baseURL, got, tc.want)
+			}
+		})
+	}
+}

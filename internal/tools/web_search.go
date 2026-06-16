@@ -315,9 +315,10 @@ func (s *lenientScore) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	// Accept both 0.91 and "0.91"; ignore anything else (object, bool, NaN/Inf,
-	// out-of-range) by leaving the score at zero.
+	// out-of-range) by leaving the score at zero. ParseFloat accepts "NaN"/"Inf",
+	// so reject non-finite results explicitly to honor the documented filter.
 	unquoted := strings.TrimSpace(strings.Trim(string(trimmed), `"`))
-	if f, parseErr := strconv.ParseFloat(unquoted, 64); parseErr == nil {
+	if f, parseErr := strconv.ParseFloat(unquoted, 64); parseErr == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 		*s = lenientScore(f)
 	}
 	return nil

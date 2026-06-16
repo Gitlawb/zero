@@ -34,6 +34,9 @@ type transcriptSelectableLine struct {
 
 type transcriptCopiedMsg struct {
 	chars int
+	// err is set when neither the native clipboard nor the OSC52 fallback landed
+	// the copy, so the status line can report the failure instead of "Copied!".
+	err error
 }
 
 type transcriptCopyStatusExpiredMsg struct {
@@ -438,7 +441,11 @@ func copyTranscriptSelectionCmd(text string) tea.Cmd {
 		// back to OSC52 (forwarded by the terminal) for remote/SSH sessions where no
 		// local clipboard utility is reachable.
 		if err := clipboard.WriteAll(text); err != nil {
-			_, _ = os.Stdout.WriteString(ansi.SetSystemClipboard(text))
+			if _, oscErr := os.Stdout.WriteString(ansi.SetSystemClipboard(text)); oscErr != nil {
+				// Both paths failed; report it rather than claiming a copy that
+				// never reached any clipboard.
+				return transcriptCopiedMsg{err: err}
+			}
 		}
 		return transcriptCopiedMsg{chars: utf8.RuneCountInString(text)}
 	}

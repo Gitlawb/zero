@@ -48,7 +48,6 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 
 func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
 	// web_search is only registered when a backend is configured.
-	t.Setenv("ZERO_WEBSEARCH_BACKEND", "")
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	byName := map[string]Tool{}
 	for _, tool := range CoreNetworkTools() {
@@ -82,7 +81,6 @@ func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
 func TestCoreNetworkToolsOmitWebSearchWhenUnconfigured(t *testing.T) {
 	// No backend configured → don't offer web_search (it could only error, which
 	// makes the model waste calls + prompts before falling back to an MCP search).
-	t.Setenv("ZERO_WEBSEARCH_BACKEND", "")
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "")
 	names := map[string]bool{}
 	for _, tool := range CoreNetworkTools() {
