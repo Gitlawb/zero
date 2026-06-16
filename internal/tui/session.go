@@ -119,14 +119,14 @@ func tuiSessionTitle(prompt string) string {
 func (m model) handleResumeCommand(args string) (model, string) {
 	args = strings.TrimSpace(args)
 	if args == "" {
-		return m, m.resumeText("")
+		return m, m.resumeText()
 	}
 
 	session, err := m.resolveResumeSession(args)
 	if err != nil {
 		return m, "Sessions\n" + err.Error()
 	}
-	events, err := m.sessionStore.ReadEvents(session.SessionID)
+	events, err := m.resumeEvents(session.SessionID)
 	if err != nil {
 		return m, "Sessions\nerror: " + err.Error()
 	}
@@ -141,7 +141,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	}
 
 	rows := initialTranscript()
-	rows = appendRow(rows, rowSystem, formatResumeSummary(*session, len(events)))
+	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
 	for _, row := range transcriptRowsFromSessionEvents(events) {
 		rows = appendTranscriptRow(rows, row)
 	}
@@ -188,7 +188,34 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 	return session, nil
 }
 
-func formatResumeSummary(session sessions.Metadata, eventCount int) string {
+// resumeEvents reads a session's events for resume, preferring the rehydrated
+// (compaction-aware) view so a resumed session honors a prior /compact — matching
+// the CLI's `zero exec --resume` (readExecContextEvents) and the in-TUI /compact
+// reload. Falls back to the raw log if rehydration fails.
+func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
+	events, err := m.sessionStore.ReadRehydratedEvents(sessionID)
+	if err == nil {
+		return events, nil
+	}
+	raw, rawErr := m.sessionStore.ReadEvents(sessionID)
+	if rawErr != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// formatResumeSummary reports what the resumed conversation will actually continue
+// with (the active model/provider), noting the session's recorded model/provider
+// when it differs — resume keeps the current model rather than switching.
+func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) string {
+	modelLine := "model: " + displayValue(m.modelName, "none")
+	if recorded := strings.TrimSpace(session.ModelID); recorded != "" && !strings.EqualFold(recorded, m.modelName) {
+		modelLine += "  (recorded: " + recorded + ")"
+	}
+	providerLine := "provider: " + displayValue(m.providerName, "none")
+	if recorded := strings.TrimSpace(session.Provider); recorded != "" && !strings.EqualFold(recorded, m.providerName) {
+		providerLine += "  (recorded: " + recorded + ")"
+	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Resumed Zero session",
 		Status: commandStatusOK,
@@ -197,12 +224,52 @@ func formatResumeSummary(session sessions.Metadata, eventCount int) string {
 			Lines: []string{
 				"id: " + session.SessionID,
 				"title: " + displayValue(session.Title, "untitled"),
-				"model: " + displayValue(session.ModelID, "none"),
-				"provider: " + displayValue(session.Provider, "none"),
+				modelLine,
+				providerLine,
 				fmt.Sprintf("events: %d", eventCount),
 			},
 		}},
 	})
+}
+
+// newSessionPicker builds the interactive /resume picker (mirrors /model & /provider):
+// one row per resumable session — title (Label) + id and relative age (Meta). Returns
+// nil when there are no resumable sessions so the caller falls back to the text path.
+func (m model) newSessionPicker() *commandPicker {
+	if m.sessionStore == nil {
+		return nil
+	}
+	metas, err := m.sessionStore.ListResumable()
+	if err != nil || len(metas) == 0 {
+		return nil
+	}
+	now := m.now()
+	items := make([]pickerItem, 0, len(metas))
+	for _, meta := range metas {
+		items = append(items, pickerItem{
+			Label: displayValue(meta.Title, "untitled"),
+			Value: meta.SessionID,
+			Meta:  meta.SessionID + " · " + relativeAge(meta.UpdatedAt, now),
+		})
+	}
+	return &commandPicker{
+		kind:     pickerSession,
+		title:    "Resume a session",
+		items:    items,
+		allItems: append([]pickerItem{}, items...),
+		selected: 0,
+	}
+}
+
+// openSessionPicker opens the /resume picker; ok is false when there is nothing to
+// resume (the caller then falls back to the text list / "none" message).
+func (m model) openSessionPicker() (model, bool) {
+	picker := m.newSessionPicker()
+	if picker == nil {
+		return m, false
+	}
+	m.picker = picker
+	return m, true
 }
 
 func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {

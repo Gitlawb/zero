@@ -229,19 +229,10 @@ func (m model) searchText(query string) string {
 	return zsearch.FormatResult(zsearch.RedactResult(result))
 }
 
-func (m model) resumeText(args string) string {
-	args = strings.TrimSpace(args)
-	if args != "" {
-		return renderCommandOutput(commandOutput{
-			Title:  "Sessions",
-			Status: commandStatusInfo,
-			Sections: []commandSection{{
-				Title: "Resume",
-				Lines: []string{"requested session: " + args},
-			}},
-			Hints: []string{"use /resume " + args + " to hydrate this TUI session"},
-		})
-	}
+// resumeText is the text fallback for /resume — the no-session "none" message and
+// the store-error message (the interactive picker handles the populated case). It
+// also still backs the stacked-card list rendering as a defensive fallback.
+func (m model) resumeText() string {
 	// Only standalone conversations — not child/spec sub-runs, which an agent
 	// spawns by the dozen and would otherwise flood the picker (the "… N more").
 	sessions, err := m.sessionStore.ListResumable()

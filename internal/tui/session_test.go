@@ -700,7 +700,7 @@ func TestResumePickerExcludesSubRunSessions(t *testing.T) {
 		t.Fatalf("Create spec draft: %v", err)
 	}
 
-	out := newModel(context.Background(), Options{SessionStore: store}).resumeText("")
+	out := newModel(context.Background(), Options{SessionStore: store}).resumeText()
 
 	if !strings.Contains(out, "Real Conversation") {
 		t.Fatalf("resume picker should list the real conversation:\n%s", out)

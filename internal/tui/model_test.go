@@ -822,15 +822,118 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /resume to be handled without starting an agent run")
 	}
-	if !transcriptContains(next.transcript, "Newer") || !transcriptContains(next.transcript, "Older") {
-		t.Fatalf("expected session list in transcript, got %#v", next.transcript)
+	// Bare /resume now opens the interactive session picker (like /model & /provider).
+	if next.picker == nil || next.picker.kind != pickerSession {
+		t.Fatalf("expected /resume to open the session picker, got picker=%#v", next.picker)
 	}
-	// The list renders as stacked cards: id + age + title + meta per session.
-	view := next.View()
-	for _, want := range []string{first.SessionID, second.SessionID, "1 events", "anthropic"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("sessions card view missing %q:\n%s", want, view)
+	// Every row carries the session title (Label) and id (Meta), for both sessions.
+	byTitle := map[string]pickerItem{}
+	for _, item := range next.picker.items {
+		byTitle[item.Label] = item
+	}
+	for _, want := range []struct{ title, id string }{{"Newer", second.SessionID}, {"Older", first.SessionID}} {
+		item, ok := byTitle[want.title]
+		if !ok {
+			t.Fatalf("picker missing session %q; items=%#v", want.title, next.picker.items)
 		}
+		if item.Value != want.id {
+			t.Fatalf("picker %q Value = %q, want session id %q", want.title, item.Value, want.id)
+		}
+		if !strings.Contains(item.Meta, want.id) {
+			t.Fatalf("picker %q Meta should show the id %q, got %q", want.title, want.id, item.Meta)
+		}
+	}
+	// The picker overlay renders the titles and ids.
+	view := next.View()
+	for _, want := range []string{"Resume a session", "Newer", "Older", first.SessionID, second.SessionID} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("session picker view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestResumePickerSelectionHydratesSession(t *testing.T) {
+	store := testSessionStore(t)
+	target, err := store.Create(sessions.CreateInput{Title: "Pick me", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create target: %v", err)
+	}
+	if _, err := store.AppendEvent(target.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"content": "hello"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.Create(sessions.CreateInput{Title: "Other", ModelID: "x", Provider: "y"}); err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.input.SetValue("/resume")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.picker == nil || m.picker.kind != pickerSession {
+		t.Fatalf("expected the session picker to open, got %#v", m.picker)
+	}
+	for i, item := range m.picker.items {
+		if item.Value == target.SessionID {
+			m.picker.selected = i
+		}
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choosePicker
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("selecting a session to resume should not start an agent run")
+	}
+	if next.picker != nil {
+		t.Fatal("picker should close after a selection")
+	}
+	if next.activeSession.SessionID != target.SessionID {
+		t.Fatalf("active session = %q, want %q", next.activeSession.SessionID, target.SessionID)
+	}
+	if !transcriptContains(next.transcript, "Resumed Zero session") || !transcriptContains(next.transcript, target.SessionID) {
+		t.Fatalf("expected the resume summary in the transcript, got %#v", next.transcript)
+	}
+}
+
+func TestResumeHonorsPriorCompaction(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "Compacted", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, content := range []string{"alpha", "beta", "gamma", "delta"} {
+		if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]string{"content": content}}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	plan, err := store.PlanCompaction(session.SessionID, sessions.CompactionOptions{PreserveLast: 2, MaxPromptChars: 500})
+	if err != nil {
+		t.Fatalf("PlanCompaction: %v", err)
+	}
+	if _, err := store.RecordCompaction(session.SessionID, sessions.RecordCompactionInput{Plan: plan, Summary: "early summary"}); err != nil {
+		t.Fatalf("RecordCompaction: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]string{"content": "epsilon"}}); err != nil {
+		t.Fatalf("Append epsilon: %v", err)
+	}
+
+	raw, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	rehydrated, err := store.ReadRehydratedEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadRehydratedEvents: %v", err)
+	}
+	if len(rehydrated) >= len(raw) {
+		t.Fatalf("test setup invalid: rehydrated (%d) should be < raw (%d)", len(rehydrated), len(raw))
+	}
+
+	m := newModel(context.Background(), Options{SessionStore: store})
+	next, _ := m.handleResumeCommand(session.SessionID)
+	// Resume must load the rehydrated (compaction-aware) context, not the raw log —
+	// matching the CLI's --resume and the in-TUI /compact reload.
+	if len(next.sessionEvents) != len(rehydrated) {
+		t.Fatalf("resumed sessionEvents = %d, want rehydrated %d (not raw %d): resume must honor prior compaction", len(next.sessionEvents), len(rehydrated), len(raw))
 	}
 }
 

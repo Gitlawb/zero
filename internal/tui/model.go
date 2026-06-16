@@ -1882,6 +1882,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		text := ""
 		m, text = m.handleModeCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+	case pickerSession:
+		// item.Value is the chosen session id; handleResumeCommand hydrates it and
+		// rebuilds the transcript (returning "" on success, an error note on failure).
+		text := ""
+		m, text = m.handleResumeCommand(item.Value)
+		if text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
 	}
 	return m, nil
 }
@@ -2038,6 +2046,14 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 				text: "Cannot resume sessions while a run is active.",
 			})
 			return m, nil
+		}
+		// Bare `/resume` opens an interactive session picker (like /model & /provider);
+		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
+		// back to the text path when there is nothing to resume.
+		if strings.TrimSpace(command.text) == "" {
+			if next, ok := m.openSessionPicker(); ok {
+				return next, nil
+			}
 		}
 		text := ""
 		m, text = m.handleResumeCommand(command.text)

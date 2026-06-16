@@ -23,6 +23,7 @@ const (
 	pickerModel pickerKind = iota
 	pickerEffort
 	pickerMode
+	pickerSession
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
