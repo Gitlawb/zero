@@ -3,6 +3,7 @@ package tui
 import tea "charm.land/bubbletea/v2"
 
 type mouseOverlayHit struct {
+	x int
 	y int
 }
 
@@ -448,16 +449,28 @@ func (m model) overlayMouseHit(msg tea.MouseMsg, overlay string, width int) (mou
 	if mouseX(msg) < left || mouseX(msg) >= left+overlayWidth {
 		return mouseOverlayHit{}, false
 	}
-	return mouseOverlayHit{y: mouseY(msg) - top}, true
+	return mouseOverlayHit{x: mouseX(msg) - left, y: mouseY(msg) - top}, true
 }
 
 func (m model) overlayMouseTop(overlayHeight int, width int) int {
+	return m.overlayMouseRect(overlayHeight, width).y
+}
+
+func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {
 	if overlayHeight <= 0 {
-		return 0
+		return tuiRect{}
 	}
 	if m.altScreen && m.height > 0 {
 		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-		return frame.bodyRect.y + maxInt(0, (frame.bodyRect.height-overlayHeight)/2)
+		return tuiRect{
+			y:      frame.bodyRect.y + maxInt(0, (frame.bodyRect.height-overlayHeight)/2),
+			width:  width,
+			height: overlayHeight,
+		}
 	}
-	return maxInt(0, (normalizedStartupHeight(m.height)-overlayHeight)/2)
+	return tuiRect{
+		y:      maxInt(0, (normalizedStartupHeight(m.height)-overlayHeight)/2),
+		width:  width,
+		height: overlayHeight,
+	}
 }
