@@ -27,6 +27,8 @@ func (f *fakeKR) Delete(service, account string) (bool, error) {
 }
 
 func TestStoreKeyringBackendRoundTrip(t *testing.T) {
+	// Keep the cross-process keyring lock file inside a temp config dir.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
@@ -92,6 +94,7 @@ func TestNewStoreStorageSelection(t *testing.T) {
 }
 
 func TestStoreKeyringStatus(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {

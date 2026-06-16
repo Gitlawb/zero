@@ -18,8 +18,9 @@ const minScheduleInterval = time.Second
 // Schedule describes when a scheduled job fires. Scheduling is interval-based
 // ("wakeup"): the job first fires after FirstDelay (or Every when FirstDelay is
 // zero), then every Every interval, until MaxRuns successful spawns is reached
-// or the job/scheduler is stopped. A daily "cron" time is expressed by setting
-// FirstDelay to the delay until the next occurrence and Every to 24h (see the
+// or the job/scheduler is stopped. A daily "cron" time sets Daily with Hour/Minute
+// (and Every=24h for display/validation); the run loop then recomputes the delay
+// to the next local HH:MM each cycle so it holds across DST (see the
 // swarm_schedule tool's daily_at handling).
 type Schedule struct {
 	// Every is the interval between fires. Required, must be >= minScheduleInterval.
@@ -28,6 +29,12 @@ type Schedule struct {
 	FirstDelay time.Duration
 	// MaxRuns bounds successful spawns. Zero => unbounded (until cancelled).
 	MaxRuns int
+	// Daily, when set, recomputes each fire as the next local Hour:Minute rather
+	// than adding a fixed Every, so a wall-clock daily time does not drift across
+	// DST transitions.
+	Daily  bool
+	Hour   int
+	Minute int
 }
 
 func (sch Schedule) validate() error {
@@ -107,6 +114,9 @@ func (j *scheduledJob) snapshot() JobStatus {
 type Scheduler struct {
 	sw        *Swarm
 	newTicker tickerFunc
+	// now is the wall clock used to recompute a daily job's next local fire each
+	// cycle (so HH:MM holds across DST). Defaults to time.Now; tests override it.
+	now func() time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -125,10 +135,19 @@ func newScheduler(sw *Swarm) *Scheduler {
 	return &Scheduler{
 		sw:        sw,
 		newTicker: realTicker,
+		now:       time.Now,
 		ctx:       ctx,
 		cancel:    cancel,
 		jobs:      map[string]*scheduledJob{},
 	}
+}
+
+// clock returns the scheduler's wall clock, defaulting to time.Now.
+func (s *Scheduler) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // Add registers a recurring spawn and starts its timing loop. It validates the
@@ -150,6 +169,14 @@ func (s *Scheduler) Add(pol Policy, teamName, agentType, task, cwd string, sch S
 	defer s.mu.Unlock()
 	if s.closed {
 		return "", errors.New("swarm: scheduler is closed")
+	}
+	// A scheduler whose parent context is already canceled (e.g. after
+	// Swarm.Close) is effectively closed: a new job's loop would exit on the
+	// first select, so reject Add rather than reporting a job that never runs.
+	select {
+	case <-s.ctx.Done():
+		return "", errors.New("swarm: scheduler is closed")
+	default:
 	}
 	id := fmt.Sprintf("sched-%d", s.seq.Add(1))
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -230,8 +257,23 @@ func (s *Scheduler) run(job *scheduledJob) {
 			stop()
 			return
 		case <-ch:
+			stop()
 		}
-		delay = job.schedule.Every
+		// A tick and a cancel can be ready together; the select above may pick the
+		// tick, so re-check cancellation before firing to avoid one extra spawn
+		// after Cancel/Close.
+		select {
+		case <-job.ctx.Done():
+			return
+		default:
+		}
+		// Daily jobs recompute the delay to the next local HH:MM each cycle so the
+		// wall-clock time holds across DST; interval jobs use the fixed Every.
+		if job.schedule.Daily {
+			delay = nextDailyDelay(s.clock(), job.schedule.Hour, job.schedule.Minute)
+		} else {
+			delay = job.schedule.Every
+		}
 		if !s.fireIfIdle(job) {
 			continue
 		}

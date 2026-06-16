@@ -151,7 +151,14 @@ func NewStore(options StoreOptions) (*Store, error) {
 			}
 			kr = osKeyring
 		}
-		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount}, now: now}, nil
+		// Serialize the keyring's read-modify-write across processes with a lock
+		// file beside where the file backend would live. Best-effort: if no config
+		// location resolves, fall back to in-process serialization only.
+		lockPath := ""
+		if storePath, perr := ResolveStorePath(options.Env); perr == nil {
+			lockPath = filepath.Join(filepath.Dir(storePath), "oauth-keyring.lockfile")
+		}
+		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath}, now: now}, nil
 	default:
 		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\" or \"keyring\")", storage)
 	}
@@ -369,6 +376,9 @@ type keyringBlob struct {
 	kr      KeyringClient
 	service string
 	account string
+	// lockPath, when set, is a cross-process lock file serializing the keyring's
+	// read-modify-write so concurrent processes don't clobber each other's tokens.
+	lockPath string
 }
 
 func (b keyringBlob) read() ([]byte, bool, error) {
@@ -387,9 +397,20 @@ func (b keyringBlob) write(data []byte) error {
 	return b.kr.Set(b.service, b.account, base64.StdEncoding.EncodeToString(data))
 }
 
-// withLock relies on Store.mu for within-process serialization; the keyring is
-// the single source of truth, so no cross-process lock file is used.
-func (b keyringBlob) withLock(_ func() time.Time, fn func() error) error { return fn() }
+// withLock serializes the keyring's read-modify-write. Store.mu covers the
+// in-process case; lockPath (when set) adds cross-process exclusion so two
+// processes can't both read the blob, modify, and write — dropping a token.
+func (b keyringBlob) withLock(now func() time.Time, fn func() error) error {
+	if b.lockPath == "" {
+		return fn()
+	}
+	unlock, err := acquireFileLock(b.lockPath, now)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
+}
 
 func (b keyringBlob) location() string { return "keyring:" + b.service + "/" + b.account }
 

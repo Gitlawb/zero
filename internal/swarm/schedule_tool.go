@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,7 +105,13 @@ func (t *scheduleTool) add(args map[string]any, options tools.RunOptions) tools.
 		if err != nil {
 			return errResult("%v", err)
 		}
+		// Daily mode: Every=24h satisfies validation/display, but the scheduler
+		// recomputes each fire from Hour:Minute so the wall-clock time holds across
+		// DST instead of drifting by a fixed 24h.
 		sch.Every = 24 * time.Hour
+		sch.Daily = true
+		sch.Hour = hour
+		sch.Minute = minute
 		sch.FirstDelay = nextDailyDelay(t.clock(), hour, minute)
 	default:
 		d, err := time.ParseDuration(every)
@@ -209,6 +216,11 @@ func swarmInt(args map[string]any, key string) (int, bool) {
 	}
 	switch n := v.(type) {
 	case float64:
+		// Reject non-integer / non-finite JSON numbers so e.g. max_runs=1.9 is an
+		// error rather than silently truncating to 1.
+		if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
+			return 0, false
+		}
 		return int(n), true
 	case int:
 		return n, true

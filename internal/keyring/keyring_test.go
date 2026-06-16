@@ -94,6 +94,20 @@ func (f *fakeKeyring) run(_ context.Context, name string, stdin []byte, args ...
 	return nil, fakeExit{1}
 }
 
+func TestKeyringGetSurfacesNonNotFoundError(t *testing.T) {
+	// On macOS only exit 44 (errSecItemNotFound) means "no entry"; any other
+	// non-zero exit is a real failure that must surface, not be masked as absent.
+	k := &Keyring{
+		goos: "darwin",
+		run: func(_ context.Context, _ string, _ []byte, _ ...string) ([]byte, error) {
+			return nil, fakeExit{1}
+		},
+	}
+	if _, ok, err := k.Get("zero", "tokens"); err == nil || ok {
+		t.Fatalf("a non-44 exit must surface as an error, got ok=%v err=%v", ok, err)
+	}
+}
+
 func TestKeyringRoundTripDarwin(t *testing.T) {
 	k := newFake("darwin").keyring()
 	if err := k.Set("zero", "tokens", "blob-AAA"); err != nil {

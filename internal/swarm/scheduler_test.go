@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -155,6 +156,49 @@ func TestSchedulerCloseStopsJobs(t *testing.T) {
 	}
 }
 
+func TestSchedulerAddRejectedAfterContextCancel(t *testing.T) {
+	sw := newSwarmFor(t, newLauncher(okFor))
+	sched := sw.Scheduler()
+	// Parent context canceled but s.closed not yet set: Add must still refuse so it
+	// never reports a job whose loop exits immediately.
+	sched.cancel()
+	if _, err := sched.Add(Policy{}, "team", "teammate", "t", "", Schedule{Every: time.Hour}); err == nil {
+		t.Fatal("Add after the scheduler context is canceled should fail")
+	}
+}
+
+func TestSchedulerDailyRecomputesNextDelay(t *testing.T) {
+	l := newLauncher(okFor)
+	sw := newSwarmFor(t, l)
+	sched := sw.Scheduler()
+	ticks := make(chan time.Time)
+	var delays []time.Duration
+	sched.newTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		delays = append(delays, d)
+		return ticks, func() {}
+	}
+	// Freeze the clock at 10:00 local so the next 11:00 is deterministically 1h —
+	// not the fixed 24h Every. This is what guards against DST drift.
+	base := time.Date(2026, 1, 1, 10, 0, 0, 0, time.Local)
+	sched.now = func() time.Time { return base }
+
+	if _, err := sched.Add(Policy{Model: "m"}, "team", "teammate", "ping", "",
+		Schedule{Every: 24 * time.Hour, Daily: true, Hour: 11, Minute: 0, FirstDelay: nextDailyDelay(base, 11, 0), MaxRuns: 2}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		ticks <- time.Time{}
+		waitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == i+1 })
+	}
+	if len(delays) < 2 {
+		t.Fatalf("expected at least two requested delays, got %v", delays)
+	}
+	// The second iteration's delay is recomputed from the clock (1h), not Every (24h).
+	if delays[1] != time.Hour {
+		t.Fatalf("recomputed daily delay = %s, want 1h (next 11:00 from frozen 10:00)", delays[1])
+	}
+}
+
 func TestNextDailyDelay(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 6, 15, 10, 0, 0, 0, loc)
@@ -194,5 +238,15 @@ func TestSwarmInt(t *testing.T) {
 	}
 	if _, ok := swarmInt(nil, "n"); ok {
 		t.Fatal("nil args should not parse")
+	}
+	// A non-integer JSON number must be rejected, not truncated to an int.
+	if v, ok := swarmInt(map[string]any{"n": 1.9}, "n"); ok {
+		t.Fatalf("non-integer float should not parse, got %d", v)
+	}
+	if _, ok := swarmInt(map[string]any{"n": math.Inf(1)}, "n"); ok {
+		t.Fatal("infinity should not parse")
+	}
+	if _, ok := swarmInt(map[string]any{"n": math.NaN()}, "n"); ok {
+		t.Fatal("NaN should not parse")
 	}
 }

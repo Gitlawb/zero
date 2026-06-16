@@ -85,7 +85,7 @@ func (k *Keyring) Get(service, account string) (string, bool, error) {
 	case "darwin":
 		out, err := k.exec(nil, "security", "find-generic-password", "-s", service, "-a", account, "-w")
 		if err != nil {
-			if isNotFound(err) {
+			if isNotFound(err, securityNotFoundExit) {
 				return "", false, nil
 			}
 			return "", false, wrap("get", err)
@@ -94,7 +94,7 @@ func (k *Keyring) Get(service, account string) (string, bool, error) {
 	case "linux":
 		out, err := k.exec(nil, "secret-tool", "lookup", "service", service, "account", account)
 		if err != nil {
-			if isNotFound(err) {
+			if isNotFound(err, secretToolNotFoundExit) {
 				return "", false, nil
 			}
 			return "", false, wrap("get", err)
@@ -119,7 +119,7 @@ func (k *Keyring) Delete(service, account string) (bool, error) {
 	case "darwin":
 		_, err := k.exec(nil, "security", "delete-generic-password", "-s", service, "-a", account)
 		if err != nil {
-			if isNotFound(err) {
+			if isNotFound(err, securityNotFoundExit) {
 				return false, nil
 			}
 			return false, wrap("delete", err)
@@ -176,14 +176,28 @@ func (e *runError) Error() string {
 
 func (e *runError) Unwrap() error { return e.err }
 
-// isNotFound reports whether err is a tool exit indicating "no such entry"
-// (a non-zero exit) rather than a missing binary or another failure. It matches
-// on the ExitCode behavior (satisfied by *exec.ExitError) so the logic is
-// testable without spawning a real process.
-func isNotFound(err error) bool {
+// Not-found exit codes for the OS tools: macOS `security` exits 44
+// (errSecItemNotFound) when no matching item exists; `secret-tool` exits 1 when a
+// lookup finds nothing. Any other non-zero exit is a real failure.
+const (
+	securityNotFoundExit   = 44
+	secretToolNotFoundExit = 1
+)
+
+// isNotFound reports whether err is a tool exit whose code is one of the given
+// "no such entry" codes (as opposed to a missing binary or a genuine failure,
+// which must not be masked). It matches on the ExitCode behavior (satisfied by
+// *exec.ExitError) so the logic is testable without spawning a real process.
+func isNotFound(err error, codes ...int) bool {
 	var coder interface{ ExitCode() int }
-	if errors.As(err, &coder) {
-		return coder.ExitCode() != 0
+	if !errors.As(err, &coder) {
+		return false
+	}
+	code := coder.ExitCode()
+	for _, c := range codes {
+		if code == c {
+			return true
+		}
 	}
 	return false
 }

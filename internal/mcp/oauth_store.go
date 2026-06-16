@@ -201,6 +201,15 @@ func (store *TokenStore) Status() ([]TokenStatus, error) {
 // left untouched, and the rename ensures it is imported at most once.
 func (store *TokenStore) migrateLegacy(legacyPath string) error {
 	legacyPath = filepath.Clean(legacyPath)
+	// FilePath() is an absolute path; resolve a relative LegacyPath so the
+	// same-file guard can't be bypassed by a relative spelling of the same file.
+	if !filepath.IsAbs(legacyPath) {
+		abs, err := filepath.Abs(legacyPath)
+		if err != nil {
+			return err
+		}
+		legacyPath = filepath.Clean(abs)
+	}
 	if legacyPath == store.store.FilePath() {
 		return nil // legacy and unified resolve to the same file; nothing to migrate
 	}
