@@ -123,6 +123,10 @@ type model struct {
 	height            int
 	now               func() time.Time
 	chatScrollOffset  int
+	// chatBodyLines is the live body's line count at the last update; used to pin
+	// the viewport (hold the read position) when content streams in while the user
+	// has scrolled up. 0 means "at the bottom / not pinned".
+	chatBodyLines int
 
 	// Flush-frontier state (see flush.go). In inline mode, transcript[:flushed]
 	// is already in native scrollback; in alt-screen mode this frontier stays
@@ -458,6 +462,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return next, cmd
 	}
+	nm = nm.syncChatScroll()
 	nm, mouseCmd := nm.syncMouseCapture()
 	nm, flushCmd := nm.settleTranscript()
 	return nm, batchCommands(cmd, mouseCmd, flushCmd)
@@ -1281,6 +1286,36 @@ func (m model) scrollChat(delta int) model {
 	}
 	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+delta)
 	return m
+}
+
+// syncChatScroll pins the viewport to what the user is reading. The scroll offset
+// is measured from the bottom, so when the transcript grows (streaming) the window
+// would otherwise follow the new bottom and drag the user off their spot. While
+// the user has scrolled up, bump the offset by however many lines the body grew so
+// the absolute view holds; at the bottom (offset 0) it follows normally. Only the
+// scrolled-up path renders the body, so the common case stays cheap.
+func (m model) syncChatScroll() model {
+	if !m.altScreen || m.chatScrollOffset <= 0 {
+		// At the bottom (or inline mode): follow the tail; reset the pin baseline.
+		m.chatBodyLines = 0
+		return m
+	}
+	current := m.chatBodyLineCount()
+	switch {
+	case m.chatBodyLines == 0:
+		// Just scrolled up: establish the baseline, no adjustment this frame.
+	case current > m.chatBodyLines:
+		m.chatScrollOffset += current - m.chatBodyLines
+	}
+	m.chatBodyLines = current
+	return m
+}
+
+// chatBodyLineCount renders the live transcript body and returns its line count.
+// Only called while the user is scrolled up (see syncChatScroll).
+func (m model) chatBodyLineCount() int {
+	body, _ := m.transcriptBody(chatWidth(m.width), "")
+	return len(viewLines(body))
 }
 
 func (m model) chatPageScrollLines() int {
