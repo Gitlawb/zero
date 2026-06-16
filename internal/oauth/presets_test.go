@@ -1,12 +1,15 @@
 package oauth
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestResolveConfigUsesXAIPreset(t *testing.T) {
 	r := NewRegistry()
-	// Non-nil empty env => no env vars (and no os.Getenv fallback), so the preset
-	// supplies everything.
-	cfg, flow, err := r.ResolveConfig("xai", map[string]string{})
+	// Presets are opt-in; with ZERO_OAUTH_ALLOW_PRESETS set and no other env vars
+	// the preset supplies everything.
+	cfg, flow, err := r.ResolveConfig("xai", map[string]string{"ZERO_OAUTH_ALLOW_PRESETS": "1"})
 	if err != nil {
 		t.Fatalf("ResolveConfig(xai): %v", err)
 	}
@@ -33,6 +36,7 @@ func TestResolveConfigUsesXAIPreset(t *testing.T) {
 func TestResolveConfigEnvOverridesPreset(t *testing.T) {
 	r := NewRegistry()
 	env := map[string]string{
+		"ZERO_OAUTH_ALLOW_PRESETS": "1",
 		"ZERO_OAUTH_XAI_CLIENT_ID": "custom-id",
 		"ZERO_OAUTH_XAI_SCOPES":    "alpha beta",
 		"ZERO_OAUTH_XAI_FLOW":      "device",
@@ -60,5 +64,19 @@ func TestResolveConfigNoPresetStillRequiresEnv(t *testing.T) {
 	r := NewRegistry()
 	if _, _, err := r.ResolveConfig("acme-no-preset", map[string]string{}); err == nil {
 		t.Fatal("a provider with neither preset nor env config should error")
+	}
+}
+
+// Without the opt-in flag the xAI preset must stay inert: no third-party client
+// identity is baked into the default credential path, and the error points the
+// user at the opt-in.
+func TestResolveConfigPresetInertWithoutOptIn(t *testing.T) {
+	r := NewRegistry()
+	_, _, err := r.ResolveConfig("xai", map[string]string{})
+	if err == nil {
+		t.Fatal("xai must not resolve from the preset unless ZERO_OAUTH_ALLOW_PRESETS is set")
+	}
+	if !strings.Contains(err.Error(), "ZERO_OAUTH_ALLOW_PRESETS") {
+		t.Fatalf("error should point at the opt-in, got: %v", err)
 	}
 }

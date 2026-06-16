@@ -28,10 +28,11 @@ func ValidateProviderName(name string) error {
 	return nil
 }
 
-// Registry resolves a provider's Config from env/config. It ships NO built-in
-// providers, endpoints, or client identities: every provider is defined entirely
-// by the operator via ZERO_OAUTH_<NAME>_* variables, so no third-party brand or
-// OAuth client identity is baked into the binary.
+// Registry resolves a provider's Config from env/config. By default every provider
+// is defined entirely by the operator via ZERO_OAUTH_<NAME>_* variables, so no
+// third-party OAuth client identity is used. A small set of built-in presets
+// exists for convenience but stays inert unless the operator opts in with
+// ZERO_OAUTH_ALLOW_PRESETS (see presetsAllowed); env always overrides a preset.
 type Registry struct{}
 
 // NewRegistry returns the (stateless) env-driven registry.
@@ -61,9 +62,13 @@ func (r *Registry) ResolveConfig(name string, env map[string]string) (Config, Fl
 	if err := ValidateProviderName(name); err != nil {
 		return Config{}, "", err
 	}
-	// A baked-in preset (if any) supplies defaults; each field is overridable by
-	// the matching ZERO_OAUTH_<NAME>_* env var (env wins).
-	preset, _ := lookupOAuthPreset(name)
+	// A baked-in preset (if any) supplies defaults, but ONLY when the operator opts
+	// in with ZERO_OAUTH_ALLOW_PRESETS — otherwise no third-party client identity is
+	// used and every field must come from a ZERO_OAUTH_<NAME>_* env var (env wins).
+	var preset providerPreset
+	if presetsAllowed(env) {
+		preset, _ = lookupOAuthPreset(name)
+	}
 	cfg := Config{
 		ClientID:                    firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "CLIENT_ID"))), preset.ClientID),
 		ClientSecret:                firstNonEmpty(strings.TrimSpace(envValue(env, envKey(name, "CLIENT_SECRET"))), preset.ClientSecret),
@@ -74,7 +79,11 @@ func (r *Registry) ResolveConfig(name string, env map[string]string) (Config, Fl
 		Scopes:                      scopesOrPreset(envValue(env, envKey(name, "SCOPES")), preset.Scopes),
 	}
 	if cfg.ClientID == "" {
-		return Config{}, "", fmt.Errorf("oauth: provider %q is not configured; set %s (and its endpoints or an issuer)", name, envKey(name, "CLIENT_ID"))
+		hint := ""
+		if _, ok := lookupOAuthPreset(name); ok {
+			hint = " (or set ZERO_OAUTH_ALLOW_PRESETS=1 to use the built-in preset)"
+		}
+		return Config{}, "", fmt.Errorf("oauth: provider %q is not configured; set %s (and its endpoints or an issuer)%s", name, envKey(name, "CLIENT_ID"), hint)
 	}
 	var flow Flow
 	switch strings.ToLower(strings.TrimSpace(envValue(env, envKey(name, "FLOW")))) {

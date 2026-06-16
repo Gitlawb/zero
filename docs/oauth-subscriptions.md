@@ -50,7 +50,8 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
 
 - **OpenRouter / xAI** are real OAuth: your browser opens to approve → done (no
   key to paste). OpenRouter mints a key; xAI stores a refreshable token. The same
-  chooser appears in first-run onboarding.
+  chooser appears in first-run onboarding. (xAI uses an opt-in preset — set
+  `ZERO_OAUTH_ALLOW_PRESETS=1` or your own `ZERO_OAUTH_XAI_*`; see below.)
 - **Device code (headless / SSH):** for a provider that supports it (xAI), press
   **d** on the list to get a code to enter on another device instead of opening a
   browser. On an SSH session or headless Linux box (no `DISPLAY`) device code is
@@ -60,20 +61,23 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
   OAuth (see §2). Use *Paste an API key / browse providers* + a local proxy
   (`chatgpt-proxy` / `custom-anthropic-compatible`), as described below.
 
-### Built-in OAuth providers (no env needed)
+### Built-in OAuth providers
 
-Two providers ship a working browser login out of the box:
-
-- **OpenRouter** — `zero auth openrouter` opens a browser, you approve, and it
-  **mints an OpenRouter API key** (public PKCE flow, no client_id). In the
-  interactive setup wizard, pick **OpenRouter** and press **ctrl+o** at the key
-  step to do the same inline ("Log in with OAuth"). The minted key is saved to the
-  provider profile and used normally.
-- **xAI (Grok)** — `zero auth login xai` (browser, or `--device` for headless).
-  The token is used directly on `api.x.ai/v1`; configure an `xai` provider profile
-  and it's picked up automatically. Requires a SuperGrok / X Premium+ subscription;
-  the client_id is an undocumented public Grok-CLI client (override via
-  `ZERO_OAUTH_XAI_*` if it changes).
+- **OpenRouter (no env needed)** — `zero auth openrouter` opens a browser, you
+  approve, and it **mints an OpenRouter API key** (public PKCE flow, no client_id).
+  In the interactive setup wizard, pick **OpenRouter** and press **ctrl+o** at the
+  key step to do the same inline ("Log in with OAuth"). The minted key is saved to
+  the provider profile and used normally.
+- **xAI (Grok) — opt-in preset** — xAI's flow needs an OAuth `client_id`. Zero
+  ships a built-in preset for the public Grok-CLI client, but to keep third-party
+  client identities out of the default credential path it is **off by default**.
+  Enable it with `export ZERO_OAUTH_ALLOW_PRESETS=1`, then `zero auth login xai`
+  (browser, or `--device` for headless) works one-click; the token is used directly
+  on `api.x.ai/v1`. Without the opt-in, set `ZERO_OAUTH_XAI_CLIENT_ID` (and
+  endpoints, or an issuer) yourself via `ZERO_OAUTH_XAI_*`. Either way the preset is
+  fully overridable by `ZERO_OAUTH_XAI_*` (env wins), and it requires a
+  SuperGrok / X Premium+ subscription; the client_id is an undocumented public
+  Grok-CLI client that may change without notice.
 
 Any field of a preset is overridable via `ZERO_OAUTH_<NAME>_*`. For a fully custom
 OAuth/OIDC provider, set those env vars (see `zero auth --help`) and

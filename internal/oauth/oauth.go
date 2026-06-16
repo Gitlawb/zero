@@ -14,9 +14,11 @@
 //   - Tokens, codes, and verifiers are never logged; error bodies are redacted.
 //   - Token files are 0600, base-confined, and file-locked.
 //
-// This package holds NO vendor secrets: provider client IDs and any overridable
-// endpoints come from config/env, so no third-party OAuth client identity is
-// baked into the binary.
+// This package holds NO vendor secrets: provider client IDs and endpoints come
+// from config/env by default, so no third-party OAuth client identity is used
+// unless the operator opts in. A small set of built-in presets (e.g. xAI's public
+// client) exists for convenience but is OFF by default and only consulted when
+// ZERO_OAUTH_ALLOW_PRESETS is set; env always overrides a preset.
 package oauth
 
 import (

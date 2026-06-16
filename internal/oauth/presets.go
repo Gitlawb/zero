@@ -19,6 +19,13 @@ type providerPreset struct {
 
 // builtinOAuthPresets maps a provider name to its default OAuth config.
 //
+// These presets are OFF by default and only consulted when the operator opts in
+// with ZERO_OAUTH_ALLOW_PRESETS (see presetsAllowed). A preset carries a
+// third-party OAuth client identity, and the engine keeps such identities out of
+// the default credential path (see the package doc) — opting in is an explicit
+// acknowledgement that the binary's preset client_id will be used when no
+// ZERO_OAUTH_<NAME>_* override is set.
+//
 // xAI (Grok): the client_id is a PUBLIC client (no secret) used by several Grok
 // CLIs; its access token is accepted directly as a bearer on api.x.ai/v1 (an
 // OpenAI-compatible endpoint), so no header/identity spoofing is involved.
@@ -42,6 +49,18 @@ var builtinOAuthPresets = map[string]providerPreset{
 func lookupOAuthPreset(name string) (providerPreset, bool) {
 	preset, ok := builtinOAuthPresets[strings.ToLower(strings.TrimSpace(name))]
 	return preset, ok
+}
+
+// presetsAllowed reports whether baked-in OAuth presets may supply defaults. They
+// are OFF unless the operator opts in with ZERO_OAUTH_ALLOW_PRESETS set to a
+// truthy value, keeping any third-party OAuth client identity out of the default
+// credential path (a preset client_id is only ever used after explicit opt-in).
+func presetsAllowed(env map[string]string) bool {
+	switch strings.ToLower(strings.TrimSpace(envValue(env, "ZERO_OAUTH_ALLOW_PRESETS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // scopesOrPreset returns the env scopes (space-separated) when set, else the
