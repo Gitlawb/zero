@@ -15,8 +15,8 @@ func TestPrServiceDetectsGitHubPRAndDiffStats(t *testing.T) {
 		"git merge-base origin/main HEAD": {
 			output: "abc123\n",
 		},
-		"git diff --shortstat abc123": {
-			output: " 1 file changed, 42 insertions(+), 7 deletions(-)\n",
+		"git diff --numstat abc123": {
+			output: "42\t7\tinternal/tui/view.go\n",
 		},
 	}}
 	service := NewPrService("/workspace/zero")
@@ -49,8 +49,8 @@ func TestPrServiceFallsBackToGitLabMR(t *testing.T) {
 		"git merge-base origin/develop HEAD": {
 			output: "def456\n",
 		},
-		"git diff --shortstat def456": {
-			output: " 2 files changed, 9 insertions(+), 11 deletions(-)\n",
+		"git diff --numstat def456": {
+			output: "4\t5\ta.go\n5\t6\tb.go\n",
 		},
 	}}
 	service := NewPrService("/workspace/zero")
@@ -71,8 +71,8 @@ func TestGetLocalDiffStatsFallsBackToOriginBase(t *testing.T) {
 		"git merge-base origin/main HEAD": {
 			err: errors.New("unknown revision"),
 		},
-		"git diff --shortstat origin/main": {
-			output: " 1 file changed, 3 insertions(+)\n",
+		"git diff --numstat origin/main": {
+			output: "3\t0\tREADME.md\n",
 		},
 	}}
 
@@ -82,6 +82,13 @@ func TestGetLocalDiffStatsFallsBackToOriginBase(t *testing.T) {
 	}
 	if additions != 3 || deletions != 0 {
 		t.Fatalf("diff stats = +%d -%d, want +3 -0", additions, deletions)
+	}
+}
+
+func TestParseGitNumStatSumsLocaleIndependentColumns(t *testing.T) {
+	additions, deletions := parseGitNumStat("10\t2\tfile one.go\n-\t-\tassets/logo.png\n3\t4\tdir/file.go\n")
+	if additions != 13 || deletions != 6 {
+		t.Fatalf("diff stats = +%d -%d, want +13 -6", additions, deletions)
 	}
 }
 

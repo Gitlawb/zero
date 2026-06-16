@@ -69,6 +69,7 @@ type model struct {
 	sessionCompactor       SessionCompactor
 	prService              *PrService
 	prState                PrState
+	prWatcherStop          func()
 	runtimeMessageSink     func(tea.Msg)
 	agentOptions           agent.Options
 	notifier               *notify.Notifier
@@ -258,6 +259,10 @@ type doctorCommandResultMsg struct {
 
 type prStateMsg struct {
 	state PrState
+}
+
+type prWatcherStartedMsg struct {
+	stop func()
 }
 
 type permissionDecision = agent.PermissionDecisionAction
@@ -463,13 +468,26 @@ func (m model) Init() tea.Cmd {
 			ctx = context.Background()
 		}
 		cmds = append(cmds, func() tea.Msg {
-			WatchPRStateContext(ctx, service, func(state PrState) {
+			stop := WatchPRStateContext(ctx, service, func(state PrState) {
 				sink(prStateMsg{state: state})
 			})
-			return nil
+			return prWatcherStartedMsg{stop: stop}
 		})
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m *model) stopPRWatcher() {
+	if m.prWatcherStop == nil {
+		return
+	}
+	m.prWatcherStop()
+	m.prWatcherStop = nil
+}
+
+func (m model) quit() (tea.Model, tea.Cmd) {
+	m.stopPRWatcher()
+	return m, tea.Quit
 }
 
 // Update routes every message through updateModel, then advances the flush
@@ -551,7 +569,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.flushRunIDs) > 0 {
 				return m, nil
 			}
-			return m, tea.Quit
+			return m.quit()
 		case tea.KeyCtrlO:
 			return m.toggleDetailedTranscript(), nil
 		case tea.KeyEsc:
@@ -950,7 +968,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// checkpoint session events have been flushed (above). Now that the
 				// last pending flush is drained, fire the deferred quit.
 				if m.exiting && len(m.flushRunIDs) == 0 {
-					return m, tea.Quit
+					return m.quit()
 				}
 			}
 			return m, nil
@@ -1071,6 +1089,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case prStateMsg:
 		m.prState = msg.state
+		return m, nil
+	case prWatcherStartedMsg:
+		if msg.stop == nil {
+			return m, nil
+		}
+		if m.prWatcherStop != nil {
+			m.prWatcherStop()
+		}
+		m.prWatcherStop = msg.stop
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
@@ -1877,7 +1904,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		if len(m.flushRunIDs) > 0 {
 			return m, nil
 		}
-		return m, tea.Quit
+		return m.quit()
 	case commandTools:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.toolsText()})
 		return m, nil

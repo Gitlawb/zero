@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,31 +257,34 @@ func getLocalDiffStats(ctx context.Context, cwd string, baseBranch string, run p
 	if err != nil {
 		mergeBase = originBase
 	}
-	output, err := run(ctx, cwd, "git", "diff", "--shortstat", strings.TrimSpace(mergeBase))
+	output, err := run(ctx, cwd, "git", "diff", "--numstat", strings.TrimSpace(mergeBase))
 	if err != nil {
 		return 0, 0, err
 	}
-	additions, deletions := parseGitShortStat(output)
+	additions, deletions := parseGitNumStat(output)
 	return additions, deletions, nil
 }
 
-var insertionShortStatPattern = regexp.MustCompile(`(\d+)\s+insertion`)
-var deletionShortStatPattern = regexp.MustCompile(`(\d+)\s+deletion`)
-
-func parseGitShortStat(output string) (int, int) {
-	return parseShortStatCount(insertionShortStatPattern, output), parseShortStatCount(deletionShortStatPattern, output)
+func parseGitNumStat(output string) (int, int) {
+	additions := 0
+	deletions := 0
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		additions += parseNumStatValue(fields[0])
+		deletions += parseNumStatValue(fields[1])
+	}
+	return additions, deletions
 }
 
-func parseShortStatCount(pattern *regexp.Regexp, output string) int {
-	matches := pattern.FindStringSubmatch(output)
-	if len(matches) < 2 {
-		return 0
-	}
-	value, err := strconv.Atoi(matches[1])
+func parseNumStatValue(value string) int {
+	count, err := strconv.Atoi(value)
 	if err != nil {
 		return 0
 	}
-	return value
+	return count
 }
 
 func jsonScalarString(raw json.RawMessage) string {
