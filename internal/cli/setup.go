@@ -289,6 +289,49 @@ func setupRequired(resolved config.ResolvedConfig) bool {
 	return missing
 }
 
+// firstUsableProvider returns the saved provider best suited to run without
+// onboarding: the first usable (inline credential present, or no-auth/local)
+// non-local provider, else the first usable local one. It lets the CLI fall back
+// to an already-configured login when the active provider happens to lack a
+// credential, instead of re-running onboarding every launch.
+func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderProfile, bool) {
+	var localFallback config.ProviderProfile
+	haveLocal := false
+	for _, profile := range providers {
+		if !config.HasProviderProfile(profile) {
+			continue
+		}
+		if _, missing := setupMissingCredentialEnv(profile); missing {
+			continue
+		}
+		if providerProfileIsLocal(profile) {
+			if !haveLocal {
+				localFallback = profile
+				haveLocal = true
+			}
+			continue
+		}
+		return profile, true
+	}
+	if haveLocal {
+		return localFallback, true
+	}
+	return config.ProviderProfile{}, false
+}
+
+// providerProfileIsLocal reports whether a provider points at a local endpoint
+// (a loopback URL or a catalog entry flagged Local), so the fallback prefers a
+// remote keyed provider that is more likely reachable.
+func providerProfileIsLocal(profile config.ProviderProfile) bool {
+	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
+		if descriptor, err := providercatalog.Require(catalogID); err == nil && descriptor.Local {
+			return true
+		}
+	}
+	host := strings.ToLower(profile.BaseURL)
+	return strings.Contains(host, "localhost") || strings.Contains(host, "127.0.0.1") || strings.Contains(host, "[::1]")
+}
+
 func formatSetupComplete(result tui.SetupResult) string {
 	lines := []string{"Zero setup complete"}
 	if result.Provider.Name != "" {
