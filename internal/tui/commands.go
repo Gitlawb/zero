@@ -25,6 +25,7 @@ const (
 	commandPlan
 	commandSearch
 	commandResume
+	commandRetitle
 	commandSpec
 	commandCompact
 	commandRewind
@@ -159,6 +160,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "List recent sessions or show resume guidance.",
 		kind:        commandResume,
+	},
+	{
+		name:        "/retitle",
+		usage:       "/retitle",
+		group:       commandGroupSession,
+		description: "Generate concise titles for resumable sessions.",
+		kind:        commandRetitle,
 	},
 	{
 		name:        "/spec",

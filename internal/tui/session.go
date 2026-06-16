@@ -306,6 +306,15 @@ func (m model) sessionHasResumableContent(sessionID string) bool {
 	if err != nil {
 		return true
 	}
+	return eventsHaveResumableContent(events)
+}
+
+// eventsHaveResumableContent reports whether already-loaded events contain
+// anything worth resuming: a tool call/result, or a non-user message with real
+// content (not the no-output guardrail stop). It is the pure core of
+// sessionHasResumableContent so callers that already hold the events (e.g. the
+// /retitle scan) don't re-read them.
+func eventsHaveResumableContent(events []sessions.Event) bool {
 	for _, event := range events {
 		switch event.Type {
 		case sessions.EventToolCall, sessions.EventToolResult:

@@ -576,6 +576,42 @@ func (store *Store) appendEventLocked(sessionID string, input AppendEventInput) 
 	return event, nil
 }
 
+// UpdateTitle replaces a session's Title and returns the updated metadata. It is
+// serialized under the same per-session lock as AppendEvent and re-reads the
+// latest metadata under that lock before rewriting, so a concurrent append can't
+// clobber the new title (nor the title clobber a concurrent append's event
+// count/timestamp). UpdatedAt is deliberately left untouched: a retitle is not
+// activity, so it must not reorder the session in the resumable list. A blank
+// title is rejected so a failed model generation can never erase a useful
+// first-message title, and an unchanged title is a no-op (no rewrite/fsync).
+func (store *Store) UpdateTitle(sessionID string, title string) (Metadata, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return Metadata{}, fmt.Errorf("zero session title is required")
+	}
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if session.Title == trimmed {
+		return session, nil
+	}
+	session.Title = trimmed
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, err
+	}
+	return session, nil
+}
+
 func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 	if !ValidSessionID(sessionID) {
 		return nil, fmt.Errorf("invalid zero session id %q", sessionID)
