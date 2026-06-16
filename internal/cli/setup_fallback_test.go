@@ -8,7 +8,7 @@ import (
 
 func TestFirstUsableProviderPrefersRemoteKeyed(t *testing.T) {
 	providers := []config.ProviderProfile{
-		{Name: "ollama", CatalogID: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "k"},     // usable but local
+		{Name: "ollama", CatalogID: "ollama", BaseURL: "http://localhost:11434/v1", APIKey: "k"},      // usable but local
 		{Name: "moonshot", CatalogID: "moonshot", BaseURL: "https://api.moonshot.ai/v1", APIKey: "k"}, // usable, remote
 		{Name: "xai", CatalogID: "xai", APIKeyEnv: "XAI_API_KEY"},                                     // not usable (env only, no inline key)
 	}
