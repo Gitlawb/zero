@@ -121,9 +121,21 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 		return m.renderSelectableAssistantRow(rowIndex, row, width, startBodyY)
 	case rowReasoning:
 		return m.renderSelectableReasoningRow(rowIndex, row, width, startBodyY)
+	case rowToolResult:
+		return m.renderSelectableToolResultRow(rowIndex, row, width, rc, startBodyY)
 	default:
 		return m.renderRow(row, width, rc), nil
 	}
+}
+
+// renderSelectableToolResultRow renders the tool result card and marks its head
+// (first line) as a clickable collapse/expand toggle while the row is live.
+func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	rendered := m.renderRow(row, width, rc)
+	if rendered == "" {
+		return "", nil
+	}
+	return rendered, []transcriptSelectableLine{{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}}
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -353,7 +365,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			if line.live {
 				m.streamingReasoningExpanded = !m.streamingReasoningExpanded
 			} else {
-				m = m.toggleReasoningRow(line.rowIndex)
+				m = m.toggleTranscriptRow(line.rowIndex)
 			}
 			return m, nil, true
 		}
@@ -388,11 +400,16 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 	}
 }
 
-func (m model) toggleReasoningRow(rowIndex int) model {
-	if rowIndex < 0 || rowIndex >= len(m.transcript) || m.transcript[rowIndex].kind != rowReasoning {
+// toggleTranscriptRow flips the collapse state of a collapsible row (a provider
+// thought or a tool result card).
+func (m model) toggleTranscriptRow(rowIndex int) model {
+	if rowIndex < 0 || rowIndex >= len(m.transcript) {
 		return m
 	}
-	m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+	switch m.transcript[rowIndex].kind {
+	case rowReasoning, rowToolResult:
+		m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+	}
 	return m
 }
 

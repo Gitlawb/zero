@@ -56,15 +56,19 @@ func TestDetailedTranscriptIncludesToolOutputBeyondLiveCap(t *testing.T) {
 	m.transcript = append(m.transcript, row)
 	m.flushed = len(m.transcript)
 
+	// Long generic tool output collapses in the live view (click to expand);
+	// the body is hidden behind a one-line summary.
 	compact := plainRender(t, m.renderRow(row, m.width, buildRowContext(m.transcript)))
 	assertNotContains(t, compact, "line-020")
-	assertContains(t, compact, "more lines")
+	assertContains(t, compact, "click to expand")
 
+	// The detailed transcript view (Ctrl+O) still shows the full, uncapped output.
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	next := updated.(model)
 	view := plainRender(t, next.View())
 	assertContains(t, view, "line-404")
 	assertNotContains(t, view, "more lines")
+	assertNotContains(t, view, "click to expand")
 }
 
 func TestDetailedTranscriptViewNeverExceedsTerminalWidth(t *testing.T) {

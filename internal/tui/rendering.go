@@ -947,9 +947,52 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		borderStyle = zeroTheme.cardErr
 	}
 	key := rcKey(row.runID, row.id)
+	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
+	// transcript stays scannable; the model still received the full output. Click
+	// the card to expand (▸ → ▾) while it is live; collapsed rows flush to
+	// scrollback clean. Skipped for: the uncapped detailed view (opts.bodyCap==0),
+	// diff tools whose body must stay reviewable, and short output.
+	collapsedFooter := ""
+	if opts.bodyCap > 0 && !toolCardAlwaysExpands(name) {
+		collapsedFooter = collapsedToolFooter(row.detail)
+	}
+	if collapsedFooter != "" && !row.expanded {
+		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
+		return toolCard(head, nil, collapsedFooter, borderStyle, width)
+	}
 	body := toolCardBody(name, rc.hints[key], row.detail, width, opts)
 	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width, opts)
-	return toolCard(head, body.lines, body.footer, borderStyle, width)
+	footer := body.footer
+	if collapsedFooter != "" && row.expanded && footer == "" {
+		footer = "▾ collapse"
+	}
+	return toolCard(head, body.lines, footer, borderStyle, width)
+}
+
+// toolCardAlwaysExpands reports tools whose body is a code diff that must stay
+// visible for review (mirrors the deeper flush cap intent) rather than collapse.
+func toolCardAlwaysExpands(name string) bool {
+	switch name {
+	case "edit_file", "apply_patch", "write_file":
+		return true
+	}
+	return false
+}
+
+// collapsedToolFooter summarizes the hidden output for a collapsed tool card, or
+// "" when the output is short enough to render inline. Only output longer than
+// the live body cap (the noisy "… N more lines" case, e.g. a web-search dump)
+// collapses by default.
+func collapsedToolFooter(detail string) string {
+	trimmed := strings.TrimRight(detail, "\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return ""
+	}
+	n := strings.Count(trimmed, "\n") + 1
+	if n <= cardBodyMaxLines {
+		return ""
+	}
+	return fmt.Sprintf("▸ %d lines — click to expand", n)
 }
 
 func toolRowName(row transcriptRow) string {
