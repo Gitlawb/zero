@@ -340,12 +340,8 @@ func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
 }
 
 func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
-	bodyLines := viewLines(body)
-	available := frame.bodyRect.height
-	maxOffset := maxInt(0, len(bodyLines)-available)
-	offset := clamp(scrollOffset, 0, maxOffset)
-	start := maxInt(0, len(bodyLines)-available-offset)
-	return start, available, frame.bodyRect.y
+	window := transcriptViewportForBody(body, frame, scrollOffset).window()
+	return window.start, window.height, frame.bodyRect.y
 }
 
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {

@@ -1430,17 +1430,13 @@ func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
 func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
 	bodyLines := viewLines(body)
 	frame := m.scrollableTranscriptFrame(header, footer)
-	available := frame.bodyHeight
-	maxOffset := maxInt(0, len(bodyLines)-available)
-	offset := clamp(m.chatScrollOffset, 0, maxOffset)
-	start := maxInt(0, len(bodyLines)-available-offset)
-	end := minInt(len(bodyLines), start+available)
+	window := newTranscriptViewport(len(bodyLines), frame.bodyRect.height, m.chatScrollOffset).window()
 
-	bodyWindow := make([]string, 0, available)
-	if start < end {
-		bodyWindow = append(bodyWindow, bodyLines[start:end]...)
+	bodyWindow := make([]string, 0, window.height)
+	if window.start < window.end {
+		bodyWindow = append(bodyWindow, bodyLines[window.start:window.end]...)
 	}
-	for len(bodyWindow) < available {
+	for len(bodyWindow) < window.height {
 		bodyWindow = append(bodyWindow, "")
 	}
 	bodyWindow = overlayViewportLines(bodyWindow, overlay, width)
@@ -1552,9 +1548,11 @@ func (m model) scrollChat(delta int) model {
 	if !m.altScreen || delta == 0 {
 		return m
 	}
-	maxOffset := m.chatMaxScrollOffset()
-	current := clampInt(m.chatScrollOffset, 0, maxOffset)
-	m.chatScrollOffset = clampInt(current+delta, 0, maxOffset)
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
+		return m
+	}
+	m.chatScrollOffset = viewport.scroll(delta).offset
 	if m.chatScrollOffset == 0 {
 		m.chatBodyLines = 0
 	}
@@ -1567,15 +1565,21 @@ func (m model) chatMaxScrollOffset() int {
 }
 
 func (m model) chatScrollMetrics() (int, int) {
-	if !m.altScreen || m.height <= 0 {
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
 		return 0, 0
+	}
+	return viewport.totalLines, viewport.maxOffset()
+}
+
+func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
+	if !m.altScreen || m.height <= 0 {
+		return transcriptViewport{}, false
 	}
 	width := chatWidth(m.width)
 	body, _ := m.transcriptBody(width, "")
-	bodyLines := len(viewLines(body))
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	available := frame.bodyHeight
-	return bodyLines, maxInt(0, bodyLines-available)
+	return transcriptViewportForBody(body, frame, m.chatScrollOffset), true
 }
 
 // syncChatScroll pins the viewport to what the user is reading. The scroll offset
