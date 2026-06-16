@@ -214,6 +214,21 @@ func TestNextDailyDelay(t *testing.T) {
 	}
 }
 
+func TestNextDailyDelayHoldsWallClockAcrossDST(t *testing.T) {
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	// US spring-forward 2026-03-08: clocks jump 02:00 -> 03:00 (a 23-hour day).
+	// At 06:00 EDT the 01:30 target has passed, so the next fire must be 01:30
+	// local tomorrow; a fixed Add(24h) would land at 02:30 instead.
+	now := time.Date(2026, 3, 8, 6, 0, 0, 0, loc)
+	got := now.Add(nextDailyDelay(now, 1, 30))
+	if got.Day() != 9 || got.Hour() != 1 || got.Minute() != 30 {
+		t.Fatalf("next fire = %s, want 2026-03-09 01:30 local (DST-safe)", got.Format("2006-01-02 15:04 MST"))
+	}
+}
+
 func TestParseClock(t *testing.T) {
 	h, m, err := parseClock(" 09:30 ")
 	if err != nil || h != 9 || m != 30 {

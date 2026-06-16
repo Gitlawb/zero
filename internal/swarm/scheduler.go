@@ -335,7 +335,11 @@ func (s *Scheduler) forget(id string) {
 func nextDailyDelay(now time.Time, hour, minute int) time.Duration {
 	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
 	if !next.After(now) {
-		next = next.Add(24 * time.Hour)
+		// Roll to the same wall-clock time on the next calendar day via day+1
+		// (not Add(24h)): time.Date normalizes the date and applies the correct
+		// local offset, so the HH:MM holds across DST (a spring-forward/fall-back
+		// day is 23h/25h, and a fixed 24h would fire an hour early/late).
+		next = time.Date(now.Year(), now.Month(), now.Day()+1, hour, minute, 0, 0, now.Location())
 	}
 	return next.Sub(now)
 }
