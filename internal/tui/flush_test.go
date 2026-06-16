@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -30,7 +30,7 @@ func TestSettledRowsAdvanceFrontierAndLeaveLiveView(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected a scrollback print command for the settled rows")
 	}
-	view := next.View()
+	view := viewString(next.View())
 	if strings.Contains(view, "hello there") || strings.Contains(view, "noted") {
 		t.Fatalf("flushed rows must not re-render in the live view, got %q", view)
 	}
@@ -50,7 +50,7 @@ func TestAltScreenKeepsSettledRowsInManagedView(t *testing.T) {
 	if next.flushed != 0 {
 		t.Fatalf("alt-screen mode should keep the flush frontier unchanged, got %d", next.flushed)
 	}
-	view := next.View()
+	view := viewString(next.View())
 	if !strings.Contains(view, "hello there") || !strings.Contains(view, "noted") {
 		t.Fatalf("settled rows should remain in the managed alt-screen view, got %q", view)
 	}
@@ -103,7 +103,7 @@ func TestClearResetsFlushFrontier(t *testing.T) {
 	}
 
 	m.input.SetValue("/clear")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if len(next.transcript) != 1 || next.transcript[0].kind != rowWelcome {
 		t.Fatalf("expected /clear to reset transcript, got %#v", next.transcript)
@@ -120,7 +120,7 @@ func TestEscCancellationLeavesVisibleMarker(t *testing.T) {
 	m.runCancel = func() {}
 	m.streamingText = "half an answer"
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(testKey(tea.KeyEsc))
 	next := updated.(model)
 	if !transcriptContains(next.transcript, "Run cancelled.") {
 		t.Fatalf("expected visible cancellation marker, got %#v", next.transcript)
@@ -154,21 +154,21 @@ func TestComposerHistoryRecall(t *testing.T) {
 	m := sizedTestModel(80)
 	for _, prompt := range []string{"first input", "second input"} {
 		m.input.SetValue(prompt)
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(testKey(tea.KeyEnter))
 		m = updated.(model)
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ := m.Update(testKey(tea.KeyUp))
 	m = updated.(model)
 	if got := m.input.Value(); got != "second input" {
 		t.Fatalf("first ↑ should recall the newest input, got %q", got)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ = m.Update(testKey(tea.KeyUp))
 	m = updated.(model)
 	if got := m.input.Value(); got != "first input" {
 		t.Fatalf("second ↑ should recall the older input, got %q", got)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = m.Update(testKey(tea.KeyDown))
 	m = updated.(model)
 	if got := m.input.Value(); got != "second input" {
 		t.Fatalf("↓ should walk back toward the newest input, got %q", got)

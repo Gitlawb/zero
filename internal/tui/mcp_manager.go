@@ -4,8 +4,8 @@ import (
 	"strings"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 const (
@@ -109,26 +109,26 @@ func (m model) handleMCPManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	if m.mcpManager == nil {
 		return m, nil
 	}
-	switch msg.Type {
-	case tea.KeyEsc:
+	switch {
+	case keyIs(msg, tea.KeyEsc):
 		m.mcpManager = nil
-	case tea.KeyUp:
+	case keyIs(msg, tea.KeyUp):
 		m.moveMCPManager(-1)
-	case tea.KeyDown, tea.KeyTab:
+	case keyIs(msg, tea.KeyDown) || keyIs(msg, tea.KeyTab):
 		m.moveMCPManager(1)
-	case tea.KeyEnter:
+	case keyIs(msg, tea.KeyEnter):
 		return m.chooseMCPManagerItem()
-	case tea.KeyBackspace, tea.KeyDelete, tea.KeyCtrlH:
+	case keyBackspace(msg) || keyIs(msg, tea.KeyDelete):
 		m.deleteMCPManagerQueryRune()
-	case tea.KeyCtrlU:
+	case keyCtrl(msg, 'u'):
 		m.mcpManager.query = ""
 		m.mcpManager.selected = 0
-	case tea.KeyRunes:
-		if !msg.Alt {
-			m.appendMCPManagerQuery(msg.Runes)
+	case keyText(msg) != "":
+		if !keyAlt(msg) {
+			m.appendMCPManagerQuery(keyRunes(msg))
 			return m, nil
 		}
-		switch strings.ToLower(string(msg.Runes)) {
+		switch strings.ToLower(keyText(msg)) {
 		case "a":
 			return m.openMCPAddWizard("http"), nil
 		case "s":

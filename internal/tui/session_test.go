@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -64,7 +64,7 @@ func TestPromptSubmitPersistsTUISessionEvents(t *testing.T) {
 	})
 	m.input.SetValue("inspect repo")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -113,7 +113,7 @@ func TestPromptWithoutProviderDoesNotCreateSession(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("hello")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -159,7 +159,7 @@ func TestPromptSubmitPersistsToolSessionEvents(t *testing.T) {
 	})
 	m.input.SetValue("read notes")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -236,7 +236,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 	})
 	m.input.SetValue("write notes")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -252,7 +252,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
-			updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+			updated, _ = next.Update(testKeyText("d"))
 			next = updated.(model)
 		}
 	}
@@ -444,7 +444,7 @@ func receiveFinalMessage(t *testing.T, messages <-chan tea.Msg) tea.Msg {
 func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key string, runtimeMessages <-chan tea.Msg, expectedRuntimeMessages int) model {
 	t.Helper()
 	m.input.SetValue(prompt)
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -460,7 +460,7 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok && key != "" {
-			updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+			updated, _ = next.Update(testKeyText(key))
 			next = updated.(model)
 		}
 	}
@@ -584,7 +584,7 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume " + session.SessionID)
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -628,7 +628,7 @@ func TestRewindRefreshesInMemorySessionState(t *testing.T) {
 
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume " + session.SessionID)
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if !transcriptContains(m.transcript, "DROPPED-AFTER-CHECKPOINT") {
 		t.Fatalf("setup: resumed transcript should include the post-checkpoint message")
@@ -672,7 +672,7 @@ func TestResumeCommandIsBlockedWhileRunPending(t *testing.T) {
 	m.pending = true
 	m.input.SetValue("/resume " + other.SessionID)
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -726,7 +726,7 @@ func TestResumeLatestHydratesNewestSession(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume latest")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "Newer") || !transcriptContains(next.transcript, "new answer") {
@@ -750,13 +750,13 @@ func TestEscCancelRecordsSessionError(t *testing.T) {
 	})
 	m.input.SetValue("cancel me")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
 
 	list, err := store.List()
@@ -796,7 +796,7 @@ func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 	m.input.SetValue("rewrite notes")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -818,7 +818,7 @@ func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
 			// Cancel mid-run via Esc while the permission prompt is pending: this
 			// unblocks the goroutine through ctx cancellation.
-			updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			updated, _ = next.Update(testKey(tea.KeyEsc))
 			next = updated.(model)
 			cancelled = true
 		}
@@ -870,7 +870,7 @@ func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
 	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
 	m.input.SetValue("rewrite notes")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -895,7 +895,7 @@ func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
 			// exiting — but it must NOT quit before the in-flight run's final
 			// message has been drained, or the captured checkpoint is orphaned.
 			var exitCmd tea.Cmd
-			updated, exitCmd = next.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			updated, exitCmd = next.Update(testKeyCtrl('c'))
 			next = updated.(model)
 			if !next.exiting {
 				t.Fatal("expected Ctrl+C to mark model exiting")
@@ -958,11 +958,11 @@ func TestResumedPromptIncludesSessionContext(t *testing.T) {
 		SessionStore: store,
 	})
 	m.input.SetValue("/resume " + session.SessionID)
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	next.input.SetValue("continue")
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd == nil {
 		t.Fatal("expected resumed prompt to start an agent run")
@@ -988,7 +988,7 @@ func TestResumeCommandReportsMissingSession(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t)})
 	m.input.SetValue("/resume missing_session")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "zero session not found: missing_session") {

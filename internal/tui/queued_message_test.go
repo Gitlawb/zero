@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -19,7 +19,7 @@ func TestEnterWhilePendingQueuesPromptWithoutStartingRun(t *testing.T) {
 	m.runID = 1
 	m.input.SetValue("second prompt")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -44,10 +44,10 @@ func TestQueuedPromptPreviewAppearsInView(t *testing.T) {
 	m.width = 96
 	m.input.SetValue("summarize the failing test output")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	view := next.View()
+	view := viewString(next.View())
 	for _, want := range []string{"queued", "summarize the failing test output"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected queued prompt preview to contain %q, got:\n%s", want, view)
@@ -67,7 +67,7 @@ func TestAgentResponseLaunchesQueuedPrompt(t *testing.T) {
 	m.runID = 7
 	m.input.SetValue("run queued followup")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected queued prompt not to launch until active run completes")
@@ -102,10 +102,10 @@ func TestEscClearsQueuedPromptBeforeCancelingRun(t *testing.T) {
 	m.width = 96
 	m.input.SetValue("queued followup")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
 
 	if cancelled {
@@ -114,8 +114,9 @@ func TestEscClearsQueuedPromptBeforeCancelingRun(t *testing.T) {
 	if !next.pending {
 		t.Fatal("expected active run to remain pending after clearing queued prompt")
 	}
-	if strings.Contains(next.View(), "queued followup") {
-		t.Fatalf("expected queued prompt preview to clear, got:\n%s", next.View())
+	view := viewString(next.View())
+	if strings.Contains(view, "queued followup") {
+		t.Fatalf("expected queued prompt preview to clear, got:\n%s", view)
 	}
 	if transcriptContains(next.transcript, "Run cancelled.") {
 		t.Fatalf("expected Esc not to cancel run while clearing queued prompt, got %#v", next.transcript)
@@ -130,7 +131,7 @@ func TestEnterWhileExitingDoesNotQueuePrompt(t *testing.T) {
 	m.runID = 1
 	m.input.SetValue("do not run during shutdown")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -156,7 +157,7 @@ func TestAgentResponseLaunchesQueuedPromptAfterError(t *testing.T) {
 	m.runID = 9
 	m.input.SetValue("retry with more detail")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	updated, cmd := next.Update(agentResponseMsg{runID: 9, err: errors.New("first run failed")})

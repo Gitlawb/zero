@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
@@ -19,7 +19,7 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel should not return a command")
@@ -29,6 +29,42 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	}
 	if m.chatScrollOffset != chatWheelScrollLines {
 		t.Fatalf("chatScrollOffset = %d, want %d", m.chatScrollOffset, chatWheelScrollLines)
+	}
+}
+
+func TestScrollChatClampsOffsetAtTranscriptTop(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	for index := 0; index < 40; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
+	maxOffset := m.chatMaxScrollOffset()
+	if maxOffset <= chatWheelScrollLines {
+		t.Fatalf("test transcript should be scrollable, maxOffset=%d", maxOffset)
+	}
+
+	m = m.scrollChat(maxOffset + 100)
+	if m.chatScrollOffset != maxOffset {
+		t.Fatalf("scroll beyond top offset = %d, want %d", m.chatScrollOffset, maxOffset)
+	}
+
+	m.chatScrollOffset = maxOffset + 100 // Simulate an offset saved before clamping existed.
+	m = m.scrollChat(-chatWheelScrollLines)
+	if want := maxOffset - chatWheelScrollLines; m.chatScrollOffset != want {
+		t.Fatalf("scroll down from inflated offset = %d, want %d", m.chatScrollOffset, want)
+	}
+}
+
+func TestScrollChatDoesNotAccumulateWhenTranscriptFits(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 20
+	m.transcript = appendRow(m.transcript, rowAssistant, "short")
+
+	m = m.scrollChat(100)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("non-scrollable transcript offset = %d, want 0", m.chatScrollOffset)
 	}
 }
 
@@ -42,7 +78,7 @@ func TestMouseWheelOverWrappedComposerMovesComposerCursor(t *testing.T) {
 	m.input.CursorEnd()
 	startCursor := len([]rune(text))
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Y: 14})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, 14))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel over composer should not return a command")
@@ -65,7 +101,7 @@ func TestMouseWheelOnClippedFooterStatusDoesNotMoveComposerCursor(t *testing.T) 
 	m.input.CursorEnd()
 	startCursor := len([]rune(text))
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Y: m.height - 1})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelUp, 0, m.height-1))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel on clipped footer should not return a command")
@@ -146,14 +182,17 @@ func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 20
+	for index := 0; index < 30; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	updated, _ := m.Update(testKey(tea.KeyPgUp))
 	m = updated.(model)
 	if m.chatScrollOffset != m.chatPageScrollLines() {
 		t.Fatalf("page up offset = %d, want %d", m.chatScrollOffset, m.chatPageScrollLines())
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	updated, _ = m.Update(testKey(tea.KeyPgDown))
 	m = updated.(model)
 	if m.chatScrollOffset != 0 {
 		t.Fatalf("page down should return to bottom, got offset %d", m.chatScrollOffset)

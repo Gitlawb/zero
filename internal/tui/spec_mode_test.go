@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -23,7 +23,7 @@ func TestSpecCommandCreatesDraftReview(t *testing.T) {
 	m := newSpecModeTestModel(t.TempDir(), provider, store)
 	m.input.SetValue("/spec add review flow")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected /spec to start a draft run")
@@ -58,7 +58,7 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 	m := newSpecModeTestModel(t.TempDir(), provider, store)
 	m.input.SetValue("/spec add review flow")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
@@ -67,7 +67,7 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 		t.Fatal("expected pending review before approval")
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	updated, cmd = next.Update(testKeyText("a"))
 	next = updated.(model)
 	if cmd == nil {
 		t.Fatal("expected approval to start implementation run")
@@ -104,7 +104,7 @@ func TestSpecReviewBlocksShiftTabModeCycle(t *testing.T) {
 	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
 	m.pendingSpecReview = &pendingSpecReviewPrompt{SpecID: "spec", SpecFilePath: ".zero/specs/spec.md"}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated, _ := m.Update(testKeyShift(tea.KeyTab))
 	next := updated.(model)
 
 	if next.permissionMode != agent.PermissionModeAuto {
@@ -123,7 +123,7 @@ func TestSpecReviewCancelLaunchesQueuedPrompt(t *testing.T) {
 	m.pendingSpecReview = &pendingSpecReviewPrompt{SpecID: "spec", SpecFilePath: ".zero/specs/spec.md"}
 	m.queuedMessage = "continue after cancel"
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, cmd := m.Update(testKey(tea.KeyEsc))
 	next := updated.(model)
 
 	if cmd == nil {
@@ -157,7 +157,7 @@ func TestSpecReviewRejectLaunchesQueuedPrompt(t *testing.T) {
 	m := newSpecModeTestModel(t.TempDir(), provider, store)
 	m.input.SetValue("/spec add review flow")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	updated, _ = next.Update(execCmd(cmd))
 	next = updated.(model)
@@ -166,7 +166,7 @@ func TestSpecReviewRejectLaunchesQueuedPrompt(t *testing.T) {
 	}
 	next.queuedMessage = "continue after reject"
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	updated, cmd = next.Update(testKeyText("r"))
 	next = updated.(model)
 
 	if cmd == nil {

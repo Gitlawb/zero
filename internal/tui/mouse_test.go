@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
@@ -19,12 +19,7 @@ func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
 
 	width := chatWidth(m.width)
 	top := m.overlayMouseTop(len(viewLines(m.suggestionOverlay(width))), width)
-	click := tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      width / 2,
-		Y:      top + 3,
-	}
+	click := testMouseClick(tea.MouseLeft, width/2, top+3)
 	updated, cmd := m.Update(click)
 	next := updated.(model)
 	if cmd != nil {
@@ -65,12 +60,7 @@ func TestMouseClickSelectsThenAppliesPickerRow(t *testing.T) {
 
 	width := chatWidth(m.width)
 	top := m.overlayMouseTop(len(viewLines(m.pickerOverlay(width))), width)
-	click := tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      width / 2,
-		Y:      top + 3,
-	}
+	click := testMouseClick(tea.MouseLeft, width/2, top+3)
 	updated, cmd := m.Update(click)
 	next := updated.(model)
 	if cmd != nil {
@@ -105,12 +95,7 @@ func TestMouseClickSelectsProviderWizardRow(t *testing.T) {
 
 	width := chatWidth(m.width)
 	top := m.overlayMouseTop(len(viewLines(m.providerWizardOverlay(width))), width)
-	click := tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      width / 2,
-		Y:      top + 5,
-	}
+	click := testMouseClick(tea.MouseLeft, width/2, top+5)
 	updated, cmd := m.Update(click)
 	next := updated.(model)
 	if cmd != nil {
@@ -137,7 +122,7 @@ func TestMouseWheelMovesProviderWizardRows(t *testing.T) {
 	m.providerWizard.step = providerWizardStepProvider // skip the new method chooser
 	m.mouseCapture = true
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelDown, 0, 0))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("mouse wheel should not return a command")
@@ -156,12 +141,7 @@ func TestMouseClickSelectsThenContinuesSetupProviderRow(t *testing.T) {
 	height := normalizedStartupHeight(m.height)
 	rowWidth := setupProviderBlockWidth(width, m.setup.providers)
 	top := setupContentTop(height, len(m.setupProviderLines(width, height)), m.setup.err != "")
-	click := tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      maxInt(0, (width-rowWidth)/2) + 2,
-		Y:      top + 3,
-	}
+	click := testMouseClick(tea.MouseLeft, maxInt(0, (width-rowWidth)/2)+2, top+3)
 	updated, cmd := m.Update(click)
 	next := updated.(model)
 	if cmd != nil {
@@ -196,12 +176,7 @@ func TestMouseClickSelectsThenContinuesSetupModelRow(t *testing.T) {
 	height := normalizedStartupHeight(m.height)
 	rowWidth := setupModelBlockWidth(width, m.setup.models)
 	top := setupContentTop(height, len(m.setupModelLines(width, height)), m.setup.err != "")
-	click := tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      maxInt(0, (width-rowWidth)/2) + 2,
-		Y:      top + 5,
-	}
+	click := testMouseClick(tea.MouseLeft, maxInt(0, (width-rowWidth)/2)+2, top+5)
 	updated, cmd := m.Update(click)
 	next := updated.(model)
 	if cmd != nil {
@@ -234,7 +209,7 @@ func TestMouseCaptureOnlyWhileInteractiveSurfaceOpen(t *testing.T) {
 		t.Fatalf("open command palette should capture mouse, wants=%v active=%v", m.wantsMouseCapture(), m.mouseCapture)
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, cmd := m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 	_ = cmd
 	if !m.wantsMouseCapture() || !m.mouseCapture {
@@ -259,12 +234,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 
-	updated, cmd := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      40,
-		Y:      20,
-	})
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, 40, 20))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("empty-area click should not return a command")
@@ -273,12 +243,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 		t.Fatal("empty-area click should not start transcript selection")
 	}
 
-	updated, cmd = next.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      3,
-		Y:      1,
-	})
+	updated, cmd = next.Update(testMouseClick(tea.MouseLeft, 3, 1))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("transcript press should not copy yet")
@@ -293,19 +258,9 @@ func TestTranscriptSelectionExtractsVisibleTextRange(t *testing.T) {
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 
-	updated, _ := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      3,
-		Y:      1,
-	})
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
 	m = updated.(model)
-	updated, _ = m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionMotion,
-		X:      8,
-		Y:      1,
-	})
+	updated, _ = m.Update(testMouseMotion(tea.MouseLeft, 8, 1))
 	m = updated.(model)
 
 	if got := m.selectedTranscriptText(); got != "hello" {
@@ -318,19 +273,9 @@ func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 
-	updated, _ := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      3,
-		Y:      1,
-	})
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
 	m = updated.(model)
-	updated, _ = m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonNone,
-		Action: tea.MouseActionMotion,
-		X:      8,
-		Y:      1,
-	})
+	updated, _ = m.Update(testMouseMotion(tea.MouseNone, 8, 1))
 	m = updated.(model)
 
 	if got := m.selectedTranscriptText(); got != "hello" {
@@ -343,21 +288,11 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 
-	updated, _ := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      3,
-		Y:      1,
-	})
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
 	m = updated.(model)
 	// A left-button drag is Action==Motion with Button==Left; this must update the
 	// cursor without resetting the selection anchor.
-	updated, _ = m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionMotion,
-		X:      8,
-		Y:      1,
-	})
+	updated, _ = m.Update(testMouseMotion(tea.MouseLeft, 8, 1))
 	m = updated.(model)
 
 	if got := m.selectedTranscriptText(); got != "hello" {
@@ -370,19 +305,9 @@ func TestTranscriptSelectionReleaseExtendsRangeWithoutMotion(t *testing.T) {
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 
-	updated, _ := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      3,
-		Y:      1,
-	})
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
 	m = updated.(model)
-	updated, cmd := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonNone,
-		Action: tea.MouseActionRelease,
-		X:      8,
-		Y:      1,
-	})
+	updated, cmd := m.Update(testMouseRelease(tea.MouseNone, 8, 1))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("release after range selection should return copy command")
@@ -428,12 +353,7 @@ func TestMouseClickTogglesReasoningRow(t *testing.T) {
 		t.Fatalf("expected reasoning header to be clickable, selectable=%#v", selectable)
 	}
 
-	updated, cmd := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      target.textStart,
-		Y:      target.bodyY - start,
-	})
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, target.textStart, target.bodyY-start))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("reasoning toggle click should not return a command")
@@ -467,12 +387,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 		t.Fatalf("expected live reasoning header to be clickable, selectable=%#v", selectable)
 	}
 
-	updated, cmd := m.Update(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionPress,
-		X:      target.textStart,
-		Y:      target.bodyY - start,
-	})
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, target.textStart, target.bodyY-start))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("streaming reasoning toggle click should not return a command")
@@ -525,7 +440,7 @@ func TestMCPManagerMouseSelectsFirstItemRow(t *testing.T) {
 	left, _, _ := normalizeOverlayBlock(lines, width)
 	y := m.overlayMouseTop(len(lines), width) + mcpManagerFirstItemRow(m.mcpViewState())
 
-	target, ok := m.selectMCPManagerAtMouse(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: left + 2, Y: y})
+	target, ok := m.selectMCPManagerAtMouse(testMouseClick(tea.MouseLeft, left+2, y))
 	if !ok {
 		t.Fatal("expected click on first manager item row to select")
 	}
@@ -545,7 +460,7 @@ func TestMCPAddWizardMouseSelectsAndActivatesType(t *testing.T) {
 	lines := viewLines(overlay)
 	left, _, _ := normalizeOverlayBlock(lines, width)
 	y := m.overlayMouseTop(len(lines), width) + 5 // second type row: top border + step + rule + title + first row
-	msg := tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: left + 2, Y: y}
+	msg := testMouseClick(tea.MouseLeft, left+2, y)
 
 	updated, cmd := m.Update(msg)
 	next := updated.(model)

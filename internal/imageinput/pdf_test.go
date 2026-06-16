@@ -10,6 +10,8 @@ import (
 	"testing"
 )
 
+const minimalPDFTextChunkSize = 80
+
 // buildMinimalPDF assembles a tiny, single-page PDF whose content stream draws
 // the given text. It computes a real cross-reference table and trailer so a
 // pure-Go PDF parser (ledongthuc/pdf) accepts it. Generating the fixture in-test
@@ -28,10 +30,11 @@ func buildMinimalPDF(text string) []byte {
 	startObj() // object 2: page tree
 	buf.WriteString("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
 
+	pageHeight := minimalPDFPageHeight(text)
 	startObj() // object 3: page
-	buf.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n")
+	buf.WriteString("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 " + strconv.Itoa(pageHeight) + "] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n")
 
-	content := "BT /F1 24 Tf 72 700 Td (" + text + ") Tj ET"
+	content := minimalPDFTextContent(text, pageHeight-92)
 	startObj() // object 4: content stream
 	buf.WriteString("4 0 obj\n<< /Length " + strconv.Itoa(len(content)) + " >>\nstream\n")
 	buf.WriteString(content)
@@ -50,6 +53,56 @@ func buildMinimalPDF(text string) []byte {
 	buf.WriteString("trailer\n<< /Size " + strconv.Itoa(len(offsets)+1) + " /Root 1 0 R >>\n")
 	buf.WriteString("startxref\n" + strconv.Itoa(xrefStart) + "\n%%EOF\n")
 	return buf.Bytes()
+}
+
+func minimalPDFPageHeight(text string) int {
+	lines := (len(text) + minimalPDFTextChunkSize - 1) / minimalPDFTextChunkSize
+	if lines < 1 {
+		lines = 1
+	}
+	height := 184 + lines*10
+	if height < 792 {
+		return 792
+	}
+	return height
+}
+
+func minimalPDFTextContent(text string, startY int) string {
+	var content strings.Builder
+	content.WriteString("BT /F1 8 Tf 10 TL 72 ")
+	content.WriteString(strconv.Itoa(startY))
+	content.WriteString(" Td ")
+	for index := 0; len(text) > 0; index++ {
+		if index > 0 {
+			content.WriteString(" T* ")
+		}
+		chunk := text
+		if len(chunk) > minimalPDFTextChunkSize {
+			cut := minimalPDFTextChunkSize
+			for cut > 0 && !utf8RuneStart(chunk[cut]) {
+				cut--
+			}
+			if cut == 0 {
+				cut = minimalPDFTextChunkSize
+			}
+			chunk = text[:cut]
+		}
+		content.WriteString("(")
+		content.WriteString(escapePDFLiteral(chunk))
+		content.WriteString(") Tj")
+		text = text[len(chunk):]
+	}
+	content.WriteString(" ET")
+	return content.String()
+}
+
+func escapePDFLiteral(text string) string {
+	text = strings.ReplaceAll(text, `\`, `\\`)
+	text = strings.ReplaceAll(text, `(`, `\(`)
+	text = strings.ReplaceAll(text, `)`, `\)`)
+	text = strings.ReplaceAll(text, "\r", `\r`)
+	text = strings.ReplaceAll(text, "\n", `\n`)
+	return text
 }
 
 func TestIsPDF(t *testing.T) {
@@ -159,7 +212,7 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 	// Many short lines so the *extracted text* (not the file) exceeds the cap.
 	var body strings.Builder
 	line := "The quick brown fox jumps over the lazy dog. "
-	for body.Len() < MaxDocumentTextBytes+4096 {
+	for body.Len() < MaxDocumentTextBytes+65536 {
 		body.WriteString(line)
 	}
 	if err := os.WriteFile(filepath.Join(root, "long.pdf"), buildMinimalPDF(body.String()), 0o644); err != nil {
@@ -173,7 +226,7 @@ func TestLoadDocumentTruncatesLongText(t *testing.T) {
 		t.Fatalf("capped text length %d exceeds cap %d (marker must be counted against the cap)", len(doc.Text), MaxDocumentTextBytes)
 	}
 	if !doc.Truncated {
-		t.Fatal("Truncated should be set when extracted text is capped")
+		t.Fatalf("Truncated should be set when extracted text is capped; extracted len=%d pages=%d", len(doc.Text), doc.Pages)
 	}
 	if !strings.Contains(doc.Text, documentTruncatedMarker) {
 		t.Fatal("truncated text should carry the truncation marker")

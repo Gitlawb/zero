@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -76,7 +76,7 @@ func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
 	})
 	m.input.SetValue("which model are you")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -136,7 +136,7 @@ func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
 	}
 	m.input.SetValue("hello")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("expected prompt submit to start an agent run")
@@ -254,7 +254,7 @@ func TestInitialRenderShowsLimeChatSurface(t *testing.T) {
 	model.width = 120
 	model.height = 34
 
-	view := model.View()
+	view := viewString(model.View())
 	assertContains(t, view, `/workspace/zero`)
 	assertContains(t, view, "openai/gpt-4.1")
 	assertContains(t, view, emptyStateTagline)
@@ -273,7 +273,7 @@ func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	m.height = 30
 	m.input.SetValue("inspect the repo")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	next.width = m.width
 	next.height = m.height
@@ -287,7 +287,7 @@ func TestEmptyStateCollapsesAfterFirstPrompt(t *testing.T) {
 	if next.flushed != len(next.transcript) {
 		t.Fatalf("expected settled rows to flush to scrollback, flushed=%d rows=%d", next.flushed, len(next.transcript))
 	}
-	view := next.View()
+	view := viewString(next.View())
 	if strings.Contains(view, emptyStateTagline) {
 		t.Fatalf("empty state should collapse after first prompt, got %q", view)
 	}
@@ -302,12 +302,12 @@ func TestEmptyStateStaysVisibleOnEmptySubmit(t *testing.T) {
 	m.height = 30
 	m.input.SetValue("   ")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	next.width = m.width
 	next.height = m.height
 
-	view := next.View()
+	view := viewString(next.View())
 	assertContains(t, view, emptyStateTagline)
 	assertNotContains(t, view, "❯ inspect")
 }
@@ -316,7 +316,7 @@ func TestHelpCommandAppendsHelpRow(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/help")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "/tools") {
@@ -332,7 +332,7 @@ func TestClearCommandResetsTranscript(t *testing.T) {
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "hello"})
 	m.input.SetValue("/clear")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if len(next.transcript) != 1 || next.transcript[0].kind != rowWelcome {
@@ -346,7 +346,7 @@ func TestToolsCommandListsRegisteredTools(t *testing.T) {
 	m := newModel(context.Background(), Options{Registry: registry})
 	m.input.SetValue("/tools")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "read_file") {
@@ -380,7 +380,7 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 	})
 	m.input.SetValue("/permissions")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -428,7 +428,7 @@ func TestPlanCommandShowsCurrentPlan(t *testing.T) {
 	m := newModel(context.Background(), Options{Registry: registry})
 	m.input.SetValue("/plan")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -445,7 +445,7 @@ func TestPlanCommandHandlesMissingPlanTool(t *testing.T) {
 	m := newModel(context.Background(), Options{Registry: tools.NewRegistry()})
 	m.input.SetValue("/plan")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "No plan is active") {
@@ -465,7 +465,7 @@ func TestContextCommandShowsSessionState(t *testing.T) {
 	})
 	m.input.SetValue("/context")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -494,7 +494,7 @@ func TestModelCommandShowsActiveModelWithoutRunningAgent(t *testing.T) {
 	})
 	m.input.SetValue("/model list")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -534,7 +534,7 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -613,7 +613,7 @@ func TestModelCommandRequestsCompactionBeforeDirtyContextSwitch(t *testing.T) {
 	m.sessionEvents = []sessions.Event{{Sequence: 1, Type: sessions.EventMessage}}
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -660,7 +660,7 @@ func TestModelCommandRequiresProviderRebuildForSwitch(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -687,7 +687,7 @@ func TestModelCommandRejectsSwitchWhilePending(t *testing.T) {
 	m.pending = true
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -716,7 +716,7 @@ func TestModelCommandReportsProviderRebuildErrors(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if next.modelName != "gpt-4.1" {
@@ -738,7 +738,7 @@ func TestDoctorCommandUsesCurrentProviderProfile(t *testing.T) {
 	})
 	m.input.SetValue("/doctor")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -774,7 +774,7 @@ func TestSearchCommandUsesSessionStore(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/search needle")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -789,7 +789,7 @@ func TestSearchCommandRequiresQuery(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/search")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "usage: /search <query>") {
@@ -816,7 +816,7 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -849,7 +849,7 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 		}
 	}
 	// The picker overlay renders the titles and ids.
-	view := next.View()
+	view := viewString(next.View())
 	for _, want := range []string{"Resume a session", "Newer", "Older", first.SessionID, second.SessionID} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session picker view missing %q:\n%s", want, view)
@@ -872,7 +872,7 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker == nil || m.picker.kind != pickerSession {
 		t.Fatalf("expected the session picker to open, got %#v", m.picker)
@@ -883,7 +883,7 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 		}
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // choosePicker
+	updated, cmd := m.Update(testKey(tea.KeyEnter)) // choosePicker
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("selecting a session to resume should not start an agent run")
@@ -990,7 +990,7 @@ func TestResumeCommandWithUnknownIDReportsMissingSession(t *testing.T) {
 	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t)})
 	m.input.SetValue("/resume zero_123")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if !transcriptContains(next.transcript, "zero session not found: zero_123") {
@@ -1011,7 +1011,7 @@ func TestPromptSubmitAppendsUserAndAssistantRows(t *testing.T) {
 	})
 	m.input.SetValue("say hi")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if !transcriptContains(next.transcript, "say hi") {
 		t.Fatalf("expected user row after submit, got %#v", next.transcript)
@@ -1036,7 +1036,7 @@ func TestPromptSubmitDoesNotStartAnotherRunWhilePending(t *testing.T) {
 	m.pending = true
 	m.input.SetValue("second prompt")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -1057,7 +1057,7 @@ func TestEscCancelsPendingRun(t *testing.T) {
 	m.activeRunID = 1
 	m.runCancel = func() { cancelled = true }
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := m.Update(testKey(tea.KeyEsc))
 	next := updated.(model)
 
 	if !cancelled {
@@ -1211,7 +1211,7 @@ func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
 			})
 			next := updated.(model)
 
-			updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+			updated, cmd := next.Update(testKeyText(tc.key))
 			next = updated.(model)
 
 			if cmd != nil {
@@ -1242,7 +1242,7 @@ func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
 	next := updated.(model)
 	next.input.SetValue("second prompt")
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {
@@ -1426,7 +1426,7 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 		agent.PermissionModeAsk,
 		agent.PermissionModeAuto,
 	} {
-		updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		updated, cmd := m.Update(testKeyShift(tea.KeyTab))
 		m = updated.(model)
 		if cmd != nil {
 			t.Fatalf("expected shift+tab to cycle mode synchronously, got command")
@@ -1455,7 +1455,7 @@ func TestShiftTabDoesNotCycleWhileModalsActive(t *testing.T) {
 		m.activeRunID = 7
 		updated, _ := m.Update(permissionRequestMsg{runID: 7, request: testPromptPermissionRequest()})
 		next := updated.(model)
-		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		updated, _ = next.Update(testKeyShift(tea.KeyTab))
 		next = updated.(model)
 		if next.permissionMode != agent.PermissionModeAuto {
 			t.Fatalf("expected mode unchanged while permission modal is up, got %q", next.permissionMode)
@@ -1470,7 +1470,7 @@ func TestShiftTabDoesNotCycleWhileModalsActive(t *testing.T) {
 		m.activeRunID = 7
 		updated, _ := m.Update(askUserRequestMsg{runID: 7, request: testAskUserRequest(), answer: func([]string) {}})
 		next := updated.(model)
-		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		updated, _ = next.Update(testKeyShift(tea.KeyTab))
 		next = updated.(model)
 		if next.permissionMode != agent.PermissionModeAuto {
 			t.Fatalf("expected mode unchanged while ask_user prompt is up, got %q", next.permissionMode)
@@ -1487,12 +1487,12 @@ func TestShiftTabDoesNotCycleWhileModalsActive(t *testing.T) {
 			PermissionMode: agent.PermissionModeAuto,
 		})
 		m.input.SetValue("/model")
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, _ := m.Update(testKey(tea.KeyEnter))
 		next := updated.(model)
 		if next.picker == nil {
 			t.Skip("model picker unavailable in test environment")
 		}
-		updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		updated, _ = next.Update(testKeyShift(tea.KeyTab))
 		next = updated.(model)
 		if next.permissionMode != agent.PermissionModeAuto {
 			t.Fatalf("expected mode unchanged while picker is open, got %q", next.permissionMode)
@@ -1503,7 +1503,7 @@ func TestShiftTabDoesNotCycleWhileModalsActive(t *testing.T) {
 func TestCtrlCExits(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	updated, cmd := m.Update(testKeyCtrl('c'))
 	next := updated.(model)
 
 	if !next.exiting {
@@ -1514,19 +1514,21 @@ func TestCtrlCExits(t *testing.T) {
 	}
 }
 
-func assertContains(t *testing.T, text string, want string) {
+func assertContains(t *testing.T, text any, want string) {
 	t.Helper()
 
-	if !strings.Contains(text, want) {
-		t.Fatalf("expected %q to contain %q", text, want)
+	content := plainRender(t, text)
+	if !strings.Contains(content, want) {
+		t.Fatalf("expected %q to contain %q", content, want)
 	}
 }
 
-func assertNotContains(t *testing.T, text string, unwanted string) {
+func assertNotContains(t *testing.T, text any, unwanted string) {
 	t.Helper()
 
-	if strings.Contains(text, unwanted) {
-		t.Fatalf("expected %q not to contain %q", text, unwanted)
+	content := plainRender(t, text)
+	if strings.Contains(content, unwanted) {
+		t.Fatalf("expected %q not to contain %q", content, unwanted)
 	}
 }
 

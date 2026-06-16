@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -23,9 +23,9 @@ var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m|\x1b\][^\a\x1b]*(?:\a|\x1b\
 // plainRender strips styling so assertions run against text, not styled
 // bytes. (Without a TTY lipgloss already renders plain; this keeps the tests
 // honest either way.)
-func plainRender(t *testing.T, rendered string) string {
+func plainRender(t *testing.T, rendered any) string {
 	t.Helper()
-	return ansiPattern.ReplaceAllString(rendered, "")
+	return ansiPattern.ReplaceAllString(renderContent(rendered), "")
 }
 
 func limeTestModel() model {
@@ -838,7 +838,7 @@ func TestComposerLineTracksRunState(t *testing.T) {
 
 func TestComposerLineShowsRequiredCommandArgumentHint(t *testing.T) {
 	m := limeTestModel()
-	m.input.Width = 40
+	m.input.SetWidth(40)
 	m.input.SetValue("/spec")
 	m.input.CursorEnd()
 	if got := plainRender(t, m.composerLine(96)); !strings.Contains(got, "/spec [task]") {
@@ -987,10 +987,10 @@ func TestTitleBarShowsWorkspaceAndModel(t *testing.T) {
 }
 
 func TestTitleBarHighlightsBranchOverWorkspace(t *testing.T) {
-	oldProfile := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	oldProfile := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
 	t.Cleanup(func() {
-		lipgloss.SetColorProfile(oldProfile)
+		lipgloss.Writer.Profile = oldProfile
 	})
 
 	m := limeTestModel()

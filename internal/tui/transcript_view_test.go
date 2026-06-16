@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -16,12 +16,12 @@ func TestTranscriptCommandTogglesDetailedView(t *testing.T) {
 	m := transcriptViewTestModel()
 	m.input.SetValue("/transcript")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	assertContains(t, plainRender(t, next.View()), "Transcript")
 
 	next.input.SetValue("/transcript")
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	assertNotContains(t, plainRender(t, next.View()), "Transcript")
 }
@@ -29,22 +29,22 @@ func TestTranscriptCommandTogglesDetailedView(t *testing.T) {
 func TestCtrlOTogglesDetailedTranscriptView(t *testing.T) {
 	m := transcriptViewTestModel()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	updated, _ := m.Update(testKeyCtrl('o'))
 	next := updated.(model)
 	assertContains(t, plainRender(t, next.View()), "Transcript")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	updated, _ = next.Update(testKeyCtrl('o'))
 	next = updated.(model)
 	assertNotContains(t, plainRender(t, next.View()), "Transcript")
 }
 
 func TestEscExitsDetailedTranscriptView(t *testing.T) {
 	m := transcriptViewTestModel()
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	updated, _ := m.Update(testKeyCtrl('o'))
 	next := updated.(model)
 	assertContains(t, plainRender(t, next.View()), "Transcript")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
 	assertNotContains(t, plainRender(t, next.View()), "Transcript")
 }
@@ -63,7 +63,7 @@ func TestDetailedTranscriptIncludesToolOutputBeyondLiveCap(t *testing.T) {
 	assertContains(t, compact, "click to expand")
 
 	// The detailed transcript view (Ctrl+O) still shows the full, uncapped output.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	updated, _ := m.Update(testKeyCtrl('o'))
 	next := updated.(model)
 	view := plainRender(t, next.View())
 	assertContains(t, view, "line-404")
@@ -82,9 +82,9 @@ func TestDetailedTranscriptViewNeverExceedsTerminalWidth(t *testing.T) {
 		)
 		m.flushed = len(m.transcript)
 
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+		updated, _ := m.Update(testKeyCtrl('o'))
 		next := updated.(model)
-		view := next.View()
+		view := viewString(next.View())
 		assertContains(t, plainRender(t, view), "Transcript")
 		for index, line := range strings.Split(view, "\n") {
 			if got := lipgloss.Width(line); got > chatWidth(width) {
@@ -96,11 +96,11 @@ func TestDetailedTranscriptViewNeverExceedsTerminalWidth(t *testing.T) {
 
 func TestDetailedTranscriptSwallowsNormalChatSubmit(t *testing.T) {
 	m := transcriptViewTestModel()
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	updated, _ := m.Update(testKeyCtrl('o'))
 	next := updated.(model)
 	next.input.SetValue("this should not launch")
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if cmd != nil {

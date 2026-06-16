@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -159,7 +159,7 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 		m.width, m.height = width, 24
 
 		// Empty state first: the centered tagline/hint must also fit.
-		for index, line := range strings.Split(m.View(), "\n") {
+		for index, line := range strings.Split(viewString(m.View()), "\n") {
 			if got := lipgloss.Width(line); got > width {
 				t.Fatalf("width %d: empty-state line %d is %d cells wide: %q", width, index, got, line)
 			}
@@ -177,7 +177,7 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 			transcriptRow{kind: rowAssistant, text: "Done — the change is in.", final: true, turnTools: 2},
 		)
 
-		for index, line := range strings.Split(m.View(), "\n") {
+		for index, line := range strings.Split(viewString(m.View()), "\n") {
 			if got := lipgloss.Width(line); got > width {
 				t.Fatalf("width %d: frame line %d is %d cells wide: %q", width, index, got, line)
 			}

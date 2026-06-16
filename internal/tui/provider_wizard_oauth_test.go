@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -80,6 +78,11 @@ func selectWizardOAuthProvider(t *testing.T, m model, id string) model {
 	return m
 }
 
+func beginTestOAuthAttempt(wizard *providerWizardState, device bool) (string, int) {
+	providerID := wizard.currentProvider().ID
+	return providerID, wizard.beginOAuthAttempt(device)
+}
+
 func TestProviderWizardDeviceShortcutStartsDeviceFlow(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
@@ -87,9 +90,12 @@ func TestProviderWizardDeviceShortcutStartsDeviceFlow(t *testing.T) {
 	next, _ := m.advanceProviderWizard() // → OAuth list
 	m = selectWizardOAuthProvider(t, next, "xai")
 
-	out, cmd := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	out, cmd := m.handleProviderWizardKey(testKeyText("d"))
 	if !out.providerWizard.oauthPending || !out.providerWizard.oauthDevice {
 		t.Fatalf("'d' should start device login (pending=%v device=%v)", out.providerWizard.oauthPending, out.providerWizard.oauthDevice)
+	}
+	if out.providerWizard.oauthAttemptID == 0 {
+		t.Fatal("'d' should assign an OAuth attempt id")
 	}
 	if cmd == nil {
 		t.Fatal("'d' should return the device-prepare command")
@@ -102,11 +108,10 @@ func TestProviderWizardDeviceCodeMsgShowsCodeAndPolls(t *testing.T) {
 	m.providerWizard.selectedMethod = 0
 	next, _ := m.advanceProviderWizard()
 	m = selectWizardOAuthProvider(t, next, "xai")
-	m.providerWizard.oauthPending = true
-	m.providerWizard.oauthDevice = true
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
 
 	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
-		providerID: "xai", userCode: "ABCD-1234", verifyURL: "https://x.ai/device",
+		providerID: providerID, attemptID: attemptID, userCode: "ABCD-1234", verifyURL: "https://x.ai/device",
 	})
 	if out.providerWizard.deviceUserCode != "ABCD-1234" || out.providerWizard.deviceVerificationURI != "https://x.ai/device" {
 		t.Fatalf("device code not stored: %+v", out.providerWizard)
@@ -123,11 +128,10 @@ func TestProviderWizardDeviceCodeMsgShowsCodeAndPolls(t *testing.T) {
 func TestProviderWizardDeviceErrorSurfaced(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
-	m.providerWizard.oauthPending = true
-	m.providerWizard.oauthDevice = true
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
 
 	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
-		providerID: "xai", err: errors.New("device endpoint unreachable"),
+		providerID: providerID, attemptID: attemptID, err: errors.New("device endpoint unreachable"),
 	})
 	if out.providerWizard.oauthPending || out.providerWizard.oauthDevice {
 		t.Fatal("device error should clear pending/device state")
@@ -143,12 +147,11 @@ func TestProviderWizardDeviceErrorSurfaced(t *testing.T) {
 func TestProviderWizardOAuthSuccessClearsDeviceState(t *testing.T) {
 	m := mouseTestModel()
 	m.providerWizard = m.newProviderWizard()
-	m.providerWizard.oauthPending = true
-	m.providerWizard.oauthDevice = true
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
 	m.providerWizard.deviceUserCode = "X-1"
 	m.providerWizard.deviceVerificationURI = "https://x.ai/device"
 
-	out, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{tokenLogin: true})
+	out, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true})
 	if out.providerWizard.oauthDevice || out.providerWizard.deviceUserCode != "" || out.providerWizard.deviceVerificationURI != "" {
 		t.Fatalf("success should clear device state: %+v", out.providerWizard)
 	}
@@ -177,6 +180,9 @@ func TestProviderWizardOAuthDispatchFromList(t *testing.T) {
 	next, cmd := next.advanceProviderWizard()
 	if !next.providerWizard.oauthPending {
 		t.Fatal("advancing from the OAuth list should start the login (oauthPending)")
+	}
+	if next.providerWizard.oauthAttemptID == 0 {
+		t.Fatal("advancing from the OAuth list should assign an OAuth attempt id")
 	}
 	if cmd == nil {
 		t.Fatal("advancing from the OAuth list should return the OAuth command")
@@ -210,9 +216,12 @@ func TestProviderWizardSupportsOAuth(t *testing.T) {
 
 func TestProviderWizardCtrlOStartsOAuthForOpenRouter(t *testing.T) {
 	m := wizardModelAt(t, "openrouter", providerWizardStepCredential)
-	next, cmd := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	next, cmd := m.handleProviderWizardKey(testKeyCtrl('o'))
 	if next.providerWizard == nil || !next.providerWizard.oauthPending {
 		t.Fatal("ctrl+o should mark the wizard oauthPending")
+	}
+	if next.providerWizard.oauthAttemptID == 0 {
+		t.Fatal("ctrl+o should assign an OAuth attempt id")
 	}
 	if cmd == nil {
 		t.Fatal("ctrl+o should return a command to run the OAuth flow")
@@ -221,7 +230,7 @@ func TestProviderWizardCtrlOStartsOAuthForOpenRouter(t *testing.T) {
 
 func TestProviderWizardCtrlONoopForNonOAuthProvider(t *testing.T) {
 	m := wizardModelAt(t, "openai", providerWizardStepCredential)
-	next, _ := m.handleProviderWizardKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	next, _ := m.handleProviderWizardKey(testKeyCtrl('o'))
 	if next.providerWizard != nil && next.providerWizard.oauthPending {
 		t.Fatal("ctrl+o must not start OAuth for a provider that doesn't support it")
 	}
@@ -229,8 +238,8 @@ func TestProviderWizardCtrlONoopForNonOAuthProvider(t *testing.T) {
 
 func TestApplyProviderWizardOAuthSuccessAdvances(t *testing.T) {
 	m := wizardModelAt(t, "openrouter", providerWizardStepCredential)
-	m.providerWizard.oauthPending = true
-	next, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{apiKey: "sk-or-minted"})
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, false)
+	next, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, apiKey: "sk-or-minted"})
 	if next.providerWizard == nil {
 		t.Fatal("wizard should remain open")
 	}
@@ -247,8 +256,8 @@ func TestApplyProviderWizardOAuthSuccessAdvances(t *testing.T) {
 
 func TestApplyProviderWizardOAuthErrorStays(t *testing.T) {
 	m := wizardModelAt(t, "openrouter", providerWizardStepCredential)
-	m.providerWizard.oauthPending = true
-	next, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{err: errors.New("nope")})
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, false)
+	next, _ := m.applyProviderWizardOAuth(providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, err: errors.New("nope")})
 	if next.providerWizard == nil {
 		t.Fatal("wizard should remain open on error")
 	}
@@ -272,5 +281,53 @@ func TestRenderCredentialStepShowsOAuthHintAndPending(t *testing.T) {
 	w.oauthPending = true
 	if !strings.Contains(strings.Join(w.renderOAuthWaiting(80), "\n"), "Waiting for authorization") {
 		t.Fatal("pending state should show the browser-waiting message")
+	}
+}
+
+func TestApplyProviderWizardOAuthIgnoresStaleAttempt(t *testing.T) {
+	m := wizardModelAt(t, "openrouter", providerWizardStepCredential)
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, false)
+
+	next, cmd := m.applyProviderWizardOAuth(providerWizardOAuthMsg{
+		providerID: providerID,
+		attemptID:  attemptID - 1,
+		apiKey:     "sk-or-stale",
+	})
+	if cmd != nil {
+		t.Fatal("stale OAuth result should not start a command")
+	}
+	if !next.providerWizard.oauthPending {
+		t.Fatal("stale OAuth result should leave the active attempt pending")
+	}
+	if next.providerWizard.apiKey != "" {
+		t.Fatalf("stale OAuth result applied api key %q", next.providerWizard.apiKey)
+	}
+	if next.providerWizard.step != providerWizardStepCredential {
+		t.Fatalf("stale OAuth result moved step to %v", next.providerWizard.step)
+	}
+}
+
+func TestProviderWizardDeviceCodeIgnoresStaleAttempt(t *testing.T) {
+	m := mouseTestModel()
+	m.providerWizard = m.newProviderWizard()
+	m.providerWizard.selectedMethod = 0
+	next, _ := m.advanceProviderWizard()
+	m = selectWizardOAuthProvider(t, next, "xai")
+	providerID, attemptID := beginTestOAuthAttempt(m.providerWizard, true)
+
+	out, cmd := m.applyProviderWizardDeviceCode(providerWizardDeviceCodeMsg{
+		providerID: providerID,
+		attemptID:  attemptID - 1,
+		userCode:   "STALE",
+		verifyURL:  "https://x.ai/device",
+	})
+	if cmd != nil {
+		t.Fatal("stale device-code result should not start polling")
+	}
+	if !out.providerWizard.oauthPending {
+		t.Fatal("stale device-code result should leave the active attempt pending")
+	}
+	if out.providerWizard.deviceUserCode != "" || out.providerWizard.deviceVerificationURI != "" {
+		t.Fatalf("stale device-code result applied device details: %+v", out.providerWizard)
 	}
 }

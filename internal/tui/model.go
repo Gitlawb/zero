@@ -9,10 +9,10 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
@@ -33,7 +33,7 @@ import (
 
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
-const chatWheelScrollLines = 3
+const chatWheelScrollLines = 5
 
 type model struct {
 	ctx                    context.Context
@@ -381,16 +381,13 @@ func newModel(ctx context.Context, options Options) model {
 
 	input := textinput.New()
 	input.Prompt = "❯ "
-	input.PromptStyle = zeroTheme.userPrompt
-	input.TextStyle = zeroTheme.ink
-	input.PlaceholderStyle = zeroTheme.faint
 	input.Placeholder = composerPlaceholder
 	// Bubble's Ctrl+V binding reads the clipboard itself. Keep it disabled so
 	// terminal bracketed paste (Paste: true) is the single paste path.
 	input.KeyMap.Paste.SetEnabled(false)
 	input.Focus()
 
-	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(zeroTheme.accent))
+	runSpinner := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 
 	notifier := notify.New(os.Stderr, notify.Config{
 		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
@@ -575,14 +572,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		if m.setup.visible || m.pendingAskUser != nil {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+		if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
+			return m, nil
+		}
+		state := m.currentComposerState()
+		m = m.applyComposerText(state, msg.Content, true)
+		m.recomputeSuggestions()
+		return m, nil
+	case tea.KeyPressMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.clearMouseSelection()
-		switch msg.Type {
-		case tea.KeyCtrlC:
+		switch {
+		case keyCtrl(msg, 'c'):
 			// cancelRun records the in-flight run into flushRunIDs and writes the
 			// "Run cancelled." marker, exactly like the Esc path. While ANY cancelled
 			// run is still flushing we must NOT quit yet: each cancelled goroutine
@@ -600,9 +610,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.quit()
-		case tea.KeyCtrlO:
+		case keyCtrl(msg, 'o'):
 			return m.toggleDetailedTranscript(), nil
-		case tea.KeyEsc:
+		case keyIs(msg, tea.KeyEsc):
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
 				if m.mcpAddWizard != nil {
@@ -659,7 +669,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancelRun()
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case keyIs(msg, tea.KeyEnter):
 			if m.transcriptDetailed {
 				if command := parseCommand(m.input.Value()); command.kind == commandTranscript {
 					m.input.SetValue("")
@@ -688,7 +698,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.picker != nil {
 				return m.choosePicker()
 			}
-			if msg.Alt {
+			if keyAlt(msg) {
 				if next, ok := m.applyComposerKey(msg); ok {
 					return next, nil
 				}
@@ -701,7 +711,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.chooseSuggestion()
 			}
 			return m.handleSubmit()
-		case tea.KeyShiftTab:
+		case keyIs(msg, tea.KeyTab) && keyShift(msg):
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -714,14 +724,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
-		case tea.KeyCtrlF:
+		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
 					return m, nil
 				}
 				return m.toggleModelFavorite(), nil
 			}
-		case tea.KeyBackspace, tea.KeyCtrlH:
+		case keyBackspace(msg):
 			if m.picker != nil {
 				if m.modelPickerIsLoading() {
 					return m, nil
@@ -729,7 +739,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.picker.deleteQueryRune()
 				return m, nil
 			}
-		case tea.KeyTab:
+		case keyIs(msg, tea.KeyTab):
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -746,17 +756,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSuggestion(1)
 				return m, nil
 			}
-		case tea.KeyPgUp:
+		case keyIs(msg, tea.KeyPgUp):
 			if m.transcriptDetailed {
 				return m, nil
 			}
 			return m.scrollChat(m.chatPageScrollLines()), nil
-		case tea.KeyPgDown:
+		case keyIs(msg, tea.KeyPgDown):
 			if m.transcriptDetailed {
 				return m, nil
 			}
 			return m.scrollChat(-m.chatPageScrollLines()), nil
-		case tea.KeyDown:
+		case keyIs(msg, tea.KeyDown):
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -786,7 +796,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.historyRecallActive() {
 				return m.recallHistory(1), nil
 			}
-		case tea.KeyUp:
+		case keyIs(msg, tea.KeyUp):
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -848,8 +858,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.modelPickerIsLoading() {
 				return m, nil
 			}
-			if msg.Type == tea.KeyRunes {
-				m.picker.appendQuery(msg.Runes)
+			if keyPrintable(msg) {
+				m.picker.appendQuery(keyRunes(msg))
 			}
 			return m, nil
 		}
@@ -910,7 +920,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
-		m.input.Width = maxInt(20, chatWidth(msg.Width)-14)
+		m.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
 		// The title bar prints once into native scrollback when the inline
 		// renderer is active. In alt-screen mode tea.Println is ignored, so the
 		// title stays managed inside View.
@@ -1161,14 +1171,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
+	var content string
 	if m.setup.visible {
-		return m.setupView(chatWidth(m.width))
+		content = m.setupView(chatWidth(m.width))
+	} else if m.transcriptDetailed {
+		content = m.detailedTranscriptView()
+	} else {
+		content = m.transcriptView()
 	}
-	if m.transcriptDetailed {
-		return m.detailedTranscriptView()
+
+	view := tea.NewView(content)
+	view.AltScreen = m.altScreen
+	view.ReportFocus = m.notifier != nil
+	if m.wantsMouseCapture() {
+		view.MouseMode = tea.MouseModeCellMotion
 	}
-	return m.transcriptView()
+	return view
 }
 
 // transcriptEmpty reports whether the chat surface has no real content yet
@@ -1380,8 +1399,37 @@ func (m model) scrollChat(delta int) model {
 	if !m.altScreen || delta == 0 {
 		return m
 	}
-	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+delta)
+	maxOffset := m.chatMaxScrollOffset()
+	current := clampInt(m.chatScrollOffset, 0, maxOffset)
+	m.chatScrollOffset = clampInt(current+delta, 0, maxOffset)
+	if m.chatScrollOffset == 0 {
+		m.chatBodyLines = 0
+	}
 	return m
+}
+
+func (m model) chatMaxScrollOffset() int {
+	_, maxOffset := m.chatScrollMetrics()
+	return maxOffset
+}
+
+func (m model) chatScrollMetrics() (int, int) {
+	if !m.altScreen || m.height <= 0 {
+		return 0, 0
+	}
+	width := chatWidth(m.width)
+	body, _ := m.transcriptBody(width, "")
+	bodyLines := len(viewLines(body))
+	footerLines := viewLines(m.footerView(width))
+	maxFooterLines := maxInt(0, m.height-1)
+	if len(footerLines) > maxFooterLines {
+		footerLines = footerLines[len(footerLines)-maxFooterLines:]
+	}
+	available := m.height - len(footerLines)
+	if available < 1 {
+		available = 1
+	}
+	return bodyLines, maxInt(0, bodyLines-available)
 }
 
 // syncChatScroll pins the viewport to what the user is reading. The scroll offset
@@ -1396,7 +1444,12 @@ func (m model) syncChatScroll() model {
 		m.chatBodyLines = 0
 		return m
 	}
-	current := m.chatBodyLineCount()
+	current, maxOffset := m.chatScrollMetrics()
+	m.chatScrollOffset = clampInt(m.chatScrollOffset, 0, maxOffset)
+	if m.chatScrollOffset <= 0 {
+		m.chatBodyLines = 0
+		return m
+	}
 	if m.chatBodyLines == 0 {
 		// Just scrolled up: establish the baseline, no adjustment this frame.
 		m.chatBodyLines = current
@@ -1406,16 +1459,9 @@ func (m model) syncChatScroll() model {
 	// (streaming appended lines) or shrank (a tool card collapsed, transcript
 	// cleared). Clamp at zero so a large shrink lands the user back at the tail
 	// rather than underflowing past it.
-	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+current-m.chatBodyLines)
+	m.chatScrollOffset = clampInt(m.chatScrollOffset+current-m.chatBodyLines, 0, maxOffset)
 	m.chatBodyLines = current
 	return m
-}
-
-// chatBodyLineCount renders the live transcript body and returns its line count.
-// Only called while the user is scrolled up (see syncChatScroll).
-func (m model) chatBodyLineCount() int {
-	body, _ := m.transcriptBody(chatWidth(m.width), "")
-	return len(viewLines(body))
 }
 
 func (m model) chatPageScrollLines() int {
@@ -1442,7 +1488,7 @@ func (m model) interimBlock(width int) string {
 		if len(blocks) > 0 {
 			return strings.Join(blocks, "\n")
 		}
-		return m.spinner.View() + " " + zeroTheme.muted.Render("working…")
+		return zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render("working…")
 	}
 	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
@@ -1487,7 +1533,7 @@ func (m model) composerLine(width int) string {
 		argumentHint = ""
 	}
 	if argumentHint != "" {
-		input.Width = 0
+		input.SetWidth(0)
 		return fitStyledLine(commandArgumentHintComposerLine(input, argumentHint), width)
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
@@ -1507,7 +1553,7 @@ func renderComposerInput(input textinput.Model, state composerState, width int) 
 		return ""
 	}
 	if state.text == "" {
-		return fitStyledLine(input.View(), width)
+		return fitStyledLine(composerVisualLinePrefix(input, true)+zeroTheme.faint.Render(input.Placeholder), width)
 	}
 
 	segments := composerWrappedVisualLines(input, state, width)
@@ -1593,7 +1639,7 @@ func composerCursorVisualLine(segments []composerVisualLine, cursor int) int {
 func renderComposerVisualLine(input textinput.Model, state composerState, segment composerVisualLine, hasCursor bool) string {
 	runes := []rune(state.text)
 	prefix := composerVisualLinePrefix(input, segment.first)
-	textStyle := input.TextStyle.Inline(true)
+	textStyle := zeroTheme.ink.Inline(true)
 	if !hasCursor {
 		return prefix + textStyle.Render(string(runes[segment.start:segment.end]))
 	}
@@ -1601,19 +1647,16 @@ func renderComposerVisualLine(input textinput.Model, state composerState, segmen
 	offset := clamp(state.cursor-segment.start, 0, segment.end-segment.start)
 	cursorIndex := segment.start + offset
 	before := string(runes[segment.start:cursorIndex])
-	cursor := input.Cursor
 	if cursorIndex < segment.end {
-		cursor.SetChar(string(runes[cursorIndex]))
 		after := string(runes[cursorIndex+1 : segment.end])
-		return prefix + textStyle.Render(before) + cursor.View() + textStyle.Render(after)
+		return prefix + textStyle.Render(before) + composerCursor(string(runes[cursorIndex])) + textStyle.Render(after)
 	}
-	cursor.SetChar(" ")
-	return prefix + textStyle.Render(before) + cursor.View()
+	return prefix + textStyle.Render(before) + composerCursor(" ")
 }
 
 func composerVisualLinePrefix(input textinput.Model, first bool) string {
 	if first {
-		return input.PromptStyle.Render(input.Prompt)
+		return zeroTheme.userPrompt.Render(input.Prompt)
 	}
 	return "  "
 }
@@ -1741,14 +1784,16 @@ func commandArgumentHintComposerLine(input textinput.Model, argumentHint string)
 	if len(hintRunes) == 0 {
 		return input.View()
 	}
-	input.Cursor.TextStyle = zeroTheme.faint
-	input.Cursor.SetChar(string(hintRunes[0]))
 	displayValue := strings.TrimRightFunc(input.Value(), unicode.IsSpace)
-	return input.PromptStyle.Render(input.Prompt) +
-		input.TextStyle.Inline(true).Render(displayValue) +
+	return zeroTheme.userPrompt.Render(input.Prompt) +
+		zeroTheme.ink.Inline(true).Render(displayValue) +
 		zeroTheme.faint.Render(" ") +
-		input.Cursor.View() +
+		composerCursor(zeroTheme.faint.Render(string(hintRunes[0]))) +
 		zeroTheme.faint.Render(string(hintRunes[1:]))
+}
+
+func composerCursor(char string) string {
+	return zeroTheme.selection.Render(char)
 }
 
 func commandArgumentHintForInput(value string) string {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -252,7 +252,7 @@ func TestRetitleBackfillTitlesOnlyAutoTitledSessions(t *testing.T) {
 		Provider:     titleProvider("Generated Backfill Title"),
 	})
 	m.input.SetValue("/retitle")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if !m.retitleActive {
 		t.Fatal("expected a backfill to be active")

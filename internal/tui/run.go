@@ -4,11 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/Gitlawb/zero/internal/notify"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -29,20 +26,12 @@ func Run(ctx context.Context, options Options) int {
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
-	}
-	if options.AltScreen {
-		programOpts = append(programOpts, tea.WithAltScreen())
-	}
-	if notify.Enabled(notify.Mode(strings.TrimSpace(options.Notify.Mode))) {
-		programOpts = append(programOpts, tea.WithReportFocus())
+		tea.WithFilter(mouseEventFilter()),
 	}
 	initialModel := newModel(ctx, options)
 	if initialModel.wantsMouseCapture() {
-		programOpts = append(programOpts, tea.WithMouseCellMotion())
 		initialModel.mouseCapture = true
 	}
-	// Mouse capture starts enabled only when the initial surface needs it; later
-	// surfaces enable/disable it through syncMouseCapture after each update.
 	program = tea.NewProgram(initialModel, programOpts...)
 
 	if _, err := program.Run(); err != nil {
