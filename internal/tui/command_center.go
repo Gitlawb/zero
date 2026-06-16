@@ -424,6 +424,7 @@ func (m model) handleModelCommand(args string) (model, string) {
 	if err != nil {
 		return m, "Model\n" + err.Error()
 	}
+	persisted, persistErr := m.persistSelectedModel(nextProfile)
 
 	m.providerProfile = nextProfile
 	m.provider = nextProvider
@@ -451,13 +452,37 @@ func (m model) handleModelCommand(args string) (model, string) {
 		lines = append(lines, target.notice)
 	}
 	lines = append(lines,
-		"Switched model for this TUI session.",
+		"Switched model.",
 		"model: "+target.modelID,
 		"provider: "+displayValue(nextProfile.Name, string(metadata.ProviderKind)),
 		"api model: "+metadata.APIModel,
 		effortLine,
 	)
+	if persisted {
+		lines = append(lines, "saved: user config")
+	} else if persistErr != nil {
+		lines = append(lines, "saved: no ("+persistErr.Error()+")")
+	}
 	return m, strings.Join(lines, "\n")
+}
+
+func (m model) persistSelectedModel(profile config.ProviderProfile) (bool, error) {
+	path := strings.TrimSpace(m.userConfigPath)
+	if path == "" {
+		return false, nil
+	}
+	name := strings.TrimSpace(profile.Name)
+	if name == "" {
+		return false, nil
+	}
+	model := strings.TrimSpace(profile.Model)
+	if model == "" {
+		return false, nil
+	}
+	if _, err := config.SetProviderModel(path, name, model); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type modelSwitchTarget struct {

@@ -553,6 +553,57 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	}
 }
 
+func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name:         "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		APIKey:       "sk-test",
+		Model:        "gpt-4.1",
+	}, true); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openai",
+		ModelName:      "gpt-4.1",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			APIKey:       "sk-test",
+			Model:        "gpt-4.1",
+		},
+		Provider: &fakeProvider{},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-4.1-mini" {
+		t.Fatalf("modelName = %q, want gpt-4.1-mini", next.modelName)
+	}
+	persisted, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("resolve persisted config: %v", err)
+	}
+	if got := persisted.Provider.Model; got != "gpt-4.1-mini" {
+		t.Fatalf("persisted provider model = %q, want gpt-4.1-mini", got)
+	}
+	if !transcriptContains(next.transcript, "saved: user config") {
+		t.Fatalf("expected model transcript to mention saved user config, got %#v", next.transcript)
+	}
+}
+
 type stubModelSwitchCompactionGuard struct {
 	decision modelSwitchCompactionDecision
 	requests []modelSwitchCompactionRequest
