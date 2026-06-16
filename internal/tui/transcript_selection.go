@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -414,7 +415,14 @@ func (m model) selectedTranscriptText() string {
 
 func copyTranscriptSelectionCmd(text string) tea.Cmd {
 	return func() tea.Msg {
-		_, _ = os.Stdout.WriteString(ansi.SetSystemClipboard(text))
+		// Prefer the native OS clipboard (pbcopy / clip.exe / xclip): it works on
+		// local terminals — including macOS Terminal.app, which has no OSC52 support
+		// at all — so the auto-copy-on-select actually lands on the clipboard. Fall
+		// back to OSC52 (forwarded by the terminal) for remote/SSH sessions where no
+		// local clipboard utility is reachable.
+		if err := clipboard.WriteAll(text); err != nil {
+			_, _ = os.Stdout.WriteString(ansi.SetSystemClipboard(text))
+		}
 		return transcriptCopiedMsg{chars: utf8.RuneCountInString(text)}
 	}
 }
