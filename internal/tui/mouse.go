@@ -214,13 +214,9 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 	if composerTop < 0 {
 		return false
 	}
-	footerLines := fullFooterLines
-	clippedPrefix := 0
-	maxFooterLines := maxInt(0, m.height-1)
-	if len(footerLines) > maxFooterLines {
-		clippedPrefix = len(footerLines) - maxFooterLines
-		footerLines = footerLines[clippedPrefix:]
-	}
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	footerLines := frame.footerLines
+	clippedPrefix := len(fullFooterLines) - len(footerLines)
 	if len(footerLines) == 0 {
 		return false
 	}
@@ -229,7 +225,7 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 	if visibleTop >= visibleBottom {
 		return false
 	}
-	footerTop := maxInt(0, m.height-len(footerLines))
+	footerTop := len(frame.headerLines) + frame.bodyHeight
 	top := footerTop + visibleTop - clippedPrefix
 	return msg.Y >= top && msg.Y < top+visibleBottom-visibleTop
 }
@@ -508,20 +504,8 @@ func (m model) overlayMouseTop(overlayHeight int, width int) int {
 		return 0
 	}
 	if m.altScreen && m.height > 0 {
-		if m.transcriptEmpty() && !m.pending {
-			top := 0
-			available := normalizedStartupHeight(m.height) - 5
-			if !m.headerPrinted {
-				top += len(viewLines(m.titleBar(width)))
-				available -= 2
-			}
-			return top + maxInt(0, (available-overlayHeight)/2)
-		}
-		available := m.height - len(viewLines(m.footerView(width)))
-		if available < 1 {
-			available = 1
-		}
-		return maxInt(0, (available-overlayHeight)/2)
+		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+		return len(frame.headerLines) + maxInt(0, (frame.bodyHeight-overlayHeight)/2)
 	}
 	return maxInt(0, (normalizedStartupHeight(m.height)-overlayHeight)/2)
 }

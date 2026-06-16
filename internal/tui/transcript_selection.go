@@ -55,9 +55,9 @@ func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcr
 		lines = append(lines, "")
 	}
 
-	// The title bar prints once into scrollback on the first WindowSizeMsg;
+	// The inline title bar prints once into scrollback on the first WindowSizeMsg;
 	// until then it renders managed so the surface never appears headless.
-	if !m.headerPrinted {
+	if m.titleBarInTranscriptBody() {
 		appendBlock(m.titleBar(width))
 	}
 
@@ -315,11 +315,11 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 	}
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
-	start, available := m.transcriptViewportStart(body, width)
-	if msg.Y < 0 || msg.Y >= available {
+	start, available, top := m.transcriptViewportStart(body, width)
+	if msg.Y < top || msg.Y >= top+available {
 		return transcriptSelectableLine{}, false
 	}
-	bodyY := start + msg.Y
+	bodyY := start + msg.Y - top
 	for _, line := range selectable {
 		if line.bodyY != bodyY {
 			continue
@@ -332,17 +332,14 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 	return transcriptSelectableLine{}, false
 }
 
-func (m model) transcriptViewportStart(body string, width int) (int, int) {
+func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
 	bodyLines := viewLines(body)
-	footerLines := viewLines(m.footerView(width))
-	available := m.height - len(footerLines)
-	if available < 1 {
-		available = 1
-	}
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	available := frame.bodyHeight
 	maxOffset := maxInt(0, len(bodyLines)-available)
 	offset := clamp(m.chatScrollOffset, 0, maxOffset)
 	start := maxInt(0, len(bodyLines)-available-offset)
-	return start, available
+	return start, available, len(frame.headerLines)
 }
 
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {

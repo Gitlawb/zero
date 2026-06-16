@@ -258,6 +258,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
 	updated, cmd := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
@@ -277,7 +278,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      3,
-		Y:      1,
+		Y:      textY,
 	})
 	next = updated.(model)
 	if cmd != nil {
@@ -292,19 +293,20 @@ func TestTranscriptSelectionExtractsVisibleTextRange(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      3,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionMotion,
 		X:      8,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 
@@ -317,19 +319,20 @@ func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      3,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 	updated, _ = m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonNone,
 		Action: tea.MouseActionMotion,
 		X:      8,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 
@@ -342,12 +345,13 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      3,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 	// A left-button drag is Action==Motion with Button==Left; this must update the
@@ -356,7 +360,7 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionMotion,
 		X:      8,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 
@@ -369,19 +373,20 @@ func TestTranscriptSelectionReleaseExtendsRangeWithoutMotion(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
 	updated, _ := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      3,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 	updated, cmd := m.Update(tea.MouseMsg{
 		Button: tea.MouseButtonNone,
 		Action: tea.MouseActionRelease,
 		X:      8,
-		Y:      1,
+		Y:      textY,
 	})
 	m = updated.(model)
 	if cmd == nil {
@@ -416,7 +421,7 @@ func TestMouseClickTogglesReasoningRow(t *testing.T) {
 
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
-	start, _ := m.transcriptViewportStart(body, width)
+	start, _, top := m.transcriptViewportStart(body, width)
 	var target transcriptSelectableLine
 	for _, line := range selectable {
 		if line.toggle {
@@ -432,7 +437,7 @@ func TestMouseClickTogglesReasoningRow(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      target.textStart,
-		Y:      target.bodyY - start,
+		Y:      top + target.bodyY - start,
 	})
 	next := updated.(model)
 	if cmd != nil {
@@ -455,7 +460,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
-	start, _ := m.transcriptViewportStart(body, width)
+	start, _, top := m.transcriptViewportStart(body, width)
 	var target transcriptSelectableLine
 	for _, line := range selectable {
 		if line.toggle && line.live {
@@ -471,7 +476,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 		X:      target.textStart,
-		Y:      target.bodyY - start,
+		Y:      top + target.bodyY - start,
 	})
 	next := updated.(model)
 	if cmd != nil {
@@ -615,6 +620,20 @@ func TestMouseCaptureOnlyDuringInteractiveSetupStages(t *testing.T) {
 			t.Fatalf("wantsMouseCapture at setup stage %v = %v, want %v", tt.stage, got, tt.want)
 		}
 	}
+}
+
+func firstTranscriptTextMouseY(t *testing.T, m model) int {
+	t.Helper()
+	width := chatWidth(m.width)
+	body, selectable := m.transcriptBody(width, "")
+	start, _, top := m.transcriptViewportStart(body, width)
+	for _, line := range selectable {
+		if line.text != "" && !line.toggle {
+			return top + line.bodyY - start
+		}
+	}
+	t.Fatalf("no selectable transcript text line found: %#v", selectable)
+	return 0
 }
 
 func mouseTestModel() model {

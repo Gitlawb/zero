@@ -56,7 +56,7 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 	// Center the palette in the visible chat area. While the command palette is
 	// open it replaces the empty-state wordmark instead of sitting below it.
 	available := normalizedStartupHeight(m.height) - 5
-	if !m.headerPrinted {
+	if m.titleBarInTranscriptBody() {
 		available -= 2
 	}
 	gap := maxInt(0, (available-len(lines))/2)
