@@ -69,5 +69,6 @@ func scopesOrPreset(envScopes string, preset []string) []string {
 	if fields := strings.Fields(envScopes); len(fields) > 0 {
 		return fields
 	}
-	return preset
+	// Copy so a caller appending to cfg.Scopes can't mutate the shared preset slice.
+	return append([]string(nil), preset...)
 }

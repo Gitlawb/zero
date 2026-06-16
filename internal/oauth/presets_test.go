@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestScopesOrPresetReturnsACopy(t *testing.T) {
+	preset := []string{"openid", "profile"}
+	got := scopesOrPreset("", preset)
+	if len(got) != 2 || got[0] != "openid" {
+		t.Fatalf("got %v, want the preset scopes", got)
+	}
+	// Mutating the result must not bleed into the shared preset slice.
+	got[0] = "MUTATED"
+	if preset[0] != "openid" {
+		t.Fatalf("scopesOrPreset aliased the shared preset slice: %v", preset)
+	}
+}
+
 func TestResolveConfigUsesXAIPreset(t *testing.T) {
 	r := NewRegistry()
 	// Presets are opt-in; with ZERO_OAUTH_ALLOW_PRESETS set and no other env vars

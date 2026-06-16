@@ -1574,6 +1574,14 @@ func (m model) setupAPIKeyInputLine(width int) string {
 }
 
 func (m model) setupCredentialSummary(option SetupProviderOption) string {
+	// An OAuth token-login provider (e.g. xAI) is authenticated by a stored,
+	// refreshable token, not an API key — don't advertise an env var for it on the
+	// Ready screen. (Key-minting OAuth like OpenRouter still ends up as a saved key.)
+	if m.setup.oauthMode {
+		if d, ok := providercatalog.Get(option.ID); ok && d.OAuth && !d.OAuthMintsKey {
+			return "OAuth token"
+		}
+	}
 	if !setupProviderAcceptsAPIKey(option) {
 		return "not required"
 	}

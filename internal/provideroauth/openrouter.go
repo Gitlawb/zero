@@ -6,6 +6,7 @@
 package provideroauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -141,7 +142,7 @@ func openRouterExchange(ctx context.Context, client *http.Client, base, code, ve
 	if err != nil {
 		return "", err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+openRouterKeyExchangePath, strings.NewReader(string(payload)))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+openRouterKeyExchangePath, bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}

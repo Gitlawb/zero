@@ -48,6 +48,20 @@ func TestSetupMethodOptionsDropsOAuthWithoutOAuthProviders(t *testing.T) {
 	}
 }
 
+func TestSetupCredentialSummaryOAuthToken(t *testing.T) {
+	m := newModel(context.Background(), Options{Setup: SetupOptions{Visible: true}})
+	m.setup.oauthMode = true
+	// xAI logs in with a stored, refreshable OAuth token (not key-minting), so the
+	// Ready screen must say "OAuth token", not advertise an env var.
+	if got := m.setupCredentialSummary(SetupProviderOption{ID: "xai", EnvVar: "XAI_API_KEY", RequiresAuth: true}); got != "OAuth token" {
+		t.Fatalf("xai OAuth summary = %q, want \"OAuth token\"", got)
+	}
+	// OpenRouter mints a normal API key via OAuth, so it must NOT be labeled a token.
+	if got := m.setupCredentialSummary(SetupProviderOption{ID: "openrouter", EnvVar: "OPENROUTER_API_KEY", RequiresAuth: true}); got == "OAuth token" {
+		t.Fatalf("openrouter (key-minting) should not show as OAuth token, got %q", got)
+	}
+}
+
 func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	var saved SetupSelection
 	m := newModel(context.Background(), Options{
