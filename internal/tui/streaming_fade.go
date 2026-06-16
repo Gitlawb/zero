@@ -1,11 +1,11 @@
 package tui
 
 import (
-	"fmt"
+	"image/color"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // Streaming-text age-based fade.
@@ -18,10 +18,11 @@ import (
 // more correct for single-token streams but is ~10x the work and visually
 // indistinguishable for prose.
 //
-// The palette is pre-computed at init() in linear sRGB. Both endpoints are
-// near-white (accent #caff3f and ink #ececee), so the perceptual difference
-// between sRGB and CIELAB interpolation is invisible; we save the Lab math
-// (and the go-colorful dependency) for the day someone complains.
+// The palette is pre-computed at init() using lipgloss.Blend1D, which
+// interpolates in CIELAB. Lab is the right call here even though the two
+// endpoints are both near-white: the path through L*a*b* is the same cost
+// as the linear sRGB loop it replaces, and it's a free upgrade for any
+// future wider-ramp theme tokens.
 
 const (
 	// streamingFadeSteps is the number of discrete buckets in the age→color
@@ -49,10 +50,10 @@ const (
 type streamingFadeTickMsg time.Time
 
 // streamingFadePalette holds the 12-step ramp from fresh (accent) to settled
-// (ink), pre-computed at init() in linear sRGB. Index 0 = freshest, index
-// N-1 = closest to settled. The styles are stored eagerly (one
-// lipgloss.NewStyle call per step) so per-frame lookups are a struct-field
-// access and a single Render call, not a hex parse.
+// (ink), pre-computed at init() via lipgloss.Blend1D (CIELAB interpolation).
+// Index 0 = freshest, index N-1 = closest to settled. The styles are stored
+// eagerly (one lipgloss.NewStyle call per step) so per-frame lookups are a
+// struct-field access and a single Render call, not a hex parse.
 var streamingFadePalette [streamingFadeSteps]lipgloss.Style
 
 // init builds the palette once at package load. Cheap; called before any
@@ -66,9 +67,10 @@ func init() {
 }
 
 // buildStreamingFadePalette interpolates `steps` colors from fresh to base
-// in linear sRGB (each channel independently). Exposed for tests so they can
-// build a 1-step or 3-step palette without the package-init side effect.
-func buildStreamingFadePalette(steps int, fresh, base lipgloss.Color) [streamingFadeSteps]lipgloss.Style {
+// in CIELAB (via lipgloss.Blend1D, which uses go-colorful internally).
+// Exposed for tests so they can build a 1-step or 3-step palette without
+// the package-init side effect.
+func buildStreamingFadePalette(steps int, fresh, base color.Color) [streamingFadeSteps]lipgloss.Style {
 	var palette [streamingFadeSteps]lipgloss.Style
 	if steps < 1 {
 		steps = 1
@@ -76,75 +78,27 @@ func buildStreamingFadePalette(steps int, fresh, base lipgloss.Color) [streaming
 	if steps > streamingFadeSteps {
 		steps = streamingFadeSteps
 	}
-	freshR, freshG, freshB, ok := hexToRGB(string(fresh))
-	if !ok {
-		// Theme didn't have a #RRGGBB literal (shouldn't happen — all our
-		// theme tokens are 7-char hex). Fall back to a no-op palette so
-		// streamed text stays in the base color rather than going neon.
+	if fresh == nil || base == nil {
+		// Theme didn't have a parseable color literal. Fall back to a
+		// no-op palette so streamed text stays in the base color
+		// rather than going neon.
 		for i := 0; i < steps; i++ {
 			palette[i] = lipgloss.NewStyle().Foreground(base)
 		}
 		return palette
 	}
-	baseR, baseG, baseB, ok := hexToRGB(string(base))
-	if !ok {
-		for i := 0; i < steps; i++ {
-			palette[i] = lipgloss.NewStyle().Foreground(base)
-		}
-		return palette
-	}
-	// 12 steps over a 1.2s window ≈ 100ms per step, so each step boundary
-	// is well below the eye's flicker fusion threshold. Index 0 is the
-	// accent (freshest); index steps-1 is one step away from ink.
-	for i := 0; i < steps; i++ {
-		t := float64(i) / float64(steps)
-		r := uint8(float64(freshR) + t*(float64(baseR)-float64(freshR)))
-		g := uint8(float64(freshG) + t*(float64(baseG)-float64(freshG)))
-		b := uint8(float64(freshB) + t*(float64(baseB)-float64(freshB)))
-		palette[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", r, g, b)))
+	blend := lipgloss.Blend1D(steps, fresh, base)
+	for i, c := range blend {
+		// Convert the Blend1D output to a concrete color.RGBA so
+		// GetForeground() returns a stable stdlib type and tests can
+		// type-assert on it. Blend1D returns a colorful.Color (the
+		// go-colorful CIELAB type) which satisfies color.Color but is
+		// its own package — depending on it in our public surface
+		// would force a go-colorful import on every consumer.
+		r, g, b, a := c.RGBA()
+		palette[i] = lipgloss.NewStyle().Foreground(color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)})
 	}
 	return palette
-}
-
-// hexToRGB parses a 7-character "#RRGGBB" string into 0-255 RGB channels.
-// Returns ok=false on any other shape; the caller falls back to a no-op
-// palette. We don't reach for a general hex parser because every theme
-// token in this codebase is the 7-char form.
-func hexToRGB(s string) (uint8, uint8, uint8, bool) {
-	if len(s) != 7 || s[0] != '#' {
-		return 0, 0, 0, false
-	}
-	hex := func(c byte) (uint8, bool) {
-		switch {
-		case c >= '0' && c <= '9':
-			return c - '0', true
-		case c >= 'a' && c <= 'f':
-			return c - 'a' + 10, true
-		case c >= 'A' && c <= 'F':
-			return c - 'A' + 10, true
-		default:
-			return 0, false
-		}
-	}
-	hi, ok1 := hex(s[1])
-	lo, ok2 := hex(s[2])
-	if !ok1 || !ok2 {
-		return 0, 0, 0, false
-	}
-	r := hi*16 + lo
-	hi, ok1 = hex(s[3])
-	lo, ok2 = hex(s[4])
-	if !ok1 || !ok2 {
-		return 0, 0, 0, false
-	}
-	g := hi*16 + lo
-	hi, ok1 = hex(s[5])
-	lo, ok2 = hex(s[6])
-	if !ok1 || !ok2 {
-		return 0, 0, 0, false
-	}
-	b := hi*16 + lo
-	return r, g, b, true
 }
 
 // streamingFadeTick returns the next tea.Tick command. The Update loop

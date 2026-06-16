@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
@@ -22,7 +22,7 @@ func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/provider")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -50,7 +50,7 @@ func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
 
 	// Choosing the API-key method reveals the full provider catalog.
 	next.providerWizard.selectedMethod = len(providerWizardMethodOptions()) - 1
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	listView := plainRender(t, next.View())
 	for _, want := range []string{"Choose provider", "OpenAI", "Anthropic", "Google", "Groq", "OpenRouter", "Ollama"} {
@@ -84,7 +84,7 @@ func TestProviderWizardReplacesEmptyStateWordmark(t *testing.T) {
 	m.height = 34
 	m.input.SetValue("/provider")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	next.width = m.width
 	next.height = m.height
@@ -172,13 +172,13 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ := m.Update(testKey(tea.KeyDown))
 	next := updated.(model)
 	if got := next.providerWizard.currentProvider().ID; got != "anthropic" {
 		t.Fatalf("after down, selected provider = %q, want anthropic", got)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("wizard step = %v, want credential", next.providerWizard.step)
@@ -193,7 +193,7 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 	}
 	assertNotContains(t, view, "zero providers add anthropic")
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("wizard step = %v, want model", next.providerWizard.step)
@@ -222,7 +222,7 @@ func TestProviderWizardAdvancesProviderAPIKeyAndModelSteps(t *testing.T) {
 		assertContains(t, view, want)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("wizard step = %v, want done", next.providerWizard.step)
@@ -244,30 +244,30 @@ func TestProviderWizardSupportsLeftAndGuardedRightNavigation(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ := m.Update(testKey(tea.KeyRight))
 	next := updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("right from provider step = %v, want credential", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = next.Update(testKey(tea.KeyLeft))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepProvider {
 		t.Fatalf("left from credential step = %v, want provider", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	clearProviderAuthEnvForTest(t, next.providerWizard.currentProvider())
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = next.Update(testKey(tea.KeyRight))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("right from empty credential step = %v, want credential", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("sk-test")})
+	updated, _ = next.Update(testKeyText("sk-test"))
 	next = updated.(model)
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, cmd := next.Update(testKey(tea.KeyRight))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("right from entered credential step = %v, want model", next.providerWizard.step)
@@ -276,7 +276,7 @@ func TestProviderWizardSupportsLeftAndGuardedRightNavigation(t *testing.T) {
 		t.Fatal("right from entered credential should start live model discovery")
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = next.Update(testKey(tea.KeyRight))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("right while loading step = %v, want model", next.providerWizard.step)
@@ -291,13 +291,13 @@ func TestProviderWizardSupportsLeftAndGuardedRightNavigation(t *testing.T) {
 		}},
 	})
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = next.Update(testKey(tea.KeyRight))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("right from model step = %v, want ready", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = next.Update(testKey(tea.KeyLeft))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("left from ready step = %v, want model", next.providerWizard.step)
@@ -309,13 +309,13 @@ func TestProviderWizardRightAllowsExistingCredentialEnv(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m = openProviderWizardForTest(t, m)
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("enter from provider step = %v, want credential", next.providerWizard.step)
 	}
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, cmd := next.Update(testKey(tea.KeyRight))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("right with env credential step = %v, want model", next.providerWizard.step)
@@ -336,7 +336,7 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("custom endpoint step should not start model discovery")
@@ -354,16 +354,16 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 		assertContains(t, view, want)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepEndpoint {
 		t.Fatalf("blank endpoint advanced to %v, want endpoint", next.providerWizard.step)
 	}
 	assertContains(t, plainRender(t, next.View()), "enter an endpoint URL")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://proxy.example/v1")})
+	updated, _ = next.Update(testKeyText("https://proxy.example/v1"))
 	next = updated.(model)
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("endpoint step should not start model discovery")
@@ -380,7 +380,7 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 		assertContains(t, view, want)
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("name step should not start model discovery")
@@ -389,7 +389,7 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 		t.Fatalf("name step advanced to %v, want credential", next.providerWizard.step)
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("custom model step should not discover against the placeholder endpoint")
@@ -406,16 +406,16 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 		assertContains(t, view, want)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("blank model advanced to %v, want model", next.providerWizard.step)
 	}
 	assertContains(t, plainRender(t, next.View()), "enter a model name")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("my-custom-model")})
+	updated, _ = next.Update(testKeyText("my-custom-model"))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("model step advanced to %v, want ready", next.providerWizard.step)
@@ -425,7 +425,7 @@ func TestProviderWizardCustomCompatibleProviderCollectsEndpointAndModel(t *testi
 	assertContains(t, view, "Name        proxy")
 	assertContains(t, view, "Model       my-custom-model")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard != nil {
 		t.Fatal("saving custom provider should close the wizard")
@@ -452,15 +452,15 @@ func TestProviderWizardCustomCompatibleProviderRejectsRemoteHTTP(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.providerWizard.step != providerWizardStepEndpoint {
 		t.Fatalf("custom provider first step = %v, want endpoint", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("http://api.example.com/v1")})
+	updated, _ = next.Update(testKeyText("http://api.example.com/v1"))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepEndpoint {
 		t.Fatalf("remote http endpoint advanced to %v, want endpoint", next.providerWizard.step)
@@ -479,29 +479,29 @@ func TestProviderWizardCustomCompatibleProviderDerivesIPName(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "custom-openai-compatible")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://127.0.0.1:1234/v1")})
+	updated, _ = next.Update(testKeyText("https://127.0.0.1:1234/v1"))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepName {
 		t.Fatalf("endpoint step advanced to %v, want name", next.providerWizard.step)
 	}
 	assertContains(t, plainRender(t, next.View()), "ip-127-0-0-1")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("local-test-model")})
+	updated, _ = next.Update(testKeyText("local-test-model"))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("model step advanced to %v, want ready", next.providerWizard.step)
 	}
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard != nil {
 		t.Fatal("saving custom provider should close the wizard")
@@ -522,7 +522,7 @@ func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("local provider step = %v, want model", next.providerWizard.step)
@@ -537,7 +537,7 @@ func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
 	assertContains(t, view, "Checking available models")
 	assertNotContains(t, view, "llama3.1")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = next.Update(testKey(tea.KeyEsc))
 	next = updated.(model)
 	if next.providerWizard != nil {
 		t.Fatal("Esc should close provider wizard")
@@ -550,13 +550,13 @@ func TestProviderWizardAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "google")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.providerWizard.step != providerWizardStepCredential {
 		t.Fatalf("wizard step = %v, want credential", next.providerWizard.step)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	updated, _ = next.Update(testKeyText(secret))
 	next = updated.(model)
 	if next.providerWizard.apiKey != secret {
 		t.Fatalf("wizard api key was not captured from paste")
@@ -580,22 +580,22 @@ func TestProviderWizardAppliesPastedKeyToCurrentSession(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "google")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	updated, _ = next.Update(testKeyText(secret))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("wizard step = %v, want model", next.providerWizard.step)
 	}
 	next = finishProviderWizardModelDiscoveryForTest(t, next)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepDone {
 		t.Fatalf("wizard step = %v, want done", next.providerWizard.step)
 	}
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if next.providerWizard != nil {
@@ -629,18 +629,18 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama-cloud")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	updated, _ = next.Update(testKeyText(secret))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	next = finishProviderWizardModelDiscoveryForTest(t, next)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if captured.APIKey != secret {
@@ -680,16 +680,16 @@ func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama-cloud")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	next = finishProviderWizardModelDiscoveryForTest(t, next)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if captured.APIKey != secret {
@@ -728,7 +728,7 @@ func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("wizard step = %v, want model", next.providerWizard.step)
@@ -740,7 +740,7 @@ func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	assertContains(t, view, "Checking available models")
 	assertNotContains(t, view, "llama3.1")
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	waiting := updated.(model)
 	if waiting.providerWizard.step != providerWizardStepModel {
 		t.Fatalf("enter while loading step = %v, want model", waiting.providerWizard.step)
@@ -768,20 +768,20 @@ func TestProviderWizardIgnoresStaleDiscoveryForSameProvider(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("first model entry should start discovery")
 	}
 	staleToken := next.providerWizard.discoveryToken
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = next.Update(testKey(tea.KeyLeft))
 	next = updated.(model)
 	if next.providerWizard.step != providerWizardStepProvider {
 		t.Fatalf("left from local model step = %v, want provider", next.providerWizard.step)
 	}
 
-	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	if cmd == nil {
 		t.Fatal("second model entry should start discovery")
@@ -828,7 +828,7 @@ func TestProviderWizardKeepsFallbackModelsWhenLiveDiscoveryFails(t *testing.T) {
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd == nil {
 		t.Fatal("entering model step should start live model discovery")
@@ -923,7 +923,7 @@ func TestProviderWizardModelSearchFiltersAndAppliesRawModelID(t *testing.T) {
 		},
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("deep")})
+	updated, _ := m.Update(testKeyText("deep"))
 	next := updated.(model)
 
 	if next.providerWizard.modelSearch != "deep" {
@@ -958,9 +958,9 @@ func TestProviderWizardBlocksAdvanceWhenModelSearchHasNoMatches(t *testing.T) {
 		},
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nomatch")})
+	updated, _ := m.Update(testKeyText("nomatch"))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
 	if next.providerWizard.step != providerWizardStepModel {
@@ -980,7 +980,7 @@ func TestProviderWizardBlocksAdvanceWhenModelSearchHasNoMatches(t *testing.T) {
 func openProviderWizardForTest(t *testing.T, m model) model {
 	t.Helper()
 	m.input.SetValue("/provider")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.providerWizard == nil {
 		t.Fatal("expected provider wizard to be open")
@@ -991,7 +991,7 @@ func openProviderWizardForTest(t *testing.T, m model) model {
 	if next.providerWizard.step == providerWizardStepMethod {
 		options := providerWizardMethodOptions()
 		next.providerWizard.selectedMethod = len(options) - 1 // last = "browse / API key"
-		u2, _ := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		u2, _ := next.Update(testKey(tea.KeyEnter))
 		next = u2.(model)
 		if next.providerWizard == nil || next.providerWizard.step != providerWizardStepProvider {
 			t.Fatalf("expected provider step after choosing API-key method, got %#v", next.providerWizard)

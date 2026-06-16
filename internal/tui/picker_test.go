@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -71,7 +71,7 @@ func TestModelPickerRefreshesLiveModelsForActiveProvider(t *testing.T) {
 	})
 	m.input.SetValue("/model")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.picker == nil {
 		t.Fatal("expected model picker to open")
@@ -111,7 +111,7 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 		},
 	})
 	m.input.SetValue("/model")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("expected opening the model picker to start discovery")
@@ -120,7 +120,7 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	assertContains(t, loading, "Checking available models...")
 	assertNotContains(t, loading, "Live Cloud A")
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker == nil {
 		t.Fatal("Enter while loading should not choose the fallback list")
@@ -192,7 +192,7 @@ func TestModelPickerFallsBackWhenDiscoveryFails(t *testing.T) {
 		},
 	})
 	m.input.SetValue("/model")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("expected opening the model picker to start discovery")
@@ -228,7 +228,7 @@ func TestModelPickerAppliesLiveDiscoveredModelID(t *testing.T) {
 	m.picker = m.newModelPicker()
 	m.picker.selected = pickerIndex(m.picker.items, "glm-5.1")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if captured.Model != "glm-5.1" {
 		t.Fatalf("captured model = %q, want glm-5.1", captured.Model)
@@ -261,7 +261,7 @@ func TestModelSwitchNormalizesDetectedOllamaCloudProfile(t *testing.T) {
 	m.modelPickerLiveModels = []providermodeldiscovery.Model{{ID: "glm-5.1", Description: "GLM 5.1"}}
 	m.input.SetValue("/model glm-5.1")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
 	if captured.Name != "ollama-cloud" || captured.CatalogID != "ollama-cloud" {
@@ -293,7 +293,7 @@ func TestModelPickerSearchFiltersModels(t *testing.T) {
 	})
 	m.picker = m.newModelPicker()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("qwen")})
+	updated, _ := m.Update(testKeyText("qwen"))
 	next := updated.(model)
 	if next.picker.query != "qwen" {
 		t.Fatalf("picker query = %q, want qwen", next.picker.query)
@@ -329,7 +329,7 @@ func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
 	}
 	m.picker.selected = target
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	updated, _ := m.Update(testKeyCtrl('f'))
 	next := updated.(model)
 	if !next.favoriteModels["qwen3-coder:480b"] {
 		t.Fatalf("favorite map = %#v, want qwen3-coder:480b favorited", next.favoriteModels)
@@ -342,7 +342,7 @@ func TestModelPickerFavoriteShortcutTogglesSelectedModel(t *testing.T) {
 		t.Fatalf("persisted FavoriteModels = %#v, want qwen3-coder:480b", persisted.Preferences.FavoriteModels)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	updated, _ = next.Update(testKeyCtrl('f'))
 	next = updated.(model)
 	if next.favoriteModels["qwen3-coder:480b"] {
 		t.Fatalf("favorite map = %#v, want qwen3-coder:480b unfavorited", next.favoriteModels)
@@ -431,7 +431,7 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	})
 	m.input.SetValue("/model openai/gpt-4.1")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("expected /model to be handled without starting a run")
@@ -451,7 +451,7 @@ func TestModelPickerOpensAndCancels(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.input.SetValue("/model")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("opening the model picker should not start a run")
@@ -461,7 +461,7 @@ func TestModelPickerOpensAndCancels(t *testing.T) {
 	}
 
 	// Esc cancels the picker without touching the run or transcript.
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ = m.Update(testKey(tea.KeyEsc))
 	m = updated.(model)
 	if m.picker != nil {
 		t.Fatal("Esc should close the picker")
@@ -485,7 +485,7 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 		},
 	})
 	m.input.SetValue("/model")
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker == nil {
 		t.Fatal("expected model picker open")
@@ -510,7 +510,7 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 	}
 	m.picker.selected = target
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker != nil {
 		t.Fatal("choosing should close the picker")
@@ -527,7 +527,7 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.input.SetValue("/effort")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker == nil || m.picker.kind != pickerEffort {
 		t.Fatalf("expected an open effort picker, got %#v", m.picker)
@@ -543,7 +543,7 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 			m.picker.selected = i
 		}
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.reasoningEffort != "high" {
 		t.Fatalf("expected effort applied via handler, got %q", m.reasoningEffort)
@@ -554,7 +554,7 @@ func TestThemeCommandOpensNoPicker(t *testing.T) {
 	// /theme keeps the existing shell-only message; no picker opens.
 	m := newModel(context.Background(), Options{})
 	m.input.SetValue("/theme")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.picker != nil {
 		t.Fatal("/theme should not open a picker")
@@ -581,7 +581,7 @@ func TestPickersRefuseToOpenWhileRunPending(t *testing.T) {
 			m.pending = true
 			m.input.SetValue(tc.command)
 
-			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			updated, cmd := m.Update(testKey(tea.KeyEnter))
 			next := updated.(model)
 			if cmd != nil {
 				t.Fatalf("%s while pending should not start a run", tc.command)
@@ -603,9 +603,9 @@ func TestPickerRenders(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
 	m.width, m.height = 96, 30
 	m.input.SetValue("/model")
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
-	if !strings.Contains(m.View(), "Choose a model") {
+	if !strings.Contains(viewString(m.View()), "Choose a model") {
 		t.Fatal("view should render the picker title")
 	}
 }

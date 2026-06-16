@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestComposerInsertNewlineAtCursor(t *testing.T) {
@@ -87,7 +87,7 @@ func TestBackspaceAfterCompletedFileMentionRemovesWholeMention(t *testing.T) {
 			m.input.SetValue(tc.start)
 			m.input.CursorEnd()
 
-			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+			updated, _ := m.Update(testKey(tea.KeyBackspace))
 			next := updated.(model)
 
 			if got := next.composerValue(); got != tc.want {
@@ -109,7 +109,7 @@ func TestBackspaceInsideActiveFileMentionStillEditsQuery(t *testing.T) {
 	m := newModel(context.Background(), Options{Cwd: root})
 	m = typeRunes(t, m, "@docs")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated, _ := m.Update(testKey(tea.KeyBackspace))
 	next := updated.(model)
 
 	if got := next.composerValue(); got != "@doc" {
@@ -134,7 +134,7 @@ func TestCtrlVDoesNotPasteIntoComposer(t *testing.T) {
 	m.input.SetValue("hello")
 	m.input.CursorEnd()
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated, cmd := m.Update(testKeyCtrl('v'))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -154,7 +154,7 @@ func TestPastedMultilineComposerContentRendersAsPreview(t *testing.T) {
 	}, "\n")
 	m := newModel(context.Background(), Options{})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	next := updated.(model)
 
 	if got := next.composerValue(); got != paste {
@@ -176,7 +176,7 @@ func TestPastedLongSingleLineComposerContentRendersWrappedLineCount(t *testing.T
 	m := newModel(context.Background(), Options{})
 	m.width = 44
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	next := updated.(model)
 
 	if got := next.composerValue(); got != paste {
@@ -198,10 +198,10 @@ func TestPastedLongSingleLineComposerContentRendersWrappedLineCount(t *testing.T
 func TestBackspaceAfterPastedPreviewDeletesWholePaste(t *testing.T) {
 	paste := "first line\nsecond line\nthird line"
 	m := newModel(context.Background(), Options{})
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	next := updated.(model)
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated, _ = next.Update(testKey(tea.KeyBackspace))
 	next = updated.(model)
 	if got := next.composerValue(); got != "" {
 		t.Fatalf("composer value after deleting paste preview = %q, want empty", got)
@@ -217,9 +217,9 @@ func TestAltBackspaceAfterPastedPreviewDoesNotLeakPaste(t *testing.T) {
 	m.input.SetValue("prefix ")
 	m.input.CursorEnd()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyBackspace, Alt: true})
+	updated, _ = next.Update(testKeyAlt(tea.KeyBackspace))
 	next = updated.(model)
 
 	if got := next.composerValue(); got != "prefix " {
@@ -235,11 +235,11 @@ func TestBackspaceAfterTypedTextKeepsPastedPreviewCollapsed(t *testing.T) {
 	paste := "first line\nsecond line\nthird line"
 	m := newModel(context.Background(), Options{})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(paste), Paste: true})
+	updated, _ := m.Update(testPaste(paste))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	updated, _ = next.Update(testKeyText("x"))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated, _ = next.Update(testKey(tea.KeyBackspace))
 	next = updated.(model)
 
 	if got := next.composerValue(); got != paste {
@@ -270,11 +270,11 @@ func TestPastingTwiceKeepsBothComposerPreviews(t *testing.T) {
 	}, "\n")
 	m := newModel(context.Background(), Options{})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(firstPaste), Paste: true})
+	updated, _ := m.Update(testPaste(firstPaste))
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	updated, _ = next.Update(testKeyCtrl('j'))
 	next = updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secondPaste), Paste: true})
+	updated, _ = next.Update(testPaste(secondPaste))
 	next = updated.(model)
 
 	if got := next.composerValue(); got != firstPaste+"\n"+secondPaste {
@@ -296,10 +296,10 @@ func TestPastingTwiceKeepsBothComposerPreviews(t *testing.T) {
 func TestModifiedEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 	tests := []struct {
 		name string
-		key  tea.KeyMsg
+		key  tea.Msg
 	}{
-		{name: "alt enter", key: tea.KeyMsg{Type: tea.KeyEnter, Alt: true}},
-		{name: "shift enter", key: tea.KeyMsg{Type: tea.KeyCtrlJ}},
+		{name: "alt enter", key: testKeyAlt(tea.KeyEnter)},
+		{name: "shift enter", key: testKeyCtrl('j')},
 	}
 
 	for _, tc := range tests {
@@ -328,7 +328,7 @@ func TestMultilineComposerEditingDoesNotFallBackToFlatInput(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.setComposerState(composerState{text: "alpha\nbeta gamma", cursor: len([]rune("alpha\nbeta"))})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	updated, _ := m.Update(testKeyCtrl('u'))
 	next := updated.(model)
 	if got := next.composerValue(); got != "alpha\n gamma" {
 		t.Fatalf("ctrl+u composer value = %q, want current line prefix removed", got)
@@ -337,7 +337,7 @@ func TestMultilineComposerEditingDoesNotFallBackToFlatInput(t *testing.T) {
 		t.Fatal("ctrl+u should keep multiline composer state active")
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	updated, _ = next.Update(testKeyCtrl('k'))
 	next = updated.(model)
 	if got := next.composerValue(); got != "alpha\n" {
 		t.Fatalf("ctrl+k composer value = %q, want current line suffix removed", got)
@@ -351,7 +351,7 @@ func TestMultilineComposerAcceptsSpaceKey(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.setComposerState(composerState{text: "alpha\nbetagamma", cursor: len([]rune("alpha\nbeta"))})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	updated, _ := m.Update(testKey(tea.KeySpace))
 	next := updated.(model)
 
 	if got := next.composerValue(); got != "alpha\nbeta gamma" {
@@ -370,7 +370,7 @@ func TestWrappedComposerArrowKeysMoveByVisualLine(t *testing.T) {
 	m.input.CursorEnd()
 	startCursor := len([]rune(text))
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated, _ := m.Update(testKey(tea.KeyUp))
 	next := updated.(model)
 	if got := next.composerValue(); got != text {
 		t.Fatalf("composer value = %q, want unchanged text %q", got, text)
@@ -380,7 +380,7 @@ func TestWrappedComposerArrowKeysMoveByVisualLine(t *testing.T) {
 		t.Fatalf("up cursor = %d, want before end cursor %d", upCursor, startCursor)
 	}
 
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = next.Update(testKey(tea.KeyDown))
 	next = updated.(model)
 	if got := next.currentComposerState().cursor; got != startCursor {
 		t.Fatalf("down cursor = %d, want restored end cursor %d", got, startCursor)
@@ -392,7 +392,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 		name       string
 		start      string
 		cursor     int
-		key        tea.KeyMsg
+		key        tea.Msg
 		want       string
 		wantCursor int
 	}{
@@ -400,7 +400,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 			name:       "alt backspace skips trailing spaces",
 			start:      "alpha beta  ",
 			cursor:     len([]rune("alpha beta  ")),
-			key:        tea.KeyMsg{Type: tea.KeyBackspace, Alt: true},
+			key:        testKeyAlt(tea.KeyBackspace),
 			want:       "alpha ",
 			wantCursor: len([]rune("alpha ")),
 		},
@@ -408,7 +408,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 			name:       "ctrl w skips trailing spaces",
 			start:      "alpha beta  ",
 			cursor:     len([]rune("alpha beta  ")),
-			key:        tea.KeyMsg{Type: tea.KeyCtrlW},
+			key:        testKeyCtrl('w'),
 			want:       "alpha ",
 			wantCursor: len([]rune("alpha ")),
 		},
@@ -416,7 +416,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 			name:       "alt b moves back a word",
 			start:      "alpha beta gamma",
 			cursor:     len([]rune("alpha beta gamma")),
-			key:        tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b"), Alt: true},
+			key:        testKeyAltText("b"),
 			want:       "alpha beta gamma",
 			wantCursor: len([]rune("alpha beta ")),
 		},
@@ -424,7 +424,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 			name:       "ctrl left moves back a word",
 			start:      "alpha beta gamma",
 			cursor:     len([]rune("alpha beta gamma")),
-			key:        tea.KeyMsg{Type: tea.KeyCtrlLeft},
+			key:        testKeyPressMod(tea.KeyLeft, tea.ModCtrl),
 			want:       "alpha beta gamma",
 			wantCursor: len([]rune("alpha beta ")),
 		},
@@ -432,7 +432,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 			name:       "alt f moves forward a word",
 			start:      "alpha beta gamma",
 			cursor:     len([]rune("alpha ")),
-			key:        tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f"), Alt: true},
+			key:        testKeyAltText("f"),
 			want:       "alpha beta gamma",
 			wantCursor: len([]rune("alpha beta")),
 		},
@@ -440,7 +440,7 @@ func TestComposerTerminalWordKeybindings(t *testing.T) {
 			name:       "ctrl right moves forward a word",
 			start:      "alpha beta gamma",
 			cursor:     len([]rune("alpha ")),
-			key:        tea.KeyMsg{Type: tea.KeyCtrlRight},
+			key:        testKeyPressMod(tea.KeyRight, tea.ModCtrl),
 			want:       "alpha beta gamma",
 			wantCursor: len([]rune("alpha beta")),
 		},

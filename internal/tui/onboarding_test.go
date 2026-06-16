@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -92,11 +92,11 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	m.width = 100
 	m.height = 30
 
-	if view := m.View(); !strings.Contains(view, "Welcome to Zero") || !strings.Contains(view, "Space to set up Zero") || !strings.Contains(view, "terminal agent for changing real code") {
+	if view := plainRender(t, m.View()); !strings.Contains(view, "Welcome to Zero") || !strings.Contains(view, "Space to set up Zero") || !strings.Contains(view, "terminal agent for changing real code") {
 		t.Fatalf("setup welcome view missing expected text:\n%s", view)
 	}
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	updated, cmd := m.Update(testKey(tea.KeySpace))
 	if cmd != nil {
 		t.Fatal("setup navigation should not launch a command")
 	}
@@ -105,13 +105,13 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 		t.Fatalf("stage = %v, want method chooser", m.setup.stage)
 	}
 	m.setup.selectedMethod = len(m.setupMethodOptions()) - 1 // API-key / browse path
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.setup.stage != setupStageProvider {
 		t.Fatalf("stage = %v, want provider", m.setup.stage)
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = m.Update(testKey(tea.KeyDown))
 	m = updated.(model)
 	if got := m.setupProvider().ID; got != "ollama" {
 		t.Fatalf("selected provider = %q, want ollama", got)
@@ -120,7 +120,7 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	for m.setup.stage != setupStageReady {
 		m = pressSetupContinue(m)
 	}
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("setup completion should stay in the fullscreen chat surface")
@@ -178,14 +178,14 @@ func TestSetupTakeoverCustomCompatibleCollectsEndpointNameAndModel(t *testing.T)
 	assertContains(t, view, "url >")
 	assertContains(t, view, "https://api.example.com/v1")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.setup.stage != setupStageEndpoint {
 		t.Fatalf("blank endpoint advanced to %v, want endpoint", m.setup.stage)
 	}
 	assertContains(t, plainRender(t, m.View()), "enter an endpoint URL")
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("https://api.minimax.io/v1")})
+	updated, _ = m.Update(testKeyText("https://api.minimax.io/v1"))
 	m = updated.(model)
 	m = pressSetupContinue(m)
 	if m.setup.stage != setupStageName {
@@ -209,14 +209,14 @@ func TestSetupTakeoverCustomCompatibleCollectsEndpointNameAndModel(t *testing.T)
 	assertContains(t, view, "model >")
 	assertContains(t, view, "custom-model")
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.setup.stage != setupStageModel {
 		t.Fatalf("blank model advanced to %v, want model", m.setup.stage)
 	}
 	assertContains(t, plainRender(t, m.View()), "Enter a model name")
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("MiniMax-M3")})
+	updated, _ = m.Update(testKeyText("MiniMax-M3"))
 	m = updated.(model)
 	m = pressSetupContinue(m)
 	if m.setup.stage != setupStageSafety {
@@ -314,7 +314,7 @@ func TestSetupTakeoverBlocksPromptSubmission(t *testing.T) {
 	})
 	m.input.SetValue("run tests")
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("setup enter should not launch an agent run")
@@ -350,7 +350,7 @@ func TestSetupRightArrowDoesNotAdvance(t *testing.T) {
 		})
 		m.setup.stage = stage
 
-		updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		updated, cmd := m.Update(testKey(tea.KeyRight))
 		m = updated.(model)
 		if cmd != nil {
 			t.Fatalf("right arrow at stage %v should not return a command", stage)
@@ -379,7 +379,7 @@ func TestSetupProviderMouseWheelChangesSelection(t *testing.T) {
 	})
 	m.setup.stage = setupStageProvider
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelDown, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("provider wheel should not return a command")
@@ -388,7 +388,7 @@ func TestSetupProviderMouseWheelChangesSelection(t *testing.T) {
 		t.Fatalf("provider after wheel down = %q, want anthropic", got)
 	}
 
-	updated, cmd = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	updated, cmd = m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("provider wheel should not return a command")
@@ -410,7 +410,7 @@ func TestSetupModelMouseWheelChangesSelection(t *testing.T) {
 	m.setup.stage = setupStageModel
 	m.resetSetupModels()
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelDown, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("model wheel should not return a command")
@@ -419,7 +419,7 @@ func TestSetupModelMouseWheelChangesSelection(t *testing.T) {
 		t.Fatalf("model after wheel down = %q, want non-default model", got)
 	}
 
-	updated, cmd = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	updated, cmd = m.Update(testMouseWheel(tea.MouseWheelUp, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("model wheel should not return a command")
@@ -442,7 +442,7 @@ func TestSetupModelMouseWheelIgnoredWhileLoading(t *testing.T) {
 	m.resetSetupModels()
 	m.setup.modelLoad = true
 
-	updated, cmd := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	updated, cmd := m.Update(testMouseWheel(tea.MouseWheelDown, 0, 0))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("loading model wheel should not return a command")
@@ -473,7 +473,7 @@ func TestSetupEnterDoesNotAdvanceSpaceOnlyStages(t *testing.T) {
 		})
 		m.setup.stage = stage
 
-		updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, cmd := m.Update(testKey(tea.KeyEnter))
 		m = updated.(model)
 		if cmd != nil {
 			t.Fatalf("enter at stage %v should not return a command", stage)
@@ -504,7 +504,7 @@ func TestSetupProviderRequiresEnter(t *testing.T) {
 	})
 	m.setup.stage = setupStageProvider
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	updated, cmd := m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("space on provider step should not return a command")
@@ -513,7 +513,7 @@ func TestSetupProviderRequiresEnter(t *testing.T) {
 		t.Fatalf("space on provider step advanced to %v", m.setup.stage)
 	}
 
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("enter on provider step should not return a command")
@@ -545,7 +545,7 @@ func TestSetupReadyRequiresEnter(t *testing.T) {
 	})
 	m.setup.stage = setupStageReady
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	updated, cmd := m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("space on ready step should not return a command")
@@ -557,7 +557,7 @@ func TestSetupReadyRequiresEnter(t *testing.T) {
 		t.Fatalf("space on ready step should keep setup visible at ready, visible=%v stage=%v", m.setup.visible, m.setup.stage)
 	}
 
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("enter on ready step should stay in the fullscreen chat surface")
@@ -600,7 +600,7 @@ func TestSetupCredentialsAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T)
 	m.height = 30
 	m.setup.stage = setupStageCredentials
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(secret)})
+	updated, _ := m.Update(testKeyText(secret))
 	m = updated.(model)
 	view := plainRender(t, m.View())
 	if strings.Contains(view, secret) {
@@ -613,7 +613,7 @@ func TestSetupCredentialsAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T)
 	for m.setup.stage != setupStageReady {
 		m = pressSetupContinue(m)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if saved.APIKey != secret {
@@ -637,7 +637,7 @@ func TestSetupCredentialsCtrlVDoesNotRunClipboardPaste(t *testing.T) {
 	m.setup.apiKey.SetValue("existing")
 	m.setup.apiKey.CursorEnd()
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated, cmd := m.Update(testKeyCtrl('v'))
 	next := updated.(model)
 
 	if cmd != nil {
@@ -675,7 +675,7 @@ func TestSetupModelStepSavesCatalogModelChoice(t *testing.T) {
 	m.height = 30
 	m.setup.stage = setupStageCredentials
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.setup.stage != setupStageModel {
 		t.Fatalf("stage = %v, want model", m.setup.stage)
@@ -696,7 +696,7 @@ func TestSetupModelStepSavesCatalogModelChoice(t *testing.T) {
 		}
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = m.Update(testKey(tea.KeyDown))
 	m = updated.(model)
 	selected := m.setupCurrentModel().ID
 	if selected == "" || selected == "llama-3.3-70b-versatile" {
@@ -705,7 +705,7 @@ func TestSetupModelStepSavesCatalogModelChoice(t *testing.T) {
 	for m.setup.stage != setupStageReady {
 		m = pressSetupContinue(m)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if saved.Model != selected {
@@ -734,7 +734,7 @@ func TestSetupModelSearchFiltersAndSavesMatch(t *testing.T) {
 		},
 	})
 	m.setup.stage = setupStageCredentials
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("entering the model step should start model discovery")
@@ -742,7 +742,7 @@ func TestSetupModelSearchFiltersAndSavesMatch(t *testing.T) {
 	updated, _ = m.Update(cmd())
 	m = updated.(model)
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("oss")})
+	updated, _ = m.Update(testKeyText("oss"))
 	m = updated.(model)
 	if got := m.setupCurrentModel().ID; got != "openai/gpt-oss-120b" {
 		t.Fatalf("filtered model = %q, want openai/gpt-oss-120b", got)
@@ -754,7 +754,7 @@ func TestSetupModelSearchFiltersAndSavesMatch(t *testing.T) {
 	for m.setup.stage != setupStageReady {
 		m = pressSetupContinue(m)
 	}
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 
 	if saved.Model != "openai/gpt-oss-120b" {
@@ -778,7 +778,7 @@ func TestSetupModelLoadingBlocksSelectionAndSearch(t *testing.T) {
 	m.height = 30
 	m.setup.stage = setupStageCredentials
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("entering the model step should start model discovery")
@@ -788,13 +788,13 @@ func TestSetupModelLoadingBlocksSelectionAndSearch(t *testing.T) {
 		t.Fatalf("loading model step should not render fallback models:\n%s", view)
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("oss")})
+	updated, _ = m.Update(testKeyText("oss"))
 	m = updated.(model)
 	if m.setup.modelQuery != "" {
 		t.Fatalf("model query while loading = %q, want empty", m.setup.modelQuery)
 	}
 
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.setup.stage != setupStageModel {
 		t.Fatalf("enter while loading advanced stage to %v", m.setup.stage)
@@ -816,7 +816,7 @@ func TestSetupModelSearchAcceptsQ(t *testing.T) {
 	m.setup.stage = setupStageModel
 	m.resetSetupModels()
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	updated, cmd := m.Update(testKeyText("q"))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("q should search on the model step, not quit setup")
@@ -885,7 +885,7 @@ func TestSetupModelStepDoesNotSpinWithoutDiscovery(t *testing.T) {
 	})
 	m.setup.stage = setupStageCredentials
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	updated, cmd := m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("custom setup provider should not start model discovery")
@@ -916,7 +916,7 @@ func TestSetupModelStepUsesDiscoveredModels(t *testing.T) {
 	m.height = 30
 	m.setup.stage = setupStageCredentials
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	updated, cmd := m.Update(testKey(tea.KeySpace))
 	m = updated.(model)
 	if m.setup.stage != setupStageModel {
 		t.Fatalf("stage = %v, want model", m.setup.stage)
@@ -1052,7 +1052,7 @@ func TestSetupModelDiscoveryRedactsRequestAPIKey(t *testing.T) {
 	m.setup.stage = setupStageCredentials
 	m.setup.apiKey.SetValue(oldSecret)
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("entering model step should start discovery")
@@ -1315,7 +1315,7 @@ func TestSetupMethodChooserOAuthPath(t *testing.T) {
 		t.Fatalf("stage = %v, want method chooser", m.setup.stage)
 	}
 	m.setup.selectedMethod = 0 // "Sign in with OAuth"
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)
 	if m.setup.stage != setupStageProvider || !m.setup.oauthMode {
 		t.Fatalf("OAuth method should enter the OAuth provider list, got stage=%v oauth=%v", m.setup.stage, m.setup.oauthMode)
@@ -1329,7 +1329,7 @@ func TestSetupMethodChooserOAuthPath(t *testing.T) {
 	}
 
 	// Left returns to the method chooser and clears the OAuth selection.
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	updated, _ = m.Update(testKey(tea.KeyLeft))
 	m = updated.(model)
 	if m.setup.stage != setupStageMethod || m.setup.oauthMode {
 		t.Fatalf("retreat should return to method without oauthMode, got stage=%v oauth=%v", m.setup.stage, m.setup.oauthMode)
@@ -1349,7 +1349,7 @@ func setupAtOAuthList(t *testing.T) model {
 	m.height = 30
 	m = pressSetupContinueOnce(m) // Welcome → Method
 	m.setup.selectedMethod = 0    // Sign in with OAuth
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	return updated.(model)
 }
 
@@ -1361,7 +1361,7 @@ func TestSetupDeviceShortcutStartsDeviceFlow(t *testing.T) {
 			break
 		}
 	}
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	updated, cmd := m.Update(testKeyText("d"))
 	m = updated.(model)
 	if !m.setup.oauthPending || !m.setup.oauthDevice {
 		t.Fatalf("'d' should start device login (pending=%v device=%v)", m.setup.oauthPending, m.setup.oauthDevice)
@@ -1411,7 +1411,7 @@ func TestApplySetupOAuthSuccessAdvancesToModel(t *testing.T) {
 	m.height = 30
 	m = pressSetupContinueOnce(m) // Welcome → Method
 	m.setup.selectedMethod = 0
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	m = updated.(model) // OAuth provider stage
 	m.setup.oauthPending = true
 
@@ -1443,9 +1443,9 @@ func pressSetupContinueOnce(m model) model {
 	var updated tea.Model
 	var cmd tea.Cmd
 	if m.setup.stage == setupStageMethod || m.setup.stage == setupStageProvider || m.setupEndpointInputActive() || m.setupNameInputActive() || m.setupCredentialInputActive() || m.setup.stage == setupStageModel || m.setup.stage == setupStageReady {
-		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		updated, cmd = m.Update(testKey(tea.KeyEnter))
 	} else {
-		updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+		updated, cmd = m.Update(testKey(tea.KeySpace))
 	}
 	m = updated.(model)
 	if cmd != nil {
@@ -1455,14 +1455,15 @@ func pressSetupContinueOnce(m model) model {
 	return m
 }
 
-func displayColumnForVisibleLine(t *testing.T, view string, marker string) int {
+func displayColumnForVisibleLine(t *testing.T, view any, marker string) int {
 	t.Helper()
-	for _, line := range strings.Split(plainRender(t, view), "\n") {
+	rendered := plainRender(t, view)
+	for _, line := range strings.Split(rendered, "\n") {
 		if strings.Contains(line, marker) {
 			return displayColumn(line, marker)
 		}
 	}
-	t.Fatalf("marker %q missing from view:\n%s", marker, view)
+	t.Fatalf("marker %q missing from view:\n%s", marker, rendered)
 	return -1
 }
 
@@ -1474,7 +1475,7 @@ func displayColumn(line string, marker string) int {
 	return lipgloss.Width(line[:index])
 }
 
-func assertSetupLineCentered(t *testing.T, view string, marker string, width int) {
+func assertSetupLineCentered(t *testing.T, view any, marker string, width int) {
 	t.Helper()
 	line := visibleLineForMarker(t, view, marker)
 	trimmed := strings.TrimSpace(line)
@@ -1486,14 +1487,15 @@ func assertSetupLineCentered(t *testing.T, view string, marker string, width int
 	}
 }
 
-func visibleLineForMarker(t *testing.T, view string, marker string) string {
+func visibleLineForMarker(t *testing.T, view any, marker string) string {
 	t.Helper()
-	for _, line := range strings.Split(plainRender(t, view), "\n") {
+	rendered := plainRender(t, view)
+	for _, line := range strings.Split(rendered, "\n") {
 		if strings.Contains(line, marker) {
 			return line
 		}
 	}
-	t.Fatalf("marker %q missing from view:\n%s", marker, view)
+	t.Fatalf("marker %q missing from view:\n%s", marker, rendered)
 	return ""
 }
 
