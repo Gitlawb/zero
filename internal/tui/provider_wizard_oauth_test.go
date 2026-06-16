@@ -163,10 +163,16 @@ func TestProviderWizardOAuthDispatchFromList(t *testing.T) {
 	m.providerWizard.selectedMethod = 0
 	next, _ := m.advanceProviderWizard() // → OAuth provider list
 	// select openrouter
+	found := false
 	for i, d := range next.providerWizard.providers {
 		if d.ID == "openrouter" {
 			next.providerWizard.selectedProvider = i
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatal("openrouter not present in the OAuth provider list")
 	}
 	next, cmd := next.advanceProviderWizard()
 	if !next.providerWizard.oauthPending {

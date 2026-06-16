@@ -286,7 +286,7 @@ func (m *Manager) GetFresh(ctx context.Context, key string) (string, error) {
 	if !token.NeedsRefresh(m.now(), m.buffer) {
 		return token.AccessToken, nil
 	}
-	cfg, err := m.resolveConfigForKey(key)
+	cfg, err := m.resolveConfigForKey(ctx, key)
 	if err != nil {
 		return "", err
 	}
@@ -300,7 +300,7 @@ func (m *Manager) Handle401(ctx context.Context, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cfg, err := m.resolveConfigForKey(key)
+	cfg, err := m.resolveConfigForKey(ctx, key)
 	if err != nil {
 		return "", err
 	}
@@ -337,12 +337,19 @@ func (m *Manager) loadToken(key string) (Token, error) {
 // resolveConfigForKey resolves the provider OAuth config for a provider-token key.
 // It is only needed to refresh a token (the endpoints + client identity), not to
 // read one.
-func (m *Manager) resolveConfigForKey(key string) (Config, error) {
+func (m *Manager) resolveConfigForKey(ctx context.Context, key string) (Config, error) {
 	name := strings.TrimPrefix(key, KeyPrefixProvider)
 	if name == key {
 		return Config{}, fmt.Errorf("oauth: refresh is only supported for provider tokens (got %q)", key)
 	}
 	cfg, _, err := m.registry.ResolveConfig(name, m.env)
+	if err != nil {
+		return Config{}, err
+	}
+	// Fill any missing token/authorize/device endpoints from issuer discovery so a
+	// provider configured with only ZERO_OAUTH_<NAME>_ISSUER_URL can still refresh
+	// (refreshAndSave requires the token endpoint).
+	cfg, err = m.resolveEndpoints(ctx, cfg)
 	if err != nil {
 		return Config{}, err
 	}
