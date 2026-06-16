@@ -1583,9 +1583,13 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 // spinner.
 //
 // We drive WorkingWordsStepEvery-1 ticks and assert the verb didn't
-// change, then drive one more tick and assert it did. This catches a
-// regression where someone removes the gate (revert to "every tick") or
-// sets the gate to 1 (same effect).
+// change, then drive one more tick and assert it did. Then we drive
+// another WorkingWordsStepEvery-1 ticks and assert the verb stayed put
+// (i.e. the counter reset after the advance, not carried over). This
+// catches a regression where someone removes the gate (revert to "every
+// tick"), sets the gate to 1 (same effect), or forgets to reset the
+// counter after the advance (so a follow-up advance lands one window
+// early).
 func TestWorkingVerbAdvancesOnStepEverySpinnerTicks(t *testing.T) {
 	m := limeTestModel()
 	m.pending = true
@@ -1603,16 +1607,21 @@ func TestWorkingVerbAdvancesOnStepEverySpinnerTicks(t *testing.T) {
 	// The (WorkingWordsStepEvery)th tick IS the advance.
 	updated, _ := m.Update(spinner.TickMsg{})
 	m = updated.(model)
-	if got := m.workingVerb.Current(); got == before {
+	afterAdvance := m.workingVerb.Current()
+	if afterAdvance == before {
 		t.Fatalf("after %d ticks verb still = %q, want advance", WorkingWordsStepEvery, before)
 	}
 
-	// And the counter resets — one more full window still requires the
-	// full step count to advance again.
-	updated, _ = m.Update(spinner.TickMsg{})
-	m = updated.(model)
-	if got := m.workingVerb.Current(); got == before {
-		// just one tick past the advance — still in the new window
-		_ = m
+	// Drive another (WorkingWordsStepEvery - 1) ticks. The verb must NOT
+	// advance again — the counter resets after each advance, not carries
+	// over. A regression that omits the reset (so the next advance lands
+	// one window early) would fail this assertion.
+	for i := 0; i < WorkingWordsStepEvery-1; i++ {
+		updated, _ := m.Update(spinner.TickMsg{})
+		m = updated.(model)
+	}
+	if got := m.workingVerb.Current(); got != afterAdvance {
+		t.Fatalf("after advance + %d ticks verb = %q, want unchanged from post-advance (%q) — counter didn't reset",
+			WorkingWordsStepEvery-1, got, afterAdvance)
 	}
 }
