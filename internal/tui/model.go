@@ -153,6 +153,19 @@ type model struct {
 	streamingText              string // live assistant text for the current segment
 	streamingReasoning         string // live provider reasoning for the current segment
 	streamingReasoningExpanded bool
+	// Streaming-text fade state. lineAges is keyed to LOGICAL lines of
+	// streamingText (one entry per \n in the accumulated text), and
+	// lastStreamActivity is the time of the most recent delta (used for
+	// the in-progress last line — the one the model is currently typing
+	// into). fadeActive is true from the first agentTextMsg of a run
+	// until the matching agentResponseMsg, and gates both the per-line
+	// fade application in interimBlock and the streamingFadeTick
+	// re-render loop. The state is reset on stream end, on cancel, and
+	// on terminal resize (where the visual line count may change and
+	// per-line ages are no longer meaningful).
+	lineAges           []time.Time
+	lastStreamActivity time.Time
+	fadeActive         bool
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
@@ -869,7 +882,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamingText += msg.delta
-		return m, nil
+		// recordStreamingDelta appends a time.Time to lineAges for every
+		// newline in the delta and bumps lastStreamActivity. It also
+		// re-stamps the in-progress last entry so the line that's still
+		// being filled stays visibly fresh.
+		m.recordStreamingDelta(msg.delta)
+		// The fade short-circuits when fadeActive is false, so a 0-byte
+		// delta is a no-op (the tick is still scheduled harmlessly).
+		m.fadeActive = true
+		return m, streamingFadeTick()
 	case agentReasoningMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -893,9 +914,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.setDoctorStatusRow(m.doctorConnectivityRunningText())
 		}
 		return m, cmd
+	case streamingFadeTickMsg:
+		// The fade's own tick (separate from the spinner so a slower
+		// cadence is enough). Short-circuits when fadeActive is false,
+		// which is how the ticker stops cleanly at stream end: the
+		// agentResponseMsg handler sets fadeActive = false, and the
+		// next tick that lands after that point returns nil here.
+		if !m.fadeActive {
+			return m, nil
+		}
+		return m, streamingFadeTick()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Reset the streaming-text fade state. A width change can re-wrap
+		// the in-progress text into a different number of visual lines,
+		// which invalidates the per-line age mapping. The next delta
+		// will reseed lineAges and restart the tick.
+		m.lineAges = nil
+		m.lastStreamActivity = m.now()
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
 		m.input.Width = maxInt(20, chatWidth(msg.Width)-14)
@@ -992,6 +1029,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pending = false
+		// The fade is hard-stopped on stream end: the next render emits
+		// the final row in solid ink (no settling animation), and the
+		// pending streamingFadeTickMsg that lands after this point
+		// short-circuits because fadeActive is false.
+		m.fadeActive = false
 		// The run is complete: release its context now instead of waiting for the
 		// parent context — every prompt leaked a CancelFunc (and its timer
 		// resources) until app exit otherwise.
@@ -1424,7 +1466,13 @@ func (m model) interimBlock(width int) string {
 	}
 	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
-		lines[index] = styleAssistantMarkdownLine(line, zeroTheme.ink)
+		// styleStreamingLine applies the fade palette when fadeActive is
+		// true and lineAges is populated; otherwise it falls through to
+		// the same base-ink render styleAssistantMarkdownLine would have
+		// applied. This means test fixtures that pre-populate
+		// m.streamingText without going through the agentTextMsg
+		// branch keep rendering identically to before.
+		lines[index] = m.styleStreamingLine(line, index, len(lines))
 	}
 	lines = appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
@@ -2310,6 +2358,10 @@ func (m *model) cancelRun() {
 	m.streamingText = ""
 	m.streamingReasoning = ""
 	m.streamingReasoningExpanded = false
+	// Hard-stop the fade and drop the per-line age map. The next turn's
+	// first agentTextMsg will seed a fresh lineAges slice and restart
+	// the tick.
+	m.resetStreamingFade()
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {

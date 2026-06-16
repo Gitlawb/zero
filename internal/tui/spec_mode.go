@@ -208,6 +208,13 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	// Seed the streaming-text fade state for the spec-impl run. The
+	// normal launchPrompt path lets the first agentTextMsg do this; the
+	// spec-impl path calls runAgent directly, so we seed explicitly. The
+	// first incoming delta will re-stamp the in-progress entry and the
+	// fade will start naturally.
+	m.resetStreamingFade()
+	m.fadeActive = true
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, nil), m.spinner.Tick)
 }
 
