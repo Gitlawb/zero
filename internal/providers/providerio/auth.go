@@ -37,31 +37,25 @@ func SendWithAuthRetry(
 ) (*http.Response, error) {
 	forceRefresh := false
 	for authTry := 0; ; authTry++ {
-		var resolveErr error
+		// Resolve auth BEFORE dispatching: a resolver error inside the request
+		// callback would otherwise let SendWithRetry send an unauthenticated
+		// request (leaking the path/body) before we return the error.
+		headers := base
+		if resolver != nil {
+			header, value, ok, rerr := resolver(ctx, forceRefresh)
+			if rerr != nil {
+				return nil, rerr
+			}
+			if ok {
+				headers = withBearer(base, header, value)
+			}
+		}
 		response, err := SendWithRetry(ctx, client, method, url, body, func(request *http.Request) {
 			if setExtra != nil {
 				setExtra(request)
 			}
-			headers := base
-			if resolver != nil {
-				header, value, ok, rerr := resolver(request.Context(), forceRefresh)
-				if rerr != nil {
-					resolveErr = rerr
-					return
-				}
-				if ok {
-					headers = withBearer(base, header, value)
-				}
-			}
 			ApplyAuthHeaders(request, headers)
 		}, maxAttempts)
-
-		if resolveErr != nil {
-			if response != nil {
-				_ = response.Body.Close()
-			}
-			return nil, resolveErr
-		}
 		if err != nil {
 			return response, err
 		}

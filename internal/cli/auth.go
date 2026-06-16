@@ -49,10 +49,15 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 // provider profile, while this command prints it for manual configuration.
 func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appDeps) int {
 	for _, a := range args {
-		if a == "-h" || a == "--help" {
+		if a == "-h" || a == "--help" || a == "help" {
 			_ = writeAuthHelp(stdout)
 			return exitSuccess
 		}
+	}
+	// openrouter takes no positional args or flags; reject the unexpected so a
+	// typo/unsupported flag fails fast instead of silently running the login.
+	if len(args) > 0 {
+		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
 	key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
@@ -355,10 +360,11 @@ Commands:
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
   openrouter                                      Log in to OpenRouter in the browser; mints an API key
 
-A provider is any OAuth 2.0 / OIDC server. A few ship built-in presets you can use
-directly (e.g. "xai" via 'zero auth login xai'; "openrouter" via 'zero auth
-openrouter'); any preset field is overridable via the env vars below. For a custom
-provider named <name>, set:
+A provider is any OAuth 2.0 / OIDC server. "openrouter" ('zero auth openrouter')
+works out of the box. "xai" ('zero auth login xai') uses a built-in preset that is
+off by default — enable it with ZERO_OAUTH_ALLOW_PRESETS=1, or set the
+ZERO_OAUTH_XAI_* vars yourself. Any preset field is overridable via the env vars
+below. For a custom provider named <name>, set:
   ZERO_OAUTH_<NAME>_CLIENT_ID       (required)
   ZERO_OAUTH_<NAME>_CLIENT_SECRET   (optional)
   ZERO_OAUTH_<NAME>_AUTHORIZE_URL   ZERO_OAUTH_<NAME>_TOKEN_URL

@@ -100,13 +100,15 @@ We researched this carefully. As of mid-2026, a **subscription** OAuth token doe
   (`anthropic-beta: oauth-2025-04-20`, `claude-cli` UA, and a verbatim
   *"You are Claude Code…"* system prompt) — and **even then** tool-using requests
   on Max plans are routed to a disabled billing lane and `400`. Anthropic's policy
-  **explicitly prohibits** subscription-token use outside Claude Code / claude.ai:
-  a **Feb 19 2026** docs update clarified that Free/Pro/Max OAuth tokens may not be
-  used in third-party tools or the Agent SDK, and **since April 4 2026** Claude
-  subscriptions **no longer cover third-party-tool usage at all** (enforcement
-  began with OpenClaw in early 2026 and expanded to every third-party harness;
-  integrators must now use an API key with usage-based billing). The request to
-  allow it (claude-code #37205) was closed *"not planned."*
+  **prohibits** subscription-token use outside Claude Code / claude.ai, and the
+  timeline hardened through 2026: a **Feb 19 2026** docs update spelled out that
+  Free/Pro/Max OAuth tokens may not be used in third-party tools or the Agent SDK,
+  then on **April 4 2026** enforcement landed and subscription OAuth tokens
+  **stopped working in third-party harnesses** (starting with OpenClaw, then the
+  rest). As of mid-2026 the only supported ways to drive Claude from a third-party
+  tool are a standard **API key** or pay-as-you-go **"Extra Usage"** billing —
+  both per-token, not the flat subscription. The request to allow subscription use
+  (claude-code #37205) was closed *"not planned."*
 
 So Zero does **not** call those backends directly or spoof those clients — that
 would be fragile, account-risky, and (for Anthropic) against the vendor's terms.

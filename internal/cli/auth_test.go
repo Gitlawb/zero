@@ -116,6 +116,21 @@ func TestRunAuthRejectsWrongFlags(t *testing.T) {
 	}
 }
 
+func TestRunAuthOpenRouterRejectsArgs(t *testing.T) {
+	withAuthStore(t)
+	var stdout, stderr bytes.Buffer
+	// An unexpected arg/flag must fail fast, not silently run the login.
+	if code := runWithDeps([]string{"auth", "openrouter", "--json"}, &stdout, &stderr, appDeps{}); code == exitSuccess {
+		t.Fatalf("openrouter with an unexpected flag should fail; stdout=%q", stdout.String())
+	}
+	// --help still works.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"auth", "openrouter", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("openrouter --help should succeed, stderr=%q", stderr.String())
+	}
+}
+
 func TestRunAuthHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runWithDeps([]string{"auth", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {

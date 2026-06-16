@@ -38,6 +38,32 @@ func TestSendWithAuthRetryAPIKeyFallbackWhenNilResolver(t *testing.T) {
 	}
 }
 
+func TestSendWithAuthRetryResolverErrorDoesNotDispatch(t *testing.T) {
+	var hit int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hit, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	resolver := func(context.Context, bool) (string, string, bool, error) {
+		return "", "", false, errors.New("resolve failed")
+	}
+	resp, err := SendWithAuthRetry(context.Background(), srv.Client(), http.MethodPost, srv.URL, nil,
+		AuthHeaders{APIKey: "KEY", DefaultAuthHeader: "X-Api-Key"}, resolver, nil, 1)
+	drain(resp)
+	if err == nil {
+		t.Fatal("expected the resolver error to surface")
+	}
+	if resp != nil {
+		t.Fatalf("no response should be returned on resolver error, got status %d", resp.StatusCode)
+	}
+	// The request must never reach the server when auth resolution failed.
+	if n := atomic.LoadInt32(&hit); n != 0 {
+		t.Fatalf("request dispatched %d times despite resolver error, want 0", n)
+	}
+}
+
 func TestSendWithAuthRetryBearerWinsAndNeverBoth(t *testing.T) {
 	var gotKey, gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

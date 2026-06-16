@@ -14,6 +14,12 @@ type mouseSelectionTarget struct {
 }
 
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// While a provider-wizard OAuth login is in flight, ignore all mouse input
+	// (clicks and wheel) so a stray scroll can't change the selected provider
+	// mid-login — mirroring the keyboard handler's pending guard.
+	if m.providerWizard != nil && m.providerWizard.oauthPending {
+		return m, nil
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:

@@ -90,7 +90,7 @@ func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	if m.setup.stage != setupStageMethod {
 		t.Fatalf("stage = %v, want method chooser", m.setup.stage)
 	}
-	m.setup.selectedMethod = len(providerWizardMethodOptions()) - 1 // API-key / browse path
+	m.setup.selectedMethod = len(m.setupMethodOptions()) - 1 // API-key / browse path
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if m.setup.stage != setupStageProvider {
@@ -1419,7 +1419,7 @@ func pressSetupContinue(m model) model {
 	// Transparently skip the connect-method chooser via the API-key/browse path so
 	// existing tests keep their Welcome→Provider→… expectations.
 	if m.setup.stage == setupStageMethod {
-		m.setup.selectedMethod = len(providerWizardMethodOptions()) - 1
+		m.setup.selectedMethod = len(m.setupMethodOptions()) - 1
 		m = pressSetupContinueOnce(m)
 	}
 	return m
