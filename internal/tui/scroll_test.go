@@ -32,6 +32,42 @@ func TestMouseWheelScrollsChatWithoutRecallingInputHistory(t *testing.T) {
 	}
 }
 
+func TestScrollChatClampsOffsetAtTranscriptTop(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 14
+	for index := 0; index < 40; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
+	maxOffset := m.chatMaxScrollOffset()
+	if maxOffset <= chatWheelScrollLines {
+		t.Fatalf("test transcript should be scrollable, maxOffset=%d", maxOffset)
+	}
+
+	m = m.scrollChat(maxOffset + 100)
+	if m.chatScrollOffset != maxOffset {
+		t.Fatalf("scroll beyond top offset = %d, want %d", m.chatScrollOffset, maxOffset)
+	}
+
+	m.chatScrollOffset = maxOffset + 100 // Simulate an offset saved before clamping existed.
+	m = m.scrollChat(-chatWheelScrollLines)
+	if want := maxOffset - chatWheelScrollLines; m.chatScrollOffset != want {
+		t.Fatalf("scroll down from inflated offset = %d, want %d", m.chatScrollOffset, want)
+	}
+}
+
+func TestScrollChatDoesNotAccumulateWhenTranscriptFits(t *testing.T) {
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width = 90
+	m.height = 20
+	m.transcript = appendRow(m.transcript, rowAssistant, "short")
+
+	m = m.scrollChat(100)
+	if m.chatScrollOffset != 0 {
+		t.Fatalf("non-scrollable transcript offset = %d, want 0", m.chatScrollOffset)
+	}
+}
+
 func TestMouseWheelOverWrappedComposerMovesComposerCursor(t *testing.T) {
 	text := "Create a book library dashboard page with cards, filters, charts, and responsive behavior."
 	m := newModel(context.Background(), Options{AltScreen: true})
@@ -146,6 +182,9 @@ func TestPageKeysScrollAltScreenTranscript(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true})
 	m.width = 90
 	m.height = 20
+	for index := 0; index < 30; index++ {
+		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index%26)))
+	}
 
 	updated, _ := m.Update(testKey(tea.KeyPgUp))
 	m = updated.(model)

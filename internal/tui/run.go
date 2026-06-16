@@ -26,6 +26,7 @@ func Run(ctx context.Context, options Options) int {
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
+		tea.WithFilter(mouseEventFilter()),
 	}
 	initialModel := newModel(ctx, options)
 	if initialModel.wantsMouseCapture() {

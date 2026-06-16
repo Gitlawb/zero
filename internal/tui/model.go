@@ -33,7 +33,7 @@ import (
 
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
-const chatWheelScrollLines = 3
+const chatWheelScrollLines = 5
 
 type model struct {
 	ctx                    context.Context
@@ -1377,8 +1377,37 @@ func (m model) scrollChat(delta int) model {
 	if !m.altScreen || delta == 0 {
 		return m
 	}
-	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+delta)
+	maxOffset := m.chatMaxScrollOffset()
+	current := clampInt(m.chatScrollOffset, 0, maxOffset)
+	m.chatScrollOffset = clampInt(current+delta, 0, maxOffset)
+	if m.chatScrollOffset == 0 {
+		m.chatBodyLines = 0
+	}
 	return m
+}
+
+func (m model) chatMaxScrollOffset() int {
+	_, maxOffset := m.chatScrollMetrics()
+	return maxOffset
+}
+
+func (m model) chatScrollMetrics() (int, int) {
+	if !m.altScreen || m.height <= 0 {
+		return 0, 0
+	}
+	width := chatWidth(m.width)
+	body, _ := m.transcriptBody(width, "")
+	bodyLines := len(viewLines(body))
+	footerLines := viewLines(m.footerView(width))
+	maxFooterLines := maxInt(0, m.height-1)
+	if len(footerLines) > maxFooterLines {
+		footerLines = footerLines[len(footerLines)-maxFooterLines:]
+	}
+	available := m.height - len(footerLines)
+	if available < 1 {
+		available = 1
+	}
+	return bodyLines, maxInt(0, bodyLines-available)
 }
 
 // syncChatScroll pins the viewport to what the user is reading. The scroll offset
@@ -1393,7 +1422,12 @@ func (m model) syncChatScroll() model {
 		m.chatBodyLines = 0
 		return m
 	}
-	current := m.chatBodyLineCount()
+	current, maxOffset := m.chatScrollMetrics()
+	m.chatScrollOffset = clampInt(m.chatScrollOffset, 0, maxOffset)
+	if m.chatScrollOffset <= 0 {
+		m.chatBodyLines = 0
+		return m
+	}
 	if m.chatBodyLines == 0 {
 		// Just scrolled up: establish the baseline, no adjustment this frame.
 		m.chatBodyLines = current
@@ -1403,16 +1437,9 @@ func (m model) syncChatScroll() model {
 	// (streaming appended lines) or shrank (a tool card collapsed, transcript
 	// cleared). Clamp at zero so a large shrink lands the user back at the tail
 	// rather than underflowing past it.
-	m.chatScrollOffset = maxInt(0, m.chatScrollOffset+current-m.chatBodyLines)
+	m.chatScrollOffset = clampInt(m.chatScrollOffset+current-m.chatBodyLines, 0, maxOffset)
 	m.chatBodyLines = current
 	return m
-}
-
-// chatBodyLineCount renders the live transcript body and returns its line count.
-// Only called while the user is scrolled up (see syncChatScroll).
-func (m model) chatBodyLineCount() int {
-	body, _ := m.transcriptBody(chatWidth(m.width), "")
-	return len(viewLines(body))
 }
 
 func (m model) chatPageScrollLines() int {
