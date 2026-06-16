@@ -19,6 +19,8 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"verify after edits",
 		"honor the active permission mode",
 		"avoid broad refactors",
+		"search the web before answering",
+		"do not recognize",
 		"final response",
 	} {
 		if !strings.Contains(prompt, want) {

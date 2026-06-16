@@ -59,8 +59,12 @@ type StoreOptions struct {
 	Env      map[string]string
 	Now      func() time.Time
 	// Storage selects the backend: "" / "file" => a 0600 JSON file (default);
-	// "keyring" => the OS keyring. When empty it falls back to ZERO_OAUTH_STORAGE.
+	// "encrypted-file" => an AES-256-GCM encrypted file; "keyring" => the OS
+	// keyring. When empty it falls back to ZERO_OAUTH_STORAGE.
 	Storage string
+	// Encrypted is a legacy alias for Storage=="encrypted-file" (AES-256-GCM at
+	// rest). Ignored when Storage is set.
+	Encrypted bool
 	// Keyring is the client used when Storage=="keyring"; nil => keyring.New().
 	// Injected by tests to avoid touching a real keychain.
 	Keyring KeyringClient
@@ -82,11 +86,13 @@ const (
 
 // Store persists OAuth tokens (provider + MCP namespaces) as one JSON blob,
 // written atomically through a pluggable backend (a 0600 file guarded by a
-// cross-process lock, or the OS keyring).
+// cross-process lock, or the OS keyring). When crypter is non-nil the file blob
+// is AES-256-GCM ciphertext at rest.
 type Store struct {
-	blob blobStore
-	now  func() time.Time
-	mu   sync.Mutex
+	blob    blobStore
+	crypter *aesGCMCrypter // nil => plaintext blob
+	now     func() time.Time
+	mu      sync.Mutex
 }
 
 type storeFile struct {
@@ -135,6 +141,9 @@ func NewStore(options StoreOptions) (*Store, error) {
 	if storage == "" {
 		storage = strings.TrimSpace(envValue(options.Env, "ZERO_OAUTH_STORAGE"))
 	}
+	if storage == "" && options.Encrypted {
+		storage = "encrypted-file" // legacy alias
+	}
 	switch storage {
 	case "", "file":
 		path, err := resolveStoreFilePath(options)
@@ -142,6 +151,14 @@ func NewStore(options StoreOptions) (*Store, error) {
 			return nil, err
 		}
 		return &Store{blob: fileBlob{path: path}, now: now}, nil
+	case "encrypted-file":
+		path, err := resolveStoreFilePath(options)
+		if err != nil {
+			return nil, err
+		}
+		// The file blob holds AES-256-GCM ciphertext; the per-user secret lives in
+		// a sibling ".secret" file (see encrypt.go).
+		return &Store{blob: fileBlob{path: path}, crypter: newAESGCMCrypter(path + ".secret"), now: now}, nil
 	case "keyring":
 		kr := options.Keyring
 		if kr == nil {
@@ -160,7 +177,7 @@ func NewStore(options StoreOptions) (*Store, error) {
 		}
 		return &Store{blob: keyringBlob{kr: kr, service: keyringService, account: keyringAccount, lockPath: lockPath}, now: now}, nil
 	default:
-		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\" or \"keyring\")", storage)
+		return nil, fmt.Errorf("oauth: unknown storage %q (want \"file\", \"encrypted-file\", or \"keyring\")", storage)
 	}
 }
 
@@ -284,6 +301,13 @@ func (s *Store) readState() (storeFile, error) {
 	if !ok {
 		return emptyStoreFile(), nil
 	}
+	if s.crypter != nil {
+		// Encrypted backend: the blob is AES-256-GCM ciphertext, not JSON.
+		data, err = s.crypter.open(data)
+		if err != nil {
+			return storeFile{}, fmt.Errorf("oauth: decrypt token store at %s: %w", s.blob.location(), err)
+		}
+	}
 	var state storeFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return storeFile{}, fmt.Errorf("oauth: invalid token store at %s: %w", s.blob.location(), err)
@@ -307,7 +331,16 @@ func (s *Store) writeState(state storeFile) error {
 	if err != nil {
 		return err
 	}
-	return s.blob.write(append(data, '\n'))
+	// Plaintext keeps the trailing newline for a tidy file; the encrypted backend
+	// writes opaque ciphertext instead.
+	payload := append(data, '\n')
+	if s.crypter != nil {
+		payload, err = s.crypter.seal(data)
+		if err != nil {
+			return err
+		}
+	}
+	return s.blob.write(payload)
 }
 
 func emptyStoreFile() storeFile {

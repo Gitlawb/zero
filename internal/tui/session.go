@@ -235,9 +235,8 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			case "user":
 				rows = append(rows, transcriptRow{kind: rowUser, text: content})
 			case "assistant":
-				// A persisted assistant message was a turn's final answer, so it keeps
-				// the final-answer rail on rehydration. Tool/timing counters were not
-				// recorded; the done line omits those segments.
+				// A persisted assistant message was a turn's final answer. Tool/timing
+				// counters were not recorded; the completion line omits those segments.
 				rows = append(rows, transcriptRow{kind: rowAssistant, text: content, final: true})
 			default:
 				rows = append(rows, transcriptRow{kind: rowSystem, text: content})

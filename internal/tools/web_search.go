@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,7 +162,7 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	if len(results) > 0 && len(domains) > 0 {
 		filtered, err := filterWebSearchByDomains(results, domains)
 		if err != nil {
-			return errorResult("Error: " + err.Error())
+			return errorResult("Error: " + redactWebSearchText(err.Error()))
 		}
 		results = filtered
 	}
@@ -175,9 +177,9 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 
 // formatSearchResults renders results as a compact numbered list:
 // "1. Title — URL" with the snippet indented on the next line.
-// If a result carries a non-zero Score, it is shown as " — score 0.91" after
-// the title; absence (zero value) is rendered without the score to keep the
-// common case tidy.
+// If a result carries a score that rounds to at least 0.01, it is shown as
+// " — score 0.91" after the title. Absent (zero), negative, and sub-0.005 scores
+// are omitted so the common case stays tidy and never prints a noisy "score 0.00".
 func formatSearchResults(results []searchResult) string {
 	lines := make([]string, 0, len(results)*2)
 	for index, result := range results {
@@ -186,8 +188,11 @@ func formatSearchResults(results []searchResult) string {
 			title = "(untitled)"
 		}
 		header := fmt.Sprintf("%d. %s — %s", index+1, title, strings.TrimSpace(result.URL))
-		if result.Score > 0 {
-			header += fmt.Sprintf(" — score %.2f", result.Score)
+		// Gate on the *rounded* value: a raw "> 0" check would still render
+		// "score 0.00" for tiny positives like 0.0001, the exact noise the
+		// score suffix is meant to avoid.
+		if rounded := math.Round(result.Score*100) / 100; rounded >= 0.01 {
+			header += fmt.Sprintf(" — score %.2f", rounded)
 		}
 		lines = append(lines, header)
 		if snippet := strings.TrimSpace(result.Snippet); snippet != "" {
@@ -296,16 +301,39 @@ func (backend *httpSearchBackend) Search(ctx context.Context, query string, limi
 	return parseSearchResults(body)
 }
 
+// lenientScore decodes a provider "score" that may arrive as a JSON number, a
+// numeric string ("0.91"), null, or some other shape, never failing the decode.
+// A plain float64 field would make json.Unmarshal reject the *entire* response
+// when a single provider sends a stringified or malformed score, dropping every
+// result; here an unparseable score degrades to the zero value (treated as
+// absent) instead.
+type lenientScore float64
+
+func (s *lenientScore) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	// Accept both 0.91 and "0.91"; ignore anything else (object, bool, NaN/Inf,
+	// out-of-range) by leaving the score at zero. ParseFloat accepts "NaN"/"Inf",
+	// so reject non-finite results explicitly to honor the documented filter.
+	unquoted := strings.TrimSpace(strings.Trim(string(trimmed), `"`))
+	if f, parseErr := strconv.ParseFloat(unquoted, 64); parseErr == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
+		*s = lenientScore(f)
+	}
+	return nil
+}
+
 // parseSearchResults accepts either a bare array [{title,url,snippet,score}] or
 // a wrapped object {"results":[...]}, the two shapes common across providers.
 // The optional "score" field is forwarded when present; providers that omit
 // it leave searchResult.Score at the zero value and the renderer skips it.
 func parseSearchResults(body []byte) ([]searchResult, error) {
 	type rawResult struct {
-		Title   string  `json:"title"`
-		URL     string  `json:"url"`
-		Snippet string  `json:"snippet"`
-		Score   float64 `json:"score,omitempty"`
+		Title   string       `json:"title"`
+		URL     string       `json:"url"`
+		Snippet string       `json:"snippet"`
+		Score   lenientScore `json:"score,omitempty"`
 	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
@@ -319,7 +347,7 @@ func parseSearchResults(body []byte) ([]searchResult, error) {
 				Title:   item.Title,
 				URL:     item.URL,
 				Snippet: item.Snippet,
-				Score:   item.Score,
+				Score:   float64(item.Score),
 			})
 		}
 		return out
@@ -421,6 +449,10 @@ func canonicalizeWebSearchHost(raw string) string {
 		trimmed = trimmed[:i]
 	}
 	trimmed = strings.ToLower(trimmed)
+	// Drop a trailing FQDN dot ("react.dev." == "react.dev") so an allowlist
+	// entry and a result host normalize the same way; hostFromWebSearchURL does
+	// the same on the result side.
+	trimmed = strings.TrimSuffix(trimmed, ".")
 	trimmed = strings.TrimPrefix(trimmed, "www.")
 	if trimmed == "" || strings.ContainsAny(trimmed, " \t\n") {
 		return ""
@@ -461,6 +493,7 @@ func hostFromWebSearchURL(raw string) string {
 		return ""
 	}
 	host := strings.ToLower(parsed.Hostname())
+	host = strings.TrimSuffix(host, ".") // match canonicalizeWebSearchHost (FQDN dot)
 	host = strings.TrimPrefix(host, "www.")
 	return host
 }

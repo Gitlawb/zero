@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -33,6 +34,9 @@ type transcriptSelectableLine struct {
 
 type transcriptCopiedMsg struct {
 	chars int
+	// err is set when neither the native clipboard nor the OSC52 fallback landed
+	// the copy, so the status line can report the failure instead of "Copied!".
+	err error
 }
 
 type transcriptCopyStatusExpiredMsg struct {
@@ -120,9 +124,21 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 		return m.renderSelectableAssistantRow(rowIndex, row, width, startBodyY)
 	case rowReasoning:
 		return m.renderSelectableReasoningRow(rowIndex, row, width, startBodyY)
+	case rowToolResult:
+		return m.renderSelectableToolResultRow(rowIndex, row, width, rc, startBodyY)
 	default:
 		return m.renderRow(row, width, rc), nil
 	}
+}
+
+// renderSelectableToolResultRow renders the tool result card and marks its head
+// (first line) as a clickable collapse/expand toggle while the row is live.
+func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	rendered := m.renderRow(row, width, rc)
+	if rendered == "" {
+		return "", nil
+	}
+	return rendered, []transcriptSelectableLine{{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}}
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
@@ -130,7 +146,7 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
 	lines := make([]string, 0, len(wrapped)+2)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	lines = append(lines, renderUserPromptHalfLine(width, "▄"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	for index, line := range wrapped {
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index + 1,
@@ -141,22 +157,17 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 		selectable = append(selectable, meta)
 		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true))), contentWidth))
 	}
-	lines = append(lines, renderUserPromptHalfLine(width, "▀"))
+	lines = append(lines, renderUserPromptPaddingLine(width))
 	return strings.Join(lines, "\n"), selectable
 }
 
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	tableMeasure := width
-	if row.final {
-		tableMeasure = maxInt(16, width-2)
-	}
 	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	lines := make([]string, 0, len(wrapped)+1)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	prefix := ""
 	textStyle := zeroTheme.sayText
 	if row.final {
-		prefix = "│ "
 		textStyle = zeroTheme.ink
 	}
 	for index, line := range wrapped {
@@ -164,14 +175,11 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index,
 			rowIndex:  rowIndex,
-			textStart: lipgloss.Width(prefix),
+			textStart: 0,
 			text:      plainLine,
 		}
 		selectable = append(selectable, meta)
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
-		if row.final {
-			rendered = zeroTheme.finalRail.Render(prefix) + rendered
-		}
 		lines = append(lines, rendered)
 	}
 	if row.final {
@@ -360,7 +368,7 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			if line.live {
 				m.streamingReasoningExpanded = !m.streamingReasoningExpanded
 			} else {
-				m = m.toggleReasoningRow(line.rowIndex)
+				m = m.toggleTranscriptRow(line.rowIndex)
 			}
 			return m, nil, true
 		}
@@ -395,11 +403,16 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 	}
 }
 
-func (m model) toggleReasoningRow(rowIndex int) model {
-	if rowIndex < 0 || rowIndex >= len(m.transcript) || m.transcript[rowIndex].kind != rowReasoning {
+// toggleTranscriptRow flips the collapse state of a collapsible row (a provider
+// thought or a tool result card).
+func (m model) toggleTranscriptRow(rowIndex int) model {
+	if rowIndex < 0 || rowIndex >= len(m.transcript) {
 		return m
 	}
-	m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+	switch m.transcript[rowIndex].kind {
+	case rowReasoning, rowToolResult:
+		m.transcript[rowIndex].expanded = !m.transcript[rowIndex].expanded
+	}
 	return m
 }
 
@@ -422,7 +435,18 @@ func (m model) selectedTranscriptText() string {
 
 func copyTranscriptSelectionCmd(text string) tea.Cmd {
 	return func() tea.Msg {
-		_, _ = os.Stdout.WriteString(ansi.SetSystemClipboard(text))
+		// Prefer the native OS clipboard (pbcopy / clip.exe / xclip): it works on
+		// local terminals — including macOS Terminal.app, which has no OSC52 support
+		// at all — so the auto-copy-on-select actually lands on the clipboard. Fall
+		// back to OSC52 (forwarded by the terminal) for remote/SSH sessions where no
+		// local clipboard utility is reachable.
+		if err := clipboard.WriteAll(text); err != nil {
+			if _, oscErr := os.Stdout.WriteString(ansi.SetSystemClipboard(text)); oscErr != nil {
+				// Both paths failed; report it rather than claiming a copy that
+				// never reached any clipboard.
+				return transcriptCopiedMsg{err: err}
+			}
+		}
 		return transcriptCopiedMsg{chars: utf8.RuneCountInString(text)}
 	}
 }

@@ -429,6 +429,18 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 
 	needsSetup := setupRequired(resolved)
+	if needsSetup && !forceSetup {
+		// The active provider lacks a usable credential, but if another saved
+		// provider already has one, fall back to it instead of forcing onboarding
+		// again. Saved logins persist across launches; switch the active provider
+		// any time with `zero provider use <name>`. Onboarding only runs when no
+		// configured provider is usable (a genuinely fresh setup).
+		if usable, ok := firstUsableProvider(resolved.Providers); ok {
+			resolved.Provider = usable
+			resolved.ActiveProvider = usable.Name
+			needsSetup = false
+		}
+	}
 	setupVisible := forceSetup || needsSetup
 	configPath := ""
 	if setupVisible {

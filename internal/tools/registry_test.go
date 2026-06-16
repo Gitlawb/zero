@@ -47,6 +47,8 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 }
 
 func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
+	// web_search is only registered when a backend is configured.
+	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	byName := map[string]Tool{}
 	for _, tool := range CoreNetworkTools() {
 		byName[tool.Name()] = tool
@@ -73,6 +75,22 @@ func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
 	}
 	if property, ok := search.Parameters().Properties["query"]; !ok || property.Type != "string" {
 		t.Fatalf("web_search must expose a string query property, got %#v", search.Parameters().Properties["query"])
+	}
+}
+
+func TestCoreNetworkToolsOmitWebSearchWhenUnconfigured(t *testing.T) {
+	// No backend configured → don't offer web_search (it could only error, which
+	// makes the model waste calls + prompts before falling back to an MCP search).
+	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "")
+	names := map[string]bool{}
+	for _, tool := range CoreNetworkTools() {
+		names[tool.Name()] = true
+	}
+	if !names["web_fetch"] {
+		t.Fatal("web_fetch should always be present")
+	}
+	if names["web_search"] {
+		t.Fatal("web_search must be omitted when no search backend is configured")
 	}
 }
 

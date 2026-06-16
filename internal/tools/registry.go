@@ -217,10 +217,15 @@ func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 }
 
 func CoreNetworkTools() []Tool {
-	return []Tool{
-		NewWebFetchTool(),
-		NewWebSearchTool(),
+	tools := []Tool{NewWebFetchTool()}
+	// Only offer the built-in web_search when a backend is actually configured.
+	// Registering it unconfigured makes the model waste calls (and high-risk
+	// permission prompts) on a tool that can only return "no backend configured";
+	// an MCP-provided search tool (e.g. Exa) stands on its own without it.
+	if defaultSearchBackend() != nil {
+		tools = append(tools, NewWebSearchTool())
 	}
+	return tools
 }
 
 func CoreTools(workspaceRoot string) []Tool { return CoreToolsScoped(workspaceRoot, nil) }

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode"
@@ -287,6 +288,69 @@ func setupRequired(resolved config.ResolvedConfig) bool {
 	}
 	_, missing := setupMissingCredentialEnv(resolved.Provider)
 	return missing
+}
+
+// firstUsableProvider returns the saved provider best suited to run without
+// onboarding: the first usable (inline credential present, or no-auth/local)
+// non-local provider, else the first usable local one. It lets the CLI fall back
+// to an already-configured login when the active provider happens to lack a
+// credential, instead of re-running onboarding every launch.
+func firstUsableProvider(providers []config.ProviderProfile) (config.ProviderProfile, bool) {
+	var localFallback config.ProviderProfile
+	haveLocal := false
+	for _, profile := range providers {
+		if !config.HasProviderProfile(profile) {
+			continue
+		}
+		// A profile whose catalog entry no longer resolves AND that has no explicit
+		// BaseURL has no endpoint to talk to, so it cannot become a working
+		// provider — skip it rather than picking a fallback that fails at first use.
+		// (A stale CatalogID with a BaseURL still works as a custom endpoint.)
+		if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" && strings.TrimSpace(profile.BaseURL) == "" {
+			if _, err := providercatalog.Require(catalogID); err != nil {
+				continue
+			}
+		}
+		if _, missing := setupMissingCredentialEnv(profile); missing {
+			continue
+		}
+		if providerProfileIsLocal(profile) {
+			if !haveLocal {
+				localFallback = profile
+				haveLocal = true
+			}
+			continue
+		}
+		return profile, true
+	}
+	if haveLocal {
+		return localFallback, true
+	}
+	return config.ProviderProfile{}, false
+}
+
+// providerProfileIsLocal reports whether a provider points at a local endpoint
+// (a loopback URL or a catalog entry flagged Local), so the fallback prefers a
+// remote keyed provider that is more likely reachable.
+func providerProfileIsLocal(profile config.ProviderProfile) bool {
+	if catalogID := strings.TrimSpace(profile.CatalogID); catalogID != "" {
+		if descriptor, err := providercatalog.Require(catalogID); err == nil && descriptor.Local {
+			return true
+		}
+	}
+	base := strings.TrimSpace(profile.BaseURL)
+	if base == "" {
+		return false
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 func formatSetupComplete(result tui.SetupResult) string {

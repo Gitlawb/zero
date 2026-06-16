@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -124,9 +125,23 @@ func validateAuthFlags(sub string, a authArgs) error {
 
 // newAuthManager builds an oauth.Manager backed by the file store, printing the
 // authorization URL / device code to stdout. The store path honors
-// ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it.
+// ZERO_OAUTH_TOKENS_PATH (env), so callers/tests can redirect it. Setting
+// ZERO_OAUTH_STORAGE=encrypted-file selects the AES-256-GCM encrypted-at-rest
+// backend (a per-user secret is created beside the token file).
 func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
-	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now})
+	// Validate ZERO_OAUTH_STORAGE up front: a mistyped value must fail fast rather
+	// than silently change the backend. Empty = default (plaintext 0600 file);
+	// "encrypted-file" = AES-256-GCM; "keyring" = the OS keyring.
+	storage := strings.ToLower(strings.TrimSpace(os.Getenv("ZERO_OAUTH_STORAGE")))
+	switch storage {
+	case "", "file", "encrypted-file", "keyring":
+	default:
+		return nil, fmt.Errorf("invalid ZERO_OAUTH_STORAGE %q (supported: file, encrypted-file, keyring)", storage)
+	}
+	store, err := oauth.NewStore(oauth.StoreOptions{
+		Now:     deps.now,
+		Storage: storage,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -333,9 +348,11 @@ built in). For a provider named <name>, set:
   ZERO_OAUTH_<NAME>_SCOPES          ZERO_OAUTH_<NAME>_FLOW (loopback|device)
 Endpoint URLs must be https (loopback exempt).
 
-Storage: tokens are kept in a 0600 file by default. Set ZERO_OAUTH_STORAGE=keyring
-to use the OS keyring instead (macOS Keychain / Linux secret-tool); MCP server
-tokens share the same store.
+Storage: tokens are written 0600 under $XDG_CONFIG_HOME/zero (override with
+ZERO_OAUTH_TOKENS_PATH). Set ZERO_OAUTH_STORAGE=encrypted-file to encrypt them at
+rest with AES-256-GCM (a per-user secret beside the file), or
+ZERO_OAUTH_STORAGE=keyring to use the OS keyring (macOS Keychain / Linux
+secret-tool). MCP server tokens share the same store.
 
 Flags:
       --device   Use the device-code flow (headless/SSH; no browser)
