@@ -178,29 +178,8 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 		return false
 	}
 	width := chatWidth(m.width)
-	composerLines := viewLines(m.composerBox(width))
-	fullFooterLines := viewLines(m.footerView(width))
-	if len(composerLines) == 0 || len(fullFooterLines) == 0 {
-		return false
-	}
-	composerTop := lineSequenceIndex(fullFooterLines, composerLines)
-	if composerTop < 0 {
-		return false
-	}
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	footerLines := frame.footerLines
-	clippedPrefix := len(fullFooterLines) - len(footerLines)
-	if len(footerLines) == 0 {
-		return false
-	}
-	visibleTop := maxInt(composerTop, clippedPrefix)
-	visibleBottom := minInt(composerTop+len(composerLines), clippedPrefix+len(footerLines))
-	if visibleTop >= visibleBottom {
-		return false
-	}
-	footerTop := len(frame.headerLines) + frame.bodyHeight
-	top := footerTop + visibleTop - clippedPrefix
-	return mouseY(msg) >= top && mouseY(msg) < top+visibleBottom-visibleTop
+	return frame.composerRect.contains(mouseX(msg), mouseY(msg))
 }
 
 func lineSequenceIndex(lines []string, sequence []string) int {
@@ -478,7 +457,7 @@ func (m model) overlayMouseTop(overlayHeight int, width int) int {
 	}
 	if m.altScreen && m.height > 0 {
 		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-		return len(frame.headerLines) + maxInt(0, (frame.bodyHeight-overlayHeight)/2)
+		return frame.bodyRect.y + maxInt(0, (frame.bodyRect.height-overlayHeight)/2)
 	}
 	return maxInt(0, (normalizedStartupHeight(m.height)-overlayHeight)/2)
 }

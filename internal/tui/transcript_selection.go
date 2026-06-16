@@ -315,11 +315,12 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 	}
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
-	start, available, top := m.transcriptViewportStart(body, width)
-	if mouseY(msg) < top || mouseY(msg) >= top+available {
+	start, _, _ := m.transcriptViewportStart(body, width)
+	_, localY, ok := m.transcriptViewportRect(width).local(mouseX(msg), mouseY(msg))
+	if !ok {
 		return transcriptSelectableLine{}, false
 	}
-	bodyY := start + mouseY(msg) - top
+	bodyY := start + localY
 	for _, line := range selectable {
 		if line.bodyY != bodyY {
 			continue
@@ -334,12 +335,17 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 
 func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
 	bodyLines := viewLines(body)
-	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	available := frame.bodyHeight
+	bodyRect := m.transcriptViewportRect(width)
+	available := bodyRect.height
 	maxOffset := maxInt(0, len(bodyLines)-available)
 	offset := clamp(m.chatScrollOffset, 0, maxOffset)
 	start := maxInt(0, len(bodyLines)-available-offset)
-	return start, available, len(frame.headerLines)
+	return start, available, bodyRect.y
+}
+
+func (m model) transcriptViewportRect(width int) tuiRect {
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	return frame.bodyRect
 }
 
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {
