@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
@@ -285,8 +286,45 @@ func setupRequired(resolved config.ResolvedConfig) bool {
 	if !config.HasProviderProfile(resolved.Provider) {
 		return true
 	}
-	_, missing := setupMissingCredentialEnv(resolved.Provider)
-	return missing
+	if _, missing := setupMissingCredentialEnv(resolved.Provider); !missing {
+		return false
+	}
+	// A stored OAuth login (e.g. `zero auth login xai`) is a credential too, even
+	// though the profile has no inline key / env var — so a logged-in provider
+	// must not trigger onboarding.
+	return !providerHasOAuthLogin(resolved.Provider, oauthLoggedInProviders())
+}
+
+// providerHasOAuthLogin reports whether a stored OAuth login exists for the
+// provider, keyed by its profile name or catalog id.
+func providerHasOAuthLogin(profile config.ProviderProfile, oauthLogins map[string]bool) bool {
+	for _, name := range []string{strings.TrimSpace(profile.Name), strings.TrimSpace(profile.CatalogID)} {
+		if name != "" && oauthLogins[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// oauthLoggedInProviders returns the set of provider names that have a stored
+// OAuth token, so credential checks recognize an OAuth login (not just inline
+// keys / env vars). Errors degrade to an empty set (no logins).
+func oauthLoggedInProviders() map[string]bool {
+	out := map[string]bool{}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return out
+	}
+	statuses, err := store.Status(oauth.KeyPrefixProvider)
+	if err != nil {
+		return out
+	}
+	for _, status := range statuses {
+		if status.HasToken {
+			out[strings.TrimPrefix(status.Key, oauth.KeyPrefixProvider)] = true
+		}
+	}
+	return out
 }
 
 func formatSetupComplete(result tui.SetupResult) string {
