@@ -266,6 +266,12 @@ func (m model) newSessionPicker() *commandPicker {
 	now := m.now()
 	items := make([]pickerItem, 0, len(metas))
 	for _, meta := range metas {
+		// Skip empty/failed runs (no assistant output, no tool calls) — e.g. the
+		// same prompt retried while the model wasn't responding. They have nothing
+		// to resume and otherwise flood the list with identical rows. Still on disk.
+		if !m.sessionHasResumableContent(meta.SessionID) {
+			continue
+		}
 		// Lead with the timestamp so same-titled sessions (e.g. the same first
 		// prompt run several times) are visually distinct; the id (right, faint)
 		// stays for reference and is what selection actually resolves.
@@ -279,6 +285,9 @@ func (m model) newSessionPicker() *commandPicker {
 			Meta:  meta.SessionID,
 		})
 	}
+	if len(items) == 0 {
+		return nil // every resumable session was an empty/failed run
+	}
 	return &commandPicker{
 		kind:     pickerSession,
 		title:    "Resume a session",
@@ -286,6 +295,33 @@ func (m model) newSessionPicker() *commandPicker {
 		allItems: append([]pickerItem{}, items...),
 		selected: 0,
 	}
+}
+
+// sessionHasResumableContent reports whether a session has anything worth
+// resuming: a tool call/result, or a non-user message with real content (not the
+// no-output guardrail stop). Empty/failed runs return false and are hidden from
+// the picker (they stay on disk). Errors fail open (the session is kept).
+func (m model) sessionHasResumableContent(sessionID string) bool {
+	events, err := m.sessionStore.ReadEvents(sessionID)
+	if err != nil {
+		return true
+	}
+	for _, event := range events {
+		switch event.Type {
+		case sessions.EventToolCall, sessions.EventToolResult:
+			return true
+		case sessions.EventMessage:
+			payload := sessionPayload(event)
+			if strings.EqualFold(payloadString(payload, "role"), "user") {
+				continue
+			}
+			content := strings.TrimSpace(payloadString(payload, "content"))
+			if content != "" && !agent.IsNoProgressStop(content) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // openSessionPicker opens the /resume picker; ok is false when there is nothing to

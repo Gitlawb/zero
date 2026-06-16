@@ -90,11 +90,23 @@ func toolFailureStopAnswer(toolName string, count int) string {
 		"Please check the request or adjust the tool arguments."
 }
 
+// noOutputStopMarker is the stable substring of the no-output stop answer; it is
+// shared with IsNoProgressStop so callers can recognize such a run from its
+// recorded message without depending on the exact turn count.
+const noOutputStopMarker = "with no output (no visible text and no tool calls)"
+
 // noOutputStopAnswer is the final answer returned when the no-output guard
 // stops the run. The turn count is interpolated at the call site.
 func noOutputStopAnswer(turns int) string {
-	return "Agent stopped after " + strconv.Itoa(turns) +
-		" turns with no output (no visible text and no tool calls) to avoid consuming tokens without making progress."
+	return "Agent stopped after " + strconv.Itoa(turns) + " turns " + noOutputStopMarker +
+		" to avoid consuming tokens without making progress."
+}
+
+// IsNoProgressStop reports whether content is the no-output guardrail stop answer
+// (a run that produced no visible text and no tool calls). Used to recognize
+// empty/failed sessions that aren't worth resuming.
+func IsNoProgressStop(content string) bool {
+	return strings.Contains(content, noOutputStopMarker)
 }
 
 // Reminder markers are stable substrings used both to build the reminder text

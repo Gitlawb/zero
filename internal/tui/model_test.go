@@ -899,6 +899,50 @@ func TestResumePickerSelectionHydratesSession(t *testing.T) {
 	}
 }
 
+func TestResumePickerHidesEmptyFailedSessions(t *testing.T) {
+	store := testSessionStore(t)
+	real, err := store.Create(sessions.CreateInput{Title: "Real one", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create real: %v", err)
+	}
+	if _, err := store.AppendEvent(real.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "do a thing"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.AppendEvent(real.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "here is the thing"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	// An empty/failed run: prompt + the no-output guardrail stop, nothing else.
+	empty, err := store.Create(sessions.CreateInput{Title: "Empty one", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("Create empty: %v", err)
+	}
+	if _, err := store.AppendEvent(empty.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"role": "user", "content": "do a thing"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := store.AppendEvent(empty.SessionID, sessions.AppendEventInput{Type: sessions.EventMessage, Payload: map[string]any{"role": "assistant", "content": "Agent stopped after 3 turns with no output (no visible text and no tool calls) to avoid consuming tokens without making progress."}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	picker := newModel(context.Background(), Options{SessionStore: store}).newSessionPicker()
+	if picker == nil {
+		t.Fatal("expected a picker containing the real session")
+	}
+	for _, item := range picker.items {
+		if item.Value == empty.SessionID {
+			t.Fatalf("empty/no-output session must be hidden from the picker: %#v", picker.items)
+		}
+	}
+	shown := false
+	for _, item := range picker.items {
+		if item.Value == real.SessionID {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Fatalf("the real session must be shown: %#v", picker.items)
+	}
+}
+
 func TestResumeHonorsPriorCompaction(t *testing.T) {
 	store := testSessionStore(t)
 	session, err := store.Create(sessions.CreateInput{Title: "Compacted", ModelID: "gpt-4.1", Provider: "openai"})
