@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -56,9 +57,11 @@ const (
 )
 
 type transcriptBodyItem struct {
-	kind     transcriptBodyItemKind
-	rowIndex int
-	render   func(startBodyY int) transcriptBodyRenderedItem
+	kind              transcriptBodyItemKind
+	rowIndex          int
+	heightCacheKey    string
+	heightCacheStable bool
+	render            func(startBodyY int) transcriptBodyRenderedItem
 }
 
 type transcriptBodyRenderedItem struct {
@@ -93,6 +96,10 @@ func (l transcriptBodyLayout) String() string {
 }
 
 func (l transcriptBodyLayout) totalLines() int {
+	if len(l.spans) > 0 {
+		last := l.spans[len(l.spans)-1]
+		return last.startY + last.height
+	}
 	return len(l.lines)
 }
 
@@ -137,9 +144,12 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				items = append(items, transcriptBlankBodyItem())
 			}
 			rowIndex, transcriptRow := index, row
+			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKey(transcriptRow, width, rc)
 			items = append(items, transcriptBodyItem{
-				kind:     transcriptBodyItemRow,
-				rowIndex: rowIndex,
+				kind:              transcriptBodyItemRow,
+				rowIndex:          rowIndex,
+				heightCacheKey:    heightCacheKey,
+				heightCacheStable: heightCacheStable,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
 					rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, width, rc, startBodyY)
 					return transcriptBodyRenderedItem{lines: viewLines(rendered), selectable: selectable}
@@ -181,8 +191,10 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 
 func transcriptBlockBodyItem(kind transcriptBodyItemKind, rowIndex int, block string) transcriptBodyItem {
 	return transcriptBodyItem{
-		kind:     kind,
-		rowIndex: rowIndex,
+		kind:              kind,
+		rowIndex:          rowIndex,
+		heightCacheKey:    transcriptBlockBodyHeightCacheKey(kind, block),
+		heightCacheStable: true,
 		render: func(int) transcriptBodyRenderedItem {
 			return transcriptBodyRenderedItem{lines: viewLines(block)}
 		},
@@ -191,8 +203,10 @@ func transcriptBlockBodyItem(kind transcriptBodyItemKind, rowIndex int, block st
 
 func transcriptBlankBodyItem() transcriptBodyItem {
 	return transcriptBodyItem{
-		kind:     transcriptBodyItemSeparator,
-		rowIndex: -1,
+		kind:              transcriptBodyItemSeparator,
+		rowIndex:          -1,
+		heightCacheKey:    "transcript-body-height:v1:separator",
+		heightCacheStable: true,
 		render: func(int) transcriptBodyRenderedItem {
 			return transcriptBodyRenderedItem{lines: []string{""}}
 		},
@@ -203,10 +217,7 @@ func layoutTranscriptBodyItems(items []transcriptBodyItem) transcriptBodyLayout 
 	layout := transcriptBodyLayout{}
 	for _, item := range items {
 		startY := len(layout.lines)
-		rendered := transcriptBodyRenderedItem{}
-		if item.render != nil {
-			rendered = item.render(startY)
-		}
+		rendered := renderTranscriptBodyItem(item, startY)
 		layout.lines = append(layout.lines, rendered.lines...)
 		layout.selectable = append(layout.selectable, rendered.selectable...)
 		layout.spans = append(layout.spans, transcriptBodyItemSpan{
@@ -217,6 +228,90 @@ func layoutTranscriptBodyItems(items []transcriptBodyItem) transcriptBodyLayout 
 		})
 	}
 	return layout
+}
+
+func measureTranscriptBodyItems(items []transcriptBodyItem, cache *transcriptBodyHeightCache) transcriptBodyLayout {
+	layout := transcriptBodyLayout{}
+	startY := 0
+	for _, item := range items {
+		height := transcriptBodyItemHeight(item, cache)
+		layout.spans = append(layout.spans, transcriptBodyItemSpan{
+			kind:     item.kind,
+			rowIndex: item.rowIndex,
+			startY:   startY,
+			height:   height,
+		})
+		startY += height
+	}
+	return layout
+}
+
+func layoutVisibleTranscriptBodyItems(items []transcriptBodyItem, metrics transcriptBodyLayout, window transcriptViewportWindow) transcriptBodyLayout {
+	layout := transcriptBodyLayout{spans: append([]transcriptBodyItemSpan(nil), metrics.spans...)}
+	if window.end <= window.start {
+		return layout
+	}
+	for index, item := range items {
+		if index >= len(metrics.spans) {
+			break
+		}
+		span := metrics.spans[index]
+		spanEnd := span.startY + span.height
+		if spanEnd <= window.start || span.startY >= window.end {
+			continue
+		}
+		rendered := renderTranscriptBodyItem(item, span.startY)
+		localStart := clampInt(window.start-span.startY, 0, len(rendered.lines))
+		localEnd := clampInt(window.end-span.startY, localStart, len(rendered.lines))
+		layout.lines = append(layout.lines, rendered.lines[localStart:localEnd]...)
+		for _, line := range rendered.selectable {
+			if line.bodyY >= window.start && line.bodyY < window.end {
+				layout.selectable = append(layout.selectable, line)
+			}
+		}
+	}
+	return layout
+}
+
+func transcriptBodyItemHeight(item transcriptBodyItem, cache *transcriptBodyHeightCache) int {
+	if item.heightCacheStable {
+		if height, ok := cache.get(item.heightCacheKey); ok {
+			return height
+		}
+	}
+	rendered := renderTranscriptBodyItem(item, 0)
+	height := len(rendered.lines)
+	if item.heightCacheStable {
+		cache.set(item.heightCacheKey, height)
+	}
+	return height
+}
+
+func renderTranscriptBodyItem(item transcriptBodyItem, startBodyY int) transcriptBodyRenderedItem {
+	if item.render == nil {
+		return transcriptBodyRenderedItem{}
+	}
+	return item.render(startBodyY)
+}
+
+func transcriptBlockBodyHeightCacheKey(kind transcriptBodyItemKind, block string) string {
+	var b strings.Builder
+	appendRenderCacheField(&b, "transcript-body-block-height-v1")
+	appendRenderCacheField(&b, strconv.Itoa(int(kind)))
+	appendRenderCacheField(&b, block)
+	return b.String()
+}
+
+func (m model) transcriptRowBodyHeightCacheKey(row transcriptRow, width int, rc rowContext) (string, bool) {
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	rowKey, stable := m.renderRowCacheKey(row, width, rc, opts, false)
+	if rowKey == "" {
+		return "", false
+	}
+	var b strings.Builder
+	appendRenderCacheField(&b, "transcript-body-row-height-v1")
+	appendRenderCacheField(&b, rowKey)
+	return b.String(), stable
 }
 
 func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
@@ -428,14 +523,16 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 		return transcriptSelectableLine{}, false
 	}
 	width := chatWidth(m.width)
-	layout := m.transcriptBodyLayout(width, "")
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
-	start, _, _ := transcriptViewportStartForLayout(layout, frame, m.chatScrollOffset)
+	items := m.transcriptBodyItems(width, "")
+	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	window := transcriptViewportForLayout(metrics, frame, m.chatScrollOffset).window()
+	layout := layoutVisibleTranscriptBodyItems(items, metrics, window)
 	_, localY, ok := frame.bodyRect.local(mouseX(msg), mouseY(msg))
 	if !ok {
 		return transcriptSelectableLine{}, false
 	}
-	bodyY := start + localY
+	bodyY := window.start + localY
 	for _, line := range layout.selectable {
 		if line.bodyY != bodyY {
 			continue

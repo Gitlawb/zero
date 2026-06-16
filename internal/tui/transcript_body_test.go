@@ -84,3 +84,122 @@ func TestTranscriptBodyLayoutVisibleLinesUsesViewportWindow(t *testing.T) {
 		t.Fatalf("visibleLines should return a copy, layout lines = %#v", layout.lines)
 	}
 }
+
+func TestMeasureTranscriptBodyItemsUsesHeightCache(t *testing.T) {
+	cache := newTranscriptBodyHeightCache(8)
+	renders := 0
+	item := transcriptBodyItem{
+		kind:              transcriptBodyItemRow,
+		rowIndex:          7,
+		heightCacheKey:    "stable-row",
+		heightCacheStable: true,
+		render: func(int) transcriptBodyRenderedItem {
+			renders++
+			return transcriptBodyRenderedItem{lines: []string{"one", "two"}}
+		},
+	}
+
+	first := measureTranscriptBodyItems([]transcriptBodyItem{item}, cache)
+	second := measureTranscriptBodyItems([]transcriptBodyItem{item}, cache)
+
+	if renders != 1 {
+		t.Fatalf("renders = %d, want first measure only", renders)
+	}
+	if first.totalLines() != 2 || second.totalLines() != 2 {
+		t.Fatalf("total lines = %d/%d, want cached height 2", first.totalLines(), second.totalLines())
+	}
+}
+
+func TestVisibleTranscriptBodyLayoutRendersOnlyIntersectingItems(t *testing.T) {
+	cache := newTranscriptBodyHeightCache(8)
+	renders := [3]int{}
+	items := []transcriptBodyItem{
+		countingTranscriptBodyItem("a", []string{"a0", "a1"}, &renders[0]),
+		countingTranscriptBodyItem("b", []string{"b0", "b1"}, &renders[1]),
+		countingTranscriptBodyItem("c", []string{"c0", "c1"}, &renders[2]),
+	}
+
+	metrics := measureTranscriptBodyItems(items, cache)
+	window := transcriptViewportWindow{start: 2, end: 4, height: 2}
+	layout := layoutVisibleTranscriptBodyItems(items, metrics, window)
+
+	if got, want := renders, [3]int{1, 2, 1}; got != want {
+		t.Fatalf("renders after first visible layout = %#v, want %#v", got, want)
+	}
+	if len(layout.lines) != 2 || layout.lines[0] != "b0" || layout.lines[1] != "b1" {
+		t.Fatalf("visible lines = %#v, want b item only", layout.lines)
+	}
+
+	metrics = measureTranscriptBodyItems(items, cache)
+	_ = layoutVisibleTranscriptBodyItems(items, metrics, window)
+
+	if got, want := renders, [3]int{1, 3, 1}; got != want {
+		t.Fatalf("renders after cached measure = %#v, want only visible item rerendered %#v", got, want)
+	}
+}
+
+func TestVisibleTranscriptBodyLayoutKeepsSelectableBodyYAbsolute(t *testing.T) {
+	items := []transcriptBodyItem{
+		transcriptBlankBodyItem(),
+		{
+			kind:              transcriptBodyItemRow,
+			rowIndex:          3,
+			heightCacheKey:    "selectable-row",
+			heightCacheStable: true,
+			render: func(startBodyY int) transcriptBodyRenderedItem {
+				return transcriptBodyRenderedItem{
+					lines: []string{"top", "hit", "bottom"},
+					selectable: []transcriptSelectableLine{{
+						bodyY:    startBodyY + 1,
+						rowIndex: 3,
+						text:     "hit",
+					}},
+				}
+			},
+		},
+	}
+	metrics := measureTranscriptBodyItems(items, newTranscriptBodyHeightCache(8))
+	window := transcriptViewportWindow{start: 2, end: 3, height: 1}
+
+	layout := layoutVisibleTranscriptBodyItems(items, metrics, window)
+
+	if len(layout.lines) != 1 || layout.lines[0] != "hit" {
+		t.Fatalf("visible lines = %#v, want selected item line", layout.lines)
+	}
+	if len(layout.selectable) != 1 || layout.selectable[0].bodyY != 2 {
+		t.Fatalf("selectable = %#v, want absolute bodyY 2", layout.selectable)
+	}
+}
+
+func TestScrollableTranscriptItemsViewMatchesFullLayout(t *testing.T) {
+	m := mouseTestModel()
+	m.height = 14
+	m.chatScrollOffset = 2
+	m.transcript = appendRow(m.transcript, rowUser, "please inspect this request")
+	m.transcript = appendRow(m.transcript, rowAssistant, "first response line\nsecond response line\nthird response line")
+	m.transcript = appendRow(m.transcript, rowUser, "follow up")
+	width := chatWidth(m.width)
+	header := m.pinnedTitleBar(width)
+	footer := m.footerView(width)
+	items := m.transcriptBodyItems(width, "")
+	full := layoutTranscriptBodyItems(items)
+
+	got := m.scrollableTranscriptItemsView(header, items, footer, width, "")
+	want := m.scrollableTranscriptLayoutView(header, full, footer, width, "")
+
+	if got != want {
+		t.Fatalf("visible item view changed output\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
+func countingTranscriptBodyItem(key string, lines []string, renders *int) transcriptBodyItem {
+	return transcriptBodyItem{
+		kind:              transcriptBodyItemRow,
+		heightCacheKey:    key,
+		heightCacheStable: true,
+		render: func(int) transcriptBodyRenderedItem {
+			(*renders)++
+			return transcriptBodyRenderedItem{lines: append([]string(nil), lines...)}
+		},
+	}
+}

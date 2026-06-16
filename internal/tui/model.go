@@ -87,6 +87,7 @@ type model struct {
 	unpricedTokens         int
 	transcript             []transcriptRow
 	transcriptDetailed     bool
+	transcriptBodyHeights  *transcriptBodyHeightCache
 	input                  textinput.Model
 	composer               composerState
 	composerActive         bool
@@ -439,6 +440,7 @@ func newModel(ctx context.Context, options Options) model {
 		userAgent:              options.UserAgent,
 		usageTracker:           usageTracker,
 		transcript:             initialTranscript(),
+		transcriptBodyHeights:  newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries),
 		prService:              prService,
 		prState:                prService.GetState(),
 		input:                  input,
@@ -1283,7 +1285,7 @@ func (m model) transcriptView() string {
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
 	}
-	bodyLayout := m.transcriptBodyLayout(width, emptyOverlay)
+	bodyItems := m.transcriptBodyItems(width, emptyOverlay)
 
 	footer := m.footerView(width)
 
@@ -1293,9 +1295,10 @@ func (m model) transcriptView() string {
 	}
 
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptLayoutView(m.pinnedTitleBar(width), bodyLayout, footer, width, overlayForViewport)
+		return m.scrollableTranscriptItemsView(m.pinnedTitleBar(width), bodyItems, footer, width, overlayForViewport)
 	}
 
+	bodyLayout := layoutTranscriptBodyItems(bodyItems)
 	body := bodyLayout.String()
 	if overlayForViewport != "" {
 		body += "\n" + overlayForViewport + "\n"
@@ -1456,6 +1459,19 @@ func (m model) scrollableTranscriptLayoutView(header string, body transcriptBody
 	window := transcriptViewportForLayout(body, frame, m.chatScrollOffset).window()
 
 	bodyWindow := body.visibleLines(window)
+	return m.renderScrollableTranscriptWindow(frame, bodyWindow, window, width, overlay)
+}
+
+func (m model) scrollableTranscriptItemsView(header string, items []transcriptBodyItem, footer string, width int, overlay string) string {
+	frame := m.scrollableTranscriptFrame(header, footer)
+	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	window := transcriptViewportForLayout(metrics, frame, m.chatScrollOffset).window()
+	body := layoutVisibleTranscriptBodyItems(items, metrics, window)
+
+	return m.renderScrollableTranscriptWindow(frame, body.lines, window, width, overlay)
+}
+
+func (m model) renderScrollableTranscriptWindow(frame transcriptFrameLayout, bodyWindow []string, window transcriptViewportWindow, width int, overlay string) string {
 	for len(bodyWindow) < window.height {
 		bodyWindow = append(bodyWindow, "")
 	}
@@ -1597,7 +1613,8 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 		return transcriptViewport{}, false
 	}
 	width := chatWidth(m.width)
-	body := m.transcriptBodyLayout(width, "")
+	items := m.transcriptBodyItems(width, "")
+	body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
 }
