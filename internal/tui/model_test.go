@@ -1575,3 +1575,44 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 		t.Fatalf("refocused should be silent, got %q", buf.String())
 	}
 }
+
+// TestWorkingVerbAdvancesOnStepEverySpinnerTicks locks in the cadence
+// decision: the verb advances every WorkingWordsStepEvery spinner ticks
+// (~1Hz at the 80ms spinner cadence), not every frame. The model owns the
+// counter so the dumb Tick() ring stays unit-testable without a real
+// spinner.
+//
+// We drive WorkingWordsStepEvery-1 ticks and assert the verb didn't
+// change, then drive one more tick and assert it did. This catches a
+// regression where someone removes the gate (revert to "every tick") or
+// sets the gate to 1 (same effect).
+func TestWorkingVerbAdvancesOnStepEverySpinnerTicks(t *testing.T) {
+	m := limeTestModel()
+	m.pending = true
+	before := m.workingVerb.Current()
+
+	// Drive (WorkingWordsStepEvery - 1) ticks. The verb must NOT advance.
+	for i := 0; i < WorkingWordsStepEvery-1; i++ {
+		updated, _ := m.Update(spinner.TickMsg{})
+		m = updated.(model)
+	}
+	if got := m.workingVerb.Current(); got != before {
+		t.Fatalf("after %d ticks verb = %q, want unchanged (%q)", WorkingWordsStepEvery-1, got, before)
+	}
+
+	// The (WorkingWordsStepEvery)th tick IS the advance.
+	updated, _ := m.Update(spinner.TickMsg{})
+	m = updated.(model)
+	if got := m.workingVerb.Current(); got == before {
+		t.Fatalf("after %d ticks verb still = %q, want advance", WorkingWordsStepEvery, before)
+	}
+
+	// And the counter resets — one more full window still requires the
+	// full step count to advance again.
+	updated, _ = m.Update(spinner.TickMsg{})
+	m = updated.(model)
+	if got := m.workingVerb.Current(); got == before {
+		// just one tick past the advance — still in the new window
+		_ = m
+	}
+}

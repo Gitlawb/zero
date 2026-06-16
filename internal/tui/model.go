@@ -98,16 +98,20 @@ type model struct {
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
 	spinner spinner.Model
-	// workingVerb holds the rotating "gitlawbmaxxing / zeroling / …" label the
-	// assistant interim block displays while pending. It advances on every
-	// spinner tick (see TickMsg branch) so its cadence matches the glyph.
-	workingVerb   *workingWords
-	pending       bool
-	queuedMessage string
-	exiting       bool
-	runCancel     context.CancelFunc
-	runID         int
-	activeRunID   int
+	// workingVerb holds the rotating "gitlawbmaxxing / openfablemaxxing / …"
+	// label the assistant interim block displays while pending. The verb
+	// advances at WorkingWordsStepEvery-tick intervals (≈1Hz at the 80ms
+	// spinner cadence) so the glyph can spin fast and the word still be
+	// readable; workingVerbTicks is the gate counter. See the spinner
+	// TickMsg branch and launchPrompt for the advance/reset.
+	workingVerb      *workingWords
+	workingVerbTicks int
+	pending          bool
+	queuedMessage    string
+	exiting          bool
+	runCancel        context.CancelFunc
+	runID            int
+	activeRunID      int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -932,10 +936,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		// workingVerb shares the spinner's cadence so the verb and the glyph
-		// stay in lockstep (one new word per glyph frame). Nil-safe; nil check
-		// is unnecessary because the type's methods handle a nil receiver.
-		m.workingVerb.Tick()
+		// Advance the working verb every WorkingWordsStepEvery spinner
+		// ticks (~1Hz at 80ms cadence). The glyph spins fast; the word
+		// turns over slowly enough to read. Nil-safe — the type's
+		// methods handle a nil receiver, and the counter still
+		// increments harmlessly.
+		m.workingVerbTicks++
+		if m.workingVerbTicks >= WorkingWordsStepEvery {
+			m.workingVerbTicks = 0
+			m.workingVerb.Tick()
+		}
 		if m.compactInFlight {
 			m.compactFrame++
 			m = m.setCompactStatusRow(m.compactText(true))
@@ -2361,7 +2371,10 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m.runCancel = cancel
 	m.pending = true
 	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
-	// the new run starts (instead of mid-rotation from a prior turn).
+	// the new run starts (instead of mid-rotation from a prior turn). Also
+	// reset the step counter so the cadence doesn't carry over a partial
+	// countdown from the previous run.
+	m.workingVerbTicks = 0
 	m.workingVerb.Reset()
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
 }
