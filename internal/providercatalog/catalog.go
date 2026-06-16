@@ -263,7 +263,7 @@ func OAuthProviders() []Descriptor {
 	out := []Descriptor{}
 	for _, descriptor := range descriptors {
 		if descriptor.OAuth {
-			out = append(out, descriptor)
+			out = append(out, cloneDescriptor(descriptor))
 		}
 	}
 	return out

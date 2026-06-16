@@ -36,14 +36,14 @@ before. Tokens are stored 0600 (or the OS keyring with
 
 Running `/provider` opens a **"How do you want to connect?"** chooser:
 
-```
+```text
 ❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI)
   Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
 ```
 
 Pick **Sign in with OAuth** → the list of providers that do real OAuth → choose one:
 
-```
+```text
 ❯ OpenRouter    browser sign-in · creates a key
   xAI (Grok)    browser or device code
 ```
@@ -95,10 +95,14 @@ We researched this carefully. As of mid-2026, a **subscription** OAuth token doe
   for third-party use unless the request spoofs the Claude Code identity
   (`anthropic-beta: oauth-2025-04-20`, `claude-cli` UA, and a verbatim
   *"You are Claude Code…"* system prompt) — and **even then** tool-using requests
-  on Max plans are routed to a disabled billing lane and `400`. Anthropic's Feb
-  2026 policy **explicitly prohibits** subscription-token use outside Claude
-  Code / claude.ai and has **actively enforced** it (account bans), and the
-  request to allow it (claude-code #37205) was closed *"not planned."*
+  on Max plans are routed to a disabled billing lane and `400`. Anthropic's policy
+  **explicitly prohibits** subscription-token use outside Claude Code / claude.ai:
+  a **Feb 19 2026** docs update clarified that Free/Pro/Max OAuth tokens may not be
+  used in third-party tools or the Agent SDK, and **since April 4 2026** Claude
+  subscriptions **no longer cover third-party-tool usage at all** (enforcement
+  began with OpenClaw in early 2026 and expanded to every third-party harness;
+  integrators must now use an API key with usage-based billing). The request to
+  allow it (claude-code #37205) was closed *"not planned."*
 
 So Zero does **not** call those backends directly or spoof those clients — that
 would be fragile, account-risky, and (for Anthropic) against the vendor's terms.

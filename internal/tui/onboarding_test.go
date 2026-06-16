@@ -13,6 +13,41 @@ import (
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 )
 
+func TestSetupMethodOptionsDropsOAuthWithoutOAuthProviders(t *testing.T) {
+	build := func(providers []SetupProviderOption) model {
+		return newModel(context.Background(), Options{
+			Setup: SetupOptions{Visible: true, Providers: providers},
+		})
+	}
+
+	// This setup offers only non-OAuth providers, so the OAuth method must be
+	// hidden — otherwise selecting it lands the user on an empty provider list.
+	noOAuth := build([]SetupProviderOption{
+		{ID: "openai", Name: "OpenAI", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+		{ID: "ollama", Name: "Ollama Local", Local: true},
+	})
+	for _, option := range noOAuth.setupMethodOptions() {
+		if option.oauth {
+			t.Fatal("OAuth method must be hidden when the setup has no OAuth providers")
+		}
+	}
+
+	// Add an OAuth-capable provider (xai) and the OAuth method returns.
+	withOAuth := build([]SetupProviderOption{
+		{ID: "xai", Name: "xAI"},
+		{ID: "openai", Name: "OpenAI", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+	})
+	hasOAuth := false
+	for _, option := range withOAuth.setupMethodOptions() {
+		if option.oauth {
+			hasOAuth = true
+		}
+	}
+	if !hasOAuth {
+		t.Fatal("OAuth method must be offered when the setup has an OAuth provider")
+	}
+}
+
 func TestSetupTakeoverRendersAndCompletes(t *testing.T) {
 	var saved SetupSelection
 	m := newModel(context.Background(), Options{

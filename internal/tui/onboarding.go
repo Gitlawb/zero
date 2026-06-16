@@ -417,8 +417,26 @@ func (m model) setupReturnToMethod() model {
 	return m
 }
 
-func (m *model) moveSetupMethod(delta int) {
+// setupMethodOptions returns the connect-method choices for this run, dropping the
+// OAuth option when this setup's own provider list has no OAuth-capable entry — so
+// the user can't pick OAuth and land on an empty provider list.
+func (m model) setupMethodOptions() []providerWizardMethodOption {
 	options := providerWizardMethodOptions()
+	if len(setupOAuthProviderOptions(m.setup.allProviders)) > 0 {
+		return options
+	}
+	filtered := make([]providerWizardMethodOption, 0, len(options))
+	for _, option := range options {
+		if option.oauth {
+			continue
+		}
+		filtered = append(filtered, option)
+	}
+	return filtered
+}
+
+func (m *model) moveSetupMethod(delta int) {
+	options := m.setupMethodOptions()
 	if len(options) == 0 {
 		return
 	}
@@ -496,6 +514,11 @@ func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, te
 	if !m.setup.visible || !m.setup.oauthPending {
 		return m, nil
 	}
+	// Ignore a stale result from a login the user has since replaced with a
+	// different provider (an in-flight prepare landing after the switch).
+	if msg.providerID != "" && msg.providerID != m.setupProviderDescriptor().ID {
+		return m, nil
+	}
 	if msg.err != nil {
 		m.setup.oauthPending = false
 		m.setup.oauthDevice = false
@@ -512,6 +535,11 @@ func (m model) applySetupOAuthDeviceCode(msg setupOAuthDeviceMsg) (tea.Model, te
 // jumps to model selection; on failure the redacted error is shown.
 func (m model) applySetupOAuth(msg setupOAuthMsg) (tea.Model, tea.Cmd) {
 	if !m.setup.visible || !m.setup.oauthPending {
+		return m, nil
+	}
+	// Ignore a stale result for a provider the user has since switched away from,
+	// so a late login can't capture a credential against the wrong provider.
+	if msg.providerID != "" && msg.providerID != m.setupProviderDescriptor().ID {
 		return m, nil
 	}
 	m.setup.oauthPending = false
@@ -573,7 +601,7 @@ func setupBlockContainsMouseX(x int, width int, blockWidth int) bool {
 func (m model) advanceSetup() (tea.Model, tea.Cmd) {
 	if m.setup.stage < setupStageReady {
 		if m.setup.stage == setupStageMethod {
-			options := providerWizardMethodOptions()
+			options := m.setupMethodOptions()
 			m.setup.selectedMethod = clamp(m.setup.selectedMethod, 0, maxInt(0, len(options)-1))
 			if len(options) > 0 && options[m.setup.selectedMethod].oauth {
 				m.setup.oauthMode = true
@@ -1352,7 +1380,7 @@ func setupModelSelectedDetail(model providerWizardModel) string {
 }
 
 func (m model) setupMethodLines(width int) []string {
-	options := providerWizardMethodOptions()
+	options := m.setupMethodOptions()
 	rowWidth := setupMethodBlockWidth(width, options)
 	idx := clamp(m.setup.selectedMethod, 0, maxInt(0, len(options)-1))
 	lines := []string{
@@ -1433,6 +1461,15 @@ func (m model) setupProviderLines(width int, height int) []string {
 		}
 		line := marker + style.Render(displayValue(option.Name, option.ID))
 		lines = append(lines, padSetupLine(line, rowWidth))
+	}
+	// A failed OAuth login drops back here with oauthPending cleared, so the
+	// waiting screen (which owns the error) is gone — surface it on the list the
+	// user lands on so the failure isn't silent and they can retry.
+	if m.setup.oauthMode && m.setup.oauthErr != "" {
+		lines = append(lines,
+			blankSetupBlockLine(rowWidth),
+			padSetupLine("  "+zeroTheme.red.Render("Sign-in failed: "+m.setup.oauthErr), rowWidth),
+		)
 	}
 	return lines
 }

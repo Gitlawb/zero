@@ -145,11 +145,20 @@ func (m *Manager) PrepareDeviceLogin(ctx context.Context, opts LoginOptions) (De
 	if len(opts.ExtraScopes) > 0 {
 		cfg.Scopes = append(append([]string{}, cfg.Scopes...), opts.ExtraScopes...)
 	}
-	cfg, err = m.resolveEndpoints(ctx, cfg)
+	// Self-bound the network prepare (endpoint discovery + device-code request) the
+	// same way Login does, so a caller that hands in an unbounded context still gets
+	// the timeout guarantee instead of a hang.
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	prepCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cfg, err = m.resolveEndpoints(prepCtx, cfg)
 	if err != nil {
 		return DeviceAuth{}, Config{}, err
 	}
-	auth, err := RequestDeviceCode(ctx, m.client, cfg, m.now)
+	auth, err := RequestDeviceCode(prepCtx, m.client, cfg, m.now)
 	if err != nil {
 		return DeviceAuth{}, Config{}, err
 	}
@@ -160,6 +169,14 @@ func (m *Manager) PrepareDeviceLogin(ctx context.Context, opts LoginOptions) (De
 // stores it under "provider:<name>", returning a redaction-safe status. Pass the
 // cfg and auth returned by PrepareDeviceLogin.
 func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg Config, auth DeviceAuth) (Status, error) {
+	// Bound the poll by the device code's own expiry so an unbounded caller context
+	// cannot leave an in-flight request hanging past the code's lifetime. PollDeviceToken
+	// re-checks ExpiresAt between polls; the deadline also caps each individual request.
+	if !auth.ExpiresAt.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, auth.ExpiresAt)
+		defer cancel()
+	}
 	token, err := PollDeviceToken(ctx, m.client, cfg, auth, m.now)
 	if err != nil {
 		return Status{}, err

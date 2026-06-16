@@ -24,6 +24,29 @@ func TestOAuthProviders(t *testing.T) {
 	}
 }
 
+func TestOAuthProvidersReturnsIndependentClones(t *testing.T) {
+	first := OAuthProviders()
+	mutated := 0
+	for i := range first {
+		for j := range first[i].AuthEnvVars {
+			first[i].AuthEnvVars[j] = "MUTATED"
+			mutated++
+		}
+	}
+	if mutated == 0 {
+		t.Fatal("expected at least one OAuth descriptor with AuthEnvVars to mutate")
+	}
+	// A fresh call must not observe the in-place mutation: like the other catalog
+	// accessors, OAuthProviders must hand back clones, not shared backing slices.
+	for _, d := range OAuthProviders() {
+		for _, env := range d.AuthEnvVars {
+			if env == "MUTATED" {
+				t.Fatalf("OAuthProviders() leaked a shared AuthEnvVars slice for %q", d.ID)
+			}
+		}
+	}
+}
+
 func TestNonOAuthProvidersNotFlagged(t *testing.T) {
 	for _, d := range All() {
 		switch d.ID {
