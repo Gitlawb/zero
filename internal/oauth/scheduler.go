@@ -50,7 +50,7 @@ func (s *RefreshScheduler) loop(ctx context.Context, m *Manager, key string, don
 	defer close(done)
 	loadErrors := 0
 	for {
-		token, _, err := m.loadForKey(key)
+		token, err := m.loadToken(key)
 		if err != nil {
 			// A load error may be transient (a concurrent store write, a brief I/O
 			// hiccup): back off and retry rather than permanently stopping proactive
