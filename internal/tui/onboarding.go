@@ -289,6 +289,13 @@ func (m model) handleSetupMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.setup.oauthPending {
 		return m, nil
 	}
+	// A right-click pastes the clipboard into the focused setup field, mirroring
+	// handleMouse (mouse.go) so paste behaves identically in setup mode — routePaste
+	// targets the active setup input. Without this branch, setup swallows the
+	// right-click and paste never fires.
+	if mouseRightPress(msg) {
+		return m, pasteFromClipboardCmd()
+	}
 	if mouseLeftPress(msg) {
 		switch m.setup.stage {
 		case setupStageProvider:

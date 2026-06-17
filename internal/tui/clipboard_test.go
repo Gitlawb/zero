@@ -19,18 +19,28 @@ func TestMouseRightPressDetectsRightClick(t *testing.T) {
 }
 
 func TestRightClickReturnsClipboardReadCmd(t *testing.T) {
-	// A right-click in the chat pastes the clipboard directly (no menu): it
-	// returns the async clipboard-read command.
+	// A right-click pastes the clipboard directly (no menu): it returns the async
+	// clipboard-read command. Assert at the handleMouse/handleSetupMouse scope
+	// where the contract actually lives — not via Update, which batches unrelated
+	// commands (ticks, etc.) so a nil-check there passes even if the right-click
+	// branch regresses.
 	m := mouseTestModel()
-	if _, cmd := m.Update(testMouseClick(tea.MouseRight, 40, 10)); cmd == nil {
-		t.Fatal("a right-click should return the clipboard-read command")
+	if _, cmd := m.handleMouse(testMouseClick(tea.MouseRight, 40, 10)); cmd == nil {
+		t.Fatal("a right-click in the chat should return the clipboard-read command")
 	}
 
-	// Same in the provider wizard.
+	// Provider wizard — also routed through handleMouse.
 	w := mouseTestModel()
 	w.providerWizard = &providerWizardState{step: providerWizardStepCredential}
-	if _, cmd := w.Update(testMouseClick(tea.MouseRight, 40, 10)); cmd == nil {
+	if _, cmd := w.handleMouse(testMouseClick(tea.MouseRight, 40, 10)); cmd == nil {
 		t.Fatal("a right-click in the wizard should return the clipboard-read command")
+	}
+
+	// Setup mode is routed to handleSetupMouse, which has its own right-click
+	// branch; without it setup would swallow the paste.
+	s := mouseTestModel()
+	if _, cmd := s.handleSetupMouse(testMouseClick(tea.MouseRight, 40, 10)); cmd == nil {
+		t.Fatal("a right-click in setup should return the clipboard-read command")
 	}
 }
 
