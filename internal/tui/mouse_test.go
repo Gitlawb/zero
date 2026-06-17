@@ -233,6 +233,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
 	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, 40, 20))
 	next := updated.(model)
@@ -243,7 +244,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 		t.Fatal("empty-area click should not start transcript selection")
 	}
 
-	updated, cmd = next.Update(testMouseClick(tea.MouseLeft, 3, 1))
+	updated, cmd = next.Update(testMouseClick(tea.MouseLeft, 3, textY))
 	next = updated.(model)
 	if cmd != nil {
 		t.Fatal("transcript press should not copy yet")
@@ -257,10 +258,11 @@ func TestTranscriptSelectionExtractsVisibleTextRange(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
-	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, textY))
 	m = updated.(model)
-	updated, _ = m.Update(testMouseMotion(tea.MouseLeft, 8, 1))
+	updated, _ = m.Update(testMouseMotion(tea.MouseLeft, 8, textY))
 	m = updated.(model)
 
 	if got := m.selectedTranscriptText(); got != "hello" {
@@ -272,10 +274,11 @@ func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
-	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, textY))
 	m = updated.(model)
-	updated, _ = m.Update(testMouseMotion(tea.MouseNone, 8, 1))
+	updated, _ = m.Update(testMouseMotion(tea.MouseNone, 8, textY))
 	m = updated.(model)
 
 	if got := m.selectedTranscriptText(); got != "hello" {
@@ -287,12 +290,13 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
-	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, textY))
 	m = updated.(model)
 	// A left-button drag is Action==Motion with Button==Left; this must update the
 	// cursor without resetting the selection anchor.
-	updated, _ = m.Update(testMouseMotion(tea.MouseLeft, 8, 1))
+	updated, _ = m.Update(testMouseMotion(tea.MouseLeft, 8, textY))
 	m = updated.(model)
 
 	if got := m.selectedTranscriptText(); got != "hello" {
@@ -304,10 +308,11 @@ func TestTranscriptSelectionReleaseExtendsRangeWithoutMotion(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
+	textY := firstTranscriptTextMouseY(t, m)
 
-	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, 1))
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, 3, textY))
 	m = updated.(model)
-	updated, cmd := m.Update(testMouseRelease(tea.MouseNone, 8, 1))
+	updated, cmd := m.Update(testMouseRelease(tea.MouseNone, 8, textY))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("release after range selection should return copy command")
@@ -341,7 +346,7 @@ func TestMouseClickTogglesReasoningRow(t *testing.T) {
 
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
-	start, _ := m.transcriptViewportStart(body, width)
+	start, _, top := m.transcriptViewportStart(body, width)
 	var target transcriptSelectableLine
 	for _, line := range selectable {
 		if line.toggle {
@@ -353,7 +358,7 @@ func TestMouseClickTogglesReasoningRow(t *testing.T) {
 		t.Fatalf("expected reasoning header to be clickable, selectable=%#v", selectable)
 	}
 
-	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, target.textStart, target.bodyY-start))
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, target.textStart, top+target.bodyY-start))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("reasoning toggle click should not return a command")
@@ -375,7 +380,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 
 	width := chatWidth(m.width)
 	body, selectable := m.transcriptBody(width, "")
-	start, _ := m.transcriptViewportStart(body, width)
+	start, _, top := m.transcriptViewportStart(body, width)
 	var target transcriptSelectableLine
 	for _, line := range selectable {
 		if line.toggle && line.live {
@@ -387,7 +392,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 		t.Fatalf("expected live reasoning header to be clickable, selectable=%#v", selectable)
 	}
 
-	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, target.textStart, target.bodyY-start))
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, target.textStart, top+target.bodyY-start))
 	next := updated.(model)
 	if cmd != nil {
 		t.Fatal("streaming reasoning toggle click should not return a command")
@@ -481,6 +486,24 @@ func TestMCPAddWizardMouseSelectsAndActivatesType(t *testing.T) {
 	}
 }
 
+func TestMCPAddWizardBlocksTranscriptSelectionBehindOverlay(t *testing.T) {
+	m := mouseTestModel()
+	m.mouseCapture = true
+	m.transcript = appendRow(m.transcript, rowUser, "hidden behind wizard")
+	textX, textY := firstTranscriptTextMousePoint(t, m)
+	m.mcpAddWizard = newMCPAddWizard("http")
+	m.mcpAddWizard.step = mcpAddWizardStepType
+
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, textX, textY))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("click behind MCP add wizard should not return a command")
+	}
+	if next.transcriptSelection.active {
+		t.Fatal("MCP add wizard should block transcript selection behind the overlay")
+	}
+}
+
 func TestTranscriptCopyStatusUsesComposerSpacerWithoutFooterGrowth(t *testing.T) {
 	m := mouseTestModel()
 	m.providerName = "ollama-cloud"
@@ -530,6 +553,26 @@ func TestMouseCaptureOnlyDuringInteractiveSetupStages(t *testing.T) {
 			t.Fatalf("wantsMouseCapture at setup stage %v = %v, want %v", tt.stage, got, tt.want)
 		}
 	}
+}
+
+func firstTranscriptTextMouseY(t *testing.T, m model) int {
+	t.Helper()
+	_, y := firstTranscriptTextMousePoint(t, m)
+	return y
+}
+
+func firstTranscriptTextMousePoint(t *testing.T, m model) (int, int) {
+	t.Helper()
+	width := chatWidth(m.width)
+	body, selectable := m.transcriptBody(width, "")
+	start, _, top := m.transcriptViewportStart(body, width)
+	for _, line := range selectable {
+		if line.text != "" && !line.toggle {
+			return line.textStart, top + line.bodyY - start
+		}
+	}
+	t.Fatalf("no selectable transcript text line found: %#v", selectable)
+	return 0, 0
 }
 
 func mouseTestModel() model {

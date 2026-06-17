@@ -554,6 +554,57 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	}
 }
 
+func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name:         "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		APIKey:       "sk-test",
+		Model:        "gpt-4.1",
+	}, true); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openai",
+		ModelName:      "gpt-4.1",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      config.OpenAIBaseURL,
+			APIKey:       "sk-test",
+			Model:        "gpt-4.1",
+		},
+		Provider: &fakeProvider{},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model gpt-4.1-mini")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-4.1-mini" {
+		t.Fatalf("modelName = %q, want gpt-4.1-mini", next.modelName)
+	}
+	persisted, err := config.Resolve(config.ResolveOptions{UserConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("resolve persisted config: %v", err)
+	}
+	if got := persisted.Provider.Model; got != "gpt-4.1-mini" {
+		t.Fatalf("persisted provider model = %q, want gpt-4.1-mini", got)
+	}
+	if !transcriptContains(next.transcript, "saved: user config") {
+		t.Fatalf("expected model transcript to mention saved user config, got %#v", next.transcript)
+	}
+}
+
 type stubModelSwitchCompactionGuard struct {
 	decision modelSwitchCompactionDecision
 	requests []modelSwitchCompactionRequest
@@ -1184,7 +1235,7 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 		t.Fatalf("expected permission request to append one permission row, got %#v", next.transcript)
 	}
 	view := next.View()
-	for _, want := range []string{"write_file", "[a] allow", "[d] deny", "[y] always", "risk:high", "Creates or overwrites files."} {
+	for _, want := range []string{"write_file", "allow once", "[a]", "deny", "[d]", "always", "[y]", "risk:high", "Creates or overwrites files."} {
 		assertContains(t, view, want)
 	}
 }
@@ -1250,16 +1301,18 @@ func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
 	next = updated.(model)
 
 	if cmd != nil {
-		t.Fatal("expected Enter to be ignored while permission prompt is active")
+		t.Fatal("expected permission confirm to resolve synchronously (no cmd)")
 	}
-	if len(decisions) != 0 {
-		t.Fatalf("expected Enter not to choose a permission decision, got %#v", decisions)
+	// Enter confirms the highlighted option (default: allow once) — it must NOT
+	// submit the composer's pending text as a new prompt.
+	if len(decisions) != 1 || decisions[0] != permissionDecisionAllow {
+		t.Fatalf("expected Enter to confirm the default option (allow once), got %#v", decisions)
 	}
 	if transcriptContains(next.transcript, "second prompt") {
 		t.Fatalf("permission prompt should block normal prompt submit, got %#v", next.transcript)
 	}
-	if next.pendingPermission == nil {
-		t.Fatal("expected permission prompt to remain pending after Enter")
+	if next.pendingPermission != nil {
+		t.Fatalf("expected permission prompt to clear after confirm, got %#v", next.pendingPermission)
 	}
 }
 
@@ -1678,5 +1731,55 @@ func TestModelNotifierFocusAndCompletion(t *testing.T) {
 	m.notifier.Notify(notify.Completion, "x")
 	if buf.Len() != 0 {
 		t.Fatalf("refocused should be silent, got %q", buf.String())
+	}
+}
+
+// TestWorkingVerbAdvancesOnStepEverySpinnerTicks locks in the cadence
+// decision: the verb advances every WorkingWordsStepEvery spinner ticks
+// (~1Hz at the 80ms spinner cadence), not every frame. The model owns the
+// counter so the dumb Tick() ring stays unit-testable without a real
+// spinner.
+//
+// We drive WorkingWordsStepEvery-1 ticks and assert the verb didn't
+// change, then drive one more tick and assert it did. Then we drive
+// another WorkingWordsStepEvery-1 ticks and assert the verb stayed put
+// (i.e. the counter reset after the advance, not carried over). This
+// catches a regression where someone removes the gate (revert to "every
+// tick"), sets the gate to 1 (same effect), or forgets to reset the
+// counter after the advance (so a follow-up advance lands one window
+// early).
+func TestWorkingVerbAdvancesOnStepEverySpinnerTicks(t *testing.T) {
+	m := limeTestModel()
+	m.pending = true
+	before := m.workingVerb.Current()
+
+	// Drive (WorkingWordsStepEvery - 1) ticks. The verb must NOT advance.
+	for i := 0; i < WorkingWordsStepEvery-1; i++ {
+		updated, _ := m.Update(spinner.TickMsg{})
+		m = updated.(model)
+	}
+	if got := m.workingVerb.Current(); got != before {
+		t.Fatalf("after %d ticks verb = %q, want unchanged (%q)", WorkingWordsStepEvery-1, got, before)
+	}
+
+	// The (WorkingWordsStepEvery)th tick IS the advance.
+	updated, _ := m.Update(spinner.TickMsg{})
+	m = updated.(model)
+	afterAdvance := m.workingVerb.Current()
+	if afterAdvance == before {
+		t.Fatalf("after %d ticks verb still = %q, want advance", WorkingWordsStepEvery, before)
+	}
+
+	// Drive another (WorkingWordsStepEvery - 1) ticks. The verb must NOT
+	// advance again — the counter resets after each advance, not carries
+	// over. A regression that omits the reset (so the next advance lands
+	// one window early) would fail this assertion.
+	for i := 0; i < WorkingWordsStepEvery-1; i++ {
+		updated, _ := m.Update(spinner.TickMsg{})
+		m = updated.(model)
+	}
+	if got := m.workingVerb.Current(); got != afterAdvance {
+		t.Fatalf("after advance + %d ticks verb = %q, want unchanged from post-advance (%q) — counter didn't reset",
+			WorkingWordsStepEvery-1, got, afterAdvance)
 	}
 }

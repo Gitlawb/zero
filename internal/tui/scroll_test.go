@@ -115,6 +115,7 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	m := newModel(context.Background(), Options{AltScreen: true, ProviderName: "openai", ModelName: "gpt-4.1"})
 	m.width = 90
 	m.height = 10
+	m.gitBranch = "feat/pinned-header"
 	for index := 0; index < 14; index++ {
 		m.transcript = appendRow(m.transcript, rowAssistant, "message "+string(rune('A'+index)))
 	}
@@ -126,6 +127,9 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	if !strings.Contains(bottom, "describe a task for zero") || !strings.Contains(bottom, "openai") {
 		t.Fatalf("bottom view should keep composer/status fixed, got:\n%s", bottom)
 	}
+	if !strings.Contains(bottom, "feat/pinned-header") || !strings.Contains(bottom, "gpt-4.1") {
+		t.Fatalf("bottom view should keep title bar fixed, got:\n%s", bottom)
+	}
 
 	m = m.scrollChat(80)
 	scrolled := plainRender(t, m.View())
@@ -134,6 +138,9 @@ func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
 	}
 	if !strings.Contains(scrolled, "describe a task for zero") || !strings.Contains(scrolled, "openai") {
 		t.Fatalf("scrolled view should keep composer/status fixed, got:\n%s", scrolled)
+	}
+	if !strings.Contains(scrolled, "feat/pinned-header") || !strings.Contains(scrolled, "gpt-4.1") {
+		t.Fatalf("scrolled view should keep title bar fixed, got:\n%s", scrolled)
 	}
 }
 

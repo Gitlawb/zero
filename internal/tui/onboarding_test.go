@@ -249,6 +249,36 @@ func TestSetupTakeoverCustomCompatibleCollectsEndpointNameAndModel(t *testing.T)
 	}
 }
 
+func TestSetupEndpointAcceptsPastedURL(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{
+			Visible: true,
+			Providers: []SetupProviderOption{
+				{ID: "custom-openai-compatible", Name: "Custom OpenAI-compatible", DefaultModel: "custom-model", EnvVar: "OPENAI_API_KEY", RequiresAuth: true},
+			},
+		},
+	})
+	m.width = 100
+	m.height = 30
+
+	m = pressSetupContinue(m)
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageEndpoint {
+		t.Fatalf("stage = %v, want endpoint", m.setup.stage)
+	}
+
+	updated, _ := m.Update(testPaste("https://api.minimax.io/v1\n"))
+	m = updated.(model)
+	if m.setup.baseURL != "https://api.minimax.io/v1" {
+		t.Fatalf("setup baseURL = %q, want pasted endpoint", m.setup.baseURL)
+	}
+
+	m = pressSetupContinue(m)
+	if m.setup.stage != setupStageName {
+		t.Fatalf("stage = %v, want name", m.setup.stage)
+	}
+}
+
 func TestSetupCompletionResetsChatSurfaceInsideAltScreen(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
@@ -600,7 +630,7 @@ func TestSetupCredentialsAcceptsPastedAPIKeyWithoutRenderingSecret(t *testing.T)
 	m.height = 30
 	m.setup.stage = setupStageCredentials
 
-	updated, _ := m.Update(testKeyText(secret))
+	updated, _ := m.Update(testPaste(secret))
 	m = updated.(model)
 	view := plainRender(t, m.View())
 	if strings.Contains(view, secret) {

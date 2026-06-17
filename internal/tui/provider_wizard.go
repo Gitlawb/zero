@@ -666,6 +666,23 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleProviderWizardPaste(content string) (model, tea.Cmd) {
+	if m.providerWizard == nil || m.providerWizard.oauthPending {
+		return m, nil
+	}
+	switch m.providerWizard.step {
+	case providerWizardStepEndpoint:
+		m.providerWizard.appendBaseURL([]rune(content))
+	case providerWizardStepName:
+		m.providerWizard.appendProfileName([]rune(content))
+	case providerWizardStepCredential:
+		m.providerWizard.appendAPIKey([]rune(content))
+	case providerWizardStepModel:
+		m.providerWizard.appendModelSearch([]rune(content))
+	}
+	return m, nil
+}
+
 func (wizard *providerWizardState) canAdvanceWithRight() bool {
 	if wizard == nil {
 		return false

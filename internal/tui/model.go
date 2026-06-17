@@ -99,6 +99,7 @@ type model struct {
 	unpricedTokens        int
 	transcript            []transcriptRow
 	transcriptDetailed    bool
+	transcriptBodyHeights *transcriptBodyHeightCache
 	input                 textinput.Model
 	composer              composerState
 	composerActive        bool
@@ -109,13 +110,21 @@ type model struct {
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
-	spinner       spinner.Model
-	pending       bool
-	queuedMessage string
-	exiting       bool
-	runCancel     context.CancelFunc
-	runID         int
-	activeRunID   int
+	spinner spinner.Model
+	// workingVerb holds the rotating "gitlawbmaxxing / openfablemaxxing / …"
+	// label the assistant interim block displays while pending. The verb
+	// advances at WorkingWordsStepEvery-tick intervals (≈1Hz at the 80ms
+	// spinner cadence) so the glyph can spin fast and the word still be
+	// readable; workingVerbTicks is the gate counter. See the spinner
+	// TickMsg branch and launchPrompt for the advance/reset.
+	workingVerb      *workingWords
+	workingVerbTicks int
+	pending          bool
+	queuedMessage    string
+	exiting          bool
+	runCancel        context.CancelFunc
+	runID            int
+	activeRunID      int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -148,7 +157,7 @@ type model struct {
 	// idle so history cannot reveal prior shell output.
 	// flushedAny gates the first turn-separator blank line; flushQueue/
 	// printInFlight serialize ordered scrollback prints; headerPrinted records
-	// the one-time title-bar print at startup.
+	// the one-time inline title-bar print at startup.
 	flushed       int
 	flushedAny    bool
 	flushQueue    []string
@@ -165,6 +174,19 @@ type model struct {
 	streamingText              string // live assistant text for the current segment
 	streamingReasoning         string // live provider reasoning for the current segment
 	streamingReasoningExpanded bool
+	// Streaming-text fade state. lineAges is keyed to LOGICAL lines of
+	// streamingText (one entry per \n in the accumulated text), and
+	// lastStreamActivity is the time of the most recent delta (used for
+	// the in-progress last line — the one the model is currently typing
+	// into). fadeActive is true from the first agentTextMsg of a run
+	// until the matching agentResponseMsg, and gates both the per-line
+	// fade application in interimBlock and the streamingFadeTick
+	// re-render loop. The state is reset on stream end, on cancel, and
+	// on terminal resize (where the visual line count may change and
+	// per-line ages are no longer meaningful).
+	lineAges           []time.Time
+	lastStreamActivity time.Time
+	fadeActive         bool
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
@@ -298,6 +320,10 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// cursor is the highlighted option index (into permissionOptions): 0=allow
+	// once (the resting default), 1=always, 2=deny. Moved by ↑/↓/Tab; confirmed
+	// by Enter or a click. The a/y/d hotkeys resolve directly and ignore it.
+	cursor int
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -430,10 +456,12 @@ func newModel(ctx context.Context, options Options) model {
 		userAgent:              options.UserAgent,
 		usageTracker:           usageTracker,
 		transcript:             initialTranscript(),
+		transcriptBodyHeights:  newTranscriptBodyHeightCache(defaultTranscriptBodyHeightCacheMaxEntries),
 		prService:              prService,
 		prState:                prService.GetState(),
 		input:                  input,
 		spinner:                runSpinner,
+		workingVerb:            newWorkingWords(),
 		now:                    time.Now,
 		notifier:               notifier,
 		altScreen:              options.AltScreen,
@@ -572,19 +600,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
+	case clipboardReadMsg:
+		// Result of a right-click paste. Insert on success; surface a brief
+		// status if the clipboard couldn't be read (e.g. no clipboard utility on
+		// a remote session). An empty clipboard is a silent no-op.
+		if msg.err != nil {
+			m.copyStatusSeq++
+			m.copyStatus = "Paste failed"
+			seq := m.copyStatusSeq
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+				return transcriptCopyStatusExpiredMsg{seq: seq}
+			})
+		}
+		return m.routePaste(msg.content)
 	case tea.PasteMsg:
-		if m.setup.visible || m.pendingAskUser != nil {
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
-		}
-		if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
-			return m, nil
-		}
-		state := m.currentComposerState()
-		m = m.applyComposerText(state, msg.Content, true)
-		m.recomputeSuggestions()
-		return m, nil
+		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)
@@ -678,7 +708,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.pendingPermission != nil {
-				return m, nil
+				// Enter confirms the highlighted option (default: allow once); the
+				// a/y/d hotkeys and a click still resolve directly.
+				return m.confirmPermissionCursor()
 			}
 			if m.pendingAskUser != nil {
 				return m.submitAskUserAnswer()
@@ -715,6 +747,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(-1), nil
+			}
 			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
 			// is intentionally not reachable by a casual keypress — see
 			// nextPermissionMode), but only when nothing modal is up: a permission
@@ -743,6 +778,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(1), nil
+			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
@@ -769,6 +807,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keyIs(msg, tea.KeyDown):
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(1), nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
@@ -799,6 +840,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keyIs(msg, tea.KeyUp):
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(-1), nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
@@ -891,6 +935,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamingText += msg.delta
+		// recordStreamingDelta appends a time.Time to lineAges for every
+		// newline in the delta and bumps lastStreamActivity. It also
+		// re-stamps the in-progress last entry so the line that's still
+		// being filled stays visibly fresh.
+		m.recordStreamingDelta(msg.delta)
+		// The fade's tick is self-perpetuating (the streamingFadeTickMsg
+		// case schedules the next one). Schedule the FIRST tick only on
+		// the inactive→active transition; subsequent deltas just refresh
+		// state and rely on the existing tick chain.
+		startTick := !m.fadeActive
+		m.fadeActive = true
+		if startTick {
+			return m, streamingFadeTick()
+		}
 		return m, nil
 	case agentReasoningMsg:
 		if msg.runID != m.activeRunID {
@@ -906,6 +964,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		// Advance the working verb every WorkingWordsStepEvery spinner
+		// ticks (~1Hz at 80ms cadence). The glyph spins fast; the word
+		// turns over slowly enough to read. Nil-safe — the type's
+		// methods handle a nil receiver, and the counter still
+		// increments harmlessly.
+		m.workingVerbTicks++
+		if m.workingVerbTicks >= WorkingWordsStepEvery {
+			m.workingVerbTicks = 0
+			m.workingVerb.Tick()
+		}
 		if m.compactInFlight {
 			m.compactFrame++
 			m = m.setCompactStatusRow(m.compactText(true))
@@ -915,15 +983,30 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.setDoctorStatusRow(m.doctorConnectivityRunningText())
 		}
 		return m, cmd
+	case streamingFadeTickMsg:
+		// The fade's own tick (separate from the spinner so a slower
+		// cadence is enough). Short-circuits when fadeActive is false,
+		// which is how the ticker stops cleanly at stream end: the
+		// agentResponseMsg handler sets fadeActive = false, and the
+		// next tick that lands after that point returns nil here.
+		if !m.fadeActive {
+			return m, nil
+		}
+		return m, streamingFadeTick()
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Reset the streaming-text fade state. A width change can re-wrap
+		// the in-progress text into a different number of visual lines,
+		// which invalidates the per-line age mapping. The next delta
+		// will reseed lineAges and restart the tick.
+		m.lineAges = nil
+		m.lastStreamActivity = m.now()
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
 		m.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
 		// The title bar prints once into native scrollback when the inline
-		// renderer is active. In alt-screen mode tea.Println is ignored, so the
-		// title stays managed inside View.
+		// renderer is active. In alt-screen mode it stays pinned inside View.
 		if !m.altScreen && !m.headerPrinted && msg.Width > 0 {
 			m.headerPrinted = true
 			m.flushQueue = append(m.flushQueue, m.titleBar(chatWidth(msg.Width)))
@@ -1014,6 +1097,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pending = false
+		// Fully reset the fade state at stream end. The next render
+		// emits the final row in solid ink (no settling animation), and
+		// the pending streamingFadeTickMsg that lands after this point
+		// short-circuits because fadeActive is false. Clearing lineAges
+		// and lastStreamActivity here too prevents stale age data from
+		// carrying over to the next turn (and stops lineAges from
+		// growing indefinitely across many runs).
+		m.resetStreamingFade()
 		// The run is complete: release its context now instead of waiting for the
 		// parent context — every prompt leaked a CancelFunc (and its timer
 		// resources) until app exit otherwise.
@@ -1230,7 +1321,7 @@ func (m model) transcriptView() string {
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		emptyOverlay = viewportOverlay
 	}
-	body, _ := m.transcriptBody(width, emptyOverlay)
+	bodyItems := m.transcriptBodyItems(width, emptyOverlay)
 
 	footer := m.footerView(width)
 
@@ -1240,13 +1331,26 @@ func (m model) transcriptView() string {
 	}
 
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptView(body, footer, width, overlayForViewport)
+		return m.scrollableTranscriptItemsView(m.pinnedTitleBar(width), bodyItems, footer, width, overlayForViewport)
 	}
 
+	bodyLayout := layoutTranscriptBodyItems(bodyItems)
+	body := bodyLayout.String()
 	if overlayForViewport != "" {
 		body += "\n" + overlayForViewport + "\n"
 	}
 	return body + footer
+}
+
+func (m model) titleBarInTranscriptBody() bool {
+	return !m.altScreen && !m.headerPrinted
+}
+
+func (m model) pinnedTitleBar(width int) string {
+	if !m.altScreen || m.height <= 0 {
+		return ""
+	}
+	return m.titleBar(width)
 }
 
 func (m model) footerView(width int) string {
@@ -1271,31 +1375,148 @@ func (m model) footerView(width int) string {
 	return footer.String()
 }
 
-func (m model) scrollableTranscriptView(body string, footer string, width int, overlay string) string {
-	bodyLines := viewLines(body)
-	footerLines := viewLines(footer)
+type tuiRect struct {
+	x      int
+	y      int
+	width  int
+	height int
+}
+
+func (r tuiRect) contains(x int, y int) bool {
+	return x >= r.x && y >= r.y && x < r.x+r.width && y < r.y+r.height
+}
+
+func (r tuiRect) local(x int, y int) (int, int, bool) {
+	if !r.contains(x, y) {
+		return 0, 0, false
+	}
+	return x - r.x, y - r.y, true
+}
+
+type transcriptFrameLayout struct {
+	width           int
+	height          int
+	headerRect      tuiRect
+	bodyRect        tuiRect
+	footerRect      tuiRect
+	composerRect    tuiRect
+	statusRect      tuiRect
+	headerLines     []string
+	bodyHeight      int
+	footerLines     []string
+	fullFooterLines []string
+	footerClip      int
+}
+
+func (m model) scrollableTranscriptFrame(header string, footer string) transcriptFrameLayout {
+	headerLines := viewLines(header)
+	fullFooterLines := viewLines(footer)
+	footerLines := append([]string(nil), fullFooterLines...)
+
 	maxFooterLines := maxInt(0, m.height-1)
 	if len(footerLines) > maxFooterLines {
 		footerLines = footerLines[len(footerLines)-maxFooterLines:]
 	}
-	available := m.height - len(footerLines)
-	if available < 1 {
-		available = 1
+	if len(headerLines)+len(footerLines) >= m.height {
+		maxHeaderLines := maxInt(0, m.height-len(footerLines)-1)
+		if len(headerLines) > maxHeaderLines {
+			headerLines = headerLines[:maxHeaderLines]
+		}
 	}
-	maxOffset := maxInt(0, len(bodyLines)-available)
-	offset := clamp(m.chatScrollOffset, 0, maxOffset)
-	start := maxInt(0, len(bodyLines)-available-offset)
-	end := minInt(len(bodyLines), start+available)
+	if len(headerLines)+len(footerLines) >= m.height {
+		maxFooterLines = maxInt(0, m.height-len(headerLines)-1)
+		if len(footerLines) > maxFooterLines {
+			footerLines = footerLines[len(footerLines)-maxFooterLines:]
+		}
+	}
 
-	lines := make([]string, 0, available+len(footerLines))
-	if start < end {
-		lines = append(lines, bodyLines[start:end]...)
+	bodyHeight := m.height - len(headerLines) - len(footerLines)
+	if bodyHeight < 1 {
+		bodyHeight = 1
 	}
-	for len(lines) < available {
-		lines = append(lines, "")
+	width := chatWidth(m.width)
+	footerTop := len(headerLines) + bodyHeight
+	frame := transcriptFrameLayout{
+		width:           width,
+		height:          m.height,
+		headerRect:      tuiRect{width: width, height: len(headerLines)},
+		bodyRect:        tuiRect{y: len(headerLines), width: width, height: bodyHeight},
+		footerRect:      tuiRect{y: footerTop, width: width, height: len(footerLines)},
+		headerLines:     headerLines,
+		bodyHeight:      bodyHeight,
+		footerLines:     footerLines,
+		fullFooterLines: fullFooterLines,
+		footerClip:      maxInt(0, len(fullFooterLines)-len(footerLines)),
 	}
-	lines = overlayViewportLines(lines, overlay, width)
-	lines = append(lines, footerLines...)
+	frame.composerRect = frame.footerSubrect(viewLines(m.composerBox(width)))
+	if len(fullFooterLines) > 0 {
+		frame.statusRect = frame.footerLineRect(len(fullFooterLines) - 1)
+	}
+	return frame
+}
+
+func (f transcriptFrameLayout) footerSubrect(sequence []string) tuiRect {
+	if len(sequence) == 0 || len(f.footerLines) == 0 {
+		return tuiRect{}
+	}
+	top := lineSequenceIndex(f.fullFooterLines, sequence)
+	if top < 0 {
+		return tuiRect{}
+	}
+	visibleTop := maxInt(top, f.footerClip)
+	visibleBottom := minInt(top+len(sequence), f.footerClip+len(f.footerLines))
+	if visibleTop >= visibleBottom {
+		return tuiRect{}
+	}
+	return tuiRect{
+		y:      f.footerRect.y + visibleTop - f.footerClip,
+		width:  f.width,
+		height: visibleBottom - visibleTop,
+	}
+}
+
+func (f transcriptFrameLayout) footerLineRect(line int) tuiRect {
+	if line < f.footerClip || line >= f.footerClip+len(f.footerLines) {
+		return tuiRect{}
+	}
+	return tuiRect{
+		y:      f.footerRect.y + line - f.footerClip,
+		width:  f.width,
+		height: 1,
+	}
+}
+
+func (m model) scrollableTranscriptView(header string, body string, footer string, width int, overlay string) string {
+	return m.scrollableTranscriptLayoutView(header, transcriptBodyLayout{lines: viewLines(body)}, footer, width, overlay)
+}
+
+func (m model) scrollableTranscriptLayoutView(header string, body transcriptBodyLayout, footer string, width int, overlay string) string {
+	frame := m.scrollableTranscriptFrame(header, footer)
+	window := transcriptViewportForLayout(body, frame, m.chatScrollOffset).window()
+
+	bodyWindow := body.visibleLines(window)
+	return m.renderScrollableTranscriptWindow(frame, bodyWindow, window, width, overlay)
+}
+
+func (m model) scrollableTranscriptItemsView(header string, items []transcriptBodyItem, footer string, width int, overlay string) string {
+	frame := m.scrollableTranscriptFrame(header, footer)
+	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	window := transcriptViewportForLayout(metrics, frame, m.chatScrollOffset).window()
+	body := layoutVisibleTranscriptBodyItems(items, metrics, window)
+
+	return m.renderScrollableTranscriptWindow(frame, body.lines, window, width, overlay)
+}
+
+func (m model) renderScrollableTranscriptWindow(frame transcriptFrameLayout, bodyWindow []string, window transcriptViewportWindow, width int, overlay string) string {
+	for len(bodyWindow) < window.height {
+		bodyWindow = append(bodyWindow, "")
+	}
+	bodyWindow = overlayViewportLines(bodyWindow, overlay, width)
+
+	lines := make([]string, 0, len(frame.headerLines)+len(bodyWindow)+len(frame.footerLines))
+	lines = append(lines, frame.headerLines...)
+	lines = append(lines, bodyWindow...)
+	lines = append(lines, frame.footerLines...)
 	for index, line := range lines {
 		lines[index] = fitStyledLine(line, width)
 	}
@@ -1399,9 +1620,11 @@ func (m model) scrollChat(delta int) model {
 	if !m.altScreen || delta == 0 {
 		return m
 	}
-	maxOffset := m.chatMaxScrollOffset()
-	current := clampInt(m.chatScrollOffset, 0, maxOffset)
-	m.chatScrollOffset = clampInt(current+delta, 0, maxOffset)
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
+		return m
+	}
+	m.chatScrollOffset = viewport.scroll(delta).offset
 	if m.chatScrollOffset == 0 {
 		m.chatBodyLines = 0
 	}
@@ -1414,22 +1637,22 @@ func (m model) chatMaxScrollOffset() int {
 }
 
 func (m model) chatScrollMetrics() (int, int) {
-	if !m.altScreen || m.height <= 0 {
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
 		return 0, 0
 	}
+	return viewport.totalLines, viewport.maxOffset()
+}
+
+func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
+	if !m.altScreen || m.height <= 0 {
+		return transcriptViewport{}, false
+	}
 	width := chatWidth(m.width)
-	body, _ := m.transcriptBody(width, "")
-	bodyLines := len(viewLines(body))
-	footerLines := viewLines(m.footerView(width))
-	maxFooterLines := maxInt(0, m.height-1)
-	if len(footerLines) > maxFooterLines {
-		footerLines = footerLines[len(footerLines)-maxFooterLines:]
-	}
-	available := m.height - len(footerLines)
-	if available < 1 {
-		available = 1
-	}
-	return bodyLines, maxInt(0, bodyLines-available)
+	items := m.transcriptBodyItems(width, "")
+	body := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	return transcriptViewportForLayout(body, frame, m.chatScrollOffset), true
 }
 
 // syncChatScroll pins the viewport to what the user is reading. The scroll offset
@@ -1488,11 +1711,17 @@ func (m model) interimBlock(width int) string {
 		if len(blocks) > 0 {
 			return strings.Join(blocks, "\n")
 		}
-		return zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render("working…")
+		return zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
 	}
 	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
-		lines[index] = styleAssistantMarkdownLine(line, zeroTheme.ink)
+		// styleStreamingLine applies the fade palette when fadeActive is
+		// true and lineAges is populated; otherwise it falls through to
+		// the same base-ink render styleAssistantMarkdownLine would have
+		// applied. This means test fixtures that pre-populate
+		// m.streamingText without going through the agentTextMsg
+		// branch keep rendering identically to before.
+		lines[index] = m.styleStreamingLine(line, index, len(lines))
 	}
 	lines = appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
@@ -2307,6 +2536,12 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
+	// the new run starts (instead of mid-rotation from a prior turn). Also
+	// reset the step counter so the cadence doesn't carry over a partial
+	// countdown from the previous run.
+	m.workingVerbTicks = 0
+	m.workingVerb.Reset()
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
 }
 
@@ -2408,6 +2643,10 @@ func (m *model) cancelRun() {
 	m.streamingText = ""
 	m.streamingReasoning = ""
 	m.streamingReasoningExpanded = false
+	// Hard-stop the fade and drop the per-line age map. The next turn's
+	// first agentTextMsg will seed a fresh lineAges slice and restart
+	// the tick.
+	m.resetStreamingFade()
 }
 
 func (m model) runAgent(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock) tea.Cmd {

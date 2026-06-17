@@ -3,6 +3,7 @@ package tui
 import tea "charm.land/bubbletea/v2"
 
 type mouseOverlayHit struct {
+	x int
 	y int
 }
 
@@ -19,6 +20,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// mid-login — mirroring the keyboard handler's pending guard.
 	if m.providerWizard != nil && m.providerWizard.oauthPending {
 		return m, nil
+	}
+	// A right-click pastes the clipboard straight into the focused field — no
+	// menu. pasteFromClipboardCmd reads the clipboard off the Update goroutine; the
+	// clipboardReadMsg result is routed by routePaste to wherever input is focused
+	// (composer, wizard, setup) or swallowed on a surface with no text field.
+	// Keyboard/selection copy-paste keep working unchanged.
+	if mouseRightPress(msg) {
+		return m, pasteFromClipboardCmd()
 	}
 	if mouseLeftPress(msg) {
 		switch {
@@ -178,33 +187,8 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 		return false
 	}
 	width := chatWidth(m.width)
-	composerLines := viewLines(m.composerBox(width))
-	fullFooterLines := viewLines(m.footerView(width))
-	if len(composerLines) == 0 || len(fullFooterLines) == 0 {
-		return false
-	}
-	composerTop := lineSequenceIndex(fullFooterLines, composerLines)
-	if composerTop < 0 {
-		return false
-	}
-	footerLines := fullFooterLines
-	clippedPrefix := 0
-	maxFooterLines := maxInt(0, m.height-1)
-	if len(footerLines) > maxFooterLines {
-		clippedPrefix = len(footerLines) - maxFooterLines
-		footerLines = footerLines[clippedPrefix:]
-	}
-	if len(footerLines) == 0 {
-		return false
-	}
-	visibleTop := maxInt(composerTop, clippedPrefix)
-	visibleBottom := minInt(composerTop+len(composerLines), clippedPrefix+len(footerLines))
-	if visibleTop >= visibleBottom {
-		return false
-	}
-	footerTop := maxInt(0, m.height-len(footerLines))
-	top := footerTop + visibleTop - clippedPrefix
-	return mouseY(msg) >= top && mouseY(msg) < top+visibleBottom-visibleTop
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	return frame.composerRect.contains(mouseX(msg), mouseY(msg))
 }
 
 func lineSequenceIndex(lines []string, sequence []string) int {
@@ -466,35 +450,39 @@ func (m model) overlayMouseHit(msg tea.MouseMsg, overlay string, width int) (mou
 	if overlayWidth <= 0 || len(lines) == 0 {
 		return mouseOverlayHit{}, false
 	}
-	top := m.overlayMouseTop(len(lines), width)
-	if mouseY(msg) < top || mouseY(msg) >= top+len(lines) {
+	rect := m.overlayMouseRect(len(lines), width)
+	if rect.height <= 0 || mouseY(msg) < rect.y || mouseY(msg) >= rect.y+rect.height {
 		return mouseOverlayHit{}, false
 	}
 	if mouseX(msg) < left || mouseX(msg) >= left+overlayWidth {
 		return mouseOverlayHit{}, false
 	}
-	return mouseOverlayHit{y: mouseY(msg) - top}, true
+	return mouseOverlayHit{x: mouseX(msg) - left, y: mouseY(msg) - rect.y}, true
 }
 
 func (m model) overlayMouseTop(overlayHeight int, width int) int {
+	return m.overlayMouseRect(overlayHeight, width).y
+}
+
+func (m model) overlayMouseRect(overlayHeight int, width int) tuiRect {
 	if overlayHeight <= 0 {
-		return 0
+		return tuiRect{}
 	}
 	if m.altScreen && m.height > 0 {
-		if m.transcriptEmpty() && !m.pending {
-			top := 0
-			available := normalizedStartupHeight(m.height) - 5
-			if !m.headerPrinted {
-				top += len(viewLines(m.titleBar(width)))
-				available -= 2
-			}
-			return top + maxInt(0, (available-overlayHeight)/2)
+		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+		visibleHeight := minInt(overlayHeight, frame.bodyRect.height)
+		if visibleHeight <= 0 {
+			return tuiRect{}
 		}
-		available := m.height - len(viewLines(m.footerView(width)))
-		if available < 1 {
-			available = 1
+		return tuiRect{
+			y:      frame.bodyRect.y + maxInt(0, (frame.bodyRect.height-visibleHeight)/2),
+			width:  width,
+			height: visibleHeight,
 		}
-		return maxInt(0, (available-overlayHeight)/2)
 	}
-	return maxInt(0, (normalizedStartupHeight(m.height)-overlayHeight)/2)
+	return tuiRect{
+		y:      maxInt(0, (normalizedStartupHeight(m.height)-overlayHeight)/2),
+		width:  width,
+		height: overlayHeight,
+	}
 }

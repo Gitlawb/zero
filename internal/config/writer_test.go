@@ -150,6 +150,72 @@ func TestSetActiveProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	}
 }
 
+func TestSetProviderModelUpdatesConfiguredProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{
+				Name:         "openai",
+				ProviderKind: ProviderKindOpenAI,
+				APIKey:       "sk-test",
+				Model:        "gpt-4.1",
+			},
+			{
+				Name:         "anthropic",
+				ProviderKind: ProviderKindAnthropic,
+				Model:        "claude-sonnet-4.5",
+			},
+		},
+	}, 0o600)
+
+	cfg, err := SetProviderModel(path, " OpenAI ", " gpt-4.1-mini ")
+	if err != nil {
+		t.Fatalf("SetProviderModel() error = %v", err)
+	}
+
+	if cfg.Providers[0].Model != "gpt-4.1-mini" {
+		t.Fatalf("updated provider model = %q, want gpt-4.1-mini", cfg.Providers[0].Model)
+	}
+	if cfg.Providers[0].APIKey != "sk-test" {
+		t.Fatalf("provider credential was not preserved: %#v", cfg.Providers[0])
+	}
+	if cfg.Providers[1].Model != "claude-sonnet-4.5" {
+		t.Fatalf("unrelated provider changed: %#v", cfg.Providers[1])
+	}
+
+	persisted := readConfigFixture(t, path)
+	if persisted.Providers[0].Model != "gpt-4.1-mini" {
+		t.Fatalf("persisted provider model = %q, want gpt-4.1-mini", persisted.Providers[0].Model)
+	}
+	if persisted.ActiveProvider != "openai" {
+		t.Fatalf("active provider changed to %q", persisted.ActiveProvider)
+	}
+}
+
+func TestSetProviderModelRejectsUnknownProviderWithoutRewriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	before := writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+		},
+	}, 0o600)
+
+	_, err := SetProviderModel(path, "anthropic", "claude-sonnet-4.5")
+	if err == nil {
+		t.Fatal("SetProviderModel() error = nil, want error")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("config was rewritten for unknown provider\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
 func TestUpsertProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not expose POSIX mode bits reliably")

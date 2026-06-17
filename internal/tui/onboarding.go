@@ -260,9 +260,41 @@ func (m model) handleSetupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleSetupPaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.setup.oauthPending {
+		return m, nil
+	}
+	switch {
+	case m.setupEndpointInputActive():
+		m.appendSetupBaseURL([]rune(msg.Content))
+	case m.setupNameInputActive():
+		m.appendSetupName([]rune(msg.Content))
+	case m.setupCredentialInputActive():
+		previousAPIKey := m.setup.apiKey.Value()
+		var cmd tea.Cmd
+		m.setup.apiKey, cmd = m.setup.apiKey.Update(msg)
+		if m.setup.apiKey.Value() != previousAPIKey {
+			m.setup.modelGen++
+			m.resetSetupModels()
+		}
+		m.setup.err = ""
+		return m, cmd
+	case m.setup.stage == setupStageModel:
+		m.appendSetupModelQuery([]rune(msg.Content))
+	}
+	return m, nil
+}
+
 func (m model) handleSetupMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.setup.oauthPending {
 		return m, nil
+	}
+	// A right-click pastes the clipboard into the focused setup field, mirroring
+	// handleMouse (mouse.go) so paste behaves identically in setup mode — routePaste
+	// targets the active setup input. Without this branch, setup swallows the
+	// right-click and paste never fires.
+	if mouseRightPress(msg) {
+		return m, pasteFromClipboardCmd()
 	}
 	if mouseLeftPress(msg) {
 		switch m.setup.stage {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -30,6 +31,11 @@ type transcriptSelectableLine struct {
 	text      string
 	toggle    bool
 	live      bool
+	// permOption marks a clickable permission-popup choice; permChoice is the
+	// decision a left-click on this row resolves. These rows carry no selectable
+	// text (they are buttons, not content).
+	permOption bool
+	permChoice permissionDecision
 }
 
 type transcriptCopiedMsg struct {
@@ -43,29 +49,85 @@ type transcriptCopyStatusExpiredMsg struct {
 	seq int
 }
 
-func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
-	lines := []string{}
-	selectable := []transcriptSelectableLine{}
-	appendBlock := func(block string) int {
-		start := len(lines)
-		lines = append(lines, viewLines(block)...)
-		return start
-	}
-	appendBlank := func() {
-		lines = append(lines, "")
-	}
+type transcriptBodyItemKind int
 
-	// The title bar prints once into scrollback on the first WindowSizeMsg;
+const (
+	transcriptBodyItemTitle transcriptBodyItemKind = iota
+	transcriptBodyItemEmpty
+	transcriptBodyItemSeparator
+	transcriptBodyItemRow
+	transcriptBodyItemPendingPrompt
+	transcriptBodyItemPendingInterim
+	transcriptBodyItemSpecReview
+)
+
+type transcriptBodyItem struct {
+	kind              transcriptBodyItemKind
+	rowIndex          int
+	heightCacheKey    string
+	heightCacheStable bool
+	render            func(startBodyY int) transcriptBodyRenderedItem
+}
+
+type transcriptBodyRenderedItem struct {
+	lines      []string
+	selectable []transcriptSelectableLine
+}
+
+type transcriptBodyItemSpan struct {
+	kind     transcriptBodyItemKind
+	rowIndex int
+	startY   int
+	height   int
+}
+
+type transcriptBodyLayout struct {
+	lines      []string
+	selectable []transcriptSelectableLine
+	spans      []transcriptBodyItemSpan
+}
+
+func (m model) transcriptBodyLayout(width int, emptyOverlay string) transcriptBodyLayout {
+	return layoutTranscriptBodyItems(m.transcriptBodyItems(width, emptyOverlay))
+}
+
+func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {
+	layout := m.transcriptBodyLayout(width, emptyOverlay)
+	return layout.String(), layout.selectable
+}
+
+func (l transcriptBodyLayout) String() string {
+	return strings.Join(l.lines, "\n")
+}
+
+func (l transcriptBodyLayout) totalLines() int {
+	if len(l.spans) > 0 {
+		last := l.spans[len(l.spans)-1]
+		return last.startY + last.height
+	}
+	return len(l.lines)
+}
+
+func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []string {
+	start := clampInt(window.start, 0, len(l.lines))
+	end := clampInt(window.end, start, len(l.lines))
+	return append([]string(nil), l.lines[start:end]...)
+}
+
+func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
+	items := []transcriptBodyItem{}
+
+	// The inline title bar prints once into scrollback on the first WindowSizeMsg;
 	// until then it renders managed so the surface never appears headless.
-	if !m.headerPrinted {
-		appendBlock(m.titleBar(width))
+	if m.titleBarInTranscriptBody() {
+		items = append(items, transcriptBlockBodyItem(transcriptBodyItemTitle, -1, m.titleBar(width)))
 	}
 
 	if m.transcriptEmpty() && !m.pending {
 		if emptyOverlay != "" {
-			appendBlock(m.emptyStateWithOverlay(width, emptyOverlay))
+			items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, m.emptyStateWithOverlay(width, emptyOverlay)))
 		} else {
-			appendBlock(m.emptyState(width))
+			items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, m.emptyState(width)))
 		}
 	} else {
 		rc := buildRowContext(m.transcript)
@@ -81,15 +143,23 @@ func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcr
 			// Blank-line separation before turns, including between flushed
 			// history and the first live row.
 			if (shownAny || m.flushedAny) && startsTurn(row.kind) {
-				appendBlank()
+				items = append(items, transcriptBlankBodyItem())
 			}
 			if (shownAny || (m.flushedAny && havePreviousKind)) && previousKind == rowUser && row.kind == rowReasoning {
-				appendBlank()
+				items = append(items, transcriptBlankBodyItem())
 			}
-			start := len(lines)
-			rendered, rowSelectable := m.renderTranscriptRow(index, row, width, rc, start)
-			appendBlock(rendered)
-			selectable = append(selectable, rowSelectable...)
+			rowIndex, transcriptRow := index, row
+			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKey(transcriptRow, width, rc)
+			items = append(items, transcriptBodyItem{
+				kind:              transcriptBodyItemRow,
+				rowIndex:          rowIndex,
+				heightCacheKey:    heightCacheKey,
+				heightCacheStable: heightCacheStable,
+				render: func(startBodyY int) transcriptBodyRenderedItem {
+					rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, width, rc, startBodyY)
+					return transcriptBodyRenderedItem{lines: viewLines(rendered), selectable: selectable}
+				},
+			})
 			shownAny = true
 			previousKind = row.kind
 			havePreviousKind = true
@@ -97,23 +167,178 @@ func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcr
 	}
 
 	if m.pending {
-		appendBlank()
+		items = append(items, transcriptBlankBodyItem())
 		switch {
 		case m.pendingPermission != nil:
-			appendBlock(renderFocusedPermissionPrompt(m.pendingPermission.request, width))
+			perm := m.pendingPermission
+			items = append(items, transcriptBodyItem{
+				kind:              transcriptBodyItemPendingPrompt,
+				rowIndex:          -1,
+				heightCacheStable: false, // the highlight changes with the cursor
+				render: func(startBodyY int) transcriptBodyRenderedItem {
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					options := permissionOptions()
+					selectable := make([]transcriptSelectableLine, 0, len(offsets))
+					for index, offset := range offsets {
+						if index >= len(options) {
+							break
+						}
+						selectable = append(selectable, transcriptSelectableLine{
+							bodyY:      startBodyY + offset,
+							rowIndex:   -1,
+							permOption: true,
+							permChoice: options[index].choice,
+						})
+					}
+					return transcriptBodyRenderedItem{lines: viewLines(block), selectable: selectable}
+				},
+			})
 		case m.pendingAskUser != nil:
-			appendBlock(renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width))
+			items = append(items, transcriptBlockBodyItem(transcriptBodyItemPendingPrompt, -1, renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width)))
 		default:
-			start := appendBlock(m.interimBlock(width))
-			selectable = append(selectable, m.renderSelectableStreamingReasoning(width, start)...)
+			items = append(items, transcriptBodyItem{
+				kind:     transcriptBodyItemPendingInterim,
+				rowIndex: -1,
+				render: func(startBodyY int) transcriptBodyRenderedItem {
+					return transcriptBodyRenderedItem{
+						lines:      viewLines(m.interimBlock(width)),
+						selectable: m.renderSelectableStreamingReasoning(width, startBodyY),
+					}
+				},
+			})
 		}
 	}
 	if m.pendingSpecReview != nil {
-		appendBlank()
-		appendBlock(renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width))
+		items = append(items, transcriptBlankBodyItem())
+		items = append(items, transcriptBlockBodyItem(transcriptBodyItemSpecReview, -1, renderFocusedSpecReviewPrompt(*m.pendingSpecReview, width)))
 	}
 
-	return strings.Join(lines, "\n"), selectable
+	return items
+}
+
+func transcriptBlockBodyItem(kind transcriptBodyItemKind, rowIndex int, block string) transcriptBodyItem {
+	return transcriptBodyItem{
+		kind:              kind,
+		rowIndex:          rowIndex,
+		heightCacheKey:    transcriptBlockBodyHeightCacheKey(kind, block),
+		heightCacheStable: true,
+		render: func(int) transcriptBodyRenderedItem {
+			return transcriptBodyRenderedItem{lines: viewLines(block)}
+		},
+	}
+}
+
+func transcriptBlankBodyItem() transcriptBodyItem {
+	return transcriptBodyItem{
+		kind:              transcriptBodyItemSeparator,
+		rowIndex:          -1,
+		heightCacheKey:    "transcript-body-height:v1:separator",
+		heightCacheStable: true,
+		render: func(int) transcriptBodyRenderedItem {
+			return transcriptBodyRenderedItem{lines: []string{""}}
+		},
+	}
+}
+
+func layoutTranscriptBodyItems(items []transcriptBodyItem) transcriptBodyLayout {
+	layout := transcriptBodyLayout{}
+	for _, item := range items {
+		startY := len(layout.lines)
+		rendered := renderTranscriptBodyItem(item, startY)
+		layout.lines = append(layout.lines, rendered.lines...)
+		layout.selectable = append(layout.selectable, rendered.selectable...)
+		layout.spans = append(layout.spans, transcriptBodyItemSpan{
+			kind:     item.kind,
+			rowIndex: item.rowIndex,
+			startY:   startY,
+			height:   len(rendered.lines),
+		})
+	}
+	return layout
+}
+
+func measureTranscriptBodyItems(items []transcriptBodyItem, cache *transcriptBodyHeightCache) transcriptBodyLayout {
+	layout := transcriptBodyLayout{}
+	startY := 0
+	for _, item := range items {
+		height := transcriptBodyItemHeight(item, cache)
+		layout.spans = append(layout.spans, transcriptBodyItemSpan{
+			kind:     item.kind,
+			rowIndex: item.rowIndex,
+			startY:   startY,
+			height:   height,
+		})
+		startY += height
+	}
+	return layout
+}
+
+func layoutVisibleTranscriptBodyItems(items []transcriptBodyItem, metrics transcriptBodyLayout, window transcriptViewportWindow) transcriptBodyLayout {
+	layout := transcriptBodyLayout{spans: append([]transcriptBodyItemSpan(nil), metrics.spans...)}
+	if window.end <= window.start {
+		return layout
+	}
+	for index, item := range items {
+		if index >= len(metrics.spans) {
+			break
+		}
+		span := metrics.spans[index]
+		spanEnd := span.startY + span.height
+		if spanEnd <= window.start || span.startY >= window.end {
+			continue
+		}
+		rendered := renderTranscriptBodyItem(item, span.startY)
+		localStart := clampInt(window.start-span.startY, 0, len(rendered.lines))
+		localEnd := clampInt(window.end-span.startY, localStart, len(rendered.lines))
+		layout.lines = append(layout.lines, rendered.lines[localStart:localEnd]...)
+		for _, line := range rendered.selectable {
+			if line.bodyY >= window.start && line.bodyY < window.end {
+				layout.selectable = append(layout.selectable, line)
+			}
+		}
+	}
+	return layout
+}
+
+func transcriptBodyItemHeight(item transcriptBodyItem, cache *transcriptBodyHeightCache) int {
+	if item.heightCacheStable {
+		if height, ok := cache.get(item.heightCacheKey); ok {
+			return height
+		}
+	}
+	rendered := renderTranscriptBodyItem(item, 0)
+	height := len(rendered.lines)
+	if item.heightCacheStable {
+		cache.set(item.heightCacheKey, height)
+	}
+	return height
+}
+
+func renderTranscriptBodyItem(item transcriptBodyItem, startBodyY int) transcriptBodyRenderedItem {
+	if item.render == nil {
+		return transcriptBodyRenderedItem{}
+	}
+	return item.render(startBodyY)
+}
+
+func transcriptBlockBodyHeightCacheKey(kind transcriptBodyItemKind, block string) string {
+	var b strings.Builder
+	appendRenderCacheField(&b, "transcript-body-block-height-v1")
+	appendRenderCacheField(&b, strconv.Itoa(int(kind)))
+	appendRenderCacheField(&b, block)
+	return b.String()
+}
+
+func (m model) transcriptRowBodyHeightCacheKey(row transcriptRow, width int, rc rowContext) (string, bool) {
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	rowKey, stable := m.renderRowCacheKey(row, width, rc, opts, false)
+	if rowKey == "" {
+		return "", false
+	}
+	var b strings.Builder
+	appendRenderCacheField(&b, "transcript-body-row-height-v1")
+	appendRenderCacheField(&b, rowKey)
+	return b.String(), stable
 }
 
 func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
@@ -144,9 +369,7 @@ func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, wi
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
-	lines := make([]string, 0, len(wrapped)+2)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	lines = append(lines, renderUserPromptPaddingLine(width))
 	for index, line := range wrapped {
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index + 1,
@@ -155,6 +378,13 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 			text:      line,
 		}
 		selectable = append(selectable, meta)
+	}
+	if !m.transcriptSelection.active {
+		return m.renderRow(row, width, rowContext{}), selectable
+	}
+	lines := make([]string, 0, len(wrapped)+2)
+	lines = append(lines, renderUserPromptPaddingLine(width))
+	for _, meta := range selectable {
 		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true))), contentWidth))
 	}
 	lines = append(lines, renderUserPromptPaddingLine(width))
@@ -164,12 +394,7 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	tableMeasure := width
 	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
-	lines := make([]string, 0, len(wrapped)+1)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
-	textStyle := zeroTheme.sayText
-	if row.final {
-		textStyle = zeroTheme.ink
-	}
 	for index, line := range wrapped {
 		plainLine := stripMarkdownRenderControls(line)
 		meta := transcriptSelectableLine{
@@ -179,6 +404,17 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 			text:      plainLine,
 		}
 		selectable = append(selectable, meta)
+	}
+	if !m.transcriptSelection.active {
+		return m.renderRow(row, width, rowContext{}), selectable
+	}
+	lines := make([]string, 0, len(wrapped)+1)
+	textStyle := zeroTheme.sayText
+	if row.final {
+		textStyle = zeroTheme.ink
+	}
+	for index, line := range wrapped {
+		meta := selectable[index]
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
 		lines = append(lines, rendered)
 	}
@@ -310,17 +546,21 @@ func splitPlainAtDisplayWidth(text string, width int) (string, string) {
 }
 
 func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine, bool) {
-	if !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+	if !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
 		return transcriptSelectableLine{}, false
 	}
 	width := chatWidth(m.width)
-	body, selectable := m.transcriptBody(width, "")
-	start, available := m.transcriptViewportStart(body, width)
-	if mouseY(msg) < 0 || mouseY(msg) >= available {
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	items := m.transcriptBodyItems(width, "")
+	metrics := measureTranscriptBodyItems(items, m.transcriptBodyHeights)
+	window := transcriptViewportForLayout(metrics, frame, m.chatScrollOffset).window()
+	layout := layoutVisibleTranscriptBodyItems(items, metrics, window)
+	_, localY, ok := frame.bodyRect.local(mouseX(msg), mouseY(msg))
+	if !ok {
 		return transcriptSelectableLine{}, false
 	}
-	bodyY := start + mouseY(msg)
-	for _, line := range selectable {
+	bodyY := window.start + localY
+	for _, line := range layout.selectable {
 		if line.bodyY != bodyY {
 			continue
 		}
@@ -332,17 +572,19 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 	return transcriptSelectableLine{}, false
 }
 
-func (m model) transcriptViewportStart(body string, width int) (int, int) {
-	bodyLines := viewLines(body)
-	footerLines := viewLines(m.footerView(width))
-	available := m.height - len(footerLines)
-	if available < 1 {
-		available = 1
-	}
-	maxOffset := maxInt(0, len(bodyLines)-available)
-	offset := clamp(m.chatScrollOffset, 0, maxOffset)
-	start := maxInt(0, len(bodyLines)-available-offset)
-	return start, available
+func (m model) transcriptViewportStart(body string, width int) (int, int, int) {
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	return transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)
+}
+
+func transcriptViewportStartForLayout(layout transcriptBodyLayout, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
+	window := transcriptViewportForLayout(layout, frame, scrollOffset).window()
+	return window.start, window.height, frame.bodyRect.y
+}
+
+func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, scrollOffset int) (int, int, int) {
+	window := transcriptViewportForBody(body, frame, scrollOffset).window()
+	return window.start, window.height, frame.bodyRect.y
 }
 
 func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) transcriptSelectionPoint {
@@ -363,6 +605,11 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 				return m, nil, true
 			}
 			return m, nil, false
+		}
+		if line.permOption {
+			// A left-click on a permission-popup option resolves it directly.
+			next, cmd := m.resolvePermission(line.permChoice)
+			return next.(model), cmd, true
 		}
 		if line.toggle {
 			if line.live {
@@ -418,9 +665,9 @@ func (m model) toggleTranscriptRow(rowIndex int) model {
 
 func (m model) selectedTranscriptText() string {
 	width := chatWidth(m.width)
-	_, selectable := m.transcriptBody(width, "")
+	layout := m.transcriptBodyLayout(width, "")
 	parts := []string{}
-	for _, line := range selectable {
+	for _, line := range layout.selectable {
 		start, end, ok := m.selectedColumnsForTranscriptLine(line)
 		if !ok {
 			continue

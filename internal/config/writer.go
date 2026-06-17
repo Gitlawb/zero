@@ -72,6 +72,43 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
 }
 
+func SetProviderModel(path string, name string, model string) (FileConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return FileConfig{}, fmt.Errorf("provider name is required")
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return FileConfig{}, fmt.Errorf("model is required")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	cfg := FileConfig{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+
+	for index := range cfg.Providers {
+		if strings.EqualFold(cfg.Providers[index].Name, name) {
+			cfg.Providers[index].Model = model
+			if err := writeConfigFile(path, cfg); err != nil {
+				return FileConfig{}, err
+			}
+			return cfg, nil
+		}
+	}
+
+	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+}
+
 func SetFavoriteModels(path string, models []string) (FileConfig, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
