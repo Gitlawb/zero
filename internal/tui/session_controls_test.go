@@ -101,9 +101,9 @@ func TestCycleReasoningEffortWrapsToAuto(t *testing.T) {
 
 func TestCycleReasoningEffortUnknownResetsToAuto(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
-	// minimal is a valid ReasoningEffort but not in claude-sonnet-4.5's supported
-	// set, so the ring can't place it — cycle falls back to auto rather than guess.
-	m.reasoningEffort = modelregistry.ReasoningEffortMinimal
+	// Use a sentinel that is guaranteed to be unplaceable in any supported ring,
+	// so this test stays correct even if Minimal gets supported later.
+	m.reasoningEffort = modelregistry.ReasoningEffort("__unknown_effort__")
 	next, _ := m.cycleReasoningEffort()
 	if next.reasoningEffort != "" {
 		t.Fatalf("expected unknown effort to reset to auto, got %q", next.reasoningEffort)

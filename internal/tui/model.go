@@ -741,6 +741,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case keyCtrl(msg, 't'):
+			if m.transcriptDetailed {
+				return m, nil
+			}
 			// Ctrl+T cycles reasoning effort opencode-style (auto -> low ->
 			// medium -> high -> auto), but only when nothing modal is up — the
 			// same gate shift+tab uses above. Not gated on m.pending: cycling
