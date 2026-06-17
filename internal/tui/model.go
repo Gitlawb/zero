@@ -512,6 +512,15 @@ func (m *model) stopPRWatcher() {
 	m.prWatcherStop = nil
 }
 
+// noBlockingModal reports that no modal surface (permission prompt, ask_user,
+// spec review, provider/MCP wizard, MCP manager, or picker) is up, so a global
+// shortcut may act instead of falling through to a modal's own handler. Shared
+// by every shortcut that should defer to whichever modal is focused.
+func (m model) noBlockingModal() bool {
+	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
+		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
+}
+
 func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
 	return m, tea.Quit
@@ -736,7 +745,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil {
+			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
 			}
@@ -750,7 +759,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// mid-run is allowed and takes effect on the next turn, matching
 			// /effort. cycleReasoningEffort is a silent no-op on models with no
 			// effort controls.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil {
+			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
 		case keyCtrl(msg, 'f'):
