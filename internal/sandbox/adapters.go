@@ -48,18 +48,21 @@ func (backend Backend) EnforcesScopedEgress() bool {
 }
 
 type BackendPlan struct {
-	Backend           Backend             `json:"backend"`
-	TargetBackend     BackendName         `json:"targetBackend"`
-	WorkspaceRoot     string              `json:"workspaceRoot"`
-	Policy            Policy              `json:"policy"`
-	CommandWrapped    bool                `json:"commandWrapped"`
-	SandboxEnvMarkers []string            `json:"sandboxEnvMarkers,omitempty"`
-	EnforcementLevel  EnforcementLevel    `json:"enforcementLevel"`
-	DowngradeReason   string              `json:"downgradeReason,omitempty"`
-	SupportLevel      BackendSupportLevel `json:"supportLevel"`
-	Capabilities      []BackendCapability `json:"capabilities"`
-	Restrictions      []string            `json:"restrictions"`
-	Warnings          []string            `json:"warnings,omitempty"`
+	Backend                 Backend             `json:"backend"`
+	TargetBackend           BackendName         `json:"targetBackend"`
+	WorkspaceRoot           string              `json:"workspaceRoot"`
+	Policy                  Policy              `json:"policy"`
+	PermissionProfile       PermissionProfile   `json:"permissionProfile"`
+	CommandWrapped          bool                `json:"commandWrapped"`
+	SandboxEnvMarkers       []string            `json:"sandboxEnvMarkers,omitempty"`
+	EnforcementLevel        EnforcementLevel    `json:"enforcementLevel"`
+	DowngradeReason         string              `json:"downgradeReason,omitempty"`
+	SupportLevel            BackendSupportLevel `json:"supportLevel"`
+	RequiresPlatformSandbox bool                `json:"requiresPlatformSandbox"`
+	LegacyAdapter           string              `json:"legacyAdapter,omitempty"`
+	Capabilities            []BackendCapability `json:"capabilities"`
+	Restrictions            []string            `json:"restrictions"`
+	Warnings                []string            `json:"warnings,omitempty"`
 }
 
 type BackendCapability struct {
@@ -191,6 +194,24 @@ func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPla
 	if effectivePolicy.Mode == "" {
 		effectivePolicy = DefaultPolicy()
 	}
+	profile := PermissionProfileFromPolicy(workspaceRoot, effectivePolicy, nil)
+	execRequest, _ := NewSandboxManager(SandboxManagerOptions{
+		GOOS:    backend.Platform,
+		Backend: backend,
+	}).BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot: workspaceRoot,
+		Policy:        effectivePolicy,
+		Profile:       profile,
+		Preference:    SandboxPreferenceAuto,
+	})
+	return execRequest.BackendPlan(effectivePolicy)
+}
+
+func (backend Backend) restrictions(policy Policy) []string {
+	effectivePolicy := policy
+	if effectivePolicy.Mode == "" {
+		effectivePolicy = DefaultPolicy()
+	}
 	restrictions := []string{}
 	if effectivePolicy.EnforceWorkspace {
 		restrictions = append(restrictions, "filesystem writes must stay inside workspace")
@@ -211,21 +232,7 @@ func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPla
 	} else if backend.Available {
 		restrictions = append(restrictions, "shell commands are wrapped through "+string(backend.Name)+" when launched by the sandbox engine")
 	}
-	enforcementLevel := backend.EnforcementLevel(effectivePolicy)
-	return BackendPlan{
-		Backend:           backend,
-		TargetBackend:     backend.TargetBackend(),
-		WorkspaceRoot:     workspaceRoot,
-		Policy:            effectivePolicy,
-		CommandWrapped:    backend.CommandWrapping && backend.Available,
-		SandboxEnvMarkers: backend.SandboxEnvMarkers(effectivePolicy),
-		EnforcementLevel:  enforcementLevel,
-		DowngradeReason:   backend.DowngradeReason(effectivePolicy),
-		SupportLevel:      backend.SupportLevel(),
-		Capabilities:      backend.Capabilities(effectivePolicy),
-		Restrictions:      restrictions,
-		Warnings:          backend.Warnings(),
-	}
+	return restrictions
 }
 
 func (backend Backend) SupportLevel() BackendSupportLevel {

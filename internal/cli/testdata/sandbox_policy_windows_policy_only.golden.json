@@ -36,10 +36,35 @@
       "allowPolicyOnlyRunner": true,
       "maxAutonomy": "high"
     },
+    "permissionProfile": {
+      "fileSystem": {
+        "kind": "restricted",
+        "readRoots": [
+          "$WORKSPACE"
+        ],
+        "writeRoots": [
+          {
+            "root": "$WORKSPACE",
+            "protectedMetadataNames": [
+              ".git",
+              ".zero",
+              ".agents"
+            ]
+          }
+        ],
+        "includePlatformRoots": true,
+        "allowTemp": true
+      },
+      "network": {
+        "mode": "deny"
+      }
+    },
     "commandWrapped": false,
     "enforcementLevel": "degraded",
     "downgradeReason": "policy-only fallback: Windows native sandbox adapter is not implemented",
     "supportLevel": "policy-only",
+    "requiresPlatformSandbox": true,
+    "legacyAdapter": "policy-only",
     "capabilities": [
       {
         "key": "policy_evaluation",

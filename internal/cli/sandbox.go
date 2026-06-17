@@ -196,6 +196,7 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 		"support_level: "+string(plan.SupportLevel),
 		"command_wrapped: "+fmt.Sprintf("%t", plan.CommandWrapped),
 		"enforcement_level: "+string(plan.EnforcementLevel),
+		"requires_platform_sandbox: "+fmt.Sprintf("%t", plan.RequiresPlatformSandbox),
 		"interactive_command_guard: "+enabledLabel(guards.InteractiveCommand),
 		"destructive_shell_guard: "+enabledLabel(guards.DestructiveShell),
 		"network_guard: "+enabledLabel(guards.Network),
@@ -204,6 +205,9 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 	)
 	if plan.DowngradeReason != "" {
 		lines = append(lines, "downgrade_reason: "+plan.DowngradeReason)
+	}
+	if plan.LegacyAdapter != "" {
+		lines = append(lines, "legacy_adapter: "+plan.LegacyAdapter)
 	}
 	if backend.Platform != "" {
 		lines = append(lines, "backend_platform: "+backend.Platform)
@@ -509,9 +513,13 @@ func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backen
 		"support_level: " + string(plan.SupportLevel),
 		"command_wrapped: " + fmt.Sprintf("%t", plan.CommandWrapped),
 		"enforcement_level: " + string(plan.EnforcementLevel),
+		"requires_platform_sandbox: " + fmt.Sprintf("%t", plan.RequiresPlatformSandbox),
 	}
 	if plan.DowngradeReason != "" {
 		lines = append(lines, "downgrade_reason: "+plan.DowngradeReason)
+	}
+	if plan.LegacyAdapter != "" {
+		lines = append(lines, "legacy_adapter: "+plan.LegacyAdapter)
 	}
 	if backend.Platform != "" {
 		lines = append(lines, "backend_platform: "+backend.Platform)

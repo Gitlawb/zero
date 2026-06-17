@@ -32,19 +32,22 @@ type CommandSpec struct {
 }
 
 type CommandPlan struct {
-	Backend           Backend          `json:"backend"`
-	TargetBackend     BackendName      `json:"targetBackend"`
-	WorkspaceRoot     string           `json:"workspaceRoot"`
-	Policy            Policy           `json:"policy"`
-	Wrapped           bool             `json:"wrapped"`
-	SandboxEnvMarkers []string         `json:"sandboxEnvMarkers,omitempty"`
-	EnforcementLevel  EnforcementLevel `json:"enforcementLevel"`
-	DowngradeReason   string           `json:"downgradeReason,omitempty"`
-	Name              string           `json:"name"`
-	Args              []string         `json:"args"`
-	Dir               string           `json:"dir,omitempty"`
-	Env               []string         `json:"env,omitempty"`
-	SandboxDir        string           `json:"sandboxDir,omitempty"`
+	Backend                 Backend           `json:"backend"`
+	TargetBackend           BackendName       `json:"targetBackend"`
+	WorkspaceRoot           string            `json:"workspaceRoot"`
+	Policy                  Policy            `json:"policy"`
+	PermissionProfile       PermissionProfile `json:"permissionProfile"`
+	Wrapped                 bool              `json:"wrapped"`
+	SandboxEnvMarkers       []string          `json:"sandboxEnvMarkers,omitempty"`
+	EnforcementLevel        EnforcementLevel  `json:"enforcementLevel"`
+	DowngradeReason         string            `json:"downgradeReason,omitempty"`
+	RequiresPlatformSandbox bool              `json:"requiresPlatformSandbox"`
+	LegacyAdapter           string            `json:"legacyAdapter,omitempty"`
+	Name                    string            `json:"name"`
+	Args                    []string          `json:"args"`
+	Dir                     string            `json:"dir,omitempty"`
+	Env                     []string          `json:"env,omitempty"`
+	SandboxDir              string            `json:"sandboxDir,omitempty"`
 	// MonitorTag, when non-empty, is the unique marker embedded in the
 	// sandbox-exec profile's denial messages; a caller passes it to
 	// StartDenialMonitor to capture what the sandbox blocked. Empty unless
@@ -200,10 +203,22 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	// fails and a second egress proxy would be redundant. Return a pass-through
 	// plan.
 	if IsAlreadySandboxed() {
-		return directCommandPlan(spec, backend, policy, workspaceRoot), nil
+		execRequest, err := engine.buildSandboxExecutionRequest(spec, workspaceRoot, policy, backend, SandboxPreferenceForbid)
+		if err != nil {
+			return CommandPlan{}, err
+		}
+		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
 	}
 	if policy.Mode == ModeDisabled {
-		return directCommandPlan(spec, backend, policy, workspaceRoot), nil
+		execRequest, err := engine.buildSandboxExecutionRequest(spec, workspaceRoot, policy, backend, SandboxPreferenceForbid)
+		if err != nil {
+			return CommandPlan{}, err
+		}
+		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
+	}
+	execRequest, err := engine.buildSandboxExecutionRequest(spec, workspaceRoot, policy, backend, SandboxPreferenceAuto)
+	if err != nil {
+		return CommandPlan{}, err
 	}
 	switch backend.Name {
 	case BackendBubblewrap:
@@ -212,7 +227,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 			// bridge to the host loopback proxy, so it cannot enforce scoped egress;
 			// a scoped policy collapses to deny (no proxy is started). Evaluate's
 			// network gate denies network-risk tools for this backend to match.
-			return bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend), nil
+			return withSandboxExecutionMetadata(bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend), execRequest), nil
 		}
 	case BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
@@ -220,7 +235,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 			if err != nil {
 				return CommandPlan{}, err
 			}
-			return sandboxExecCommandPlan(spec, workspaceRoot, engine.writeRoots(workspaceRoot), policy, backend, egress), nil
+			return withSandboxExecutionMetadata(sandboxExecCommandPlan(spec, workspaceRoot, engine.writeRoots(workspaceRoot), policy, backend, egress), execRequest), nil
 		}
 	case BackendWSL:
 		// WSL fallback: no native isolation available. Fail closed unless the policy
@@ -233,12 +248,41 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		if err != nil {
 			return CommandPlan{}, err
 		}
-		return wslCommandPlan(spec, workspaceRoot, policy, backend, egress), nil
+		return withSandboxExecutionMetadata(wslCommandPlan(spec, workspaceRoot, policy, backend, egress), execRequest), nil
 	}
 	if !policy.AllowPolicyOnlyRunner {
 		return CommandPlan{}, errPolicyOnlyRunnerDisabled
 	}
-	return directCommandPlan(spec, backend, policy, workspaceRoot), nil
+	return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
+}
+
+func (engine *Engine) buildSandboxExecutionRequest(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend, preference SandboxPreference) (SandboxExecutionRequest, error) {
+	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	manager := NewSandboxManager(SandboxManagerOptions{
+		GOOS:    backend.Platform,
+		Backend: backend,
+	})
+	return manager.BuildExecutionRequest(SandboxManagerRequest{
+		WorkspaceRoot:     workspaceRoot,
+		Command:           spec,
+		Policy:            policy,
+		Scope:             engine.scope,
+		Profile:           profile,
+		Preference:        preference,
+		ValidateExecution: true,
+	})
+}
+
+func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequest) CommandPlan {
+	plan.Backend = request.Backend
+	plan.TargetBackend = request.TargetBackend
+	plan.PermissionProfile = request.PermissionProfile
+	plan.SandboxEnvMarkers = request.SandboxEnvMarkers
+	plan.EnforcementLevel = request.EnforcementLevel
+	plan.DowngradeReason = request.DowngradeReason
+	plan.RequiresPlatformSandbox = request.RequiresPlatformSandbox
+	plan.LegacyAdapter = request.LegacyAdapter
+	return plan
 }
 
 // wslCommandPlan builds the WSL policy-only fallback plan: the command runs
