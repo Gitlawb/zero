@@ -379,10 +379,10 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
-	if plan.SandboxDir != filepath.ToSlash(resolvedExtra) {
+	if filepath.Clean(plan.SandboxDir) != filepath.Clean(resolvedExtra) {
 		t.Fatalf("SandboxDir=%q want real extra-root path %q", plan.SandboxDir, resolvedExtra)
 	}
-	assertArgsContainSequence(t, plan.Args, "--command-cwd", filepath.ToSlash(resolvedExtra))
+	assertArgsContainSequence(t, plan.Args, "--command-cwd", resolvedExtra)
 	config, err := ParseLinuxSandboxHelperArgs(plan.Args)
 	if err != nil {
 		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
@@ -391,7 +391,7 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
 	}
-	assertArgsContainSequence(t, bwrapArgs, "--chdir", filepath.ToSlash(resolvedExtra))
+	assertArgsContainSequence(t, bwrapArgs, "--chdir", resolvedExtra)
 }
 
 func TestProxyEnv(t *testing.T) {
