@@ -329,8 +329,8 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	}
 
 	got := stdout.String()
-	got = strings.ReplaceAll(got, workspace, "$WORKSPACE")
-	got = strings.ReplaceAll(got, store.FilePath(), "$GRANTS")
+	got = replacePathToken(got, workspace, "$WORKSPACE")
+	got = replacePathToken(got, store.FilePath(), "$GRANTS")
 	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox_policy_windows_policy_only.golden.json"))
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
@@ -338,6 +338,13 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	if got != string(wantBytes) {
 		t.Fatalf("policy JSON golden mismatch\nwant:\n%s\ngot:\n%s", string(wantBytes), got)
 	}
+}
+
+func replacePathToken(value string, path string, token string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+		value = strings.ReplaceAll(value, resolved, token)
+	}
+	return strings.ReplaceAll(value, path, token)
 }
 
 func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
