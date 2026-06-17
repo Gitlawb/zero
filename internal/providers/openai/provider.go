@@ -163,6 +163,15 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 			}
 		}, 0)
 	if err != nil {
+		// A caller-driven cancel/deadline (parent ctx done) surfaces here as a
+		// transport error whose string can contain "context deadline exceeded" plus
+		// the request host — which UpstreamUnreachable would mislabel as an upstream
+		// outage. Check the parent context first and surface its error verbatim, so
+		// only genuine connect failures (ctx still live) get humanized.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctxErr.Error())})
+			return
+		}
 		// A direct connection that never completes (e.g. a hosted endpoint blocked
 		// by the local network) surfaces as a transport error; humanize it the same
 		// way as a proxy's gateway error so the user sees a clear connectivity cause.
