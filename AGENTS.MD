@@ -1,6 +1,6 @@
 ---
 description: Extending Zero — how to write AGENTS.md files, custom specialists, skills, hooks, MCP servers, and plugins for the open-source CLI coding agent.
-globs: "*.go, *.js, *.md"
+globs: "*.go, *.js, *.md, *.json, *.toml, *.yaml, *.yml"
 alwaysApply: false
 ---
 
@@ -16,14 +16,19 @@ If you only want to *use* Zero, the [README](README.md) is enough. This page is 
 
 ## 1. Drop a project `AGENTS.md`
 
-When Zero starts in a directory, it looks for project-level instructions in two places and applies both:
+When Zero starts in a directory, it looks for project-level instructions and injects them into the system prompt. The lookup walks from your current working directory **up to the nearest git root** and reads the first matching file at each level — general rules at the repo root, more specific rules in sub-trees. Files are labeled with their directory in the prompt (e.g. `## Project guidelines (services/api/AGENTS.md)`).
 
-| Path | Scope | Notes |
-| --- | --- | --- |
-| `./AGENTS.md` | repo-root | The classic spot — committed to your repo, shared with the team. |
-| `./.zero/AGENTS.md` | project-local | Hidden, gitignored. Personal notes that stay out of git. |
+Accepted file names, in priority order at each level:
 
-Both files use the same format. YAML frontmatter is optional; the markdown body is loaded as instructions for the agent.
+| Path | Notes |
+| --- | --- |
+| `./AGENTS.md` | The classic spot — committed to your repo, shared with the team. |
+| `./ZERO.md` | Brand-specific alias. Same format, lower priority. |
+| `./.zero/AGENTS.md` | Project-local, hidden, gitignored. Personal notes that stay out of git. |
+
+Matching is **case-insensitive** on the basename, so `AGENTS.md`, `Agents.md`, and `agents.md` resolve to the same file on Windows and macOS. The git-tracked filename in this repo is `AGENTS.MD` (uppercase `MD`) — keep that on case-sensitive filesystems (Linux, the WSL filesystem, or a CI runner) to match what the loader looks for.
+
+Both files use the same format. YAML frontmatter is optional; the markdown body is loaded as instructions for the agent. Zero reads the file once at session start, so changes take effect on the next `zero` launch — not mid-session.
 
 ```markdown
 ---
@@ -42,10 +47,11 @@ alwaysApply: false
 
 Tips:
 
-- Keep it under ~80 lines. Long files dilute the agent's attention.
+- Keep each file under ~8 KiB. Zero caps the **total** across all matched files at 32 KiB; everything past the cap is dropped.
 - Use `globs:` to scope which files the rules apply to (mirrors Claude Code's `settings.json` scoping).
 - Re-state rules in the imperative voice: "Run `make lint`", not "you should consider running the linter".
 - Don't put secrets, model IDs, or environment-specific paths in `AGENTS.md`. Use `config.json` for those.
+- In a monorepo, drop a narrower `AGENTS.md` in each sub-tree (e.g. `services/api/AGENTS.md`). Zero picks those up automatically when you launch from inside the sub-tree.
 
 ## 2. Custom specialists (droids)
 
@@ -95,9 +101,13 @@ zero specialist delete api-reviewer --project
 
 The full format spec (frontmatter fields, tool scopes, prompt conventions) is in [`docs/SPECIALISTS.md`](docs/SPECIALISTS.md).
 
+> **Roadmap.** `zero /droids` will open an in-UI manager (create / edit / delete / preview) the same way the `/mcp` manager works. Today you use the `zero specialist` CLI subcommands above.
+
 ## 3. Skills
 
-Skills are markdown instruction packs the agent can pull in on demand. Each skill is a directory containing a `SKILL.md`:
+Skills are markdown instruction packs the agent can pull in on demand. Each skill is a directory containing a `SKILL.md`. Skills are **user-level only** in this version — there's no project-scoped skill directory yet, so anything you want shared with the team goes in `AGENTS.md` (section 1) or as a hook (section 4).
+
+Discovery root: `$ZERO_SKILLS_DIR` → `$XDG_DATA_HOME/zero/skills` → `~/.local/share/zero/skills/`. A missing directory is fine — Zero just reports "no skills".
 
 ```
 ~/.local/share/zero/skills/
@@ -121,7 +131,7 @@ description: Run the project's benchmark suite and summarize the deltas.
 3. Report any regression > 5% with the function name and the previous value.
 ```
 
-Override the directory with `ZERO_SKILLS_DIR=...`. A missing directory is fine — Zero just reports "no skills".
+Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. If two skills declare the same name, the one in the lexicographically-first directory wins — duplicates are dropped silently. Plugin-declared skills (section 6) are not yet merged into the loader, so a `skills:` entry inside a plugin's `plugin.json` is not visible to the `skill` tool today.
 
 The `skill` core tool lets the agent load any discovered skill by name.
 
@@ -167,6 +177,8 @@ Events the agent emits (in dispatch order):
 | `specialistStop` | A sub-agent ends | yes (specialist name) |
 
 A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). Hooks that misbehave are recorded in the audit log; use `zero doctor` to surface them.
+
+> **Roadmap.** `zero /hooks` will open an in-UI manager that generates this file for you (similar to the `/droids` and `/plugins` managers). Today you edit the JSON directly.
 
 ## 5. MCP — Model Context Protocol
 
@@ -252,6 +264,8 @@ zero plugins remove github-pr-review
 ```
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
+
+> **Roadmap.** `zero /plugins` will open an in-UI manager (browse, install, enable / disable). Today you use the `zero plugins` CLI subcommands above. Skills declared inside a plugin's `plugin.json` are not yet merged into the `skill` tool's discovery (see section 3).
 
 ## 7. Configuration locations
 
