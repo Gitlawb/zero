@@ -970,11 +970,26 @@ func TestStatusLineGroups(t *testing.T) {
 }
 
 func TestComposerDividerShowsEffortWhenSet(t *testing.T) {
+	// claude-sonnet-4.5 exposes effort controls; the divider must render the
+	// segment when one is set.
 	m := limeTestModel()
+	m.modelName = "claude-sonnet-4.5"
 	m.reasoningEffort = modelregistry.ReasoningEffortHigh
 	divider := plainRender(t, m.composerDividerLine(110))
 	if !strings.Contains(divider, "high") {
 		t.Fatalf("composer divider = %q, missing effort segment when set", divider)
+	}
+}
+
+func TestComposerDividerOmitsEffortForModelWithoutEffortControls(t *testing.T) {
+	// test-model is not in the registry (no effort controls); the divider
+	// must not render a stale effort segment on it, matching how the segment
+	// is omitted on "auto" (m.reasoningEffort == "").
+	m := limeTestModel()
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	divider := plainRender(t, m.composerDividerLine(110))
+	if strings.Contains(divider, "high") {
+		t.Fatalf("composer divider = %q, should omit effort segment on a model without effort controls", divider)
 	}
 }
 

@@ -169,13 +169,13 @@ func (m model) composerDividerLine(width int) string {
 	model := displayValue(strings.TrimSpace(m.modelName), "no model")
 	label, style := m.modeLabel()
 	meta := zeroTheme.muted.Render(model) + zeroTheme.muted.Render(" · ") + style.Render(label)
-	if m.reasoningEffort != "" {
+	if m.reasoningEffort != "" && len(m.availableReasoningEfforts()) > 0 {
 		// Show the active reasoning effort in the brand lime so a just-cycled
 		// value (Ctrl+T) draws the eye. Omitted on "auto" (m.reasoningEffort ==
-		// ""), matching opencode hiding the variant when unset — so the segment
-		// appearing/disappearing is itself the auto-state feedback. No registry
-		// lookup here: the divider renders every frame and DefaultRegistry()
-		// rebuilds the catalog on every call.
+		// "") and on models with no effort controls (e.g. gpt-4.1) so the
+		// segment appearing/disappearing is the state feedback for both. The
+		// available-effort lookup is over a static hard-coded catalog, not a
+		// per-frame rebuild, so it's safe on the render path.
 		meta += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
 	}
 	metaWidth := lipgloss.Width(meta)
