@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -300,6 +301,89 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunSandboxSetupRunsWindowsHelper(t *testing.T) {
+	workspace := t.TempDir()
+	runnerDir := t.TempDir()
+	runnerPath := filepath.Join(runnerDir, sandbox.WindowsSandboxCommandRunnerName)
+	var gotPath string
+	var gotArgs []string
+	deps := appDeps{
+		getwd: func() (string, error) { return workspace, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{
+				Sandbox: config.SandboxConfig{Network: "allow"},
+			}, nil
+		},
+		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{
+				Name:            sandbox.BackendWindowsRestrictedToken,
+				Available:       true,
+				Platform:        "windows",
+				Executable:      runnerPath,
+				CommandWrapping: true,
+				NativeIsolation: true,
+			}
+		},
+		runSandboxSetupHelper: func(path string, args []string, stdout io.Writer, stderr io.Writer) error {
+			gotPath = path
+			gotArgs = append([]string{}, args...)
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "setup", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("setup exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	wantPath := filepath.Join(runnerDir, sandbox.WindowsSandboxSetupName)
+	if gotPath != wantPath {
+		t.Fatalf("setup helper path = %q, want %q", gotPath, wantPath)
+	}
+	config, err := sandbox.ParseWindowsSandboxSetupArgs(gotArgs)
+	if err != nil {
+		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
+	}
+	if config.CommandCWD != workspace || len(config.WorkspaceRoots) != 1 || config.WorkspaceRoots[0] != workspace {
+		t.Fatalf("setup args config = %#v, want workspace cwd/root", config)
+	}
+	if config.PermissionProfile.Network.Mode != sandbox.NetworkAllow {
+		t.Fatalf("setup network profile = %#v, want allow", config.PermissionProfile.Network)
+	}
+	var payload sandboxSetupResult
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode setup JSON: %v\n%s", err, stdout.String())
+	}
+	if !payload.Ran || payload.Helper != wantPath || payload.Backend != sandbox.BackendWindowsRestrictedToken {
+		t.Fatalf("setup payload = %#v, want ran Windows helper", payload)
+	}
+}
+
+func TestRunSandboxSetupNoopsForNonWindowsBackend(t *testing.T) {
+	deps := appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{Name: sandbox.BackendLinuxBwrap, Platform: "linux", Available: true}
+		},
+		runSandboxSetupHelper: func(string, []string, io.Writer, io.Writer) error {
+			t.Fatal("setup helper should not run for non-Windows backend")
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "setup"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("setup exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No native sandbox setup is required for linux") {
+		t.Fatalf("setup output = %q, want non-Windows no-op message", stdout.String())
 	}
 }
 

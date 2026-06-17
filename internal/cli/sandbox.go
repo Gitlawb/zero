@@ -31,6 +31,8 @@ func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return exitSuccess
 	case "policy":
 		return runSandboxPolicy(args[1:], stdout, stderr, deps)
+	case "setup":
+		return runSandboxSetup(args[1:], stdout, stderr, deps)
 	case "grants":
 		return runSandboxGrants(args[1:], stdout, stderr, deps)
 	default:
@@ -110,6 +112,102 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseSandboxCommandOptions(args, sandboxCommandFlags{})
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeSandboxSetupHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	workspaceRoot, err := resolveWorkspaceRoot("", deps)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitProvider)
+	}
+	policy := applyConfiguredSandboxPolicy(zeroSandbox.DefaultPolicy(), resolved.Sandbox)
+	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
+	if backend.Platform != "windows" {
+		message := "No native sandbox setup is required for " + displayPlatform(backend.Platform)
+		return writeSandboxSetupResult(stdout, options.json, sandboxSetupResult{
+			Platform: displayPlatform(backend.Platform),
+			Backend:  backend.Name,
+			Ran:      false,
+			Message:  message,
+		})
+	}
+	if backend.Name != zeroSandbox.BackendWindowsRestrictedToken || !backend.Available || backend.Executable == "" {
+		message := "Windows sandbox setup helper is not available"
+		if strings.TrimSpace(backend.Message) != "" {
+			message += ": " + backend.Message
+		}
+		return writeAppError(stderr, message, exitProvider)
+	}
+	scope, err := zeroSandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	profile := zeroSandbox.PermissionProfileFromPolicy(workspaceRoot, policy, scope)
+	setupPath := zeroSandbox.WindowsSandboxSetupPathForRunner(backend.Executable)
+	setupArgs, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
+		CommandCWD:        workspaceRoot,
+		WorkspaceRoots:    []string{workspaceRoot},
+		PermissionProfile: profile,
+	})
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
+	if err := deps.runSandboxSetupHelper(setupPath, setupArgs, stdout, stderr); err != nil {
+		return writeAppError(stderr, "Windows sandbox setup failed: "+err.Error(), exitProvider)
+	}
+	return writeSandboxSetupResult(stdout, options.json, sandboxSetupResult{
+		Platform: "windows",
+		Backend:  backend.Name,
+		Helper:   setupPath,
+		Ran:      true,
+		Message:  "Windows sandbox setup complete",
+	})
+}
+
+type sandboxSetupResult struct {
+	Platform string                  `json:"platform"`
+	Backend  zeroSandbox.BackendName `json:"backend"`
+	Helper   string                  `json:"helper,omitempty"`
+	Ran      bool                    `json:"ran"`
+	Message  string                  `json:"message"`
+}
+
+func writeSandboxSetupResult(stdout io.Writer, asJSON bool, result sandboxSetupResult) int {
+	if asJSON {
+		if err := writePrettyJSON(stdout, result); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintln(stdout, result.Message); err != nil {
+		return exitCrash
+	}
+	if result.Helper != "" {
+		if _, err := fmt.Fprintln(stdout, "helper: "+result.Helper); err != nil {
+			return exitCrash
+		}
+	}
+	return exitSuccess
+}
+
+func displayPlatform(platform string) string {
+	if strings.TrimSpace(platform) == "" {
+		return "this platform"
+	}
+	return platform
 }
 
 // sandboxGuards is the resolved set of pre-execution safety guards the engine
@@ -546,6 +644,7 @@ func writeSandboxHelp(w io.Writer) error {
 
 Commands:
   policy      Inspect active sandbox policy and platform backend
+  setup       Run native platform sandbox setup
   grants      Manage persistent sandbox grants
 
 `)
@@ -558,6 +657,19 @@ func writeSandboxPolicyHelp(w io.Writer) error {
 
 Flags:
       --effective         Print the resolved effective policy (merged config + guards)
+      --json              Print JSON output
+  -h, --help              Show this help
+`)
+	return err
+}
+
+func writeSandboxSetupHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero sandbox setup [flags]
+
+Runs native platform sandbox setup when the selected backend requires it.
+
+Flags:
       --json              Print JSON output
   -h, --help              Show this help
 `)

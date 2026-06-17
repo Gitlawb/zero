@@ -42,6 +42,13 @@ func findWindowsSandboxSetupHelper(lookup func(string) (string, error)) string {
 	return findAdjacentOrPathExecutable(WindowsSandboxSetupName, lookup)
 }
 
+func WindowsSandboxSetupPathForRunner(runnerPath string) string {
+	if strings.TrimSpace(runnerPath) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(runnerPath), WindowsSandboxSetupName)
+}
+
 func WindowsSandboxSetupMarkerPath(sandboxHome string) string {
 	return filepath.Join(sandboxHome, "windows-setup.json")
 }

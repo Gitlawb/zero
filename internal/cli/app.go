@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -37,35 +38,36 @@ import (
 var version = "dev"
 
 type appDeps struct {
-	getwd                func() (string, error)
-	stdin                io.Reader
-	userConfigPath       func() (string, error)
-	resolveConfig        func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
-	resolveMCPConfig     func(workspaceRoot string) (config.MCPConfig, error)
-	newProvider          func(config.ProviderProfile) (zeroruntime.Provider, error)
-	probeProviderHealth  func(context.Context, providerhealth.Options) providerhealth.Result
-	newSessionStore      func() *sessions.Store
-	loadPlugins          func(plugins.LoadOptions) (plugins.LoadResult, error)
-	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
-	skillsDir            func() string
-	pluginsDir           func() string
-	toolsDir             func() string
-	newMCPStore          func() (*mcp.PermissionStore, error)
-	newMCPTokenStore     func() (*mcp.TokenStore, error)
-	newSandboxStore      func() (*sandbox.GrantStore, error)
-	selectSandboxBackend func(sandbox.BackendOptions) sandbox.Backend
-	registerMCPTools     func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
-	prepareWorktree      func(context.Context, worktrees.Options) (worktrees.Result, error)
-	detectVerifyPlan     func(string) (verify.Plan, error)
-	runVerify            func(context.Context, verify.Plan, verify.RunOptions) verify.Report
-	runSelfVerify        func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
-	runAgentEval         func(context.Context, agentEvalOptions) (agentEvalReport, error)
-	inspectChanges       func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
-	commitChanges        func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
-	runTUI               func(context.Context, tui.Options) int
-	runEditor            func(string) error
-	checkUpdate          func(context.Context, update.Options) (update.Result, error)
-	now                  func() time.Time
+	getwd                 func() (string, error)
+	stdin                 io.Reader
+	userConfigPath        func() (string, error)
+	resolveConfig         func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
+	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
+	newProvider           func(config.ProviderProfile) (zeroruntime.Provider, error)
+	probeProviderHealth   func(context.Context, providerhealth.Options) providerhealth.Result
+	newSessionStore       func() *sessions.Store
+	loadPlugins           func(plugins.LoadOptions) (plugins.LoadResult, error)
+	loadHooks             func(hooks.LoadOptions) (hooks.LoadResult, error)
+	skillsDir             func() string
+	pluginsDir            func() string
+	toolsDir              func() string
+	newMCPStore           func() (*mcp.PermissionStore, error)
+	newMCPTokenStore      func() (*mcp.TokenStore, error)
+	newSandboxStore       func() (*sandbox.GrantStore, error)
+	selectSandboxBackend  func(sandbox.BackendOptions) sandbox.Backend
+	runSandboxSetupHelper func(path string, args []string, stdout io.Writer, stderr io.Writer) error
+	registerMCPTools      func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error)
+	prepareWorktree       func(context.Context, worktrees.Options) (worktrees.Result, error)
+	detectVerifyPlan      func(string) (verify.Plan, error)
+	runVerify             func(context.Context, verify.Plan, verify.RunOptions) verify.Report
+	runSelfVerify         func(context.Context, verify.Plan, selfverify.Options) selfverify.Report
+	runAgentEval          func(context.Context, agentEvalOptions) (agentEvalReport, error)
+	inspectChanges        func(context.Context, zerogit.InspectOptions) (zerogit.ChangeSummary, error)
+	commitChanges         func(context.Context, zerogit.CommitOptions) (zerogit.CommitResult, error)
+	runTUI                func(context.Context, tui.Options) int
+	runEditor             func(string) error
+	checkUpdate           func(context.Context, update.Options) (update.Result, error)
+	now                   func() time.Time
 }
 
 type mcpToolRuntime interface {
@@ -133,6 +135,12 @@ func defaultAppDeps() appDeps {
 			return sandbox.NewGrantStore(sandbox.StoreOptions{})
 		},
 		selectSandboxBackend: sandbox.SelectBackend,
+		runSandboxSetupHelper: func(path string, args []string, stdout io.Writer, stderr io.Writer) error {
+			cmd := exec.Command(path, args...)
+			cmd.Stdout = stdout
+			cmd.Stderr = stderr
+			return cmd.Run()
+		},
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
 		},
@@ -366,6 +374,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.selectSandboxBackend == nil {
 		deps.selectSandboxBackend = defaults.selectSandboxBackend
+	}
+	if deps.runSandboxSetupHelper == nil {
+		deps.runSandboxSetupHelper = defaults.runSandboxSetupHelper
 	}
 	if deps.registerMCPTools == nil {
 		deps.registerMCPTools = defaults.registerMCPTools

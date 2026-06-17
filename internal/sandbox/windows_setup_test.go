@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -35,6 +36,17 @@ func TestBuildAndParseWindowsSandboxSetupArgs(t *testing.T) {
 	}
 	if config.PermissionProfile.FileSystem.Kind != FileSystemRestricted || len(config.PermissionProfile.FileSystem.DenyRead) != 1 {
 		t.Fatalf("permission profile = %#v, want restricted deny-read profile", config.PermissionProfile)
+	}
+}
+
+func TestWindowsSandboxSetupPathForRunner(t *testing.T) {
+	got := WindowsSandboxSetupPathForRunner(filepath.Join("C:", "zero", WindowsSandboxCommandRunnerName))
+	want := filepath.Join("C:", "zero", WindowsSandboxSetupName)
+	if got != want {
+		t.Fatalf("WindowsSandboxSetupPathForRunner = %q, want %q", got, want)
+	}
+	if got := WindowsSandboxSetupPathForRunner(""); got != "" {
+		t.Fatalf("empty runner setup path = %q, want empty", got)
 	}
 }
 
