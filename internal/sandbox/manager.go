@@ -49,6 +49,11 @@ type SandboxExecutionRequest struct {
 	LegacyAdapter           string              `json:"legacyAdapter,omitempty"`
 }
 
+type SandboxCommandTransformOptions struct {
+	RelativeDir string
+	WriteRoots  []string
+}
+
 func NewSandboxManager(options SandboxManagerOptions) SandboxManager {
 	goos := options.GOOS
 	if goos == "" {
@@ -146,6 +151,18 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		RequiresPlatformSandbox: requiresPlatformSandbox,
 		LegacyAdapter:           legacyAdapterName(backend),
 	}, nil
+}
+
+func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest, options SandboxCommandTransformOptions) (CommandPlan, error) {
+	execRequest, err := manager.BuildExecutionRequest(request)
+	if err != nil {
+		return CommandPlan{}, err
+	}
+	policy := request.Policy
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	return buildLegacyCommandPlan(execRequest, policy, options)
 }
 
 func (manager SandboxManager) targetBackend(preference SandboxPreference, policy Policy, requiresPlatformSandbox bool) BackendName {

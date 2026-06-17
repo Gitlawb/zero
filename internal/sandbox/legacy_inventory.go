@@ -31,8 +31,15 @@ func LegacySandboxEntrypoints() []LegacySandboxEntrypoint {
 			Area:         "command-planning",
 			Path:         "internal/sandbox/runner.go",
 			Symbol:       "Engine.BuildCommandPlan",
+			DeleteTarget: false,
+			Replacement:  "SandboxManager.BuildCommandPlan boundary",
+		},
+		{
+			Area:         "command-planning",
+			Path:         "internal/sandbox/runner.go",
+			Symbol:       "buildLegacyCommandPlan",
 			DeleteTarget: true,
-			Replacement:  "sandbox manager command transformation",
+			Replacement:  "platform backend command transformers",
 		},
 		{
 			Area:         "linux-helper",

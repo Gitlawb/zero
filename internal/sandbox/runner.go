@@ -197,28 +197,46 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if backend.Name == "" {
 		backend = Backend{Name: BackendPolicyOnly, Message: "policy-only fallback: sandbox backend was not selected"}
 	}
+	preference := SandboxPreferenceAuto
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
 	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
 	// IsAlreadySandboxed) must not be wrapped again — nested bwrap / sandbox-exec
 	// fails and a second egress proxy would be redundant. Return a pass-through
 	// plan.
 	if IsAlreadySandboxed() {
-		execRequest, err := engine.buildSandboxExecutionRequest(spec, workspaceRoot, policy, backend, SandboxPreferenceForbid)
-		if err != nil {
-			return CommandPlan{}, err
-		}
-		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
+		preference = SandboxPreferenceForbid
 	}
 	if policy.Mode == ModeDisabled {
-		execRequest, err := engine.buildSandboxExecutionRequest(spec, workspaceRoot, policy, backend, SandboxPreferenceForbid)
-		if err != nil {
-			return CommandPlan{}, err
-		}
-		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
+		preference = SandboxPreferenceForbid
 	}
-	execRequest, err := engine.buildSandboxExecutionRequest(spec, workspaceRoot, policy, backend, SandboxPreferenceAuto)
-	if err != nil {
-		return CommandPlan{}, err
+	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
+	manager := NewSandboxManager(SandboxManagerOptions{
+		GOOS:    backend.Platform,
+		Backend: backend,
+	})
+	return manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     workspaceRoot,
+		Command:           spec,
+		Policy:            policy,
+		Scope:             engine.scope,
+		Profile:           profile,
+		Preference:        preference,
+		ValidateExecution: true,
+	}, SandboxCommandTransformOptions{
+		RelativeDir: relativeDir,
+		WriteRoots:  engine.writeRoots(workspaceRoot),
+	})
+}
+
+func buildLegacyCommandPlan(execRequest SandboxExecutionRequest, policy Policy, options SandboxCommandTransformOptions) (CommandPlan, error) {
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	spec := execRequest.Command
+	backend := execRequest.Backend
+	workspaceRoot := execRequest.WorkspaceRoot
+	if execRequest.EnforcementLevel == EnforcementDisabled || execRequest.TargetBackend == BackendNone || !execRequest.RequiresPlatformSandbox {
+		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
 	}
 	switch backend.Name {
 	case BackendBubblewrap:
@@ -227,7 +245,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 			// bridge to the host loopback proxy, so it cannot enforce scoped egress;
 			// a scoped policy collapses to deny (no proxy is started). Evaluate's
 			// network gate denies network-risk tools for this backend to match.
-			return withSandboxExecutionMetadata(bubblewrapCommandPlan(spec, workspaceRoot, relativeDir, engine.writeRoots(workspaceRoot), policy, backend), execRequest), nil
+			return withSandboxExecutionMetadata(bubblewrapCommandPlan(spec, workspaceRoot, options.RelativeDir, options.WriteRoots, policy, backend), execRequest), nil
 		}
 	case BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
@@ -235,7 +253,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 			if err != nil {
 				return CommandPlan{}, err
 			}
-			return withSandboxExecutionMetadata(sandboxExecCommandPlan(spec, workspaceRoot, engine.writeRoots(workspaceRoot), policy, backend, egress), execRequest), nil
+			return withSandboxExecutionMetadata(sandboxExecCommandPlan(spec, workspaceRoot, options.WriteRoots, policy, backend, egress), execRequest), nil
 		}
 	case BackendWSL:
 		// WSL fallback: no native isolation available. Fail closed unless the policy
@@ -254,23 +272,6 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		return CommandPlan{}, errPolicyOnlyRunnerDisabled
 	}
 	return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
-}
-
-func (engine *Engine) buildSandboxExecutionRequest(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend, preference SandboxPreference) (SandboxExecutionRequest, error) {
-	profile := PermissionProfileFromPolicy(workspaceRoot, policy, engine.scope)
-	manager := NewSandboxManager(SandboxManagerOptions{
-		GOOS:    backend.Platform,
-		Backend: backend,
-	})
-	return manager.BuildExecutionRequest(SandboxManagerRequest{
-		WorkspaceRoot:     workspaceRoot,
-		Command:           spec,
-		Policy:            policy,
-		Scope:             engine.scope,
-		Profile:           profile,
-		Preference:        preference,
-		ValidateExecution: true,
-	})
 }
 
 func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequest) CommandPlan {

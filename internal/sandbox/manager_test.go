@@ -88,6 +88,57 @@ func TestSandboxManagerBuildsExecutionRequestFromProfile(t *testing.T) {
 	}
 }
 
+func TestSandboxManagerBuildsCommandPlanThroughTemporaryAdapter(t *testing.T) {
+	backend := Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap", Platform: "linux"}
+	policy := DefaultPolicy()
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend})
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: "/workspace/nested"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	}, SandboxCommandTransformOptions{
+		RelativeDir: "nested",
+		WriteRoots:  []string{"/workspace"},
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if !plan.Wrapped || plan.Name != "/usr/bin/bwrap" || plan.TargetBackend != BackendLinuxBwrap {
+		t.Fatalf("command plan = %#v, want native linux-bwrap wrapper", plan)
+	}
+	if plan.LegacyAdapter != string(BackendBubblewrap) || plan.EnforcementLevel != EnforcementNative {
+		t.Fatalf("command metadata = %#v, want temporary adapter with native enforcement", plan)
+	}
+	assertArgsContainSequence(t, plan.Args, "--chdir", bubblewrapWorkspace+"/nested")
+	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
+}
+
+func TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan(t *testing.T) {
+	policy := DefaultPolicy()
+	backend := Backend{Name: BackendPolicyOnly, Platform: "windows", Fallback: true, Message: "policy-only fallback"}
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     `C:\workspace`,
+		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/c", "dir"}, Dir: `C:\workspace`},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(`C:\workspace`, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	}, SandboxCommandTransformOptions{})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if plan.Wrapped || plan.Name != "cmd.exe" || plan.TargetBackend != BackendWindowsRestrictedToken {
+		t.Fatalf("policy-only plan = %#v, want direct command targeting windows backend", plan)
+	}
+	if plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason == "" || plan.LegacyAdapter != string(BackendPolicyOnly) {
+		t.Fatalf("policy-only metadata = %#v, want degraded temporary adapter", plan)
+	}
+}
+
 func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 	tests := []struct {
 		name       string
