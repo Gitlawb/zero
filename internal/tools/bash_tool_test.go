@@ -360,7 +360,7 @@ func TestBashToolBuildsWrappedSandboxExecCommand(t *testing.T) {
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
 		Backend: sandbox.Backend{
-			Name:       sandbox.BackendSandboxExec,
+			Name:       sandbox.BackendMacOSSeatbelt,
 			Available:  true,
 			Executable: "/usr/bin/sandbox-exec",
 		},

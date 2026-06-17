@@ -64,7 +64,6 @@
     "downgradeReason": "policy-only fallback: Windows sandbox command runner is not available",
     "supportLevel": "policy-only",
     "requiresPlatformSandbox": true,
-    "legacyAdapter": "policy-only",
     "capabilities": [
       {
         "key": "policy_evaluation",

@@ -230,9 +230,6 @@ func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
 		meta["sandbox_downgrade_reason"] = plan.DowngradeReason
 	}
 	meta["sandbox_requires_platform"] = strconv.FormatBool(plan.RequiresPlatformSandbox)
-	if plan.LegacyAdapter != "" {
-		meta["sandbox_legacy_adapter"] = plan.LegacyAdapter
-	}
 	if plan.Backend.Message != "" {
 		meta["sandbox_message"] = plan.Backend.Message
 	}

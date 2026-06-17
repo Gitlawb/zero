@@ -304,9 +304,6 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 	if plan.DowngradeReason != "" {
 		lines = append(lines, "downgrade_reason: "+plan.DowngradeReason)
 	}
-	if plan.LegacyAdapter != "" {
-		lines = append(lines, "legacy_adapter: "+plan.LegacyAdapter)
-	}
 	if backend.Platform != "" {
 		lines = append(lines, "backend_platform: "+backend.Platform)
 	}
@@ -615,9 +612,6 @@ func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backen
 	}
 	if plan.DowngradeReason != "" {
 		lines = append(lines, "downgrade_reason: "+plan.DowngradeReason)
-	}
-	if plan.LegacyAdapter != "" {
-		lines = append(lines, "legacy_adapter: "+plan.LegacyAdapter)
 	}
 	if backend.Platform != "" {
 		lines = append(lines, "backend_platform: "+backend.Platform)

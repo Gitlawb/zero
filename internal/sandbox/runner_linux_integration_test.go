@@ -17,7 +17,7 @@ func TestLinuxHelperRealSandboxSmoke(t *testing.T) {
 		t.Skip("set ZERO_SANDBOX_REAL_SMOKE=1 to run real sandbox smoke tests")
 	}
 	backend := SelectBackend(BackendOptions{})
-	if !backend.Available || (backend.Name != BackendBubblewrap && backend.Name != BackendLinuxBwrap) {
+	if !backend.Available || backend.Name != BackendLinuxBwrap {
 		t.Skipf("Linux sandbox backend unavailable: %s", backend.Message)
 	}
 	root := t.TempDir()

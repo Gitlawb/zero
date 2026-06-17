@@ -13,9 +13,9 @@ import (
 // — that is fine: these tests assert the *permission gate*, not execution.
 func nativeBackendStub() sandbox.Backend {
 	return sandbox.Backend{
-		Name:            sandbox.BackendBubblewrap,
+		Name:            sandbox.BackendLinuxBwrap,
 		Available:       true,
-		Executable:      "/nonexistent/bwrap-stub",
+		Executable:      "/nonexistent/zero-linux-sandbox-stub",
 		CommandWrapping: true,
 		NativeIsolation: true,
 	}

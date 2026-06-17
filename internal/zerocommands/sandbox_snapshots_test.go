@@ -102,7 +102,7 @@ func TestSandboxViolationSnapshotFromViolationHandlesNilAndTrims(t *testing.T) {
 
 func TestSandboxBackendSnapshotFromBackendCopiesAllFields(t *testing.T) {
 	backend := sandbox.Backend{
-		Name:            sandbox.BackendBubblewrap,
+		Name:            sandbox.BackendLinuxBwrap,
 		Available:       true,
 		Platform:        "linux",
 		Fallback:        false,
@@ -112,8 +112,8 @@ func TestSandboxBackendSnapshotFromBackendCopiesAllFields(t *testing.T) {
 		Message:         "  bubblewrap is available  ",
 	}
 	snapshot := SandboxBackendSnapshotFromBackend(backend)
-	if snapshot.Name != string(sandbox.BackendBubblewrap) {
-		t.Fatalf("Name = %q, want %q", snapshot.Name, sandbox.BackendBubblewrap)
+	if snapshot.Name != string(sandbox.BackendLinuxBwrap) {
+		t.Fatalf("Name = %q, want %q", snapshot.Name, sandbox.BackendLinuxBwrap)
 	}
 	if !snapshot.Available || !snapshot.CommandWrapping || !snapshot.NativeIsolation {
 		t.Fatalf("boolean fields not preserved: %#v", snapshot)
@@ -128,7 +128,7 @@ func TestSandboxBackendSnapshotFromBackendCopiesAllFields(t *testing.T) {
 
 func TestSandboxPlanSnapshotFromPlanSortsRestrictionsAndTrimsRoot(t *testing.T) {
 	plan := sandbox.BackendPlan{
-		Backend: sandbox.Backend{Name: sandbox.BackendSandboxExec, Platform: "darwin"},
+		Backend: sandbox.Backend{Name: sandbox.BackendMacOSSeatbelt, Platform: "darwin"},
 		Policy:  sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
 		Restrictions: []string{
 			"  native process isolation unavailable on darwin  ",
@@ -140,8 +140,8 @@ func TestSandboxPlanSnapshotFromPlanSortsRestrictionsAndTrimsRoot(t *testing.T) 
 	if snapshot.Policy.EffectiveMode != string(sandbox.ModeEnforce) {
 		t.Fatalf("Policy.EffectiveMode = %q, want %q", snapshot.Policy.EffectiveMode, sandbox.ModeEnforce)
 	}
-	if snapshot.Backend.Name != string(sandbox.BackendSandboxExec) {
-		t.Fatalf("Backend.Name = %q, want %q", snapshot.Backend.Name, sandbox.BackendSandboxExec)
+	if snapshot.Backend.Name != string(sandbox.BackendMacOSSeatbelt) {
+		t.Fatalf("Backend.Name = %q, want %q", snapshot.Backend.Name, sandbox.BackendMacOSSeatbelt)
 	}
 	if snapshot.WorkspaceRoot != "/repo" {
 		t.Fatalf("WorkspaceRoot not trimmed: %q", snapshot.WorkspaceRoot)

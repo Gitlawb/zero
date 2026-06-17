@@ -765,8 +765,8 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 func TestEngineNetworkHostAllowed(t *testing.T) {
 	// scoped enforcement requires a backend that can actually route scoped egress
 	// (only sandbox-exec); otherwise scoped fails closed (collapses to deny).
-	egressBackend := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
-	noEgressBackend := Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"}
+	egressBackend := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
+	noEgressBackend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"}
 	cases := []struct {
 		name    string
 		policy  Policy
@@ -810,7 +810,7 @@ func TestEngineNetworkHostAllowed(t *testing.T) {
 // the network policy, so even a deny / scoped-unlisted host is allowed (the
 // sandboxed-shell egress decision is separate and unaffected).
 func TestEngineNetworkHostAllowedToolNetworkDefaultExempt(t *testing.T) {
-	egressBackend := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
+	egressBackend := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
 	policies := []Policy{
 		{Mode: ModeEnforce, Network: NetworkDeny},
 		{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"allowed.test"}},

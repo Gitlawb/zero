@@ -29,9 +29,9 @@ func bashRequest() Request {
 }
 
 var nativeWrappingBackend = Backend{
-	Name:            BackendBubblewrap,
+	Name:            BackendLinuxBwrap,
 	Available:       true,
-	Executable:      "/usr/bin/bwrap",
+	Executable:      "/usr/bin/zero-linux-sandbox",
 	CommandWrapping: true,
 	NativeIsolation: true,
 }

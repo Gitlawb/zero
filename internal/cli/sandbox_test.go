@@ -821,22 +821,19 @@ func TestApplyConfiguredAutonomyCeiling(t *testing.T) {
 	}
 }
 
-func TestApplyConfiguredSandboxPolicyHardeningFlags(t *testing.T) {
+func TestApplyConfiguredSandboxPolicyDiagnosticsFlags(t *testing.T) {
 	base := sandbox.DefaultPolicy()
-	if base.BlockUnixSockets || base.MonitorDenials {
-		t.Fatalf("precondition: hardening flags must default off, got block=%v monitor=%v", base.BlockUnixSockets, base.MonitorDenials)
+	if base.MonitorDenials {
+		t.Fatalf("precondition: monitor denials must default off")
 	}
 
 	// Omitted keys leave the (off) defaults untouched.
-	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.BlockUnixSockets || got.MonitorDenials {
-		t.Fatalf("empty config must not enable hardening flags, got block=%v monitor=%v", got.BlockUnixSockets, got.MonitorDenials)
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.MonitorDenials {
+		t.Fatalf("empty config must not enable monitor denials")
 	}
 
-	// Each flag opts in independently.
-	got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{BlockUnixSockets: true, MonitorDenials: true})
-	if !got.BlockUnixSockets {
-		t.Fatal("BlockUnixSockets config not applied to policy")
-	}
+	// The flag opts in.
+	got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{MonitorDenials: true})
 	if !got.MonitorDenials {
 		t.Fatal("MonitorDenials config not applied to policy")
 	}

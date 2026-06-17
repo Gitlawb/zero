@@ -83,9 +83,6 @@ func TestSandboxManagerBuildsExecutionRequestFromProfile(t *testing.T) {
 	if request.PermissionProfile.FileSystem.Kind != FileSystemRestricted || !request.RequiresPlatformSandbox {
 		t.Fatalf("execution request profile = %#v, requires=%t", request.PermissionProfile, request.RequiresPlatformSandbox)
 	}
-	if request.LegacyAdapter != "" {
-		t.Fatalf("legacy adapter = %q, want empty for helper backend", request.LegacyAdapter)
-	}
 }
 
 func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
@@ -99,9 +96,6 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
-	}, SandboxCommandTransformOptions{
-		RelativeDir: "nested",
-		WriteRoots:  []string{"/workspace"},
 	})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
@@ -109,7 +103,7 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 	if !plan.Wrapped || plan.Name != "/usr/bin/zero-linux-sandbox" || plan.TargetBackend != BackendLinuxBwrap {
 		t.Fatalf("command plan = %#v, want native linux helper wrapper", plan)
 	}
-	if plan.LegacyAdapter != "" || plan.EnforcementLevel != EnforcementNative {
+	if plan.EnforcementLevel != EnforcementNative {
 		t.Fatalf("command metadata = %#v, want helper backend with native enforcement", plan)
 	}
 	assertArgsContainSequence(t, plan.Args, "--sandbox-policy-cwd", "/workspace")
@@ -128,14 +122,14 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 		Profile:           PermissionProfileFromPolicy(`C:\workspace`, policy, nil),
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
-	}, SandboxCommandTransformOptions{})
+	})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
 	if !plan.Wrapped || plan.Name != `C:\zero\zero-windows-command-runner.exe` || plan.TargetBackend != BackendWindowsRestrictedToken {
 		t.Fatalf("command plan = %#v, want native windows command runner wrapper", plan)
 	}
-	if plan.EnforcementLevel != EnforcementNative || plan.LegacyAdapter != "" {
+	if plan.EnforcementLevel != EnforcementNative {
 		t.Fatalf("command metadata = %#v, want native restricted-token backend", plan)
 	}
 	assertArgsContainSequence(t, plan.Args, "--command-cwd", `C:\workspace\src`)
@@ -170,15 +164,15 @@ func TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan(t *testing.T) {
 		Profile:           PermissionProfileFromPolicy(`C:\workspace`, policy, nil),
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
-	}, SandboxCommandTransformOptions{})
+	})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
 	if plan.Wrapped || plan.Name != "cmd.exe" || plan.TargetBackend != BackendWindowsRestrictedToken {
 		t.Fatalf("policy-only plan = %#v, want direct command targeting windows backend", plan)
 	}
-	if plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason == "" || plan.LegacyAdapter != string(BackendPolicyOnly) {
-		t.Fatalf("policy-only metadata = %#v, want degraded temporary adapter", plan)
+	if plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason == "" {
+		t.Fatalf("policy-only metadata = %#v, want degraded fallback", plan)
 	}
 }
 
@@ -193,7 +187,7 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 		wantTarget BackendName
 	}{
 		{name: "linux", goos: "linux", lookupName: LinuxSandboxHelperName, lookupPath: "/usr/bin/zero-linux-sandbox", want: BackendLinuxBwrap, wantTarget: BackendLinuxBwrap},
-		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendSandboxExec, wantTarget: BackendMacOSSeatbelt},
+		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendMacOSSeatbelt, wantTarget: BackendMacOSSeatbelt},
 		{name: "windows", goos: "windows", lookupName: WindowsSandboxCommandRunnerName, lookupPath: `C:\zero\zero-windows-command-runner.exe`, setupPath: `C:\zero\zero-windows-sandbox-setup.exe`, want: BackendWindowsRestrictedToken, wantTarget: BackendWindowsRestrictedToken},
 		{name: "unsupported", goos: "plan9", want: BackendPolicyOnly, wantTarget: BackendPolicyOnly},
 	}
@@ -205,6 +199,9 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 				LookupExecutable: func(name string) (string, error) {
 					if name == test.lookupName && test.lookupPath != "" {
 						return test.lookupPath, nil
+					}
+					if test.goos == "linux" && name == "bwrap" {
+						return "/usr/bin/bwrap", nil
 					}
 					if name == WindowsSandboxSetupName && test.setupPath != "" {
 						return test.setupPath, nil
@@ -230,6 +227,9 @@ func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 			if name == LinuxSandboxHelperName {
 				return "/usr/bin/zero-linux-sandbox", nil
 			}
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
 			return "", errors.New("missing")
 		},
 	})
@@ -238,6 +238,9 @@ func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 		LookupExecutable: func(name string) (string, error) {
 			if name == LinuxSandboxHelperName {
 				return "/usr/bin/zero-linux-sandbox", nil
+			}
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
 			}
 			return "", errors.New("missing")
 		},

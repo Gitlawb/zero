@@ -46,12 +46,6 @@ type SandboxExecutionRequest struct {
 	DowngradeReason         string              `json:"downgradeReason,omitempty"`
 	SupportLevel            BackendSupportLevel `json:"supportLevel"`
 	RequiresPlatformSandbox bool                `json:"requiresPlatformSandbox"`
-	LegacyAdapter           string              `json:"legacyAdapter,omitempty"`
-}
-
-type SandboxCommandTransformOptions struct {
-	RelativeDir string
-	WriteRoots  []string
 }
 
 func NewSandboxManager(options SandboxManagerOptions) SandboxManager {
@@ -81,18 +75,18 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 	switch goos {
 	case "linux":
 		if helper, err := lookup(LinuxSandboxHelperName); err == nil && helper != "" {
+			if _, bwrapErr := lookup("bwrap"); bwrapErr != nil {
+				return policyOnlyBackend(goos, "policy-only fallback: bubblewrap is not installed")
+			}
 			return nativeBackend(goos, BackendLinuxBwrap, helper, "Linux sandbox helper available")
-		}
-		if path, err := lookup("bwrap"); err == nil && path != "" {
-			return nativeBackend(goos, BackendBubblewrap, path, "bubblewrap sandbox available")
 		}
 		if info := detectWSL(); info.IsWSL {
 			return wslBackend(goos, info)
 		}
-		return policyOnlyBackend(goos, "policy-only fallback: bubblewrap is not installed")
+		return policyOnlyBackend(goos, "policy-only fallback: Linux sandbox helper is not available")
 	case "darwin":
 		if path, err := lookup("sandbox-exec"); err == nil && path != "" {
-			return nativeBackend(goos, BackendSandboxExec, path, "sandbox-exec backend available")
+			return nativeBackend(goos, BackendMacOSSeatbelt, path, "macOS Seatbelt backend available")
 		}
 		return policyOnlyBackend(goos, "policy-only fallback: sandbox-exec is not available")
 	case "windows":
@@ -160,11 +154,10 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		DowngradeReason:         downgradeReason,
 		SupportLevel:            backend.SupportLevel(),
 		RequiresPlatformSandbox: requiresPlatformSandbox,
-		LegacyAdapter:           legacyAdapterName(backend),
 	}, nil
 }
 
-func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest, options SandboxCommandTransformOptions) (CommandPlan, error) {
+func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest) (CommandPlan, error) {
 	execRequest, err := manager.BuildExecutionRequest(request)
 	if err != nil {
 		return CommandPlan{}, err
@@ -173,7 +166,7 @@ func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest, op
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
-	return buildLegacyCommandPlan(execRequest, policy, options)
+	return buildPlatformCommandPlan(execRequest, policy)
 }
 
 func (manager SandboxManager) targetBackend(preference SandboxPreference, policy Policy, requiresPlatformSandbox bool) BackendName {
@@ -199,7 +192,6 @@ func (request SandboxExecutionRequest) BackendPlan(policy Policy) BackendPlan {
 		DowngradeReason:         request.DowngradeReason,
 		SupportLevel:            request.SupportLevel,
 		RequiresPlatformSandbox: request.RequiresPlatformSandbox,
-		LegacyAdapter:           request.LegacyAdapter,
 		Capabilities:            request.Backend.Capabilities(policy),
 		Restrictions:            request.Backend.restrictions(policy),
 		Warnings:                request.Backend.Warnings(),
@@ -210,24 +202,15 @@ func permissionProfileUnset(profile PermissionProfile) bool {
 	return profile.FileSystem.Kind == "" && profile.Network.Mode == ""
 }
 
-func legacyAdapterName(backend Backend) string {
-	switch backend.Name {
-	case BackendBubblewrap, BackendSandboxExec, BackendWSL, BackendPolicyOnly:
-		return string(backend.Name)
-	default:
-		return ""
-	}
-}
-
 func inferBackendCapabilities(backend Backend) Backend {
 	if backend.Available && backend.Executable != "" {
 		switch backend.Name {
-		case BackendBubblewrap, BackendLinuxBwrap, BackendSandboxExec, BackendMacOSSeatbelt, BackendWindowsRestrictedToken:
+		case BackendLinuxBwrap, BackendMacOSSeatbelt, BackendWindowsRestrictedToken:
 			backend.CommandWrapping = true
 			backend.NativeIsolation = true
 		}
 	}
-	if (backend.Name == BackendSandboxExec || backend.Name == BackendMacOSSeatbelt) && backend.Available && backend.Executable != "" {
+	if backend.Name == BackendMacOSSeatbelt && backend.Available && backend.Executable != "" {
 		backend.ScopedEgress = true
 	}
 	return backend

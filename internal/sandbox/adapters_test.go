@@ -15,6 +15,9 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				if name == LinuxSandboxHelperName {
 					return "/usr/bin/zero-linux-sandbox", nil
 				}
+				if name == "bwrap" {
+					return "/usr/bin/bwrap", nil
+				}
 				return "", errors.New("missing")
 			},
 		})
@@ -33,7 +36,7 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("linux bubblewrap compatibility fallback", func(t *testing.T) {
+	t.Run("linux helper missing falls back explicitly", func(t *testing.T) {
 		backend := SelectBackend(BackendOptions{
 			GOOS: "linux",
 			LookupExecutable: func(name string) (string, error) {
@@ -43,8 +46,11 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				return "", errors.New("missing")
 			},
 		})
-		if backend.Name != BackendBubblewrap || !backend.Available || backend.Executable != "/usr/bin/bwrap" {
-			t.Fatalf("linux backend = %#v, want temporary bubblewrap adapter", backend)
+		if backend.Name != BackendPolicyOnly || backend.Available {
+			t.Fatalf("linux backend = %#v, want policy-only fallback without Linux helper", backend)
+		}
+		if !strings.Contains(backend.Message, "Linux sandbox helper is not available") {
+			t.Fatalf("linux fallback message = %q, want missing helper", backend.Message)
 		}
 	})
 
@@ -58,8 +64,8 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				return "", errors.New("missing")
 			},
 		})
-		if backend.Name != BackendSandboxExec || !backend.Available || backend.Executable != "/usr/bin/sandbox-exec" {
-			t.Fatalf("darwin backend = %#v, want available sandbox-exec", backend)
+		if backend.Name != BackendMacOSSeatbelt || !backend.Available || backend.Executable != "/usr/bin/sandbox-exec" {
+			t.Fatalf("darwin backend = %#v, want available macOS Seatbelt backend", backend)
 		}
 		if backend.Platform != "darwin" || backend.Fallback || !backend.CommandWrapping || !backend.NativeIsolation {
 			t.Fatalf("darwin backend capabilities = %#v, want native wrapping", backend)

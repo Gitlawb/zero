@@ -57,7 +57,6 @@ type BackendPlan struct {
 	DowngradeReason         string              `json:"downgradeReason,omitempty"`
 	SupportLevel            BackendSupportLevel `json:"supportLevel"`
 	RequiresPlatformSandbox bool                `json:"requiresPlatformSandbox"`
-	LegacyAdapter           string              `json:"legacyAdapter,omitempty"`
 	Capabilities            []BackendCapability `json:"capabilities"`
 	Restrictions            []string            `json:"restrictions"`
 	Warnings                []string            `json:"warnings,omitempty"`
@@ -100,10 +99,6 @@ func (backend Backend) TargetBackend() BackendName {
 		return BackendWindowsRestrictedToken
 	}
 	switch backend.Name {
-	case BackendBubblewrap:
-		return BackendLinuxBwrap
-	case BackendSandboxExec:
-		return BackendMacOSSeatbelt
 	case BackendWSL:
 		return BackendPolicyOnly
 	case BackendNone, BackendMacOSSeatbelt, BackendLinuxBwrap, BackendLinuxLandlock, BackendWindowsRestrictedToken, BackendWindowsElevated, BackendPolicyOnly:
@@ -121,12 +116,9 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 		Fallback:        false,
 		CommandWrapping: true,
 		NativeIsolation: true,
-		// macOS Seatbelt can enforce scoped egress by allowing only the local
-		// filtering proxy ports. Bubblewrap's isolated network namespace has no
-		// bridge to the host filtering proxy.
-		ScopedEgress: name == BackendSandboxExec || name == BackendMacOSSeatbelt,
-		Executable:   executable,
-		Message:      message,
+		ScopedEgress:    name == BackendMacOSSeatbelt,
+		Executable:      executable,
+		Message:         message,
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 // TestScopedNetworkGateInEvaluate verifies the preflight network gate: a populated
 // scoped policy permits a network-risk tool ONLY when the active backend can
 // actually route through the filtering proxy. A backend that cannot enforce scoped
-// egress (Linux bwrap netns has no bridge; policy-only has no isolation)
+// egress (Linux helper netns has no bridge; policy-only has no isolation)
 // fails closed and denies, exactly like an empty-allowlist scoped policy.
 func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	root := t.TempDir()
@@ -21,7 +21,7 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"url": "https://github.com"},
 	}
-	sandboxExec := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true}
+	seatbelt := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true}
 
 	// This test exercises the network GATE for a network tool, so it opts the
 	// in-process tools into the network policy (EnforceToolNetwork); by default
@@ -33,7 +33,7 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	}
 
 	// An enforcing backend lets a populated scoped policy permit a network tool.
-	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped([]string{"github.com"}, nil), Backend: sandboxExec})
+	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped([]string{"github.com"}, nil), Backend: seatbelt})
 	if decision := enforcing.Evaluate(context.Background(), networkRequest); decision.Action == ActionDeny {
 		t.Fatalf("enforcing backend + scoped policy denied a network tool: %#v", decision)
 	}
@@ -52,7 +52,7 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	}
 
 	// Empty allowlist still fails closed regardless of backend.
-	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped(nil, nil), Backend: sandboxExec})
+	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped(nil, nil), Backend: seatbelt})
 	decision := empty.Evaluate(context.Background(), networkRequest)
 	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
 		t.Fatalf("empty scoped policy must deny network like NetworkDeny, got %#v", decision)
@@ -135,15 +135,15 @@ func TestLinuxHelperScopedPlanFailsClosedWithoutProxy(t *testing.T) {
 	}
 }
 
-// TestSandboxExecScopedPlanWiresProxy verifies a scoped sandbox-exec profile
+// TestSeatbeltScopedPlanWiresProxy verifies a scoped Seatbelt profile
 // denies general network but permits localhost (the proxy port) and sets the
 // proxy env.
-func TestSandboxExecScopedPlanWiresProxy(t *testing.T) {
+func TestSeatbeltScopedPlanWiresProxy(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy([]string{"github.com"}, nil),
-		Backend:       Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true},
+		Backend:       Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {
@@ -213,8 +213,8 @@ func TestScopedProxyStartFailureDeniesNetwork(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy([]string{"github.com"}, nil),
-		// sandbox-exec actually starts the proxy, so its failure must fail closed.
-		Backend: Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true},
+		// macOS Seatbelt actually starts the proxy, so its failure must fail closed.
+		Backend: Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true},
 	})
 	// Force the proxy factory to fail; the build must surface an error rather than
 	// degrade to an unproxied (open) network plan.

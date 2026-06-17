@@ -2,8 +2,6 @@ package sandbox
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,35 +29,15 @@ func TestTargetBackendForPlatformBaseline(t *testing.T) {
 	}
 }
 
-func TestLegacySandboxEntrypointsAreExplicitAndExist(t *testing.T) {
-	entries := LegacySandboxEntrypoints()
-	if len(entries) == 0 {
-		t.Fatal("legacy inventory must not be empty")
-	}
-	deleteTargets := 0
-	for _, entry := range entries {
-		if entry.Area == "" || entry.Path == "" || entry.Symbol == "" || entry.Replacement == "" {
-			t.Fatalf("legacy entry has empty required field: %#v", entry)
-		}
-		if entry.DeleteTarget {
-			deleteTargets++
-		}
-		path := filepath.Join("..", "..", entry.Path)
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("legacy entry %s points at missing path %s: %v", entry.Symbol, entry.Path, err)
-		}
-	}
-	if deleteTargets == 0 {
-		t.Fatal("legacy inventory must identify delete targets")
-	}
-}
-
 func TestBackendPlanCarriesPhase0ManagerFields(t *testing.T) {
 	linux := SelectBackend(BackendOptions{
 		GOOS: "linux",
 		LookupExecutable: func(name string) (string, error) {
 			if name == LinuxSandboxHelperName {
 				return "/usr/bin/zero-linux-sandbox", nil
+			}
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
 			}
 			return "", errors.New("missing")
 		},

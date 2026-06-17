@@ -15,9 +15,8 @@ const EnvAutoAllowBash = "ZERO_SANDBOX_AUTO_ALLOW_BASH"
 // EnvSandboxed marks a process that zero has already wrapped in a sandbox: every
 // wrapped command carries ZERO_SANDBOXED=1 in its environment. When such a
 // process spawns another command through the engine, the re-entrancy guard
-// returns a pass-through plan instead of double-wrapping it — nested bwrap /
-// sandbox-exec fails, and a second egress proxy would be redundant. Mirrors the
-// already-sandboxed guard used by comparable executor sandboxes. Unset by default.
+// returns a pass-through plan instead of double-wrapping it; nested platform
+// wrappers fail, and a second egress proxy would be redundant. Unset by default.
 const EnvSandboxed = "ZERO_SANDBOXED"
 
 // EnvSandboxBackend records which backend wrapped the command. sandboxEnvironment
@@ -136,12 +135,6 @@ const (
 	BackendWindowsRestrictedToken BackendName = "windows-restricted-token"
 	BackendWindowsElevated        BackendName = "windows-elevated"
 	BackendPolicyOnly             BackendName = "policy-only"
-	// BackendBubblewrap is the legacy Linux adapter name kept until the Linux
-	// helper backend owns command transformation.
-	BackendBubblewrap BackendName = "bubblewrap"
-	// BackendSandboxExec is the legacy macOS adapter name kept until Seatbelt
-	// profile generation moves behind the sandbox manager.
-	BackendSandboxExec BackendName = "sandbox-exec"
 	// BackendWSL is the policy-only fallback used under WSL when bubblewrap is
 	// unavailable/unreliable: there is no native OS isolation, but network egress
 	// is still routed through the local filtering proxy and the command runs under
@@ -201,13 +194,6 @@ type Policy struct {
 	// Ignored on non-macOS backends, and a no-op where the OS does not deliver
 	// seatbelt denials to the unified log.
 	MonitorDenials bool `json:"monitorDenials,omitempty"`
-	// BlockUnixSockets, when true on the bubblewrap (Linux) backend, prefixes the
-	// sandboxed command with the zero-seccomp helper to install a seccomp filter
-	// that denies AF_UNIX socket creation — closing the Unix-socket gap bubblewrap's
-	// filesystem/network isolation leaves open. Off by default; degrades gracefully
-	// (runs without the filter) when the helper binary is not found. Ignored on
-	// non-bubblewrap backends.
-	BlockUnixSockets bool `json:"blockUnixSockets,omitempty"`
 	// AllowRead/DenyRead/AllowWrite/DenyWrite are fine-grained path lists layered
 	// ON TOP of the workspace + Scope guards; they never bypass the symlink /
 	// out-of-workspace protections. Each entry is home-expanded, made absolute, and

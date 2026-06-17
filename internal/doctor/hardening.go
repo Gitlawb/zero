@@ -124,7 +124,6 @@ func doctorSandboxPolicy(cfg config.SandboxConfig) sandbox.Policy {
 	case sandbox.NetworkAllow, sandbox.NetworkDeny:
 		policy.Network = sandbox.NetworkMode(cfg.Network)
 	}
-	policy.BlockUnixSockets = cfg.BlockUnixSockets
 	policy.MonitorDenials = cfg.MonitorDenials
 	return policy
 }

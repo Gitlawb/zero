@@ -409,7 +409,7 @@ func TestWebFetchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
 		Backend: zeroSandbox.Backend{
-			Name: zeroSandbox.BackendSandboxExec, Available: true,
+			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
 		},
 	})
@@ -437,7 +437,7 @@ func TestRegistryRoutesWebFetchThroughSandboxScopedPolicy(t *testing.T) {
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
 		Backend: zeroSandbox.Backend{
-			Name: zeroSandbox.BackendSandboxExec, Available: true,
+			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
 		},
 	})

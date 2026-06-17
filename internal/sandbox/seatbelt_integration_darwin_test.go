@@ -24,7 +24,7 @@ func TestSeatbeltEnforcesExtraWriteRoots(t *testing.T) {
 		t.Skipf("sandbox-exec unavailable: %v", err)
 	}
 	backend := SelectBackend(BackendOptions{})
-	if !backend.Available || backend.Name != BackendSandboxExec {
+	if !backend.Available || backend.Name != BackendMacOSSeatbelt {
 		t.Skipf("host sandbox backend is not sandbox-exec: %s", backend.Message)
 	}
 
@@ -116,7 +116,7 @@ func runSeatbeltShellWrite(t *testing.T, engine *Engine, target string, content 
 	if err != nil {
 		t.Fatalf("CommandContext: %v", err)
 	}
-	if !plan.Wrapped || plan.Backend.Name != BackendSandboxExec {
+	if !plan.Wrapped || plan.Backend.Name != BackendMacOSSeatbelt {
 		t.Fatalf("plan = %#v, want wrapped sandbox-exec", plan)
 	}
 	output, runErr := command.CombinedOutput()

@@ -11,10 +11,10 @@ import (
 
 // ApplyUnixSocketBlock installs a seccomp BPF filter on the CURRENT thread/process
 // that denies socket(AF_UNIX, ...) with EPERM, closing the Unix-socket gap that
-// bubblewrap's filesystem/network isolation leaves open. It must be called in the
-// child, after fork and before exec, so the zero-seccomp helper applies it and then
-// execs the real command. It first sets NO_NEW_PRIVS (required to load a filter
-// without CAP_SYS_ADMIN), then loads the program.
+// the Linux helper's filesystem/network isolation leaves open. It must be called
+// in the child, after fork and before exec, so the inner helper stage applies it
+// and then execs the real command. It first sets NO_NEW_PRIVS (required to load a
+// filter without CAP_SYS_ADMIN), then loads the program.
 //
 // Not yet verified on real Linux — see seccomp.go. Callers should degrade
 // gracefully (run without the filter, with a warning) if this returns an error,

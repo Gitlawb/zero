@@ -40,15 +40,15 @@ func TestSandboxCheckPassesWhenBackendPresent(t *testing.T) {
 		Now:              fixedDoctorClock("2026-06-12T10:00:00Z"),
 		Runtime:          "go",
 		GOOS:             "linux",
-		LookupExecutable: stubLookup("bwrap"),
+		LookupExecutable: stubLookup(sandbox.LinuxSandboxHelperName, "bwrap"),
 	})
 
 	check := report.Check("sandbox.backend")
 	if check == nil || check.Status != StatusPass {
 		t.Fatalf("expected sandbox.backend pass, got %#v", report.Checks)
 	}
-	if !strings.Contains(strings.ToLower(check.Message), "bubblewrap") {
-		t.Fatalf("expected bubblewrap named in message, got %q", check.Message)
+	if !strings.Contains(check.Message, string(sandbox.BackendLinuxBwrap)) {
+		t.Fatalf("expected Linux sandbox backend named in message, got %q", check.Message)
 	}
 }
 

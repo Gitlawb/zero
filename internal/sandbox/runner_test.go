@@ -25,6 +25,7 @@ func TestBuildCommandPlanWrapsLinuxHelper(t *testing.T) {
 			Name:       BackendLinuxBwrap,
 			Available:  true,
 			Executable: "/usr/bin/zero-linux-sandbox",
+			Platform:   "linux",
 			Message:    "Linux sandbox helper available",
 		},
 	})
@@ -59,10 +60,11 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
 		Backend: Backend{
-			Name:       BackendSandboxExec,
+			Name:       BackendMacOSSeatbelt,
 			Available:  true,
 			Executable: "/usr/bin/sandbox-exec",
-			Message:    "sandbox-exec backend available",
+			Platform:   "darwin",
+			Message:    "macOS Seatbelt backend available",
 		},
 	})
 
@@ -75,8 +77,8 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
 
-	if !plan.Wrapped || plan.Name != "/usr/bin/sandbox-exec" || plan.Backend.Name != BackendSandboxExec {
-		t.Fatalf("plan backend = %#v, want wrapped sandbox-exec", plan)
+	if !plan.Wrapped || plan.Name != "/usr/bin/sandbox-exec" || plan.Backend.Name != BackendMacOSSeatbelt {
+		t.Fatalf("plan backend = %#v, want wrapped macOS Seatbelt", plan)
 	}
 	if len(plan.Args) < 5 || plan.Args[0] != "-p" {
 		t.Fatalf("sandbox-exec args = %#v, want profile and command", plan.Args)
@@ -180,8 +182,8 @@ func TestSandboxExecProfileAllowsDevNullAndTemp(t *testing.T) {
 		t.Skip("sandbox-exec is macOS-only")
 	}
 	backend := SelectBackend(BackendOptions{})
-	if !backend.Available || backend.Name != BackendSandboxExec {
-		t.Skipf("sandbox-exec backend unavailable: %s", backend.Message)
+	if !backend.Available || backend.Name != BackendMacOSSeatbelt {
+		t.Skipf("macOS Seatbelt backend unavailable: %s", backend.Message)
 	}
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: backend})
@@ -304,7 +306,7 @@ func TestSeatbeltCommandPlanUsesExecutionPermissionProfile(t *testing.T) {
 	request := SandboxExecutionRequest{
 		Command: CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/workspace"},
 		Backend: Backend{
-			Name:            BackendSandboxExec,
+			Name:            BackendMacOSSeatbelt,
 			Available:       true,
 			Executable:      "/usr/bin/sandbox-exec",
 			CommandWrapping: true,
@@ -325,11 +327,9 @@ func TestSeatbeltCommandPlanUsesExecutionPermissionProfile(t *testing.T) {
 		EnforcementLevel:        EnforcementNative,
 		RequiresPlatformSandbox: true,
 	}
-	plan, err := buildLegacyCommandPlan(request, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, SandboxCommandTransformOptions{
-		WriteRoots: []string{"/legacy-write"},
-	})
+	plan, err := buildPlatformCommandPlan(request, Policy{Mode: ModeEnforce, EnforceWorkspace: true})
 	if err != nil {
-		t.Fatalf("buildLegacyCommandPlan: %v", err)
+		t.Fatalf("buildPlatformCommandPlan: %v", err)
 	}
 	if len(plan.Args) < 2 {
 		t.Fatalf("plan args = %#v, want sandbox-exec profile", plan.Args)
@@ -337,9 +337,6 @@ func TestSeatbeltCommandPlanUsesExecutionPermissionProfile(t *testing.T) {
 	sbpl := plan.Args[1]
 	if !strings.Contains(sbpl, `(subpath "/profile-write")`) {
 		t.Fatalf("plan profile did not use PermissionProfile write root:\n%s", sbpl)
-	}
-	if strings.Contains(sbpl, `/legacy-write`) {
-		t.Fatalf("plan profile used legacy write roots instead of PermissionProfile:\n%s", sbpl)
 	}
 }
 
@@ -404,11 +401,12 @@ func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
 
 func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 	policy := Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}
-	backend := Backend{Name: BackendSandboxExec, Available: true, Executable: "/usr/bin/sandbox-exec"}
+	backend := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/bin/sandbox-exec"}
 	spec := CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/ws"}
+	profile := seatbeltCompatibilityPermissionProfile([]string{"/ws"}, policy)
 
-	p1 := sandboxExecCommandPlan(spec, "/ws", []string{"/ws"}, policy, backend, nil)
-	p2 := sandboxExecCommandPlan(spec, "/ws", []string{"/ws"}, policy, backend, nil)
+	p1 := seatbeltCommandPlanWithProfile(spec, "/ws", profile, policy, backend, nil)
+	p2 := seatbeltCommandPlanWithProfile(spec, "/ws", profile, policy, backend, nil)
 	if p1.MonitorTag == "" || p2.MonitorTag == "" {
 		t.Fatalf("monitored plans must carry a denial tag: %q %q", p1.MonitorTag, p2.MonitorTag)
 	}
@@ -421,7 +419,8 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 		t.Fatalf("plan profile must embed its own tag %q:\n%v", p1.MonitorTag, p1.Args)
 	}
 
-	off := sandboxExecCommandPlan(spec, "/ws", []string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, backend, nil)
+	offPolicy := Policy{Mode: ModeEnforce, EnforceWorkspace: true}
+	off := seatbeltCommandPlanWithProfile(spec, "/ws", seatbeltCompatibilityPermissionProfile([]string{"/ws"}, offPolicy), offPolicy, backend, nil)
 	if off.MonitorTag != "" {
 		t.Fatalf("a non-monitored plan must carry no tag, got %q", off.MonitorTag)
 	}
@@ -490,10 +489,10 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 		t.Fatalf("NewScope: %v", err)
 	}
 	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: DefaultPolicy(), Scope: scope})
-	if _, _, _, err := engine.resolveCommandDir(extra, engine.policy); err != nil {
+	if _, _, err := engine.resolveCommandDir(extra, engine.policy); err != nil {
 		t.Fatalf("resolveCommandDir(extra root) = %v, want nil", err)
 	}
-	if _, _, _, err := engine.resolveCommandDir(t.TempDir(), engine.policy); err == nil {
+	if _, _, err := engine.resolveCommandDir(t.TempDir(), engine.policy); err == nil {
 		t.Fatal("resolveCommandDir(outside all roots) = nil error, want violation")
 	}
 }
