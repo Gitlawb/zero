@@ -78,6 +78,31 @@ func TestWindowsSandboxSetupMarkerRefreshesWhenProfileChanges(t *testing.T) {
 	}
 }
 
+func TestWindowsSandboxSetupConfigFromCommandPreservesProfileInputs(t *testing.T) {
+	command := WindowsSandboxCommandConfig{
+		SandboxHome:    t.TempDir(),
+		CommandCWD:     `C:\workspace\src`,
+		WorkspaceRoots: []string{`C:\workspace`},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+				DenyRead:   []string{`C:\workspace\secret`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+		Env:     map[string]string{"ZERO_SANDBOXED": "1"},
+		Command: []string{"cmd.exe", "/c", "dir"},
+	}
+	setup := WindowsSandboxSetupConfigFromCommand(command)
+	if setup.SandboxHome != command.SandboxHome || setup.CommandCWD != command.CommandCWD || len(setup.WorkspaceRoots) != 1 || setup.WorkspaceRoots[0] != `C:\workspace` {
+		t.Fatalf("setup config = %#v, want command roots", setup)
+	}
+	if setup.PermissionProfile.FileSystem.Kind != FileSystemRestricted || len(setup.PermissionProfile.FileSystem.DenyRead) != 1 {
+		t.Fatalf("setup profile = %#v, want command permission profile", setup.PermissionProfile)
+	}
+}
+
 func TestWindowsACLPlanHashIsStableAcrossEntryOrder(t *testing.T) {
 	left, err := WindowsACLPlanHash(WindowsACLPlan{Entries: []WindowsACLEntry{
 		{Action: WindowsACLDenyRead, Path: `C:\workspace\secret`, Capability: "S-1-5-21-3", Materialize: true},

@@ -154,6 +154,15 @@ func (config WindowsSandboxSetupConfig) commandConfig() WindowsSandboxCommandCon
 	}
 }
 
+func WindowsSandboxSetupConfigFromCommand(config WindowsSandboxCommandConfig) WindowsSandboxSetupConfig {
+	return WindowsSandboxSetupConfig{
+		SandboxHome:       config.SandboxHome,
+		CommandCWD:        config.CommandCWD,
+		WorkspaceRoots:    cloneStrings(config.WorkspaceRoots),
+		PermissionProfile: config.PermissionProfile,
+	}
+}
+
 func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSandboxSetupMarker, error) {
 	plan, err := BuildWindowsACLPlan(config.commandConfig())
 	if err != nil {

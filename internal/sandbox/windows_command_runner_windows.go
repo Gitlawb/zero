@@ -12,6 +12,10 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 		fmt.Fprintf(stderr, "%s: unsupported Windows sandbox level %q\n", WindowsSandboxCommandRunnerName, config.SandboxLevel)
 		return 1
 	}
+	if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(config)); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		return 1
+	}
 	capabilitySIDs, err := WindowsCapabilitySIDsForConfig(config)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())

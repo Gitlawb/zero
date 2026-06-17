@@ -8,10 +8,23 @@ import (
 )
 
 func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) int {
-	if _, err := BuildWindowsACLPlan(config.commandConfig()); err != nil {
+	plan, err := BuildWindowsACLPlan(config.commandConfig())
+	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
-	fmt.Fprintln(stderr, WindowsSandboxSetupName+": Windows ACL setup is not complete")
-	return 1
+	rollback, err := applyWindowsACLPlan(plan)
+	if err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			fmt.Fprintf(stderr, "%s: %v; rollback failed: %v\n", WindowsSandboxSetupName, err, rollbackErr)
+			return 1
+		}
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
+	return 0
 }
