@@ -17,10 +17,29 @@ type RegisterOptions struct {
 	ClientFactory   func(context.Context, Server) (ToolClient, error)
 }
 
+// SkippedServer records an MCP server that was not registered because it could
+// not be reached or its tools could not be validated. Registration is
+// best-effort per server: one unreachable server is skipped (and reported here)
+// rather than aborting startup or disabling the others.
+type SkippedServer struct {
+	Name string
+	Err  error
+}
+
 type Runtime struct {
 	clients []ToolClient
+	skipped []SkippedServer
 	once    sync.Once
 	err     error
+}
+
+// Skipped returns the servers that were skipped during registration (unreachable
+// or invalid), so the caller can warn the user without failing the launch.
+func (runtime *Runtime) Skipped() []SkippedServer {
+	if runtime == nil {
+		return nil
+	}
+	return runtime.skipped
 }
 
 var unsafeToolNameChars = regexp.MustCompile(`[^A-Za-z0-9_]+`)
@@ -45,52 +64,82 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		}
 	}
 
-	// Registration is atomic per call: validate and stage every server's tools
-	// first, then commit to the caller's registry only once they all succeed. If a
-	// LATER server fails mid-registration, nothing was committed, so the registry
-	// never ends up holding dead tools that point at a (now-closed) client for an
-	// earlier server.
+	// Registration is best-effort across servers but atomic within a server: each
+	// server is connected and ALL of its tools validated before any are committed,
+	// so a server never contributes a partial tool set (no tools pointing at a
+	// now-closed client). A server that cannot be reached, lists no valid tools, or
+	// conflicts with an already-committed tool is SKIPPED — recorded in
+	// runtime.skipped, not fatal — so one unreachable MCP server can't abort startup
+	// or disable the others. The conflict check still spans the registry plus every
+	// tool committed by an earlier server in this call.
 	staged := make([]registryTool, 0)
 	stagedNames := make(map[string]struct{})
 	for _, server := range servers {
-		client, err := factory(ctx, server)
-		if err != nil {
-			_ = runtime.Close()
-			return nil, err
+		client, serverTools, stageErr := stageServer(ctx, registry, factory, server, options, stagedNames)
+		if stageErr != nil {
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: stageErr})
+			continue
 		}
 		runtime.clients = append(runtime.clients, client)
-
-		remoteTools, err := client.ListTools(ctx)
-		if err != nil {
-			_ = runtime.Close()
-			return nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
-		}
-		for _, remote := range remoteTools {
-			if strings.TrimSpace(remote.Name) == "" {
-				_ = runtime.Close()
-				return nil, fmt.Errorf("MCP server %s returned a tool without a name", server.Name)
-			}
-			tool := newRegistryTool(server, remote, client, options)
-			// Conflict detection spans both the existing registry and tools staged so
-			// far in this call (two MCP tools whose names collapse to the same
-			// sanitized name conflict even though neither is in the registry yet).
-			if existing, ok := registry.Get(tool.Name()); ok {
-				_ = runtime.Close()
-				return nil, fmt.Errorf("MCP tool %s from %s conflicts with existing tool %s", remote.Name, server.Name, existing.Name())
-			}
-			if _, ok := stagedNames[tool.Name()]; ok {
-				_ = runtime.Close()
-				return nil, fmt.Errorf("MCP tool %s from %s conflicts with another MCP tool named %s", remote.Name, server.Name, tool.Name())
-			}
+		for _, tool := range serverTools {
 			stagedNames[tool.Name()] = struct{}{}
 			staged = append(staged, tool)
 		}
 	}
-	// Every server succeeded — commit the staged tools to the registry.
+	// Commit the tools of every server that fully validated.
 	for _, tool := range staged {
 		registry.Register(tool)
 	}
 	return runtime, nil
+}
+
+// stageServer connects to one server and validates ALL of its tools against the
+// registry and the names already committed by earlier servers. It returns the
+// client and the server's tools only when every tool is named and conflict-free;
+// on any failure it closes the client and returns an error, so the caller skips
+// the whole server (per-server atomicity — never a partial tool set, never a
+// dangling tool on a closed client).
+func stageServer(
+	ctx context.Context,
+	registry *tools.Registry,
+	factory func(context.Context, Server) (ToolClient, error),
+	server Server,
+	options RegisterOptions,
+	stagedNames map[string]struct{},
+) (ToolClient, []registryTool, error) {
+	client, err := factory(ctx, server)
+	if err != nil {
+		return nil, nil, err
+	}
+	remoteTools, err := client.ListTools(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
+	}
+	serverTools := make([]registryTool, 0, len(remoteTools))
+	localNames := make(map[string]struct{})
+	for _, remote := range remoteTools {
+		if strings.TrimSpace(remote.Name) == "" {
+			_ = client.Close()
+			return nil, nil, fmt.Errorf("MCP server %s returned a tool without a name", server.Name)
+		}
+		tool := newRegistryTool(server, remote, client, options)
+		if existing, ok := registry.Get(tool.Name()); ok {
+			_ = client.Close()
+			return nil, nil, fmt.Errorf("MCP tool %s from %s conflicts with existing tool %s", remote.Name, server.Name, existing.Name())
+		}
+		if _, ok := stagedNames[tool.Name()]; ok {
+			_ = client.Close()
+			return nil, nil, fmt.Errorf("MCP tool %s from %s conflicts with another MCP tool named %s", remote.Name, server.Name, tool.Name())
+		}
+		if _, ok := localNames[tool.Name()]; ok {
+			_ = client.Close()
+			return nil, nil, fmt.Errorf("MCP tool %s from %s conflicts with another tool from the same server", remote.Name, server.Name)
+		}
+		localNames[tool.Name()] = struct{}{}
+		serverTools = append(serverTools, tool)
+	}
+	return client, serverTools, nil
 }
 
 func (runtime *Runtime) Close() error {

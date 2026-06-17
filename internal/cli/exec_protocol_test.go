@@ -715,6 +715,10 @@ func (fn closeFunc) Close() error {
 	return fn()
 }
 
+func (fn closeFunc) Skipped() []mcp.SkippedServer {
+	return nil
+}
+
 type toolCallingExecProvider struct {
 	toolCallID string
 	toolName   string

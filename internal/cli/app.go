@@ -19,6 +19,7 @@ import (
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -70,11 +71,16 @@ type appDeps struct {
 
 type mcpToolRuntime interface {
 	Close() error
+	Skipped() []mcp.SkippedServer
 }
 
 type noopMCPRuntime struct{}
 
 func (noopMCPRuntime) Close() error {
+	return nil
+}
+
+func (noopMCPRuntime) Skipped() []mcp.SkippedServer {
 	return nil
 }
 
@@ -495,6 +501,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
+	// A server that could not be reached or validated is skipped, not fatal (one
+	// bad MCP server must not abort startup) — surface each so a missing tool set is
+	// explained rather than silently absent.
+	for _, skipped := range mcpRuntime.Skipped() {
+		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
+	}
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
