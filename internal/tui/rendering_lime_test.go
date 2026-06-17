@@ -1336,3 +1336,55 @@ func TestSessionsCardFieldsAreSanitized(t *testing.T) {
 		t.Fatalf("sanitizeCardField left separator bytes: %q", got)
 	}
 }
+
+func TestComposerDescriptionHintRendersForSingleSlashMatch(t *testing.T) {
+	// When the user has typed a slash command that matches exactly one entry in
+	// the command palette, the composer hint line should surface that command's
+	// description below the box, claude-code style.
+	m := limeTestModel()
+	m.input.SetValue("/effort")
+	m.recomputeSuggestions()
+	if !m.commandPaletteOpen || len(m.suggestions) != 1 || m.suggestions[0].Name != "/effort" {
+		t.Fatalf("setup: expected a single /effort suggestion, got palette=%v matches=%#v", m.commandPaletteOpen, m.suggestions)
+	}
+	got := plainRender(t, m.composerDescriptionHint(96))
+	if !strings.Contains(got, "reasoning effort") {
+		t.Fatalf("description hint = %q, want it to mention reasoning effort", got)
+	}
+}
+
+func TestComposerDescriptionHintStaysEmptyForAmbiguousPrefix(t *testing.T) {
+	// A prefix that still matches multiple commands should not surface a hint --
+	// the dropdown is the right affordance for an ambiguous match.
+	m := limeTestModel()
+	m.input.SetValue("/")
+	m.recomputeSuggestions()
+	if !m.commandPaletteOpen || len(m.suggestions) < 2 {
+		t.Fatalf("setup: expected multiple suggestions for bare '/', got palette=%v matches=%d", m.commandPaletteOpen, len(m.suggestions))
+	}
+	if got := m.composerDescriptionHint(96); got != "" {
+		t.Fatalf("description hint should be empty for ambiguous matches, got %q", got)
+	}
+}
+
+func TestComposerDescriptionHintStaysEmptyAfterArgs(t *testing.T) {
+	// Once the user starts typing arguments, the palette narrows off and we
+	// shouldn't keep advertising the command's description.
+	m := limeTestModel()
+	m.input.SetValue("/effort high")
+	m.recomputeSuggestions()
+	if got := m.composerDescriptionHint(96); got != "" {
+		t.Fatalf("description hint should be empty after args, got %q", got)
+	}
+}
+
+func TestComposerDescriptionHintStaysEmptyForFilePalette(t *testing.T) {
+	// The @file palette already renders its rows; the description hint is
+	// scoped to slash commands.
+	m := limeTestModel()
+	m.input.SetValue("@")
+	m.recomputeSuggestions()
+	if got := m.composerDescriptionHint(96); got != "" {
+		t.Fatalf("description hint should be empty for file palette, got %q", got)
+	}
+}

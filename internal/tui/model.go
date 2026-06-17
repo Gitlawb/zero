@@ -1348,6 +1348,10 @@ func (m model) footerView(width int) string {
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))
+	if hint := m.composerDescriptionHint(width); hint != "" {
+		footer.WriteString("\n")
+		footer.WriteString(hint)
+	}
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
 		footer.WriteString("\n")
 		footer.WriteString(queued)
@@ -1937,6 +1941,37 @@ func (m model) composerBox(width int) string {
 	}
 	rendered = append(rendered, m.composerDividerLine(width))
 	return strings.Join(rendered, "\n")
+}
+
+// composerDescriptionHint returns the description line that sits below the
+// composer box, claude-code style, when the input is a single unambiguous
+// slash command. Returns "" when the user is mid-prompt, the palette is closed,
+// or more than one command matches. Slash commands only; the @file palette
+// already shows its rows. The inline argument hint ([low|medium|...]) is
+// unchanged and continues to render inside the composer box.
+func (m model) composerDescriptionHint(width int) string {
+	if width < 8 {
+		return ""
+	}
+	if m.suggestionsAreFiles {
+		return ""
+	}
+	if !m.commandPaletteOpen || len(m.suggestions) != 1 {
+		return ""
+	}
+	if m.suggestionIdx != 0 {
+		return ""
+	}
+	value := strings.TrimSpace(m.input.Value())
+	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \t\n") {
+		return ""
+	}
+	suggestion := m.suggestions[0]
+	desc := strings.TrimSpace(suggestion.Desc)
+	if desc == "" {
+		return ""
+	}
+	return fitStyledLine(zeroTheme.muted.Render(desc), width)
 }
 
 // startsTurn reports whether a row begins a new conversational turn and therefore
