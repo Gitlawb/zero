@@ -89,7 +89,7 @@ func TestDoctorCommandOutputGroupsProviderAndPlatformChecks(t *testing.T) {
 		doctorCheck("provider.config", doctor.StatusPass, "Provider config loaded."),
 		doctorCheck("provider.model", doctor.StatusWarn, "Provider model is not configured."),
 		doctorCheck("provider.connectivity", doctor.StatusFail, "Provider connectivity failed."),
-		doctorCheck("sandbox.backend", doctor.StatusWarn, "No native sandbox backend on windows; ZERO falls back to policy-only preflight checks."),
+		doctorCheck("sandbox.backend", doctor.StatusWarn, "Native sandbox backend unavailable on windows: policy-only fallback: Windows sandbox command runner is not available."),
 		doctorCheck("runtime.go", doctor.StatusPass, "Zero Go runtime is available."),
 		doctorCheck("config.files", doctor.StatusPass, "Zero config file inputs are available."),
 	}}, nil)
@@ -151,7 +151,15 @@ func TestDoctorCommandOutputAddsActionableHints(t *testing.T) {
 		doctorCheck("provider.config", doctor.StatusFail, "No LLM provider is configured."),
 		doctorCheck("provider.model", doctor.StatusWarn, "Provider model is not configured."),
 		doctorCheck("provider.connectivity", doctor.StatusWarn, "Provider connectivity was skipped."),
-		doctorCheck("sandbox.backend", doctor.StatusWarn, "No native sandbox backend on windows; ZERO falls back to policy-only preflight checks."),
+		{
+			ID:      "sandbox.backend",
+			Label:   "Sandbox backend",
+			Status:  doctor.StatusWarn,
+			Message: "Native sandbox backend unavailable on windows: policy-only fallback: Windows sandbox setup helper is not available.",
+			Details: map[string]any{
+				"remedy": "install the Windows sandbox command runner and setup helper together, then run `zero sandbox setup`",
+			},
+		},
 		doctorCheck("lsp.servers", doctor.StatusWarn, "2 language server(s) missing from PATH; affected files degrade to text-only edits."),
 	}}, nil)
 
@@ -159,12 +167,16 @@ func TestDoctorCommandOutputAddsActionableHints(t *testing.T) {
 	for _, want := range []string{
 		"/provider",
 		"/doctor --connectivity",
-		"WSL2",
-		"Linux container",
+		"zero sandbox setup",
 		"install missing language servers",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("formatted output missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"WSL2", "Linux container"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("formatted output should not contain stale sandbox guidance %q:\n%s", unwanted, text)
 		}
 	}
 }

@@ -179,8 +179,10 @@ func doctorActions(checks []doctor.Check, backend *zerocommands.BackendLifecycle
 		case "provider.connectivity":
 			add("/doctor --connectivity - probe the provider endpoint")
 		case "sandbox.backend":
-			if strings.Contains(message, "windows") || strings.Contains(message, "policy-only") {
-				add("WSL2 or Linux container - enable native sandbox isolation on Windows")
+			if remedy := doctorCheckDetailString(check, "remedy"); remedy != "" {
+				add(remedy)
+			} else if strings.Contains(message, "policy-only") || strings.Contains(message, "unavailable") {
+				add("zero sandbox policy --effective - inspect sandbox backend and enforcement status")
 			}
 		case "lsp.servers":
 			if strings.Contains(message, "missing") {
@@ -195,4 +197,12 @@ func doctorActions(checks []doctor.Check, backend *zerocommands.BackendLifecycle
 		add("/plugins - inspect plugins")
 	}
 	return actions
+}
+
+func doctorCheckDetailString(check doctor.Check, key string) string {
+	if check.Details == nil {
+		return ""
+	}
+	value, _ := check.Details[key].(string)
+	return strings.TrimSpace(value)
 }

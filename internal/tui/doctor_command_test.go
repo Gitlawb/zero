@@ -271,6 +271,25 @@ func TestDoctorFixLinesShowNoAutomaticFixForUnmappedFailure(t *testing.T) {
 	}
 }
 
+func TestDoctorFixLinesUseSandboxRemedy(t *testing.T) {
+	lines := doctorFixLines(doctor.Report{Checks: []doctor.Check{{
+		ID:      "sandbox.backend",
+		Status:  doctor.StatusWarn,
+		Message: "Native sandbox backend unavailable on windows: policy-only fallback: Windows sandbox setup helper is not available.",
+		Details: map[string]any{
+			"remedy": "install the Windows sandbox command runner and setup helper together, then run `zero sandbox setup`",
+		},
+	}}})
+
+	text := strings.Join(lines, "\n")
+	if !strings.Contains(text, "zero sandbox setup") {
+		t.Fatalf("doctorFixLines missing sandbox setup remedy:\n%s", text)
+	}
+	if strings.Contains(text, "WSL2") || strings.Contains(text, "Linux container") {
+		t.Fatalf("doctorFixLines used stale Windows sandbox guidance:\n%s", text)
+	}
+}
+
 func newestDoctorStatusText(rows []transcriptRow) string {
 	if row := newestDoctorStatusRow(rows); row != nil {
 		return row.text

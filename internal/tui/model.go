@@ -502,6 +502,7 @@ func (m model) doctorOptions(connectivity bool) doctor.Options {
 		UserConfig:     m.doctorUserConfigPath,
 		ProjectConfig:  m.projectConfigPath,
 		Provider:       m.providerProfile,
+		WorkspaceRoot:  m.cwd,
 		Connectivity:   connectivity,
 		ProviderHealth: health,
 	}

@@ -167,7 +167,11 @@ func doctorFixLines(report doctor.Report) []string {
 		hasIssue = true
 		switch check.ID {
 		case "sandbox.backend":
-			lines = append(lines, "native sandbox: use WSL2 or a Linux container on Windows")
+			if remedy := doctorCheckDetailString(check, "remedy"); remedy != "" {
+				lines = append(lines, "native sandbox: "+remedy)
+			} else {
+				lines = append(lines, "native sandbox: run zero sandbox policy --effective to inspect backend status")
+			}
 		case "lsp.servers":
 			lines = append(lines, "language servers: install missing LSP binaries on PATH")
 		case "provider.connectivity":

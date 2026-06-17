@@ -43,6 +43,8 @@ type Options struct {
 	UserConfig     string
 	ProjectConfig  string
 	Provider       config.ProviderProfile
+	WorkspaceRoot  string
+	Sandbox        config.SandboxConfig
 	Connectivity   bool
 	ProviderHealth *providerhealth.Result
 	// GOOS overrides the platform used to resolve the sandbox backend. Empty
@@ -69,7 +71,7 @@ func Run(options Options) Report {
 	modelCheck := providerModelCheck(options.Provider)
 	checks = append(checks, modelCheck)
 	checks = append(checks, connectivityCheck(options.Provider, options.Connectivity, modelCheck.Status, options.ProviderHealth))
-	checks = append(checks, sandboxBackendCheck(options.GOOS, options.LookupExecutable))
+	checks = append(checks, sandboxBackendCheck(options.GOOS, options.LookupExecutable, options.WorkspaceRoot, options.Sandbox))
 	checks = append(checks, lspServersCheck(options.LookupExecutable))
 
 	report := Report{

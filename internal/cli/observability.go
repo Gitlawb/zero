@@ -46,8 +46,10 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	}
 
 	var provider config.ProviderProfile
+	var sandboxConfig config.SandboxConfig
 	if resolved, resolveErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); resolveErr == nil {
 		provider = resolved.Provider
+		sandboxConfig = resolved.Sandbox
 	}
 	var health *providerhealth.Result
 	if options.connectivity && config.HasProviderProfile(provider) {
@@ -67,6 +69,8 @@ func runDoctor(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 		UserConfig:     userConfig,
 		ProjectConfig:  projectConfig,
 		Provider:       provider,
+		WorkspaceRoot:  workspaceRoot,
+		Sandbox:        sandboxConfig,
 		Connectivity:   options.connectivity,
 		ProviderHealth: health,
 	})

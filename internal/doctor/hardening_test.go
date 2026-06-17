@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // validProvider is a fully-formed provider profile so the report's overall OK
@@ -98,6 +99,74 @@ func TestSandboxCheckRemedyIsPlatformSpecific(t *testing.T) {
 	}).Check("sandbox.backend")
 	if macPresent == nil || macPresent.Status != StatusPass {
 		t.Fatalf("expected darwin sandbox pass when sandbox-exec present, got %#v", macPresent)
+	}
+}
+
+func TestSandboxCheckReportsWindowsNativeSetupStates(t *testing.T) {
+	native := Run(Options{
+		Now:     fixedDoctorClock("2026-06-12T10:08:00Z"),
+		Runtime: "go",
+		GOOS:    "windows",
+		LookupExecutable: stubLookup(
+			sandbox.WindowsSandboxCommandRunnerName,
+			sandbox.WindowsSandboxSetupName,
+		),
+	}).Check("sandbox.backend")
+	if native == nil || native.Status != StatusPass {
+		t.Fatalf("expected windows native sandbox pass when helpers are present, got %#v", native)
+	}
+	if !strings.Contains(native.Message, string(sandbox.BackendWindowsRestrictedToken)) {
+		t.Fatalf("expected native Windows backend in message, got %q", native.Message)
+	}
+
+	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", t.TempDir())
+	needsSetup := Run(Options{
+		Now:           fixedDoctorClock("2026-06-12T10:08:30Z"),
+		Runtime:       "go",
+		GOOS:          "windows",
+		WorkspaceRoot: t.TempDir(),
+		LookupExecutable: stubLookup(
+			sandbox.WindowsSandboxCommandRunnerName,
+			sandbox.WindowsSandboxSetupName,
+		),
+	}).Check("sandbox.backend")
+	if needsSetup == nil || needsSetup.Status != StatusWarn {
+		t.Fatalf("expected setup-missing warning when marker is absent, got %#v", needsSetup)
+	}
+	setupStatus, _ := needsSetup.Details["setupStatus"].(string)
+	setupRemedy, _ := needsSetup.Details["remedy"].(string)
+	if setupStatus != "missing-or-out-of-date" || !strings.Contains(setupRemedy, "zero sandbox setup") {
+		t.Fatalf("setup warning details = %#v, want missing/out-of-date with setup remedy", needsSetup.Details)
+	}
+
+	setupMissing := Run(Options{
+		Now:              fixedDoctorClock("2026-06-12T10:09:00Z"),
+		Runtime:          "go",
+		GOOS:             "windows",
+		LookupExecutable: stubLookup(sandbox.WindowsSandboxCommandRunnerName),
+	}).Check("sandbox.backend")
+	if setupMissing == nil || setupMissing.Status != StatusWarn {
+		t.Fatalf("expected setup-missing warning, got %#v", setupMissing)
+	}
+	remedy, _ := setupMissing.Details["remedy"].(string)
+	if !strings.Contains(setupMissing.Message, "setup helper") || !strings.Contains(remedy, "zero sandbox setup") {
+		t.Fatalf("setup-missing check message=%q remedy=%q details=%#v", setupMissing.Message, remedy, setupMissing.Details)
+	}
+	if strings.Contains(setupMissing.Message, "not yet available") || strings.Contains(remedy, "WSL2") {
+		t.Fatalf("windows remedy should not claim native sandboxing is unavailable: message=%q remedy=%q", setupMissing.Message, remedy)
+	}
+
+	runnerMissing := Run(Options{
+		Now:              fixedDoctorClock("2026-06-12T10:10:00Z"),
+		Runtime:          "go",
+		GOOS:             "windows",
+		LookupExecutable: stubLookup(),
+	}).Check("sandbox.backend")
+	if runnerMissing == nil || runnerMissing.Status != StatusWarn {
+		t.Fatalf("expected runner-missing warning, got %#v", runnerMissing)
+	}
+	if !strings.Contains(runnerMissing.Message, "command runner") {
+		t.Fatalf("runner-missing message = %q, want command runner guidance", runnerMissing.Message)
 	}
 }
 
