@@ -10,3 +10,6 @@ var ErrSeccompUnsupported = errors.New("seccomp Unix-socket blocking is only sup
 
 // ApplyUnixSocketBlock is a no-op on non-Linux platforms.
 func ApplyUnixSocketBlock() error { return ErrSeccompUnsupported }
+
+// ApplyLinuxNetworkDeny is a no-op on non-Linux platforms.
+func ApplyLinuxNetworkDeny() error { return ErrSeccompUnsupported }

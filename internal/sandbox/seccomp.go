@@ -21,8 +21,10 @@ const (
 	auditArchX86_64  = 0xC000003E
 	auditArchAARCH64 = 0xC00000B7
 
-	nrSocketX86_64  = 41
-	nrSocketAARCH64 = 198
+	nrSocketX86_64      = 41
+	nrSocketAARCH64     = 198
+	nrSocketpairX86_64  = 53
+	nrSocketpairAARCH64 = 199
 
 	afUnix = 1 // AF_UNIX / AF_LOCAL
 
@@ -35,6 +37,50 @@ const (
 	seccompOffsetArch = 4
 	seccompOffsetArg0 = 16
 )
+
+var networkDenySyscallsX86_64 = []uint32{
+	42,  // connect
+	43,  // accept
+	44,  // sendto
+	48,  // shutdown
+	49,  // bind
+	50,  // listen
+	51,  // getsockname
+	52,  // getpeername
+	54,  // setsockopt
+	55,  // getsockopt
+	101, // ptrace
+	288, // accept4
+	299, // recvmmsg
+	307, // sendmmsg
+	310, // process_vm_readv
+	311, // process_vm_writev
+	425, // io_uring_setup
+	426, // io_uring_enter
+	427, // io_uring_register
+}
+
+var networkDenySyscallsAARCH64 = []uint32{
+	117, // ptrace
+	200, // bind
+	201, // listen
+	202, // accept
+	203, // connect
+	204, // getsockname
+	205, // getpeername
+	206, // sendto
+	208, // setsockopt
+	209, // getsockopt
+	210, // shutdown
+	242, // accept4
+	243, // recvmmsg
+	269, // sendmmsg
+	270, // process_vm_readv
+	271, // process_vm_writev
+	425, // io_uring_setup
+	426, // io_uring_enter
+	427, // io_uring_register
+}
 
 // unixSocketBlockFilter builds a classic-BPF seccomp program that denies
 // socket(2)/AF_UNIX with EPERM on x86-64 and arm64 and allows everything else.
@@ -72,4 +118,46 @@ func unixSocketBlockFilter() []sockFilter {
 		// 11: block with EPERM
 		{Code: bpfRETK, K: seccompRetErrno | errnoEPERM},
 	}
+}
+
+func networkDenySeccompFilter() []sockFilter {
+	x86Section := networkDenySection(nrSocketX86_64, nrSocketpairX86_64, networkDenySyscallsX86_64)
+	armSection := networkDenySection(nrSocketAARCH64, nrSocketpairAARCH64, networkDenySyscallsAARCH64)
+	program := []sockFilter{
+		{Code: bpfLDWABS, K: seccompOffsetArch},
+		{Code: bpfJEQK, K: auditArchX86_64, Jt: 0, Jf: uint8(len(x86Section))},
+	}
+	program = append(program, x86Section...)
+	program = append(program, sockFilter{Code: bpfJEQK, K: auditArchAARCH64, Jt: 0, Jf: uint8(len(armSection))})
+	program = append(program, armSection...)
+	program = append(program, sockFilter{Code: bpfRETK, K: seccompRetAllow})
+	return program
+}
+
+func networkDenySection(socketNr uint32, socketpairNr uint32, deniedSyscalls []uint32) []sockFilter {
+	section := []sockFilter{{Code: bpfLDWABS, K: seccompOffsetNr}}
+	for _, nr := range deniedSyscalls {
+		section = append(section,
+			sockFilter{Code: bpfJEQK, K: nr, Jt: 0, Jf: 1},
+			sockFilter{Code: bpfRETK, K: seccompRetErrno | errnoEPERM},
+		)
+	}
+	section = appendNetworkSocketCheck(section, socketNr, true)
+	section = appendNetworkSocketCheck(section, socketpairNr, false)
+	section = append(section, sockFilter{Code: bpfRETK, K: seccompRetAllow})
+	return section
+}
+
+func appendNetworkSocketCheck(section []sockFilter, nr uint32, reloadSyscallNumber bool) []sockFilter {
+	section = append(section,
+		sockFilter{Code: bpfJEQK, K: nr, Jt: 0, Jf: 4},
+		sockFilter{Code: bpfLDWABS, K: seccompOffsetArg0},
+		sockFilter{Code: bpfJEQK, K: afUnix, Jt: 1, Jf: 0},
+		sockFilter{Code: bpfRETK, K: seccompRetErrno | errnoEPERM},
+		sockFilter{Code: bpfRETK, K: seccompRetAllow},
+	)
+	if reloadSyscallNumber {
+		section = append(section, sockFilter{Code: bpfLDWABS, K: seccompOffsetNr})
+	}
+	return section
 }

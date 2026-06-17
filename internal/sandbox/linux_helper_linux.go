@@ -20,8 +20,7 @@ func RunLinuxSandboxHelper(args []string, stderr io.Writer) int {
 		return runLinuxSandboxInnerStage(config, stderr)
 	}
 	if config.UseLandlock {
-		fmt.Fprintln(stderr, LinuxSandboxHelperName+": Landlock helper mode is not implemented yet")
-		return 125
+		return runLinuxSandboxLandlockStage(config, stderr)
 	}
 	helperPath, err := os.Executable()
 	if err != nil {
@@ -79,6 +78,23 @@ func runLinuxSandboxInnerStage(config LinuxSandboxHelperConfig, stderr io.Writer
 		return 127
 	}
 	if err := syscall.Exec(binary, config.Command, os.Environ()); err != nil {
+		fmt.Fprintln(stderr, LinuxSandboxHelperName+": exec command: "+err.Error())
+		return 126
+	}
+	return 126
+}
+
+func runLinuxSandboxLandlockStage(config LinuxSandboxHelperConfig, stderr io.Writer) int {
+	if err := ApplyLandlockFilesystemProfile(config.PermissionProfile, config.CommandCWD, config.AllowNetworkForProxy, config.ProxyRouteSpec); err != nil {
+		fmt.Fprintln(stderr, LinuxSandboxHelperName+": apply Landlock: "+err.Error())
+		return 125
+	}
+	binary, err := exec.LookPath(config.Command[0])
+	if err != nil {
+		fmt.Fprintln(stderr, LinuxSandboxHelperName+": "+err.Error())
+		return 127
+	}
+	if err := syscall.Exec(binary, config.Command, linuxHelperSandboxEnvironment(config.PermissionProfile, config.CommandCWD)); err != nil {
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": exec command: "+err.Error())
 		return 126
 	}

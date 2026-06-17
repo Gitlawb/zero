@@ -34,7 +34,7 @@ compile_pkg linux ./cmd/zero-linux-sandbox
 
 case "$(go env GOOS)" in
   linux)
-    ZERO_SANDBOX_REAL_SMOKE=1 go test ./internal/sandbox -run TestBubblewrapRealSandboxSmoke -count=1
+    ZERO_SANDBOX_REAL_SMOKE=1 go test ./internal/sandbox -run 'TestLinuxHelperRealSandboxSmoke|TestLinuxLandlockRealSandboxSmoke' -count=1
     ;;
   darwin)
     go test ./internal/sandbox -run TestSandboxExecProfileAllowsDevNullAndTemp -count=1
