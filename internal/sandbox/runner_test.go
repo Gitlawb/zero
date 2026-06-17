@@ -360,23 +360,28 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "", "", "")
+	normalizedSecretRead := sandboxProfileString(normalizeProfilePath("/repo/secret-read"))
+	normalizedSecretWrite := sandboxProfileString(normalizeProfilePath("/repo/secret-write"))
+	denySecretReadRule := `(deny file-read* (subpath "` + normalizedSecretRead + `"))`
+	denySecretReadUnlinkRule := `(deny file-write-unlink (subpath "` + normalizedSecretRead + `"))`
+	denySecretWriteRule := `(deny file-write* (subpath "` + normalizedSecretWrite + `"))`
 	for _, want := range []string{
 		`(deny file-write* (literal "/repo/vendor"))`,
 		`(deny file-write* (subpath "/repo/vendor"))`,
 		`(deny file-write* (regex #"^/repo/\.git(/.*)?$"))`,
 		`(deny file-write* (regex #"^/repo/\.zero(/.*)?$"))`,
-		`(deny file-read* (subpath "/repo/secret-read"))`,
-		`(deny file-write-unlink (subpath "/repo/secret-read"))`,
-		`(deny file-write* (subpath "/repo/secret-write"))`,
+		denySecretReadRule,
+		denySecretReadUnlinkRule,
+		denySecretWriteRule,
 	} {
 		if !strings.Contains(sbpl, want) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
 		}
 	}
 	allowIdx := strings.Index(sbpl, "(allow file-write*")
-	denyReadIdx := strings.Index(sbpl, `(deny file-read* (subpath "/repo/secret-read"))`)
+	denyReadIdx := strings.Index(sbpl, denySecretReadRule)
 	metadataIdx := strings.Index(sbpl, `(deny file-write* (regex #"^/repo/\.git(/.*)?$"))`)
-	denyWriteIdx := strings.Index(sbpl, `(deny file-write* (subpath "/repo/secret-write"))`)
+	denyWriteIdx := strings.Index(sbpl, denySecretWriteRule)
 	if allowIdx < 0 || denyReadIdx < allowIdx || metadataIdx < allowIdx || denyWriteIdx < allowIdx {
 		t.Fatalf("deny rules must follow the broad write allow (allow=%d denyRead=%d metadata=%d denyWrite=%d):\n%s", allowIdx, denyReadIdx, metadataIdx, denyWriteIdx, sbpl)
 	}
