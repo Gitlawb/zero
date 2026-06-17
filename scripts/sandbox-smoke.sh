@@ -49,7 +49,10 @@ case "$(go env GOOS)" in
     go test ./internal/sandbox -run TestSandboxExecProfileAllowsDevNullAndTemp -count=1
     ;;
   windows)
-    echo "Windows real sandbox smoke will be enabled with the native Windows backend."
+    ZERO_SANDBOX_REAL_SMOKE=1 \
+      ZERO_WINDOWS_COMMAND_RUNNER_EXE="$tmpdir/windows-zero-windows-command-runner.exe" \
+      ZERO_WINDOWS_SANDBOX_SETUP_EXE="$tmpdir/windows-zero-windows-sandbox-setup.exe" \
+      go test ./internal/sandbox -run TestWindowsRestrictedTokenRealSandboxSmoke -count=1
     ;;
   *)
     echo "No real sandbox smoke is defined for this host platform."
