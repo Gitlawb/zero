@@ -107,7 +107,7 @@ func (m *model) recomputeSuggestions() {
 	token := strings.TrimSpace(trimmed)
 
 	m.commandPaletteOpen = true
-	matches := matchCommandSuggestions(token)
+	matches := m.matchCommandSuggestions(token)
 	m.suggestions = matches
 	if m.suggestionIdx >= len(matches) {
 		m.suggestionIdx = 0
@@ -167,17 +167,30 @@ func isPathQueryBoundary(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
+func (m model) matchCommandSuggestions(token string) []commandSuggestion {
+	return matchCommandSuggestionsWithFilter(token, func(command commandDefinition) bool {
+		return command.kind != commandSandboxSetup || m.sandboxSetupCommand != nil
+	})
+}
+
 // matchCommandSuggestions returns commands whose canonical name or any alias has
 // the typed prefix (case-insensitive), preserving commandDefinitions order and
 // capped at maxCommandSuggestions. A command matched via an alias is still listed
 // by its canonical name (completing always inserts the canonical form).
 func matchCommandSuggestions(token string) []commandSuggestion {
+	return matchCommandSuggestionsWithFilter(token, func(commandDefinition) bool { return true })
+}
+
+func matchCommandSuggestionsWithFilter(token string, include func(commandDefinition) bool) []commandSuggestion {
 	prefix := strings.ToLower(strings.TrimSpace(token))
 	if prefix == "" {
 		return nil
 	}
 	out := make([]commandSuggestion, 0, minInt(maxCommandSuggestions, len(commandDefinitions)))
 	for _, command := range commandDefinitions {
+		if include != nil && !include(command) {
+			continue
+		}
 		if !commandHasPrefix(command, prefix) {
 			continue
 		}

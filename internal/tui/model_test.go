@@ -179,6 +179,7 @@ func TestParseCommand(t *testing.T) {
 		{input: "/quit", kind: commandExit},
 		{input: "/tools", kind: commandTools},
 		{input: "/permissions", kind: commandPermissions},
+		{input: "/sandbox-setup", kind: commandSandboxSetup},
 		{input: "/context", kind: commandContext},
 		{input: "/model", kind: commandModel},
 		{input: "/model list", kind: commandModel, text: "list"},

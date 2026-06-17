@@ -581,6 +581,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 				ExitCode: exitCode,
 			}
 		},
+		SandboxSetupCommand: func(context.Context) tui.SandboxSetupCommandResult {
+			var stdout, stderr bytes.Buffer
+			exitCode := runSandboxSetup(nil, &stdout, &stderr, deps)
+			return tui.SandboxSetupCommandResult{
+				Output:   strings.TrimSpace(stdout.String()),
+				Error:    strings.TrimSpace(stderr.String()),
+				ExitCode: exitCode,
+			}
+		},
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,

@@ -15,6 +15,7 @@ const (
 	commandTools
 	commandMCP
 	commandPermissions
+	commandSandboxSetup
 	commandProvider
 	commandModel
 	commandMode
@@ -101,6 +102,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupRuntime,
 		description: "Show the active permission mode and sandbox grants.",
 		kind:        commandPermissions,
+	},
+	{
+		name:        "/sandbox-setup",
+		usage:       "/sandbox-setup",
+		group:       commandGroupRuntime,
+		description: "Run native sandbox setup for this platform.",
+		kind:        commandSandboxSetup,
 	},
 	{
 		name:        "/tools",

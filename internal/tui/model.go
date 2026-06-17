@@ -56,10 +56,13 @@ type model struct {
 	mcpPermissionStore     *internalmcp.PermissionStore
 	mcpTokenStore          *internalmcp.TokenStore
 	mcpCommand             func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand    func(context.Context) SandboxSetupCommandResult
 	mcpViewStateCache      MCPViewState
 	mcpViewStateReady      bool
 	mcpCommandSeq          int
 	mcpCommandCancel       context.CancelFunc
+	sandboxSetupSeq        int
+	sandboxSetupInFlight   bool
 	doctorCommandSeq       int
 	doctorInFlight         bool
 	doctorFrame            int
@@ -295,6 +298,11 @@ type doctorCommandResultMsg struct {
 	text string
 }
 
+type sandboxSetupCommandResultMsg struct {
+	id     int
+	result SandboxSetupCommandResult
+}
+
 type prStateMsg struct {
 	state PrState
 }
@@ -447,6 +455,7 @@ func newModel(ctx context.Context, options Options) model {
 		mcpPermissionStore:     options.MCPPermissionStore,
 		mcpTokenStore:          options.MCPTokenStore,
 		mcpCommand:             options.MCPCommand,
+		sandboxSetupCommand:    options.SandboxSetupCommand,
 		agentOptions:           options.AgentOptions,
 		sessionCompactor:       options.SessionCompactor,
 		runtimeMessageSink:     options.RuntimeMessageSink,
@@ -1226,6 +1235,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.doctorInFlight = false
 			m.doctorFrame = 0
 			m = m.setDoctorStatusRow(msg.text)
+		}
+		return m, nil
+	case sandboxSetupCommandResultMsg:
+		if msg.id == 0 || msg.id == m.sandboxSetupSeq {
+			m.sandboxSetupInFlight = false
+			m = m.setSandboxSetupStatusRow(sandboxSetupResultText(msg.result))
 		}
 		return m, nil
 	case prStateMsg:
@@ -2276,6 +2291,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
+	case commandSandboxSetup:
+		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {

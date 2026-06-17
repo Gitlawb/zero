@@ -40,6 +40,7 @@ type Options struct {
 	MCPPermissionStore     *mcp.PermissionStore
 	MCPTokenStore          *mcp.TokenStore
 	MCPCommand             func(context.Context, []string) MCPCommandResult
+	SandboxSetupCommand    func(context.Context) SandboxSetupCommandResult
 	UsageTracker           *usage.Tracker
 	SessionCompactor       SessionCompactor
 	PrService              *PrService
@@ -65,6 +66,12 @@ type Options struct {
 
 type MCPCommandResult struct {
 	Config   config.MCPConfig
+	Output   string
+	Error    string
+	ExitCode int
+}
+
+type SandboxSetupCommandResult struct {
 	Output   string
 	Error    string
 	ExitCode int
