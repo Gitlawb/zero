@@ -63,6 +63,11 @@ func mouseLeftPress(msg tea.MouseMsg) bool {
 	return event.Button == tea.MouseLeft && isMouseClick(msg)
 }
 
+func mouseRightPress(msg tea.MouseMsg) bool {
+	event := mouseEvent(msg)
+	return event.Button == tea.MouseRight && isMouseClick(msg)
+}
+
 func mouseMotion(msg tea.MouseMsg) bool {
 	_, ok := msg.(tea.MouseMotionMsg)
 	return ok

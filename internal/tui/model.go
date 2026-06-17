@@ -584,25 +584,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
 		return m.applyProviderWizardDeviceCode(msg)
+	case clipboardReadMsg:
+		// Result of a right-click paste. Insert on success; surface a brief
+		// status if the clipboard couldn't be read (e.g. no clipboard utility on
+		// a remote session). An empty clipboard is a silent no-op.
+		if msg.err != nil {
+			m.copyStatusSeq++
+			m.copyStatus = "Paste failed"
+			seq := m.copyStatusSeq
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+				return transcriptCopyStatusExpiredMsg{seq: seq}
+			})
+		}
+		return m.routePaste(msg.content)
 	case tea.PasteMsg:
-		if m.setup.visible {
-			return m.handleSetupPaste(msg)
-		}
-		if m.pendingAskUser != nil {
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			return m, cmd
-		}
-		if m.providerWizard != nil {
-			return m.handleProviderWizardPaste(msg.Content)
-		}
-		if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
-			return m, nil
-		}
-		state := m.currentComposerState()
-		m = m.applyComposerText(state, msg.Content, true)
-		m.recomputeSuggestions()
-		return m, nil
+		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:
 		if m.setup.visible {
 			return m.handleSetupKey(msg)

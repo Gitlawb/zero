@@ -21,6 +21,14 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.providerWizard != nil && m.providerWizard.oauthPending {
 		return m, nil
 	}
+	// A right-click pastes the clipboard straight into the focused field — no
+	// menu. pasteFromClipboardCmd reads the clipboard off the Update goroutine; the
+	// clipboardReadMsg result is routed by routePaste to wherever input is focused
+	// (composer, wizard, setup) or swallowed on a surface with no text field.
+	// Keyboard/selection copy-paste keep working unchanged.
+	if mouseRightPress(msg) {
+		return m, pasteFromClipboardCmd()
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:
