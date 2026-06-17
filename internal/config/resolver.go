@@ -108,7 +108,10 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 }
 
 func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
-	cfg := FileConfig{}
+	// Seed Zero's built-in default MCP servers (e.g. keyless Firecrawl for free,
+	// no-setup web search/scrape) BEFORE merging user/project config, so the user
+	// can override any field or disable a default by writing over it.
+	cfg := FileConfig{MCP: MCPConfig{Servers: DefaultMCPServers()}}
 
 	for _, path := range []string{options.UserConfigPath, options.ProjectConfigPath} {
 		if path == "" {

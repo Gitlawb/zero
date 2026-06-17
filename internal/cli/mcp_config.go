@@ -697,11 +697,20 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 		if err != nil {
 			return false, false, err
 		}
-		if !legacyFound {
+		switch {
+		case legacyFound:
+			raw = legacyRaw
+			found = true
+		case config.IsDefaultMCPServer(name):
+			// A built-in default server isn't written to the file until the user
+			// overrides it. Treat it as present with an empty base so disabling it
+			// writes a minimal {"disabled":true} entry that merges over the default —
+			// letting `zero mcp disable <default>` work even though it lives in code.
+			raw = nil
+			found = true
+		default:
 			return false, false, nil
 		}
-		raw = legacyRaw
-		found = true
 	}
 	var server map[string]json.RawMessage
 	if len(raw) > 0 && string(raw) != "null" {
