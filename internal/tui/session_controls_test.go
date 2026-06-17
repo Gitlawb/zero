@@ -25,9 +25,23 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /effort list to be handled without starting an agent run")
 	}
-	for _, want := range []string{"Effort", "active effort: auto", "available: low, medium, high"} {
-		if !transcriptContains(next.transcript, want) {
-			t.Fatalf("expected effort transcript to contain %q, got %#v", want, next.transcript)
+	// The output is now a command card payload, so the effort list and the
+	// active effort appear inside the same row's text rather than as separate
+	// transcript rows. Strip the card prefix and assert against the rendered
+	// payload.
+	var cardPayload string
+	for _, row := range next.transcript {
+		if strings.HasPrefix(row.text, "\x00command-card\x00") {
+			cardPayload = strings.TrimPrefix(row.text, "\x00command-card\x00")
+			break
+		}
+	}
+	if cardPayload == "" {
+		t.Fatalf("expected an effort command card row, got %#v", next.transcript)
+	}
+	for _, want := range []string{"Effort", "active effort: auto", "available", "low, medium, high"} {
+		if !strings.Contains(cardPayload, want) {
+			t.Fatalf("expected card to contain %q, got %q", want, cardPayload)
 		}
 	}
 

@@ -59,54 +59,73 @@ func (m model) handleEffortCommand(args string) (model, string) {
 	}
 	if args == "auto" {
 		m.reasoningEffort = ""
-		return m, strings.Join([]string{
-			"Effort",
-			"active effort: auto",
-			"Reasoning effort selection will follow the active model/provider defaults.",
-		}, "\n")
+		return m, m.effortStatusCard("auto", "Reasoning effort selection will follow the active model/provider defaults.")
 	}
 
 	requested := modelregistry.ReasoningEffort(args)
 	if !modelregistry.ValidReasoningEffort(requested) {
-		return m, "Effort\nUnknown reasoning effort: " + args
+		return m, m.effortStatusCard(args, "Unknown reasoning effort: "+args)
 	}
 	efforts := m.availableReasoningEfforts()
 	if len(efforts) == 0 {
-		return m, "Effort\nActive model does not expose reasoning effort controls."
+		return m, m.effortStatusCard("", "Active model does not expose reasoning effort controls.")
 	}
 	if !reasoningEffortAllowed(efforts, requested) {
-		return m, fmt.Sprintf("Effort\nReasoning effort %q is not supported by %s.", requested, displayValue(m.modelName, "the active model"))
+		return m, m.effortStatusCard(string(requested),
+			fmt.Sprintf("Reasoning effort %q is not supported by %s.", requested, displayValue(m.modelName, "the active model")))
 	}
 
 	m.reasoningEffort = requested
-	return m, strings.Join([]string{
-		"Effort",
-		"active effort: " + string(requested),
-		"model: " + displayValue(m.modelName, "none"),
-		"Reasoning effort preference is stored for this TUI session.",
-	}, "\n")
+	return m, m.effortStatusCard(string(requested), "Reasoning effort preference is stored for this TUI session.")
+}
+
+// effortStatusCard renders the small inline confirmation card shown after a
+// /effort <value> mutation (set, auto, unknown, unsupported). The body is a
+// lime-bordered card so the transition from "picker open" -> "card collapsed"
+// reads as the same surface the picker came from, instead of a separate grey
+// status block.
+func (m model) effortStatusCard(value string, detail string) string {
+	active := strings.TrimSpace(value)
+	if active == "" {
+		active = "auto"
+	}
+	fields := []commandField{
+		{Key: "active effort", Value: active},
+		{Key: "model", Value: displayValue(m.modelName, "none")},
+	}
+	return renderCommandCardTranscript(commandCard{
+		Title:   "Effort",
+		Summary: []string{"active effort: " + active},
+		Sections: []commandCardSection{{
+			Title:  "State",
+			Fields: fields,
+			Lines:  []string{detail},
+		}},
+	})
 }
 
 func (m model) effortText() string {
-	lines := []string{
-		"active effort: " + m.effortDisplay(),
-		"model: " + displayValue(m.modelName, "none"),
-	}
 	efforts := m.availableReasoningEfforts()
+	fields := []commandField{
+		{Key: "active effort", Value: m.effortDisplay()},
+		{Key: "model", Value: displayValue(m.modelName, "none")},
+	}
+	actions := []string{"use /effort <value> to switch", "/effort auto to clear"}
 	if len(efforts) == 0 {
-		lines = append(lines, "available: none for active model")
-		return renderCommandOutput(commandOutput{
+		fields = append(fields, commandField{Key: "available", Value: "none for active model"})
+		return renderCommandCardTranscript(commandCard{
 			Title:    "Effort",
-			Status:   commandStatusWarning,
-			Sections: []commandSection{{Title: "State", Lines: lines}},
+			Summary:  []string{"active effort: " + m.effortDisplay(), "no reasoning controls on this model"},
+			Sections: []commandCardSection{{Title: "State", Fields: fields}},
+			Actions:  actions,
 		})
 	}
-	lines = append(lines, "available: "+joinReasoningEfforts(efforts))
-	return renderCommandOutput(commandOutput{
+	fields = append(fields, commandField{Key: "available", Value: joinReasoningEfforts(efforts)})
+	return renderCommandCardTranscript(commandCard{
 		Title:    "Effort",
-		Status:   commandStatusOK,
-		Sections: []commandSection{{Title: "State", Lines: lines}},
-		Hints:    []string{"use /effort <value> or /effort auto"},
+		Summary:  []string{"active effort: " + m.effortDisplay(), fmt.Sprintf("%d supported level(s)", len(efforts))},
+		Sections: []commandCardSection{{Title: "State", Fields: fields}},
+		Actions:  actions,
 	})
 }
 

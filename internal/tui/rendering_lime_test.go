@@ -108,6 +108,65 @@ func TestCommandCardRowRendersAsTitledCard(t *testing.T) {
 	}
 }
 
+func TestEffortCommandCardRendersAsTitledCard(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind: rowSystem,
+		text: renderCommandCardTranscript(commandCard{
+			Title:   "Effort",
+			Summary: []string{"active effort: auto", "3 supported level(s)"},
+			Sections: []commandCardSection{{
+				Title: "State",
+				Fields: []commandField{
+					{Key: "active effort", Value: "auto"},
+					{Key: "model", Value: "claude-sonnet-4.5"},
+					{Key: "available", Value: "low, medium, high"},
+				},
+			}},
+			Actions: []string{"use /effort <value> to switch", "/effort auto to clear"},
+		}),
+	}
+
+	got := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if !strings.Contains(got, "Effort") {
+		t.Fatalf("effort card should render title in the border, got:\n%s", got)
+	}
+	for _, want := range []string{
+		"State",
+		"active effort",
+		"auto",
+		"claude-sonnet-4.5",
+		"low, medium, high",
+		"actions: use /effort <value> to switch | /effort auto to clear",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("effort card missing %q in:\n%s", want, got)
+		}
+	}
+	// Status card for unsupported models should still surface the no-controls
+	// hint rather than falling back to the grey commandOutput panel.
+	row.text = renderCommandCardTranscript(commandCard{
+		Title:   "Effort",
+		Summary: []string{"active effort: auto", "no reasoning controls on this model"},
+		Sections: []commandCardSection{{
+			Title: "State",
+			Fields: []commandField{
+				{Key: "active effort", Value: "auto"},
+				{Key: "model", Value: "glm-5.1"},
+				{Key: "available", Value: "none for active model"},
+			},
+		}},
+		Actions: []string{"use /effort <value> to switch", "/effort auto to clear"},
+	})
+	got = plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	if !strings.Contains(got, "none for active model") {
+		t.Fatalf("effort unsupported card should render no-controls row, got:\n%s", got)
+	}
+	if strings.Contains(got, "status: warning") {
+		t.Fatalf("effort card should not carry commandOutput status text, got:\n%s", got)
+	}
+}
+
 func TestCommandCardRowTrimsIndentedActionsLabel(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{
