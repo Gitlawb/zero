@@ -98,6 +98,7 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 		Backend: Backend{
 			Name:            BackendBubblewrap,
 			Available:       true,
+			Platform:        "linux",
 			Executable:      "/usr/bin/bwrap",
 			CommandWrapping: true,
 			NativeIsolation: true,

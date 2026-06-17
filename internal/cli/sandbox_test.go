@@ -341,10 +341,17 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 }
 
 func replacePathToken(value string, path string, token string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
-		value = strings.ReplaceAll(value, resolved, token)
+	replace := func(value string, path string) string {
+		value = strings.ReplaceAll(value, path, token)
+		if encoded, err := json.Marshal(path); err == nil && len(encoded) >= 2 {
+			value = strings.ReplaceAll(value, string(encoded[1:len(encoded)-1]), token)
+		}
+		return value
 	}
-	return strings.ReplaceAll(value, path, token)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+		value = replace(value, resolved)
+	}
+	return replace(value, path)
 }
 
 func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
