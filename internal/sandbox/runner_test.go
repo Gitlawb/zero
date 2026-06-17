@@ -250,6 +250,118 @@ func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
 	}
 }
 
+func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:      FileSystemRestricted,
+			ReadRoots: []string{"/read-root"},
+			WriteRoots: []WritableRoot{{
+				Root: "/write-root",
+			}},
+			IncludePlatformRoots: true,
+			AllowTemp:            true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "", "", "")
+	for _, want := range []string{
+		`(subpath "/read-root")`,
+		`(subpath "/write-root")`,
+		`(subpath "/usr/bin")`,
+		`(subpath "/tmp")`,
+		`(literal "/dev/null")`,
+		`(deny network*)`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
+		}
+	}
+	if strings.Contains(sbpl, "(allow file-read*)\n(allow file-write*)") {
+		t.Fatalf("restricted permission profile must not become full read/write:\n%s", sbpl)
+	}
+}
+
+func TestSeatbeltCommandPlanUsesExecutionPermissionProfile(t *testing.T) {
+	request := SandboxExecutionRequest{
+		Command: CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/workspace"},
+		Backend: Backend{
+			Name:            BackendSandboxExec,
+			Available:       true,
+			Executable:      "/usr/bin/sandbox-exec",
+			CommandWrapping: true,
+			NativeIsolation: true,
+		},
+		WorkspaceRoot: "/workspace",
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				ReadRoots:  []string{"/"},
+				WriteRoots: []WritableRoot{{Root: "/profile-write"}},
+				AllowTemp:  true,
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+		TargetBackend:           BackendMacOSSeatbelt,
+		CommandWrapped:          true,
+		EnforcementLevel:        EnforcementNative,
+		RequiresPlatformSandbox: true,
+	}
+	plan, err := buildLegacyCommandPlan(request, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, SandboxCommandTransformOptions{
+		WriteRoots: []string{"/legacy-write"},
+	})
+	if err != nil {
+		t.Fatalf("buildLegacyCommandPlan: %v", err)
+	}
+	if len(plan.Args) < 2 {
+		t.Fatalf("plan args = %#v, want sandbox-exec profile", plan.Args)
+	}
+	sbpl := plan.Args[1]
+	if !strings.Contains(sbpl, `(subpath "/profile-write")`) {
+		t.Fatalf("plan profile did not use PermissionProfile write root:\n%s", sbpl)
+	}
+	if strings.Contains(sbpl, `/legacy-write`) {
+		t.Fatalf("plan profile used legacy write roots instead of PermissionProfile:\n%s", sbpl)
+	}
+}
+
+func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:      FileSystemRestricted,
+			ReadRoots: []string{"/"},
+			WriteRoots: []WritableRoot{{
+				Root:                   "/repo",
+				ReadOnlySubpaths:       []string{"/repo/vendor"},
+				ProtectedMetadataNames: []string{".git", ".zero"},
+			}},
+			DenyRead:  []string{"/repo/secret-read"},
+			DenyWrite: []string{"/repo/secret-write"},
+			AllowTemp: true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "", "", "")
+	for _, want := range []string{
+		`(require-not (literal "/repo/vendor"))`,
+		`(require-not (subpath "/repo/vendor"))`,
+		`(require-not (regex #"^/repo/\.git(/.*)?$"))`,
+		`(require-not (regex #"^/repo/\.zero(/.*)?$"))`,
+		`(deny file-read* (subpath "/repo/secret-read"))`,
+		`(deny file-write-unlink (subpath "/repo/secret-read"))`,
+		`(deny file-write* (subpath "/repo/secret-write"))`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
+		}
+	}
+	allowIdx := strings.Index(sbpl, "(allow file-write*")
+	denyReadIdx := strings.Index(sbpl, `(deny file-read* (subpath "/repo/secret-read"))`)
+	denyWriteIdx := strings.Index(sbpl, `(deny file-write* (subpath "/repo/secret-write"))`)
+	if allowIdx < 0 || denyReadIdx < allowIdx || denyWriteIdx < allowIdx {
+		t.Fatalf("deny rules must follow the broad write allow (allow=%d denyRead=%d denyWrite=%d):\n%s", allowIdx, denyReadIdx, denyWriteIdx, sbpl)
+	}
+}
+
 func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
 	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
 	if strings.Contains(off, "with message") {

@@ -214,12 +214,12 @@ func legacyAdapterName(backend Backend) string {
 func inferBackendCapabilities(backend Backend) Backend {
 	if backend.Available && backend.Executable != "" {
 		switch backend.Name {
-		case BackendBubblewrap, BackendLinuxBwrap, BackendSandboxExec:
+		case BackendBubblewrap, BackendLinuxBwrap, BackendSandboxExec, BackendMacOSSeatbelt:
 			backend.CommandWrapping = true
 			backend.NativeIsolation = true
 		}
 	}
-	if backend.Name == BackendSandboxExec && backend.Available && backend.Executable != "" {
+	if (backend.Name == BackendSandboxExec || backend.Name == BackendMacOSSeatbelt) && backend.Available && backend.Executable != "" {
 		backend.ScopedEgress = true
 	}
 	return backend

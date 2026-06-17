@@ -243,13 +243,13 @@ func buildLegacyCommandPlan(execRequest SandboxExecutionRequest, policy Policy, 
 		if backend.Available && backend.Executable != "" {
 			return linuxSandboxHelperCommandPlan(execRequest, policy)
 		}
-	case BackendSandboxExec:
+	case BackendMacOSSeatbelt, BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
 			egress, err := startScopedEgress(policy, backend)
 			if err != nil {
 				return CommandPlan{}, err
 			}
-			return withSandboxExecutionMetadata(sandboxExecCommandPlan(spec, workspaceRoot, options.WriteRoots, policy, backend, egress), execRequest), nil
+			return withSandboxExecutionMetadata(seatbeltCommandPlan(execRequest, policy, backend, egress), execRequest), nil
 		}
 	case BackendWSL:
 		// WSL fallback: no native isolation available. Fail closed unless the policy
@@ -623,6 +623,15 @@ func findSeccompHelper() string {
 }
 
 func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots []string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
+	profile := seatbeltCompatibilityPermissionProfile(writeRoots, policy)
+	return sandboxExecCommandPlanWithProfile(spec, workspaceRoot, profile, policy, backend, egress)
+}
+
+func seatbeltCommandPlan(execRequest SandboxExecutionRequest, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
+	return sandboxExecCommandPlanWithProfile(execRequest.Command, execRequest.WorkspaceRoot, execRequest.PermissionProfile, policy, backend, egress)
+}
+
+func sandboxExecCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, profile PermissionProfile, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
 	var proxyPort, socksPort string
 	if egress != nil {
 		if _, port, err := net.SplitHostPort(egress.addr); err == nil {
@@ -636,9 +645,13 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 	if policy.MonitorDenials {
 		denialTag = nextSandboxDenialTag()
 	}
-	args := []string{"-p", sandboxExecProfile(writeRoots, policy, proxyPort, socksPort, denialTag), spec.Name}
+	args := []string{"-p", seatbeltProfileFromPermissionProfile(profile, policy, proxyPort, socksPort, denialTag), spec.Name}
 	args = append(args, spec.Args...)
-	env := sandboxEnvironment(policy, BackendSandboxExec, workspaceRoot)
+	envBackend := backend.Name
+	if envBackend == "" {
+		envBackend = BackendSandboxExec
+	}
+	env := sandboxEnvironment(policy, envBackend, workspaceRoot)
 	if egress != nil {
 		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
 		env = appendCACertEnv(env, egress)
@@ -664,6 +677,33 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 	// monitor matches exactly this run's denials.
 	plan.MonitorTag = denialTag
 	return plan
+}
+
+func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) PermissionProfile {
+	fs := FileSystemPolicy{
+		Kind:                 FileSystemUnrestricted,
+		ReadRoots:            []string{string(filepath.Separator)},
+		IncludePlatformRoots: true,
+		AllowTemp:            true,
+	}
+	if policy.EnforceWorkspace {
+		fs.Kind = FileSystemRestricted
+		fs.WriteRoots = make([]WritableRoot, 0, len(writeRoots))
+		for _, root := range writeRoots {
+			fs.WriteRoots = append(fs.WriteRoots, WritableRoot{Root: root})
+		}
+	}
+	fs.DenyRead = normalizeProfilePaths(policy.DenyRead)
+	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
+	return PermissionProfile{
+		FileSystem: fs,
+		Network: NetworkPolicy{
+			Mode:           effectiveNetwork(policy),
+			AllowedDomains: normalizeDomains(policy.AllowedDomains),
+			DeniedDomains:  normalizeDomains(policy.DeniedDomains),
+			ProxyRequired:  effectiveNetwork(policy) == NetworkScoped,
+		},
+	}
 }
 
 func existingBubblewrapMounts() []string {
@@ -798,24 +838,13 @@ func sandboxMachLookupRule() string {
 }
 
 func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, socksPort string, denialTag string) string {
-	networkRule := networkRuleFor(policy, proxyPort, socksPort)
-	writeRule := "(allow file-write*)"
-	if policy.EnforceWorkspace {
-		// The granted write roots are the only writable *project* locations. Temp
-		// trees and the standard device nodes are the only additions, matching what
-		// the bubblewrap backend already grants (--tmpfs /tmp, --dev /dev).
-		filters := make([]string, 0, len(writeRoots)+len(sandboxWritableSubpaths)+len(sandboxWritableDevices))
-		for _, root := range writeRoots {
-			filters = append(filters, `(subpath "`+sandboxProfileString(root)+`")`)
-		}
-		for _, subpath := range sandboxWritableSubpaths {
-			filters = append(filters, `(subpath "`+subpath+`")`)
-		}
-		for _, device := range sandboxWritableDevices {
-			filters = append(filters, `(literal "`+device+`")`)
-		}
-		writeRule = "(allow file-write*\n  " + strings.Join(filters, "\n  ") + ")"
-	}
+	return seatbeltProfileFromPermissionProfile(seatbeltCompatibilityPermissionProfile(writeRoots, policy), policy, proxyPort, socksPort, denialTag)
+}
+
+func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Policy, proxyPort string, socksPort string, denialTag string) string {
+	networkRule := networkRuleForProfile(profile.Network, proxyPort, socksPort)
+	readRule := seatbeltReadRule(profile.FileSystem)
+	writeRule := seatbeltWriteRule(profile.FileSystem)
 	denyDefault := "(deny default)"
 	if denialTag != "" {
 		// Tag denials so the runtime log monitor can attribute them to THIS run; the
@@ -834,32 +863,139 @@ func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, so
 		// process outside its own group.
 		"(allow signal (target self) (target pgrp))",
 		sandboxMachLookupRule(),
-		"(allow file-read*)",
+		readRule,
 		writeRule,
 	}
-	// DenyWrite entries are emitted AFTER the write allow so seatbelt's
-	// last-match-wins makes them override the workspace/AllowWrite binds — so
-	// "DenyWrite wins" holds for shell commands too, not just the policy gate.
-	rules = append(rules, denyWriteRules(policy)...)
+	rules = append(rules, denyReadRules(profile.FileSystem)...)
+	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
-	return strings.Join(rules, "\n")
+	return strings.Join(nonEmptyStrings(rules), "\n")
+}
+
+func seatbeltReadRule(fs FileSystemPolicy) string {
+	if fs.Kind == FileSystemUnrestricted {
+		return "(allow file-read*)"
+	}
+	filters := make([]string, 0, len(fs.ReadRoots)+len(macosPlatformReadRoots()))
+	for _, root := range fs.ReadRoots {
+		filters = appendSeatbeltSubpathFilter(filters, root)
+	}
+	if fs.IncludePlatformRoots {
+		for _, root := range macosPlatformReadRoots() {
+			filters = appendSeatbeltSubpathFilter(filters, root)
+		}
+	}
+	if len(filters) == 0 {
+		return ""
+	}
+	return "(allow file-read* file-test-existence\n  " + strings.Join(filters, "\n  ") + ")"
+}
+
+func seatbeltWriteRule(fs FileSystemPolicy) string {
+	if fs.Kind == FileSystemUnrestricted {
+		return "(allow file-write*)"
+	}
+	filters := make([]string, 0, len(fs.WriteRoots)+len(sandboxWritableSubpaths)+len(sandboxWritableDevices))
+	for _, root := range fs.WriteRoots {
+		if filter := seatbeltWritableRootFilter(root); filter != "" {
+			filters = append(filters, filter)
+		}
+	}
+	if fs.AllowTemp {
+		for _, subpath := range sandboxWritableSubpaths {
+			filters = append(filters, `(subpath "`+sandboxProfileString(subpath)+`")`)
+		}
+	}
+	for _, device := range sandboxWritableDevices {
+		filters = append(filters, `(literal "`+sandboxProfileString(device)+`")`)
+	}
+	if len(filters) == 0 {
+		return ""
+	}
+	return "(allow file-write*\n  " + strings.Join(filters, "\n  ") + ")"
+}
+
+func seatbeltWritableRootFilter(root WritableRoot) string {
+	rootPath := strings.TrimSpace(root.Root)
+	if rootPath == "" {
+		return ""
+	}
+	base := `(subpath "` + sandboxProfileString(rootPath) + `")`
+	var requirements []string
+	for _, subpath := range root.ReadOnlySubpaths {
+		subpath = strings.TrimSpace(subpath)
+		if subpath == "" {
+			continue
+		}
+		escaped := sandboxProfileString(subpath)
+		requirements = append(requirements, `(require-not (literal "`+escaped+`"))`)
+		requirements = append(requirements, `(require-not (subpath "`+escaped+`"))`)
+	}
+	for _, name := range root.ProtectedMetadataNames {
+		regex := seatbeltProtectedMetadataRegex(rootPath, name)
+		if regex == "" {
+			continue
+		}
+		requirements = append(requirements, `(require-not (regex #"`+sandboxProfileRegex(regex)+`"))`)
+	}
+	if len(requirements) == 0 {
+		return base
+	}
+	return "(require-all " + base + " " + strings.Join(requirements, " ") + ")"
+}
+
+func seatbeltProtectedMetadataRegex(root string, name string) string {
+	root = strings.TrimSpace(filepath.ToSlash(filepath.Clean(root)))
+	name = strings.Trim(strings.TrimSpace(name), `/\`)
+	if root == "" || name == "" || name == "." {
+		return ""
+	}
+	root = strings.TrimRight(root, "/")
+	if root == "" {
+		root = "/"
+	}
+	escapedRoot := regexpQuoteMeta(root)
+	escapedName := regexpQuoteMeta(name)
+	if root == "/" {
+		return "^/" + escapedName + "(/.*)?$"
+	}
+	return "^" + escapedRoot + "/" + escapedName + "(/.*)?$"
+}
+
+func denyReadRules(fs FileSystemPolicy) []string {
+	return denySeatbeltPathRules("file-read*", fs.DenyRead)
 }
 
 // denyWriteRules returns seatbelt deny clauses for the policy's resolved
 // DenyWrite paths: a (subpath ...) clause for a directory, a (literal ...) clause
 // for a single file. Empty when DenyWrite is unset.
 func denyWriteRules(policy Policy) []string {
-	resolved := resolvePolicyPaths(policy.DenyWrite)
+	return denyWriteRulesFromPaths(resolvePolicyPaths(policy.DenyWrite))
+}
+
+func denyWriteRulesFromPaths(paths []string) []string {
+	return denySeatbeltPathRules("file-write*", paths)
+}
+
+func denySeatbeltPathRules(action string, paths []string) []string {
+	resolved := normalizeProfilePaths(paths)
 	if len(resolved) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(resolved))
+	out := make([]string, 0, len(resolved)*2)
 	for _, path := range resolved {
-		filter := `(subpath "` + sandboxProfileString(path) + `")`
+		filters := []string{`(subpath "` + sandboxProfileString(path) + `")`}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			filter = `(literal "` + sandboxProfileString(path) + `")`
+			filters = []string{`(literal "` + sandboxProfileString(path) + `")`}
+		} else {
+			filters = append(filters, `(literal "`+sandboxProfileString(path)+`")`)
 		}
-		out = append(out, "(deny file-write* "+filter+")")
+		for _, filter := range filters {
+			out = append(out, "(deny "+action+" "+filter+")")
+			if action == "file-read*" {
+				out = append(out, "(deny file-write-unlink "+filter+")")
+			}
+		}
 	}
 	return out
 }
@@ -873,7 +1009,11 @@ func denyWriteRules(policy Policy) []string {
 // ALL_PROXY=socks5://... must reach the SOCKS listener). A scoped policy with no
 // resolvable proxy port falls back to a full deny (fail closed).
 func networkRuleFor(policy Policy, proxyPort string, socksPort string) string {
-	switch effectiveNetwork(policy) {
+	return networkRuleForProfile(NetworkPolicy{Mode: effectiveNetwork(policy)}, proxyPort, socksPort)
+}
+
+func networkRuleForProfile(network NetworkPolicy, proxyPort string, socksPort string) string {
+	switch network.Mode {
 	case NetworkAllow:
 		return "(allow network*)"
 	case NetworkScoped:
@@ -904,5 +1044,66 @@ func networkRuleFor(policy Policy, proxyPort string, socksPort string) string {
 
 func sandboxProfileString(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
+	return replacer.Replace(value)
+}
+
+func sandboxProfileRegex(value string) string {
+	replacer := strings.NewReplacer(`"`, `\"`, "\n", `\n`, "\r", `\r`)
+	return replacer.Replace(value)
+}
+
+func appendSeatbeltSubpathFilter(filters []string, root string) []string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return filters
+	}
+	return append(filters, `(subpath "`+sandboxProfileString(root)+`")`)
+}
+
+func macosPlatformReadRoots() []string {
+	return []string{
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/usr/lib",
+		"/usr/libexec",
+		"/usr/share",
+		"/etc",
+		"/private/etc",
+		"/System/Library",
+		"/Library/Apple",
+		"/Library/Preferences",
+		"/dev",
+	}
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func regexpQuoteMeta(value string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`.`, `\.`,
+		`+`, `\+`,
+		`*`, `\*`,
+		`?`, `\?`,
+		`(`, `\(`,
+		`)`, `\)`,
+		`|`, `\|`,
+		`[`, `\[`,
+		`]`, `\]`,
+		`{`, `\{`,
+		`}`, `\}`,
+		`^`, `\^`,
+		`$`, `\$`,
+	)
 	return replacer.Replace(value)
 }

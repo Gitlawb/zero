@@ -121,9 +121,10 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 		Fallback:        false,
 		CommandWrapping: true,
 		NativeIsolation: true,
-		// Only sandbox-exec can enforce scoped egress today; bubblewrap's isolated
-		// network namespace has no bridge to the host filtering proxy.
-		ScopedEgress: name == BackendSandboxExec,
+		// macOS Seatbelt can enforce scoped egress by allowing only the local
+		// filtering proxy ports. Bubblewrap's isolated network namespace has no
+		// bridge to the host filtering proxy.
+		ScopedEgress: name == BackendSandboxExec || name == BackendMacOSSeatbelt,
 		Executable:   executable,
 		Message:      message,
 	}
