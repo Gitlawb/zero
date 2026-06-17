@@ -15,7 +15,7 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 2
+const windowsSandboxSetupMarkerSchemaVersion = 3
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string
@@ -36,6 +36,8 @@ type WindowsSandboxSetupMarker struct {
 	ACLPlanHash       string `json:"aclPlanHash"`
 	ACLPlanEntries    int    `json:"aclPlanEntries"`
 	NetworkPolicyHash string `json:"networkPolicyHash"`
+	NetworkPlanHash   string `json:"networkPlanHash"`
+	NetworkFilters    int    `json:"networkFilters"`
 }
 
 func findWindowsSandboxSetupHelper(lookup func(string) (string, error)) string {
@@ -184,11 +186,21 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
+	networkPlan, err := BuildWindowsNetworkPlan(config.commandConfig())
+	if err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
+	networkPlanHash, err := WindowsNetworkPlanHash(networkPlan)
+	if err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
 	return WindowsSandboxSetupMarker{
 		SchemaVersion:     windowsSandboxSetupMarkerSchemaVersion,
 		ACLPlanHash:       hash,
 		ACLPlanEntries:    len(plan.Entries),
 		NetworkPolicyHash: networkHash,
+		NetworkPlanHash:   networkPlanHash,
+		NetworkFilters:    len(networkPlan.Filters),
 	}, nil
 }
 
@@ -251,6 +263,9 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	}
 	if actual.NetworkPolicyHash != expected.NetworkPolicyHash {
 		return errors.New("windows sandbox setup is out of date: network policy changed")
+	}
+	if actual.NetworkPlanHash != expected.NetworkPlanHash || actual.NetworkFilters != expected.NetworkFilters {
+		return errors.New("windows sandbox setup is out of date: network enforcement plan changed")
 	}
 	return nil
 }

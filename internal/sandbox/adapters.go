@@ -190,7 +190,11 @@ func (backend Backend) restrictions(policy Policy) []string {
 		restrictions = append(restrictions, "filesystem writes must stay inside workspace")
 	}
 	if effectivePolicy.Network == NetworkDeny {
-		restrictions = append(restrictions, "network access denied unless a future adapter grants it explicitly")
+		if backend.Name == BackendWindowsRestrictedToken && backend.NativeIsolation {
+			restrictions = append(restrictions, "Windows WFP filters block outbound network for sandbox identities")
+		} else {
+			restrictions = append(restrictions, "network access denied unless a future adapter grants it explicitly")
+		}
 	}
 	if effectivePolicy.DenyDestructiveShell {
 		restrictions = append(restrictions, "destructive shell patterns denied before execution")
@@ -291,6 +295,15 @@ func (backend Backend) Capabilities(policy Policy) []BackendCapability {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
+	networkGuard := BackendCapability{
+		Key:    "network_guard",
+		Status: policyCapabilityStatus(policy.Mode, policy.Network == NetworkDeny),
+		Detail: "network-capable tool requests are denied before execution",
+	}
+	if policy.Mode != ModeDisabled && policy.Network == NetworkDeny && backend.Name == BackendWindowsRestrictedToken && backend.NativeIsolation {
+		networkGuard.Status = CapabilityNative
+		networkGuard.Detail = "Windows WFP filters block outbound network for sandbox identities"
+	}
 	capabilities := []BackendCapability{
 		{
 			Key:    "policy_evaluation",
@@ -302,11 +315,7 @@ func (backend Backend) Capabilities(policy Policy) []BackendCapability {
 			Status: policyCapabilityStatus(policy.Mode, policy.EnforceWorkspace),
 			Detail: "filesystem writes are checked against the workspace root before execution",
 		},
-		{
-			Key:    "network_guard",
-			Status: policyCapabilityStatus(policy.Mode, policy.Network == NetworkDeny),
-			Detail: "network-capable tool requests are denied before execution",
-		},
+		networkGuard,
 		{
 			Key:    "destructive_shell_guard",
 			Status: policyCapabilityStatus(policy.Mode, policy.DenyDestructiveShell),

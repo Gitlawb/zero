@@ -92,6 +92,9 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityNative {
 			t.Fatalf("windows native isolation capability = %#v, want native", plan.Capabilities)
 		}
+		if capabilityStatus(plan.Capabilities, "network_guard") != CapabilityNative {
+			t.Fatalf("windows network guard capability = %#v, want native WFP enforcement", plan.Capabilities)
+		}
 	})
 
 	t.Run("windows setup helper missing", func(t *testing.T) {

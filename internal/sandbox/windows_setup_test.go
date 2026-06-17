@@ -111,7 +111,7 @@ func TestWindowsSandboxSetupMarkerRefreshesWhenNetworkChanges(t *testing.T) {
 	}
 
 	changed := config
-	changed.PermissionProfile.Network = NetworkPolicy{Mode: NetworkScoped, AllowedDomains: []string{"example.com"}, ProxyRequired: true}
+	changed.PermissionProfile.Network = NetworkPolicy{Mode: NetworkDeny}
 	err := ValidateWindowsSandboxSetupMarker(changed)
 	if err == nil || !strings.Contains(err.Error(), "network policy changed") {
 		t.Fatalf("ValidateWindowsSandboxSetupMarker changed error = %v, want network policy changed", err)
