@@ -98,6 +98,10 @@ func TestPlanWindowsDenyReadPathsIncludesCanonicalExistingPath(t *testing.T) {
 	if err := os.Mkdir(realDir, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
+	wantRealDir, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks real dir: %v", err)
+	}
 	linkDir := filepath.Join(root, "link")
 	if err := os.Symlink(realDir, linkDir); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
@@ -107,8 +111,8 @@ func TestPlanWindowsDenyReadPathsIncludesCanonicalExistingPath(t *testing.T) {
 	if !windowsPathListContains(paths, linkDir) {
 		t.Fatalf("deny-read paths = %#v, want lexical path %q", paths, linkDir)
 	}
-	if !windowsPathListContains(paths, realDir) {
-		t.Fatalf("deny-read paths = %#v, want canonical path %q", paths, realDir)
+	if !windowsPathListContains(paths, wantRealDir) {
+		t.Fatalf("deny-read paths = %#v, want canonical path %q", paths, wantRealDir)
 	}
 }
 
