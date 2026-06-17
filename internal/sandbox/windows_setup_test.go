@@ -78,6 +78,34 @@ func TestWindowsSandboxSetupMarkerRefreshesWhenProfileChanges(t *testing.T) {
 	}
 }
 
+func TestWindowsSandboxSetupMarkerRefreshesWhenNetworkChanges(t *testing.T) {
+	config := WindowsSandboxSetupConfig{
+		SandboxHome:    t.TempDir(),
+		CommandCWD:     `C:\workspace`,
+		WorkspaceRoots: []string{`C:\workspace`},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+			},
+			Network: NetworkPolicy{Mode: NetworkAllow},
+		},
+	}
+	if _, err := WriteWindowsSandboxSetupMarker(config); err != nil {
+		t.Fatalf("WriteWindowsSandboxSetupMarker: %v", err)
+	}
+	if err := ValidateWindowsSandboxSetupMarker(config); err != nil {
+		t.Fatalf("ValidateWindowsSandboxSetupMarker unchanged: %v", err)
+	}
+
+	changed := config
+	changed.PermissionProfile.Network = NetworkPolicy{Mode: NetworkScoped, AllowedDomains: []string{"example.com"}, ProxyRequired: true}
+	err := ValidateWindowsSandboxSetupMarker(changed)
+	if err == nil || !strings.Contains(err.Error(), "network policy changed") {
+		t.Fatalf("ValidateWindowsSandboxSetupMarker changed error = %v, want network policy changed", err)
+	}
+}
+
 func TestWindowsSandboxSetupConfigFromCommandPreservesProfileInputs(t *testing.T) {
 	command := WindowsSandboxCommandConfig{
 		SandboxHome:    t.TempDir(),

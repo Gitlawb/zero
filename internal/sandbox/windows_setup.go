@@ -15,7 +15,7 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 1
+const windowsSandboxSetupMarkerSchemaVersion = 2
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string
@@ -32,9 +32,10 @@ type WindowsSandboxSetupConfig struct {
 }
 
 type WindowsSandboxSetupMarker struct {
-	SchemaVersion  int    `json:"schemaVersion"`
-	ACLPlanHash    string `json:"aclPlanHash"`
-	ACLPlanEntries int    `json:"aclPlanEntries"`
+	SchemaVersion     int    `json:"schemaVersion"`
+	ACLPlanHash       string `json:"aclPlanHash"`
+	ACLPlanEntries    int    `json:"aclPlanEntries"`
+	NetworkPolicyHash string `json:"networkPolicyHash"`
 }
 
 func findWindowsSandboxSetupHelper(lookup func(string) (string, error)) string {
@@ -172,10 +173,15 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
+	networkHash, err := WindowsNetworkPolicyHash(config.PermissionProfile.Network)
+	if err != nil {
+		return WindowsSandboxSetupMarker{}, err
+	}
 	return WindowsSandboxSetupMarker{
-		SchemaVersion:  windowsSandboxSetupMarkerSchemaVersion,
-		ACLPlanHash:    hash,
-		ACLPlanEntries: len(plan.Entries),
+		SchemaVersion:     windowsSandboxSetupMarkerSchemaVersion,
+		ACLPlanHash:       hash,
+		ACLPlanEntries:    len(plan.Entries),
+		NetworkPolicyHash: networkHash,
 	}, nil
 }
 
@@ -235,6 +241,9 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	}
 	if actual.ACLPlanHash != expected.ACLPlanHash || actual.ACLPlanEntries != expected.ACLPlanEntries {
 		return errors.New("windows sandbox setup is out of date: permission roots or deny lists changed")
+	}
+	if actual.NetworkPolicyHash != expected.NetworkPolicyHash {
+		return errors.New("windows sandbox setup is out of date: network policy changed")
 	}
 	return nil
 }

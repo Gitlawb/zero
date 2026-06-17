@@ -25,3 +25,27 @@ func TestValidateWindowsNetworkPolicyFailsClosedForDenyAndScoped(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowsNetworkPolicyHashNormalizesDomainOrder(t *testing.T) {
+	left, err := WindowsNetworkPolicyHash(NetworkPolicy{
+		Mode:           NetworkScoped,
+		AllowedDomains: []string{"API.Example.com", "example.com"},
+		DeniedDomains:  []string{"blocked.example.com"},
+		ProxyRequired:  true,
+	})
+	if err != nil {
+		t.Fatalf("WindowsNetworkPolicyHash left: %v", err)
+	}
+	right, err := WindowsNetworkPolicyHash(NetworkPolicy{
+		Mode:           NetworkScoped,
+		AllowedDomains: []string{"example.com", "api.example.com"},
+		DeniedDomains:  []string{"blocked.example.com"},
+		ProxyRequired:  true,
+	})
+	if err != nil {
+		t.Fatalf("WindowsNetworkPolicyHash right: %v", err)
+	}
+	if left != right {
+		t.Fatalf("network hashes differ: %q vs %q", left, right)
+	}
+}
