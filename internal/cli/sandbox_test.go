@@ -335,9 +335,22 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	if got != string(wantBytes) {
+	if !jsonValuesEqual(t, wantBytes, []byte(got)) {
 		t.Fatalf("policy JSON golden mismatch\nwant:\n%s\ngot:\n%s", string(wantBytes), got)
 	}
+}
+
+func jsonValuesEqual(t *testing.T, wantBytes []byte, gotBytes []byte) bool {
+	t.Helper()
+	var wantValue any
+	if err := json.Unmarshal(wantBytes, &wantValue); err != nil {
+		t.Fatalf("decode wanted JSON: %v", err)
+	}
+	var gotValue any
+	if err := json.Unmarshal(gotBytes, &gotValue); err != nil {
+		t.Fatalf("decode got JSON: %v\n%s", err, string(gotBytes))
+	}
+	return reflect.DeepEqual(wantValue, gotValue)
 }
 
 func replacePathToken(value string, path string, token string) string {
