@@ -1,0 +1,88 @@
+{
+  "policy": {
+    "mode": "enforce",
+    "network": "deny",
+    "enforceWorkspace": true,
+    "denyDestructiveShell": true,
+    "allowPolicyOnlyRunner": true,
+    "maxAutonomy": "high"
+  },
+  "backend": {
+    "name": "policy-only",
+    "available": false,
+    "platform": "windows",
+    "fallback": true,
+    "commandWrapping": false,
+    "nativeIsolation": false,
+    "message": "policy-only fallback: Windows native sandbox adapter is not implemented"
+  },
+  "plan": {
+    "backend": {
+      "name": "policy-only",
+      "available": false,
+      "platform": "windows",
+      "fallback": true,
+      "commandWrapping": false,
+      "nativeIsolation": false,
+      "message": "policy-only fallback: Windows native sandbox adapter is not implemented"
+    },
+    "targetBackend": "windows-restricted-token",
+    "workspaceRoot": "$WORKSPACE",
+    "policy": {
+      "mode": "enforce",
+      "network": "deny",
+      "enforceWorkspace": true,
+      "denyDestructiveShell": true,
+      "allowPolicyOnlyRunner": true,
+      "maxAutonomy": "high"
+    },
+    "commandWrapped": false,
+    "enforcementLevel": "degraded",
+    "downgradeReason": "policy-only fallback: Windows native sandbox adapter is not implemented",
+    "supportLevel": "policy-only",
+    "capabilities": [
+      {
+        "key": "policy_evaluation",
+        "status": "preflight",
+        "detail": "tool requests are evaluated against sandbox policy before execution"
+      },
+      {
+        "key": "workspace_write_guard",
+        "status": "preflight",
+        "detail": "filesystem writes are checked against the workspace root before execution"
+      },
+      {
+        "key": "network_guard",
+        "status": "preflight",
+        "detail": "network-capable tool requests are denied before execution"
+      },
+      {
+        "key": "destructive_shell_guard",
+        "status": "preflight",
+        "detail": "destructive shell patterns are denied before execution"
+      },
+      {
+        "key": "native_process_isolation",
+        "status": "unavailable",
+        "detail": "Windows native sandbox adapter is not implemented yet"
+      },
+      {
+        "key": "command_wrapping",
+        "status": "unavailable",
+        "detail": "shell commands are not wrapped by a native platform sandbox"
+      }
+    ],
+    "restrictions": [
+      "filesystem writes must stay inside workspace",
+      "network access denied unless a future adapter grants it explicitly",
+      "destructive shell patterns denied before execution",
+      "native process isolation unavailable on windows; policy engine still evaluates tool requests before execution",
+      "shell commands are not wrapped by a native platform sandbox"
+    ],
+    "warnings": [
+      "Windows native sandbox adapter is not implemented; using policy-only preflight checks",
+      "shell commands are not wrapped by a native platform sandbox"
+    ]
+  },
+  "grantsPath": "$GRANTS"
+}

@@ -32,15 +32,19 @@ type CommandSpec struct {
 }
 
 type CommandPlan struct {
-	Backend       Backend  `json:"backend"`
-	WorkspaceRoot string   `json:"workspaceRoot"`
-	Policy        Policy   `json:"policy"`
-	Wrapped       bool     `json:"wrapped"`
-	Name          string   `json:"name"`
-	Args          []string `json:"args"`
-	Dir           string   `json:"dir,omitempty"`
-	Env           []string `json:"env,omitempty"`
-	SandboxDir    string   `json:"sandboxDir,omitempty"`
+	Backend           Backend          `json:"backend"`
+	TargetBackend     BackendName      `json:"targetBackend"`
+	WorkspaceRoot     string           `json:"workspaceRoot"`
+	Policy            Policy           `json:"policy"`
+	Wrapped           bool             `json:"wrapped"`
+	SandboxEnvMarkers []string         `json:"sandboxEnvMarkers,omitempty"`
+	EnforcementLevel  EnforcementLevel `json:"enforcementLevel"`
+	DowngradeReason   string           `json:"downgradeReason,omitempty"`
+	Name              string           `json:"name"`
+	Args              []string         `json:"args"`
+	Dir               string           `json:"dir,omitempty"`
+	Env               []string         `json:"env,omitempty"`
+	SandboxDir        string           `json:"sandboxDir,omitempty"`
 	// MonitorTag, when non-empty, is the unique marker embedded in the
 	// sandbox-exec profile's denial messages; a caller passes it to
 	// StartDenialMonitor to capture what the sandbox blocked. Empty unless
@@ -194,8 +198,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
 	// IsAlreadySandboxed) must not be wrapped again — nested bwrap / sandbox-exec
 	// fails and a second egress proxy would be redundant. Return a pass-through
-	// plan. Mirrors the already-sandboxed guard used by comparable executor
-	// sandboxes.
+	// plan.
 	if IsAlreadySandboxed() {
 		return directCommandPlan(spec, backend, policy, workspaceRoot), nil
 	}
@@ -267,15 +270,19 @@ func wslCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backe
 			"with proxy egress (least privilege). The engine still enforces the full policy."
 	}
 	plan := CommandPlan{
-		Backend:       backend,
-		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
-		Wrapped:       false,
-		Name:          spec.Name,
-		Args:          cloneStrings(spec.Args),
-		Dir:           spec.Dir,
-		Env:           env,
-		Notes:         []string{note},
+		Backend:           backend,
+		TargetBackend:     backend.TargetBackend(),
+		WorkspaceRoot:     workspaceRoot,
+		Policy:            policy,
+		Wrapped:           false,
+		SandboxEnvMarkers: backend.SandboxEnvMarkers(policy),
+		EnforcementLevel:  backend.EnforcementLevel(policy),
+		DowngradeReason:   note,
+		Name:              spec.Name,
+		Args:              cloneStrings(spec.Args),
+		Dir:               spec.Dir,
+		Env:               env,
+		Notes:             []string{note},
 	}
 	if egress != nil {
 		plan.cleanup = egress.cleanup
@@ -358,14 +365,18 @@ func startScopedEgress(policy Policy, backend Backend) (*scopedEgress, error) {
 
 func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspaceRoot string) CommandPlan {
 	return CommandPlan{
-		Backend:       backend,
-		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
-		Wrapped:       false,
-		Name:          spec.Name,
-		Args:          cloneStrings(spec.Args),
-		Dir:           spec.Dir,
-		Env:           cloneStrings(spec.Env),
+		Backend:           backend,
+		TargetBackend:     backend.TargetBackend(),
+		WorkspaceRoot:     workspaceRoot,
+		Policy:            policy,
+		Wrapped:           false,
+		SandboxEnvMarkers: backend.SandboxEnvMarkers(policy),
+		EnforcementLevel:  backend.EnforcementLevel(policy),
+		DowngradeReason:   backend.DowngradeReason(policy),
+		Name:              spec.Name,
+		Args:              cloneStrings(spec.Args),
+		Dir:               spec.Dir,
+		Env:               cloneStrings(spec.Env),
 	}
 }
 
@@ -488,13 +499,16 @@ func bubblewrapCommandPlan(spec CommandSpec, workspaceRoot string, relativeDir s
 	args = append(args, "--")
 	args = append(args, command...)
 	return CommandPlan{
-		Backend:       backend,
-		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
-		Wrapped:       true,
-		Name:          backend.Executable,
-		Args:          args,
-		SandboxDir:    sandboxDir,
+		Backend:           backend,
+		TargetBackend:     backend.TargetBackend(),
+		WorkspaceRoot:     workspaceRoot,
+		Policy:            policy,
+		Wrapped:           true,
+		SandboxEnvMarkers: backend.SandboxEnvMarkers(policy),
+		EnforcementLevel:  backend.EnforcementLevel(policy),
+		Name:              backend.Executable,
+		Args:              args,
+		SandboxDir:        sandboxDir,
 	}
 }
 
@@ -546,15 +560,18 @@ func sandboxExecCommandPlan(spec CommandSpec, workspaceRoot string, writeRoots [
 		env = appendCACertEnv(env, egress)
 	}
 	plan := CommandPlan{
-		Backend:       backend,
-		WorkspaceRoot: workspaceRoot,
-		Policy:        policy,
-		Wrapped:       true,
-		Name:          backend.Executable,
-		Args:          args,
-		Dir:           spec.Dir,
-		Env:           env,
-		SandboxDir:    spec.Dir,
+		Backend:           backend,
+		TargetBackend:     backend.TargetBackend(),
+		WorkspaceRoot:     workspaceRoot,
+		Policy:            policy,
+		Wrapped:           true,
+		SandboxEnvMarkers: backend.SandboxEnvMarkers(policy),
+		EnforcementLevel:  backend.EnforcementLevel(policy),
+		Name:              backend.Executable,
+		Args:              args,
+		Dir:               spec.Dir,
+		Env:               env,
+		SandboxDir:        spec.Dir,
 	}
 	if egress != nil {
 		plan.cleanup = egress.cleanup

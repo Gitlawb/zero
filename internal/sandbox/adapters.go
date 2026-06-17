@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os/exec"
 	"runtime"
+	"strings"
 )
 
 type BackendOptions struct {
@@ -47,13 +48,18 @@ func (backend Backend) EnforcesScopedEgress() bool {
 }
 
 type BackendPlan struct {
-	Backend       Backend             `json:"backend"`
-	WorkspaceRoot string              `json:"workspaceRoot"`
-	Policy        Policy              `json:"policy"`
-	SupportLevel  BackendSupportLevel `json:"supportLevel"`
-	Capabilities  []BackendCapability `json:"capabilities"`
-	Restrictions  []string            `json:"restrictions"`
-	Warnings      []string            `json:"warnings,omitempty"`
+	Backend           Backend             `json:"backend"`
+	TargetBackend     BackendName         `json:"targetBackend"`
+	WorkspaceRoot     string              `json:"workspaceRoot"`
+	Policy            Policy              `json:"policy"`
+	CommandWrapped    bool                `json:"commandWrapped"`
+	SandboxEnvMarkers []string            `json:"sandboxEnvMarkers,omitempty"`
+	EnforcementLevel  EnforcementLevel    `json:"enforcementLevel"`
+	DowngradeReason   string              `json:"downgradeReason,omitempty"`
+	SupportLevel      BackendSupportLevel `json:"supportLevel"`
+	Capabilities      []BackendCapability `json:"capabilities"`
+	Restrictions      []string            `json:"restrictions"`
+	Warnings          []string            `json:"warnings,omitempty"`
 }
 
 type BackendCapability struct {
@@ -92,6 +98,43 @@ func SelectBackend(options BackendOptions) Backend {
 		return policyOnlyBackend(goos, "policy-only fallback: Windows native sandbox adapter is not implemented")
 	default:
 		return policyOnlyBackend(goos, "policy-only fallback: no platform sandbox adapter is available for "+goos)
+	}
+}
+
+func TargetBackendForPlatform(goos string, wsl bool) BackendName {
+	switch goos {
+	case "darwin":
+		return BackendMacOSSeatbelt
+	case "linux":
+		if wsl {
+			return BackendPolicyOnly
+		}
+		return BackendLinuxBwrap
+	case "windows":
+		return BackendWindowsRestrictedToken
+	default:
+		return BackendPolicyOnly
+	}
+}
+
+func (backend Backend) TargetBackend() BackendName {
+	if backend.Platform == "windows" {
+		if backend.Name == BackendWindowsElevated || backend.Name == BackendWindowsRestrictedToken {
+			return backend.Name
+		}
+		return BackendWindowsRestrictedToken
+	}
+	switch backend.Name {
+	case BackendBubblewrap:
+		return BackendLinuxBwrap
+	case BackendSandboxExec:
+		return BackendMacOSSeatbelt
+	case BackendWSL:
+		return BackendPolicyOnly
+	case BackendNone, BackendMacOSSeatbelt, BackendLinuxBwrap, BackendLinuxLandlock, BackendWindowsRestrictedToken, BackendWindowsElevated, BackendPolicyOnly:
+		return backend.Name
+	default:
+		return TargetBackendForPlatform(backend.Platform, false)
 	}
 }
 
@@ -168,14 +211,20 @@ func (backend Backend) BuildPlan(workspaceRoot string, policy Policy) BackendPla
 	} else if backend.Available {
 		restrictions = append(restrictions, "shell commands are wrapped through "+string(backend.Name)+" when launched by the sandbox engine")
 	}
+	enforcementLevel := backend.EnforcementLevel(effectivePolicy)
 	return BackendPlan{
-		Backend:       backend,
-		WorkspaceRoot: workspaceRoot,
-		Policy:        effectivePolicy,
-		SupportLevel:  backend.SupportLevel(),
-		Capabilities:  backend.Capabilities(effectivePolicy),
-		Restrictions:  restrictions,
-		Warnings:      backend.Warnings(),
+		Backend:           backend,
+		TargetBackend:     backend.TargetBackend(),
+		WorkspaceRoot:     workspaceRoot,
+		Policy:            effectivePolicy,
+		CommandWrapped:    backend.CommandWrapping && backend.Available,
+		SandboxEnvMarkers: backend.SandboxEnvMarkers(effectivePolicy),
+		EnforcementLevel:  enforcementLevel,
+		DowngradeReason:   backend.DowngradeReason(effectivePolicy),
+		SupportLevel:      backend.SupportLevel(),
+		Capabilities:      backend.Capabilities(effectivePolicy),
+		Restrictions:      restrictions,
+		Warnings:          backend.Warnings(),
 	}
 }
 
@@ -184,6 +233,60 @@ func (backend Backend) SupportLevel() BackendSupportLevel {
 		return BackendSupportNative
 	}
 	return BackendSupportPolicyOnly
+}
+
+func (backend Backend) EnforcementLevel(policy Policy) EnforcementLevel {
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	if policy.Mode == ModeDisabled {
+		return EnforcementDisabled
+	}
+	if backend.SupportLevel() == BackendSupportNative {
+		return EnforcementNative
+	}
+	return EnforcementDegraded
+}
+
+func (backend Backend) DowngradeReason(policy Policy) string {
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	if policy.Mode == ModeDisabled {
+		return "sandbox policy disabled"
+	}
+	if backend.SupportLevel() == BackendSupportNative {
+		return ""
+	}
+	if strings.TrimSpace(backend.Message) != "" {
+		return backend.Message
+	}
+	platform := backend.Platform
+	if platform == "" {
+		platform = "this platform"
+	}
+	return "native sandbox unavailable on " + platform
+}
+
+func (backend Backend) SandboxEnvMarkers(policy Policy) []string {
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	if policy.Mode == ModeDisabled {
+		return nil
+	}
+	if !(backend.CommandWrapping && backend.Available) && backend.Name != BackendWSL {
+		return nil
+	}
+	name := backend.Name
+	if name == "" {
+		name = BackendPolicyOnly
+	}
+	return []string{
+		EnvSandboxed + "=1",
+		EnvSandboxBackend + "=" + string(name),
+		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
+	}
 }
 
 func (backend Backend) Warnings() []string {

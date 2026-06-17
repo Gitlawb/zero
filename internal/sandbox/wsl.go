@@ -3,8 +3,7 @@ package sandbox
 import "strings"
 
 // WSLInfo describes the Windows Subsystem for Linux environment, if any. It is
-// derived from /proc/version. Mirrors reference wsl/index.js isWSL/isWSL2 and
-// sandbox-manager.js isWsl (reads /proc/version, matches "microsoft").
+// derived from /proc/version.
 type WSLInfo struct {
 	IsWSL  bool
 	IsWSL2 bool

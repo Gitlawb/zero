@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -242,10 +243,14 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 					Policy  sandbox.Policy  `json:"policy"`
 					Backend sandbox.Backend `json:"backend"`
 					Plan    struct {
-						SupportLevel string                      `json:"supportLevel"`
-						Capabilities []sandbox.BackendCapability `json:"capabilities"`
-						Restrictions []string                    `json:"restrictions"`
-						Warnings     []string                    `json:"warnings"`
+						TargetBackend    sandbox.BackendName         `json:"targetBackend"`
+						CommandWrapped   bool                        `json:"commandWrapped"`
+						EnforcementLevel sandbox.EnforcementLevel    `json:"enforcementLevel"`
+						DowngradeReason  string                      `json:"downgradeReason"`
+						SupportLevel     string                      `json:"supportLevel"`
+						Capabilities     []sandbox.BackendCapability `json:"capabilities"`
+						Restrictions     []string                    `json:"restrictions"`
+						Warnings         []string                    `json:"warnings"`
 					} `json:"plan"`
 					Grants string `json:"grantsPath"`
 				}
@@ -261,6 +266,9 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				if payload.Plan.SupportLevel != string(sandbox.BackendSupportPolicyOnly) {
 					t.Fatalf("support level = %q, want policy-only", payload.Plan.SupportLevel)
 				}
+				if payload.Plan.TargetBackend != sandbox.BackendWindowsRestrictedToken || payload.Plan.CommandWrapped || payload.Plan.EnforcementLevel != sandbox.EnforcementDegraded || payload.Plan.DowngradeReason == "" {
+					t.Fatalf("unexpected manager baseline fields: %#v", payload.Plan)
+				}
 				if sandboxPolicyCapabilityStatus(payload.Plan.Capabilities, "native_process_isolation") != sandbox.CapabilityUnavailable {
 					t.Fatalf("expected native isolation unavailable, got %#v", payload.Plan.Capabilities)
 				}
@@ -275,7 +283,11 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				for _, want := range []string{
 					"Zero sandbox policy",
 					"backend: policy-only",
+					"target_backend: windows-restricted-token",
 					"support_level: policy-only",
+					"command_wrapped: false",
+					"enforcement_level: degraded",
+					"downgrade_reason: policy-only fallback: Windows native sandbox adapter is not implemented",
 					"backend_fallback: true",
 					"backend_command_wrapping: false",
 					"backend_native_isolation: false",
@@ -288,6 +300,43 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
+	store := newSandboxTestStore(t)
+	workspace := t.TempDir()
+	deps := appDeps{
+		getwd:           func() (string, error) { return workspace, nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{
+				Name:     sandbox.BackendPolicyOnly,
+				Platform: "windows",
+				Fallback: true,
+				Message:  "policy-only fallback: Windows native sandbox adapter is not implemented",
+			}
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "policy", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("policy exit = %d, stderr %q", exitCode, stderr.String())
+	}
+
+	got := stdout.String()
+	got = strings.ReplaceAll(got, workspace, "$WORKSPACE")
+	got = strings.ReplaceAll(got, store.FilePath(), "$GRANTS")
+	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox_policy_windows_policy_only.golden.json"))
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if got != string(wantBytes) {
+		t.Fatalf("policy JSON golden mismatch\nwant:\n%s\ngot:\n%s", string(wantBytes), got)
 	}
 }
 

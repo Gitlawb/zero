@@ -50,6 +50,7 @@ type GrantDecision string
 type BackendName string
 type BackendSupportLevel string
 type CapabilityStatus string
+type EnforcementLevel string
 
 const (
 	SideEffectRead           SideEffect = "read"
@@ -128,9 +129,19 @@ const (
 )
 
 const (
-	BackendBubblewrap  BackendName = "bubblewrap"
+	BackendNone                   BackendName = "none"
+	BackendMacOSSeatbelt          BackendName = "macos-seatbelt"
+	BackendLinuxBwrap             BackendName = "linux-bwrap"
+	BackendLinuxLandlock          BackendName = "linux-landlock"
+	BackendWindowsRestrictedToken BackendName = "windows-restricted-token"
+	BackendWindowsElevated        BackendName = "windows-elevated"
+	BackendPolicyOnly             BackendName = "policy-only"
+	// BackendBubblewrap is the legacy Linux adapter name kept until the Linux
+	// helper backend owns command transformation.
+	BackendBubblewrap BackendName = "bubblewrap"
+	// BackendSandboxExec is the legacy macOS adapter name kept until Seatbelt
+	// profile generation moves behind the sandbox manager.
 	BackendSandboxExec BackendName = "sandbox-exec"
-	BackendPolicyOnly  BackendName = "policy-only"
 	// BackendWSL is the policy-only fallback used under WSL when bubblewrap is
 	// unavailable/unreliable: there is no native OS isolation, but network egress
 	// is still routed through the local filtering proxy and the command runs under
@@ -148,6 +159,12 @@ const (
 	CapabilityPreflight   CapabilityStatus = "preflight"
 	CapabilityUnavailable CapabilityStatus = "unavailable"
 	CapabilityDisabled    CapabilityStatus = "disabled"
+)
+
+const (
+	EnforcementNative   EnforcementLevel = "native"
+	EnforcementDegraded EnforcementLevel = "degraded"
+	EnforcementDisabled EnforcementLevel = "disabled"
 )
 
 type Policy struct {
