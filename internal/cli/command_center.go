@@ -78,6 +78,9 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if command == "setup" {
 		return runProvidersSetup(args, stdout, stderr, deps)
 	}
+	if command == "detect" {
+		return runProvidersDetect(args, stdout, stderr, deps)
+	}
 	if command != "list" && command != "current" && command != "catalog" {
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown providers command %q", command))
 	}
@@ -451,8 +454,10 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers check [name] [flags]
   zero providers use <name> [flags]
   zero providers setup <catalog-id> [flags]
+  zero providers detect [flags]
 
 Inspects resolved provider profiles and provider catalog descriptors without printing secrets.
+Detect probes for running local runtimes (Ollama, LM Studio) and prints adopt commands plus per-provider next steps.
 
 Flags:
       --json                    Print JSON summary
