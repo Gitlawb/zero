@@ -139,6 +139,7 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 		t.Fatalf("command metadata = %#v, want native restricted-token backend", plan)
 	}
 	assertArgsContainSequence(t, plan.Args, "--command-cwd", `C:\workspace\src`)
+	assertArgsContainSequence(t, plan.Args, "--sandbox-home")
 	assertArgsContainSequence(t, plan.Args, "--windows-sandbox-level", string(WindowsSandboxLevelRestrictedToken))
 	assertArgsContainSequence(t, plan.Args, "--workspace-root", `C:\workspace`)
 	assertArgsContainSequence(t, plan.Args, "--", "cmd.exe", "/d", "/s", "/c", "dir")
@@ -147,7 +148,7 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseWindowsSandboxCommandArgs: %v", err)
 	}
-	if config.CommandCWD != `C:\workspace\src` || len(config.WorkspaceRoots) != 1 || config.WorkspaceRoots[0] != `C:\workspace` {
+	if config.SandboxHome == "" || config.CommandCWD != `C:\workspace\src` || len(config.WorkspaceRoots) != 1 || config.WorkspaceRoots[0] != `C:\workspace` {
 		t.Fatalf("parsed roots = %#v cwd=%q, want workspace root and command cwd", config.WorkspaceRoots, config.CommandCWD)
 	}
 	if config.PermissionProfile.FileSystem.Kind != FileSystemRestricted || config.PermissionProfile.Network.Mode != NetworkDeny {

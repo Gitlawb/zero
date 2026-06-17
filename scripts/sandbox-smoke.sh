@@ -6,7 +6,7 @@ cd "$ROOT"
 
 export GOCACHE="${GOCACHE:-/tmp/zero-go-cache}"
 
-go test ./internal/sandbox -run 'TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile|TestPermissionProfileFromDisabledPolicyDoesNotRequirePlatformSandbox|TestSandboxManagerBuildsExecutionRequestFromProfile|TestSandboxManagerBuildsCommandPlanThroughLinuxHelper|TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan|TestSandboxManagerSelectsPlatformBackend|TestSelectBackendDelegatesToSandboxManagerSelection|TestSandboxManagerFailsClosedWhenNativeRequiredAndPolicyOnlyDisabled|TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile|TestParseLinuxSandboxHelperArgs|TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage|TestTargetBackendForPlatformBaseline|TestLegacySandboxEntrypointsAreExplicitAndExist|TestBackendPlanCarriesPhase0ManagerFields|TestCommandPlanCarriesSandboxMetadata|TestPolicyOnlyDisabledFailClosedForTargetPlatforms|TestSelectBackendChoosesPlatformAdapterWithFallback|TestBackendBuildPlanDocumentsBestEffortIsolation|TestBackendCapabilitiesReflectDisabledPolicy'
+go test ./internal/sandbox -run 'TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile|TestPermissionProfileFromDisabledPolicyDoesNotRequirePlatformSandbox|TestSandboxManagerBuildsExecutionRequestFromProfile|TestSandboxManagerBuildsCommandPlanThroughLinuxHelper|TestSandboxManagerBuildsCommandPlanThroughWindowsRunner|TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan|TestSandboxManagerSelectsPlatformBackend|TestSelectBackendDelegatesToSandboxManagerSelection|TestSandboxManagerFailsClosedWhenNativeRequiredAndPolicyOnlyDisabled|TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile|TestParseLinuxSandboxHelperArgs|TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage|TestWindowsCapabilitySIDsPersistAndReuse|TestWindowsCapabilitySIDsAreScopedByRoot|TestWindowsCapabilitySIDsForConfigSelectsReadOnlySID|TestWindowsCapabilitySIDsForConfigSelectsWritableRootSIDs|TestRunWindowsSandboxCommandRunnerRejectsInvalidArgs|TestTargetBackendForPlatformBaseline|TestLegacySandboxEntrypointsAreExplicitAndExist|TestBackendPlanCarriesPhase0ManagerFields|TestCommandPlanCarriesSandboxMetadata|TestPolicyOnlyDisabledFailClosedForTargetPlatforms|TestSelectBackendChoosesPlatformAdapterWithFallback|TestBackendBuildPlanDocumentsBestEffortIsolation|TestBackendCapabilitiesReflectDisabledPolicy'
 go test ./internal/cli -run 'TestRunSandboxPolicyInspectTextAndJSON|TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields|TestRunSandboxPolicyEffectiveTextAndJSON'
 go test ./internal/tools -run 'TestRegistryRunsBashThroughSandboxEngine|TestBashToolReportsDisabledPolicyOnlyRunner|TestBashToolBuildsWrappedSandboxExecCommand'
 
@@ -24,6 +24,13 @@ compile_pkg() {
   GOOS="$goos" GOARCH=amd64 go test -c -o "$tmpdir/${goos}-${name}.test" "$pkg"
 }
 
+build_cmd() {
+  local goos="$1"
+  local pkg="$2"
+  local name="$3"
+  GOOS="$goos" GOARCH=amd64 go build -o "$tmpdir/${goos}-${name}" "$pkg"
+}
+
 for goos in linux darwin windows; do
   compile_pkg "$goos" ./internal/sandbox
   compile_pkg "$goos" ./internal/cli
@@ -31,6 +38,7 @@ for goos in linux darwin windows; do
 done
 compile_pkg linux ./cmd/zero-seccomp
 compile_pkg linux ./cmd/zero-linux-sandbox
+build_cmd windows ./cmd/zero-windows-command-runner zero-windows-command-runner.exe
 
 case "$(go env GOOS)" in
   linux)
