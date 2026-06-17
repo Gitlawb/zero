@@ -117,6 +117,47 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
 }
 
+func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
+	backend := Backend{Name: BackendWindowsRestrictedToken, Available: true, Executable: `C:\zero\zero-windows-command-runner.exe`, Platform: "windows"}
+	policy := DefaultPolicy()
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     `C:\workspace`,
+		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/d", "/s", "/c", "dir"}, Dir: `C:\workspace\src`, Env: []string{"PATH=C:\\Tools", "TERM=xterm"}},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy(`C:\workspace`, policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	}, SandboxCommandTransformOptions{})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if !plan.Wrapped || plan.Name != `C:\zero\zero-windows-command-runner.exe` || plan.TargetBackend != BackendWindowsRestrictedToken {
+		t.Fatalf("command plan = %#v, want native windows command runner wrapper", plan)
+	}
+	if plan.EnforcementLevel != EnforcementNative || plan.LegacyAdapter != "" {
+		t.Fatalf("command metadata = %#v, want native restricted-token backend", plan)
+	}
+	assertArgsContainSequence(t, plan.Args, "--command-cwd", `C:\workspace\src`)
+	assertArgsContainSequence(t, plan.Args, "--windows-sandbox-level", string(WindowsSandboxLevelRestrictedToken))
+	assertArgsContainSequence(t, plan.Args, "--workspace-root", `C:\workspace`)
+	assertArgsContainSequence(t, plan.Args, "--", "cmd.exe", "/d", "/s", "/c", "dir")
+
+	config, err := ParseWindowsSandboxCommandArgs(plan.Args)
+	if err != nil {
+		t.Fatalf("ParseWindowsSandboxCommandArgs: %v", err)
+	}
+	if config.CommandCWD != `C:\workspace\src` || len(config.WorkspaceRoots) != 1 || config.WorkspaceRoots[0] != `C:\workspace` {
+		t.Fatalf("parsed roots = %#v cwd=%q, want workspace root and command cwd", config.WorkspaceRoots, config.CommandCWD)
+	}
+	if config.PermissionProfile.FileSystem.Kind != FileSystemRestricted || config.PermissionProfile.Network.Mode != NetworkDeny {
+		t.Fatalf("parsed permission profile = %#v, want restricted deny profile", config.PermissionProfile)
+	}
+	if config.Env[EnvSandboxed] != "1" || config.Env[EnvSandboxBackend] != string(BackendWindowsRestrictedToken) || config.Env["COMSPEC"] == "" {
+		t.Fatalf("parsed env = %#v, want sandbox markers and COMSPEC", config.Env)
+	}
+}
+
 func TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan(t *testing.T) {
 	policy := DefaultPolicy()
 	backend := Backend{Name: BackendPolicyOnly, Platform: "windows", Fallback: true, Message: "policy-only fallback"}
@@ -151,7 +192,7 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 	}{
 		{name: "linux", goos: "linux", lookupName: LinuxSandboxHelperName, lookupPath: "/usr/bin/zero-linux-sandbox", want: BackendLinuxBwrap, wantTarget: BackendLinuxBwrap},
 		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendSandboxExec, wantTarget: BackendMacOSSeatbelt},
-		{name: "windows", goos: "windows", want: BackendPolicyOnly, wantTarget: BackendWindowsRestrictedToken},
+		{name: "windows", goos: "windows", lookupName: WindowsSandboxCommandRunnerName, lookupPath: `C:\zero\zero-windows-command-runner.exe`, want: BackendWindowsRestrictedToken, wantTarget: BackendWindowsRestrictedToken},
 		{name: "unsupported", goos: "plan9", want: BackendPolicyOnly, wantTarget: BackendPolicyOnly},
 	}
 

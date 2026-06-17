@@ -14,7 +14,7 @@
     "fallback": true,
     "commandWrapping": false,
     "nativeIsolation": false,
-    "message": "policy-only fallback: Windows native sandbox adapter is not implemented"
+    "message": "policy-only fallback: Windows sandbox command runner is not available"
   },
   "plan": {
     "backend": {
@@ -24,7 +24,7 @@
       "fallback": true,
       "commandWrapping": false,
       "nativeIsolation": false,
-      "message": "policy-only fallback: Windows native sandbox adapter is not implemented"
+      "message": "policy-only fallback: Windows sandbox command runner is not available"
     },
     "targetBackend": "windows-restricted-token",
     "workspaceRoot": "$WORKSPACE",
@@ -61,7 +61,7 @@
     },
     "commandWrapped": false,
     "enforcementLevel": "degraded",
-    "downgradeReason": "policy-only fallback: Windows native sandbox adapter is not implemented",
+    "downgradeReason": "policy-only fallback: Windows sandbox command runner is not available",
     "supportLevel": "policy-only",
     "requiresPlatformSandbox": true,
     "legacyAdapter": "policy-only",
@@ -89,7 +89,7 @@
       {
         "key": "native_process_isolation",
         "status": "unavailable",
-        "detail": "Windows native sandbox adapter is not implemented yet"
+        "detail": "Windows sandbox command runner is not available"
       },
       {
         "key": "command_wrapping",
@@ -105,7 +105,7 @@
       "shell commands are not wrapped by a native platform sandbox"
     ],
     "warnings": [
-      "Windows native sandbox adapter is not implemented; using policy-only preflight checks",
+      "Windows sandbox command runner is not available; using policy-only preflight checks",
       "shell commands are not wrapped by a native platform sandbox"
     ]
   },

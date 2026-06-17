@@ -96,7 +96,10 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 		}
 		return policyOnlyBackend(goos, "policy-only fallback: sandbox-exec is not available")
 	case "windows":
-		return policyOnlyBackend(goos, "policy-only fallback: Windows native sandbox adapter is not implemented")
+		if path, err := lookup(WindowsSandboxCommandRunnerName); err == nil && path != "" {
+			return nativeBackend(goos, BackendWindowsRestrictedToken, path, "Windows sandbox command runner available")
+		}
+		return policyOnlyBackend(goos, "policy-only fallback: Windows sandbox command runner is not available")
 	default:
 		return policyOnlyBackend(goos, "policy-only fallback: no platform sandbox adapter is available for "+goos)
 	}
@@ -214,7 +217,7 @@ func legacyAdapterName(backend Backend) string {
 func inferBackendCapabilities(backend Backend) Backend {
 	if backend.Available && backend.Executable != "" {
 		switch backend.Name {
-		case BackendBubblewrap, BackendLinuxBwrap, BackendSandboxExec, BackendMacOSSeatbelt:
+		case BackendBubblewrap, BackendLinuxBwrap, BackendSandboxExec, BackendMacOSSeatbelt, BackendWindowsRestrictedToken:
 			backend.CommandWrapping = true
 			backend.NativeIsolation = true
 		}

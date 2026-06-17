@@ -66,6 +66,31 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 	})
 
+	t.Run("windows command runner available", func(t *testing.T) {
+		backend := SelectBackend(BackendOptions{
+			GOOS: "windows",
+			LookupExecutable: func(name string) (string, error) {
+				if name == WindowsSandboxCommandRunnerName {
+					return `C:\zero\zero-windows-command-runner.exe`, nil
+				}
+				return "", errors.New("missing")
+			},
+		})
+		if backend.Name != BackendWindowsRestrictedToken || !backend.Available || backend.Executable != `C:\zero\zero-windows-command-runner.exe` {
+			t.Fatalf("windows backend = %#v, want available restricted-token runner", backend)
+		}
+		if backend.Platform != "windows" || backend.Fallback || !backend.CommandWrapping || !backend.NativeIsolation {
+			t.Fatalf("windows backend capabilities = %#v, want native wrapping", backend)
+		}
+		plan := backend.BuildPlan(t.TempDir(), DefaultPolicy())
+		if plan.SupportLevel != BackendSupportNative || len(plan.Warnings) != 0 {
+			t.Fatalf("windows plan = %#v, want native support without warnings", plan)
+		}
+		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityNative {
+			t.Fatalf("windows native isolation capability = %#v, want native", plan.Capabilities)
+		}
+	})
+
 	t.Run("windows falls back explicitly", func(t *testing.T) {
 		backend := SelectBackend(BackendOptions{
 			GOOS:             "windows",
@@ -77,7 +102,7 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		if !backend.Fallback || backend.CommandWrapping || backend.NativeIsolation {
 			t.Fatalf("windows backend capabilities = %#v, want no native wrapping", backend)
 		}
-		if !strings.Contains(backend.Message, "Windows native sandbox adapter is not implemented") {
+		if !strings.Contains(backend.Message, "Windows sandbox command runner is not available") {
 			t.Fatalf("expected Windows fallback message, got %q", backend.Message)
 		}
 		plan := backend.BuildPlan(t.TempDir(), DefaultPolicy())
@@ -87,8 +112,8 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityUnavailable {
 			t.Fatalf("windows native isolation capability = %#v, want unavailable", plan.Capabilities)
 		}
-		if !restrictionContains(plan.Warnings, "Windows native sandbox adapter is not implemented") {
-			t.Fatalf("windows warnings = %#v, want adapter warning", plan.Warnings)
+		if !restrictionContains(plan.Warnings, "Windows sandbox command runner is not available") {
+			t.Fatalf("windows warnings = %#v, want command runner warning", plan.Warnings)
 		}
 	})
 

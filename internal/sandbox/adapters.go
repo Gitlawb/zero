@@ -282,7 +282,7 @@ func (backend Backend) Warnings() []string {
 		"shell commands are not wrapped by a native platform sandbox",
 	}
 	if backend.Platform == "windows" {
-		warnings[0] = "Windows native sandbox adapter is not implemented; using policy-only preflight checks"
+		warnings[0] = "Windows sandbox command runner is not available; using policy-only preflight checks"
 	}
 	return warnings
 }
@@ -322,7 +322,7 @@ func (backend Backend) Capabilities(policy Policy) []BackendCapability {
 		nativeIsolation.Status = CapabilityNative
 		nativeIsolation.Detail = "tool subprocesses can run inside " + string(backend.Name)
 	} else if backend.Platform == "windows" {
-		nativeIsolation.Detail = "Windows native sandbox adapter is not implemented yet"
+		nativeIsolation.Detail = "Windows sandbox command runner is not available"
 	}
 	commandWrapping := BackendCapability{
 		Key:    "command_wrapping",

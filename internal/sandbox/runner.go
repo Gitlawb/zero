@@ -251,6 +251,10 @@ func buildLegacyCommandPlan(execRequest SandboxExecutionRequest, policy Policy, 
 			}
 			return withSandboxExecutionMetadata(seatbeltCommandPlan(execRequest, policy, backend, egress), execRequest), nil
 		}
+	case BackendWindowsRestrictedToken:
+		if backend.Available && backend.Executable != "" {
+			return windowsRestrictedTokenCommandPlan(execRequest, policy)
+		}
 	case BackendWSL:
 		// WSL fallback: no native isolation available. Fail closed unless the policy
 		// opted into the policy-only runner; otherwise run policy-only with the

@@ -219,7 +219,7 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				Name:     sandbox.BackendPolicyOnly,
 				Platform: "windows",
 				Fallback: true,
-				Message:  "policy-only fallback: Windows native sandbox adapter is not implemented",
+				Message:  "policy-only fallback: Windows sandbox command runner is not available",
 			}
 		},
 	}
@@ -275,7 +275,7 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				if !sandboxPolicyRestrictionContains(payload.Plan.Restrictions, "native process isolation unavailable on windows") {
 					t.Fatalf("expected JSON plan to document Windows fallback, got %#v", payload.Plan.Restrictions)
 				}
-				if !sandboxPolicyRestrictionContains(payload.Plan.Warnings, "Windows native sandbox adapter is not implemented") {
+				if !sandboxPolicyRestrictionContains(payload.Plan.Warnings, "Windows sandbox command runner is not available") {
 					t.Fatalf("expected JSON warnings to document Windows fallback, got %#v", payload.Plan.Warnings)
 				}
 			} else {
@@ -287,12 +287,12 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 					"support_level: policy-only",
 					"command_wrapped: false",
 					"enforcement_level: degraded",
-					"downgrade_reason: policy-only fallback: Windows native sandbox adapter is not implemented",
+					"downgrade_reason: policy-only fallback: Windows sandbox command runner is not available",
 					"backend_fallback: true",
 					"backend_command_wrapping: false",
 					"backend_native_isolation: false",
 					"backend_platform: windows",
-					"Windows native sandbox adapter is not implemented",
+					"Windows sandbox command runner is not available",
 				} {
 					if !strings.Contains(output, want) {
 						t.Fatalf("expected policy text to contain %q, got %q", want, output)
@@ -317,7 +317,7 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 				Name:     sandbox.BackendPolicyOnly,
 				Platform: "windows",
 				Fallback: true,
-				Message:  "policy-only fallback: Windows native sandbox adapter is not implemented",
+				Message:  "policy-only fallback: Windows sandbox command runner is not available",
 			}
 		},
 	}
