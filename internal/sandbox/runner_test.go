@@ -268,6 +268,8 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 		`(subpath "/read-root")`,
 		`(subpath "/write-root")`,
 		`(subpath "/usr/bin")`,
+		`(subpath "/System/Library/Frameworks")`,
+		`(subpath "/private/var/db")`,
 		`(subpath "/tmp")`,
 		`(literal "/dev/null")`,
 		`(deny network*)`,
@@ -278,6 +280,23 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 	}
 	if strings.Contains(sbpl, "(allow file-read*)\n(allow file-write*)") {
 		t.Fatalf("restricted permission profile must not become full read/write:\n%s", sbpl)
+	}
+}
+
+func TestSeatbeltProfileIncludesRuntimeStartupAllowances(t *testing.T) {
+	sbpl := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
+	for _, want := range []string{
+		`(allow file-map-executable`,
+		`(subpath "/System/Library/Frameworks")`,
+		`(allow system-mac-syscall (mac-policy-name "vnguard"))`,
+		`(allow file-read* file-test-existence (literal "/"))`,
+		`(allow user-preference-read)`,
+		`(allow pseudo-tty)`,
+		`(allow ipc-posix-sem)`,
+	} {
+		if !strings.Contains(sbpl, want) {
+			t.Fatalf("Seatbelt profile missing runtime startup allowance %q:\n%s", want, sbpl)
+		}
 	}
 }
 
