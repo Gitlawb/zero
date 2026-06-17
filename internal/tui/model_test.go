@@ -1079,7 +1079,7 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 		t.Fatalf("expected permission request to append one permission row, got %#v", next.transcript)
 	}
 	view := next.View()
-	for _, want := range []string{"write_file", "[a] allow", "[d] deny", "[y] always", "risk:high", "Creates or overwrites files."} {
+	for _, want := range []string{"write_file", "allow once", "[a]", "deny", "[d]", "always", "[y]", "risk:high", "Creates or overwrites files."} {
 		assertContains(t, view, want)
 	}
 }
@@ -1145,16 +1145,18 @@ func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
 	next = updated.(model)
 
 	if cmd != nil {
-		t.Fatal("expected Enter to be ignored while permission prompt is active")
+		t.Fatal("expected permission confirm to resolve synchronously (no cmd)")
 	}
-	if len(decisions) != 0 {
-		t.Fatalf("expected Enter not to choose a permission decision, got %#v", decisions)
+	// Enter confirms the highlighted option (default: allow once) — it must NOT
+	// submit the composer's pending text as a new prompt.
+	if len(decisions) != 1 || decisions[0] != permissionDecisionAllow {
+		t.Fatalf("expected Enter to confirm the default option (allow once), got %#v", decisions)
 	}
 	if transcriptContains(next.transcript, "second prompt") {
 		t.Fatalf("permission prompt should block normal prompt submit, got %#v", next.transcript)
 	}
-	if next.pendingPermission == nil {
-		t.Fatal("expected permission prompt to remain pending after Enter")
+	if next.pendingPermission != nil {
+		t.Fatalf("expected permission prompt to clear after confirm, got %#v", next.pendingPermission)
 	}
 }
 

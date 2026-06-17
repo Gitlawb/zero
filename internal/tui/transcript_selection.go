@@ -31,6 +31,11 @@ type transcriptSelectableLine struct {
 	text      string
 	toggle    bool
 	live      bool
+	// permOption marks a clickable permission-popup choice; permChoice is the
+	// decision a left-click on this row resolves. These rows carry no selectable
+	// text (they are buttons, not content).
+	permOption bool
+	permChoice permissionDecision
 }
 
 type transcriptCopiedMsg struct {
@@ -165,7 +170,29 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 		items = append(items, transcriptBlankBodyItem())
 		switch {
 		case m.pendingPermission != nil:
-			items = append(items, transcriptBlockBodyItem(transcriptBodyItemPendingPrompt, -1, renderFocusedPermissionPrompt(m.pendingPermission.request, width)))
+			perm := m.pendingPermission
+			items = append(items, transcriptBodyItem{
+				kind:              transcriptBodyItemPendingPrompt,
+				rowIndex:          -1,
+				heightCacheStable: false, // the highlight changes with the cursor
+				render: func(startBodyY int) transcriptBodyRenderedItem {
+					block, offsets := renderFocusedPermissionPrompt(perm.request, perm.cursor, width)
+					options := permissionOptions()
+					selectable := make([]transcriptSelectableLine, 0, len(offsets))
+					for index, offset := range offsets {
+						if index >= len(options) {
+							break
+						}
+						selectable = append(selectable, transcriptSelectableLine{
+							bodyY:      startBodyY + offset,
+							rowIndex:   -1,
+							permOption: true,
+							permChoice: options[index].choice,
+						})
+					}
+					return transcriptBodyRenderedItem{lines: viewLines(block), selectable: selectable}
+				},
+			})
 		case m.pendingAskUser != nil:
 			items = append(items, transcriptBlockBodyItem(transcriptBodyItemPendingPrompt, -1, renderFocusedAskUserPrompt(*m.pendingAskUser, m.input.Value(), width)))
 		default:
@@ -578,6 +605,11 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 				return m, nil, true
 			}
 			return m, nil, false
+		}
+		if line.permOption {
+			// A left-click on a permission-popup option resolves it directly.
+			next, cmd := m.resolvePermission(line.permChoice)
+			return next.(model), cmd, true
 		}
 		if line.toggle {
 			if line.live {

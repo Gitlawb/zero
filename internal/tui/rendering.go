@@ -815,10 +815,11 @@ func wrapDetailBlock(detail string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderFocusedPermissionPrompt draws the modal permission card: PERMISSION
-// badge + risk on top, tool + reason body, then the key-chip action row. The
-// keys themselves are handled in handlePermissionKey, unchanged.
-func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) string {
+// renderFocusedPermissionPrompt draws the modal permission card and reports the
+// card-relative Y offset of each option line (in permissionOptions order) so the
+// caller can register those lines as clickable. cursor is the highlighted option
+// (default 0 = allow once); the a/y/d hotkeys still resolve directly.
+func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, width int) (string, []int) {
 	name := strings.TrimSpace(request.ToolName)
 	if name == "" {
 		name = "tool"
@@ -844,14 +845,33 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, width int) s
 		lines = append(lines, fill(zeroTheme.muted).Render("scope: "+scope))
 	}
 
-	actions := zeroTheme.badge.Render(" [a] allow once ") +
-		fill(zeroTheme.ink).Render(" ") +
-		fill(zeroTheme.accent).Render("[y]") + fill(zeroTheme.ink).Render(" always ") +
-		fill(zeroTheme.red).Render("[d]") + fill(zeroTheme.ink).Render(" deny ") +
-		fill(zeroTheme.faint).Render("[esc] cancel run")
-	lines = append(lines, actions)
+	lines = append(lines, "")
 
-	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg)
+	// Each option is its own line so a click anywhere on that row selects it (no
+	// per-column hit-testing). The highlighted row gets a ▸ marker and a reverse
+	// label; the rest stay quiet. styledBlockFill prepends exactly one top-border
+	// line, so an option at content index i renders at card line i+1 — the offset
+	// returned for click registration.
+	options := permissionOptions()
+	cursor = clampPermissionCursor(cursor)
+	offsets := make([]int, len(options))
+	for index, option := range options {
+		offsets[index] = 1 + len(lines)
+		hotkey := fill(zeroTheme.faint).Render(" [" + option.hotkey + "]")
+		if index == cursor {
+			marker := fill(zeroTheme.accent).Render("▸ ")
+			label := zeroTheme.badge.Render(" " + option.label + " ")
+			lines = append(lines, marker+label+hotkey)
+		} else {
+			label := fill(zeroTheme.ink).Render(option.label)
+			lines = append(lines, "  "+label+hotkey)
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter or click to confirm · [esc] cancel run"))
+
+	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), offsets
 }
 
 // renderFocusedAskUserPrompt draws the ask-user questionnaire in the same

@@ -308,6 +308,10 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// cursor is the highlighted option index (into permissionOptions): 0=allow
+	// once (the resting default), 1=always, 2=deny. Moved by ↑/↓/Tab; confirmed
+	// by Enter or a click. The a/y/d hotkeys resolve directly and ignore it.
+	cursor int
 }
 
 // askUserRequestMsg is the TUI-loop equivalent of permissionRequestMsg: the
@@ -696,7 +700,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.pendingPermission != nil {
-				return m, nil
+				// Enter confirms the highlighted option (default: allow once); the
+				// a/y/d hotkeys and a click still resolve directly.
+				return m.confirmPermissionCursor()
 			}
 			if m.pendingAskUser != nil {
 				return m.submitAskUserAnswer()
@@ -733,6 +739,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(-1), nil
+			}
 			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
 			// is intentionally not reachable by a casual keypress — see
 			// nextPermissionMode), but only when nothing modal is up: a permission
@@ -761,6 +770,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(1), nil
+			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
 			}
@@ -787,6 +799,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keyIs(msg, tea.KeyDown):
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(1), nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
@@ -817,6 +832,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keyIs(msg, tea.KeyUp):
 			if m.transcriptDetailed {
 				return m, nil
+			}
+			if m.pendingPermission != nil {
+				return m.movePermissionCursor(-1), nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
