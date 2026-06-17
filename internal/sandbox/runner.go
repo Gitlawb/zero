@@ -867,6 +867,7 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		writeRule,
 	}
 	rules = append(rules, denyReadRules(profile.FileSystem)...)
+	rules = append(rules, writeRootCarveoutDenyRules(profile.FileSystem)...)
 	rules = append(rules, denyWriteRulesFromPaths(profile.FileSystem.DenyWrite)...)
 	rules = append(rules, networkRule)
 	return strings.Join(nonEmptyStrings(rules), "\n")
@@ -920,28 +921,7 @@ func seatbeltWritableRootFilter(root WritableRoot) string {
 	if rootPath == "" {
 		return ""
 	}
-	base := `(subpath "` + sandboxProfileString(rootPath) + `")`
-	var requirements []string
-	for _, subpath := range root.ReadOnlySubpaths {
-		subpath = strings.TrimSpace(subpath)
-		if subpath == "" {
-			continue
-		}
-		escaped := sandboxProfileString(subpath)
-		requirements = append(requirements, `(require-not (literal "`+escaped+`"))`)
-		requirements = append(requirements, `(require-not (subpath "`+escaped+`"))`)
-	}
-	for _, name := range root.ProtectedMetadataNames {
-		regex := seatbeltProtectedMetadataRegex(rootPath, name)
-		if regex == "" {
-			continue
-		}
-		requirements = append(requirements, `(require-not (regex #"`+sandboxProfileRegex(regex)+`"))`)
-	}
-	if len(requirements) == 0 {
-		return base
-	}
-	return "(require-all " + base + " " + strings.Join(requirements, " ") + ")"
+	return `(subpath "` + sandboxProfileString(rootPath) + `")`
 }
 
 func seatbeltProtectedMetadataRegex(root string, name string) string {
@@ -964,6 +944,34 @@ func seatbeltProtectedMetadataRegex(root string, name string) string {
 
 func denyReadRules(fs FileSystemPolicy) []string {
 	return denySeatbeltPathRules("file-read*", fs.DenyRead)
+}
+
+func writeRootCarveoutDenyRules(fs FileSystemPolicy) []string {
+	if fs.Kind != FileSystemRestricted {
+		return nil
+	}
+	var out []string
+	for _, root := range fs.WriteRoots {
+		for _, subpath := range root.ReadOnlySubpaths {
+			subpath = strings.TrimSpace(subpath)
+			if subpath == "" {
+				continue
+			}
+			escaped := sandboxProfileString(subpath)
+			out = append(out,
+				`(deny file-write* (literal "`+escaped+`"))`,
+				`(deny file-write* (subpath "`+escaped+`"))`,
+			)
+		}
+		for _, name := range root.ProtectedMetadataNames {
+			regex := seatbeltProtectedMetadataRegex(root.Root, name)
+			if regex == "" {
+				continue
+			}
+			out = append(out, `(deny file-write* (regex #"`+sandboxProfileRegex(regex)+`"))`)
+		}
+	}
+	return out
 }
 
 // denyWriteRules returns seatbelt deny clauses for the policy's resolved

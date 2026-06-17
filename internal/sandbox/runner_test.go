@@ -342,10 +342,10 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	}
 	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "", "", "")
 	for _, want := range []string{
-		`(require-not (literal "/repo/vendor"))`,
-		`(require-not (subpath "/repo/vendor"))`,
-		`(require-not (regex #"^/repo/\.git(/.*)?$"))`,
-		`(require-not (regex #"^/repo/\.zero(/.*)?$"))`,
+		`(deny file-write* (literal "/repo/vendor"))`,
+		`(deny file-write* (subpath "/repo/vendor"))`,
+		`(deny file-write* (regex #"^/repo/\.git(/.*)?$"))`,
+		`(deny file-write* (regex #"^/repo/\.zero(/.*)?$"))`,
 		`(deny file-read* (subpath "/repo/secret-read"))`,
 		`(deny file-write-unlink (subpath "/repo/secret-read"))`,
 		`(deny file-write* (subpath "/repo/secret-write"))`,
@@ -356,9 +356,10 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 	}
 	allowIdx := strings.Index(sbpl, "(allow file-write*")
 	denyReadIdx := strings.Index(sbpl, `(deny file-read* (subpath "/repo/secret-read"))`)
+	metadataIdx := strings.Index(sbpl, `(deny file-write* (regex #"^/repo/\.git(/.*)?$"))`)
 	denyWriteIdx := strings.Index(sbpl, `(deny file-write* (subpath "/repo/secret-write"))`)
-	if allowIdx < 0 || denyReadIdx < allowIdx || denyWriteIdx < allowIdx {
-		t.Fatalf("deny rules must follow the broad write allow (allow=%d denyRead=%d denyWrite=%d):\n%s", allowIdx, denyReadIdx, denyWriteIdx, sbpl)
+	if allowIdx < 0 || denyReadIdx < allowIdx || metadataIdx < allowIdx || denyWriteIdx < allowIdx {
+		t.Fatalf("deny rules must follow the broad write allow (allow=%d denyRead=%d metadata=%d denyWrite=%d):\n%s", allowIdx, denyReadIdx, metadataIdx, denyWriteIdx, sbpl)
 	}
 }
 
