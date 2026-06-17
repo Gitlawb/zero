@@ -64,13 +64,13 @@ func runSandboxCheck(args []string, stdout io.Writer, stderr io.Writer, deps app
 	backend := deps.selectSandboxBackend(zeroSandbox.BackendOptions{})
 	plan := backend.BuildPlan(workspaceRoot, policy)
 
-	sideEffect := zeroSandbox.SideEffect(strings.ToLower(strings.TrimSpace(options.sideEffect)))
-	if sideEffect == "" {
-		sideEffect = zeroSandbox.SideEffectRead
+	sideEffect, err := parseSandboxCheckSideEffect(options.sideEffect)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
 	}
-	autonomy := zeroSandbox.Autonomy(strings.ToLower(strings.TrimSpace(options.autonomy)))
-	if autonomy == "" {
-		autonomy = zeroSandbox.AutonomyHigh
+	autonomy, err := parseSandboxCheckAutonomy(options.autonomy)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
 	}
 
 	requestArgs := map[string]any{}
@@ -84,11 +84,20 @@ func runSandboxCheck(args []string, stdout io.Writer, stderr io.Writer, deps app
 		}
 	}
 
+	// Build the engine with the SAME write scope the real entrypoints use
+	// (workspace root + configured additional write roots) so the check's
+	// decision matches actual enforcement and a stale extra-root config surfaces
+	// here too, instead of silently falling back to a workspace-only scope.
+	scope, err := zeroSandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), exitProvider)
+	}
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
 		Policy:        policy,
 		Store:         store,
 		Backend:       backend,
+		Scope:         scope,
 	})
 	ctx, stop := signalContext()
 	defer stop()
@@ -191,6 +200,44 @@ func assignSandboxCheckFlag(options *sandboxCheckOptions, flag string, value str
 	}
 }
 
+// parseSandboxCheckSideEffect validates --side-effect against the closed set the
+// help advertises (empty defaults to read), so a typo returns a usage error
+// instead of being passed to the engine as an unknown side effect.
+func parseSandboxCheckSideEffect(value string) (zeroSandbox.SideEffect, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "read":
+		return zeroSandbox.SideEffectRead, nil
+	case "write":
+		return zeroSandbox.SideEffectWrite, nil
+	case "shell":
+		return zeroSandbox.SideEffectShell, nil
+	case "network":
+		return zeroSandbox.SideEffectNetwork, nil
+	case "none":
+		return zeroSandbox.SideEffectNone, nil
+	default:
+		return "", execUsageError{fmt.Sprintf("invalid --side-effect %q: expected read, write, shell, network, or none", value)}
+	}
+}
+
+// parseSandboxCheckAutonomy validates --autonomy against the closed set the help
+// advertises (empty defaults to high), so a typo returns a usage error instead
+// of the engine silently clamping an unknown tier.
+func parseSandboxCheckAutonomy(value string) (zeroSandbox.Autonomy, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return zeroSandbox.AutonomyHigh, nil
+	case string(zeroSandbox.AutonomyLow):
+		return zeroSandbox.AutonomyLow, nil
+	case string(zeroSandbox.AutonomyMedium):
+		return zeroSandbox.AutonomyMedium, nil
+	case string(zeroSandbox.AutonomyHigh):
+		return zeroSandbox.AutonomyHigh, nil
+	default:
+		return "", execUsageError{fmt.Sprintf("invalid --autonomy %q: expected low, medium, or high", value)}
+	}
+}
+
 func formatSandboxCheckReport(report sandboxCheckReport) string {
 	lines := []string{
 		"Sandbox check: " + report.Tool,
@@ -215,7 +262,7 @@ func formatSandboxCheckReport(report sandboxCheckReport) string {
 	if report.Grant.Matched && report.Grant.Grant != nil {
 		lines = append(lines, "grant: matched "+report.Grant.Grant.Decision+" (maxAutonomy "+report.Grant.Grant.MaxAutonomy+")")
 	} else {
-		lines = append(lines, "grant: none recorded for this tool")
+		lines = append(lines, "grant: no grant matched this action")
 	}
 	lines = append(lines,
 		"policy: mode="+report.Plan.Policy.EffectiveMode+" network="+report.Plan.Policy.Network+fmt.Sprintf(" enforceWorkspace=%t", report.Plan.Policy.EnforceWorkspace),

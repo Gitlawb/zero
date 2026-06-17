@@ -94,7 +94,7 @@ func TestRunSandboxCheckTextRendersDecisionAndPlan(t *testing.T) {
 		"risk: ",
 		"policy: mode=enforce",
 		"backend: policy-only",
-		"grant: none recorded for this tool",
+		"grant: no grant matched this action",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("check text missing %q:\n%s", want, out)
@@ -111,5 +111,72 @@ func TestRunSandboxCheckRequiresTool(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "tool name is required") {
 		t.Fatalf("expected 'tool name is required', got %q", stderr.String())
+	}
+}
+
+func TestRunSandboxCheckRejectsInvalidFlags(t *testing.T) {
+	deps, _ := sandboxCheckDeps(t)
+	for _, args := range [][]string{
+		{"sandbox", "check", "read_file", "--side-effect", "wrtie"},
+		{"sandbox", "check", "read_file", "--autonomy", "supreme"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runWithDeps(args, &stdout, &stderr, deps); code == exitSuccess {
+			t.Fatalf("args %v: expected a usage error, got success: %s", args, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "invalid --") {
+			t.Fatalf("args %v: expected an 'invalid --…' usage error, got %q", args, stderr.String())
+		}
+	}
+}
+
+func TestRunSandboxCheckMatchedGrantRedactsReason(t *testing.T) {
+	store := newSandboxTestStore(t)
+	root := t.TempDir()
+	deps := appDeps{
+		getwd:           func() (string, error) { return root, nil },
+		newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{}, nil
+		},
+		selectSandboxBackend: func(sandbox.BackendOptions) sandbox.Backend {
+			return sandbox.Backend{Name: sandbox.BackendPolicyOnly}
+		},
+	}
+	// Seed a tool-wide allow grant whose reason embeds a secret; the matched-grant
+	// snapshot must redact it.
+	if _, err := store.Grant(sandbox.GrantInput{
+		ToolName:    "read_file",
+		Decision:    sandbox.GrantAllow,
+		MaxAutonomy: sandbox.AutonomyHigh,
+		Reason:      "approved with sk-test-secret1234567890",
+	}); err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "check", "read_file", "--autonomy", "high", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("check exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "sk-test-secret1234567890") {
+		t.Fatalf("grant reason leaked a secret into the snapshot:\n%s", stdout.String())
+	}
+	var payload struct {
+		Grant struct {
+			Matched bool `json:"matched"`
+			Grant   *struct {
+				Reason string `json:"reason"`
+			} `json:"grant"`
+		} `json:"grant"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode check JSON: %v\n%s", err, stdout.String())
+	}
+	if !payload.Grant.Matched || payload.Grant.Grant == nil {
+		t.Fatalf("expected a matched grant, got %#v", payload.Grant)
+	}
+	if !strings.Contains(payload.Grant.Grant.Reason, "REDACTED") {
+		t.Fatalf("expected the reason to be redacted, got %q", payload.Grant.Grant.Reason)
 	}
 }
