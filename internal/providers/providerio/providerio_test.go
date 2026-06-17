@@ -119,3 +119,85 @@ func TestScanSSEDataWithContextDeliversThenEOF(t *testing.T) {
 		t.Fatalf("got %#v, want one accumulated payload", got)
 	}
 }
+
+// UpstreamUnreachable rewrites a transport/gateway connectivity failure into a
+// clear message naming the host, and leaves genuine model errors (and bare
+// markers with no host) untouched.
+func TestUpstreamUnreachable(t *testing.T) {
+	cases := []struct {
+		name       string
+		message    string
+		wantMatch  bool
+		wantHost   string
+		wantReason string
+	}{
+		{
+			name:       "ollama daemon 502 cloud proxy",
+			message:    `Post "https://ollama.com:443/v1/chat/completions?ts=1781690613": net/http: TLS handshake timeout`,
+			wantMatch:  true,
+			wantHost:   "ollama.com:443",
+			wantReason: "TLS handshake timeout",
+		},
+		{
+			name:       "direct connection tls timeout",
+			message:    `Post "https://ollama.com/v1/chat/completions": net/http: TLS handshake timeout`,
+			wantMatch:  true,
+			wantHost:   "ollama.com",
+			wantReason: "TLS handshake timeout",
+		},
+		{
+			name:       "url form preferred over dial target",
+			message:    `Get "https://api.example.com/v1/models": dial tcp 203.0.113.7:443: i/o timeout`,
+			wantMatch:  true,
+			wantHost:   "api.example.com",
+			wantReason: "i/o timeout",
+		},
+		{
+			name:       "dns lookup failure keeps url host",
+			message:    `Post "https://ollama.com/api/chat": dial tcp: lookup ollama.com on 8.8.8.8:53: no such host`,
+			wantMatch:  true,
+			wantHost:   "ollama.com",
+			wantReason: "no such host",
+		},
+		{
+			name:       "local daemon not running",
+			message:    `dial tcp 127.0.0.1:11434: connect: connection refused`,
+			wantMatch:  true,
+			wantHost:   "127.0.0.1:11434",
+			wantReason: "connection refused",
+		},
+		{
+			name:      "genuine model error untouched",
+			message:   `{"error":{"message":"model not found"}}`,
+			wantMatch: false,
+		},
+		{
+			name:      "marker without host untouched",
+			message:   `context deadline exceeded`,
+			wantMatch: false,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, ok := UpstreamUnreachable(testCase.message)
+			if ok != testCase.wantMatch {
+				t.Fatalf("match = %v, want %v (got %q)", ok, testCase.wantMatch, got)
+			}
+			if !testCase.wantMatch {
+				if got != testCase.message {
+					t.Fatalf("non-match must return input unchanged, got %q", got)
+				}
+				return
+			}
+			if !strings.HasPrefix(got, "upstream unreachable: ") {
+				t.Errorf("missing prefix in %q", got)
+			}
+			if !strings.Contains(got, testCase.wantHost) {
+				t.Errorf("missing host %q in %q", testCase.wantHost, got)
+			}
+			if !strings.Contains(got, testCase.wantReason) {
+				t.Errorf("missing reason %q in %q", testCase.wantReason, got)
+			}
+		})
+	}
+}

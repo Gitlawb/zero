@@ -375,6 +375,33 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionHumanizesUpstreamUnreachableGatewayError(t *testing.T) {
+	// A local Ollama daemon serving a "-cloud" model answers on localhost but
+	// returns HTTP 502 with an opaque proxied transport error when it cannot reach
+	// its cloud backend. The adapter must surface a clear connectivity message
+	// naming the host, not the raw proxied JSON body.
+	provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"Post \"https://ollama.com:443/v1/chat/completions?ts=1\": net/http: TLS handshake timeout"}`, http.StatusBadGateway)
+	})
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{})
+	if err != nil {
+		t.Fatalf("StreamCompletion returned setup error: %v", err)
+	}
+	events := readAll(stream)
+	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
+		t.Fatalf("events = %#v, want one error", events)
+	}
+	got := events[0].Error
+	if !strings.HasPrefix(got, "upstream unreachable: ") {
+		t.Fatalf("error = %q, want upstream-unreachable prefix", got)
+	}
+	for _, want := range []string{"ollama.com:443", "TLS handshake timeout"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
 func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 	provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"error":{"message":"stream failed sk-secret","type":"server_error"}}`)

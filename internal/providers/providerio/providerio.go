@@ -248,6 +248,76 @@ func Redact(message string, secrets ...string) string {
 	return strings.Join(words, " ")
 }
 
+// upstreamFailureMarkers are transport-level failures that mean a request never
+// reached the model: the server the client connected to could not establish a
+// connection to its upstream. They distinguish a connectivity problem (outside
+// the agent's control) from the model rejecting the request.
+var upstreamFailureMarkers = []string{
+	"TLS handshake timeout",
+	"context deadline exceeded",
+	"connection refused",
+	"no such host",
+	"network is unreachable",
+	"i/o timeout",
+}
+
+// UpstreamUnreachable detects a provider error that is really a connectivity
+// failure to an upstream host rather than a model/request error, and rewrites it
+// into a clear, actionable message. The common case is a local Ollama daemon
+// serving a "-cloud" model: it answers on localhost but returns HTTP 502 because
+// it cannot reach its own cloud backend, surfacing an opaque proxied string like
+// `Post "https://ollama.com:443/...": net/http: TLS handshake timeout`. It
+// matches only when both a transport failure marker and a concrete host are
+// present, so the agent's own request-deadline cancellations are left untouched.
+// Non-matching messages are returned unchanged with false.
+func UpstreamUnreachable(message string) (string, bool) {
+	reason := ""
+	for _, marker := range upstreamFailureMarkers {
+		if strings.Contains(message, marker) {
+			reason = marker
+			break
+		}
+	}
+	host := upstreamHost(message)
+	if reason == "" || host == "" {
+		return message, false
+	}
+
+	return "upstream unreachable: the model server could not connect to " + host +
+		" (" + reason + "). The request never reached the model — this is a network failure " +
+		"between the model server and its upstream, not a model error. Verify the host is " +
+		"reachable from the machine running the model server (DNS/proxy/VPN/firewall); a local " +
+		"daemon proxying a cloud model — e.g. an Ollama daemon serving a \"-cloud\" model — must " +
+		"itself be able to reach the internet.", true
+}
+
+// upstreamHost extracts the unreachable host from a Go transport error. It
+// handles the two shapes these errors take: a quoted request URL
+// (`... "https://host:port/path": ...`) and a raw dial target
+// (`dial tcp host:port: ...`). The URL form is preferred when both are present.
+// It returns "" when neither yields a host.
+func upstreamHost(message string) string {
+	if index := strings.Index(message, "\"http"); index >= 0 {
+		rest := message[index+1:]
+		if end := strings.IndexByte(rest, '"'); end >= 0 {
+			if parsed, err := url.Parse(rest[:end]); err == nil && parsed.Host != "" {
+				return parsed.Host
+			}
+		}
+	}
+	const dialPrefix = "dial tcp "
+	if index := strings.Index(message, dialPrefix); index >= 0 {
+		rest := message[index+len(dialPrefix):]
+		if end := strings.Index(rest, ": "); end >= 0 {
+			rest = rest[:end]
+		}
+		if host := strings.TrimSpace(rest); host != "" && !strings.Contains(host, " ") {
+			return host
+		}
+	}
+	return ""
+}
+
 // PositiveOrDefault validates optional max token settings.
 func PositiveOrDefault(value int, fallback int, label string) (int, error) {
 	if value == 0 {
