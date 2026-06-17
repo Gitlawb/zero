@@ -16,6 +16,10 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 		return 1
 	}
+	if err := ValidateWindowsNetworkPolicy(config.PermissionProfile.Network); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		return 1
+	}
 	capabilitySIDs, err := WindowsCapabilitySIDsForConfig(config)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
