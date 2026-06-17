@@ -188,12 +188,13 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 		goos       string
 		lookupName string
 		lookupPath string
+		setupPath  string
 		want       BackendName
 		wantTarget BackendName
 	}{
 		{name: "linux", goos: "linux", lookupName: LinuxSandboxHelperName, lookupPath: "/usr/bin/zero-linux-sandbox", want: BackendLinuxBwrap, wantTarget: BackendLinuxBwrap},
 		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendSandboxExec, wantTarget: BackendMacOSSeatbelt},
-		{name: "windows", goos: "windows", lookupName: WindowsSandboxCommandRunnerName, lookupPath: `C:\zero\zero-windows-command-runner.exe`, want: BackendWindowsRestrictedToken, wantTarget: BackendWindowsRestrictedToken},
+		{name: "windows", goos: "windows", lookupName: WindowsSandboxCommandRunnerName, lookupPath: `C:\zero\zero-windows-command-runner.exe`, setupPath: `C:\zero\zero-windows-sandbox-setup.exe`, want: BackendWindowsRestrictedToken, wantTarget: BackendWindowsRestrictedToken},
 		{name: "unsupported", goos: "plan9", want: BackendPolicyOnly, wantTarget: BackendPolicyOnly},
 	}
 
@@ -204,6 +205,9 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 				LookupExecutable: func(name string) (string, error) {
 					if name == test.lookupName && test.lookupPath != "" {
 						return test.lookupPath, nil
+					}
+					if name == WindowsSandboxSetupName && test.setupPath != "" {
+						return test.setupPath, nil
 					}
 					return "", errors.New("missing")
 				},

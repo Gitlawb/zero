@@ -73,6 +73,9 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				if name == WindowsSandboxCommandRunnerName {
 					return `C:\zero\zero-windows-command-runner.exe`, nil
 				}
+				if name == WindowsSandboxSetupName {
+					return `C:\zero\zero-windows-sandbox-setup.exe`, nil
+				}
 				return "", errors.New("missing")
 			},
 		})
@@ -88,6 +91,24 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityNative {
 			t.Fatalf("windows native isolation capability = %#v, want native", plan.Capabilities)
+		}
+	})
+
+	t.Run("windows setup helper missing", func(t *testing.T) {
+		backend := SelectBackend(BackendOptions{
+			GOOS: "windows",
+			LookupExecutable: func(name string) (string, error) {
+				if name == WindowsSandboxCommandRunnerName {
+					return `C:\zero\zero-windows-command-runner.exe`, nil
+				}
+				return "", errors.New("missing")
+			},
+		})
+		if backend.Name != BackendPolicyOnly || backend.Available || backend.Platform != "windows" {
+			t.Fatalf("windows backend = %#v, want policy-only windows fallback", backend)
+		}
+		if !strings.Contains(backend.Message, "Windows sandbox setup helper is not available") {
+			t.Fatalf("expected Windows setup helper fallback message, got %q", backend.Message)
 		}
 	})
 

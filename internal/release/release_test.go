@@ -210,6 +210,9 @@ func TestBuildHelpersMatchScriptContracts(t *testing.T) {
 	if got := WindowsSandboxCommandRunnerArtifactName("windows"); got != "zero-windows-command-runner.exe" {
 		t.Fatalf("WindowsSandboxCommandRunnerArtifactName(windows) = %q", got)
 	}
+	if got := WindowsSandboxSetupArtifactName("windows"); got != "zero-windows-sandbox-setup.exe" {
+		t.Fatalf("WindowsSandboxSetupArtifactName(windows) = %q", got)
+	}
 	if got := BuildLdflags(version); !strings.Contains(got, "-X github.com/Gitlawb/zero/internal/cli.version=0.1.0") {
 		t.Fatalf("BuildLdflags = %q", got)
 	}
@@ -378,14 +381,16 @@ func TestCopyPackageFilesStagesLinuxSandboxHelper(t *testing.T) {
 	}
 }
 
-func TestCopyPackageFilesStagesWindowsSandboxCommandRunner(t *testing.T) {
+func TestCopyPackageFilesStagesWindowsSandboxHelpers(t *testing.T) {
 	root := t.TempDir()
 	staging := t.TempDir()
 	artifact := filepath.Join(root, "zero.exe")
 	runner := filepath.Join(root, "zero-windows-command-runner.exe")
+	setup := filepath.Join(root, "zero-windows-sandbox-setup.exe")
 	for path, content := range map[string]string{
 		artifact:                              "zero",
 		runner:                                "runner",
+		setup:                                 "setup",
 		filepath.Join(root, "README.md"):      "readme",
 		filepath.Join(root, "package.json"):   `{"version":"0.1.0"}`,
 		filepath.Join(root, "bin", "zero.js"): "wrapper",
@@ -394,11 +399,15 @@ func TestCopyPackageFilesStagesWindowsSandboxCommandRunner(t *testing.T) {
 	}
 	if err := copyPackageFiles(root, staging, artifact, filepath.Join(staging, "zero.exe"), "windows", "0.1.0", map[string]string{
 		"zero-windows-command-runner.exe": runner,
+		"zero-windows-sandbox-setup.exe":  setup,
 	}); err != nil {
 		t.Fatalf("copyPackageFiles: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(staging, "zero-windows-command-runner.exe")); err != nil {
 		t.Fatalf("staged runner missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(staging, "zero-windows-sandbox-setup.exe")); err != nil {
+		t.Fatalf("staged setup helper missing: %v", err)
 	}
 }
 

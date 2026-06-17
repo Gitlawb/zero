@@ -16,14 +16,18 @@ const WindowsSandboxCommandRunnerName = "zero-windows-command-runner.exe"
 const windowsCapabilitySIDSchemaVersion = 1
 
 func findWindowsSandboxCommandRunner(lookup func(string) (string, error)) string {
+	return findAdjacentOrPathExecutable(WindowsSandboxCommandRunnerName, lookup)
+}
+
+func findAdjacentOrPathExecutable(name string, lookup func(string) (string, error)) string {
 	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), WindowsSandboxCommandRunnerName)
+		candidate := filepath.Join(filepath.Dir(exe), name)
 		if regularFile(candidate) {
 			return candidate
 		}
 	}
 	if lookup != nil {
-		if path, err := lookup(WindowsSandboxCommandRunnerName); err == nil && path != "" {
+		if path, err := lookup(name); err == nil && path != "" {
 			return path
 		}
 	}

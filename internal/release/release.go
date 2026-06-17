@@ -210,6 +210,8 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 	if goos == "windows" {
 		runnerPath := filepath.Join(rootDir, WindowsSandboxCommandRunnerArtifactName(goos))
 		helperArtifacts[WindowsSandboxCommandRunnerArtifactName(goos)] = runnerPath
+		setupPath := filepath.Join(rootDir, WindowsSandboxSetupArtifactName(goos))
+		helperArtifacts[WindowsSandboxSetupArtifactName(goos)] = setupPath
 	}
 
 	if err := os.RemoveAll(releaseDir); err != nil {
@@ -276,6 +278,13 @@ func WindowsSandboxCommandRunnerArtifactName(goos string) string {
 		return "zero-windows-command-runner.exe"
 	}
 	return "zero-windows-command-runner"
+}
+
+func WindowsSandboxSetupArtifactName(goos string) string {
+	if goos == "windows" {
+		return "zero-windows-sandbox-setup.exe"
+	}
+	return "zero-windows-sandbox-setup"
 }
 
 func DefaultBuildOutput(rootDir string, goos string) string {
@@ -595,12 +604,21 @@ func buildWindowsSandboxCommandRunner(ctx context.Context, rootDir string, outpu
 	return buildGoPackage(ctx, rootDir, output, "", goos, goarch, "./cmd/zero-windows-command-runner")
 }
 
+func buildWindowsSandboxSetup(ctx context.Context, rootDir string, output string, goos string, goarch string) error {
+	if goos != "windows" {
+		return nil
+	}
+	return buildGoPackage(ctx, rootDir, output, "", goos, goarch, "./cmd/zero-windows-sandbox-setup")
+}
+
 func buildReleaseHelper(ctx context.Context, rootDir string, output string, goos string, goarch string, name string) error {
 	switch name {
 	case LinuxSandboxHelperArtifactName(goos):
 		return buildLinuxSandboxHelper(ctx, rootDir, output, goos, goarch)
 	case WindowsSandboxCommandRunnerArtifactName(goos):
 		return buildWindowsSandboxCommandRunner(ctx, rootDir, output, goos, goarch)
+	case WindowsSandboxSetupArtifactName(goos):
+		return buildWindowsSandboxSetup(ctx, rootDir, output, goos, goarch)
 	default:
 		return fmt.Errorf("unknown release helper %s", name)
 	}

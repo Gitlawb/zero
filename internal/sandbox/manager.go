@@ -96,8 +96,13 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 		}
 		return policyOnlyBackend(goos, "policy-only fallback: sandbox-exec is not available")
 	case "windows":
-		if path := findWindowsSandboxCommandRunner(lookup); path != "" {
-			return nativeBackend(goos, BackendWindowsRestrictedToken, path, "Windows sandbox command runner available")
+		runner := findWindowsSandboxCommandRunner(lookup)
+		setup := findWindowsSandboxSetupHelper(lookup)
+		if runner != "" && setup != "" {
+			return nativeBackend(goos, BackendWindowsRestrictedToken, runner, "Windows sandbox command runner and setup helper available")
+		}
+		if runner != "" {
+			return policyOnlyBackend(goos, "policy-only fallback: Windows sandbox setup helper is not available")
 		}
 		return policyOnlyBackend(goos, "policy-only fallback: Windows sandbox command runner is not available")
 	default:
