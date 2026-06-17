@@ -63,7 +63,7 @@ func TestPermissionProfileFromDisabledPolicyDoesNotRequirePlatformSandbox(t *tes
 }
 
 func TestSandboxManagerBuildsExecutionRequestFromProfile(t *testing.T) {
-	backend := Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap", Platform: "linux"}
+	backend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox", Platform: "linux"}
 	policy := DefaultPolicy()
 	profile := PermissionProfileFromPolicy("/workspace", policy, nil)
 	request, err := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend}).BuildExecutionRequest(SandboxManagerRequest{
@@ -83,13 +83,13 @@ func TestSandboxManagerBuildsExecutionRequestFromProfile(t *testing.T) {
 	if request.PermissionProfile.FileSystem.Kind != FileSystemRestricted || !request.RequiresPlatformSandbox {
 		t.Fatalf("execution request profile = %#v, requires=%t", request.PermissionProfile, request.RequiresPlatformSandbox)
 	}
-	if request.LegacyAdapter != string(BackendBubblewrap) {
-		t.Fatalf("legacy adapter = %q, want %q", request.LegacyAdapter, BackendBubblewrap)
+	if request.LegacyAdapter != "" {
+		t.Fatalf("legacy adapter = %q, want empty for helper backend", request.LegacyAdapter)
 	}
 }
 
-func TestSandboxManagerBuildsCommandPlanThroughTemporaryAdapter(t *testing.T) {
-	backend := Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap", Platform: "linux"}
+func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
+	backend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox", Platform: "linux"}
 	policy := DefaultPolicy()
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend})
 	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
@@ -106,13 +106,14 @@ func TestSandboxManagerBuildsCommandPlanThroughTemporaryAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
-	if !plan.Wrapped || plan.Name != "/usr/bin/bwrap" || plan.TargetBackend != BackendLinuxBwrap {
-		t.Fatalf("command plan = %#v, want native linux-bwrap wrapper", plan)
+	if !plan.Wrapped || plan.Name != "/usr/bin/zero-linux-sandbox" || plan.TargetBackend != BackendLinuxBwrap {
+		t.Fatalf("command plan = %#v, want native linux helper wrapper", plan)
 	}
-	if plan.LegacyAdapter != string(BackendBubblewrap) || plan.EnforcementLevel != EnforcementNative {
-		t.Fatalf("command metadata = %#v, want temporary adapter with native enforcement", plan)
+	if plan.LegacyAdapter != "" || plan.EnforcementLevel != EnforcementNative {
+		t.Fatalf("command metadata = %#v, want helper backend with native enforcement", plan)
 	}
-	assertArgsContainSequence(t, plan.Args, "--chdir", bubblewrapWorkspace+"/nested")
+	assertArgsContainSequence(t, plan.Args, "--sandbox-policy-cwd", "/workspace")
+	assertArgsContainSequence(t, plan.Args, "--command-cwd", "/workspace/nested")
 	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
 }
 
@@ -148,7 +149,7 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 		want       BackendName
 		wantTarget BackendName
 	}{
-		{name: "linux", goos: "linux", lookupName: "bwrap", lookupPath: "/usr/bin/bwrap", want: BackendBubblewrap, wantTarget: BackendLinuxBwrap},
+		{name: "linux", goos: "linux", lookupName: LinuxSandboxHelperName, lookupPath: "/usr/bin/zero-linux-sandbox", want: BackendLinuxBwrap, wantTarget: BackendLinuxBwrap},
 		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendSandboxExec, wantTarget: BackendMacOSSeatbelt},
 		{name: "windows", goos: "windows", want: BackendPolicyOnly, wantTarget: BackendWindowsRestrictedToken},
 		{name: "unsupported", goos: "plan9", want: BackendPolicyOnly, wantTarget: BackendPolicyOnly},
@@ -180,8 +181,8 @@ func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 	backend := SelectBackend(BackendOptions{
 		GOOS: "linux",
 		LookupExecutable: func(name string) (string, error) {
-			if name == "bwrap" {
-				return "/usr/bin/bwrap", nil
+			if name == LinuxSandboxHelperName {
+				return "/usr/bin/zero-linux-sandbox", nil
 			}
 			return "", errors.New("missing")
 		},
@@ -189,8 +190,8 @@ func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 	managerBackend := NewSandboxManager(SandboxManagerOptions{
 		GOOS: "linux",
 		LookupExecutable: func(name string) (string, error) {
-			if name == "bwrap" {
-				return "/usr/bin/bwrap", nil
+			if name == LinuxSandboxHelperName {
+				return "/usr/bin/zero-linux-sandbox", nil
 			}
 			return "", errors.New("missing")
 		},

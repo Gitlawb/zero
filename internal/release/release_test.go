@@ -351,6 +351,30 @@ func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 	})
 }
 
+func TestCopyPackageFilesStagesLinuxSandboxHelper(t *testing.T) {
+	root := t.TempDir()
+	staging := t.TempDir()
+	artifact := filepath.Join(root, "zero")
+	helper := filepath.Join(root, "zero-linux-sandbox")
+	for path, content := range map[string]string{
+		artifact:                              "zero",
+		helper:                                "helper",
+		filepath.Join(root, "README.md"):      "readme",
+		filepath.Join(root, "package.json"):   `{"version":"0.1.0"}`,
+		filepath.Join(root, "bin", "zero.js"): "wrapper",
+	} {
+		mustWriteFile(t, path, content)
+	}
+	if err := copyPackageFiles(root, staging, artifact, filepath.Join(staging, "zero"), "linux", "0.1.0", map[string]string{
+		"zero-linux-sandbox": helper,
+	}); err != nil {
+		t.Fatalf("copyPackageFiles: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(staging, "zero-linux-sandbox")); err != nil {
+		t.Fatalf("staged helper missing: %v", err)
+	}
+}
+
 func packageStagingFixture(t *testing.T, binaryName string) string {
 	t.Helper()
 	dir := t.TempDir()

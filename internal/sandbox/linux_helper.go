@@ -6,10 +6,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 const LinuxSandboxHelperName = "zero-linux-sandbox"
+
+const linuxSandboxBackendEnv = BackendLinuxBwrap
 
 type LinuxSandboxCommandArgsOptions struct {
 	SandboxPolicyCWD     string
@@ -34,6 +40,19 @@ type LinuxSandboxHelperConfig struct {
 	NoProc               bool
 	Command              []string
 }
+
+type LinuxSandboxHelperCommand struct {
+	Name       string
+	ArgsPrefix []string
+	Dir        string
+}
+
+type LinuxSandboxBwrapOptions struct {
+	Config     LinuxSandboxHelperConfig
+	HelperPath string
+}
+
+var linuxSandboxHelperCommand = findLinuxSandboxHelperCommand
 
 func BuildLinuxSandboxCommandArgs(options LinuxSandboxCommandArgsOptions) ([]string, error) {
 	sandboxPolicyCWD := strings.TrimSpace(options.SandboxPolicyCWD)
@@ -114,11 +133,214 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 	return config, nil
 }
 
-func RunLinuxSandboxHelper(args []string, stderr io.Writer) int {
-	if _, err := ParseLinuxSandboxHelperArgs(args); err != nil {
-		fmt.Fprintln(stderr, LinuxSandboxHelperName+": "+err.Error())
-		return 2
+func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, error) {
+	config := options.Config
+	if config.ApplySeccompThenExec {
+		return nil, errors.New("inner seccomp stage cannot be wrapped by bubblewrap again")
 	}
-	fmt.Fprintln(stderr, LinuxSandboxHelperName+": native Linux helper enforcement is not implemented yet")
-	return 125
+	if config.UseLandlock {
+		return nil, errors.New("linux landlock helper mode is not implemented yet")
+	}
+	helperPath := strings.TrimSpace(options.HelperPath)
+	if helperPath == "" {
+		return nil, errors.New("linux sandbox helper path is required")
+	}
+	commandCWD := strings.TrimSpace(config.CommandCWD)
+	if commandCWD == "" {
+		commandCWD = config.SandboxPolicyCWD
+	}
+	innerArgs, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
+		SandboxPolicyCWD:     config.SandboxPolicyCWD,
+		CommandCWD:           commandCWD,
+		PermissionProfile:    config.PermissionProfile,
+		ApplySeccompThenExec: true,
+		AllowNetworkForProxy: config.AllowNetworkForProxy,
+		ProxyRouteSpec:       config.ProxyRouteSpec,
+		NoProc:               config.NoProc,
+		Command:              config.Command,
+	})
+	if err != nil {
+		return nil, err
+	}
+	args := []string{
+		"--new-session",
+		"--die-with-parent",
+		"--unshare-user",
+		"--unshare-pid",
+		"--unshare-ipc",
+		"--unshare-uts",
+	}
+	args = append(args, linuxBwrapFilesystemArgs(config.PermissionProfile)...)
+	if pathExists(helperPath) {
+		args = append(args, "--ro-bind", helperPath, helperPath)
+	}
+	if shouldUnshareLinuxNetwork(config.PermissionProfile.Network, config.AllowNetworkForProxy) {
+		args = append(args, "--unshare-net")
+	}
+	if !config.NoProc {
+		args = append(args, "--proc", "/proc")
+	}
+	args = append(args, "--chdir", commandCWD)
+	args = append(args, "--clearenv")
+	for _, env := range linuxHelperSandboxEnvironment(config.PermissionProfile, commandCWD) {
+		key, value, ok := strings.Cut(env, "=")
+		if ok {
+			args = append(args, "--setenv", key, value)
+		}
+	}
+	args = append(args, "--", helperPath)
+	args = append(args, innerArgs...)
+	return args, nil
+}
+
+func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
+	fs := profile.FileSystem
+	if fs.Kind == FileSystemUnrestricted {
+		args := []string{"--ro-bind", "/", "/", "--dev", "/dev"}
+		if fs.AllowTemp {
+			args = append(args, "--tmpfs", "/tmp")
+		}
+		for _, root := range fs.WriteRoots {
+			if pathExists(root.Root) {
+				args = append(args, "--bind", root.Root, root.Root)
+			}
+		}
+		return args
+	}
+
+	args := []string{"--tmpfs", "/", "--dev", "/dev"}
+	if fs.IncludePlatformRoots {
+		for _, root := range linuxPlatformReadRoots() {
+			args = append(args, "--ro-bind", root, root)
+		}
+	}
+	for _, root := range fs.ReadRoots {
+		if pathExists(root) {
+			args = append(args, "--ro-bind", root, root)
+		}
+	}
+	if fs.AllowTemp {
+		args = append(args, "--tmpfs", "/tmp")
+	}
+	for _, root := range fs.WriteRoots {
+		if !pathExists(root.Root) {
+			continue
+		}
+		args = append(args, "--bind", root.Root, root.Root)
+		for _, subpath := range root.ReadOnlySubpaths {
+			args = appendReadOnlyLinuxPathArgs(args, subpath)
+		}
+		for _, name := range root.ProtectedMetadataNames {
+			args = appendReadOnlyLinuxPathArgs(args, filepath.Join(root.Root, name))
+		}
+	}
+	for _, path := range fs.DenyWrite {
+		args = appendReadOnlyLinuxPathArgs(args, path)
+	}
+	for _, path := range fs.DenyRead {
+		args = appendUnreadableLinuxPathArgs(args, path)
+	}
+	return args
+}
+
+func linuxPlatformReadRoots() []string {
+	candidates := []string{"/bin", "/sbin", "/usr", "/etc", "/lib", "/lib64", "/nix/store", "/run/current-system/sw"}
+	roots := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if pathExists(candidate) {
+			roots = append(roots, candidate)
+		}
+	}
+	return roots
+}
+
+func appendReadOnlyLinuxPathArgs(args []string, path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return args
+	}
+	if pathExists(path) {
+		return append(args, "--ro-bind", path, path)
+	}
+	return append(args, "--perms", "555", "--tmpfs", path, "--remount-ro", path)
+}
+
+func appendUnreadableLinuxPathArgs(args []string, path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return args
+	}
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return append(args, "--ro-bind", "/dev/null", path)
+	}
+	return append(args, "--perms", "000", "--tmpfs", path, "--remount-ro", path)
+}
+
+func shouldUnshareLinuxNetwork(policy NetworkPolicy, allowNetworkForProxy bool) bool {
+	if allowNetworkForProxy {
+		return true
+	}
+	return policy.Mode == NetworkDeny || policy.Mode == NetworkScoped || policy.ProxyRequired
+}
+
+func linuxHelperSandboxEnvironment(profile PermissionProfile, home string) []string {
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + firstEnv("PATH", defaultPath()),
+		"TERM=" + firstEnv("TERM", "dumb"),
+		EnvSandboxBackend + "=" + string(linuxSandboxBackendEnv),
+		"ZERO_SANDBOX_NETWORK=" + string(profile.Network.Mode),
+		EnvSandboxed + "=1",
+	}
+	return env
+}
+
+func pathExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
+		if executableRegularFile(candidate) {
+			return LinuxSandboxHelperCommand{Name: candidate}, nil
+		}
+	}
+	if path, err := exec.LookPath(LinuxSandboxHelperName); err == nil && path != "" {
+		return LinuxSandboxHelperCommand{Name: path}, nil
+	}
+	if root := linuxSandboxRepoRoot(); root != "" {
+		mainPath := filepath.Join(root, "cmd", LinuxSandboxHelperName, "main.go")
+		if _, err := os.Stat(mainPath); err == nil {
+			if goPath, lookErr := exec.LookPath("go"); lookErr == nil && goPath != "" {
+				return LinuxSandboxHelperCommand{
+					Name:       goPath,
+					ArgsPrefix: []string{"run", "./cmd/" + LinuxSandboxHelperName},
+					Dir:        root,
+				}, nil
+			}
+		}
+	}
+	return LinuxSandboxHelperCommand{}, errors.New("zero-linux-sandbox helper is not available")
+}
+
+func executableRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+func linuxSandboxRepoRoot() string {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		return ""
+	}
+	return root
 }

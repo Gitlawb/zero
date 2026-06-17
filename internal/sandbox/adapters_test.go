@@ -8,18 +8,18 @@ import (
 )
 
 func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
-	t.Run("linux bubblewrap available", func(t *testing.T) {
+	t.Run("linux helper available", func(t *testing.T) {
 		backend := SelectBackend(BackendOptions{
 			GOOS: "linux",
 			LookupExecutable: func(name string) (string, error) {
-				if name == "bwrap" {
-					return "/usr/bin/bwrap", nil
+				if name == LinuxSandboxHelperName {
+					return "/usr/bin/zero-linux-sandbox", nil
 				}
 				return "", errors.New("missing")
 			},
 		})
-		if backend.Name != BackendBubblewrap || !backend.Available || backend.Executable != "/usr/bin/bwrap" {
-			t.Fatalf("linux backend = %#v, want available bubblewrap", backend)
+		if backend.Name != BackendLinuxBwrap || !backend.Available || backend.Executable != "/usr/bin/zero-linux-sandbox" {
+			t.Fatalf("linux backend = %#v, want available Linux helper", backend)
 		}
 		if backend.Platform != "linux" || backend.Fallback || !backend.CommandWrapping || !backend.NativeIsolation {
 			t.Fatalf("linux backend capabilities = %#v, want native wrapping", backend)
@@ -30,6 +30,21 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityNative {
 			t.Fatalf("linux native isolation capability = %#v, want native", plan.Capabilities)
+		}
+	})
+
+	t.Run("linux bubblewrap compatibility fallback", func(t *testing.T) {
+		backend := SelectBackend(BackendOptions{
+			GOOS: "linux",
+			LookupExecutable: func(name string) (string, error) {
+				if name == "bwrap" {
+					return "/usr/bin/bwrap", nil
+				}
+				return "", errors.New("missing")
+			},
+		})
+		if backend.Name != BackendBubblewrap || !backend.Available || backend.Executable != "/usr/bin/bwrap" {
+			t.Fatalf("linux backend = %#v, want temporary bubblewrap adapter", backend)
 		}
 	})
 

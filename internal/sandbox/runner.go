@@ -239,13 +239,9 @@ func buildLegacyCommandPlan(execRequest SandboxExecutionRequest, policy Policy, 
 		return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
 	}
 	switch backend.Name {
-	case BackendBubblewrap:
+	case BackendLinuxBwrap, BackendBubblewrap:
 		if backend.Available && backend.Executable != "" {
-			// Bubblewrap isolates the network namespace (--unshare-net) with no
-			// bridge to the host loopback proxy, so it cannot enforce scoped egress;
-			// a scoped policy collapses to deny (no proxy is started). Evaluate's
-			// network gate denies network-risk tools for this backend to match.
-			return withSandboxExecutionMetadata(bubblewrapCommandPlan(spec, workspaceRoot, options.RelativeDir, options.WriteRoots, policy, backend), execRequest), nil
+			return linuxSandboxHelperCommandPlan(execRequest, policy)
 		}
 	case BackendSandboxExec:
 		if backend.Available && backend.Executable != "" {
@@ -272,6 +268,49 @@ func buildLegacyCommandPlan(execRequest SandboxExecutionRequest, policy Policy, 
 		return CommandPlan{}, errPolicyOnlyRunnerDisabled
 	}
 	return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
+}
+
+func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy Policy) (CommandPlan, error) {
+	spec := execRequest.Command
+	helper := LinuxSandboxHelperCommand{}
+	if execRequest.Backend.Name == BackendLinuxBwrap && execRequest.Backend.Executable != "" {
+		helper.Name = execRequest.Backend.Executable
+	} else {
+		resolved, err := linuxSandboxHelperCommand()
+		if err != nil {
+			return CommandPlan{}, err
+		}
+		helper = resolved
+	}
+	command := append([]string{spec.Name}, spec.Args...)
+	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
+		SandboxPolicyCWD:  execRequest.WorkspaceRoot,
+		CommandCWD:        spec.Dir,
+		PermissionProfile: execRequest.PermissionProfile,
+		Command:           command,
+	})
+	if err != nil {
+		return CommandPlan{}, err
+	}
+	planDir := spec.Dir
+	if helper.Dir != "" {
+		planDir = helper.Dir
+	}
+	plan := CommandPlan{
+		Backend:           execRequest.Backend,
+		TargetBackend:     execRequest.TargetBackend,
+		WorkspaceRoot:     execRequest.WorkspaceRoot,
+		Policy:            policy,
+		Wrapped:           true,
+		SandboxEnvMarkers: execRequest.SandboxEnvMarkers,
+		EnforcementLevel:  execRequest.EnforcementLevel,
+		Name:              helper.Name,
+		Args:              append(append([]string{}, helper.ArgsPrefix...), args...),
+		Dir:               planDir,
+		Env:               cloneStrings(spec.Env),
+		SandboxDir:        spec.Dir,
+	}
+	return withSandboxExecutionMetadata(plan, execRequest), nil
 }
 
 func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequest) CommandPlan {

@@ -1,10 +1,10 @@
 package sandbox
 
 import (
-	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -85,7 +85,11 @@ func TestParseLinuxSandboxHelperArgs(t *testing.T) {
 	}
 }
 
-func TestRunLinuxSandboxHelperFailsClosedUntilEnforcementIsWired(t *testing.T) {
+func TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage(t *testing.T) {
+	helperPath := filepath.Join(t.TempDir(), LinuxSandboxHelperName)
+	if err := os.WriteFile(helperPath, []byte("helper"), 0o755); err != nil {
+		t.Fatalf("WriteFile helper: %v", err)
+	}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
 		SandboxPolicyCWD:  "/workspace",
 		PermissionProfile: DefaultPermissionProfile("/workspace"),
@@ -94,12 +98,31 @@ func TestRunLinuxSandboxHelperFailsClosedUntilEnforcementIsWired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildLinuxSandboxCommandArgs: %v", err)
 	}
-	var stderr bytes.Buffer
-	if code := RunLinuxSandboxHelper(args, &stderr); code != 125 {
-		t.Fatalf("exit code = %d, want 125; stderr=%s", code, stderr.String())
+	config, err := ParseLinuxSandboxHelperArgs(args)
+	if err != nil {
+		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "not implemented") {
-		t.Fatalf("stderr = %q, want fail-closed message", stderr.String())
+	bwrapArgs, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{
+		Config:     config,
+		HelperPath: helperPath,
+	})
+	if err != nil {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
+	}
+	for _, want := range [][]string{
+		{"--new-session"},
+		{"--die-with-parent"},
+		{"--unshare-user"},
+		{"--unshare-pid"},
+		{"--unshare-net"},
+		{"--chdir", "/workspace"},
+		{"--setenv", EnvSandboxBackend, string(BackendLinuxBwrap)},
+		{"--ro-bind", helperPath, helperPath},
+		{"--", helperPath},
+		{"--apply-seccomp-then-exec"},
+		{"--", "true"},
+	} {
+		assertArgsContainSequence(t, bwrapArgs, want...)
 	}
 }
 

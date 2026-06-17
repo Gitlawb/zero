@@ -58,8 +58,8 @@ func TestBackendPlanCarriesPhase0ManagerFields(t *testing.T) {
 	linux := SelectBackend(BackendOptions{
 		GOOS: "linux",
 		LookupExecutable: func(name string) (string, error) {
-			if name == "bwrap" {
-				return "/usr/bin/bwrap", nil
+			if name == LinuxSandboxHelperName {
+				return "/usr/bin/zero-linux-sandbox", nil
 			}
 			return "", errors.New("missing")
 		},
@@ -68,7 +68,7 @@ func TestBackendPlanCarriesPhase0ManagerFields(t *testing.T) {
 	if linux.TargetBackend != BackendLinuxBwrap || linux.EnforcementLevel != EnforcementNative || !linux.CommandWrapped {
 		t.Fatalf("linux plan metadata = %#v, want linux-bwrap native wrapped", linux)
 	}
-	for _, marker := range []string{EnvSandboxed + "=1", EnvSandboxBackend + "=" + string(BackendBubblewrap), "ZERO_SANDBOX_NETWORK=deny"} {
+	for _, marker := range []string{EnvSandboxed + "=1", EnvSandboxBackend + "=" + string(BackendLinuxBwrap), "ZERO_SANDBOX_NETWORK=deny"} {
 		if !stringSliceContains(linux.SandboxEnvMarkers, marker) {
 			t.Fatalf("linux plan markers = %#v, missing %q", linux.SandboxEnvMarkers, marker)
 		}
@@ -96,10 +96,10 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
 		Backend: Backend{
-			Name:            BackendBubblewrap,
+			Name:            BackendLinuxBwrap,
 			Available:       true,
 			Platform:        "linux",
-			Executable:      "/usr/bin/bwrap",
+			Executable:      "/usr/bin/zero-linux-sandbox",
 			CommandWrapping: true,
 			NativeIsolation: true,
 		},
@@ -112,7 +112,7 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 	if plan.TargetBackend != BackendLinuxBwrap || !plan.Wrapped || plan.EnforcementLevel != EnforcementNative || plan.DowngradeReason != "" {
 		t.Fatalf("wrapped command metadata = %#v, want native linux-bwrap", plan)
 	}
-	if !stringSliceContains(plan.SandboxEnvMarkers, EnvSandboxBackend+"="+string(BackendBubblewrap)) {
+	if !stringSliceContains(plan.SandboxEnvMarkers, EnvSandboxBackend+"="+string(BackendLinuxBwrap)) {
 		t.Fatalf("wrapped command markers = %#v, missing backend marker", plan.SandboxEnvMarkers)
 	}
 

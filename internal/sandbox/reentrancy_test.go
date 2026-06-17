@@ -11,7 +11,7 @@ func TestIsAlreadySandboxed(t *testing.T) {
 		t.Fatalf("IsAlreadySandboxed must be false when only %s=1 is set without %s", EnvSandboxed, EnvSandboxBackend)
 	}
 	// The backend marker alone (no ZERO_SANDBOXED=1) must not count either.
-	t.Setenv(EnvSandboxBackend, string(BackendBubblewrap))
+	t.Setenv(EnvSandboxBackend, string(BackendLinuxBwrap))
 	t.Setenv(EnvSandboxed, "")
 	if IsAlreadySandboxed() {
 		t.Fatalf("IsAlreadySandboxed must be false when only %s is set", EnvSandboxBackend)
@@ -28,11 +28,11 @@ func TestIsAlreadySandboxed(t *testing.T) {
 }
 
 func TestSandboxEnvironmentMarksSandboxed(t *testing.T) {
-	env := sandboxEnvironment(DefaultPolicy(), BackendBubblewrap, "/home/agent")
+	env := sandboxEnvironment(DefaultPolicy(), BackendLinuxBwrap, "/home/agent")
 	// Both correlated markers must be set: IsAlreadySandboxed requires BOTH, so a
 	// regression that drops either one would silently break re-entrancy detection.
 	wantSandboxed := EnvSandboxed + "=1"
-	wantBackend := EnvSandboxBackend + "=" + string(BackendBubblewrap)
+	wantBackend := EnvSandboxBackend + "=" + string(BackendLinuxBwrap)
 	var gotSandboxed, gotBackend bool
 	for _, entry := range env {
 		switch entry {
@@ -55,14 +55,14 @@ func TestBuildCommandPlanWrapsWhenNotAlreadySandboxed(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
-	if !plan.Wrapped || plan.Name != "/usr/bin/bwrap" {
-		t.Fatalf("expected a wrapped bubblewrap plan, got wrapped=%v name=%q", plan.Wrapped, plan.Name)
+	if !plan.Wrapped || plan.Name != "/usr/bin/zero-linux-sandbox" {
+		t.Fatalf("expected a wrapped Linux helper plan, got wrapped=%v name=%q", plan.Wrapped, plan.Name)
 	}
 }
 
@@ -70,12 +70,12 @@ func TestBuildCommandPlanReEntrancyGuardReturnsPassThrough(t *testing.T) {
 	// Simulate running inside an already-wrapped process: BOTH correlated markers
 	// that sandboxEnvironment sets together must be present for the guard to fire.
 	t.Setenv(EnvSandboxed, "1")
-	t.Setenv(EnvSandboxBackend, string(BackendBubblewrap))
+	t.Setenv(EnvSandboxBackend, string(BackendLinuxBwrap))
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {

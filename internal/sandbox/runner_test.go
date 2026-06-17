@@ -10,21 +10,22 @@ import (
 	"testing"
 )
 
-func TestBuildCommandPlanWrapsBubblewrap(t *testing.T) {
+func TestBuildCommandPlanWrapsLinuxHelper(t *testing.T) {
 	root := t.TempDir()
 	resolvedRoot := resolvedTestPath(t, root)
 	nested := filepath.Join(root, "nested")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	resolvedNested := resolvedTestPath(t, nested)
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
 		Backend: Backend{
-			Name:       BackendBubblewrap,
+			Name:       BackendLinuxBwrap,
 			Available:  true,
-			Executable: "/usr/bin/bwrap",
-			Message:    "bubblewrap sandbox available",
+			Executable: "/usr/bin/zero-linux-sandbox",
+			Message:    "Linux sandbox helper available",
 		},
 	})
 
@@ -37,18 +38,17 @@ func TestBuildCommandPlanWrapsBubblewrap(t *testing.T) {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
 
-	if !plan.Wrapped || plan.Name != "/usr/bin/bwrap" || plan.Backend.Name != BackendBubblewrap {
-		t.Fatalf("plan backend = %#v, want wrapped bubblewrap", plan)
+	if !plan.Wrapped || plan.Name != "/usr/bin/zero-linux-sandbox" || plan.Backend.Name != BackendLinuxBwrap {
+		t.Fatalf("plan backend = %#v, want wrapped Linux helper", plan)
 	}
-	assertArgsContainSequence(t, plan.Args, "--bind", resolvedRoot, bubblewrapWorkspace)
-	assertArgsContainSequence(t, plan.Args, "--chdir", bubblewrapWorkspace+"/nested")
-	assertArgsContainSequence(t, plan.Args, "--unshare-net")
+	assertArgsContainSequence(t, plan.Args, "--sandbox-policy-cwd", resolvedRoot)
+	assertArgsContainSequence(t, plan.Args, "--command-cwd", resolvedNested)
 	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
-	if plan.SandboxDir != bubblewrapWorkspace+"/nested" {
-		t.Fatalf("SandboxDir = %q, want nested workspace dir", plan.SandboxDir)
+	if plan.SandboxDir != resolvedNested {
+		t.Fatalf("SandboxDir = %q, want command cwd", plan.SandboxDir)
 	}
-	if plan.Dir != "" {
-		t.Fatalf("bubblewrap host Dir = %q, want empty because bwrap owns chdir", plan.Dir)
+	if plan.Dir != resolvedNested {
+		t.Fatalf("helper host Dir = %q, want command cwd", plan.Dir)
 	}
 }
 
@@ -318,7 +318,7 @@ func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
 	}
 }
 
-func TestBubblewrapPlanBindsExtraWriteRoots(t *testing.T) {
+func TestLinuxHelperPlanCarriesExtraWriteRoots(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()
 	scope, err := NewScope(workspace, []string{extra})
@@ -329,69 +329,19 @@ func TestBubblewrapPlanBindsExtraWriteRoots(t *testing.T) {
 		WorkspaceRoot: workspace,
 		Policy:        DefaultPolicy(),
 		Scope:         scope,
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true"})
 	if err != nil {
 		t.Fatalf("BuildCommandPlan: %v", err)
 	}
-	joined := strings.Join(plan.Args, " ")
+	config, err := ParseLinuxSandboxHelperArgs(plan.Args)
+	if err != nil {
+		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
+	}
 	resolvedExtra := scope.Roots()[1]
-	if !strings.Contains(joined, "--bind "+resolvedExtra+" "+resolvedExtra) {
-		t.Fatalf("bubblewrap args missing rw bind for extra root %q:\n%s", resolvedExtra, joined)
-	}
-}
-
-func TestBubblewrapPlanPrefixesSeccompHelperWhenBlockingUnixSockets(t *testing.T) {
-	const fakeHelper = "/opt/zero/bin/zero-seccomp"
-	original := seccompHelper
-	seccompHelper = func() string { return fakeHelper }
-	defer func() { seccompHelper = original }()
-
-	workspace := t.TempDir()
-	policy := DefaultPolicy()
-	policy.BlockUnixSockets = true
-	engine := NewEngine(EngineOptions{
-		WorkspaceRoot: workspace,
-		Policy:        policy,
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
-	})
-	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}})
-	if err != nil {
-		t.Fatalf("BuildCommandPlan: %v", err)
-	}
-	joined := strings.Join(plan.Args, " ")
-	if !strings.Contains(joined, "--ro-bind "+fakeHelper+" "+fakeHelper) {
-		t.Fatalf("args missing ro-bind for seccomp helper:\n%s", joined)
-	}
-	// The helper must be the argv that follows the bwrap "--" separator, ahead of
-	// the real command, so it wraps execution.
-	if !strings.Contains(joined, "-- "+fakeHelper+" /bin/sh -c true") {
-		t.Fatalf("seccomp helper not prefixed before the command:\n%s", joined)
-	}
-}
-
-func TestBubblewrapPlanNoSeccompHelperByDefault(t *testing.T) {
-	original := seccompHelper
-	seccompHelper = func() string { return "/should/not/be/used/zero-seccomp" }
-	defer func() { seccompHelper = original }()
-
-	workspace := t.TempDir()
-	engine := NewEngine(EngineOptions{
-		WorkspaceRoot: workspace,
-		Policy:        DefaultPolicy(), // BlockUnixSockets is false by default
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
-	})
-	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}})
-	if err != nil {
-		t.Fatalf("BuildCommandPlan: %v", err)
-	}
-	joined := strings.Join(plan.Args, " ")
-	if strings.Contains(joined, "zero-seccomp") {
-		t.Fatalf("seccomp helper must not appear when BlockUnixSockets is off:\n%s", joined)
-	}
-	if !strings.Contains(joined, "-- /bin/sh -c true") {
-		t.Fatalf("command not wired as the plain argv after --:\n%s", joined)
+	if len(config.PermissionProfile.FileSystem.WriteRoots) < 2 || config.PermissionProfile.FileSystem.WriteRoots[1].Root != resolvedExtra {
+		t.Fatalf("helper profile missing extra write root %q: %#v", resolvedExtra, config.PermissionProfile.FileSystem.WriteRoots)
 	}
 }
 
@@ -411,7 +361,7 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 	}
 }
 
-func TestBubblewrapPlanChdirsToRealPathForExtraRootCwd(t *testing.T) {
+func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()
 	scope, err := NewScope(workspace, []string{extra})
@@ -422,7 +372,7 @@ func TestBubblewrapPlanChdirsToRealPathForExtraRootCwd(t *testing.T) {
 		WorkspaceRoot: workspace,
 		Policy:        DefaultPolicy(),
 		Scope:         scope,
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	resolvedExtra := scope.Roots()[1]
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "true", Dir: extra})
@@ -432,16 +382,16 @@ func TestBubblewrapPlanChdirsToRealPathForExtraRootCwd(t *testing.T) {
 	if plan.SandboxDir != filepath.ToSlash(resolvedExtra) {
 		t.Fatalf("SandboxDir=%q want real extra-root path %q", plan.SandboxDir, resolvedExtra)
 	}
-	joined := strings.Join(plan.Args, " ")
-	if !strings.Contains(joined, "--chdir "+filepath.ToSlash(resolvedExtra)) {
-		t.Fatalf("args missing --chdir to real extra-root path:\n%s", joined)
+	assertArgsContainSequence(t, plan.Args, "--command-cwd", filepath.ToSlash(resolvedExtra))
+	config, err := ParseLinuxSandboxHelperArgs(plan.Args)
+	if err != nil {
+		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
 	}
-	// The workspace must appear only at its /workspace remount, never
-	// double-bound at its real host path.
-	resolvedWorkspace := scope.Roots()[0]
-	if strings.Contains(joined, "--bind "+resolvedWorkspace+" "+resolvedWorkspace) {
-		t.Fatalf("workspace double-bound at real path:\n%s", joined)
+	bwrapArgs, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{Config: config, HelperPath: "/usr/bin/zero-linux-sandbox"})
+	if err != nil {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
 	}
+	assertArgsContainSequence(t, bwrapArgs, "--chdir", filepath.ToSlash(resolvedExtra))
 }
 
 func TestProxyEnv(t *testing.T) {

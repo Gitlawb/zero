@@ -80,6 +80,9 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 	}
 	switch goos {
 	case "linux":
+		if helper, err := lookup(LinuxSandboxHelperName); err == nil && helper != "" {
+			return nativeBackend(goos, BackendLinuxBwrap, helper, "Linux sandbox helper available")
+		}
 		if path, err := lookup("bwrap"); err == nil && path != "" {
 			return nativeBackend(goos, BackendBubblewrap, path, "bubblewrap sandbox available")
 		}
@@ -211,7 +214,7 @@ func legacyAdapterName(backend Backend) string {
 func inferBackendCapabilities(backend Backend) Backend {
 	if backend.Available && backend.Executable != "" {
 		switch backend.Name {
-		case BackendBubblewrap, BackendSandboxExec:
+		case BackendBubblewrap, BackendLinuxBwrap, BackendSandboxExec:
 			backend.CommandWrapping = true
 			backend.NativeIsolation = true
 		}

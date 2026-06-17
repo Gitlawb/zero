@@ -9,7 +9,7 @@ import (
 // TestScopedNetworkGateInEvaluate verifies the preflight network gate: a populated
 // scoped policy permits a network-risk tool ONLY when the active backend can
 // actually route through the filtering proxy. A backend that cannot enforce scoped
-// egress (bubblewrap's isolated netns has no bridge; policy-only has no isolation)
+// egress (Linux bwrap netns has no bridge; policy-only has no isolation)
 // fails closed and denies, exactly like an empty-allowlist scoped policy.
 func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	root := t.TempDir()
@@ -40,7 +40,7 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 
 	// Backends that cannot enforce scoped egress must fail closed (deny).
 	unenforceable := map[string]Backend{
-		"bubblewrap":  {Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		"linux-bwrap": {Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 		"policy-only": {},
 	}
 	for name, backend := range unenforceable {
@@ -92,11 +92,9 @@ func TestEffectiveNetworkScopedEmptyIsDeny(t *testing.T) {
 	}
 }
 
-// TestBubblewrapScopedPlanFailsClosedWithoutProxy verifies that, because
-// bubblewrap isolates the network namespace (--unshare-net) with no bridge to the
-// host loopback proxy, a scoped policy collapses to deny: the plan keeps
-// --unshare-net, never exports a proxy, and never starts an (unreachable) proxy.
-func TestBubblewrapScopedPlanFailsClosedWithoutProxy(t *testing.T) {
+// TestLinuxHelperScopedPlanFailsClosedWithoutProxy verifies that scoped Linux
+// helper networking collapses to deny until a real proxy route exists.
+func TestLinuxHelperScopedPlanFailsClosedWithoutProxy(t *testing.T) {
 	root := t.TempDir()
 	started := false
 	restore := startEgressProxy
@@ -109,7 +107,7 @@ func TestBubblewrapScopedPlanFailsClosedWithoutProxy(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy([]string{"github.com"}, nil),
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {
@@ -117,15 +115,23 @@ func TestBubblewrapScopedPlanFailsClosedWithoutProxy(t *testing.T) {
 	}
 	defer plan.Cleanup()
 
-	joined := strings.Join(plan.Args, " ")
-	if !strings.Contains(joined, "--unshare-net") {
-		t.Fatalf("scoped bubblewrap plan must keep --unshare-net (deny-equivalent):\n%s", joined)
+	config, err := ParseLinuxSandboxHelperArgs(plan.Args)
+	if err != nil {
+		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
 	}
-	if proxyAddr := proxySetenvValue(t, plan.Args, "HTTP_PROXY"); proxyAddr != "" {
-		t.Fatalf("scoped bubblewrap plan must not export a proxy it cannot reach:\n%s", joined)
+	bwrapArgs, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{Config: config, HelperPath: "/usr/bin/zero-linux-sandbox"})
+	if err != nil {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
+	}
+	joined := strings.Join(bwrapArgs, " ")
+	if !strings.Contains(joined, "--unshare-net") {
+		t.Fatalf("scoped Linux helper plan must keep --unshare-net (deny-equivalent):\n%s", joined)
+	}
+	if proxyAddr := proxySetenvValue(t, bwrapArgs, "HTTP_PROXY"); proxyAddr != "" {
+		t.Fatalf("scoped Linux helper plan must not export a proxy it cannot reach:\n%s", joined)
 	}
 	if started {
-		t.Fatal("bubblewrap must not start an unreachable egress proxy for a scoped policy")
+		t.Fatal("Linux helper must not start an unreachable egress proxy for a scoped policy")
 	}
 }
 
@@ -174,7 +180,7 @@ func TestScopedEmptyAllowlistBuildsLikeDeny(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        scopedPolicy(nil, nil),
-		Backend:       Backend{Name: BackendBubblewrap, Available: true, Executable: "/usr/bin/bwrap"},
+		Backend:       Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"},
 	})
 	plan, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})
 	if err != nil {
@@ -182,11 +188,19 @@ func TestScopedEmptyAllowlistBuildsLikeDeny(t *testing.T) {
 	}
 	defer plan.Cleanup()
 
-	joined := strings.Join(plan.Args, " ")
+	config, err := ParseLinuxSandboxHelperArgs(plan.Args)
+	if err != nil {
+		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
+	}
+	bwrapArgs, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{Config: config, HelperPath: "/usr/bin/zero-linux-sandbox"})
+	if err != nil {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
+	}
+	joined := strings.Join(bwrapArgs, " ")
 	if !strings.Contains(joined, "--unshare-net") {
 		t.Fatalf("empty scoped plan must keep --unshare-net (deny-equivalent):\n%s", joined)
 	}
-	if proxySetenvValue(t, plan.Args, "HTTP_PROXY") != "" {
+	if proxySetenvValue(t, bwrapArgs, "HTTP_PROXY") != "" {
 		t.Fatalf("empty scoped plan must not export a proxy:\n%s", joined)
 	}
 }
