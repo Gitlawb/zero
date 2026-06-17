@@ -48,6 +48,32 @@ var (
 		// mkfs.<fstype> form (e.g. mkfs.ext4) not caught by the bare \bmkfs\b above when followed by a dot.
 		regexp.MustCompile(`(?i)\bmkfs\.[a-z0-9]+\b`),
 	}
+	// catastrophicCommandPattern mirrors destructiveCommandPattern but restricts
+	// the rm target to the IRRECOVERABLE / workspace-escaping forms — a system
+	// root (/), $HOME (bare/braced), ~, or a path-traversal escape (..) — while
+	// keeping the always-irrecoverable non-rm forms (mkfs, dd if=, recursive or
+	// system chmod 777, chown -R). A bare-glob delete (rm -rf *) is deliberately
+	// ABSENT: it is workspace-local and the engine downgrades it to a prompt
+	// rather than hard-denying it. Everything this matches stays a hard block
+	// even in unsafe mode.
+	catastrophicCommandPattern = regexp.MustCompile(`(?i)(\brm\s+(-[A-Za-z]*r[A-Za-z]*f|-rf|-fr)\s+(--\s+)?["']?(\$\{?HOME\}?|/|~|\.\.)["']?|\bmkfs\b|\bdd\s+if=|\bchmod\s+(-[A-Za-z]*[rR][A-Za-z]*\s+)+0?777\b|\bchmod\s+(-\S+\s+)*0?777\s+-[A-Za-z]*[rR][A-Za-z]*\b|\bchmod\s+(-\S+\s+)*0?777\s+["']?/(\s|$|["']|(etc|usr|bin|sbin|lib|lib64|var|boot|opt|root|sys|proc|dev)\b)|\bchown\s+-R\b)`)
+	// catastrophicExtraPatterns mirror destructiveExtraPatterns: the device/fork-
+	// bomb forms are unconditionally catastrophic; the rm form drops the bare-glob
+	// target (kept scoped) and adds a path-traversal target (..) so a workspace
+	// escape stays denied. mkfs.<fstype> is likewise catastrophic.
+	catastrophicExtraPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`),
+		regexp.MustCompile(`(?i)>\s*/dev/(sd[a-z]+\d*|nvme\d+n\d+(p\d+)?|hd[a-z]+\d*|xvd[a-z]+\d*|mmcblk\d+)`),
+		regexp.MustCompile(`(?i)\bof=/dev/(sd[a-z]+\d*|nvme\d+n\d+(p\d+)?|hd[a-z]+\d*|xvd[a-z]+\d*|mmcblk\d+)`),
+		regexp.MustCompile(`(?i)\brm\s+(-{1,2}\S+\s+)*(--\s+)?["']?(/\*?|~|\$\{?HOME\}?|\.\.)["']?(\s|$|/)`),
+		regexp.MustCompile(`(?i)\bmkfs\.[a-z0-9]+\b`),
+	}
+	// pathTraversalPattern matches a `..` path component (../, /.., or a bare ..).
+	// Combined with a destructive classification it flags a command whose target
+	// escapes the workspace — fail-closed: a destructive command containing any
+	// `..` component is treated as catastrophic even if it would resolve inside
+	// the workspace, because the regex matchers cannot prove it does.
+	pathTraversalPattern = regexp.MustCompile(`(^|[\s"'=:(/])\.\.(/|$|[\s"'])`)
 )
 
 func matchesDestructive(command string) bool {
@@ -60,6 +86,31 @@ func matchesDestructive(command string) bool {
 		}
 	}
 	return false
+}
+
+// matchesCatastrophic reports the irrecoverable / workspace-escaping subset of
+// matchesDestructive: the forms that stay a hard deny even in unsafe mode. It is
+// strictly narrower than matchesDestructive — a workspace-local delete such as
+// `rm -rf *` or `rm -rf <subdir>` is destructive but NOT catastrophic, so the
+// engine can downgrade it to a prompt instead of hard-blocking it.
+func matchesCatastrophic(command string) bool {
+	if catastrophicCommandPattern.MatchString(command) {
+		return true
+	}
+	for _, pattern := range catastrophicExtraPatterns {
+		if pattern.MatchString(command) {
+			return true
+		}
+	}
+	return false
+}
+
+// commandHasPathTraversal reports whether the command contains a `..` path
+// component. Used only in combination with a destructive classification to keep
+// a workspace-escaping delete (e.g. `rm -rf ../../`) catastrophic even when the
+// regex matchers — which key off system-root/$HOME/~ targets — do not match it.
+func commandHasPathTraversal(command string) bool {
+	return pathTraversalPattern.MatchString(command)
 }
 
 func Classify(request Request) Risk {
@@ -102,11 +153,14 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 		}
 		if matchesDestructive(command) {
 			add("destructive", RiskCritical)
-			// destructive_catastrophic marks the irrecoverable, system-level forms
-			// (rm -rf / or $HOME/~/*, mkfs, dd to a raw device, fork bomb, chmod 777
-			// on a system tree, chown -R). These stay a hard block even in unsafe
-			// mode; the broader "destructive" set (e.g. rm -rf <subdir>, only flagged
-			// by the AST analyzer below) is downgraded to a prompt in the engine.
+		}
+		if matchesCatastrophic(command) {
+			// destructive_catastrophic marks the irrecoverable, system-level or
+			// workspace-escaping forms (rm -rf / or $HOME/~/.., mkfs, dd to a raw
+			// device, fork bomb, chmod 777 on a system tree, chown -R). These stay a
+			// hard block even in unsafe mode. A workspace-local destructive command
+			// (rm -rf * or rm -rf <subdir>) is "destructive" but NOT catastrophic, so
+			// the engine downgrades it to a prompt rather than hard-blocking it.
 			add("destructive_catastrophic", RiskCritical)
 		}
 		if pipedInstallerPattern.MatchString(command) {
@@ -124,6 +178,14 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 		}
 		if analysis.Destructive {
 			add("destructive", RiskCritical)
+			// A destructive command whose target escapes the workspace via path
+			// traversal (..) is catastrophic and must stay denied even in unsafe
+			// mode. The regex matchers only catch system-root/$HOME/~ targets, so the
+			// AST (which flags `rm -rf <anything>` regardless of flag order) plus a
+			// simple `..` check closes the `rm -rf ../../` escape Vasanth flagged.
+			if commandHasPathTraversal(command) {
+				add("destructive_catastrophic", RiskCritical)
+			}
 		}
 		if analysis.TooComplex {
 			add("unparseable_command", RiskHigh)

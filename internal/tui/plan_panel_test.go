@@ -41,6 +41,24 @@ func TestPlanPanelShowsOnlyDuringAPlannedRun(t *testing.T) {
 	}
 }
 
+func TestPlanPanelHiddenWhenTerminalTooShort(t *testing.T) {
+	// height <= planPanelReserveRows leaves zero drawable rows above the bottom
+	// reserve, so composeWithPlanPanel overlays nothing. Activation must agree.
+	short := plannedRunModel(t)
+	short.height = planPanelReserveRows
+	if short.rightColumnBase() {
+		t.Fatal("right column must hide when height <= planPanelReserveRows")
+	}
+	if short.planPanelActive() {
+		t.Fatal("plan panel must hide when height <= planPanelReserveRows")
+	}
+	// One more row → there is capacity for an overlay, so it shows again.
+	short.height = planPanelReserveRows + 1
+	if !short.rightColumnBase() {
+		t.Fatal("right column should show once a drawable row exists above the reserve")
+	}
+}
+
 func TestPlanPanelHiddenWhenNotApplicable(t *testing.T) {
 	narrow := plannedRunModel(t)
 	narrow.width = 60 // 60 - 40 < 48 → keep chat readable

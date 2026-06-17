@@ -33,7 +33,11 @@ const (
 // unreadable. The individual cards add their own "is there anything to show"
 // test on top (a live plan, a live edit) so a trivial "hi" shows nothing.
 func (m model) rightColumnBase() bool {
-	if !m.altScreen || m.height <= 0 || m.setup.visible || m.transcriptDetailed {
+	// Require at least one drawable row ABOVE the bottom reserve: composeWithPlanPanel
+	// overlays only m.height-planPanelReserveRows rows, so on a short terminal
+	// (height <= planPanelReserveRows) it would draw zero rows while activation still
+	// reported visible. Gate by the same capacity so the two never diverge.
+	if !m.altScreen || m.height <= planPanelReserveRows || m.setup.visible || m.transcriptDetailed {
 		return false
 	}
 	if !m.pending {

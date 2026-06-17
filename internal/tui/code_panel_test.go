@@ -189,3 +189,28 @@ func TestEditCardsCollapseOnlyWhileCodePanelActive(t *testing.T) {
 		t.Fatalf("once the run ends the diff should render inline, got:\n%s", full)
 	}
 }
+
+func TestShortEditDiffCollapsesInCompactMode(t *testing.T) {
+	// A short edit diff (< cardBodyMaxLines) would normally render inline. But while
+	// the live Code card shows the same diff, leaving the inline card expanded
+	// duplicates it — so in compact-edit mode even a short edit collapses.
+	m := editingRunModel(t, sampleEditDiff)
+	row := m.transcript[len(m.transcript)-1]
+	rc := buildRowContext(m.transcript)
+
+	live := plainRender(t, m.renderRow(row, 80, rc))
+	if !strings.Contains(live, "click to expand") {
+		t.Fatalf("short edit card should collapse in compact-edit mode, got:\n%s", live)
+	}
+	if strings.Contains(live, "cart.push(id)") {
+		t.Fatal("collapsed short edit card must not duplicate the diff body in the chat")
+	}
+
+	// Run finished (Code card gone) → the short diff renders inline again.
+	done := m
+	done.pending = false
+	full := plainRender(t, done.renderRow(row, 80, buildRowContext(done.transcript)))
+	if !strings.Contains(full, "cart.push(id)") {
+		t.Fatalf("once the run ends the short diff should render inline, got:\n%s", full)
+	}
+}

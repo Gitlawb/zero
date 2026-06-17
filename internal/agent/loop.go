@@ -141,10 +141,33 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				}
 				stream, err = provider.StreamCompletion(ctx, request)
 			}
-			if err != nil {
-				result.Messages = copyMessages(messages)
-				return result, err
+			// fall through to the shared initial-call network retry below
+		}
+		// Retry a transient network failure on the INITIAL call too, mirroring the
+		// collect-phase retry below: a TLS/dial timeout or connection reset here
+		// means the request never reached the provider, so re-sending after a short
+		// backoff is safe. Reactive compaction above only recovers context-limit
+		// errors, not connectivity ones — without this, a transient call-level
+		// failure returned immediately and skipped retries entirely.
+		for attempt := 1; err != nil && attempt <= maxNetworkRetries &&
+			ctx.Err() == nil && isTransientNetworkError(err.Error()); attempt++ {
+			if options.OnNetworkRetry != nil {
+				options.OnNetworkRetry(attempt, err.Error())
 			}
+			if !sleepWithContext(ctx, networkRetryBackoff(attempt-1)) {
+				break // run cancelled during backoff
+			}
+			stream, err = provider.StreamCompletion(ctx, request)
+		}
+		if err != nil {
+			result.Messages = copyMessages(messages)
+			// A transient failure that survived every retry is a connectivity problem
+			// reaching the provider; make the surfaced error actionable (mirrors the
+			// collect-phase annotation below) instead of a cryptic timeout.
+			if ctx.Err() == nil && isTransientNetworkError(err.Error()) {
+				return result, errors.New(annotateUnreachableProvider(err.Error()))
+			}
+			return result, err
 		}
 
 		collectOpts := zeroruntime.CollectOptions{
@@ -161,7 +184,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// is left for the normal handling below.
 		for attempt := 1; attempt <= maxNetworkRetries &&
 			ctx.Err() == nil &&
-			collected.Error != "" && collected.Text == "" && len(collected.ToolCalls) == 0 &&
+			collected.Error != "" && streamProducedNoOutput(collected) &&
 			isTransientNetworkError(collected.Error); attempt++ {
 			if options.OnNetworkRetry != nil {
 				options.OnNetworkRetry(attempt, collected.Error)
@@ -179,8 +202,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// A transient network failure that survived every retry is a connectivity
 		// problem reaching the provider, not the model. Make the surfaced error
 		// actionable instead of a cryptic "TLS handshake timeout".
-		if ctx.Err() == nil && collected.Error != "" && collected.Text == "" &&
-			len(collected.ToolCalls) == 0 && isTransientNetworkError(collected.Error) {
+		if ctx.Err() == nil && collected.Error != "" && streamProducedNoOutput(collected) &&
+			isTransientNetworkError(collected.Error) {
 			collected.Error = annotateUnreachableProvider(collected.Error)
 		}
 		if collected.Error != "" {

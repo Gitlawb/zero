@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 // maxNetworkRetries is how many times a transient network failure that produced
@@ -51,6 +53,17 @@ func isTransientNetworkError(reason string) bool {
 		}
 	}
 	return false
+}
+
+// streamProducedNoOutput reports whether a collected stream surfaced nothing the
+// user would see: no text, no tool calls, no reasoning blocks, and no dropped
+// tool-call signals. The no-output network retry only fires when this holds — a
+// stream that already produced ANY of these must not be re-sent, since
+// re-collecting it would duplicate already-surfaced output and contradict the
+// "no output" retry contract.
+func streamProducedNoOutput(c zeroruntime.CollectedStream) bool {
+	return c.Text == "" && len(c.ToolCalls) == 0 &&
+		len(c.ReasoningBlocks) == 0 && c.DroppedToolCalls == 0
 }
 
 // networkRetryBackoff is the wait before the (0-based) attempt-th retry. It is a

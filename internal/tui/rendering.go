@@ -964,7 +964,11 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	// diff tools whose body must stay reviewable, and short output.
 	collapsedFooter := ""
 	if opts.bodyCap > 0 && (!toolCardAlwaysExpands(name) || opts.compactEdit) {
-		collapsedFooter = collapsedToolFooter(row.detail)
+		// In compact-edit mode an edit card collapses regardless of length: its diff
+		// is already shown in the live Code card, so leaving even a short diff
+		// expanded here duplicates it. Force the footer for edit tools in that mode.
+		forceCollapse := opts.compactEdit && toolCardAlwaysExpands(name)
+		collapsedFooter = collapsedToolFooter(row.detail, forceCollapse)
 	}
 	if collapsedFooter != "" && !row.expanded {
 		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
@@ -992,14 +996,16 @@ func toolCardAlwaysExpands(name string) bool {
 // collapsedToolFooter summarizes the hidden output for a collapsed tool card, or
 // "" when the output is short enough to render inline. Only output longer than
 // the live body cap (the noisy "… N more lines" case, e.g. a web-search dump)
-// collapses by default.
-func collapsedToolFooter(detail string) string {
+// collapses by default. When force is set the footer is produced regardless of
+// length (compact-edit mode, where even a short edit diff must collapse so it is
+// not duplicated by the live Code card) — but empty output never gets a footer.
+func collapsedToolFooter(detail string, force bool) string {
 	trimmed := strings.TrimRight(detail, "\n")
 	if strings.TrimSpace(trimmed) == "" {
 		return ""
 	}
 	n := strings.Count(trimmed, "\n") + 1
-	if n <= cardBodyMaxLines {
+	if n <= cardBodyMaxLines && !force {
 		return ""
 	}
 	return fmt.Sprintf("▸ %d lines — click to expand", n)
