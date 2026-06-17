@@ -185,6 +185,41 @@ func TestRegisterToolsKeepsPriorStateAndReachableServersWhenOneIsSkipped(t *test
 	}
 }
 
+func TestRegisterToolsSkipsServerThatExceedsConnectTimeout(t *testing.T) {
+	// A slow server must not block startup: it is abandoned after ConnectTimeout
+	// and skipped, while a fast server registers normally. This is the latency fix
+	// — one unreachable server can't hold up the first response.
+	registry := tools.NewRegistry()
+	fastClient := &fakeToolClient{listed: []RemoteTool{{Name: "lookup", Description: "fast"}}}
+
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"fast": {Type: "stdio", Command: "fast-mcp"},
+		"slow": {Type: "stdio", Command: "slow-mcp"},
+	}}, RegisterOptions{
+		ConnectTimeout: 50 * time.Millisecond,
+		ClientFactory: func(ctx context.Context, server Server) (ToolClient, error) {
+			if server.Name == "slow" {
+				// Block past the timeout, honoring ctx cancellation so the abandoned
+				// connect tears down cleanly instead of leaking.
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return fastClient, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterTools error: %v", err)
+	}
+	defer runtime.Close()
+	if _, ok := registry.Get("mcp_fast_lookup"); !ok {
+		t.Fatal("expected the fast server's tools to register despite the slow one timing out")
+	}
+	skipped := runtime.Skipped()
+	if len(skipped) != 1 || skipped[0].Name != "slow" {
+		t.Fatalf("Skipped() = %#v, want exactly one entry for slow", skipped)
+	}
+}
+
 func TestRegistryToolIsDeferredEligible(t *testing.T) {
 	client := &fakeToolClient{}
 	tool := newRegistryTool(
