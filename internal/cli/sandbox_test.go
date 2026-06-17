@@ -387,6 +387,26 @@ func TestRunSandboxSetupNoopsForNonWindowsBackend(t *testing.T) {
 	}
 }
 
+func TestTUISandboxSetupCommandGatedToWindowsNativeBackend(t *testing.T) {
+	if got := tuiSandboxSetupCommand(sandbox.Backend{Name: sandbox.BackendLinuxBwrap, Platform: "linux", Available: true}, appDeps{}); got != nil {
+		t.Fatal("linux backend should not enable the TUI sandbox setup command")
+	}
+	if got := tuiSandboxSetupCommand(sandbox.Backend{Name: sandbox.BackendPolicyOnly, Platform: "windows", Available: false}, appDeps{}); got != nil {
+		t.Fatal("policy-only Windows backend should not enable the TUI sandbox setup command")
+	}
+	got := tuiSandboxSetupCommand(sandbox.Backend{
+		Name:            sandbox.BackendWindowsRestrictedToken,
+		Platform:        "windows",
+		Available:       true,
+		Executable:      filepath.Join(t.TempDir(), sandbox.WindowsSandboxCommandRunnerName),
+		CommandWrapping: true,
+		NativeIsolation: true,
+	}, appDeps{})
+	if got == nil {
+		t.Fatal("native Windows backend should enable the TUI sandbox setup command")
+	}
+}
+
 func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	store := newSandboxTestStore(t)
 	workspace := t.TempDir()

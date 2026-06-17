@@ -536,11 +536,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize sandbox grants: "+err.Error(), 1)
 	}
+	sandboxBackend := deps.selectSandboxBackend(sandbox.BackendOptions{})
 	sandboxEngine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: workspaceRoot,
 		Policy:        applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), resolved.Sandbox),
 		Store:         sandboxStore,
-		Backend:       deps.selectSandboxBackend(sandbox.BackendOptions{}),
+		Backend:       sandboxBackend,
 		Scope:         scope,
 	})
 	lastKnownMCPConfig := mcpConfig
@@ -581,15 +582,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 				ExitCode: exitCode,
 			}
 		},
-		SandboxSetupCommand: func(context.Context) tui.SandboxSetupCommandResult {
-			var stdout, stderr bytes.Buffer
-			exitCode := runSandboxSetup(nil, &stdout, &stderr, deps)
-			return tui.SandboxSetupCommandResult{
-				Output:   strings.TrimSpace(stdout.String()),
-				Error:    strings.TrimSpace(stderr.String()),
-				ExitCode: exitCode,
-			}
-		},
+		SandboxSetupCommand: tuiSandboxSetupCommand(sandboxBackend, deps),
 		AgentOptions: agent.Options{
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,
@@ -612,6 +605,21 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			},
 		},
 	})
+}
+
+func tuiSandboxSetupCommand(backend sandbox.Backend, deps appDeps) func(context.Context) tui.SandboxSetupCommandResult {
+	if backend.Platform != "windows" || backend.Name != sandbox.BackendWindowsRestrictedToken || !backend.Available || backend.Executable == "" {
+		return nil
+	}
+	return func(context.Context) tui.SandboxSetupCommandResult {
+		var stdout, stderr bytes.Buffer
+		exitCode := runSandboxSetup(nil, &stdout, &stderr, deps)
+		return tui.SandboxSetupCommandResult{
+			Output:   strings.TrimSpace(stdout.String()),
+			Error:    strings.TrimSpace(stderr.String()),
+			ExitCode: exitCode,
+		}
+	}
 }
 
 func buildProvider(resolved config.ResolvedConfig, deps appDeps) (zeroruntime.Provider, error) {
