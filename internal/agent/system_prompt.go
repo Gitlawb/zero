@@ -31,13 +31,20 @@ var confirmationPolicy string
 const fallbackSystemPrompt = "You are Zero, a terminal coding agent. Help with the current workspace and use tools when needed."
 
 // projectContextFiles are workspace docs injected into the system prompt so the
-// agent honors project-specific conventions (mirrors AGENTS.md / CLAUDE.md). The
-// first one found wins.
+// agent honors project-specific conventions (mirrors AGENTS.md / CLAUDE.md).
+// The first match at each directory level wins; the loader walks the chain
+// from the git root down to the cwd and injects the matches in
+// general-to-specific order.
 var projectContextFiles = []string{"AGENTS.md", "ZERO.md", ".zero/AGENTS.md"}
 
-// maxProjectContextBytes caps how much of a project doc is injected so a large
-// guidelines file can't blow the context budget.
-const maxProjectContextBytes = 8 << 10 // 8 KiB
+// maxProjectContextBytes caps how much of a single project doc is injected so
+// a large guidelines file can't blow the context budget.
+const maxProjectContextBytes = 8 << 10 // 8 KiB per file
+
+// maxProjectContextTotalBytes caps the total bytes across all matched
+// project guideline files. With path-walking, multiple files can match (root
+// + sub-tree), so a per-file cap alone is not enough.
+const maxProjectContextTotalBytes = 32 << 10 // 32 KiB total
 
 // maxRepoMapContextBytes keeps the repository map useful but compact enough to
 // remain stable across normal agent turns.
@@ -121,8 +128,36 @@ func workspaceContext(cwd string) string {
 	}
 	b.WriteString("</environment>")
 
-	for _, name := range projectContextFiles {
-		data, err := os.ReadFile(filepath.Join(cwd, name))
+	b.WriteString(projectGuidelines(cwd, findProjectGitRoot(cwd)))
+	if repoMap := repoMapContext(cwd); repoMap != "" {
+		b.WriteString("\n\n## Repo map\n\n" + repoMap)
+	}
+	return b.String()
+}
+
+// projectGuidelines walks the directory chain from the git root to cwd
+// (inclusive), finds the first matching project context file at each level
+// (case-insensitive basename match), reads it, and returns the joined
+// content in general-to-specific order — the most general file (at the git
+// root) appears first, the most specific (at cwd) last. Each file is capped
+// at maxProjectContextBytes; the total across all files is capped at
+// maxProjectContextTotalBytes. Returns "" when no file matches.
+func projectGuidelines(cwd, gitRoot string) string {
+	dirs := projectGuidelineDirs(cwd, gitRoot)
+	if len(dirs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	totalUsed := 0
+	for _, dir := range dirs {
+		if totalUsed >= maxProjectContextTotalBytes {
+			break
+		}
+		match := findProjectContextFile(dir)
+		if match == "" {
+			continue
+		}
+		data, err := os.ReadFile(match)
 		if err != nil {
 			continue
 		}
@@ -130,20 +165,162 @@ func workspaceContext(cwd string) string {
 		if content == "" {
 			continue
 		}
-		if len(content) > maxProjectContextBytes {
-			cut := maxProjectContextBytes
+		// Per-file cap is the lesser of the configured per-file limit and
+		// whatever remains of the total budget, so a single file can never
+		// blow past either bound.
+		limit := maxProjectContextBytes
+		if remaining := maxProjectContextTotalBytes - totalUsed; remaining < limit {
+			limit = remaining
+		}
+		if len(content) > limit {
+			cut := limit
 			for cut > 0 && !utf8.RuneStart(content[cut]) {
 				cut--
 			}
 			content = content[:cut] + "\n… (truncated)"
 		}
-		b.WriteString("\n\n## Project guidelines (" + name + ")\n\n" + content)
-		break // first match wins
-	}
-	if repoMap := repoMapContext(cwd); repoMap != "" {
-		b.WriteString("\n\n## Repo map\n\n" + repoMap)
+		label := projectGuidelineLabel(match, gitRoot)
+		b.WriteString("\n\n## Project guidelines (" + label + ")\n\n" + content)
+		totalUsed += len(content)
 	}
 	return b.String()
+}
+
+// projectGuidelineDirs returns the directory chain from gitRoot to cwd
+// (inclusive), in root-to-leaf order. If gitRoot is empty or unreachable
+// from cwd, the chain collapses to [cwd].
+func projectGuidelineDirs(cwd, gitRoot string) []string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return nil
+	}
+	gitRoot = strings.TrimSpace(gitRoot)
+	if gitRoot == "" {
+		return []string{cwd}
+	}
+	rel, err := filepath.Rel(gitRoot, cwd)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return []string{cwd}
+	}
+	if rel == "." {
+		return []string{gitRoot}
+	}
+	dirs := []string{gitRoot}
+	cur := gitRoot
+	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+		if seg == "" || seg == "." {
+			continue
+		}
+		cur = filepath.Join(cur, seg)
+		dirs = append(dirs, cur)
+	}
+	return dirs
+}
+
+// projectGuidelineLabel renders the path of match as a short label relative
+// to gitRoot. When gitRoot is empty, the basename is returned.
+func projectGuidelineLabel(match, gitRoot string) string {
+	if gitRoot == "" {
+		return filepath.Base(match)
+	}
+	rel, err := filepath.Rel(gitRoot, match)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.Base(match)
+	}
+	return rel
+}
+
+// findProjectContextFile returns the first matching project guideline file
+// in dir. Lookup is case-insensitive on the basename and on the actual
+// filename returned, so a git-tracked file like AGENTS.MD (uppercase MD)
+// still resolves to its true filename on case-sensitive filesystems — the
+// returned path is what should appear in the project guidelines label.
+// Returns "" when nothing matches.
+func findProjectContextFile(dir string) string {
+	for _, name := range projectContextFiles {
+		baseLower := strings.ToLower(filepath.Base(name))
+		// Walk to the file's parent through dir with case-insensitive segment
+		// matching, then find a regular file with the same lowercased
+		// basename. This works on both case-sensitive and case-insensitive
+		// filesystems and always returns the on-disk filename.
+		parent, ok := resolveDirCaseInsensitive(filepath.Dir(filepath.Join(dir, name)), dir)
+		if !ok {
+			continue
+		}
+		entries, err := os.ReadDir(parent)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.ToLower(e.Name()) == baseLower {
+				return filepath.Join(parent, e.Name())
+			}
+		}
+	}
+	return ""
+}
+
+// resolveDirCaseInsensitive walks from anchor to target, matching each
+// segment case-insensitively. Returns the resolved absolute path and true on
+// success, or "" and false if any segment cannot be found.
+func resolveDirCaseInsensitive(target, anchor string) (string, bool) {
+	if target == "" || target == "." {
+		return anchor, true
+	}
+	rel, err := filepath.Rel(anchor, target)
+	if err != nil {
+		return "", false
+	}
+	if rel == "." {
+		return anchor, true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	cur := anchor
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		entries, err := os.ReadDir(cur)
+		if err != nil {
+			return "", false
+		}
+		found := false
+		for _, e := range entries {
+			if e.IsDir() && strings.EqualFold(e.Name(), p) {
+				cur = filepath.Join(cur, e.Name())
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", false
+		}
+	}
+	return cur, true
+}
+
+// findProjectGitRoot returns the nearest ancestor of cwd that contains a
+// .git entry (file or directory). Returns "" when no git root is found, so
+// the caller can fall back to cwd-only lookup.
+func findProjectGitRoot(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	cur := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return cur
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return ""
+		}
+		cur = parent
+	}
 }
 
 func workspaceSeedContext(cwd string) string {

@@ -95,3 +95,159 @@ func systemPromptTestBlock(t *testing.T, prompt, start, end string) string {
 	}
 	return body
 }
+
+func TestBuildSystemPromptInjectsProjectGuidelinesCaseInsensitive(t *testing.T) {
+	// Git tracks AGENTS.MD (uppercase MD) on a case-sensitive filesystem; the
+	// loader must still resolve it when the cwd lookup uses lowercase.
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.MD"), []byte("Always run `make lint`."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildSystemPrompt(Options{Cwd: cwd})
+	if !strings.Contains(prompt, "## Project guidelines (AGENTS.MD)") {
+		t.Fatalf("expected case-insensitive AGENTS.MD resolution, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "make lint") {
+		t.Fatalf("expected AGENTS.MD content injected, got:\n%s", prompt)
+	}
+}
+
+func TestBuildSystemPromptProjectGuidelinesPathWalkingMonorepo(t *testing.T) {
+	// Simulate a monorepo: root + sub-tree each have their own AGENTS.md.
+	// The user launches Zero from the sub-tree, so both files should be
+	// injected in general-to-specific order (root first, cwd last).
+	root := t.TempDir()
+	leaf := filepath.Join(root, "services", "api")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Repo-wide: prefer Go."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaf, "AGENTS.md"), []byte("API: follow REST conventions."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildSystemPrompt(Options{Cwd: leaf})
+	normalized := filepath.ToSlash(prompt)
+	rootLabel := "Project guidelines (AGENTS.md)"
+	leafLabel := "Project guidelines (services/api/AGENTS.md)"
+	rootBlock := systemPromptTestBlock(t, normalized, rootLabel, leafLabel)
+	leafBlock := systemPromptTestBlock(t, normalized, leafLabel, "## Repo map")
+	if !strings.Contains(rootBlock, "Repo-wide: prefer Go.") {
+		t.Fatalf("expected root AGENTS.md in general-to-specific slot, got:\n%s", rootBlock)
+	}
+	if !strings.Contains(leafBlock, "API: follow REST conventions.") {
+		t.Fatalf("expected leaf AGENTS.md in specific slot, got:\n%s", leafBlock)
+	}
+	// Root must appear before leaf in the prompt.
+	rootIdx := strings.Index(normalized, "## "+rootLabel)
+	leafIdx := strings.Index(normalized, "## "+leafLabel)
+	if rootIdx < 0 || leafIdx < 0 || rootIdx > leafIdx {
+		t.Fatalf("expected root (general) before leaf (specific) in prompt, got root=%d leaf=%d", rootIdx, leafIdx)
+	}
+}
+
+func TestBuildSystemPromptProjectGuidelinesZeroFallback(t *testing.T) {
+	// ZERO.md is the second-priority name at each level; the loader picks it
+	// when no AGENTS.md is present.
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "ZERO.md"), []byte("Brand-specific rule."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildSystemPrompt(Options{Cwd: cwd})
+	if !strings.Contains(prompt, "## Project guidelines (ZERO.md)") {
+		t.Fatalf("expected ZERO.md fallback to be injected, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Brand-specific rule.") {
+		t.Fatalf("expected ZERO.md content, got:\n%s", prompt)
+	}
+}
+
+func TestBuildSystemPromptProjectGuidelinesProjectLocalFallback(t *testing.T) {
+	cwd := t.TempDir()
+	dot := filepath.Join(cwd, ".zero")
+	if err := os.MkdirAll(dot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dot, "AGENTS.md"), []byte("Personal: use dark theme."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildSystemPrompt(Options{Cwd: cwd})
+	// Without a git root, the label collapses to the basename; the test
+	// confirms the .zero/AGENTS.md file's content is the one injected, not
+	// any other file.
+	if !strings.Contains(prompt, "Personal: use dark theme.") {
+		t.Fatalf("expected .zero/AGENTS.md content, got:\n%s", prompt)
+	}
+	// The project guidelines block must be present (regardless of label).
+	if !strings.Contains(prompt, "## Project guidelines (") {
+		t.Fatalf("expected a project guidelines block, got:\n%s", prompt)
+	}
+}
+
+func TestBuildSystemPromptProjectGuidelinesTruncatesAtTotalCap(t *testing.T) {
+	// Root file fits in the per-file cap; leaf file is bigger than what's
+	// left of the total budget, so it must be truncated. The truncation
+	// marker must appear in the prompt and the full untruncated payload
+	// must not.
+	root := t.TempDir()
+	leaf := filepath.Join(root, "sub")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootContent := strings.Repeat("r", maxProjectContextBytes)        // exactly per-file cap
+	leafContent := strings.Repeat("L", maxProjectContextTotalBytes+1) // over the total cap
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(rootContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaf, "AGENTS.md"), []byte(leafContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildSystemPrompt(Options{Cwd: leaf})
+	if !strings.Contains(prompt, "truncated") {
+		t.Fatalf("expected truncation marker on second file, prompt length=%d", len(prompt))
+	}
+	// Sanity: the leaf file's full payload must NOT be present untruncated.
+	if strings.Contains(prompt, strings.Repeat("L", maxProjectContextTotalBytes-1)) {
+		t.Fatalf("leaf file appears untruncated; total cap is not enforced")
+	}
+}
+
+func TestProjectGuidelineDirsOrdersRootToLeaf(t *testing.T) {
+	root := filepath.Join("r")
+	leaf := filepath.Join(root, "a", "b")
+	got := projectGuidelineDirs(leaf, root)
+	want := []string{root, filepath.Join(root, "a"), leaf}
+	if len(got) != len(want) {
+		t.Fatalf("projectGuidelineDirs = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("projectGuidelineDirs[%d] = %q, want %q (full %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestProjectGuidelineDirsCollapsesToCwdWithoutGitRoot(t *testing.T) {
+	got := projectGuidelineDirs(filepath.Join("some", "path"), "")
+	if len(got) != 1 || got[0] != filepath.Join("some", "path") {
+		t.Fatalf("projectGuidelineDirs = %v, want [some/path]", got)
+	}
+}
+
+func TestFindProjectContextFileCaseInsensitiveBasename(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "AGENTS.MD"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := findProjectContextFile(cwd)
+	if filepath.Base(got) != "AGENTS.MD" {
+		t.Fatalf("findProjectContextFile = %q, want basename AGENTS.MD", got)
+	}
+}
