@@ -261,7 +261,10 @@ func estimateTextTokens(value string) int {
 	if value == "" {
 		return 0
 	}
-	tokens := len(value) / 4
+	// Share the agent's heuristic (non-whitespace bytes / 4) so the context
+	// preview matches the scale the compaction loop uses and tracks the real
+	// tokenizer far better than naive len/4. Non-empty text reports at least 1.
+	tokens := agent.ApproxTextTokens(value)
 	if tokens == 0 {
 		return 1
 	}
