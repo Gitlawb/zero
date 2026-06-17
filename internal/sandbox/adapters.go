@@ -1,8 +1,6 @@
 package sandbox
 
 import (
-	"os/exec"
-	"runtime"
 	"strings"
 )
 
@@ -72,36 +70,10 @@ type BackendCapability struct {
 }
 
 func SelectBackend(options BackendOptions) Backend {
-	goos := options.GOOS
-	if goos == "" {
-		goos = runtime.GOOS
-	}
-	lookup := options.LookupExecutable
-	if lookup == nil {
-		lookup = exec.LookPath
-	}
-	switch goos {
-	case "linux":
-		if path, err := lookup("bwrap"); err == nil && path != "" {
-			return nativeBackend(goos, BackendBubblewrap, path, "bubblewrap sandbox available")
-		}
-		// Under WSL (no bubblewrap), do NOT silently degrade to a plain policy-only
-		// runner: select the WSL backend, which still routes egress through the
-		// filtering proxy and is gated on AllowPolicyOnlyRunner in the runner.
-		if info := detectWSL(); info.IsWSL {
-			return wslBackend(goos, info)
-		}
-		return policyOnlyBackend(goos, "policy-only fallback: bubblewrap is not installed")
-	case "darwin":
-		if path, err := lookup("sandbox-exec"); err == nil && path != "" {
-			return nativeBackend(goos, BackendSandboxExec, path, "sandbox-exec backend available")
-		}
-		return policyOnlyBackend(goos, "policy-only fallback: sandbox-exec is not available")
-	case "windows":
-		return policyOnlyBackend(goos, "policy-only fallback: Windows native sandbox adapter is not implemented")
-	default:
-		return policyOnlyBackend(goos, "policy-only fallback: no platform sandbox adapter is available for "+goos)
-	}
+	return NewSandboxManager(SandboxManagerOptions{
+		GOOS:             options.GOOS,
+		LookupExecutable: options.LookupExecutable,
+	}).Backend()
 }
 
 func TargetBackendForPlatform(goos string, wsl bool) BackendName {

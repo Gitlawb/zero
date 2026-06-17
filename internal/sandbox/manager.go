@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"os/exec"
 	"runtime"
 )
 
@@ -13,8 +14,9 @@ const (
 )
 
 type SandboxManagerOptions struct {
-	GOOS    string
-	Backend Backend
+	GOOS             string
+	LookupExecutable func(string) (string, error)
+	Backend          Backend
 }
 
 type SandboxManager struct {
@@ -54,13 +56,42 @@ func NewSandboxManager(options SandboxManagerOptions) SandboxManager {
 	}
 	backend := options.Backend
 	if backend.Name == "" {
-		backend = policyOnlyBackend(goos, "policy-only fallback: sandbox backend was not selected")
+		backend = selectPlatformBackend(goos, options.LookupExecutable)
 	}
 	if backend.Platform == "" {
 		backend.Platform = goos
 	}
 	backend = inferBackendCapabilities(backend)
 	return SandboxManager{goos: goos, backend: backend}
+}
+
+func (manager SandboxManager) Backend() Backend {
+	return manager.backend
+}
+
+func selectPlatformBackend(goos string, lookup func(string) (string, error)) Backend {
+	if lookup == nil {
+		lookup = exec.LookPath
+	}
+	switch goos {
+	case "linux":
+		if path, err := lookup("bwrap"); err == nil && path != "" {
+			return nativeBackend(goos, BackendBubblewrap, path, "bubblewrap sandbox available")
+		}
+		if info := detectWSL(); info.IsWSL {
+			return wslBackend(goos, info)
+		}
+		return policyOnlyBackend(goos, "policy-only fallback: bubblewrap is not installed")
+	case "darwin":
+		if path, err := lookup("sandbox-exec"); err == nil && path != "" {
+			return nativeBackend(goos, BackendSandboxExec, path, "sandbox-exec backend available")
+		}
+		return policyOnlyBackend(goos, "policy-only fallback: sandbox-exec is not available")
+	case "windows":
+		return policyOnlyBackend(goos, "policy-only fallback: Windows native sandbox adapter is not implemented")
+	default:
+		return policyOnlyBackend(goos, "policy-only fallback: no platform sandbox adapter is available for "+goos)
+	}
 }
 
 func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerRequest) (SandboxExecutionRequest, error) {

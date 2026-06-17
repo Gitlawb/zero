@@ -18,6 +18,13 @@ func LegacySandboxEntrypoints() []LegacySandboxEntrypoint {
 			Path:         "internal/sandbox/adapters.go",
 			Symbol:       "SelectBackend",
 			DeleteTarget: true,
+			Replacement:  "SandboxManager backend selection compatibility shim",
+		},
+		{
+			Area:         "backend-selection",
+			Path:         "internal/sandbox/manager.go",
+			Symbol:       "selectPlatformBackend",
+			DeleteTarget: false,
 			Replacement:  "sandbox manager platform selection",
 		},
 		{

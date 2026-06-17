@@ -88,6 +88,67 @@ func TestSandboxManagerBuildsExecutionRequestFromProfile(t *testing.T) {
 	}
 }
 
+func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
+	tests := []struct {
+		name       string
+		goos       string
+		lookupName string
+		lookupPath string
+		want       BackendName
+		wantTarget BackendName
+	}{
+		{name: "linux", goos: "linux", lookupName: "bwrap", lookupPath: "/usr/bin/bwrap", want: BackendBubblewrap, wantTarget: BackendLinuxBwrap},
+		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendSandboxExec, wantTarget: BackendMacOSSeatbelt},
+		{name: "windows", goos: "windows", want: BackendPolicyOnly, wantTarget: BackendWindowsRestrictedToken},
+		{name: "unsupported", goos: "plan9", want: BackendPolicyOnly, wantTarget: BackendPolicyOnly},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewSandboxManager(SandboxManagerOptions{
+				GOOS: test.goos,
+				LookupExecutable: func(name string) (string, error) {
+					if name == test.lookupName && test.lookupPath != "" {
+						return test.lookupPath, nil
+					}
+					return "", errors.New("missing")
+				},
+			})
+			backend := manager.Backend()
+			if backend.Name != test.want {
+				t.Fatalf("backend = %#v, want %q", backend, test.want)
+			}
+			if backend.TargetBackend() != test.wantTarget {
+				t.Fatalf("target backend = %q, want %q for %#v", backend.TargetBackend(), test.wantTarget, backend)
+			}
+		})
+	}
+}
+
+func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
+	backend := SelectBackend(BackendOptions{
+		GOOS: "linux",
+		LookupExecutable: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("missing")
+		},
+	})
+	managerBackend := NewSandboxManager(SandboxManagerOptions{
+		GOOS: "linux",
+		LookupExecutable: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("missing")
+		},
+	}).Backend()
+	if backend != managerBackend {
+		t.Fatalf("SelectBackend = %#v, manager backend = %#v", backend, managerBackend)
+	}
+}
+
 func TestSandboxManagerFailsClosedWhenNativeRequiredAndPolicyOnlyDisabled(t *testing.T) {
 	policy := DefaultPolicy()
 	policy.AllowPolicyOnlyRunner = false
