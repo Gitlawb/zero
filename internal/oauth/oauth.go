@@ -40,6 +40,11 @@ type Token struct {
 	// Account is an optional non-secret identifier (email / account id) shown in
 	// status output; never a credential.
 	Account string `json:"account,omitempty"`
+	// IDToken is the OIDC ID token returned alongside the access token (when the
+	// `openid` scope was requested). It is a JWS and may carry claims (such as
+	// `chatgpt_account_id`) that the request path needs as headers. Treated as
+	// sensitive like the access token: never logged, persisted 0600.
+	IDToken string `json:"id_token,omitempty"`
 }
 
 // Expired reports whether the token has an expiry that is at or before now.

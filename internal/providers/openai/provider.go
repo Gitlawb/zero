@@ -47,6 +47,13 @@ type Options struct {
 	// ParseThinkTags converts streamed <think>...</think> content into reasoning
 	// events for OpenAI-compatible models known to emit that legacy format.
 	ParseThinkTags bool
+	// SetRequestExtra, when non-nil, is invoked on every outgoing request after
+	// the provider's built-in headers (Content-Type, User-Agent) are set, so a
+	// wrapper (notably the Codex provider) can inject request-specific headers
+	// — e.g. an account id resolved from the OAuth token, or a hard-coded
+	// "originator" value. It is also called on the 401-refresh retry, so any
+	// per-request state must be re-derivable from the live request.
+	SetRequestExtra func(*http.Request)
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
@@ -64,6 +71,7 @@ type Provider struct {
 	userAgent         string
 	streamIdleTimeout time.Duration
 	parseThinkTags    bool
+	setRequestExtra   func(*http.Request)
 }
 
 // New creates an OpenAI-compatible provider.
@@ -111,6 +119,7 @@ func New(options Options) (*Provider, error) {
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: idleTimeout,
 		parseThinkTags:    options.ParseThinkTags,
+		setRequestExtra:   options.SetRequestExtra,
 	}, nil
 }
 
@@ -160,6 +169,9 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 			request.Header.Set("Content-Type", "application/json")
 			if provider.userAgent != "" {
 				request.Header.Set("User-Agent", provider.userAgent)
+			}
+			if provider.setRequestExtra != nil {
+				provider.setRequestExtra(request)
 			}
 		}, 0)
 	if err != nil {

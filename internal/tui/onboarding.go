@@ -475,7 +475,8 @@ func (m *model) moveSetupMethod(delta int) {
 // setupOAuthCmd runs the chosen provider's browser OAuth login off the UI
 // goroutine for first-run setup. Mirrors the /provider wizard's flow.
 func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
-	if provider.OAuthMintsKey {
+	switch {
+	case provider.OAuthMintsKey:
 		return func() tea.Msg {
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
@@ -483,10 +484,16 @@ func setupOAuthCmd(provider providercatalog.Descriptor) tea.Cmd {
 			})
 			return setupOAuthMsg{apiKey: key, providerID: provider.ID, err: err}
 		}
-	}
-	name := provider.ID
-	return func() tea.Msg {
-		return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name)}
+	case provider.ID == "chatgpt":
+		return func() tea.Msg {
+			err := runProviderChatGPTLogin()
+			return setupOAuthMsg{tokenLogin: true, providerID: provider.ID, err: err}
+		}
+	default:
+		name := provider.ID
+		return func() tea.Msg {
+			return setupOAuthMsg{tokenLogin: true, providerID: name, err: runProviderTokenLogin(name)}
+		}
 	}
 }
 

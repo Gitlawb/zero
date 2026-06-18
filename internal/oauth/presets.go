@@ -43,6 +43,35 @@ var builtinOAuthPresets = map[string]providerPreset{
 		Scopes:                      []string{"openid", "profile", "email", "offline_access", "grok-cli:access", "api:access"},
 		Flow:                        FlowLoopback,
 	},
+	// Hugging Face uses its public OAuth/OIDC server at huggingface.co/oauth/*.
+	// HF lets you create a "public" OAuth app (no client secret) and gives a
+	// client_id per registration. Unlike xAI there is no globally-shipped
+	// client_id we can bake in, so the preset ships endpoints + scopes + issuer
+	// pre-filled; the operator supplies ZERO_OAUTH_HUGGINGFACE_CLIENT_ID from
+	// the app they create at https://huggingface.co/settings/applications/new.
+	// Device-code is the simpler headless path; the loopback flow also works.
+	"huggingface": {
+		AuthorizationEndpoint:       "https://huggingface.co/oauth/authorize",
+		TokenEndpoint:               "https://huggingface.co/oauth/token",
+		DeviceAuthorizationEndpoint: "https://huggingface.co/oauth/device",
+		IssuerURL:                   "https://huggingface.co",
+		Scopes:                      []string{"openid", "profile", "email", "inference-api"},
+		Flow:                        FlowDevice,
+	},
+	// ChatGPT (Codex) uses the same OAuth client identity the `codex` CLI ships
+	// publicly. The token works against `chatgpt.com/backend-api/codex/responses`
+	// (NOT `api.openai.com`) for ChatGPT Plus/Pro/Business/Enterprise subscribers
+	// and carries the `chatgpt-account-id` claim that the Codex backend requires
+	// as a header on every request. The flow is loopback (browser required);
+	// there is no public device-code path.
+	"chatgpt": {
+		ClientID:              "app_EMoamEEZ73f0CkXaXp7hrann",
+		AuthorizationEndpoint: "https://auth.openai.com/oauth/authorize",
+		TokenEndpoint:         "https://auth.openai.com/oauth/token",
+		IssuerURL:             "https://auth.openai.com",
+		Scopes:                []string{"openid", "profile", "email", "offline_access"},
+		Flow:                  FlowLoopback,
+	},
 }
 
 // lookupOAuthPreset returns the baked-in preset for a provider name (if any).

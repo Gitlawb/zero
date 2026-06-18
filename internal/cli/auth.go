@@ -38,6 +38,8 @@ func runAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return runAuthRefresh(args[1:], stdout, stderr, deps)
 	case "openrouter":
 		return runAuthOpenRouter(args[1:], stdout, stderr, deps)
+	case "chatgpt":
+		return runAuthChatGPT(args[1:], stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown auth subcommand %q", args[0]))
 	}
@@ -72,6 +74,98 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, _ appD
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// runAuthChatGPT runs the ChatGPT (Codex) browser PKCE login, persists the
+// bearer + chatgpt-account-id claim under the "chatgpt" provider key, and
+// prints a status block. The bearer routes to chatgpt.com/backend-api/codex
+// for ChatGPT Plus/Pro/Business/Enterprise subscribers; a successful login
+// makes the agent use the chatgpt catalog entry with the OAuth bearer.
+func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			_ = writeAuthHelp(stdout)
+			return exitSuccess
+		}
+	}
+	if len(args) > 0 {
+		return writeExecUsageError(stderr, fmt.Sprintf("zero auth chatgpt takes no arguments (got %q)", args[0]))
+	}
+
+	// Build the same env map the oauth engine reads so the chatgpt preset is
+	// opted into (the preset is off by default to keep third-party OAuth
+	// client identities out of the default credential path). The env is
+	// layered: process env first, then ZERO_OAUTH_ALLOW_PRESETS=1.
+	env := map[string]string{}
+	for _, kv := range os.Environ() {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			env[kv[:eq]] = kv[eq+1:]
+		}
+	}
+	env["ZERO_OAUTH_ALLOW_PRESETS"] = "1"
+
+	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
+		Env:        env,
+		HTTPClient: &http.Client{Timeout: 60 * time.Second},
+		Out:        stdout,
+		// Don't auto-open a browser — print the URL to stdout and let the
+		// user click it. (Same posture as runAuthOpenRouter; the headless
+		// sandbox context makes launching a browser a worse default than
+		// printing the URL.)
+		OpenBrowser: func(string) error { return nil },
+	})
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+
+	// Persist via the oauth manager's store so the same path
+	// zero auth status / zero auth refresh / TokenResolver use is hit.
+	// We bypass Manager.Login because the account-id extraction happens
+	// inside provideroauth.ChatGPTLogin; the manager would not pick up
+	// the customized Token.Account field.
+	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now})
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	statuses, err := oauthFormatChatGPTStatus(token)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if _, err := fmt.Fprint(stdout, statuses); err != nil {
+		return exitCrash
+	}
+	if _, err := fmt.Fprint(stdout, "\nUse it with zero, e.g.:\n  zero --provider chatgpt --model gpt-5\n"); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+// oauthFormatChatGPTStatus formats the saved ChatGPT token into the same
+// shape `zero auth status` prints, so the user sees a consistent view.
+func oauthFormatChatGPTStatus(token oauth.Token) (string, error) {
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return "", err
+	}
+	statuses, err := store.Status("provider:chatgpt")
+	if err != nil {
+		return "", err
+	}
+	if len(statuses) == 0 {
+		// Fallback: the token was just saved but the status query came up
+		// empty (e.g. an OS keyring backend that doesn't enumerate). The
+		// user still has a successful login; tell them what was saved
+		// without the formatted status block.
+		accountLine := ""
+		if strings.TrimSpace(token.Account) != "" {
+			accountLine = fmt.Sprintf("ChatGPT account id: %s\n", token.Account)
+		}
+		return fmt.Sprintf("ChatGPT login complete.\n%s", accountLine), nil
+	}
+	return oauth.FormatStatuses(statuses), nil
 }
 
 // authArgs is the parsed form of an auth subcommand's arguments.
@@ -373,6 +467,7 @@ Commands:
   status [provider]                               Show login presence/expiry (never the token)
   refresh <provider> [--watch]                    Force a token refresh (--watch keeps it fresh)
   openrouter                                      Log in to OpenRouter in the browser; mints an API key
+  chatgpt                                         Log in to ChatGPT in the browser (Codex backend, ChatGPT Plus/Pro)
 
 A provider is any OAuth 2.0 / OIDC server. "openrouter" ('zero auth openrouter')
 works out of the box. "xai" ('zero auth login xai') uses a built-in preset that is

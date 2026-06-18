@@ -15,6 +15,8 @@ var expectedCatalogIDs = []string{
 	"ollama",
 	"lmstudio",
 	"openrouter",
+	"huggingface",
+	"chatgpt",
 	"groq",
 	"deepseek",
 	"together",
@@ -102,6 +104,12 @@ func TestRemoteProvidersDeclareAuthOrExplicitPublicAccess(t *testing.T) {
 			continue
 		}
 		if descriptor.RequiresAuth && (len(descriptor.AuthEnvVars) > 0 || descriptor.UsesAmbientAuth) {
+			continue
+		}
+		// OAuth-only providers (no API-key env var, no ambient auth) authenticate
+		// via an interactive login flow rather than a credential env var. They
+		// still require auth — the OAuthResolver populates the bearer at runtime.
+		if descriptor.OAuth && descriptor.RequiresAuth {
 			continue
 		}
 		if descriptor.Public && !descriptor.RequiresAuth {
@@ -221,7 +229,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"ollama-cloud", "ollama", "lmstudio", "openrouter", "groq", "deepseek", "together", "dashscope", "moonshot", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "gitlawb-opengateway", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "dashscope", "moonshot", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "gitlawb-opengateway", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {
@@ -280,7 +288,7 @@ func TestReturnedDescriptorsAreCopies(t *testing.T) {
 
 func TestOAuthProviderClassification(t *testing.T) {
 	oauthIDs := descriptorIDs(OAuthProviders())
-	if want := []string{"openrouter", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
+	if want := []string{"openrouter", "huggingface", "chatgpt", "xai"}; !reflect.DeepEqual(oauthIDs, want) {
 		t.Fatalf("OAuthProviders() = %#v, want %#v", oauthIDs, want)
 	}
 	if d, _ := Get("openrouter"); !d.OAuthMintsKey {
@@ -288,6 +296,12 @@ func TestOAuthProviderClassification(t *testing.T) {
 	}
 	if d, _ := Get("xai"); !d.OAuthDeviceFlow {
 		t.Fatal("xai should advertise device-code flow")
+	}
+	if d, _ := Get("huggingface"); !d.OAuthDeviceFlow {
+		t.Fatal("huggingface should advertise device-code flow")
+	}
+	if d, _ := Get("chatgpt"); d.OAuthDeviceFlow {
+		t.Fatal("chatgpt should NOT advertise device-code flow (loopback only)")
 	}
 }
 
