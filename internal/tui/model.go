@@ -284,6 +284,34 @@ type agentRowMsg struct {
 	row   transcriptRow
 }
 
+// planUpdateMsg carries a snapshot of plan items from the update_plan tool
+// result callback to the live model. The callback runs on the agent goroutine
+// and captures model by value, so it cannot mutate m.plan directly — it sends
+// this message through the runtimeMessageSink instead.
+type planUpdateMsg struct {
+	runID int
+	items []tools.PlanItem
+}
+
+// specialistStartMsg carries specialist start info from the OnToolCall
+// callback to the live model (same rationale as planUpdateMsg).
+type specialistStartMsg struct {
+	runID          int
+	name           string
+	description    string
+	childSessionID string
+}
+
+// specialistCompleteMsg carries specialist completion info from the
+// OnToolResult callback to the live model.
+type specialistCompleteMsg struct {
+	runID          int
+	toolCallID     string
+	childSessionID string
+	status         specialistStatus
+	errorMsg       string
+}
+
 type mcpCommandOrigin int
 
 const (
@@ -1316,6 +1344,32 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastCompactResult = &msg.result
 		m = m.setCompactStatusRow(m.compactText(true))
+		return m, nil
+	case planUpdateMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.plan.updateFromItems(msg.items, m.now())
+		return m, nil
+	case specialistStartMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.start(msg.name, msg.description, msg.childSessionID, m.now())
+		return m, nil
+	case specialistCompleteMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.complete(msg.childSessionID, msg.status, 0, msg.errorMsg, m.now())
+		if info, ok := m.specialists.getBySessionID(msg.toolCallID); ok {
+			cardRow := transcriptRow{
+				kind:           rowSpecialist,
+				runID:          msg.runID,
+				specialistInfo: &info,
+			}
+			m.transcript = appendTranscriptRow(m.transcript, cardRow)
+		}
 		return m, nil
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
@@ -3117,7 +3171,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// key and reconcile on the result.
 			if call.Name == "Task" {
 				name, desc := parseTaskCallArgs(call.Arguments)
-				m.specialists.start(name, desc, call.ID, m.now())
+				if m.runtimeMessageSink != nil {
+					m.runtimeMessageSink(specialistStartMsg{
+						runID:          runID,
+						name:           name,
+						description:    desc,
+						childSessionID: call.ID,
+					})
+				}
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type: sessions.EventToolCall,
@@ -3175,7 +3236,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if result.Name == "update_plan" && m.registry != nil {
 				if planTool, ok := m.registry.Get("update_plan"); ok {
 					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
-						m.plan.updateFromItems(reader.CurrentPlan(), m.now())
+						if m.runtimeMessageSink != nil {
+							m.runtimeMessageSink(planUpdateMsg{runID: runID, items: reader.CurrentPlan()})
+						}
 					}
 				}
 			}
@@ -3204,19 +3267,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				if result.Status == tools.StatusError {
 					status = specialistError
 				}
+				childSessionID := result.ToolCallID
 				if sid, ok := result.Meta["session_id"]; ok && sid != "" {
-					m.specialists.complete(sid, status, 0, result.Output, m.now())
-				} else {
-					m.specialists.complete(result.ToolCallID, status, 0, result.Output, m.now())
+					childSessionID = sid
 				}
-				// Also emit a specialist card row in the transcript.
-				if info, ok := m.specialists.getBySessionID(result.ToolCallID); ok {
-					cardRow := transcriptRow{
-						kind:           rowSpecialist,
+				if m.runtimeMessageSink != nil {
+					m.runtimeMessageSink(specialistCompleteMsg{
 						runID:          runID,
-						specialistInfo: &info,
-					}
-					m.sendAgentRow(runID, cardRow)
+						toolCallID:     result.ToolCallID,
+						childSessionID: childSessionID,
+						status:         status,
+						errorMsg:       result.Output,
+					})
 				}
 			}
 			if onToolResult != nil {
