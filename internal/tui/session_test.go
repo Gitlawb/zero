@@ -230,7 +230,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 			Autonomy: string(sandbox.AutonomyMedium),
 			Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 				WorkspaceRoot: root,
-				Policy:        sandbox.DefaultPolicy(),
+				Policy:        promptWritePolicy(),
 			}),
 		},
 	})
@@ -473,7 +473,7 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 func newPermissionTestModel(root string, provider zeroruntime.Provider, registry *tools.Registry, store *sessions.Store, grantStore *sandbox.GrantStore, runtimeMessages chan<- tea.Msg) model {
 	engineOptions := sandbox.EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        sandbox.DefaultPolicy(),
+		Policy:        promptWritePolicy(),
 	}
 	if grantStore != nil {
 		engineOptions.Store = grantStore
@@ -495,6 +495,12 @@ func newPermissionTestModel(root string, provider zeroruntime.Provider, registry
 			Sandbox:  sandbox.NewEngine(engineOptions),
 		},
 	})
+}
+
+func promptWritePolicy() sandbox.Policy {
+	policy := sandbox.DefaultPolicy()
+	policy.EnforceWorkspace = false
+	return policy
 }
 
 func writeFileToolScript(callID string, path string, content string) []zeroruntime.StreamEvent {

@@ -174,6 +174,7 @@ func permissionCacheFingerprint(event *agent.PermissionEvent) string {
 		event.ToolCallID,
 		event.ToolName,
 		string(event.Action),
+		string(event.DecisionAction),
 		event.Permission,
 		string(event.PermissionMode),
 		event.Autonomy,
@@ -183,6 +184,7 @@ func permissionCacheFingerprint(event *agent.PermissionEvent) string {
 		string(event.Risk.Level),
 		strconv.FormatBool(event.GrantMatched),
 		strconv.FormatBool(event.Grant != nil),
+		strconv.FormatBool(event.Grant != nil && event.Grant.Session),
 	}
 	if event.Violation != nil {
 		fields = append(fields,

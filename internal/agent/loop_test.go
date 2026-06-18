@@ -792,6 +792,55 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write done")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			t.Fatal("workspace write should not request permission")
+			return PermissionDecision{}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("expected workspace write content, got %q", content)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one auto permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || event.PermissionGranted || event.GrantMatched {
+		t.Fatalf("expected sandbox policy allow without user grant, got %#v", event)
+	}
+	if event.Reason != "workspace write permitted by sandbox policy" {
+		t.Fatalf("expected workspace-write reason, got %#v", event)
+	}
+}
+
 func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
@@ -850,6 +899,8 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	registry.Register(tools.NewWriteFileTool(root))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var permissionEvents []PermissionEvent
+	policy := sandbox.DefaultPolicy()
+	policy.EnforceWorkspace = false
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
@@ -857,7 +908,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 		Autonomy:       string(sandbox.AutonomyMedium),
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
+			Policy:        policy,
 			Store:         store,
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
@@ -907,6 +958,91 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	}
 	if event.Grant.Decision != sandbox.GrantAllow || event.Grant.ToolName != "write_file" {
 		t.Fatalf("unexpected persisted grant in event: %#v", event)
+	}
+}
+
+func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"first","overwrite":true}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"path":"notes.txt","content":"second","overwrite":true}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+	policy := sandbox.DefaultPolicy()
+	policy.EnforceWorkspace = false
+
+	result, err := Run(context.Background(), "write notes twice", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        policy,
+			Store:         store,
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllowForSession, Reason: "trust this file for the session"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second" {
+		t.Fatalf("expected second write content, got %q", content)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	if len(permissionEvents) != 2 {
+		t.Fatalf("expected two permission events, got %#v", permissionEvents)
+	}
+	if permissionEvents[0].DecisionAction != PermissionDecisionAllowForSession || permissionEvents[0].Grant == nil || !permissionEvents[0].Grant.Session {
+		t.Fatalf("expected first event to carry session grant, got %#v", permissionEvents[0])
+	}
+	if !permissionEvents[1].GrantMatched || permissionEvents[1].Grant == nil || !permissionEvents[1].Grant.Session {
+		t.Fatalf("expected second event to be session-grant matched, got %#v", permissionEvents[1])
+	}
+	lookup, err := store.Lookup("write_file", filepath.Join(root, "notes.txt"), sandbox.AutonomyMedium)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookup.Matched {
+		t.Fatalf("session approval must not persist a grant, got %#v", lookup)
 	}
 }
 

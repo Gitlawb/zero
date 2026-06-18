@@ -286,6 +286,9 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.Permission != "" {
 		parts = append(parts, "permission="+event.Permission)
 	}
+	if event.DecisionAction != "" {
+		parts = append(parts, "decision="+string(event.DecisionAction))
+	}
 	if event.PermissionMode != "" {
 		parts = append(parts, "mode="+string(event.PermissionMode))
 	}

@@ -763,9 +763,11 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	switch event.Action {
 	case agent.PermissionActionAllow:
 		label := "allowed once"
-		// Rehydrated events lose the grant object but keep GrantMatched, which
-		// for a prompted allow is set exactly by the always path.
-		if event.Grant != nil || event.GrantMatched {
+		if event.DecisionAction == agent.PermissionDecisionAllowForSession ||
+			(event.Grant != nil && event.Grant.Session) {
+			label = "allowed for session"
+		} else if event.DecisionAction == agent.PermissionDecisionAlwaysAllow ||
+			event.Grant != nil || event.GrantMatched {
 			label = "always"
 		}
 		line := zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
@@ -817,8 +819,7 @@ func wrapDetailBlock(detail string, width int) string {
 
 // renderFocusedPermissionPrompt draws the modal permission card and reports the
 // card-relative Y offset of each option line (in permissionOptions order) so the
-// caller can register those lines as clickable. cursor is the highlighted option
-// (default 0 = allow once); the a/y/d hotkeys still resolve directly.
+// caller can register those lines as clickable.
 func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, width int) (string, []int) {
 	name := strings.TrimSpace(request.ToolName)
 	if name == "" {
@@ -852,8 +853,8 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	// label; the rest stay quiet. styledBlockFill prepends exactly one top-border
 	// line, so an option at content index i renders at card line i+1 — the offset
 	// returned for click registration.
-	options := permissionOptions()
-	cursor = clampPermissionCursor(cursor)
+	options := permissionOptions(request)
+	cursor = clampPermissionCursor(cursor, request)
 	offsets := make([]int, len(options))
 	for index, option := range options {
 		offsets[index] = 1 + len(lines)
@@ -883,13 +884,33 @@ func permissionScopeLine(request agent.PermissionRequest, scope string) string {
 }
 
 func permissionOptionLabel(option permissionOption, request agent.PermissionRequest) string {
-	if option.choice != permissionDecisionAlwaysAllow || strings.TrimSpace(request.Scope) == "" {
+	switch option.choice {
+	case permissionDecisionAllow:
+		if request.SideEffect == string(tools.SideEffectNetwork) {
+			return "Yes, just this once"
+		}
+		return "Yes, proceed"
+	case permissionDecisionAllowForSession:
+		if request.SideEffect == string(tools.SideEffectNetwork) {
+			return "Yes, and allow this host for this conversation"
+		}
+		if request.SideEffect == string(tools.SideEffectWrite) && strings.TrimSpace(request.Scope) != "" {
+			return "Yes, and don't ask again for these files in this session"
+		}
+		return "Yes, and don't ask again for this command in this session"
+	case permissionDecisionAlwaysAllow:
+		if request.SideEffect == string(tools.SideEffectNetwork) {
+			return "Yes, and allow this host in the future"
+		}
+		if strings.TrimSpace(request.Scope) != "" {
+			return "Yes, and don't ask again for this scope"
+		}
+		return option.label
+	case permissionDecisionDeny:
+		return "No, and tell Zero what to do differently"
+	default:
 		return option.label
 	}
-	if request.SideEffect == string(tools.SideEffectNetwork) {
-		return "always for this host"
-	}
-	return "always for this scope"
 }
 
 func permissionEventScopeLabel(event *agent.PermissionEvent) string {

@@ -454,6 +454,7 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 		ToolCallID:        firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id")),
 		ToolName:          name,
 		Action:            agent.PermissionAction(payloadString(payload, "action")),
+		DecisionAction:    agent.PermissionDecisionAction(payloadString(payload, "decisionAction")),
 		Permission:        payloadString(payload, "permission"),
 		PermissionGranted: payloadBool(payload, "permissionGranted"),
 		PermissionMode:    agent.PermissionMode(payloadString(payload, "permissionMode")),

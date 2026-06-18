@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"time"
 )
 
 // reasonAboveCeiling is the Decision.Reason emitted when a grant-allow or unsafe
@@ -24,6 +26,8 @@ type Engine struct {
 	store         *GrantStore
 	backend       Backend
 	scope         *Scope
+	sessionMu     sync.Mutex
+	sessionGrants map[string][]Grant
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -63,6 +67,10 @@ func (engine *Engine) Scope() *Scope {
 		return nil
 	}
 	return engine.scope
+}
+
+func (engine *Engine) CanPersistGrants() bool {
+	return engine != nil && engine.store != nil
 }
 
 // ReadExclusions returns the resolved DenyRead/AllowRead exclusion matcher for
@@ -300,9 +308,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {
 		return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command is blocked by sandbox policy", false)
 	}
+	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
+	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
 	if engine.store != nil {
-		reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
-		reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
 		match, err := engine.store.Lookup(request.ToolName, reqScope, request.Autonomy)
 		if err == nil && match.Matched {
 			grant := match.Grant
@@ -330,8 +338,33 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			}
 		}
 	}
+	if match := engine.lookupSessionGrant(request.ToolName, reqScope, request.Autonomy); match.Matched {
+		grant := match.Grant
+		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
+			return Decision{
+				Action:       ActionPrompt,
+				Reason:       reasonAboveCeiling,
+				Risk:         risk,
+				GrantMatched: true,
+				Grant:        &grant,
+			}
+		}
+		return Decision{
+			Action:       ActionAllow,
+			Reason:       "session sandbox allow grant matched",
+			Risk:         risk,
+			GrantMatched: true,
+			Grant:        &grant,
+		}
+	}
 	if request.Permission == PermissionAllow {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
+	}
+	if workspaceWriteAutoAllowed(policy, request) {
+		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
+		}
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write permitted by sandbox policy", AutoAllowed: true}
 	}
 	// Auto-allow a sandboxed shell command when the operator opted in: the active
 	// native sandbox is the safety boundary, so the bash prompt is skipped. This
@@ -358,9 +391,47 @@ func (engine *Engine) Grant(input GrantInput) (Grant, error) {
 	if engine == nil || engine.store == nil {
 		return Grant{}, errors.New("sandbox grant store is not configured")
 	}
-	kind, err := normalizeScopeKind(input.ScopeKind)
+	input, err := engine.normalizeGrantInput(input)
 	if err != nil {
 		return Grant{}, err
+	}
+	return engine.store.Grant(input)
+}
+
+func (engine *Engine) GrantForSession(input GrantInput) (Grant, error) {
+	if engine == nil {
+		return Grant{}, errors.New("sandbox engine is not configured")
+	}
+	input, err := engine.normalizeGrantInput(input)
+	if err != nil {
+		return Grant{}, err
+	}
+	grant, err := createGrant(input, time.Now)
+	if err != nil {
+		return Grant{}, err
+	}
+	grant.Session = true
+	engine.sessionMu.Lock()
+	defer engine.sessionMu.Unlock()
+	if engine.sessionGrants == nil {
+		engine.sessionGrants = map[string][]Grant{}
+	}
+	bucket := engine.sessionGrants[grant.ToolName]
+	for index := range bucket {
+		if bucket[index].Scope == grant.Scope && bucket[index].ScopeKind == grant.ScopeKind {
+			bucket[index] = grant
+			engine.sessionGrants[grant.ToolName] = bucket
+			return grant, nil
+		}
+	}
+	engine.sessionGrants[grant.ToolName] = append(bucket, grant)
+	return grant, nil
+}
+
+func (engine *Engine) normalizeGrantInput(input GrantInput) (GrantInput, error) {
+	kind, err := normalizeScopeKind(input.ScopeKind)
+	if err != nil {
+		return GrantInput{}, err
 	}
 	scope, kind := reconcileScope(strings.TrimSpace(input.Scope), kind)
 	if kind != ScopeToolWide {
@@ -370,7 +441,34 @@ func (engine *Engine) Grant(input GrantInput) (Grant, error) {
 	}
 	input.Scope = scope
 	input.ScopeKind = kind
-	return engine.store.Grant(input)
+	return input, nil
+}
+
+func (engine *Engine) lookupSessionGrant(toolName string, reqScope string, requestedAutonomy Autonomy) GrantLookup {
+	if engine == nil {
+		return GrantLookup{}
+	}
+	requested, err := NormalizeAutonomy(requestedAutonomy)
+	if err != nil {
+		return GrantLookup{}
+	}
+	engine.sessionMu.Lock()
+	defer engine.sessionMu.Unlock()
+	return lookupGrantBucket(engine.sessionGrants[strings.TrimSpace(toolName)], reqScope, requested)
+}
+
+func workspaceWriteAutoAllowed(policy Policy, request Request) bool {
+	if !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
+		return false
+	}
+	switch request.ToolName {
+	case "write_file", "edit_file":
+		return len(requestPaths(request)) > 0
+	case "apply_patch":
+		return true
+	default:
+		return false
+	}
 }
 
 func deny(request Request, risk Risk, code ViolationCode, path string, reason string, recoverable bool) Decision {

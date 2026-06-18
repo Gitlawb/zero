@@ -1249,13 +1249,13 @@ func TestFocusedPermissionCardShowsBadgeRiskAndKeys(t *testing.T) {
 	}
 	card, offsets := renderFocusedPermissionPrompt(request, 0, 80)
 	got := plainRender(t, card)
-	for _, want := range []string{"PERMISSION", "risk: medium", "edit_file", "writes internal/agent/exec.go", "allow once", "[a]", "always", "[y]", "deny", "[d]", "[esc]"} {
+	for _, want := range []string{"PERMISSION", "risk: medium", "edit_file", "writes internal/agent/exec.go", "Yes, proceed", "[a]", "this session", "[s]", "don't ask again", "[y]", "tell Zero", "[d]", "[esc]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("permission card = %q, missing %q", got, want)
 		}
 	}
-	if len(offsets) != len(permissionOptions()) {
-		t.Fatalf("offsets = %d, want one per option (%d)", len(offsets), len(permissionOptions()))
+	if len(offsets) != len(permissionOptions(request)) {
+		t.Fatalf("offsets = %d, want one per option (%d)", len(offsets), len(permissionOptions(request)))
 	}
 }
 
@@ -1274,6 +1274,17 @@ func TestPermissionPromptCollapsesAfterDecision(t *testing.T) {
 	}
 	if got := plainRender(t, m.renderRow(allowed, 80, rc)); !strings.Contains(got, "allowed once · bash") {
 		t.Fatalf("manual allow = %q, want allowed once · bash", got)
+	}
+
+	session := transcriptRow{kind: rowPermission, id: "call_session", permission: &agent.PermissionEvent{
+		ToolCallID: "call_session", ToolName: "bash", Action: agent.PermissionActionAllow, DecisionAction: agent.PermissionDecisionAllowForSession,
+	}}
+	rcSession := buildRowContext([]transcriptRow{
+		{kind: rowPermission, id: "call_session", permission: &agent.PermissionEvent{ToolCallID: "call_session", ToolName: "bash", Action: agent.PermissionActionPrompt}},
+		session,
+	})
+	if got := plainRender(t, m.renderRow(session, 80, rcSession)); !strings.Contains(got, "allowed for session · bash") {
+		t.Fatalf("session allow = %q, want allowed for session · bash", got)
 	}
 
 	grant := &agent.PermissionEvent{ToolCallID: "call_2", ToolName: "bash", Action: agent.PermissionActionAllow}

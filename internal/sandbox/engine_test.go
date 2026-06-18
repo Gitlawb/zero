@@ -67,7 +67,7 @@ func TestEngineEvaluatesReadPromptAndPersistentDecisions(t *testing.T) {
 	}
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        DefaultPolicy(),
+		Policy:        promptWorkspaceWritePolicy(),
 		Store:         store,
 	})
 
@@ -145,7 +145,7 @@ func TestEngineGrantScopesToFileAndDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
-	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Store: store})
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: promptWorkspaceWritePolicy(), Store: store})
 
 	writeReq := func(path string) Request {
 		return Request{
@@ -182,6 +182,46 @@ func TestEngineGrantScopesToFileAndDirectory(t *testing.T) {
 	denied.Autonomy = AutonomyHigh
 	if d := engine.Evaluate(context.Background(), denied); d.Action != ActionDeny || !d.GrantMatched || d.Violation == nil || d.Violation.Code != ViolationPersistentDeny {
 		t.Fatalf("path under deny subtree should be denied, got %#v", d)
+	}
+}
+
+func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "write_file", args: map[string]any{"path": "notes.txt"}},
+		{name: "edit_file", args: map[string]any{"path": "notes.txt"}},
+		{name: "apply_patch", args: map[string]any{"patch": "diff --git a/notes.txt b/notes.txt\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       tc.name,
+				SideEffect:     SideEffectWrite,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Autonomy:       AutonomyMedium,
+				Args:           tc.args,
+			})
+			if decision.Action != ActionAllow || !decision.AutoAllowed || decision.GrantMatched {
+				t.Fatalf("workspace mutation decision = %#v, want auto allow without grant", decision)
+			}
+		})
+	}
+
+	outside := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       AutonomyMedium,
+		Args:           map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
+	})
+	if outside.Action != ActionDeny || outside.Violation == nil || outside.Violation.Code != ViolationOutsideWorkspace {
+		t.Fatalf("outside workspace mutation decision = %#v, want deny", outside)
 	}
 }
 
@@ -716,6 +756,12 @@ func fixedSandboxTime(value string) func() time.Time {
 		panic(err)
 	}
 	return func() time.Time { return parsed }
+}
+
+func promptWorkspaceWritePolicy() Policy {
+	policy := DefaultPolicy()
+	policy.EnforceWorkspace = false
+	return policy
 }
 
 func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {

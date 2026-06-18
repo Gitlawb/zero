@@ -38,9 +38,10 @@ const (
 )
 
 const (
-	PermissionDecisionAllow       PermissionDecisionAction = "allow"
-	PermissionDecisionDeny        PermissionDecisionAction = "deny"
-	PermissionDecisionAlwaysAllow PermissionDecisionAction = "always_allow"
+	PermissionDecisionAllow           PermissionDecisionAction = "allow"
+	PermissionDecisionAllowForSession PermissionDecisionAction = "allow_for_session"
+	PermissionDecisionDeny            PermissionDecisionAction = "deny"
+	PermissionDecisionAlwaysAllow     PermissionDecisionAction = "always_allow"
 )
 
 type ToolResult struct {
@@ -78,20 +79,21 @@ const (
 )
 
 type PermissionRequest struct {
-	ToolCallID     string             `json:"toolCallId"`
-	ToolName       string             `json:"name"`
-	Action         PermissionAction   `json:"action"`
-	Permission     string             `json:"permission"`
-	PermissionMode PermissionMode     `json:"permissionMode"`
-	Autonomy       string             `json:"autonomy,omitempty"`
-	SideEffect     string             `json:"sideEffect"`
-	Reason         string             `json:"reason,omitempty"`
-	Scope          string             `json:"scope,omitempty"`
-	Risk           sandbox.Risk       `json:"risk"`
-	Args           map[string]any     `json:"args,omitempty"`
-	Violation      *sandbox.Violation `json:"violation,omitempty"`
-	GrantMatched   bool               `json:"grantMatched,omitempty"`
-	Grant          *sandbox.Grant     `json:"grant,omitempty"`
+	ToolCallID         string                     `json:"toolCallId"`
+	ToolName           string                     `json:"name"`
+	Action             PermissionAction           `json:"action"`
+	Permission         string                     `json:"permission"`
+	PermissionMode     PermissionMode             `json:"permissionMode"`
+	Autonomy           string                     `json:"autonomy,omitempty"`
+	SideEffect         string                     `json:"sideEffect"`
+	Reason             string                     `json:"reason,omitempty"`
+	Scope              string                     `json:"scope,omitempty"`
+	Risk               sandbox.Risk               `json:"risk"`
+	Args               map[string]any             `json:"args,omitempty"`
+	Violation          *sandbox.Violation         `json:"violation,omitempty"`
+	GrantMatched       bool                       `json:"grantMatched,omitempty"`
+	Grant              *sandbox.Grant             `json:"grant,omitempty"`
+	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -100,21 +102,22 @@ type PermissionDecision struct {
 }
 
 type PermissionEvent struct {
-	ToolCallID        string             `json:"toolCallId"`
-	ToolName          string             `json:"name"`
-	Action            PermissionAction   `json:"action"`
-	Permission        string             `json:"permission"`
-	PermissionGranted bool               `json:"permissionGranted,omitempty"`
-	PermissionMode    PermissionMode     `json:"permissionMode"`
-	Autonomy          string             `json:"autonomy,omitempty"`
-	SideEffect        string             `json:"sideEffect"`
-	Reason            string             `json:"reason,omitempty"`
-	Scope             string             `json:"scope,omitempty"`
-	DecisionReason    string             `json:"decisionReason,omitempty"`
-	Risk              sandbox.Risk       `json:"risk"`
-	Violation         *sandbox.Violation `json:"violation,omitempty"`
-	GrantMatched      bool               `json:"grantMatched,omitempty"`
-	Grant             *sandbox.Grant     `json:"grant,omitempty"`
+	ToolCallID        string                   `json:"toolCallId"`
+	ToolName          string                   `json:"name"`
+	Action            PermissionAction         `json:"action"`
+	DecisionAction    PermissionDecisionAction `json:"decisionAction,omitempty"`
+	Permission        string                   `json:"permission"`
+	PermissionGranted bool                     `json:"permissionGranted,omitempty"`
+	PermissionMode    PermissionMode           `json:"permissionMode"`
+	Autonomy          string                   `json:"autonomy,omitempty"`
+	SideEffect        string                   `json:"sideEffect"`
+	Reason            string                   `json:"reason,omitempty"`
+	Scope             string                   `json:"scope,omitempty"`
+	DecisionReason    string                   `json:"decisionReason,omitempty"`
+	Risk              sandbox.Risk             `json:"risk"`
+	Violation         *sandbox.Violation       `json:"violation,omitempty"`
+	GrantMatched      bool                     `json:"grantMatched,omitempty"`
+	Grant             *sandbox.Grant           `json:"grant,omitempty"`
 }
 
 // AskUserQuestion is one clarifying question the agent wants answered.

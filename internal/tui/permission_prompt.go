@@ -2,6 +2,8 @@ package tui
 
 import (
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/agent"
 )
 
 // permissionOption is one selectable choice in the permission popup. The slice
@@ -13,20 +15,46 @@ type permissionOption struct {
 	choice permissionDecision
 }
 
-// permissionOptions returns the ordered choices the popup offers. "Allow once"
-// is first so it is the resting highlight (the common response a user attends
-// to a prompt to give); "deny" is last. The hotkeys mirror handlePermissionKey.
-func permissionOptions() []permissionOption {
-	return []permissionOption{
-		{label: "allow once", hotkey: "a", choice: permissionDecisionAllow},
-		{label: "always", hotkey: "y", choice: permissionDecisionAlwaysAllow},
-		{label: "deny", hotkey: "d", choice: permissionDecisionDeny},
+// permissionOptions returns the ordered choices the popup offers. The backend
+// supplies the decision set because network, file, and generic command prompts
+// can validly expose different scopes.
+func permissionOptions(request agent.PermissionRequest) []permissionOption {
+	decisions := request.AvailableDecisions
+	if len(decisions) == 0 {
+		decisions = []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowForSession,
+			agent.PermissionDecisionAlwaysAllow,
+			agent.PermissionDecisionDeny,
+		}
 	}
+	options := make([]permissionOption, 0, len(decisions))
+	seen := map[agent.PermissionDecisionAction]bool{}
+	for _, decision := range decisions {
+		if seen[decision] {
+			continue
+		}
+		seen[decision] = true
+		switch decision {
+		case agent.PermissionDecisionAllow:
+			options = append(options, permissionOption{label: "allow once", hotkey: "a", choice: permissionDecisionAllow})
+		case agent.PermissionDecisionAllowForSession:
+			options = append(options, permissionOption{label: "allow for session", hotkey: "s", choice: permissionDecisionAllowForSession})
+		case agent.PermissionDecisionAlwaysAllow:
+			options = append(options, permissionOption{label: "always", hotkey: "y", choice: permissionDecisionAlwaysAllow})
+		case agent.PermissionDecisionDeny:
+			options = append(options, permissionOption{label: "deny", hotkey: "d", choice: permissionDecisionDeny})
+		}
+	}
+	if len(options) == 0 {
+		return []permissionOption{{label: "deny", hotkey: "d", choice: permissionDecisionDeny}}
+	}
+	return options
 }
 
 // clampPermissionCursor keeps a cursor index within the option range.
-func clampPermissionCursor(cursor int) int {
-	n := len(permissionOptions())
+func clampPermissionCursor(cursor int, request agent.PermissionRequest) int {
+	n := len(permissionOptions(request))
 	if cursor < 0 {
 		return 0
 	}
@@ -43,8 +71,8 @@ func (m model) movePermissionCursor(delta int) model {
 	if m.pendingPermission == nil {
 		return m
 	}
-	n := len(permissionOptions())
-	cursor := (clampPermissionCursor(m.pendingPermission.cursor) + delta) % n
+	n := len(permissionOptions(m.pendingPermission.request))
+	cursor := (clampPermissionCursor(m.pendingPermission.cursor, m.pendingPermission.request) + delta) % n
 	if cursor < 0 {
 		cursor += n
 	}
@@ -58,6 +86,6 @@ func (m model) confirmPermissionCursor() (tea.Model, tea.Cmd) {
 	if m.pendingPermission == nil {
 		return m, nil
 	}
-	option := permissionOptions()[clampPermissionCursor(m.pendingPermission.cursor)]
+	option := permissionOptions(m.pendingPermission.request)[clampPermissionCursor(m.pendingPermission.cursor, m.pendingPermission.request)]
 	return m.resolvePermission(option.choice)
 }

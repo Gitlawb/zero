@@ -357,7 +357,7 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 				toolCallID: "call_write",
 				toolName:   "write_file",
 				arguments:  `{"path":"notes.txt","content":"hello"}`,
-				answer:     "write denied",
+				answer:     "write allowed",
 			}, nil
 		},
 		newSandboxStore: func() (*sandbox.GrantStore, error) {
@@ -374,15 +374,21 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 
 	events := decodeJSONLines(t, stdout.String())
 	eventTypes := jsonEventTypes(events)
-	if !slices.Contains(eventTypes, "permission_request") {
-		t.Fatalf("expected permission_request event in %v; output %q", eventTypes, stdout.String())
+	if slices.Contains(eventTypes, "permission_request") {
+		t.Fatalf("workspace write should not request permission in %v; output %q", eventTypes, stdout.String())
 	}
-	permissionEvent := findJSONEvent(t, events, "permission_request")
-	if permissionEvent["id"] != "call_write" || permissionEvent["name"] != "write_file" || permissionEvent["action"] != "prompt" {
+	permissionEvent := findJSONEvent(t, events, "permission_decision")
+	if permissionEvent["id"] != "call_write" || permissionEvent["name"] != "write_file" || permissionEvent["action"] != "allow" {
 		t.Fatalf("unexpected permission event: %#v", permissionEvent)
 	}
 	if permissionEvent["permission"] != "prompt" || permissionEvent["permissionMode"] != "auto" || permissionEvent["sideEffect"] != "write" {
 		t.Fatalf("unexpected permission metadata: %#v", permissionEvent)
+	}
+	if permissionEvent["permissionGranted"] == true {
+		t.Fatalf("workspace policy allow should not be recorded as user-granted permission: %#v", permissionEvent)
+	}
+	if permissionEvent["reason"] != "workspace write permitted by sandbox policy" {
+		t.Fatalf("unexpected workspace permission reason: %#v", permissionEvent)
 	}
 	risk, ok := permissionEvent["risk"].(map[string]any)
 	if !ok || risk["level"] == "" {
@@ -400,12 +406,12 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadEvents returned error: %v", err)
 	}
-	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermissionRequest)
+	permissionRecord := findSessionEvent(t, recorded, sessions.EventPermissionDecision)
 	var payload map[string]any
 	if err := json.Unmarshal(permissionRecord.Payload, &payload); err != nil {
 		t.Fatalf("decode permission payload: %v", err)
 	}
-	if payload["toolCallId"] != "call_write" || payload["name"] != "write_file" || payload["action"] != "prompt" {
+	if payload["toolCallId"] != "call_write" || payload["name"] != "write_file" || payload["action"] != "allow" {
 		t.Fatalf("unexpected recorded permission payload: %#v", payload)
 	}
 

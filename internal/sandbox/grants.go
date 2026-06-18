@@ -25,6 +25,7 @@ type Grant struct {
 	MaxAutonomy Autonomy      `json:"maxAutonomy"`
 	ApprovedAt  string        `json:"approvedAt"`
 	Reason      string        `json:"reason,omitempty"`
+	Session     bool          `json:"session,omitempty"`
 }
 
 type StoreOptions struct {
@@ -170,6 +171,10 @@ func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAuton
 		return GrantLookup{}, err
 	}
 	bucket := state.Grants[strings.TrimSpace(toolName)]
+	return lookupGrantBucket(bucket, reqScope, requested), nil
+}
+
+func lookupGrantBucket(bucket []Grant, reqScope string, requested Autonomy) GrantLookup {
 	var bestAllow *Grant
 	for i := range bucket {
 		grant := bucket[i]
@@ -178,7 +183,7 @@ func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAuton
 		}
 		if grant.Decision == GrantDeny {
 			covering := grant
-			return GrantLookup{Matched: true, Grant: covering}, nil
+			return GrantLookup{Matched: true, Grant: covering}
 		}
 		if !autonomyAllowed(requested, grant.MaxAutonomy) {
 			continue
@@ -189,9 +194,9 @@ func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAuton
 		}
 	}
 	if bestAllow != nil {
-		return GrantLookup{Matched: true, Grant: *bestAllow}, nil
+		return GrantLookup{Matched: true, Grant: *bestAllow}
 	}
-	return GrantLookup{}, nil
+	return GrantLookup{}
 }
 
 func (store *GrantStore) List() ([]Grant, error) {

@@ -1241,7 +1241,7 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 		t.Fatalf("expected permission row to preserve scope %q, got %#v", request.Scope, row)
 	}
 	view := next.View()
-	for _, want := range []string{"write_file", "allow once", "[a]", "deny", "[d]", "always for this scope", "[y]", "scope: src/main.go", "risk:high", "Creates or overwrites files."} {
+	for _, want := range []string{"write_file", "Yes, proceed", "[a]", "these files in this session", "[s]", "don't ask again for this scope", "[y]", "tell Zero", "[d]", "scope: src/main.go", "risk:high", "Creates or overwrites files."} {
 		assertContains(t, view, want)
 	}
 }
@@ -1254,6 +1254,7 @@ func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
 	}{
 		{name: "allow", key: "a", want: permissionDecisionAllow},
 		{name: "deny", key: "d", want: permissionDecisionDeny},
+		{name: "session", key: "s", want: permissionDecisionAllowForSession},
 		{name: "always", key: "y", want: permissionDecisionAlwaysAllow},
 	}
 
@@ -1309,10 +1310,10 @@ func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected permission confirm to resolve synchronously (no cmd)")
 	}
-	// Enter confirms the highlighted option (default: allow once) — it must NOT
+	// Enter confirms the highlighted option (default: approve) -- it must NOT
 	// submit the composer's pending text as a new prompt.
 	if len(decisions) != 1 || decisions[0] != permissionDecisionAllow {
-		t.Fatalf("expected Enter to confirm the default option (allow once), got %#v", decisions)
+		t.Fatalf("expected Enter to confirm the default approval option, got %#v", decisions)
 	}
 	if transcriptContains(next.transcript, "second prompt") {
 		t.Fatalf("permission prompt should block normal prompt submit, got %#v", next.transcript)

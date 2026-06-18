@@ -314,9 +314,10 @@ type prWatcherStartedMsg struct {
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
-	permissionDecisionAllow       permissionDecision = agent.PermissionDecisionAllow
-	permissionDecisionDeny        permissionDecision = agent.PermissionDecisionDeny
-	permissionDecisionAlwaysAllow permissionDecision = agent.PermissionDecisionAlwaysAllow
+	permissionDecisionAllow           permissionDecision = agent.PermissionDecisionAllow
+	permissionDecisionAllowForSession permissionDecision = agent.PermissionDecisionAllowForSession
+	permissionDecisionDeny            permissionDecision = agent.PermissionDecisionDeny
+	permissionDecisionAlwaysAllow     permissionDecision = agent.PermissionDecisionAlwaysAllow
 )
 
 type permissionRequestMsg struct {
@@ -328,9 +329,9 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
-	// cursor is the highlighted option index (into permissionOptions): 0=allow
-	// once (the resting default), 1=always, 2=deny. Moved by ↑/↓/Tab; confirmed
-	// by Enter or a click. The a/y/d hotkeys resolve directly and ignore it.
+	// cursor is the highlighted option index (into permissionOptions): 0 is the
+	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
+	// Hotkeys resolve the matching request-provided option directly.
 	cursor int
 }
 
@@ -2137,16 +2138,16 @@ func startsTurn(kind rowKind) bool {
 }
 
 func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch strings.ToLower(msg.String()) {
-	case "a":
-		return m.resolvePermission(permissionDecisionAllow)
-	case "d":
-		return m.resolvePermission(permissionDecisionDeny)
-	case "y":
-		return m.resolvePermission(permissionDecisionAlwaysAllow)
-	default:
+	if m.pendingPermission == nil {
 		return m, nil
 	}
+	key := strings.ToLower(msg.String())
+	for _, option := range permissionOptions(m.pendingPermission.request) {
+		if option.hotkey == key {
+			return m.resolvePermission(option.choice)
+		}
+	}
+	return m, nil
 }
 
 func (m model) resolvePermission(decision permissionDecision) (tea.Model, tea.Cmd) {
@@ -2209,6 +2210,8 @@ func permissionDecisionReason(decision permissionDecision) string {
 	switch decision {
 	case permissionDecisionAllow:
 		return "approved in TUI"
+	case permissionDecisionAllowForSession:
+		return "approved for this session in TUI"
 	case permissionDecisionAlwaysAllow:
 		return "persistently approved in TUI"
 	case permissionDecisionDeny:
