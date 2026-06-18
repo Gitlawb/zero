@@ -108,9 +108,14 @@ type model struct {
 	composerActive        bool
 	composerCursorVisible bool
 	composerPastePreviews []composerPastePreview
-	altScreen             bool
-	setup                 setupState
-	setupSave             func(SetupSelection) (SetupResult, error)
+	// plan holds the sticky plan panel state (steps, expansion, timings)
+	// synced from the update_plan tool. See plan_panel.go.
+	plan        planPanelState
+	specialists specialistTracker
+	taskTable   taskTableState
+	altScreen   bool
+	setup       setupState
+	setupSave   func(SetupSelection) (SetupResult, error)
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
@@ -702,6 +707,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
 		case keyIs(msg, tea.KeyEsc):
+			// Task table overlay closes on Esc before other Esc handlers.
+			if m.taskTable.visible {
+				m.taskTable.hide()
+				return m, nil
+			}
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
 				if m.mcpAddWizard != nil {
@@ -834,6 +844,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
+		case keyCtrl(msg, 'p'):
+			// Ctrl+P toggles the plan panel expansion (collapse/expand step list).
+			if m.noBlockingModal() && !m.plan.isEmpty() {
+				m.plan.expanded = !m.plan.expanded
+				return m, nil
+			}
+		case keyCtrl(msg, 'g'):
+			// Ctrl+G toggles the task table overlay showing all specialists.
+			if m.noBlockingModal() {
+				m.taskTable.toggle()
+				if m.taskTable.visible {
+					specialists := m.specialists.all()
+					if len(specialists) > 0 && m.taskTable.cursor >= len(specialists) {
+						m.taskTable.cursor = len(specialists) - 1
+					}
+				}
+				return m, nil
+			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -888,6 +916,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.scrollChat(-m.chatPageScrollLines()), nil
 		case keyIs(msg, tea.KeyDown):
+			if m.taskTable.visible {
+				specialists := m.specialists.all()
+				m.taskTable.moveCursor(1, len(specialists))
+				return m, nil
+			}
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -921,6 +954,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.recallHistory(1), nil
 			}
 		case keyIs(msg, tea.KeyUp):
+			if m.taskTable.visible {
+				specialists := m.specialists.all()
+				m.taskTable.moveCursor(-1, len(specialists))
+				return m, nil
+			}
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -1419,12 +1457,33 @@ func (m model) transcriptView() string {
 		overlayForViewport = ""
 	}
 
+	// Task table overlay takes priority over other overlays when toggled.
+	if m.taskTable.visible {
+		taskOverlay := m.renderTaskTable(width)
+		if m.altScreen && m.height > 0 {
+			return m.scrollableTranscriptItemsView(m.pinnedTitleBar(width), bodyItems, footer, width, taskOverlay)
+		}
+		bodyLayout := layoutTranscriptBodyItems(bodyItems)
+		body := bodyLayout.String()
+		body += "\n" + taskOverlay + "\n"
+		return body + footer
+	}
+
+	// Plan panel is pinned between the title bar and the transcript body.
+	planPanel := m.renderPlanPanel(width)
 	if m.altScreen && m.height > 0 {
-		return m.scrollableTranscriptItemsView(m.pinnedTitleBar(width), bodyItems, footer, width, overlayForViewport)
+		header := m.pinnedTitleBar(width)
+		if planPanel != "" {
+			header += "\n" + planPanel
+		}
+		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)
 	}
 
 	bodyLayout := layoutTranscriptBodyItems(bodyItems)
 	body := bodyLayout.String()
+	if planPanel != "" {
+		body = planPanel + "\n\n" + body
+	}
 	if overlayForViewport != "" {
 		body += "\n" + overlayForViewport + "\n"
 	}
@@ -2707,6 +2766,11 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	// Clear per-run tracking state so stale specialists and plans from the
+	// previous turn don't bleed into the new one.
+	m.specialists.clear()
+	m.plan.clear()
+	m.taskTable.hide()
 	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
 	// the new run starts (instead of mid-rotation from a prior turn). Also
 	// reset the step counter so the cadence doesn't carry over a partial
@@ -3046,6 +3110,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)
+			// Track specialist delegation: when the Task tool is called, register
+			// the specialist start so the specialist card + task table can show
+			// live status. The child session ID is not known yet (it's created
+			// inside the executor), so we use the tool call ID as a temporary
+			// key and reconcile on the result.
+			if call.Name == "Task" {
+				name, desc := parseTaskCallArgs(call.Arguments)
+				m.specialists.start(name, desc, call.ID, m.now())
+			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type: sessions.EventToolCall,
 				Payload: map[string]any{
@@ -3098,6 +3171,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			rows = append(rows, row)
 			m.sendAgentRow(runID, row)
+			// Sync the sticky plan panel when update_plan runs.
+			if result.Name == "update_plan" && m.registry != nil {
+				if planTool, ok := m.registry.Get("update_plan"); ok {
+					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
+						m.plan.updateFromItems(reader.CurrentPlan(), m.now())
+					}
+				}
+			}
 			toolPayload := map[string]any{
 				"toolCallId": result.ToolCallID,
 				"name":       result.Name,
@@ -3117,6 +3198,27 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventToolResult,
 				Payload: toolPayload,
 			})
+			// Complete specialist tracking when the Task tool returns.
+			if result.Name == "Task" {
+				status := specialistCompleted
+				if result.Status == tools.StatusError {
+					status = specialistError
+				}
+				if sid, ok := result.Meta["session_id"]; ok && sid != "" {
+					m.specialists.complete(sid, status, 0, result.Output, m.now())
+				} else {
+					m.specialists.complete(result.ToolCallID, status, 0, result.Output, m.now())
+				}
+				// Also emit a specialist card row in the transcript.
+				if info, ok := m.specialists.getBySessionID(result.ToolCallID); ok {
+					cardRow := transcriptRow{
+						kind:           rowSpecialist,
+						runID:          runID,
+						specialistInfo: &info,
+					}
+					m.sendAgentRow(runID, cardRow)
+				}
+			}
 			if onToolResult != nil {
 				onToolResult(result)
 			}

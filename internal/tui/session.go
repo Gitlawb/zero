@@ -431,6 +431,16 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if parentID != "" {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: "forked from session: " + parentID})
 			}
+		case sessions.EventSpecialistStart:
+			info := specialistInfoFromPayload(payload)
+			if info != nil {
+				rows = append(rows, transcriptRow{kind: rowSpecialist, specialistInfo: info})
+			}
+		case sessions.EventSpecialistStop:
+			info := specialistInfoFromPayload(payload)
+			if info != nil {
+				rows = append(rows, transcriptRow{kind: rowSpecialist, specialistInfo: info})
+			}
 		}
 	}
 	return rows
@@ -586,4 +596,32 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// specialistInfoFromPayload builds a specialistInfo from a specialist_start or
+// specialist_stop session event payload. Returns nil if the payload lacks a
+// childSessionId (the minimum required field).
+func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
+	childSessionID := payloadString(payload, "childSessionId")
+	if childSessionID == "" {
+		return nil
+	}
+	info := &specialistInfo{
+		name:           payloadString(payload, "specialistName"),
+		description:    payloadString(payload, "description"),
+		childSessionID: childSessionID,
+	}
+	statusStr := payloadString(payload, "status")
+	switch statusStr {
+	case "running":
+		info.status = specialistRunning
+	case "completed":
+		info.status = specialistCompleted
+	default:
+		info.status = parseSpecialistStatus(statusStr)
+	}
+	if errMsg := payloadString(payload, "error"); errMsg != "" {
+		info.errorMsg = errMsg
+	}
+	return info
 }

@@ -1,0 +1,324 @@
+// specialist_card.go renders specialist/subagent cards in the transcript.
+//
+// A specialist card summarises one spawned sub-agent (worker, explorer, code
+// review, ...): its name, task description, elapsed time, tool-call count, and
+// token usage. The SpecialistTracker holds the live state that the transcript
+// view consults each render; the session store feeds it via start/complete/
+// incrementToolCount/addTokens as specialist events arrive.
+package tui
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"charm.land/lipgloss/v2"
+)
+
+// specialistStatus is the lifecycle state of a single specialist invocation.
+type specialistStatus int
+
+const (
+	specialistRunning specialistStatus = iota
+	specialistCompleted
+	specialistError
+)
+
+// specialistInfo is the rendered view of one specialist invocation.
+type specialistInfo struct {
+	name           string
+	description    string
+	childSessionID string
+	status         specialistStatus
+	startedAt      time.Time
+	completedAt    time.Time
+	exitCode       int
+	errorMsg       string
+	toolCount      int // number of tool calls made by this specialist
+	tokenCount     int // total tokens consumed
+}
+
+// specialistTracker holds the live state for every specialist the parent agent
+// has spawned in the current turn. Lookups are by childSessionID.
+type specialistTracker struct {
+	specialists []specialistInfo
+}
+
+// start adds a new specialist entry. If childSessionID already exists the
+// existing entry is updated in place (so a duplicate start event is idempotent).
+func (t *specialistTracker) start(name, description, childSessionID string, now time.Time) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].name = name
+			t.specialists[index].description = description
+			t.specialists[index].status = specialistRunning
+			t.specialists[index].startedAt = now
+			t.specialists[index].completedAt = time.Time{}
+			t.specialists[index].exitCode = 0
+			t.specialists[index].errorMsg = ""
+			return
+		}
+	}
+	t.specialists = append(t.specialists, specialistInfo{
+		name:           name,
+		description:    description,
+		childSessionID: childSessionID,
+		status:         specialistRunning,
+		startedAt:      now,
+	})
+}
+
+// complete marks the specialist with childSessionID as finished, recording the
+// terminal status, exit code, and any error message. Specialists that are not
+// tracked are ignored.
+func (t *specialistTracker) complete(childSessionID string, status specialistStatus, exitCode int, errorMsg string, now time.Time) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].status = status
+			t.specialists[index].exitCode = exitCode
+			t.specialists[index].errorMsg = errorMsg
+			t.specialists[index].completedAt = now
+			return
+		}
+	}
+}
+
+// incrementToolCount bumps the tool-call counter for the specialist with
+// childSessionID. Unknown specialists are ignored.
+func (t *specialistTracker) incrementToolCount(childSessionID string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].toolCount++
+			return
+		}
+	}
+}
+
+// addTokens adds tokens to the running total for the specialist with
+// childSessionID. Unknown specialists are ignored.
+func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].tokenCount += tokens
+			return
+		}
+	}
+}
+
+// clear resets the tracker to an empty state.
+func (t *specialistTracker) clear() {
+	t.specialists = nil
+}
+
+// getBySessionID returns the info for childSessionID and whether it was found.
+func (t *specialistTracker) getBySessionID(childSessionID string) (specialistInfo, bool) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			return t.specialists[index], true
+		}
+	}
+	return specialistInfo{}, false
+}
+
+// all returns a copy of the specialists slice so callers may iterate without
+// the underlying array mutating underneath them.
+func (t *specialistTracker) all() []specialistInfo {
+	if len(t.specialists) == 0 {
+		return nil
+	}
+	out := make([]specialistInfo, len(t.specialists))
+	copy(out, t.specialists)
+	return out
+}
+
+// hasRunning reports whether any tracked specialist is still running.
+func (t *specialistTracker) hasRunning() bool {
+	for index := range t.specialists {
+		if t.specialists[index].status == specialistRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// specialistStatusString returns the lowercase human label for a status.
+func specialistStatusString(s specialistStatus) string {
+	switch s {
+	case specialistRunning:
+		return "running"
+	case specialistCompleted:
+		return "completed"
+	case specialistError:
+		return "error"
+	default:
+		return "error"
+	}
+}
+
+// parseSpecialistStatus maps the status string carried by specialist events to
+// the internal specialistStatus enum. Unknown values default to error so a
+// malformed event never reads as a silent success.
+func parseSpecialistStatus(s string) specialistStatus {
+	switch s {
+	case "running":
+		return specialistRunning
+	case "completed":
+		return specialistCompleted
+	default:
+		return specialistError
+	}
+}
+
+// parseTaskCallArgs extracts the specialist name and description from a Task
+// tool call's JSON arguments. The name comes from the "name" field and the
+// description from the "description" field (falling back to "prompt").
+func parseTaskCallArgs(rawArgs string) (name, description string) {
+	name = firstArgValue(rawArgs, []string{"name"})
+	description = firstArgValue(rawArgs, []string{"description", "prompt"})
+	return name, description
+}
+
+// formatTokenCount renders an integer token count with comma thousands
+// separators: 1840 -> "1,840", 5210 -> "5,210".
+func formatTokenCount(n int) string {
+	if n < 0 {
+		n = -n
+	}
+	digits := strconv.Itoa(n)
+	if len(digits) <= 3 {
+		return digits
+	}
+	var b strings.Builder
+	first := len(digits) % 3
+	if first > 0 {
+		b.WriteString(digits[:first])
+		if len(digits) > first {
+			b.WriteByte(',')
+		}
+	}
+	for i := first; i < len(digits); i += 3 {
+		b.WriteString(digits[i : i+3])
+		if i+3 < len(digits) {
+			b.WriteByte(',')
+		}
+	}
+	return b.String()
+}
+
+// formatSpecialistElapsed renders a duration as the compact "Ns" / "NmNs" form
+// shown on specialist card headers (e.g. 18s, 45s, 1m5s). Durations under a
+// second round up to 1s so a freshly started card never shows "0s".
+func formatSpecialistElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Seconds())
+	if seconds < 1 {
+		return "1s"
+	}
+	if seconds < 60 {
+		return strconv.Itoa(seconds) + "s"
+	}
+	minutes := seconds / 60
+	remainder := seconds % 60
+	if remainder == 0 {
+		return strconv.Itoa(minutes) + "m"
+	}
+	return strconv.Itoa(minutes) + "m" + strconv.Itoa(remainder) + "s"
+}
+
+// renderSpecialistCard renders one specialist as a rounded card of the given
+// width. The card has a header (icon + name + description + elapsed), a body
+// line (status + tool calls + tokens), an optional error detail, and a faint
+// hint line. Widths below the minimum are clamped to 30.
+func (m model) renderSpecialistCard(info specialistInfo, width int) string {
+	if width < 30 {
+		width = 30
+	}
+
+	// Elapsed: live while running, frozen at completion once the specialist is
+	// done.
+	var elapsed time.Duration
+	if info.status == specialistRunning {
+		elapsed = m.now().Sub(info.startedAt)
+	} else if !info.completedAt.IsZero() {
+		elapsed = info.completedAt.Sub(info.startedAt)
+	} else {
+		elapsed = m.now().Sub(info.startedAt)
+	}
+	elapsedStr := formatSpecialistElapsed(elapsed)
+
+	// Description truncation. The header reserves room for the icon, the name,
+	// the two " · " separators, the elapsed string, and a safety margin. Clamp
+	// to zero so very long names never underflow.
+	descMax := width - len(info.name) - 25
+	if descMax < 0 {
+		descMax = 0
+	}
+	description := truncateRunes(info.description, descMax)
+
+	// Header line: icon + name + " · " + description + " · " + elapsed.
+	var header string
+	switch info.status {
+	case specialistRunning:
+		icon := m.spinner.View()
+		header = zeroTheme.accent.Render(fmt.Sprintf("%s%s · %s · %s", icon, info.name, description, elapsedStr))
+	case specialistCompleted:
+		header = zeroTheme.green.Render(fmt.Sprintf("✓ %s · %s · %s", info.name, description, elapsedStr))
+	case specialistError:
+		header = zeroTheme.red.Render(fmt.Sprintf("✗ %s · %s · %s", info.name, description, elapsedStr))
+	default:
+		header = zeroTheme.accent.Render(fmt.Sprintf("• %s · %s · %s", info.name, description, elapsedStr))
+	}
+
+	// Body line: "  status · N tool calls · M,NNN tokens".
+	toolLabel := "tool calls"
+	statusLabel := specialistStatusString(info.status)
+	if info.status == specialistError {
+		statusLabel = fmt.Sprintf("error (exit code %d)", info.exitCode)
+	}
+	bodyText := fmt.Sprintf("  %s · %d %s · %s tokens", statusLabel, info.toolCount, toolLabel, formatTokenCount(info.tokenCount))
+	var body string
+	if info.status == specialistError {
+		body = zeroTheme.red.Render(bodyText)
+	} else {
+		body = zeroTheme.muted.Render(bodyText)
+	}
+
+	lines := []string{header, body}
+
+	// Optional error detail line.
+	if info.status == specialistError && strings.TrimSpace(info.errorMsg) != "" {
+		errMax := width - 4
+		if errMax < 1 {
+			errMax = 1
+		}
+		errMsg := truncateRunes(strings.TrimSpace(info.errorMsg), errMax)
+		lines = append(lines, zeroTheme.red.Render("  "+errMsg))
+	}
+
+	// Hint line.
+	lines = append(lines, zeroTheme.faint.Render("  [Enter] view subchat"))
+
+	// Wrap in a rounded border whose tint reflects the specialist's status.
+	border := specialistBorderStyle(info.status)
+	return styledBlock(width, lines, border)
+}
+
+// specialistBorderStyle picks the card border style for a specialist status:
+// the running tint while in flight, the error tint on failure, and the default
+// line once completed cleanly.
+func specialistBorderStyle(status specialistStatus) lipgloss.Style {
+	switch status {
+	case specialistRunning:
+		return zeroTheme.cardRun
+	case specialistError:
+		return zeroTheme.cardErr
+	default:
+		return zeroTheme.line
+	}
+}
+
+// truncateRunes is provided by view.go; specialist_card.go relies on it for
+// rune-safe description and error-message truncation.

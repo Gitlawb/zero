@@ -129,6 +129,10 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 			m.pending && row.runID != 0 && row.runID == m.activeRunID {
 			stable = false
 		}
+	case rowSpecialist:
+		if row.specialistInfo != nil && row.specialistInfo.status == specialistRunning {
+			stable = false
+		}
 	}
 
 	var b strings.Builder

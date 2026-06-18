@@ -238,6 +238,11 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 		return renderPermissionRow(row, width)
 	case rowAskUser:
 		return renderAskUserRow(row, width)
+	case rowSpecialist:
+		if row.specialistInfo != nil {
+			return m.renderSpecialistCard(*row.specialistInfo, width)
+		}
+		return ""
 	default:
 		return row.text
 	}

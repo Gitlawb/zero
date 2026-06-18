@@ -23,6 +23,7 @@ const (
 	rowAskUser
 	rowSystem
 	rowError
+	rowSpecialist
 )
 
 type transcriptRow struct {
@@ -37,6 +38,10 @@ type transcriptRow struct {
 	permission *agent.PermissionEvent
 	askUser    *agent.AskUserRequest
 	expanded   bool // collapsible transcript rows, e.g. provider thoughts
+
+	// specialistInfo holds the specialist card data for rowSpecialist rows.
+	// Nil for all other row kinds.
+	specialistInfo *specialistInfo
 
 	// Final-answer metadata, set at append time. Interim assistant text streams
 	// through model.streamingText and never lands in the transcript, so a
