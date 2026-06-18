@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,12 +21,17 @@ func TestDroppedAttachmentPath(t *testing.T) {
 	}
 
 	// Positives — each must resolve to the image path.
-	for name, in := range map[string]string{
-		"backslash-escaped drop": strings.ReplaceAll(img, " ", `\ `),
-		"double-quoted drop":     `"` + img + `"`,
-		"single-quoted drop":     `'` + img + `'`,
-		"plain absolute path":    img,
-	} {
+	positives := map[string]string{
+		"double-quoted drop":  `"` + img + `"`,
+		"single-quoted drop":  `'` + img + `'`,
+		"plain absolute path": img,
+	}
+	if runtime.GOOS != "windows" {
+		// Backslash-escaping of spaces is a Unix terminal drag-drop convention; on
+		// Windows the backslash is the path separator, so this form does not occur.
+		positives["backslash-escaped drop"] = strings.ReplaceAll(img, " ", `\ `)
+	}
+	for name, in := range positives {
 		got, ok := droppedAttachmentPath(in, dir)
 		if !ok || got != img {
 			t.Fatalf("%s: got %q ok=%v, want %q true", name, got, ok, img)

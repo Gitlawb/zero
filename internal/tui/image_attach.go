@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/imageinput"
@@ -53,6 +54,12 @@ func droppedAttachmentPath(content, cwd string) (string, bool) {
 // unescapeDroppedPath drops a backslash before any following byte, undoing the
 // terminal's drag-drop escaping ("\ " -> " ", "\(" -> "(", "\\" -> "\").
 func unescapeDroppedPath(s string) string {
+	if runtime.GOOS == "windows" {
+		// On Windows the backslash is the path separator, not a drag-drop escape;
+		// stripping it would corrupt real paths (C:\Users\… -> C:Users…). Dropped
+		// paths there arrive quoted (handled by stripMatchingQuotes) or plain.
+		return s
+	}
 	if !strings.Contains(s, `\`) {
 		return s
 	}
