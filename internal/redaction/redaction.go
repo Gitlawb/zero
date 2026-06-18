@@ -83,7 +83,7 @@ var (
 	privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
 	jsonStringPattern = regexp.MustCompile(`("([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*)"([^"\\]*(?:\\.[^"\\]*)*)"`)
 	assignPattern     = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s&]+))`)
-	headerPattern     = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\s*:\s*(bearer|basic)\s+([^\s,;]+)`)
+	headerPattern     = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\s*:\s*(bearer|basic|token|apikey|api-key|digest|negotiate|oauth|aws4-hmac-sha256)\s+([^\s,;]+)`)
 	secretHeader      = regexp.MustCompile(`(?i)\b(x-api-key|api-key|cookie|set-cookie)\s*:\s*([^\r\n]+)`)
 	queryPattern      = regexp.MustCompile(`([?&])([^=&#\s]+)=([^&#\s]+)`)
 )
@@ -99,6 +99,49 @@ func IsSensitiveKey(key string, options Options) bool {
 	for _, extra := range options.ExtraSensitiveKeys {
 		if normalizeKey(extra) == normalized {
 			return true
+		}
+	}
+	return keyLooksSensitive(normalized)
+}
+
+// secretKeySegments are "_"-delimited segments that mark the whole key sensitive
+// even when the full name isn't in the exact list, so compound names like
+// db_password, session_secret, and stripe_secret_key are caught. "token" is
+// handled separately (suffix-only, in keyLooksSensitive) so the agent's many
+// token-COUNT fields (max_tokens, prompt_tokens, token_count) are never redacted.
+var secretKeySegments = map[string]struct{}{
+	"password":    {},
+	"passwd":      {},
+	"passphrase":  {},
+	"secret":      {},
+	"credential":  {},
+	"credentials": {},
+	"apikey":      {},
+}
+
+// keyLooksSensitive applies conservative structural heuristics to a normalized
+// key (already lower-cased and "_"-delimited by normalizeKey). It is deliberately
+// narrow: a bare "token"/"key" segment is NOT enough, so token-count and ordinary
+// "*_key" fields (max_tokens, primary_key, public_key) stay un-redacted.
+func keyLooksSensitive(normalized string) bool {
+	segments := strings.Split(normalized, "_")
+	for i, seg := range segments {
+		if _, ok := secretKeySegments[seg]; ok {
+			return true
+		}
+		// "<x>_token" (singular, trailing) is a credential — auth_token, csrf_token,
+		// vault_token. NOT "tokens" (plural count) and NOT "token_<x>" (token_count,
+		// token_usage), where token is pluralized or not the trailing segment.
+		if seg == "token" && i > 0 && i == len(segments)-1 {
+			return true
+		}
+		// "api_key" / "private_key" as adjacent segments. A bare "key" stays
+		// non-sensitive (primary_key, public_key, cache_key, foreign_key, …).
+		if seg == "key" && i > 0 {
+			switch segments[i-1] {
+			case "api", "private":
+				return true
+			}
 		}
 	}
 	return false

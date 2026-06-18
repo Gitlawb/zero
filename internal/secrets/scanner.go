@@ -26,19 +26,23 @@ type pattern struct {
 
 // patterns are intentionally specific (fixed prefixes / structural shapes) so
 // they don't fire on arbitrary identifiers.
+// A leading \b anchors each prefixed pattern to a word boundary so it can't fire
+// mid-word — e.g. "sk-" inside "task-management-and-coordination" must NOT match
+// as an openai_key. Real secrets are preceded by a delimiter (space, quote, =, :,
+// start-of-string), all of which satisfy \b.
 var patterns = []pattern{
-	{"aws_access_key_id", regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
-	{"github_token", regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{36}`)},
-	{"github_pat", regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,}`)},
-	{"slack_token", regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`)},
-	{"google_api_key", regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`)},
+	{"aws_access_key_id", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}`)},
+	{"github_token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36}`)},
+	{"github_pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{22,}`)},
+	{"slack_token", regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`)},
+	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z\-_]{35}`)},
 	// Body allows - and _ so modern prefixed keys (sk-proj-…, sk-svcacct-…) match,
 	// not just the legacy sk-<alnum> shape.
-	{"openai_key", regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`)},
+	{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}`)},
 	// Match the ENTIRE PEM/OpenSSH block (header THROUGH the END marker, body
 	// included) so redaction removes the key material, not just the header.
 	{"private_key_block", regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----`)},
-	{"jwt", regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
+	{"jwt", regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`)},
 }
 
 // Scan returns the distinct secrets found in text (deduplicated by match,
