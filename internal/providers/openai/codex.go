@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -72,12 +73,13 @@ type CodexOptions struct {
 
 // CodexProvider is the Codex-flavored variant of the openai provider. It is
 // a thin shim that adds the Codex-specific request headers
-// (`originator`, `chatgpt-account-id`, branded `User-Agent`) on top of the
-// generic OpenAI chat-completions transport. The Codex backend speaks the
-// Responses API at `{baseURL}/responses` (not `/chat/completions`), so the
-// constructor overrides the endpoint the wrapped openai provider would
-// otherwise default to. The request body is byte-for-byte the same
-// chat-completions shape today; the path difference is the only divergence.
+// (`originator`, `chatgpt-account-id`, branded `User-Agent`) on top of a
+// Responses-API transport. The Codex backend at
+// `https://chatgpt.com/backend-api/codex/responses` serves the OpenAI
+// Responses API (not the chat-completions API), so the constructor
+// overrides the endpoint AND the transport — the wrapped Provider is used
+// only for its validated endpoint / auth / retry / timeout config; the
+// actual request body and SSE parser live in codex_responses.go.
 type CodexProvider struct {
 	inner          *Provider
 	originator     string
@@ -88,7 +90,10 @@ type CodexProvider struct {
 
 // NewCodexProvider builds a CodexProvider. It is a thin wrapper over the
 // openai.New constructor plus the Codex-specific Options.SetRequestExtra
-// callback that injects the Codex headers.
+// callback that injects the Codex headers. The wrapped Provider supplies
+// the validated endpoint / auth / retry / idle-timeout config; the
+// request body and stream parser are Codex-specific and live in
+// codex_responses.go.
 func NewCodexProvider(options CodexOptions) (*CodexProvider, error) {
 	originator := strings.TrimSpace(options.Originator)
 	if originator == "" {
@@ -106,15 +111,17 @@ func NewCodexProvider(options CodexOptions) (*CodexProvider, error) {
 		}
 	}
 
-	// Reuse the openai provider's transport. Embed Options so the openai
-	// constructor sees the full struct; here we set SetRequestExtra below.
+	// Reuse the openai provider's transport configuration. Embed Options so
+	// the openai constructor sees the full struct; here we set
+	// SetRequestExtra below. The inner Provider is NOT used for streaming
+	// — the Codex provider has its own Responses-API stream path — but its
+	// fields (endpoint, httpClient, auth headers, idle timeout) are the
+	// single source of truth for the URL / auth / retry plumbing.
 	openaiOpts := options.Options
 	openaiOpts.UserAgent = userAgent
 	// The Codex backend serves the Responses API at `{baseURL}/responses`,
 	// not `/chat/completions`. Override the endpoint the openai transport
-	// would otherwise default to so the Codex provider hits the right path.
-	// (The chat-completions request body is still accepted; only the path
-	// diverges.)
+	// would otherwise default to.
 	if baseURL := strings.TrimRight(strings.TrimSpace(openaiOpts.BaseURL), "/"); baseURL != "" {
 		openaiOpts.Endpoint = baseURL + "/responses"
 	}
@@ -134,10 +141,27 @@ func NewCodexProvider(options CodexOptions) (*CodexProvider, error) {
 	return provider, nil
 }
 
-// StreamCompletion forwards to the wrapped openai provider. The Codex headers
-// are injected on every request via the SetRequestExtra callback.
+// StreamCompletion builds a Responses-API request and dispatches it via
+// the Codex-specific stream path in codex_responses.go. The request body
+// is the Responses schema (input items, tools, max_output_tokens) and
+// the response is parsed from the typed SSE event stream the Codex
+// backend emits (response.output_text.delta, response.function_call_
+// arguments.delta, response.completed, ...).
 func (p *CodexProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
-	return p.inner.StreamCompletion(ctx, request)
+	responsesReq, err := p.buildResponsesRequest(request)
+	if err != nil {
+		return nil, fmt.Errorf("encode codex request: %w", err)
+	}
+	body, err := json.Marshal(responsesReq)
+	if err != nil {
+		return nil, fmt.Errorf("encode codex request: %w", err)
+	}
+	events := make(chan zeroruntime.StreamEvent, 16)
+	go func() {
+		defer close(events)
+		p.streamResponses(ctx, body, events)
+	}()
+	return events, nil
 }
 
 // injectCodexHeaders is the SetRequestExtra callback installed on the wrapped

@@ -27,10 +27,26 @@ type codexRequest struct {
 }
 
 // newCodexTestServer returns an httptest.Server that records each request's
-// Codex headers and writes a minimal [DONE] SSE stream. The Codex provider
-// targets `{BaseURL}/responses` (the Responses API on the chatgpt backend),
-// so the handler is mounted on that path.
+// Codex headers and writes a minimal Responses-API SSE stream (a single
+// response.completed event with no content). The Codex provider targets
+// `{BaseURL}/responses` (the Responses API on the chatgpt backend), so the
+// handler is mounted on that path. Tests that want a richer stream (text
+// deltas, tool calls, errors) use newCodexResponsesServer with a custom
+// event sequence.
 func newCodexTestServer(t *testing.T, rec *codexRequest) *httptest.Server {
+	t.Helper()
+	return newCodexResponsesServer(t, rec,
+		`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+	)
+}
+
+// newCodexResponsesServer returns an httptest.Server that records each
+// request's Codex headers and writes the given SSE data payloads in order.
+// Each payload is emitted as one `data: <payload>\n\n` block, so a test
+// can supply a complete Responses-API event sequence (created, deltas,
+// completed) by passing them in order.
+func newCodexResponsesServer(t *testing.T, rec *codexRequest, payloads ...string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/responses", func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +62,9 @@ func newCodexTestServer(t *testing.T, rec *codexRequest) *httptest.Server {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&rec.body)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		for _, payload := range payloads {
+			_, _ = w.Write([]byte("data: " + payload + "\n\n"))
+		}
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -278,7 +296,7 @@ func TestCodexProviderResolverIsConsultedOnEveryRequest(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"status\":\"completed\"}}\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -365,7 +383,11 @@ func TestCodexProviderOmitsAccountIDWhenResolverSaysNo(t *testing.T) {
 	}
 }
 
-func TestCodexProviderSendsRequestBody(t *testing.T) {
+func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
+	// The Codex provider speaks the Responses API, not the chat-completions
+	// API. The request body must carry `input` items (not `messages`), a
+	// `stream: true` flag, and `tools` (when the caller supplies any) — a
+	// chat-completions body would be rejected by the live Codex backend.
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -386,16 +408,46 @@ func TestCodexProviderSendsRequestBody(t *testing.T) {
 			{Role: zeroruntime.MessageRoleSystem, Content: "sys"},
 			{Role: zeroruntime.MessageRoleUser, Content: "hi"},
 		},
+		Tools: []zeroruntime.ToolDefinition{
+			{Name: "get_weather", Description: "get the weather", Parameters: map[string]any{"type": "object"}},
+		},
 	})
 	if err != nil {
 		t.Fatalf("StreamCompletion: %v", err)
 	}
 	drainCodexEvents(t, stream)
+
 	if rec.body["model"] != "gpt-5" {
 		t.Fatalf("body.model = %#v, want gpt-5", rec.body["model"])
 	}
 	if rec.body["stream"] != true {
 		t.Fatalf("body.stream = %#v, want true", rec.body["stream"])
+	}
+	if _, ok := rec.body["messages"]; ok {
+		t.Fatalf("body must not carry chat-completions `messages` (got %#v); the Codex backend serves the Responses API", rec.body["messages"])
+	}
+	input, ok := rec.body["input"].([]any)
+	if !ok {
+		t.Fatalf("body.input = %#v, want []any with two message items", rec.body["input"])
+	}
+	if len(input) != 2 {
+		t.Fatalf("body.input has %d items, want 2 (system + user)", len(input))
+	}
+	system, _ := input[0].(map[string]any)
+	if system["type"] != "message" || system["role"] != "system" {
+		t.Fatalf("body.input[0] = %#v, want type=message role=system", system)
+	}
+	user, _ := input[1].(map[string]any)
+	if user["type"] != "message" || user["role"] != "user" {
+		t.Fatalf("body.input[1] = %#v, want type=message role=user", user)
+	}
+	tools, ok := rec.body["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("body.tools = %#v, want a single tool", rec.body["tools"])
+	}
+	tool, _ := tools[0].(map[string]any)
+	if tool["type"] != "function" || tool["name"] != "get_weather" {
+		t.Fatalf("body.tools[0] = %#v, want type=function name=get_weather", tool)
 	}
 }
 
@@ -420,7 +472,7 @@ func TestCodexProviderRetriesHeadersAfter401(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"status\":\"completed\"}}\n\n"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -537,8 +589,8 @@ func TestCodexProviderStreamIdleTimeoutPropagates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCodexProvider: %v", err)
 	}
-	// A simple stream that returns [DONE] immediately does not hit the
-	// timeout — the test just confirms the option is accepted.
+	// A simple stream that returns response.completed immediately does not
+	// hit the timeout — the test just confirms the option is accepted.
 	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
 	})
@@ -546,4 +598,315 @@ func TestCodexProviderStreamIdleTimeoutPropagates(t *testing.T) {
 		t.Fatalf("StreamCompletion: %v", err)
 	}
 	drainCodexEvents(t, stream)
+}
+
+func TestCodexProviderParsesResponsesTextDeltas(t *testing.T) {
+	// The Codex backend streams text as a series of
+	// `response.output_text.delta` events. Each delta must surface as a
+	// runtime text event in order, and the terminal `response.completed`
+	// must emit StreamEventUsage (with the right token counts) and
+	// StreamEventDone in that order.
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		`{"type":"response.output_text.delta","delta":"hello "}`,
+		`{"type":"response.output_text.delta","delta":"world"}`,
+		`{"type":"response.output_text.delta","delta":"!"}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1},"input_tokens_details":{"cached_tokens":2}}}}`,
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "say hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var texts []string
+	var usage *zeroruntime.Usage
+	gotDone := false
+	for ev := range stream {
+		switch ev.Type {
+		case zeroruntime.StreamEventText:
+			texts = append(texts, ev.Content)
+		case zeroruntime.StreamEventUsage:
+			usage = &ev.Usage
+		case zeroruntime.StreamEventDone:
+			gotDone = true
+		case zeroruntime.StreamEventError:
+			t.Fatalf("unexpected error event: %q", ev.Error)
+		}
+	}
+	if joined := strings.Join(texts, ""); joined != "hello world!" {
+		t.Fatalf("text deltas concatenated = %q, want %q", joined, "hello world!")
+	}
+	if usage == nil {
+		t.Fatal("expected a usage event, got none")
+	}
+	if usage.InputTokens != 7 || usage.OutputTokens != 3 || usage.CachedInputTokens != 2 || usage.ReasoningTokens != 1 {
+		t.Fatalf("usage = %+v, want input=7 output=3 cached=2 reasoning=1", *usage)
+	}
+	if !gotDone {
+		t.Fatal("expected a done event, got none")
+	}
+}
+
+func TestCodexProviderParsesResponsesToolCalls(t *testing.T) {
+	// The Codex backend streams function calls as three coordinated event
+	// types: `response.output_item.added` (carries the call id and name),
+	// `response.function_call_arguments.delta` (one or more events that
+	// accumulate the arguments), and `response.output_item.done`
+	// (finalizes). The runtime must see a tool-call-start with the right
+	// name, deltas in order, and a tool-call-end that closes the call.
+	// Deltas are kept simple ("arg1"/"arg2") to avoid tangling this test
+	// in JSON-string escaping; the joined argument string is asserted
+	// directly.
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather"}}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"call-1","output_index":0,"delta":"arg1"}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"call-1","output_index":0,"delta":"arg2"}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"call-1","call_id":"call-1","name":"get_weather","arguments":"arg1arg2"}}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":3,"output_tokens":2}}}`,
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "weather in SF?"}},
+		Tools: []zeroruntime.ToolDefinition{
+			{Name: "get_weather", Parameters: map[string]any{"type": "object"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var starts, deltas, ends int
+	var startName, endName string
+	var fragments []string
+	for ev := range stream {
+		switch ev.Type {
+		case zeroruntime.StreamEventToolCallStart:
+			starts++
+			startName = ev.ToolName
+		case zeroruntime.StreamEventToolCallDelta:
+			deltas++
+			fragments = append(fragments, ev.ArgumentsFragment)
+		case zeroruntime.StreamEventToolCallEnd:
+			ends++
+			endName = ev.ToolName
+		case zeroruntime.StreamEventError:
+			t.Fatalf("unexpected error event: %q", ev.Error)
+		}
+	}
+	if starts != 1 || startName != "get_weather" {
+		t.Fatalf("tool-call-start count=%d name=%q, want 1 get_weather", starts, startName)
+	}
+	if deltas != 2 {
+		t.Fatalf("tool-call-delta count=%d, want 2", deltas)
+	}
+	if joined := strings.Join(fragments, ""); joined != "arg1arg2" {
+		t.Fatalf("tool-call-delta fragments = %q, want %q", joined, "arg1arg2")
+	}
+	if ends != 1 || endName != "get_weather" {
+		t.Fatalf("tool-call-end count=%d name=%q, want 1 get_weather", ends, endName)
+	}
+}
+
+func TestCodexProviderSendsAssistantToolCallsAsInputItems(t *testing.T) {
+	// When the runtime replays a prior assistant turn that issued a tool
+	// call, the Codex provider must serialize the turn as BOTH the
+	// assistant message (its text) AND a function_call item for the call.
+	// A bare assistant message without the function_call item would make
+	// the model think no tool was invoked.
+	var rec codexRequest
+	srv := newCodexTestServer(t, &rec)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{
+			{Role: zeroruntime.MessageRoleUser, Content: "weather in SF?"},
+			{
+				Role:    zeroruntime.MessageRoleAssistant,
+				Content: "let me check",
+				ToolCalls: []zeroruntime.ToolCall{
+					{ID: "call-1", Name: "get_weather", Arguments: `{"location":"SF"}`},
+				},
+			},
+			{Role: zeroruntime.MessageRoleTool, ToolCallID: "call-1", Content: "72F and sunny"},
+			{Role: zeroruntime.MessageRoleUser, Content: "thanks"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drainCodexEvents(t, stream)
+
+	input, ok := rec.body["input"].([]any)
+	if !ok || len(input) != 5 {
+		t.Fatalf("body.input = %#v, want 5 items (user + assistant text + function_call + function_call_output + user)", rec.body["input"])
+	}
+	user, _ := input[0].(map[string]any)
+	if user["type"] != "message" || user["role"] != "user" {
+		t.Fatalf("body.input[0] = %#v, want type=message role=user", user)
+	}
+	assistant, _ := input[1].(map[string]any)
+	if assistant["type"] != "message" || assistant["role"] != "assistant" {
+		t.Fatalf("body.input[1] = %#v, want type=message role=assistant", assistant)
+	}
+	functionCall, _ := input[2].(map[string]any)
+	if functionCall["type"] != "function_call" {
+		t.Fatalf("body.input[2] = %#v, want type=function_call", functionCall)
+	}
+	if functionCall["name"] != "get_weather" {
+		t.Fatalf("body.input[2].name = %#v, want get_weather", functionCall["name"])
+	}
+	if functionCall["arguments"] != `{"location":"SF"}` {
+		t.Fatalf("body.input[2].arguments = %#v, want %q", functionCall["arguments"], `{"location":"SF"}`)
+	}
+	functionOutput, _ := input[3].(map[string]any)
+	if functionOutput["type"] != "function_call_output" {
+		t.Fatalf("body.input[3] = %#v, want type=function_call_output", functionOutput)
+	}
+	if functionOutput["call_id"] != "call-1" {
+		t.Fatalf("body.input[3].call_id = %#v, want call-1", functionOutput["call_id"])
+	}
+	finalUser, _ := input[4].(map[string]any)
+	if finalUser["type"] != "message" || finalUser["role"] != "user" {
+		t.Fatalf("body.input[4] = %#v, want type=message role=user", finalUser)
+	}
+}
+
+func TestCodexProviderEmitsErrorOnResponseErrorEvent(t *testing.T) {
+	// A `response.error` event from the Codex backend is the stream-level
+	// error signal. It must surface as a single StreamEventError and stop
+	// the scan so the runtime doesn't hang waiting for a completion.
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		`{"type":"response.error","code":"rate_limit_exceeded","message":"too many requests"}`,
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var gotError string
+	for ev := range stream {
+		if ev.Type == zeroruntime.StreamEventError {
+			gotError = ev.Error
+		}
+	}
+	if gotError == "" {
+		t.Fatal("expected a StreamEventError, got none")
+	}
+	if !strings.Contains(gotError, "too many requests") {
+		t.Fatalf("error = %q, want one mentioning the response.error message", gotError)
+	}
+}
+
+func TestCodexProviderEmitsErrorOnMalformedStream(t *testing.T) {
+	// A non-JSON data payload (or a payload with a missing `type` field)
+	// must be reported as a stream error rather than silently dropped —
+	// otherwise the runtime would hang waiting for a completion event
+	// that never arrives.
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		`{"not-a-valid-event":true}`,
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var gotError string
+	for ev := range stream {
+		if ev.Type == zeroruntime.StreamEventError {
+			gotError = ev.Error
+		}
+	}
+	if gotError == "" {
+		t.Fatal("expected a StreamEventError for a malformed event, got none")
+	}
+}
+
+func TestCodexProviderEmitsLengthFinishWhenStreamEndsWithoutCompletion(t *testing.T) {
+	// The Codex backend may close the SSE stream without emitting
+	// `response.completed` (e.g. an internal truncation). The wrapper
+	// must surface a StreamEventDone with FinishReasonLength so the
+	// runtime can react, instead of hanging on a missing completion.
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.output_text.delta","delta":"partial"}`,
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var finishReason string
+	var gotDone bool
+	for ev := range stream {
+		if ev.Type == zeroruntime.StreamEventDone {
+			gotDone = true
+			finishReason = ev.FinishReason
+		}
+	}
+	if !gotDone {
+		t.Fatal("expected a StreamEventDone, got none")
+	}
+	if finishReason != zeroruntime.FinishReasonLength {
+		t.Fatalf("finish reason = %q, want %q", finishReason, zeroruntime.FinishReasonLength)
+	}
 }
