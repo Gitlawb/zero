@@ -63,7 +63,7 @@ func (tool readFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		return errorResult("Error: Invalid arguments for read_file: " + err.Error())
 	}
 
-	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
+	absolutePath, relativePath, err := resolveScopedReadPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error reading file " + requestedPath + ": " + err.Error())
 	}

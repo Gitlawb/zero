@@ -99,19 +99,20 @@ var forbiddenToolNames = map[string]bool{
 var defaultToolSelection = []string{"read-only"}
 
 var knownToolNames = map[string]bool{
-	"read_file":      true,
-	"list_directory": true,
-	"glob":           true,
-	"grep":           true,
-	"skill":          true,
-	"ask_user":       true,
-	"write_file":     true,
-	"edit_file":      true,
-	"apply_patch":    true,
-	"update_plan":    true,
-	"bash":           true,
-	"web_fetch":      true,
-	"web_search":     true,
+	"read_file":           true,
+	"list_directory":      true,
+	"glob":                true,
+	"grep":                true,
+	"skill":               true,
+	"ask_user":            true,
+	"request_permissions": true,
+	"write_file":          true,
+	"edit_file":           true,
+	"apply_patch":         true,
+	"update_plan":         true,
+	"bash":                true,
+	"web_fetch":           true,
+	"web_search":          true,
 }
 
 func DefaultPaths(workspaceRoot string) (Paths, error) {

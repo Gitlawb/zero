@@ -62,7 +62,7 @@ func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result
 		maxDepth = 0
 	}
 
-	absolutePath, relativePath, err := resolveScopedPath(tool.workspaceRoot, tool.scope, requestedPath)
+	absolutePath, relativePath, err := resolveScopedReadPath(tool.workspaceRoot, tool.scope, requestedPath)
 	if err != nil {
 		return errorResult("Error listing directory " + requestedPath + ": " + err.Error())
 	}

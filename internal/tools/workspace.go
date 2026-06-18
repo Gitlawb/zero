@@ -213,6 +213,10 @@ type PathScope interface {
 	Roots() []string
 }
 
+type readPathScope interface {
+	ReadRoots() []string
+}
+
 // scopedRoots returns the ordered roots to try for an absolute path: the
 // scope's roots when present, else just the workspace root. A non-nil scope
 // must expose at least one root (the workspace root first, per PathScope); an
@@ -229,6 +233,45 @@ func scopedRoots(workspaceRoot string, scope PathScope) ([]string, error) {
 		return nil, fmt.Errorf("invalid path scope: no write roots configured")
 	}
 	return roots, nil
+}
+
+func scopedReadRoots(workspaceRoot string, scope PathScope) ([]string, error) {
+	if scope == nil {
+		return []string{workspaceRoot}, nil
+	}
+	if reader, ok := scope.(readPathScope); ok {
+		roots := reader.ReadRoots()
+		if len(roots) == 0 {
+			return nil, fmt.Errorf("invalid path scope: no read roots configured")
+		}
+		return roots, nil
+	}
+	return scopedRoots(workspaceRoot, scope)
+}
+
+func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
+	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
+		return resolveWorkspacePath(workspaceRoot, requestedPath)
+	}
+	roots, err := scopedReadRoots(workspaceRoot, scope)
+	if err != nil {
+		return "", "", err
+	}
+	var firstErr error
+	for index, root := range roots {
+		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
+		absolute, relative, err := resolveWorkspacePath(root, candidate)
+		if err == nil {
+			if index > 0 {
+				return absolute, absolute, nil
+			}
+			return absolute, relative, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return "", "", firstErr
 }
 
 // resolveScopedPath is resolveWorkspacePath generalized to a scope: relative

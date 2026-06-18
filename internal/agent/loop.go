@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -24,6 +25,33 @@ const (
 )
 
 var errPermissionApprovalCanceled = errors.New("permission approval cancelled")
+
+type permissionRunState struct {
+	mu       sync.Mutex
+	cleanups []func()
+}
+
+func (state *permissionRunState) add(cleanup func()) {
+	if state == nil || cleanup == nil {
+		return
+	}
+	state.mu.Lock()
+	state.cleanups = append(state.cleanups, cleanup)
+	state.mu.Unlock()
+}
+
+func (state *permissionRunState) cleanup() {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	cleanups := state.cleanups
+	state.cleanups = nil
+	state.mu.Unlock()
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanups[i]()
+	}
+}
 
 // abortedToolResultNotice is the placeholder tool result recorded for a tool
 // call that was advertised by the assistant turn but never executed because the
@@ -66,6 +94,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	if permissionMode == "" {
 		permissionMode = PermissionModeAuto
 	}
+	runPermissions := &permissionRunState{}
+	options.runPermissions = runPermissions
+	defer runPermissions.cleanup()
 
 	messages := zeroruntime.SeedMessagesWithImages(buildSystemPrompt(options), prompt, options.Images)
 
@@ -547,6 +578,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	if call.Name == "ask_user" {
 		return executeAskUser(ctx, registry, call, args, permissionMode, options)
 	}
+	if call.Name == tools.RequestPermissionsToolName {
+		return executeRequestPermissions(ctx, call, args, permissionMode, options)
+	}
 
 	permissionGranted := permissionMode == PermissionModeUnsafe
 	if toolFound && tool.Safety().Permission == tools.PermissionAllow {
@@ -957,11 +991,240 @@ func requestPermission(ctx context.Context, request PermissionRequest, options O
 
 func normalizePermissionDecisionAction(action PermissionDecisionAction) PermissionDecisionAction {
 	switch action {
-	case PermissionDecisionAllow, PermissionDecisionAllowForSession, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
+	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
 		return action
 	default:
 		return PermissionDecisionDeny
 	}
+}
+
+type requestPermissionsArgs struct {
+	EnvironmentID string                           `json:"environment_id"`
+	Reason        string                           `json:"reason"`
+	Permissions   sandbox.RequestPermissionProfile `json:"permissions"`
+}
+
+func executeRequestPermissions(ctx context.Context, call ToolCall, args map[string]any, permissionMode PermissionMode, options Options) (ToolResult, error) {
+	parsed, err := parseRequestPermissionsArgs(args)
+	if err != nil {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: Invalid arguments for request_permissions: " + err.Error(),
+		}, nil
+	}
+	normalized, err := sandbox.NormalizeRequestPermissionProfile(parsed.Permissions, options.Cwd)
+	if err != nil {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: Invalid permissions for request_permissions: " + err.Error(),
+		}, nil
+	}
+	if normalized.Empty() {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: request_permissions requires at least one permission.",
+		}, nil
+	}
+
+	request := requestPermissionsPrompt(call, parsed, normalized, permissionMode, options)
+	if options.OnPermissionRequest == nil {
+		response := sandbox.RequestPermissionsResponse{
+			Permissions: sandbox.RequestPermissionProfile{},
+			Scope:       sandbox.PermissionGrantScopeTurn,
+		}
+		return requestPermissionsResult(call, response, false), nil
+	}
+
+	decision, err := requestPermission(ctx, request, options)
+	if err != nil {
+		decision = PermissionDecision{Action: PermissionDecisionDeny, Reason: err.Error()}
+	}
+	decision.Action = normalizePermissionDecisionAction(decision.Action)
+	decisionReason := strings.TrimSpace(decision.Reason)
+	if decisionReason == "" {
+		decisionReason = request.Reason
+	}
+
+	response := sandbox.RequestPermissionsResponse{
+		Permissions: sandbox.RequestPermissionProfile{},
+		Scope:       sandbox.PermissionGrantScopeTurn,
+	}
+	permissionGranted := false
+	switch decision.Action {
+	case PermissionDecisionAllow:
+		response.Permissions = normalized
+		response.Scope = sandbox.PermissionGrantScopeTurn
+		permissionGranted = true
+	case PermissionDecisionAllowStrict:
+		response.Permissions = normalized
+		response.Scope = sandbox.PermissionGrantScopeTurn
+		response.StrictAutoReview = true
+		permissionGranted = true
+	case PermissionDecisionAllowForSession:
+		response.Permissions = normalized
+		response.Scope = sandbox.PermissionGrantScopeSession
+		permissionGranted = true
+	case PermissionDecisionCancel:
+		decision.Action = PermissionDecisionDeny
+		decisionReason = firstNonEmptyString(decisionReason, "continued without granting permissions")
+	default:
+		decision.Action = PermissionDecisionDeny
+		decisionReason = firstNonEmptyString(decisionReason, "continued without granting permissions")
+	}
+
+	if permissionGranted {
+		if options.Sandbox == nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: request_permissions cannot grant permissions because the sandbox engine is not configured.",
+			}, nil
+		}
+		cleanup, err := options.Sandbox.GrantRequestPermissions(response.Permissions, response.Scope)
+		if err != nil {
+			return ToolResult{
+				ToolCallID: call.ID,
+				Name:       call.Name,
+				Status:     tools.StatusError,
+				Output:     "Error: Failed to grant requested permissions: " + err.Error(),
+			}, nil
+		}
+		if response.Scope == sandbox.PermissionGrantScopeTurn && options.runPermissions != nil {
+			options.runPermissions.add(cleanup)
+		}
+	}
+
+	emitRequestPermissionsDecision(options, call, request, decision.Action, decisionReason, permissionGranted)
+	return requestPermissionsResult(call, response, false), nil
+}
+
+func parseRequestPermissionsArgs(args map[string]any) (requestPermissionsArgs, error) {
+	data, err := json.Marshal(args)
+	if err != nil {
+		return requestPermissionsArgs{}, err
+	}
+	var parsed requestPermissionsArgs
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return requestPermissionsArgs{}, err
+	}
+	if parsed.EnvironmentID == "" {
+		if raw, ok := args["environmentId"].(string); ok {
+			parsed.EnvironmentID = raw
+		}
+	}
+	return parsed, nil
+}
+
+func requestPermissionsPrompt(call ToolCall, parsed requestPermissionsArgs, profile sandbox.RequestPermissionProfile, permissionMode PermissionMode, options Options) PermissionRequest {
+	autonomy := options.Autonomy
+	if normalized, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(autonomy)); err == nil {
+		autonomy = string(normalized)
+	}
+	reason := strings.TrimSpace(parsed.Reason)
+	if reason == "" {
+		reason = "The agent is requesting additional permissions."
+	}
+	return PermissionRequest{
+		ToolCallID:     call.ID,
+		ToolName:       tools.RequestPermissionsToolName,
+		Action:         PermissionActionPrompt,
+		Permission:     string(tools.PermissionPrompt),
+		PermissionMode: permissionMode,
+		Autonomy:       autonomy,
+		SideEffect:     "permissions",
+		Reason:         reason,
+		Scope:          requestPermissionsScope(profile),
+		Args: map[string]any{
+			"environment_id": parsed.EnvironmentID,
+			"reason":         parsed.Reason,
+			"permissions":    profile,
+		},
+		AvailableDecisions: []PermissionDecisionAction{
+			PermissionDecisionAllow,
+			PermissionDecisionAllowStrict,
+			PermissionDecisionAllowForSession,
+			PermissionDecisionDeny,
+		},
+	}
+}
+
+func requestPermissionsScope(profile sandbox.RequestPermissionProfile) string {
+	parts := []string{}
+	if profile.Network != nil && profile.Network.Enabled != nil && *profile.Network.Enabled {
+		parts = append(parts, "network")
+	}
+	if profile.FileSystem != nil {
+		for _, path := range profile.FileSystem.Read {
+			parts = append(parts, "read "+path)
+		}
+		for _, path := range profile.FileSystem.Write {
+			parts = append(parts, "write "+path)
+		}
+		for _, path := range profile.FileSystem.DenyRead {
+			parts = append(parts, "deny read "+path)
+		}
+	}
+	return truncateScope(strings.Join(parts, ", "))
+}
+
+func emitRequestPermissionsDecision(options Options, call ToolCall, request PermissionRequest, action PermissionDecisionAction, reason string, granted bool) {
+	if options.OnPermission == nil {
+		return
+	}
+	eventAction := PermissionActionDeny
+	if granted {
+		eventAction = PermissionActionAllow
+	}
+	options.OnPermission(PermissionEvent{
+		ToolCallID:        call.ID,
+		ToolName:          call.Name,
+		Action:            eventAction,
+		DecisionAction:    action,
+		Permission:        request.Permission,
+		PermissionGranted: granted,
+		PermissionMode:    request.PermissionMode,
+		Autonomy:          request.Autonomy,
+		SideEffect:        request.SideEffect,
+		Reason:            reason,
+		Scope:             request.Scope,
+		DecisionReason:    reason,
+	})
+}
+
+func requestPermissionsResult(call ToolCall, response sandbox.RequestPermissionsResponse, redacted bool) ToolResult {
+	data, err := json.Marshal(response)
+	if err != nil {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: Failed to serialize request_permissions response: " + err.Error(),
+		}
+	}
+	output, didRedact := scrubInterceptedOutput(string(data))
+	return ToolResult{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Status:     tools.StatusOK,
+		Output:     output,
+		Redacted:   redacted || didRedact,
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func persistPermissionGrant(toolName string, args map[string]any, reason string, options Options) (sandbox.Grant, error) {

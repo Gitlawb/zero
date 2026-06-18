@@ -304,6 +304,35 @@ func TestScopedToolsAllowExtraRootWrites(t *testing.T) {
 	}
 }
 
+func TestScopedToolsAllowReadOnlyRootsWithoutWrite(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+	scope, err := sandbox.NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	if _, err := scope.AddRead(extra); err != nil {
+		t.Fatalf("AddRead: %v", err)
+	}
+	target := filepath.Join(extra, "readable.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	read := NewScopedReadFileTool(workspace, scope).Run(context.Background(), map[string]any{"path": target})
+	if read.Status != StatusOK || !strings.Contains(read.Output, "hello") {
+		t.Fatalf("read-only root read_file status=%s output=%s", read.Status, read.Output)
+	}
+	write := NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
+		"path":      filepath.Join(extra, "created.txt"),
+		"content":   "no",
+		"overwrite": true,
+	})
+	if write.Status != StatusError {
+		t.Fatalf("read-only root write_file status=%s output=%s, want error", write.Status, write.Output)
+	}
+}
+
 func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()

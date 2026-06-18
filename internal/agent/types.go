@@ -40,6 +40,7 @@ const (
 
 const (
 	PermissionDecisionAllow           PermissionDecisionAction = "allow"
+	PermissionDecisionAllowStrict     PermissionDecisionAction = "allow_with_strict_auto_review"
 	PermissionDecisionAllowForSession PermissionDecisionAction = "allow_for_session"
 	PermissionDecisionDeny            PermissionDecisionAction = "deny"
 	PermissionDecisionAlwaysAllow     PermissionDecisionAction = "always_allow"
@@ -214,6 +215,8 @@ type Options struct {
 	// ceiling and the autonomy gate. nil disables it entirely (the loop is
 	// byte-identical to before). One instance per run — it holds attempt state.
 	SelfCorrect *SelfCorrector
+
+	runPermissions *permissionRunState
 }
 
 type Result struct {

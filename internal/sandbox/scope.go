@@ -16,6 +16,7 @@ import (
 type Scope struct {
 	mu            sync.RWMutex
 	workspaceRoot string
+	readRoots     []string
 	extraRoots    []string
 }
 
@@ -50,6 +51,19 @@ func (s *Scope) Roots() []string {
 	return roots
 }
 
+// ReadRoots returns the workspace root, write roots, and read-only roots as a
+// copy. Write roots are included because anything writable must also be readable
+// by the tool layer and native sandbox profile.
+func (s *Scope) ReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, 1+len(s.extraRoots)+len(s.readRoots))
+	roots = append(roots, s.workspaceRoot)
+	roots = append(roots, s.extraRoots...)
+	roots = append(roots, s.readRoots...)
+	return dedupeScopeRoots(roots)
+}
+
 // Add grants write access under path. The path must be an existing directory;
 // it is home-expanded, made absolute, and symlink-resolved before being
 // trusted, and the filesystem root is rejected outright. Adding a path already
@@ -70,6 +84,107 @@ func (s *Scope) Add(path string) (string, error) {
 	return root, nil
 }
 
+// AddRead grants read-only access under path. If the path is already covered by
+// a writable root, no separate read root is stored.
+func (s *Scope) AddRead(path string) (string, error) {
+	root, err := normalizeScopeRoot(path)
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeRootCoversLocked(root) {
+		return root, nil
+	}
+	for _, existing := range s.readRoots {
+		if pathWithinRoot(existing, root) {
+			return root, nil
+		}
+	}
+	s.readRoots = append(s.readRoots, root)
+	return root, nil
+}
+
+func (s *Scope) AddTemporaryRead(path string) (string, func(), error) {
+	root, err := normalizeScopeRoot(path)
+	if err != nil {
+		return "", nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeRootCoversLocked(root) {
+		return root, func() {}, nil
+	}
+	for _, existing := range s.readRoots {
+		if pathWithinRoot(existing, root) {
+			return root, func() {}, nil
+		}
+	}
+	s.readRoots = append(s.readRoots, root)
+	return root, func() { s.removeReadRoot(root) }, nil
+}
+
+func (s *Scope) AddTemporaryWrite(path string) (string, func(), error) {
+	root, err := normalizeScopeRoot(path)
+	if err != nil {
+		return "", nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeRootCoversLocked(root) {
+		return root, func() {}, nil
+	}
+	s.extraRoots = append(s.extraRoots, root)
+	return root, func() { s.removeWriteRoot(root) }, nil
+}
+
+func (s *Scope) writeRootCoversLocked(root string) bool {
+	for _, existing := range append([]string{s.workspaceRoot}, s.extraRoots...) {
+		if pathWithinRoot(existing, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scope) removeReadRoot(root string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readRoots = removeScopeRoot(s.readRoots, root)
+}
+
+func (s *Scope) removeWriteRoot(root string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extraRoots = removeScopeRoot(s.extraRoots, root)
+}
+
+func removeScopeRoot(roots []string, root string) []string {
+	next := roots[:0]
+	for _, existing := range roots {
+		if existing != root {
+			next = append(next, existing)
+		}
+	}
+	return next
+}
+
+func dedupeScopeRoots(roots []string) []string {
+	seen := map[string]struct{}{}
+	out := roots[:0]
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if _, ok := seen[root]; ok {
+			continue
+		}
+		seen[root] = struct{}{}
+		out = append(out, root)
+	}
+	return out
+}
+
 // validate reports whether requestedPath is allowed by any scope root.
 // Relative paths resolve against the workspace root only; absolute paths are
 // accepted if they validate (including per-segment symlink checks) under ANY
@@ -82,7 +197,21 @@ func (s *Scope) Add(path string) (string, error) {
 // only on outside_workspace results. The returned violation always carries
 // the caller's original requestedPath.
 func (s *Scope) validate(requestedPath string) *pathViolation {
-	roots := s.Roots()
+	return s.validateAgainstRoots(requestedPath, s.Roots())
+}
+
+func (s *Scope) validateRead(requestedPath string) *pathViolation {
+	return s.validateAgainstRoots(requestedPath, s.ReadRoots())
+}
+
+func (s *Scope) validateAgainstRoots(requestedPath string, roots []string) *pathViolation {
+	if len(roots) == 0 {
+		return &pathViolation{
+			Code:   ViolationOutsideWorkspace,
+			Path:   requestedPath,
+			Reason: fmt.Sprintf("%s is outside the workspace", requestedPath),
+		}
+	}
 	if !filepath.IsAbs(requestedPath) {
 		return validateWorkspacePath(roots[0], requestedPath)
 	}

@@ -79,7 +79,7 @@ func (tool globTool) runWith(args map[string]any, exclude readExcluder) Result {
 		return errorResult("Error: Invalid arguments for glob: " + err.Error())
 	}
 
-	root, displayRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, cwd)
+	root, displayRoot, err := resolveScopedReadPath(tool.workspaceRoot, tool.scope, cwd)
 	if err != nil {
 		return errorResult("Error running glob " + fmt.Sprintf("%q", pattern) + ": " + err.Error())
 	}

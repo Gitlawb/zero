@@ -63,6 +63,7 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	if extra := normalizeProfileDirs(policy.AllowWrite); len(extra) > 0 {
 		roots = dedupeStrings(append(roots, extra...))
 	}
+	readRoots := permissionProfileReadRoots(workspaceRoot, policy, scope, roots)
 	writeRoots := make([]WritableRoot, 0, len(roots))
 	for _, root := range roots {
 		writeRoots = append(writeRoots, WritableRoot{
@@ -73,7 +74,7 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 	return PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:                 FileSystemRestricted,
-			ReadRoots:            append([]string{}, roots...),
+			ReadRoots:            readRoots,
 			WriteRoots:           writeRoots,
 			DenyRead:             normalizeProfilePaths(policy.DenyRead),
 			DenyWrite:            normalizeProfilePaths(policy.DenyWrite),
@@ -107,6 +108,19 @@ func permissionProfileRoots(workspaceRoot string, scope *Scope) []string {
 		return []string{root}
 	}
 	return nil
+}
+
+func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scope, writeRoots []string) []string {
+	readRoots := append([]string{}, writeRoots...)
+	if scope != nil {
+		readRoots = dedupeStrings(append(readRoots, scope.ReadRoots()...))
+	} else if root := normalizeProfilePath(workspaceRoot); root != "" {
+		readRoots = dedupeStrings(append(readRoots, root))
+	}
+	if extra := normalizeProfileDirs(policy.AllowRead); len(extra) > 0 {
+		readRoots = dedupeStrings(append(readRoots, extra...))
+	}
+	return readRoots
 }
 
 func normalizeProfileDirs(entries []string) []string {

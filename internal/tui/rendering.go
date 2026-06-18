@@ -839,7 +839,9 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	top := zeroTheme.permBadge.Render(" PERMISSION ")
 
 	body := fill(zeroTheme.amber).Bold(true).Render(name)
-	if request.SideEffect != "" {
+	if request.ToolName == tools.RequestPermissionsToolName {
+		body = fill(zeroTheme.amber).Bold(true).Render("Grant requested permissions?")
+	} else if request.SideEffect != "" {
 		body += fill(zeroTheme.ink).Render("  " + request.SideEffect)
 	}
 	lines := []string{top, body}
@@ -877,12 +879,19 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter or click to confirm · [esc] cancel run"))
+	footer := "↑↓ move · enter or click to confirm · [esc] cancel run"
+	if request.ToolName == tools.RequestPermissionsToolName {
+		footer = "↑↓ move · enter or click to confirm · [esc] continue without permissions"
+	}
+	lines = append(lines, fill(zeroTheme.faint).Render(footer))
 
 	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), offsets
 }
 
 func permissionScopeLine(request agent.PermissionRequest, scope string) string {
+	if request.ToolName == tools.RequestPermissionsToolName {
+		return "permissions: " + scope
+	}
 	if request.SideEffect == string(tools.SideEffectNetwork) {
 		return "target: " + scope
 	}
@@ -890,6 +899,20 @@ func permissionScopeLine(request agent.PermissionRequest, scope string) string {
 }
 
 func permissionOptionLabel(option permissionOption, request agent.PermissionRequest) string {
+	if request.ToolName == tools.RequestPermissionsToolName {
+		switch option.choice {
+		case permissionDecisionAllow:
+			return "Grant for this turn"
+		case permissionDecisionAllowStrict:
+			return "Grant for this turn and review commands"
+		case permissionDecisionAllowForSession:
+			return "Grant for this session"
+		case permissionDecisionDeny, permissionDecisionCancel:
+			return "Continue without permissions"
+		default:
+			return option.label
+		}
+	}
 	switch option.choice {
 	case permissionDecisionAllow:
 		if request.SideEffect == string(tools.SideEffectNetwork) {

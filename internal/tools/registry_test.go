@@ -12,19 +12,25 @@ import (
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	toolset := CoreReadOnlyTools(t.TempDir())
-	if len(toolset) != 6 {
-		t.Fatalf("expected 6 core read-only tools, got %d", len(toolset))
+	if len(toolset) != 7 {
+		t.Fatalf("expected 7 core read-only tools, got %d", len(toolset))
 	}
 
+	seen := map[string]bool{}
 	for _, tool := range toolset {
+		seen[tool.Name()] = true
 		if tool.Name() == "" {
 			t.Fatalf("tool has empty name")
 		}
 		if tool.Description() == "" {
 			t.Fatalf("%s has empty description", tool.Name())
 		}
-		if tool.Safety().SideEffect != SideEffectRead {
-			t.Fatalf("%s side effect = %s, want read", tool.Name(), tool.Safety().SideEffect)
+		wantSideEffect := SideEffectRead
+		if tool.Name() == RequestPermissionsToolName {
+			wantSideEffect = SideEffectNone
+		}
+		if tool.Safety().SideEffect != wantSideEffect {
+			t.Fatalf("%s side effect = %s, want %s", tool.Name(), tool.Safety().SideEffect, wantSideEffect)
 		}
 		if tool.Safety().Permission != PermissionAllow {
 			t.Fatalf("%s permission = %s, want allow", tool.Name(), tool.Safety().Permission)
@@ -43,6 +49,9 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 		if schema.AdditionalProperties {
 			t.Fatalf("%s schema should disallow additional properties", tool.Name())
 		}
+	}
+	if !seen[RequestPermissionsToolName] {
+		t.Fatalf("expected %s in core read-only tools", RequestPermissionsToolName)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func pendingPermissionModel(t *testing.T, decide func(agent.PermissionDecision)) model {
@@ -95,6 +96,49 @@ func TestPermissionOptionsCanExposePatchCancelWithoutRecoverableDeny(t *testing.
 	}
 	if strings.Contains(got, "continue without running it") || strings.Contains(got, "[d]") {
 		t.Fatalf("apply_patch approval must not show recoverable deny, got %q", got)
+	}
+}
+
+func TestRequestPermissionsPromptUsesGrantLabelsAndEscDenies(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName: tools.RequestPermissionsToolName,
+		Action:   agent.PermissionActionPrompt,
+		Reason:   "Need write access.",
+		Scope:    "write /tmp/project",
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowStrict,
+			agent.PermissionDecisionAllowForSession,
+			agent.PermissionDecisionDeny,
+		},
+	}
+	card, _ := renderFocusedPermissionPrompt(request, 1, 96)
+	got := plainRender(t, card)
+	for _, want := range []string{
+		"Grant requested permissions?",
+		"permissions: write /tmp/project",
+		"Grant for this turn",
+		"Grant for this turn and review commands",
+		"Grant for this session",
+		"Continue without permissions",
+		"[esc] continue without permissions",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("request_permissions card = %q, missing %q", got, want)
+		}
+	}
+
+	var resolved agent.PermissionDecision
+	m := pendingPermissionModelWithRequest(t, request, func(d agent.PermissionDecision) {
+		resolved = d
+	})
+	updated, _ := m.Update(testKey(tea.KeyEsc))
+	m = updated.(model)
+	if resolved.Action != agent.PermissionDecisionDeny {
+		t.Fatalf("Esc should continue without permissions, got %#v", resolved)
+	}
+	if m.pendingPermission != nil {
+		t.Fatal("request_permissions prompt should clear after Esc")
 	}
 }
 

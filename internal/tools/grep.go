@@ -113,7 +113,7 @@ func (tool grepTool) runWith(args map[string]any, exclude readExcluder) Result {
 		return errorResult("Error running grep: " + err.Error())
 	}
 
-	target, displayRoot, err := resolveScopedPath(tool.workspaceRoot, tool.scope, targetPath)
+	target, displayRoot, err := resolveScopedReadPath(tool.workspaceRoot, tool.scope, targetPath)
 	if err != nil {
 		return errorResult("Error running grep: " + err.Error())
 	}

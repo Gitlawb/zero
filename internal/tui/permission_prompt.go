@@ -36,6 +36,8 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 		switch decision {
 		case agent.PermissionDecisionAllow:
 			options = append(options, permissionOption{label: "allow once", hotkey: "a", choice: permissionDecisionAllow})
+		case agent.PermissionDecisionAllowStrict:
+			options = append(options, permissionOption{label: "allow with review", hotkey: "r", choice: permissionDecisionAllowStrict})
 		case agent.PermissionDecisionAllowForSession:
 			options = append(options, permissionOption{label: "allow for session", hotkey: "s", choice: permissionDecisionAllowForSession})
 		case agent.PermissionDecisionAlwaysAllow:

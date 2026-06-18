@@ -5,7 +5,6 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -22,13 +21,14 @@ type EngineOptions struct {
 }
 
 type Engine struct {
-	workspaceRoot string
-	policy        Policy
-	store         *GrantStore
-	backend       Backend
-	scope         *Scope
-	sessionMu     sync.Mutex
-	sessionGrants map[string][]Grant
+	workspaceRoot   string
+	policy          Policy
+	store           *GrantStore
+	backend         Backend
+	scope           *Scope
+	sessionGrants   *memoryGrantSet
+	sessionProfiles *permissionProfileGrantSet
+	turnProfiles    *permissionProfileGrantSet
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -52,11 +52,14 @@ func NewEngine(options EngineOptions) *Engine {
 		scope = &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
 	}
 	return &Engine{
-		workspaceRoot: workspaceRoot,
-		policy:        policy,
-		store:         options.Store,
-		backend:       options.Backend,
-		scope:         scope,
+		workspaceRoot:   workspaceRoot,
+		policy:          policy,
+		store:           options.Store,
+		backend:         options.Backend,
+		scope:           scope,
+		sessionGrants:   newMemoryGrantSet(),
+		sessionProfiles: newPermissionProfileGrantSet(),
+		turnProfiles:    newPermissionProfileGrantSet(),
 	}
 }
 
@@ -82,13 +85,17 @@ func (engine *Engine) CanPersistGrants() bool {
 func (engine *Engine) ReadExclusions() *ReadExclusions {
 	// A disabled policy enforces nothing, so it must not filter search results
 	// either (Evaluate already allows every request under ModeDisabled).
-	if engine == nil || engine.policy.Mode == ModeDisabled {
+	if engine == nil {
+		return nil
+	}
+	policy := engine.effectivePolicy(engine.policy)
+	if policy.Mode == ModeDisabled {
 		return nil
 	}
 	return &ReadExclusions{
 		workspaceRoot: engine.workspaceRoot,
-		denyRoots:     resolvePolicyPaths(engine.policy.DenyRead),
-		allowRoots:    resolvePolicyPaths(engine.policy.AllowRead),
+		denyRoots:     resolvePolicyPaths(policy.DenyRead),
+		allowRoots:    resolvePolicyPaths(policy.AllowRead),
 	}
 }
 
@@ -97,10 +104,14 @@ func (engine *Engine) ReadExclusions() *ReadExclusions {
 // DenyRead is unset or the engine has no scope.
 func (engine *Engine) ReadExclusionGlobs() []string {
 	// A disabled policy filters nothing (parity with ReadExclusions / Evaluate).
-	if engine == nil || engine.policy.Mode == ModeDisabled {
+	if engine == nil {
 		return nil
 	}
-	return ReadExclusionGlobs(engine.policy, engine.scope)
+	policy := engine.effectivePolicy(engine.policy)
+	if policy.Mode == ModeDisabled {
+		return nil
+	}
+	return ReadExclusionGlobs(policy, engine.scope)
 }
 
 // effectiveNetworkMode is the single source of truth for the engine's active
@@ -139,7 +150,7 @@ func (engine *Engine) NetworkHostAllowed(host string) (bool, NetworkMode) {
 	if engine == nil {
 		return true, NetworkAllow
 	}
-	policy := engine.policy
+	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == ModeDisabled {
 		return true, NetworkAllow
 	}
@@ -245,7 +256,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if engine == nil {
 		return Decision{Action: ActionAllow, Risk: Classify(request), Reason: "sandbox disabled"}
 	}
-	policy := engine.policy
+	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
@@ -415,20 +426,7 @@ func (engine *Engine) GrantForSession(input GrantInput) (Grant, error) {
 		return Grant{}, err
 	}
 	grant.Session = true
-	engine.sessionMu.Lock()
-	defer engine.sessionMu.Unlock()
-	if engine.sessionGrants == nil {
-		engine.sessionGrants = map[string][]Grant{}
-	}
-	bucket := engine.sessionGrants[grant.ToolName]
-	for index := range bucket {
-		if bucket[index].Scope == grant.Scope && bucket[index].ScopeKind == grant.ScopeKind {
-			bucket[index] = grant
-			engine.sessionGrants[grant.ToolName] = bucket
-			return grant, nil
-		}
-	}
-	engine.sessionGrants[grant.ToolName] = append(bucket, grant)
+	engine.sessionGrants.add(grant)
 	return grant, nil
 }
 
@@ -456,9 +454,7 @@ func (engine *Engine) lookupSessionGrant(toolName string, reqScope string, reque
 	if err != nil {
 		return GrantLookup{}
 	}
-	engine.sessionMu.Lock()
-	defer engine.sessionMu.Unlock()
-	return lookupGrantBucket(engine.sessionGrants[strings.TrimSpace(toolName)], reqScope, requested)
+	return engine.sessionGrants.lookup(toolName, reqScope, requested)
 }
 
 func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) bool {

@@ -166,7 +166,8 @@ func (engine *Engine) writeRoots(workspaceRoot string) []string {
 	// sandboxed shell command may write where the policy grants writes. DenyWrite
 	// is enforced at the policy gate, and on sandbox-exec additionally as an
 	// explicit deny rule (see sandboxExecProfile).
-	if extra := resolveWriteRootPaths(engine.policy.AllowWrite); len(extra) > 0 {
+	policy := engine.effectivePolicy(engine.policy)
+	if extra := resolveWriteRootPaths(policy.AllowWrite); len(extra) > 0 {
 		roots = dedupeStrings(append(roots, extra...))
 	}
 	return roots
@@ -176,7 +177,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if engine == nil {
 		return directCommandPlan(spec, Backend{Name: BackendPolicyOnly, Message: "sandbox disabled"}, Policy{}, ""), nil
 	}
-	policy := engine.policy
+	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}

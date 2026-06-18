@@ -271,7 +271,7 @@ func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, 
 			}
 		}
 		if enforceWorkspace {
-			return scope.validate(path)
+			return scope.validateRead(path)
 		}
 		return nil
 	case SideEffectWrite, SideEffectOutOfWorkspace:

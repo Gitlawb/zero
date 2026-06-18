@@ -1,0 +1,188 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
+)
+
+func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "vegetables.txt")
+	scope, err := sandbox.NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        sandbox.DefaultPolicy(),
+		Scope:         scope,
+	})
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewRequestPermissionsTool())
+	registry.Register(tools.NewScopedWriteFileTool(workspace, scope))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "grant-1", ToolName: tools.RequestPermissionsToolName},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "grant-1", ArgumentsFragment: `{"reason":"Need to write outside the workspace.","permissions":{"file_system":{"write":[` + quoteJSONString(target) + `]}}}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "grant-1"},
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "write-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "write-1", ArgumentsFragment: `{"path":` + quoteJSONString(target) + `,"content":"carrot\n","overwrite":true}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "write-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var results []ToolResult
+
+	result, err := Run(context.Background(), "write the file", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Cwd:            workspace,
+		Sandbox:        engine,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "ok"}, nil
+		},
+		OnToolResult: func(result ToolResult) {
+			results = append(results, result)
+		},
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q, want done", result.FinalAnswer)
+	}
+	if len(requests) != 1 || requests[0].ToolName != tools.RequestPermissionsToolName {
+		t.Fatalf("permission requests = %#v, want one request_permissions prompt", requests)
+	}
+	if len(results) != 2 || results[0].Status != tools.StatusOK || results[1].Status != tools.StatusOK {
+		t.Fatalf("tool results = %#v, want request_permissions and write_file ok", results)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "carrot\n" {
+		t.Fatalf("target content = %q", content)
+	}
+
+	decision := engine.Evaluate(context.Background(), sandbox.Request{
+		WorkspaceRoot:  workspace,
+		ToolName:       "write_file",
+		SideEffect:     sandbox.SideEffectWrite,
+		Permission:     sandbox.PermissionPrompt,
+		PermissionMode: sandbox.PermissionModeAuto,
+		Autonomy:       sandbox.AutonomyMedium,
+		Args:           map[string]any{"path": target},
+	})
+	if decision.Action != sandbox.ActionDeny {
+		t.Fatalf("turn grant should be cleaned up after Run, got decision %#v", decision)
+	}
+}
+
+func TestRequestPermissionsDenyReturnsEmptyGrantAndContinues(t *testing.T) {
+	workspace := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewRequestPermissionsTool())
+	provider := requestPermissionsOnlyProvider(`{"reason":"Need network.","permissions":{"network":{"enabled":true}}}`, "done")
+	var results []ToolResult
+
+	result, err := Run(context.Background(), "request network", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+		Cwd:            workspace,
+		Sandbox:        sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: workspace, Policy: sandbox.DefaultPolicy()}),
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "no"}, nil
+		},
+		OnToolResult: func(result ToolResult) { results = append(results, result) },
+		MaxTurns:     2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q, want done", result.FinalAnswer)
+	}
+	if len(results) != 1 || results[0].Status != tools.StatusOK {
+		t.Fatalf("request_permissions denial should be an ok tool result, got %#v", results)
+	}
+	var response sandbox.RequestPermissionsResponse
+	if err := json.Unmarshal([]byte(results[0].Output), &response); err != nil {
+		t.Fatalf("unmarshal response %q: %v", results[0].Output, err)
+	}
+	if !response.Permissions.Empty() || response.Scope != sandbox.PermissionGrantScopeTurn {
+		t.Fatalf("deny response = %#v, want empty turn grant", response)
+	}
+}
+
+func TestRequestPermissionsStrictReviewResponse(t *testing.T) {
+	workspace := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewRequestPermissionsTool())
+	provider := requestPermissionsOnlyProvider(`{"reason":"Need read access.","permissions":{"file_system":{"read":[`+quoteJSONString(workspace)+`]}}}`, "done")
+	var output string
+
+	_, err := Run(context.Background(), "request read", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+		Cwd:            workspace,
+		Sandbox:        sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: workspace, Policy: sandbox.DefaultPolicy()}),
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionAllowStrict, Reason: "review commands"}, nil
+		},
+		OnToolResult: func(result ToolResult) { output = result.Output },
+		MaxTurns:     2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response sandbox.RequestPermissionsResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		t.Fatalf("unmarshal response %q: %v", output, err)
+	}
+	if !response.StrictAutoReview || response.Scope != sandbox.PermissionGrantScopeTurn {
+		t.Fatalf("strict response = %#v, want strict turn grant", response)
+	}
+	if response.Permissions.FileSystem == nil || len(response.Permissions.FileSystem.Read) != 1 {
+		t.Fatalf("strict response permissions = %#v, want read permission", response.Permissions)
+	}
+}
+
+func requestPermissionsOnlyProvider(arguments string, finalAnswer string) *mockProvider {
+	if !strings.HasPrefix(arguments, "{") {
+		arguments = "{}"
+	}
+	return &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "grant-1", ToolName: tools.RequestPermissionsToolName},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "grant-1", ArgumentsFragment: arguments},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "grant-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: finalAnswer},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+}
