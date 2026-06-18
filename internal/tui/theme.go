@@ -61,7 +61,6 @@ type tuiTheme struct {
 
 	// Permission surfaces.
 	permBadge  lipgloss.Style // PERMISSION chip: onAccent on amber, bold
-	permRisk   lipgloss.Style // risk: <level> readout, amber
 	permBg     lipgloss.Style // permission card body tint
 	permBorder lipgloss.Style // permission card border (amber-mixed line)
 
@@ -152,7 +151,6 @@ var zeroTheme = tuiTheme{
 	delText:    lipgloss.NewStyle().Foreground(lipgloss.Color(colorDelInk)),
 
 	permBadge:  lipgloss.NewStyle().Background(lipgloss.Color(colorAmber)).Foreground(lipgloss.Color(colorOnAccent)).Bold(true),
-	permRisk:   lipgloss.NewStyle().Foreground(lipgloss.Color(colorAmber)),
 	permBg:     lipgloss.NewStyle().Background(lipgloss.Color(colorPermBg)),
 	permBorder: lipgloss.NewStyle().Foreground(lipgloss.Color(colorCardPerm)),
 

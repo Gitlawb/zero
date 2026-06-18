@@ -1208,13 +1208,17 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 		t.Fatalf("permission metadata was not preserved: %#v", row)
 	}
 	rendered := next.renderRow(row, 96, buildRowContext(next.transcript))
-	for _, want := range []string{"permission", "write_file", "prompt", "risk:high", "mode=ask", "Creates or overwrites"} {
+	for _, want := range []string{"permission", "write_file", "prompt", "mode=ask", "Creates or overwrites"} {
 		assertContains(t, rendered, want)
+	}
+	if strings.Contains(rendered, "risk:") || strings.Contains(rendered, "risk=") {
+		t.Fatalf("normal permission row must not render risk labels, got %q", rendered)
 	}
 }
 
 func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	request := testPromptPermissionRequest()
+	request.Scope = "src/main.go"
 	m := newModel(context.Background(), Options{})
 	m.pending = true
 	m.activeRunID = 7
@@ -1235,9 +1239,16 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	if countTranscriptRows(next.transcript, rowPermission) != 1 {
 		t.Fatalf("expected permission request to append one permission row, got %#v", next.transcript)
 	}
-	view := next.View()
-	for _, want := range []string{"write_file", "allow once", "[a]", "deny", "[d]", "always", "[y]", "risk:high", "Creates or overwrites files."} {
+	row, ok := findTranscriptRow(next.transcript, rowPermission)
+	if !ok || row.permission == nil || row.permission.Scope != request.Scope {
+		t.Fatalf("expected permission row to preserve scope %q, got %#v", request.Scope, row)
+	}
+	view := plainRender(t, next.View())
+	for _, want := range []string{"write_file", "Yes, proceed", "[a]", "these files in this session", "[s]", "don't ask again for this scope", "[y]", "continue without running it", "[d]", "scope: src/main.go", "Creates or overwrites files."} {
 		assertContains(t, view, want)
+	}
+	if strings.Contains(view, "risk:") || strings.Contains(view, "risk=") {
+		t.Fatalf("focused permission prompt must not render risk labels, got %q", view)
 	}
 }
 
@@ -1249,6 +1260,7 @@ func TestPermissionPromptChoicesResolveDecision(t *testing.T) {
 	}{
 		{name: "allow", key: "a", want: permissionDecisionAllow},
 		{name: "deny", key: "d", want: permissionDecisionDeny},
+		{name: "session", key: "s", want: permissionDecisionAllowForSession},
 		{name: "always", key: "y", want: permissionDecisionAlwaysAllow},
 	}
 
@@ -1304,10 +1316,10 @@ func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected permission confirm to resolve synchronously (no cmd)")
 	}
-	// Enter confirms the highlighted option (default: allow once) — it must NOT
+	// Enter confirms the highlighted option (default: approve) -- it must NOT
 	// submit the composer's pending text as a new prompt.
 	if len(decisions) != 1 || decisions[0] != permissionDecisionAllow {
-		t.Fatalf("expected Enter to confirm the default option (allow once), got %#v", decisions)
+		t.Fatalf("expected Enter to confirm the default approval option, got %#v", decisions)
 	}
 	if transcriptContains(next.transcript, "second prompt") {
 		t.Fatalf("permission prompt should block normal prompt submit, got %#v", next.transcript)
@@ -1342,8 +1354,11 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 
 	rendered := newModel(context.Background(), Options{}).renderRow(permissionTranscriptRow(event), 96, buildRowContext(nil))
 
-	for _, want := range []string{"write_file", "denied", "risk:high", "violation=outside_workspace risk=critical", "../secret.txt"} {
+	for _, want := range []string{"write_file", "denied", "violation=outside_workspace", "../secret.txt"} {
 		assertContains(t, rendered, want)
+	}
+	if strings.Contains(rendered, "risk:") || strings.Contains(rendered, "risk=") {
+		t.Fatalf("denied permission row must not render risk labels, got %q", rendered)
 	}
 }
 
@@ -1667,15 +1682,25 @@ func testPromptPermissionEvent() agent.PermissionEvent {
 func testPromptPermissionRequest() agent.PermissionRequest {
 	event := testPromptPermissionEvent()
 	return agent.PermissionRequest{
-		ToolCallID:     event.ToolCallID,
-		ToolName:       event.ToolName,
-		Action:         event.Action,
-		Permission:     event.Permission,
-		PermissionMode: event.PermissionMode,
-		Autonomy:       event.Autonomy,
-		SideEffect:     event.SideEffect,
-		Reason:         event.Reason,
-		Risk:           event.Risk,
+		ToolCallID:         event.ToolCallID,
+		ToolName:           event.ToolName,
+		Action:             event.Action,
+		Permission:         event.Permission,
+		PermissionMode:     event.PermissionMode,
+		Autonomy:           event.Autonomy,
+		SideEffect:         event.SideEffect,
+		Reason:             event.Reason,
+		Risk:               event.Risk,
+		AvailableDecisions: testAllPermissionDecisions(),
+	}
+}
+
+func testAllPermissionDecisions() []agent.PermissionDecisionAction {
+	return []agent.PermissionDecisionAction{
+		agent.PermissionDecisionAllow,
+		agent.PermissionDecisionAllowForSession,
+		agent.PermissionDecisionAlwaysAllow,
+		agent.PermissionDecisionDeny,
 	}
 }
 

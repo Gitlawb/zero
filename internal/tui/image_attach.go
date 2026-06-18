@@ -2,12 +2,88 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 )
+
+// droppableImageExts are the image extensions a dragged-and-dropped file may
+// carry (matched case-insensitively); PDFs are recognized separately.
+var droppableImageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+}
+
+// droppedAttachmentPath recognizes a single drag-dropped (or pasted) file path
+// that points at an existing image or PDF, returning the cleaned path. Terminals
+// deliver a dropped file as its path with spaces/special chars backslash-escaped
+// (or the whole path quoted); this undoes that so "Screenshot 2026 at 1.png"
+// resolves. ok is false for anything that is not a single existing image/PDF
+// file, so normal text pastes and real slash-commands are left untouched.
+func droppedAttachmentPath(content, cwd string) (string, bool) {
+	s := strings.TrimSpace(content)
+	if s == "" || strings.ContainsAny(s, "\n\r") {
+		return "", false // empty or multi-line: not a single dropped file
+	}
+	if unq, quoted := stripMatchingQuotes(s); quoted {
+		s = unq // a quoted path is literal — do not unescape inside it
+	} else {
+		s = unescapeDroppedPath(s)
+	}
+	if s == "" {
+		return "", false
+	}
+	resolved := s
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(cwd, resolved)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	ext := strings.ToLower(filepath.Ext(s))
+	if droppableImageExts[ext] || ext == ".pdf" || imageinput.LooksLikeDocumentFile(s, cwd) {
+		return s, true
+	}
+	return "", false
+}
+
+// unescapeDroppedPath drops a backslash before any following byte, undoing the
+// terminal's drag-drop escaping ("\ " -> " ", "\(" -> "(", "\\" -> "\").
+func unescapeDroppedPath(s string) string {
+	if runtime.GOOS == "windows" {
+		// On Windows the backslash is the path separator, not a drag-drop escape;
+		// stripping it would corrupt real paths (C:\Users\… -> C:Users…). Dropped
+		// paths there arrive quoted (handled by stripMatchingQuotes) or plain.
+		return s
+	}
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// stripMatchingQuotes removes a single pair of surrounding ' or " quotes.
+func stripMatchingQuotes(s string) (string, bool) {
+	if len(s) >= 2 {
+		q := s[0]
+		if (q == '"' || q == '\'') && s[len(s)-1] == q {
+			return s[1 : len(s)-1], true
+		}
+	}
+	return s, false
+}
 
 // modelSupportsVisionTUI reports whether the active model can accept image input.
 // An unknown / custom id (not in the catalog) returns false: we cannot confirm
@@ -66,7 +142,9 @@ func (m model) handleImageCommand(arg string) model {
 
 	m.pendingImages = append(m.pendingImages, block)
 	m.pendingImageLabels = append(m.pendingImageLabels, filepath.Base(trimmed))
-	return m.appendImageNotice("Attached " + filepath.Base(trimmed) + " (" + block.MediaType + ").")
+	// No "attached" system message: the composer attachment chip ([Image #N]) is
+	// the confirmation, matching the compact attach UX.
+	return m
 }
 
 // pendingDocument is a PDF staged by /image for the next user turn: its extracted
@@ -91,24 +169,16 @@ func (m model) handleDocumentAttach(path string) model {
 	}
 
 	label := filepath.Base(path)
-	parts := make([]string, 0, 2)
 	if strings.TrimSpace(doc.Text) != "" {
 		m.pendingDocuments = append(m.pendingDocuments, pendingDocument{label: label, text: doc.Text})
-		summary := "text"
-		if doc.Truncated {
-			summary = "text, truncated at the size limit"
-		}
-		parts = append(parts, summary)
 	}
 	for _, block := range doc.Images {
 		m.pendingImages = append(m.pendingImages, block)
 		m.pendingImageLabels = append(m.pendingImageLabels, label)
 	}
-	if len(doc.Images) > 0 {
-		parts = append(parts, fmt.Sprintf("%d page image(s)", len(doc.Images)))
-	}
-
-	return m.appendImageNotice("Attached " + label + " (" + strings.Join(parts, ", ") + ").")
+	// The composer attachment chip ([Doc #N] / [Image #N]) is the confirmation; no
+	// "attached" system message.
+	return m
 }
 
 // consumePendingDocuments returns the staged document text formatted as a prompt
@@ -134,32 +204,50 @@ func (m model) appendImageNotice(text string) model {
 	return m.appendSystemNotice(text)
 }
 
-// renderImageChips builds a one-line "[img: a.png] [img: b.png]" row for the
-// pending attachments, or "" when there are none. Kept plain so the renderer
-// can wrap/style it consistently.
+// removeLastAttachment drops the rightmost pending attachment chip and reports
+// whether anything was removed. Documents render after images, so a staged
+// document is removed before images; image pops keep pendingImages and
+// pendingImageLabels in lockstep.
+func (m model) removeLastAttachment() (model, bool) {
+	if n := len(m.pendingDocuments); n > 0 {
+		m.pendingDocuments = m.pendingDocuments[:n-1]
+		return m, true
+	}
+	if n := len(m.pendingImageLabels); n > 0 {
+		m.pendingImageLabels = m.pendingImageLabels[:n-1]
+		if len(m.pendingImages) > 0 {
+			m.pendingImages = m.pendingImages[:len(m.pendingImages)-1]
+		}
+		return m, true
+	}
+	return m, false
+}
+
+// renderImageChips builds a compact "[Image #1] [Image #2]" row for the pending
+// image attachments, or "" when there are none, so the long file name never
+// clutters the input. Kept plain so the renderer can wrap/style it consistently.
 func renderImageChips(labels []string) string {
 	if len(labels) == 0 {
 		return ""
 	}
 	chips := make([]string, 0, len(labels))
-	for _, label := range labels {
-		chips = append(chips, "[img: "+label+"]")
+	for i := range labels {
+		chips = append(chips, fmt.Sprintf("[Image #%d]", i+1))
 	}
 	return strings.Join(chips, " ")
 }
 
-// renderAttachmentChips builds the pending-attachment row from both staged
-// images and staged documents, e.g. "[img: a.png] [doc: spec.pdf]". Returns ""
-// when nothing is staged. Document chips are de-duplicated by label so a PDF
-// that produced both a text block and several page images shows one "[doc: …]"
-// rather than one per page (its page images already show as "[img: …]").
+// renderAttachmentChips builds the pending-attachment row from both staged images
+// and staged documents, e.g. "[Image #1] [Image #2] [Doc #1]". Returns "" when
+// nothing is staged. Numbered (not named) so a long screenshot path never shows
+// in the composer.
 func renderAttachmentChips(imageLabels []string, docs []pendingDocument) string {
 	chips := make([]string, 0, len(imageLabels)+len(docs))
-	for _, label := range imageLabels {
-		chips = append(chips, "[img: "+label+"]")
+	for i := range imageLabels {
+		chips = append(chips, fmt.Sprintf("[Image #%d]", i+1))
 	}
-	for _, doc := range docs {
-		chips = append(chips, "[doc: "+doc.label+"]")
+	for i := range docs {
+		chips = append(chips, fmt.Sprintf("[Doc #%d]", i+1))
 	}
 	return strings.Join(chips, " ")
 }

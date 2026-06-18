@@ -77,17 +77,38 @@ type CompactionResult struct {
 // ~1k tokens is a representative mid-range cost across providers.
 const imageTokenEstimate = 1000
 
-// estimateTokens is a cheap, dependency-free token estimate (~4 chars/token)
+// ApproxTextTokens estimates the token count of text WITHOUT a real tokenizer.
+// The BPE tokenizers zero targets fold a run's leading space into the following
+// token rather than emitting whitespace as its own token, so naive len/4
+// overcounts real text by ~15-20% (measured: a 24.8k-char prompt counted 5.2k
+// real tokens where len/4 said 6.2k). Counting NON-whitespace bytes / 4 tracks
+// the provider's actual count closely (validated against live usage) while
+// staying allocation- and dependency-free. zero still receives the exact count
+// back as usage on every request; this estimate is only for the pre-request
+// context budget preview and the compaction threshold.
+func ApproxTextTokens(value string) int {
+	nonSpace := 0
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+		default:
+			nonSpace++
+		}
+	}
+	return nonSpace / 4
+}
+
+// estimateTokens is a cheap, dependency-free token estimate (see ApproxTextTokens)
 // across message content plus tool call names/arguments and a flat per-image
 // cost. It deliberately uses no real tokenizer; it only needs to be monotonic
 // and roughly proportional so the loop can decide when to compact.
 func estimateTokens(messages []zeroruntime.Message) int {
 	total := 0
 	for _, message := range messages {
-		total += len(message.Content) / 4
+		total += ApproxTextTokens(message.Content)
 		for _, call := range message.ToolCalls {
-			total += len(call.Name) / 4
-			total += len(call.Arguments) / 4
+			total += ApproxTextTokens(call.Name)
+			total += ApproxTextTokens(call.Arguments)
 			total += 4 // small per-call overhead
 		}
 		total += len(message.Images) * imageTokenEstimate
@@ -104,11 +125,11 @@ func estimateTokens(messages []zeroruntime.Message) int {
 func estimateToolDefTokens(tools []zeroruntime.ToolDefinition) int {
 	total := 0
 	for _, tool := range tools {
-		total += len(tool.Name) / 4
-		total += len(tool.Description) / 4
+		total += ApproxTextTokens(tool.Name)
+		total += ApproxTextTokens(tool.Description)
 		if len(tool.Parameters) > 0 {
 			if encoded, err := json.Marshal(tool.Parameters); err == nil {
-				total += len(encoded) / 4
+				total += ApproxTextTokens(string(encoded))
 			}
 		}
 		total += 4 // per-tool overhead

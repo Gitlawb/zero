@@ -19,12 +19,13 @@ const grantSchemaVersion = 2
 
 type Grant struct {
 	ToolName    string        `json:"toolName"`
-	Scope       string        `json:"scope,omitempty"`     // absolute, cleaned path; "" = tool-wide
-	ScopeKind   ScopeKind     `json:"scopeKind,omitempty"` // file | dir | "" (tool-wide)
+	Scope       string        `json:"scope,omitempty"`     // absolute path, host, or "" for tool-wide
+	ScopeKind   ScopeKind     `json:"scopeKind,omitempty"` // file | dir | host | "" (tool-wide)
 	Decision    GrantDecision `json:"decision"`
 	MaxAutonomy Autonomy      `json:"maxAutonomy"`
 	ApprovedAt  string        `json:"approvedAt"`
 	Reason      string        `json:"reason,omitempty"`
+	Session     bool          `json:"session,omitempty"`
 }
 
 type StoreOptions struct {
@@ -38,9 +39,9 @@ type GrantInput struct {
 	Decision    GrantDecision
 	MaxAutonomy Autonomy
 	Reason      string
-	// Scope is the raw (possibly relative) path the grant covers; ScopeKind
-	// classifies it. engine.Grant resolves Scope to an absolute path before
-	// persisting. Both empty means a tool-wide grant.
+	// Scope is the raw path or host the grant covers; ScopeKind classifies it.
+	// engine.Grant resolves path scopes to absolute paths and normalizes host
+	// scopes before persisting. Both empty means a tool-wide grant.
 	Scope     string
 	ScopeKind ScopeKind
 }
@@ -150,12 +151,12 @@ func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	return grant, nil
 }
 
-// Lookup returns the grant that governs a tool call whose absolute scope is
-// reqScopeAbs (empty for a tool-wide request, e.g. a shell command with no cwd).
+// Lookup returns the grant that governs a tool call whose normalized scope is
+// reqScope (empty for a tool-wide request, e.g. a shell command with no cwd).
 // Among the tool's grants that cover the request, a covering deny wins outright
 // (regardless of autonomy); otherwise the most-specific covering allow whose
 // recorded MaxAutonomy admits the requested autonomy is returned.
-func (store *GrantStore) Lookup(toolName string, reqScopeAbs string, requestedAutonomy Autonomy) (GrantLookup, error) {
+func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAutonomy Autonomy) (GrantLookup, error) {
 	if err := ValidateToolName(toolName); err != nil {
 		return GrantLookup{}, err
 	}
@@ -170,15 +171,19 @@ func (store *GrantStore) Lookup(toolName string, reqScopeAbs string, requestedAu
 		return GrantLookup{}, err
 	}
 	bucket := state.Grants[strings.TrimSpace(toolName)]
+	return lookupGrantBucket(bucket, reqScope, requested), nil
+}
+
+func lookupGrantBucket(bucket []Grant, reqScope string, requested Autonomy) GrantLookup {
 	var bestAllow *Grant
 	for i := range bucket {
 		grant := bucket[i]
-		if !grantCovers(grant, reqScopeAbs) {
+		if !grantCovers(grant, reqScope) {
 			continue
 		}
 		if grant.Decision == GrantDeny {
 			covering := grant
-			return GrantLookup{Matched: true, Grant: covering}, nil
+			return GrantLookup{Matched: true, Grant: covering}
 		}
 		if !autonomyAllowed(requested, grant.MaxAutonomy) {
 			continue
@@ -189,9 +194,9 @@ func (store *GrantStore) Lookup(toolName string, reqScopeAbs string, requestedAu
 		}
 	}
 	if bestAllow != nil {
-		return GrantLookup{Matched: true, Grant: *bestAllow}, nil
+		return GrantLookup{Matched: true, Grant: *bestAllow}
 	}
-	return GrantLookup{}, nil
+	return GrantLookup{}
 }
 
 func (store *GrantStore) List() ([]Grant, error) {
@@ -378,8 +383,10 @@ func normalizeScopeKind(kind ScopeKind) (ScopeKind, error) {
 		return ScopeFile, nil
 	case ScopeDir:
 		return ScopeDir, nil
+	case ScopeHost:
+		return ScopeHost, nil
 	default:
-		return "", fmt.Errorf("invalid sandbox scope kind %q. Expected file, dir, or empty", kind)
+		return "", fmt.Errorf("invalid sandbox scope kind %q. Expected file, dir, host, or empty", kind)
 	}
 }
 
@@ -389,6 +396,13 @@ func normalizeScopeKind(kind ScopeKind) (ScopeKind, error) {
 func reconcileScope(scope string, kind ScopeKind) (string, ScopeKind) {
 	if kind == ScopeToolWide || scope == "" {
 		return "", ScopeToolWide
+	}
+	if kind == ScopeHost {
+		host := normalizeHostScope(scope)
+		if host == "" {
+			return "", ScopeToolWide
+		}
+		return host, ScopeHost
 	}
 	return scope, kind
 }

@@ -48,6 +48,12 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
 		return m, nil
 	}
+	// A drag-dropped image/PDF arrives as a (backslash-escaped) file path. Attach
+	// it as an image instead of inserting the raw path — otherwise a "/Users/…"
+	// path would be submitted as an unknown slash-command.
+	if path, ok := droppedAttachmentPath(content, m.cwd); ok {
+		return m.handleImageCommand(path), nil
+	}
 	state := m.currentComposerState()
 	m = m.applyComposerText(state, content, true)
 	m.recomputeSuggestions()

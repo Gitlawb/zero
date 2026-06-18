@@ -255,9 +255,10 @@ type Decision struct {
 	Grant        *Grant     `json:"grant,omitempty"`
 	Violation    *Violation `json:"violation,omitempty"`
 	// AutoAllowed marks an allow that the sandbox itself authorized without a user
-	// prompt or persistent grant — currently only AutoAllowBashWhenSandboxed for a
-	// sandboxed shell command. Enforcement points treat it like a grant-authorized
-	// allow so a prompt tool runs without a separately-recorded PermissionGranted.
+	// prompt or persistent grant, such as a workspace-write file mutation or an
+	// opted-in sandboxed shell command. Enforcement points treat it like a
+	// grant-authorized allow so a prompt tool runs without a separately-recorded
+	// PermissionGranted.
 	AutoAllowed bool `json:"autoAllowed,omitempty"`
 }
 

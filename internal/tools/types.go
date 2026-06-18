@@ -38,8 +38,8 @@ type Safety struct {
 	SideEffect SideEffect
 	Permission Permission
 	Reason     string
-	// AdvertiseInAuto allows selected prompt-gated tools to be visible while
-	// still requiring the normal permission flow before execution.
+	// AdvertiseInAuto allows selected non-allow tools to be visible in auto mode
+	// while still requiring the normal permission flow before execution.
 	AdvertiseInAuto bool
 }
 

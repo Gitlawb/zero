@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/usage"
@@ -660,7 +661,7 @@ func estimateTranscriptTokens(rows []transcriptRow) int {
 		if text == "" {
 			continue
 		}
-		total += len(text)/4 + 4
+		total += agent.ApproxTextTokens(text) + 4
 	}
 	return total
 }

@@ -72,9 +72,11 @@ func TestAutoAllowBashOffStillPrompts(t *testing.T) {
 // must not error.
 func TestAutoAllowBashDoesNotAffectNonShell(t *testing.T) {
 	engine := autoAllowBashEngine(t, true, nativeWrappingBackend)
-	// A non-shell prompt tool must still prompt; auto-allow is shell-only.
+	// A non-shell prompt tool must still prompt; auto-allow is shell-only. Use a
+	// generic write tool name so the workspace file-tool auto-allow does not
+	// apply.
 	decision := engine.Evaluate(context.Background(), Request{
-		ToolName:       "write_file",
+		ToolName:       "custom_writer",
 		SideEffect:     SideEffectWrite,
 		Permission:     PermissionPrompt,
 		PermissionMode: PermissionModeAsk,

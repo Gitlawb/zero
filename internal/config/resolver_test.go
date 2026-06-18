@@ -1437,6 +1437,15 @@ func TestResolveDefaultsDeferThresholdWhenUnset(t *testing.T) {
 	}
 }
 
+// The default must stay low so a typical single MCP server's toolset defers
+// instead of shipping every full schema each turn (the token-economy fix). This
+// guards against a regression silently bumping it back up.
+func TestDefaultDeferThresholdStaysLowForTokenEconomy(t *testing.T) {
+	if defaultDeferThreshold <= 0 || defaultDeferThreshold > 4 {
+		t.Fatalf("defaultDeferThreshold = %d, want a small positive value (<=4) so small MCP sets defer", defaultDeferThreshold)
+	}
+}
+
 func TestResolveDeferThresholdFromFile(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "p",

@@ -25,7 +25,7 @@ func TestLoadOrCreateSecretConcurrentConverges(t *testing.T) {
 	}
 	wg.Wait()
 	// Exactly one creator wins; every racer must converge on the same on-disk
-	// secret rather than orphaning its own (the O_EXCL + bounded-retry path).
+	// secret rather than reading a half-published file or orphaning its own.
 	for i := 0; i < n; i++ {
 		if errs[i] != nil {
 			t.Fatalf("goroutine %d: %v", i, errs[i])

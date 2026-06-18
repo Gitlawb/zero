@@ -48,16 +48,16 @@ func MeasureContext(messages []zeroruntime.Message, tools []zeroruntime.ToolDefi
 }
 
 // estimateToolTokens approximates the token footprint of advertised tool
-// definitions (name + description + JSON schema), matching estimateTokens'
-// ~4-chars/token heuristic so all categories use the same scale.
+// definitions (name + description + JSON schema), using the same ApproxTextTokens
+// heuristic as estimateTokens so all categories share one scale.
 func estimateToolTokens(tools []zeroruntime.ToolDefinition) int {
 	total := 0
 	for _, tool := range tools {
-		total += len(tool.Name) / 4
-		total += len(tool.Description) / 4
+		total += ApproxTextTokens(tool.Name)
+		total += ApproxTextTokens(tool.Description)
 		if len(tool.Parameters) > 0 {
 			if encoded, err := json.Marshal(tool.Parameters); err == nil {
-				total += len(encoded) / 4
+				total += ApproxTextTokens(string(encoded))
 			}
 		}
 		total += 4 // per-tool overhead

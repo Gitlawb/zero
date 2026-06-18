@@ -3,7 +3,10 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // reasonAboveCeiling is the Decision.Reason emitted when a grant-allow or unsafe
@@ -24,6 +27,8 @@ type Engine struct {
 	store         *GrantStore
 	backend       Backend
 	scope         *Scope
+	sessionMu     sync.Mutex
+	sessionGrants map[string][]Grant
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -63,6 +68,10 @@ func (engine *Engine) Scope() *Scope {
 		return nil
 	}
 	return engine.scope
+}
+
+func (engine *Engine) CanPersistGrants() bool {
+	return engine != nil && engine.store != nil
 }
 
 // ReadExclusions returns the resolved DenyRead/AllowRead exclusion matcher for
@@ -282,6 +291,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// workspace boundary itself needs a root, so it is gated on having one. Mode is
 	// already known to be enforcing here (ModeDisabled returned above).
 	enforceWorkspace := policy.EnforceWorkspace && request.WorkspaceRoot != ""
+	if violation := applyPatchPathViolation(request); violation != nil {
+		return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
+	}
 	for _, requested := range requestPaths(request) {
 		if violation := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
 			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
@@ -300,10 +312,10 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {
 		return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command is blocked by sandbox policy", false)
 	}
+	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
+	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
 	if engine.store != nil {
-		reqRaw, _ := DeriveScope(request.ToolName, request.Args)
-		reqScopeAbs := resolveScopeAbs(reqRaw, request.WorkspaceRoot)
-		match, err := engine.store.Lookup(request.ToolName, reqScopeAbs, request.Autonomy)
+		match, err := engine.store.Lookup(request.ToolName, reqScope, request.Autonomy)
 		if err == nil && match.Matched {
 			grant := match.Grant
 			if grant.Decision == GrantDeny {
@@ -330,8 +342,33 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			}
 		}
 	}
+	if match := engine.lookupSessionGrant(request.ToolName, reqScope, request.Autonomy); match.Matched {
+		grant := match.Grant
+		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
+			return Decision{
+				Action:       ActionPrompt,
+				Reason:       reasonAboveCeiling,
+				Risk:         risk,
+				GrantMatched: true,
+				Grant:        &grant,
+			}
+		}
+		return Decision{
+			Action:       ActionAllow,
+			Reason:       "session sandbox allow grant matched",
+			Risk:         risk,
+			GrantMatched: true,
+			Grant:        &grant,
+		}
+	}
 	if request.Permission == PermissionAllow {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
+	}
+	if workspaceWriteAutoAllowed(policy, request, scope) {
+		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
+		}
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write permitted by sandbox policy", AutoAllowed: true}
 	}
 	// Auto-allow a sandboxed shell command when the operator opted in: the active
 	// native sandbox is the safety boundary, so the bash prompt is skipped. This
@@ -358,19 +395,146 @@ func (engine *Engine) Grant(input GrantInput) (Grant, error) {
 	if engine == nil || engine.store == nil {
 		return Grant{}, errors.New("sandbox grant store is not configured")
 	}
-	kind, err := normalizeScopeKind(input.ScopeKind)
+	input, err := engine.normalizeGrantInput(input)
 	if err != nil {
 		return Grant{}, err
 	}
+	return engine.store.Grant(input)
+}
+
+func (engine *Engine) GrantForSession(input GrantInput) (Grant, error) {
+	if engine == nil {
+		return Grant{}, errors.New("sandbox engine is not configured")
+	}
+	input, err := engine.normalizeGrantInput(input)
+	if err != nil {
+		return Grant{}, err
+	}
+	grant, err := createGrant(input, time.Now)
+	if err != nil {
+		return Grant{}, err
+	}
+	grant.Session = true
+	engine.sessionMu.Lock()
+	defer engine.sessionMu.Unlock()
+	if engine.sessionGrants == nil {
+		engine.sessionGrants = map[string][]Grant{}
+	}
+	bucket := engine.sessionGrants[grant.ToolName]
+	for index := range bucket {
+		if bucket[index].Scope == grant.Scope && bucket[index].ScopeKind == grant.ScopeKind {
+			bucket[index] = grant
+			engine.sessionGrants[grant.ToolName] = bucket
+			return grant, nil
+		}
+	}
+	engine.sessionGrants[grant.ToolName] = append(bucket, grant)
+	return grant, nil
+}
+
+func (engine *Engine) normalizeGrantInput(input GrantInput) (GrantInput, error) {
+	kind, err := normalizeScopeKind(input.ScopeKind)
+	if err != nil {
+		return GrantInput{}, err
+	}
 	scope, kind := reconcileScope(strings.TrimSpace(input.Scope), kind)
 	if kind != ScopeToolWide {
-		// Anchor a relative scope to this workspace so the grant cannot match a
-		// same-named path in another project.
-		scope = resolveScopeAbs(scope, engine.workspaceRoot)
+		// Anchor relative path scopes to this workspace so the grant cannot match
+		// a same-named path in another project. Host scopes remain network hosts.
+		scope = resolveScopeForKind(scope, kind, engine.workspaceRoot)
 	}
 	input.Scope = scope
 	input.ScopeKind = kind
-	return engine.store.Grant(input)
+	return input, nil
+}
+
+func (engine *Engine) lookupSessionGrant(toolName string, reqScope string, requestedAutonomy Autonomy) GrantLookup {
+	if engine == nil {
+		return GrantLookup{}
+	}
+	requested, err := NormalizeAutonomy(requestedAutonomy)
+	if err != nil {
+		return GrantLookup{}
+	}
+	engine.sessionMu.Lock()
+	defer engine.sessionMu.Unlock()
+	return lookupGrantBucket(engine.sessionGrants[strings.TrimSpace(toolName)], reqScope, requested)
+}
+
+func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) bool {
+	if !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
+		return false
+	}
+	paths := requestPaths(request)
+	if len(paths) == 0 || requestPathsTouchProtectedMetadata(scope, request.WorkspaceRoot, paths) {
+		return false
+	}
+	switch request.ToolName {
+	case "write_file", "edit_file", "apply_patch":
+		return true
+	default:
+		return false
+	}
+}
+
+func requestPathsTouchProtectedMetadata(scope *Scope, workspaceRoot string, paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, path := range paths {
+		if pathTouchesProtectedMetadata(scope, workspaceRoot, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathTouchesProtectedMetadata(scope *Scope, workspaceRoot string, path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if !filepath.IsAbs(path) {
+		return relativePathTouchesProtectedMetadata(path)
+	}
+	roots := []string{}
+	if scope != nil {
+		roots = scope.Roots()
+	} else if workspaceRoot != "" {
+		roots = []string{workspaceRoot}
+	}
+	for _, root := range roots {
+		root = normalizeWorkspaceRootBestEffort(root)
+		if root == "" {
+			continue
+		}
+		normalized := NormalizePrefixForRoot(filepath.Clean(path), root)
+		relative, err := filepath.Rel(root, normalized)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			continue
+		}
+		if relativePathTouchesProtectedMetadata(relative) {
+			return true
+		}
+	}
+	return false
+}
+
+func relativePathTouchesProtectedMetadata(path string) bool {
+	cleaned := filepath.Clean(filepath.FromSlash(strings.TrimSpace(path)))
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) || filepath.IsAbs(cleaned) {
+		return false
+	}
+	first := cleaned
+	if index := strings.Index(first, string(filepath.Separator)); index >= 0 {
+		first = first[:index]
+	}
+	for _, protected := range protectedMetadataNames {
+		if first == protected {
+			return true
+		}
+	}
+	return false
 }
 
 func deny(request Request, risk Risk, code ViolationCode, path string, reason string, recoverable bool) Decision {

@@ -15,7 +15,16 @@ import (
 
 const defaultMaxTurns = 30
 
-const defaultDeferThreshold = 10
+// defaultDeferThreshold is the number of deferred-eligible (MCP) tools at which
+// Zero collapses their full JSON schemas into compact `tool_search` reminder
+// lines instead of advertising every schema on every turn. MCP tool schemas run
+// 300-600 tokens each, so eagerly shipping even a small server's toolset wastes
+// thousands of input tokens per message. Kept low so a typical single-server set
+// (Exa-style, a handful of tools) defers and stays cheap; the only cost is one
+// `tool_search` round-trip before a deferred tool's first use, after which it is
+// loaded for the rest of the run. Override per-config with tools.deferThreshold
+// (set 0 to always advertise every schema, e.g. for a model without tool_search).
+const defaultDeferThreshold = 3
 
 func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 	cfg := FileConfig{

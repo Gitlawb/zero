@@ -230,7 +230,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 			Autonomy: string(sandbox.AutonomyMedium),
 			Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 				WorkspaceRoot: root,
-				Policy:        sandbox.DefaultPolicy(),
+				Policy:        promptWritePolicy(),
 			}),
 		},
 	})
@@ -473,7 +473,7 @@ func submitAndDrivePermissionRun(t *testing.T, m model, prompt string, key strin
 func newPermissionTestModel(root string, provider zeroruntime.Provider, registry *tools.Registry, store *sessions.Store, grantStore *sandbox.GrantStore, runtimeMessages chan<- tea.Msg) model {
 	engineOptions := sandbox.EngineOptions{
 		WorkspaceRoot: root,
-		Policy:        sandbox.DefaultPolicy(),
+		Policy:        promptWritePolicy(),
 	}
 	if grantStore != nil {
 		engineOptions.Store = grantStore
@@ -495,6 +495,12 @@ func newPermissionTestModel(root string, provider zeroruntime.Provider, registry
 			Sandbox:  sandbox.NewEngine(engineOptions),
 		},
 	})
+}
+
+func promptWritePolicy() sandbox.Policy {
+	policy := sandbox.DefaultPolicy()
+	policy.EnforceWorkspace = false
+	return policy
 }
 
 func writeFileToolScript(callID string, path string, content string) []zeroruntime.StreamEvent {
@@ -575,6 +581,7 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 		"permission":     "allow",
 		"permissionMode": "auto",
 		"sideEffect":     "read",
+		"scope":          "src",
 		"risk":           map[string]any{"level": "low"},
 	})
 	appendTestEvent(t, store, session.SessionID, sessions.EventToolResult, map[string]any{"toolCallId": "call_1", "name": "grep", "status": "error", "output": "matches"})
@@ -602,6 +609,9 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	permissionRow, ok := findTranscriptRow(next.transcript, rowPermission)
 	if !ok || permissionRow.tool != "grep" || permissionRow.permission == nil || permissionRow.permission.Action != agent.PermissionActionAllow {
 		t.Fatalf("expected hydrated permission metadata, got ok=%v row=%#v", ok, permissionRow)
+	}
+	if permissionRow.permission.Scope != "src" {
+		t.Fatalf("expected hydrated permission scope, got %#v", permissionRow.permission)
 	}
 	toolResult, ok := findTranscriptRow(next.transcript, rowToolResult)
 	if !ok || toolResult.tool != "grep" || toolResult.status != tools.StatusError || toolResult.detail != "matches" {

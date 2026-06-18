@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -232,5 +233,127 @@ func requestPaths(request Request) []string {
 			paths = append(paths, value)
 		}
 	}
+	if request.ToolName == "apply_patch" {
+		paths = append(paths, applyPatchRequestPaths(request.Args)...)
+	}
 	return paths
+}
+
+func applyPatchRequestPaths(args map[string]any) []string {
+	patch := firstArgString(args, "patch", "diff")
+	if patch == "" {
+		return nil
+	}
+	cwd := firstArgString(args, "cwd")
+	var paths []string
+	for _, path := range patchHeaderPaths(patch) {
+		if path == "" || path == "/dev/null" {
+			continue
+		}
+		if cwd != "" && filepath.Clean(cwd) != "." && !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func applyPatchPathViolation(request Request) *pathViolation {
+	if request.ToolName != "apply_patch" {
+		return nil
+	}
+	patch := firstArgString(request.Args, "patch", "diff")
+	if patch == "" {
+		return nil
+	}
+	for _, path := range patchHeaderPaths(patch) {
+		if path == "" || path == "/dev/null" {
+			continue
+		}
+		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
+			return &pathViolation{
+				Code:   ViolationOutsideWorkspace,
+				Path:   path,
+				Reason: fmt.Sprintf("patch path %q must stay inside the workspace", path),
+			}
+		}
+	}
+	return nil
+}
+
+func patchHeaderPaths(patch string) []string {
+	var paths []string
+	oldRemaining, newRemaining := 0, 0
+	inHunk := false
+	for _, line := range strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n") {
+		if inHunk && (oldRemaining > 0 || newRemaining > 0) {
+			switch {
+			case strings.HasPrefix(line, "-"):
+				oldRemaining--
+			case strings.HasPrefix(line, "+"):
+				newRemaining--
+			case strings.HasPrefix(line, "\\"):
+			default:
+				oldRemaining--
+				newRemaining--
+			}
+			continue
+		}
+		inHunk = false
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				paths = append(paths, stripPatchPrefix(fields[2]), stripPatchPrefix(fields[3]))
+			}
+		case strings.HasPrefix(line, "@@"):
+			oldRemaining, newRemaining = parsePatchHunkCounts(line)
+			inHunk = oldRemaining > 0 || newRemaining > 0
+		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				paths = append(paths, stripPatchPrefix(fields[1]))
+			}
+		}
+	}
+	return paths
+}
+
+func parsePatchHunkCounts(line string) (int, int) {
+	_, rest, ok := strings.Cut(line, "@@")
+	if !ok {
+		return 0, 0
+	}
+	rangeSection := rest
+	if before, _, ok := strings.Cut(rest, "@@"); ok {
+		rangeSection = before
+	}
+	old, next := 0, 0
+	for _, field := range strings.Fields(rangeSection) {
+		switch {
+		case strings.HasPrefix(field, "-"):
+			old = patchHunkCount(field[1:])
+		case strings.HasPrefix(field, "+"):
+			next = patchHunkCount(field[1:])
+		}
+	}
+	return old, next
+}
+
+func patchHunkCount(spec string) int {
+	if _, count, ok := strings.Cut(spec, ","); ok {
+		if n, err := strconv.Atoi(count); err == nil {
+			return n
+		}
+		return 0
+	}
+	return 1
+}
+
+func stripPatchPrefix(path string) string {
+	path = strings.TrimSpace(path)
+	if strings.HasPrefix(path, "a/") || strings.HasPrefix(path, "b/") {
+		path = path[2:]
+	}
+	return filepath.ToSlash(path)
 }

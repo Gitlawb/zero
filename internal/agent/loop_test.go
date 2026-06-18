@@ -54,6 +54,7 @@ func TestIsRetriableToolError(t *testing.T) {
 		// Structured denial categories are authoritative regardless of message text.
 		{"denial: filtered", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialFiltered}, false},
 		{"denial: permission", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialPermissionDenied}, false},
+		{"denial: approval canceled", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialApprovalCanceled}, false},
 		{"denial: sandbox", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialSandboxViolation}, false},
 	}
 	for _, c := range cases {
@@ -312,6 +313,37 @@ func TestRunAdvertisesWebFetchInAutoMode(t *testing.T) {
 	}
 	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "web_fetch" {
 		t.Fatalf("expected web_fetch to be advertised in auto mode, got %#v", provider.requests[0].Tools)
+	}
+}
+
+func TestRunAdvertisesAllowedWebSearchInAutoMode(t *testing.T) {
+	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreNetworkTools() {
+		if tool.Name() == "web_search" {
+			registry.Register(tool)
+		}
+	}
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "what tools exist?", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "web_search" {
+		t.Fatalf("expected web_search to be advertised in auto mode, got %#v", provider.requests[0].Tools)
 	}
 }
 
@@ -761,6 +793,55 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write done")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+		}),
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			t.Fatal("workspace write should not request permission")
+			return PermissionDecision{}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("expected workspace write content, got %q", content)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one auto permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || event.PermissionGranted || event.GrantMatched {
+		t.Fatalf("expected sandbox policy allow without user grant, got %#v", event)
+	}
+	if event.Reason != "workspace write permitted by sandbox policy" {
+		t.Fatalf("expected workspace-write reason, got %#v", event)
+	}
+}
+
 func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
@@ -809,6 +890,98 @@ func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	}
 }
 
+func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write should not continue")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionCancel, Reason: "redirect needed"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if !errors.Is(err, errPermissionApprovalCanceled) {
+		t.Fatalf("expected permission approval cancel error, got %v", err)
+	}
+	if result.FinalAnswer != "" {
+		t.Fatalf("canceled run must not continue to final answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("canceled permission prompt should stop after first turn, got %d provider requests", len(provider.requests))
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected canceled write to leave file missing, stat error: %v", err)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one cancel permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionCancel || event.DecisionAction != PermissionDecisionCancel || event.PermissionGranted {
+		t.Fatalf("expected final cancel event, got %#v", event)
+	}
+	if event.DecisionReason != "redirect needed" {
+		t.Fatalf("expected cancel reason in final event, got %#v", event)
+	}
+}
+
+func TestAvailablePermissionDecisionsSplitDenyAndCancel(t *testing.T) {
+	options := Options{Sandbox: sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})}
+	cases := []struct {
+		name string
+		tool string
+		want []PermissionDecisionAction
+	}{
+		{
+			name: "bash keeps recoverable deny and explicit cancel",
+			tool: "bash",
+			want: []PermissionDecisionAction{
+				PermissionDecisionAllow,
+				PermissionDecisionAllowForSession,
+				PermissionDecisionDeny,
+				PermissionDecisionCancel,
+			},
+		},
+		{
+			name: "apply patch uses cancel without recoverable deny",
+			tool: "apply_patch",
+			want: []PermissionDecisionAction{
+				PermissionDecisionAllow,
+				PermissionDecisionAllowForSession,
+				PermissionDecisionCancel,
+			},
+		},
+		{
+			name: "file write keeps recoverable deny",
+			tool: "write_file",
+			want: []PermissionDecisionAction{
+				PermissionDecisionAllow,
+				PermissionDecisionAllowForSession,
+				PermissionDecisionDeny,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := availablePermissionDecisions(PermissionEvent{
+				ToolName: tc.tool,
+				Action:   PermissionActionPrompt,
+			}, options)
+			if !equalPermissionDecisions(got, tc.want) {
+				t.Fatalf("decisions = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	root := t.TempDir()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
@@ -819,6 +992,8 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	registry.Register(tools.NewWriteFileTool(root))
 	provider := providerCallingWriteFileThenAnswer("write approved")
 	var permissionEvents []PermissionEvent
+	policy := sandbox.DefaultPolicy()
+	policy.EnforceWorkspace = false
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
@@ -826,7 +1001,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 		Autonomy:       string(sandbox.AutonomyMedium),
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
+			Policy:        policy,
 			Store:         store,
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
@@ -876,6 +1051,91 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	}
 	if event.Grant.Decision != sandbox.GrantAllow || event.Grant.ToolName != "write_file" {
 		t.Fatalf("unexpected persisted grant in event: %#v", event)
+	}
+}
+
+func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt","content":"first","overwrite":true}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"path":"notes.txt","content":"second","overwrite":true}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+	policy := sandbox.DefaultPolicy()
+	policy.EnforceWorkspace = false
+
+	result, err := Run(context.Background(), "write notes twice", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        policy,
+			Store:         store,
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllowForSession, Reason: "trust this file for the session"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second" {
+		t.Fatalf("expected second write content, got %q", content)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	if len(permissionEvents) != 2 {
+		t.Fatalf("expected two permission events, got %#v", permissionEvents)
+	}
+	if permissionEvents[0].DecisionAction != PermissionDecisionAllowForSession || permissionEvents[0].Grant == nil || !permissionEvents[0].Grant.Session {
+		t.Fatalf("expected first event to carry session grant, got %#v", permissionEvents[0])
+	}
+	if !permissionEvents[1].GrantMatched || permissionEvents[1].Grant == nil || !permissionEvents[1].Grant.Session {
+		t.Fatalf("expected second event to be session-grant matched, got %#v", permissionEvents[1])
+	}
+	lookup, err := store.Lookup("write_file", filepath.Join(root, "notes.txt"), sandbox.AutonomyMedium)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookup.Matched {
+		t.Fatalf("session approval must not persist a grant, got %#v", lookup)
 	}
 }
 
@@ -1186,6 +1446,18 @@ func providerCallingWritePathThenAnswer(path string, answer string) *mockProvide
 func quoteJSONString(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+func equalPermissionDecisions(a, b []PermissionDecisionAction) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRunAppendsConfirmationPolicyToSystemPrompt(t *testing.T) {
