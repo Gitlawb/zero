@@ -46,7 +46,13 @@ func TestAnalyzeCommand(t *testing.T) {
 
 		{name: "curl", script: "curl https://example.com", network: true},
 		{name: "wget piped to shell", script: "wget -qO- https://x.test | sh", network: true},
+		{name: "python http server", script: "python3 -m http.server 8000", network: true},
+		{name: "python pip install", script: "python3 -m pip install requests", network: true},
+		{name: "npm install", script: "npm install", network: true},
+		{name: "git clone", script: "git clone https://example.com/repo.git", network: true},
+		{name: "gh release download", script: "gh release download v1.0.0", network: true},
 		{name: "no network", script: "ls -la && echo done", network: false},
+		{name: "process pattern is not network", script: `pkill -f "python3 -m http.server 8000"`, network: false},
 
 		{name: "unparseable", script: `'unterminated quote`, tooComplex: true},
 	}

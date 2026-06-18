@@ -292,6 +292,14 @@ func TestClassifyASTDoesNotFlagQuotedProgramName(t *testing.T) {
 	}
 }
 
+func TestClassifyDoesNotFlagQuotedHttpServerPattern(t *testing.T) {
+	command := `pkill -f "python3 -m http.server 8000"; sleep 0.5; pgrep -af "http.server 8000" || true`
+	risk := classifyCommand(command)
+	if HasRiskCategory(risk, "network") {
+		t.Fatalf("Classify(%q) wrongly flagged network: %v", command, risk.Categories)
+	}
+}
+
 func TestClassifyBenignCommandStaysClean(t *testing.T) {
 	for _, command := range []string{"echo hello", "ls -la", "go build ./..."} {
 		risk := classifyCommand(command)

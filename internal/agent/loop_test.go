@@ -1313,7 +1313,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 	}
 }
 
-func TestRunPersistentCommandPrefixDoesNotBypassNetworkDeny(t *testing.T) {
+func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 	root := t.TempDir()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
 	if err != nil {
@@ -1339,6 +1339,7 @@ func TestRunPersistentCommandPrefixDoesNotBypassNetworkDeny(t *testing.T) {
 		},
 	}
 	var events []PermissionEvent
+	var requests []PermissionRequest
 	if _, err := Run(context.Background(), "curl", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
@@ -1350,8 +1351,8 @@ func TestRunPersistentCommandPrefixDoesNotBypassNetworkDeny(t *testing.T) {
 			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
-			t.Fatalf("matched persistent command prefix should not prompt before sandbox denial, got %#v", request)
-			return PermissionDecision{}, nil
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "network not approved"}, nil
 		},
 		OnPermission: func(event PermissionEvent) {
 			events = append(events, event)
@@ -1359,8 +1360,82 @@ func TestRunPersistentCommandPrefixDoesNotBypassNetworkDeny(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Action != PermissionActionDeny || events[0].Violation == nil || events[0].Violation.Code != sandbox.ViolationNetwork {
-		t.Fatalf("expected network sandbox denial despite prefix match, got %#v", events)
+	if len(requests) != 1 || requests[0].Reason != sandbox.ReasonNetworkBlocked {
+		t.Fatalf("expected one network permission request despite prefix match, got %#v", requests)
+	}
+	if len(events) != 1 || events[0].Action != PermissionActionDeny || events[0].DecisionReason != "network not approved" {
+		t.Fatalf("expected denied network permission event despite prefix match, got %#v", events)
+	}
+}
+
+func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
+	root := t.TempDir()
+	fakeCurl := filepath.Join(root, "curl")
+	if err := os.WriteFile(fakeCurl, []byte("#!/bin/sh\necho fake curl \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"PATH=.:$PATH curl https://example.com"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var events []PermissionEvent
+	result, err := Run(context.Background(), "curl", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approve network once"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	request := requests[0]
+	if request.Reason != sandbox.ReasonNetworkBlocked || !sandbox.HasRiskCategory(request.Risk, "network") {
+		t.Fatalf("expected network permission request, got %#v", request)
+	}
+	for _, decision := range request.AvailableDecisions {
+		if decision == PermissionDecisionAllowPrefix || decision == PermissionDecisionAlwaysAllowPrefix {
+			t.Fatalf("network prompt must not offer command-prefix approvals: %#v", request.AvailableDecisions)
+		}
+	}
+	if len(events) != 1 || events[0].Action != PermissionActionAllow || events[0].DecisionAction != PermissionDecisionAllow {
+		t.Fatalf("expected approved permission event, got %#v", events)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
+	}
+	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(lastMessage.Content, "fake curl https://example.com") {
+		t.Fatalf("expected fake curl output after approval, got %q", lastMessage.Content)
 	}
 }
 

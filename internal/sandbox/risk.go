@@ -10,7 +10,6 @@ import (
 )
 
 var (
-	networkCommandPattern = regexp.MustCompile(`(?i)\b(curl|wget|scp|ssh|rsync|nc|netcat|python3?\s+-m\s+http\.server|npm\s+(install|add|publish|login)|pnpm\s+(install|add|publish)|yarn\s+(add|publish)|bun\s+(add|install|publish)|pip3?\s+install|go\s+get|git\s+clone|gh\s+(release\s+download|repo\s+clone|api))\b`)
 	// destructiveCommandPattern matches the highest-risk shell forms:
 	//   - rm -rf (with combined/reordered r/f flags) targeting /, $HOME (bare,
 	//     quoted, or ${HOME} braced), ~, or *, with an optional `--` before the
@@ -98,9 +97,6 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 	// cannot be bypassed by choosing a different alias key.
 	command := firstArgString(request.Args, "command", "cmd", "script", "shell")
 	if command != "" {
-		if networkCommandPattern.MatchString(command) {
-			add("network", RiskCritical)
-		}
 		if matchesDestructive(command) {
 			add("destructive", RiskCritical)
 		}

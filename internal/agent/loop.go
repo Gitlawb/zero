@@ -590,6 +590,14 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	decisionReason := ""
 	var decisionAction PermissionDecisionAction
 	var decisionCommandPrefix []string
+	var permissionCleanups []func()
+	defer func() {
+		for i := len(permissionCleanups) - 1; i >= 0; i-- {
+			if permissionCleanups[i] != nil {
+				permissionCleanups[i]()
+			}
+		}
+	}()
 	if toolFound && !permissionGranted {
 		if grant, ok, session := matchCommandPrefix(call.Name, args, options); ok {
 			permissionGranted = true
@@ -624,13 +632,28 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		decisionReason = strings.TrimSpace(decision.Reason)
 		decisionAction = decision.Action
 		switch decision.Action {
-		case PermissionDecisionAllow:
+		case PermissionDecisionAllow, PermissionDecisionAllowStrict:
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
+			cleanup, err := grantNetworkForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeTurn, options)
+			if err != nil {
+				reason := "failed to grant network permission: " + err.Error()
+				emitDeniedPermission(options, call, requestEvent, reason)
+				return deniedPermissionResult(call, reason, requestEvent), nil
+			}
+			permissionCleanups = append(permissionCleanups, cleanup)
 		case PermissionDecisionAllowForSession:
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
-			if options.Sandbox != nil {
+			if networkSandboxPrompt(requestEvent) {
+				cleanup, err := grantNetworkForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeSession, options)
+				if err != nil {
+					reason := "failed to grant session network permission: " + err.Error()
+					emitDeniedPermission(options, call, requestEvent, reason)
+					return deniedPermissionResult(call, reason, requestEvent), nil
+				}
+				permissionCleanups = append(permissionCleanups, cleanup)
+			} else if options.Sandbox != nil {
 				// The current call stays allowed if recording the session grant
 				// fails; the user is simply prompted again for a later match.
 				if grant, err := persistSessionPermissionGrant(call.Name, args, decisionReason, options); err == nil {
@@ -649,6 +672,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			if options.Sandbox != nil && len(decisionCommandPrefix) > 0 {
 				options.Sandbox.GrantCommandPrefixForSession(call.Name, decisionCommandPrefix)
 			}
+			cleanup, err := grantNetworkForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeTurn, options)
+			if err != nil {
+				reason := "failed to grant network permission: " + err.Error()
+				emitDeniedPermission(options, call, requestEvent, reason)
+				return deniedPermissionResult(call, reason, requestEvent), nil
+			}
+			permissionCleanups = append(permissionCleanups, cleanup)
 		case PermissionDecisionAlwaysAllowPrefix:
 			if len(request.CommandPrefix) == 0 {
 				emitDeniedPermission(options, call, requestEvent, decisionReason)
@@ -662,6 +692,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 					decisionCommandPrefix = append([]string(nil), grant.Prefix...)
 				}
 			}
+			cleanup, err := grantNetworkForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeTurn, options)
+			if err != nil {
+				reason := "failed to grant network permission: " + err.Error()
+				emitDeniedPermission(options, call, requestEvent, reason)
+				return deniedPermissionResult(call, reason, requestEvent), nil
+			}
+			permissionCleanups = append(permissionCleanups, cleanup)
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
@@ -1026,13 +1063,26 @@ func effectivePermission(tool tools.Tool, args map[string]any) tools.Permission 
 }
 
 func shouldRequestPermission(tool tools.Tool, permissionGranted bool, decision *sandbox.Decision) bool {
-	if permissionGranted || tool.Safety().Permission != tools.PermissionPrompt {
+	if tool.Safety().Permission != tools.PermissionPrompt {
 		return false
 	}
 	if decision != nil {
+		if sandboxDecisionRequiresExplicitPermission(decision) {
+			return true
+		}
+		if permissionGranted {
+			return false
+		}
 		return decision.Action == sandbox.ActionPrompt
 	}
+	if permissionGranted {
+		return false
+	}
 	return true
+}
+
+func sandboxDecisionRequiresExplicitPermission(decision *sandbox.Decision) bool {
+	return decision != nil && decision.Action == sandbox.ActionPrompt && decision.Reason == sandbox.ReasonNetworkBlocked
 }
 
 func requestPermission(ctx context.Context, request PermissionRequest, options Options) (PermissionDecision, error) {
@@ -1591,7 +1641,7 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 	decisions := []PermissionDecisionAction{PermissionDecisionAllow}
 	if options.Sandbox != nil {
 		decisions = append(decisions, PermissionDecisionAllowForSession)
-		if event.ToolName == "bash" && len(event.CommandPrefix) > 0 {
+		if event.ToolName == "bash" && len(event.CommandPrefix) > 0 && !networkSandboxPrompt(event) {
 			decisions = append(decisions, PermissionDecisionAllowPrefix)
 			if options.Sandbox.CanPersistGrants() {
 				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
@@ -1610,6 +1660,22 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 		decisions = append(decisions, PermissionDecisionDeny)
 	}
 	return decisions
+}
+
+func networkSandboxPrompt(event PermissionEvent) bool {
+	return event.ToolName == "bash" &&
+		event.Reason == sandbox.ReasonNetworkBlocked &&
+		sandbox.HasRiskCategory(event.Risk, "network")
+}
+
+func grantNetworkForSandboxPrompt(event PermissionEvent, scope sandbox.PermissionGrantScope, options Options) (func(), error) {
+	if !networkSandboxPrompt(event) || options.Sandbox == nil {
+		return nil, nil
+	}
+	enabled := true
+	return options.Sandbox.GrantRequestPermissions(sandbox.RequestPermissionProfile{
+		Network: &sandbox.NetworkPermissions{Enabled: &enabled},
+	}, scope)
 }
 
 func permissionSupportsPersistentDecision(toolName string) bool {

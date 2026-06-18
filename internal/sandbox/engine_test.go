@@ -13,7 +13,8 @@ import (
 // hard-deny: under NetworkDeny, the engine-level network gate must NOT deny a
 // first-party network TOOL (SideEffect=network) by default, so it follows its
 // normal tool permission metadata instead of being blocked outright. EnforceToolNetwork
-// restores the strict deny, and a network SHELL command stays denied either way.
+// restores the strict deny, and a network SHELL command becomes a recoverable
+// sandbox prompt instead of a hard preflight denial.
 func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
 	base := Policy{Mode: ModeEnforce, Network: NetworkDeny, MaxAutonomy: AutonomyHigh}
 
@@ -45,14 +46,14 @@ func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
 		t.Fatalf("with EnforceToolNetwork, web_search must be network-denied, got %q (%+v)", ds.Action, ds.Violation)
 	}
 
-	// A network SHELL command (SideEffect=shell) stays denied under deny — shell
-	// egress is never exempt, even with EnforceToolNetwork off.
+	// A network SHELL command (SideEffect=shell) is not exempt; it prompts for an
+	// explicit network permission instead of being treated like a web_search tool.
 	shell := engine.Evaluate(context.Background(), Request{
 		ToolName: "bash", SideEffect: SideEffectShell, PermissionGranted: true,
 		Args: map[string]any{"command": "curl https://evil.test"},
 	})
-	if shell.Action != ActionDeny || shell.Violation == nil || shell.Violation.Code != ViolationNetwork {
-		t.Fatalf("a network shell command must stay denied under deny, got %q (%+v)", shell.Action, shell.Violation)
+	if shell.Action != ActionPrompt || shell.Reason != ReasonNetworkBlocked {
+		t.Fatalf("a network shell command must prompt under deny, got %q (%s)", shell.Action, shell.Reason)
 	}
 }
 

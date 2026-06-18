@@ -371,7 +371,10 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// the per-tool gate can't diverge from this decision. Allow is unchanged.
 	netMode := engine.effectiveNetworkMode(policy)
 	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(policy, request) {
-		return deny(request, risk, ViolationNetwork, "", "network access is blocked by sandbox policy", false)
+		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonNetworkBlocked}
+		}
+		return deny(request, risk, ViolationNetwork, "", ReasonNetworkBlocked, false)
 	}
 	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {
 		return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command is blocked by sandbox policy", false)

@@ -90,7 +90,7 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if _, interactive := interactivePrograms[prog]; interactive && !replSuppressed(prog, rest) {
 			result.Interactive = true
 		}
-		if networkPrograms[prog] {
+		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
 		if destructivePrograms[prog] || (prog == "rm" && hasRecursiveForce(rest)) || (prog == "find" && hasFindDelete(rest)) {
@@ -98,6 +98,107 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		}
 		return true
 	})
+}
+
+func commandUsesNetwork(prog string, args []*syntax.Word) bool {
+	if networkPrograms[prog] {
+		return true
+	}
+	words := literalWordTexts(args)
+	switch prog {
+	case "python", "python2", "python3", "py":
+		return pythonModuleUsesNetwork(words)
+	case "npm":
+		return firstSubcommand(words, nil) == "install" ||
+			firstSubcommand(words, nil) == "add" ||
+			firstSubcommand(words, nil) == "publish" ||
+			firstSubcommand(words, nil) == "login"
+	case "pnpm":
+		return firstSubcommand(words, nil) == "install" ||
+			firstSubcommand(words, nil) == "add" ||
+			firstSubcommand(words, nil) == "publish"
+	case "yarn":
+		return firstSubcommand(words, nil) == "add" ||
+			firstSubcommand(words, nil) == "publish"
+	case "bun":
+		return firstSubcommand(words, nil) == "add" ||
+			firstSubcommand(words, nil) == "install" ||
+			firstSubcommand(words, nil) == "publish"
+	case "pip", "pip2", "pip3":
+		return firstSubcommand(words, nil) == "install"
+	case "go":
+		return firstSubcommand(words, nil) == "get"
+	case "git":
+		return firstSubcommand(words, nil) == "clone"
+	case "gh":
+		return ghUsesNetwork(words)
+	default:
+		return false
+	}
+}
+
+func literalWordTexts(args []*syntax.Word) []string {
+	words := make([]string, 0, len(args))
+	for _, arg := range args {
+		words = append(words, strings.ToLower(strings.TrimSpace(wordText(arg))))
+	}
+	return words
+}
+
+func pythonModuleUsesNetwork(words []string) bool {
+	for index := 0; index < len(words); index++ {
+		if words[index] != "-m" || index+1 >= len(words) {
+			continue
+		}
+		module := words[index+1]
+		if module == "http.server" {
+			return true
+		}
+		if module == "pip" && firstSubcommand(words[index+2:], nil) == "install" {
+			return true
+		}
+	}
+	return false
+}
+
+func ghUsesNetwork(words []string) bool {
+	first := firstSubcommand(words, nil)
+	if first == "api" {
+		return true
+	}
+	second := secondSubcommand(words)
+	return (first == "release" && second == "download") ||
+		(first == "repo" && second == "clone")
+}
+
+func secondSubcommand(words []string) string {
+	firstSeen := false
+	for _, word := range words {
+		if word == "" || strings.HasPrefix(word, "-") {
+			continue
+		}
+		if !firstSeen {
+			firstSeen = true
+			continue
+		}
+		return word
+	}
+	return ""
+}
+
+func firstSubcommand(words []string, aliases map[string]string) string {
+	for _, word := range words {
+		if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
+			continue
+		}
+		if aliases != nil {
+			if alias, ok := aliases[word]; ok {
+				return alias
+			}
+		}
+		return word
+	}
+	return ""
 }
 
 // wordText returns the literal text of a shell word, concatenating its plain and

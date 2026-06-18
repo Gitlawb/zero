@@ -122,6 +122,8 @@ const (
 	ViolationPolicyDenied ViolationCode = "policy_denied"
 )
 
+const ReasonNetworkBlocked = "network access is blocked by sandbox policy"
+
 const (
 	GrantAllow GrantDecision = "allow"
 	GrantDeny  GrantDecision = "deny"
