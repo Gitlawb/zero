@@ -52,8 +52,9 @@ type GrantLookup struct {
 }
 
 type grantFile struct {
-	SchemaVersion int                `json:"schemaVersion"`
-	Grants        map[string][]Grant `json:"grants"`
+	SchemaVersion   int                             `json:"schemaVersion"`
+	Grants          map[string][]Grant              `json:"grants"`
+	CommandPrefixes map[string][]CommandPrefixGrant `json:"commandPrefixes,omitempty"`
 }
 
 type GrantStore struct {
@@ -151,6 +152,36 @@ func (store *GrantStore) Grant(input GrantInput) (Grant, error) {
 	return grant, nil
 }
 
+func (store *GrantStore) GrantCommandPrefix(input CommandPrefixInput) (CommandPrefixGrant, error) {
+	grant, err := createCommandPrefixGrant(input, store.now)
+	if err != nil {
+		return CommandPrefixGrant{}, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state, err := store.readState()
+	if err != nil {
+		return CommandPrefixGrant{}, err
+	}
+	bucket := state.CommandPrefixes[grant.ToolName]
+	replaced := false
+	for i := range bucket {
+		if sameStringSlice(bucket[i].Prefix, grant.Prefix) {
+			bucket[i] = grant
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		bucket = append(bucket, grant)
+	}
+	state.CommandPrefixes[grant.ToolName] = bucket
+	if err := store.writeState(state); err != nil {
+		return CommandPrefixGrant{}, err
+	}
+	return grant, nil
+}
+
 // Lookup returns the grant that governs a tool call whose normalized scope is
 // reqScope (empty for a tool-wide request, e.g. a shell command with no cwd).
 // Among the tool's grants that cover the request, a covering deny wins outright
@@ -172,6 +203,29 @@ func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAuton
 	}
 	bucket := state.Grants[strings.TrimSpace(toolName)]
 	return lookupGrantBucket(bucket, reqScope, requested), nil
+}
+
+func (store *GrantStore) LookupCommandPrefix(toolName string, command []string) (CommandPrefixGrant, bool, error) {
+	if err := ValidateToolName(toolName); err != nil {
+		return CommandPrefixGrant{}, false, err
+	}
+	if _, ok := NormalizeCommandPrefix(command); !ok {
+		return CommandPrefixGrant{}, false, nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state, err := store.readState()
+	if err != nil {
+		return CommandPrefixGrant{}, false, err
+	}
+	bucket := state.CommandPrefixes[strings.TrimSpace(toolName)]
+	for _, grant := range bucket {
+		if hasStringPrefix(command, grant.Prefix) {
+			grant.Prefix = append([]string(nil), grant.Prefix...)
+			return grant, true, nil
+		}
+	}
+	return CommandPrefixGrant{}, false, nil
 }
 
 func lookupGrantBucket(bucket []Grant, reqScope string, requested Autonomy) GrantLookup {
@@ -225,6 +279,32 @@ func (store *GrantStore) List() ([]Grant, error) {
 	return grants, nil
 }
 
+func (store *GrantStore) ListCommandPrefixes() ([]CommandPrefixGrant, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state, err := store.readState()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(state.CommandPrefixes))
+	for name := range state.CommandPrefixes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	grants := make([]CommandPrefixGrant, 0, len(names))
+	for _, name := range names {
+		bucket := append([]CommandPrefixGrant(nil), state.CommandPrefixes[name]...)
+		sort.Slice(bucket, func(i, j int) bool {
+			return strings.Join(bucket[i].Prefix, "\x00") < strings.Join(bucket[j].Prefix, "\x00")
+		})
+		for i := range bucket {
+			bucket[i].Prefix = append([]string(nil), bucket[i].Prefix...)
+		}
+		grants = append(grants, bucket...)
+	}
+	return grants, nil
+}
+
 func (store *GrantStore) Revoke(toolName string) (int, error) {
 	if err := ValidateToolName(toolName); err != nil {
 		return 0, err
@@ -237,11 +317,13 @@ func (store *GrantStore) Revoke(toolName string) (int, error) {
 	}
 	key := strings.TrimSpace(toolName)
 	bucket, ok := state.Grants[key]
-	if !ok || len(bucket) == 0 {
+	prefixes := state.CommandPrefixes[key]
+	if (!ok || len(bucket) == 0) && len(prefixes) == 0 {
 		return 0, nil
 	}
-	count := len(bucket)
+	count := len(bucket) + len(prefixes)
 	delete(state.Grants, key)
+	delete(state.CommandPrefixes, key)
 	if err := store.writeState(state); err != nil {
 		return 0, err
 	}
@@ -307,6 +389,9 @@ func (store *GrantStore) Clear() (int, error) {
 	for _, bucket := range state.Grants {
 		count += len(bucket)
 	}
+	for _, bucket := range state.CommandPrefixes {
+		count += len(bucket)
+	}
 	if count == 0 {
 		return 0, nil
 	}
@@ -317,7 +402,11 @@ func (store *GrantStore) Clear() (int, error) {
 }
 
 func FormatGrantList(grants []Grant) string {
-	if len(grants) == 0 {
+	return FormatGrantListWithCommandPrefixes(grants, nil)
+}
+
+func FormatGrantListWithCommandPrefixes(grants []Grant, prefixes []CommandPrefixGrant) string {
+	if len(grants) == 0 && len(prefixes) == 0 {
 		return "No persistent sandbox grants."
 	}
 	lines := []string{"Sandbox Grants:"}
@@ -327,6 +416,13 @@ func FormatGrantList(grants []Grant) string {
 			scope = "*" // tool-wide
 		}
 		line := fmt.Sprintf("  %s (%s) [%s/%s] approved %s", grant.ToolName, scope, grant.Decision, grant.MaxAutonomy, grant.ApprovedAt)
+		if grant.Reason != "" {
+			line += " - " + redaction.RedactString(grant.Reason, redaction.Options{})
+		}
+		lines = append(lines, line)
+	}
+	for _, grant := range prefixes {
+		line := fmt.Sprintf("  %s (`%s`) [command-prefix] approved %s", grant.ToolName, strings.Join(grant.Prefix, " "), grant.ApprovedAt)
 		if grant.Reason != "" {
 			line += " - " + redaction.RedactString(grant.Reason, redaction.Options{})
 		}
@@ -370,6 +466,23 @@ func createGrant(input GrantInput, now func() time.Time) (Grant, error) {
 		MaxAutonomy: autonomy,
 		ApprovedAt:  now().UTC().Format(time.RFC3339),
 		Reason:      redaction.RedactString(strings.TrimSpace(input.Reason), redaction.Options{}),
+	}, nil
+}
+
+func createCommandPrefixGrant(input CommandPrefixInput, now func() time.Time) (CommandPrefixGrant, error) {
+	toolName := strings.TrimSpace(input.ToolName)
+	if err := ValidateToolName(toolName); err != nil {
+		return CommandPrefixGrant{}, err
+	}
+	prefix, ok := NormalizeCommandPrefix(input.Prefix)
+	if !ok {
+		return CommandPrefixGrant{}, fmt.Errorf("invalid command prefix")
+	}
+	return CommandPrefixGrant{
+		ToolName:   toolName,
+		Prefix:     prefix,
+		ApprovedAt: now().UTC().Format(time.RFC3339),
+		Reason:     redaction.RedactString(strings.TrimSpace(input.Reason), redaction.Options{}),
 	}, nil
 }
 
@@ -419,13 +532,15 @@ func (store *GrantStore) readState() (grantFile, error) {
 	// directly to a single Grant — can be decoded and migrated separately from the
 	// current (v2) map[tool][]Grant shape.
 	var head struct {
-		SchemaVersion int             `json:"schemaVersion"`
-		Grants        json.RawMessage `json:"grants"`
+		SchemaVersion   int             `json:"schemaVersion"`
+		Grants          json.RawMessage `json:"grants"`
+		CommandPrefixes json.RawMessage `json:"commandPrefixes"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
 		return grantFile{}, store.invalidGrantFile(err)
 	}
 	buckets := map[string][]Grant{}
+	commandPrefixBuckets := map[string][]CommandPrefixGrant{}
 	switch head.SchemaVersion {
 	case 1:
 		var legacy map[string]Grant
@@ -443,6 +558,11 @@ func (store *GrantStore) readState() (grantFile, error) {
 	case grantSchemaVersion:
 		if len(head.Grants) > 0 {
 			if err := json.Unmarshal(head.Grants, &buckets); err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+		}
+		if len(head.CommandPrefixes) > 0 {
+			if err := json.Unmarshal(head.CommandPrefixes, &commandPrefixBuckets); err != nil {
 				return grantFile{}, store.invalidGrantFile(err)
 			}
 		}
@@ -465,7 +585,21 @@ func (store *GrantStore) readState() (grantFile, error) {
 			normalized[key] = append(normalized[key], ng)
 		}
 	}
-	return grantFile{SchemaVersion: grantSchemaVersion, Grants: normalized}, nil
+	normalizedPrefixes := map[string][]CommandPrefixGrant{}
+	for name, bucket := range commandPrefixBuckets {
+		key := strings.TrimSpace(name)
+		if err := ValidateToolName(key); err != nil {
+			return grantFile{}, store.invalidGrantFile(err)
+		}
+		for _, grant := range bucket {
+			ng, err := normalizeStoredCommandPrefixGrant(key, grant)
+			if err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+			normalizedPrefixes[key] = append(normalizedPrefixes[key], ng)
+		}
+	}
+	return grantFile{SchemaVersion: grantSchemaVersion, Grants: normalized, CommandPrefixes: normalizedPrefixes}, nil
 }
 
 func (store *GrantStore) invalidGrantFile(err error) error {
@@ -522,10 +656,32 @@ func normalizeStoredGrant(name string, grant Grant) (Grant, error) {
 	return grant, nil
 }
 
+func normalizeStoredCommandPrefixGrant(name string, grant CommandPrefixGrant) (CommandPrefixGrant, error) {
+	if strings.TrimSpace(grant.ToolName) == "" {
+		grant.ToolName = name
+	}
+	if strings.TrimSpace(grant.ToolName) != name {
+		return CommandPrefixGrant{}, fmt.Errorf("command prefix key %q does not match toolName %q", name, grant.ToolName)
+	}
+	if strings.TrimSpace(grant.ApprovedAt) == "" {
+		return CommandPrefixGrant{}, fmt.Errorf("command prefix grant %s approvedAt is required", name)
+	}
+	prefix, ok := NormalizeCommandPrefix(grant.Prefix)
+	if !ok {
+		return CommandPrefixGrant{}, fmt.Errorf("invalid command prefix for %s", name)
+	}
+	grant.ToolName = name
+	grant.Prefix = prefix
+	grant.ApprovedAt = strings.TrimSpace(grant.ApprovedAt)
+	grant.Reason = redaction.RedactString(strings.TrimSpace(grant.Reason), redaction.Options{})
+	return grant, nil
+}
+
 func emptyGrantState() grantFile {
 	return grantFile{
-		SchemaVersion: grantSchemaVersion,
-		Grants:        map[string][]Grant{},
+		SchemaVersion:   grantSchemaVersion,
+		Grants:          map[string][]Grant{},
+		CommandPrefixes: map[string][]CommandPrefixGrant{},
 	}
 }
 

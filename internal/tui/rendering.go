@@ -765,7 +765,9 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	switch event.Action {
 	case agent.PermissionActionAllow:
 		label := "allowed once"
-		if event.DecisionAction == agent.PermissionDecisionAllowPrefix {
+		if event.DecisionAction == agent.PermissionDecisionAlwaysAllowPrefix {
+			label = "always prefix"
+		} else if event.DecisionAction == agent.PermissionDecisionAllowPrefix {
 			label = "allowed prefix"
 		} else if event.DecisionAction == agent.PermissionDecisionAllowForSession ||
 			(event.Grant != nil && event.Grant.Session) {
@@ -934,6 +936,11 @@ func permissionOptionLabel(option permissionOption, request agent.PermissionRequ
 			return "Yes, and allow `" + strings.Join(request.CommandPrefix, " ") + "` in this session"
 		}
 		return "Yes, and allow this command prefix in this session"
+	case permissionDecisionAlwaysAllowPrefix:
+		if len(request.CommandPrefix) > 0 {
+			return "Yes, and always allow `" + strings.Join(request.CommandPrefix, " ") + "`"
+		}
+		return "Yes, and always allow this command prefix"
 	case permissionDecisionAlwaysAllow:
 		if request.SideEffect == string(tools.SideEffectNetwork) {
 			return "Yes, and allow this host in the future"

@@ -253,6 +253,13 @@ func TestClassifyASTCatchesDestructiveProgramsRegexMisses(t *testing.T) {
 	}
 }
 
+func TestClassifyFlagsFindDeleteAsDestructive(t *testing.T) {
+	risk := classifyCommand("find . -type f -delete")
+	if risk.Level != RiskCritical || !HasRiskCategory(risk, "destructive") {
+		t.Fatalf("Classify(find -delete) = level %s, categories %v; want critical destructive", risk.Level, risk.Categories)
+	}
+}
+
 func TestClassifyASTCatchesNetworkProgramsRegexMisses(t *testing.T) {
 	for _, command := range []string{
 		"telnet example.com 23",

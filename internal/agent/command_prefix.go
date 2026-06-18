@@ -7,55 +7,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-var bannedCommandPrefixSuggestions = [][]string{
-	{"python3"},
-	{"python3", "-"},
-	{"python3", "-c"},
-	{"python"},
-	{"python", "-"},
-	{"python", "-c"},
-	{"py"},
-	{"py", "-3"},
-	{"pythonw"},
-	{"pyw"},
-	{"pypy"},
-	{"pypy3"},
-	{"git"},
-	{"bash"},
-	{"bash", "-lc"},
-	{"sh"},
-	{"sh", "-c"},
-	{"sh", "-lc"},
-	{"zsh"},
-	{"zsh", "-lc"},
-	{"/bin/zsh"},
-	{"/bin/zsh", "-lc"},
-	{"/bin/bash"},
-	{"/bin/bash", "-lc"},
-	{"pwsh"},
-	{"pwsh", "-Command"},
-	{"pwsh", "-c"},
-	{"powershell"},
-	{"powershell", "-Command"},
-	{"powershell", "-c"},
-	{"powershell.exe"},
-	{"powershell.exe", "-Command"},
-	{"powershell.exe", "-c"},
-	{"env"},
-	{"sudo"},
-	{"node"},
-	{"node", "-e"},
-	{"perl"},
-	{"perl", "-e"},
-	{"ruby"},
-	{"ruby", "-e"},
-	{"php"},
-	{"php", "-r"},
-	{"lua"},
-	{"lua", "-e"},
-	{"osascript"},
-}
-
 func proposedCommandPrefix(toolName string, args map[string]any) []string {
 	if toolName != "bash" {
 		return nil
@@ -74,25 +25,31 @@ func proposedCommandPrefix(toolName string, args map[string]any) []string {
 		}
 		return nil
 	}
-	if unsafeCommandPrefix(tokens) {
+	if !sandbox.ValidCommandPrefix(tokens) {
 		return nil
 	}
 	return append([]string(nil), tokens...)
 }
 
-func matchSessionCommandPrefix(toolName string, args map[string]any, options Options) (sandbox.CommandPrefixGrant, bool) {
+func matchCommandPrefix(toolName string, args map[string]any, options Options) (sandbox.CommandPrefixGrant, bool, bool) {
 	if toolName != "bash" || options.Sandbox == nil {
-		return sandbox.CommandPrefixGrant{}, false
+		return sandbox.CommandPrefixGrant{}, false, false
 	}
 	command, ok := firstStringArg(args, "command", "cmd", "script", "shell")
 	if !ok {
-		return sandbox.CommandPrefixGrant{}, false
+		return sandbox.CommandPrefixGrant{}, false, false
 	}
 	tokens, ok := safeShellCommandTokens(command)
 	if !ok {
-		return sandbox.CommandPrefixGrant{}, false
+		return sandbox.CommandPrefixGrant{}, false, false
 	}
-	return options.Sandbox.LookupCommandPrefixForSession(toolName, tokens)
+	if grant, ok := options.Sandbox.LookupCommandPrefix(toolName, tokens); ok {
+		return grant, true, false
+	}
+	if grant, ok := options.Sandbox.LookupCommandPrefixForSession(toolName, tokens); ok {
+		return grant, true, true
+	}
+	return sandbox.CommandPrefixGrant{}, false, false
 }
 
 func firstStringArg(args map[string]any, names ...string) (string, bool) {
@@ -143,7 +100,7 @@ func cleanPrefixRule(prefix []string) []string {
 }
 
 func safeRequestedPrefix(prefix []string, command []string) bool {
-	if len(prefix) == 0 || unsafeCommandPrefix(prefix) || len(prefix) > len(command) {
+	if len(prefix) == 0 || !sandbox.ValidCommandPrefix(prefix) || len(prefix) > len(command) {
 		return false
 	}
 	for index := range prefix {
@@ -177,54 +134,15 @@ func safeShellCommandTokens(command string) ([]string, bool) {
 			return nil, false
 		}
 		lit, ok := word.Parts[0].(*syntax.Lit)
-		if !ok || unsafeCommandPrefixPart(lit.Value) {
+		if !ok {
 			return nil, false
 		}
 		tokens = append(tokens, lit.Value)
 	}
-	if unsafeCommandPrefix(tokens) {
+	if !sandbox.ValidCommandPrefix(tokens) {
 		return nil, false
 	}
 	return tokens, true
-}
-
-func unsafeCommandPrefix(prefix []string) bool {
-	if len(prefix) == 0 {
-		return true
-	}
-	for _, part := range prefix {
-		if unsafeCommandPrefixPart(part) {
-			return true
-		}
-	}
-	for _, banned := range bannedCommandPrefixSuggestions {
-		if equalStringSlices(prefix, banned) {
-			return true
-		}
-	}
-	if unsafeCommandPrefixLauncher(prefix[0]) {
-		return true
-	}
-	return false
-}
-
-func unsafeCommandPrefixPart(part string) bool {
-	part = strings.TrimSpace(part)
-	return part == "" ||
-		strings.ContainsAny(part, "\x00\r\n*?[]{}") ||
-		strings.Contains(part, "$(") ||
-		strings.Contains(part, "`")
-}
-
-func unsafeCommandPrefixLauncher(program string) bool {
-	switch program {
-	case "bash", "sh", "zsh", "/bin/bash", "/bin/zsh",
-		"pwsh", "powershell", "powershell.exe",
-		"env", "sudo", "osascript":
-		return true
-	default:
-		return false
-	}
 }
 
 func equalStringSlices(left []string, right []string) bool {

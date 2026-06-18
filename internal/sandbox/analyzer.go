@@ -93,7 +93,7 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if networkPrograms[prog] {
 			result.Network = true
 		}
-		if destructivePrograms[prog] || (prog == "rm" && hasRecursiveForce(rest)) {
+		if destructivePrograms[prog] || (prog == "rm" && hasRecursiveForce(rest)) || (prog == "find" && hasFindDelete(rest)) {
 			result.Destructive = true
 		}
 		return true
@@ -237,4 +237,13 @@ func hasRecursiveForce(args []*syntax.Word) bool {
 		}
 	}
 	return recursive && force
+}
+
+func hasFindDelete(args []*syntax.Word) bool {
+	for _, arg := range args {
+		if wordText(arg) == "-delete" {
+			return true
+		}
+	}
+	return false
 }

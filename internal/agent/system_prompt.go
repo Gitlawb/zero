@@ -74,6 +74,9 @@ func buildSystemPrompt(options Options) string {
 	if session := sessionRuntimeContext(options); session != "" {
 		sections = append(sections, session)
 	}
+	if prefixes := approvedCommandPrefixContext(options); prefixes != "" {
+		sections = append(sections, prefixes)
+	}
 	if seed := workspaceSeedContext(options.Cwd); seed != "" {
 		sections = append(sections, seed)
 	}
@@ -87,6 +90,27 @@ func buildSystemPrompt(options Options) string {
 		sections = append(sections, policy)
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+func approvedCommandPrefixContext(options Options) string {
+	if options.Sandbox == nil {
+		return ""
+	}
+	prefixes := options.Sandbox.ApprovedCommandPrefixes()
+	if len(prefixes) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(prefixes))
+	for _, grant := range prefixes {
+		if len(grant.Prefix) == 0 {
+			continue
+		}
+		lines = append(lines, "- "+grant.ToolName+": "+strings.Join(grant.Prefix, " "))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "## Approved Command Prefixes\n\nThe following command prefixes have already been approved and do not need another permission prompt:\n" + strings.Join(lines, "\n")
 }
 
 // specialistDelegationContext nudges the orchestrator to offload read-heavy or

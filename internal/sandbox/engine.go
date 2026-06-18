@@ -83,10 +83,44 @@ func (engine *Engine) GrantCommandPrefixForSession(toolName string, prefix []str
 	if engine == nil || len(prefix) == 0 {
 		return
 	}
+	prefix, ok := NormalizeCommandPrefix(prefix)
+	if !ok {
+		return
+	}
 	engine.commandPrefixes.add(CommandPrefixGrant{
 		ToolName: toolName,
 		Prefix:   prefix,
+		Session:  true,
 	})
+}
+
+func (engine *Engine) GrantCommandPrefix(input CommandPrefixInput) (CommandPrefixGrant, error) {
+	if engine == nil || engine.store == nil {
+		return CommandPrefixGrant{}, errors.New("sandbox grant store is not configured")
+	}
+	return engine.store.GrantCommandPrefix(input)
+}
+
+func (engine *Engine) LookupCommandPrefix(toolName string, command []string) (CommandPrefixGrant, bool) {
+	if engine == nil || engine.store == nil || len(command) == 0 {
+		return CommandPrefixGrant{}, false
+	}
+	grant, matched, err := engine.store.LookupCommandPrefix(toolName, command)
+	if err != nil {
+		return CommandPrefixGrant{}, false
+	}
+	return grant, matched
+}
+
+func (engine *Engine) ApprovedCommandPrefixes() []CommandPrefixGrant {
+	if engine == nil || engine.store == nil {
+		return nil
+	}
+	grants, err := engine.store.ListCommandPrefixes()
+	if err != nil {
+		return nil
+	}
+	return grants
 }
 
 func (engine *Engine) LookupCommandPrefixForSession(toolName string, command []string) (CommandPrefixGrant, bool) {

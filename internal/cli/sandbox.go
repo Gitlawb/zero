@@ -354,15 +354,20 @@ func runSandboxGrants(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		if err != nil {
 			return writeAppError(stderr, err.Error(), exitCrash)
 		}
+		prefixes, err := store.ListCommandPrefixes()
+		if err != nil {
+			return writeAppError(stderr, err.Error(), exitCrash)
+		}
 		if options.json {
 			if err := writePrettyJSON(stdout, struct {
-				Grants []zeroSandbox.Grant `json:"grants"`
-			}{Grants: grants}); err != nil {
+				Grants          []zeroSandbox.Grant              `json:"grants"`
+				CommandPrefixes []zeroSandbox.CommandPrefixGrant `json:"commandPrefixes,omitempty"`
+			}{Grants: grants, CommandPrefixes: prefixes}); err != nil {
 				return exitCrash
 			}
 			return exitSuccess
 		}
-		if _, err := fmt.Fprintln(stdout, zeroSandbox.FormatGrantList(grants)); err != nil {
+		if _, err := fmt.Fprintln(stdout, zeroSandbox.FormatGrantListWithCommandPrefixes(grants, prefixes)); err != nil {
 			return exitCrash
 		}
 		return exitSuccess

@@ -48,3 +48,41 @@ func TestProposedCommandPrefixRejectsUnsafeShellForms(t *testing.T) {
 		})
 	}
 }
+
+func TestProposedCommandPrefixRejectsUnsafeLaunchers(t *testing.T) {
+	cases := []string{
+		"find . -type f",
+		"xargs rm -rf /tmp/x",
+		"timeout 5 go test ./...",
+		"nice go test ./...",
+		"nohup go test ./...",
+		"watch ls",
+		"ssh host ls",
+		"make test",
+		"npm run dev",
+		"command git status",
+		"eval echo hi",
+		"exec echo hi",
+		"python script.py",
+		"node script.js",
+		"./script.sh --flag",
+		"/tmp/script.sh --flag",
+	}
+	for _, command := range cases {
+		t.Run(command, func(t *testing.T) {
+			if got := proposedCommandPrefix("bash", map[string]any{"command": command}); got != nil {
+				t.Fatalf("unsafe launcher got prefix %#v", got)
+			}
+		})
+	}
+}
+
+func TestProposedCommandPrefixRejectsRequestedUnsafeLauncherPrefix(t *testing.T) {
+	got := proposedCommandPrefix("bash", map[string]any{
+		"command":     "find . -type f",
+		"prefix_rule": []any{"find", "."},
+	})
+	if got != nil {
+		t.Fatalf("unsafe requested launcher prefix should be rejected, got %#v", got)
+	}
+}

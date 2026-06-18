@@ -323,13 +323,14 @@ type prWatcherStartedMsg struct {
 type permissionDecision = agent.PermissionDecisionAction
 
 const (
-	permissionDecisionAllow           permissionDecision = agent.PermissionDecisionAllow
-	permissionDecisionAllowStrict     permissionDecision = agent.PermissionDecisionAllowStrict
-	permissionDecisionAllowForSession permissionDecision = agent.PermissionDecisionAllowForSession
-	permissionDecisionAllowPrefix     permissionDecision = agent.PermissionDecisionAllowPrefix
-	permissionDecisionDeny            permissionDecision = agent.PermissionDecisionDeny
-	permissionDecisionAlwaysAllow     permissionDecision = agent.PermissionDecisionAlwaysAllow
-	permissionDecisionCancel          permissionDecision = agent.PermissionDecisionCancel
+	permissionDecisionAllow             permissionDecision = agent.PermissionDecisionAllow
+	permissionDecisionAllowStrict       permissionDecision = agent.PermissionDecisionAllowStrict
+	permissionDecisionAllowForSession   permissionDecision = agent.PermissionDecisionAllowForSession
+	permissionDecisionAllowPrefix       permissionDecision = agent.PermissionDecisionAllowPrefix
+	permissionDecisionAlwaysAllowPrefix permissionDecision = agent.PermissionDecisionAlwaysAllowPrefix
+	permissionDecisionDeny              permissionDecision = agent.PermissionDecisionDeny
+	permissionDecisionAlwaysAllow       permissionDecision = agent.PermissionDecisionAlwaysAllow
+	permissionDecisionCancel            permissionDecision = agent.PermissionDecisionCancel
 )
 
 type permissionRequestMsg struct {
@@ -2286,6 +2287,8 @@ func permissionDecisionReason(decision permissionDecision) string {
 		return "approved for this session in TUI"
 	case permissionDecisionAllowPrefix:
 		return "approved command prefix for this session in TUI"
+	case permissionDecisionAlwaysAllowPrefix:
+		return "persistently approved command prefix in TUI"
 	case permissionDecisionAlwaysAllow:
 		return "persistently approved in TUI"
 	case permissionDecisionCancel:

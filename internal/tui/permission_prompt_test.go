@@ -103,6 +103,30 @@ func TestPermissionOptionsExposeCommandPrefixApproval(t *testing.T) {
 	}
 }
 
+func TestPermissionOptionsExposePersistentCommandPrefixApproval(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName:      "bash",
+		CommandPrefix: []string{"git", "status"},
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowPrefix,
+			agent.PermissionDecisionAlwaysAllowPrefix,
+			agent.PermissionDecisionCancel,
+		},
+	}
+	options := permissionOptions(request)
+	if len(options) != 4 || options[2].choice != permissionDecisionAlwaysAllowPrefix || options[2].hotkey != "y" {
+		t.Fatalf("persistent prefix option = %#v, want y hotkey in supplied order", options)
+	}
+	card, _ := renderFocusedPermissionPrompt(request, 2, 100)
+	got := plainRender(t, card)
+	for _, want := range []string{"always allow `git status`", "[y]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("permission card = %q, missing %q", got, want)
+		}
+	}
+}
+
 func TestPermissionOptionsCanExposePatchCancelWithoutRecoverableDeny(t *testing.T) {
 	request := agent.PermissionRequest{
 		ToolName: "apply_patch",

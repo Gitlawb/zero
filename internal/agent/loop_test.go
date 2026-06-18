@@ -1209,6 +1209,161 @@ func TestRunCommandPrefixApprovalSkipsLaterMatchingBashPrompt(t *testing.T) {
 	}
 }
 
+func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	policy := sandbox.DefaultPolicy()
+	policy.Network = sandbox.NetworkAllow
+
+	firstProvider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo persist-ok"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "first done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var firstRequests []PermissionRequest
+	var firstEvents []PermissionEvent
+	if _, err := Run(context.Background(), "run once", firstProvider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        policy,
+			Store:         store,
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			firstRequests = append(firstRequests, request)
+			if !containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAlwaysAllowPrefix) {
+				t.Fatalf("bash prompt missing persistent prefix approval decision: %#v", request.AvailableDecisions)
+			}
+			return PermissionDecision{Action: PermissionDecisionAlwaysAllowPrefix, Reason: "trust this command prefix"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			firstEvents = append(firstEvents, event)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstRequests) != 1 {
+		t.Fatalf("expected first run to prompt once, got %#v", firstRequests)
+	}
+	if len(firstEvents) != 1 || firstEvents[0].DecisionAction != PermissionDecisionAlwaysAllowPrefix {
+		t.Fatalf("expected persistent prefix event, got %#v", firstEvents)
+	}
+	prefixes, err := store.ListCommandPrefixes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefixes) != 1 || !equalStringSlices(prefixes[0].Prefix, []string{"echo", "persist-ok"}) {
+		t.Fatalf("persisted prefixes = %#v, want echo persist-ok", prefixes)
+	}
+
+	secondProvider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"command":"echo persist-ok again"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "second done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var secondEvents []PermissionEvent
+	if _, err := Run(context.Background(), "run again", secondProvider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        policy,
+			Store:         store,
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			t.Fatalf("persistent command prefix should skip prompt, got %#v", request)
+			return PermissionDecision{}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			secondEvents = append(secondEvents, event)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(secondEvents) != 1 || secondEvents[0].DecisionAction != PermissionDecisionAlwaysAllowPrefix || !secondEvents[0].PermissionGranted {
+		t.Fatalf("expected persistent prefix match event, got %#v", secondEvents)
+	}
+}
+
+func TestRunPersistentCommandPrefixDoesNotBypassNetworkDeny(t *testing.T) {
+	root := t.TempDir()
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GrantCommandPrefix(sandbox.CommandPrefixInput{ToolName: "bash", Prefix: []string{"curl"}}); err != nil {
+		t.Fatalf("seed command prefix: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"curl https://example.com"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var events []PermissionEvent
+	if _, err := Run(context.Background(), "curl", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Store:         store,
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			t.Fatalf("matched persistent command prefix should not prompt before sandbox denial, got %#v", request)
+			return PermissionDecision{}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			events = append(events, event)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != PermissionActionDeny || events[0].Violation == nil || events[0].Violation.Code != sandbox.ViolationNetwork {
+		t.Fatalf("expected network sandbox denial despite prefix match, got %#v", events)
+	}
+}
+
 func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

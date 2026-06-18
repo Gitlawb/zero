@@ -591,10 +591,15 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	var decisionAction PermissionDecisionAction
 	var decisionCommandPrefix []string
 	if toolFound && !permissionGranted {
-		if grant, ok := matchSessionCommandPrefix(call.Name, args, options); ok {
+		if grant, ok, session := matchCommandPrefix(call.Name, args, options); ok {
 			permissionGranted = true
-			decisionAction = PermissionDecisionAllowPrefix
-			decisionReason = "session command prefix approval matched"
+			if session {
+				decisionAction = PermissionDecisionAllowPrefix
+				decisionReason = "session command prefix approval matched"
+			} else {
+				decisionAction = PermissionDecisionAlwaysAllowPrefix
+				decisionReason = "persistent command prefix approval matched"
+			}
 			decisionCommandPrefix = grant.Prefix
 		}
 	}
@@ -643,6 +648,19 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			decisionCommandPrefix = append([]string(nil), request.CommandPrefix...)
 			if options.Sandbox != nil && len(decisionCommandPrefix) > 0 {
 				options.Sandbox.GrantCommandPrefixForSession(call.Name, decisionCommandPrefix)
+			}
+		case PermissionDecisionAlwaysAllowPrefix:
+			if len(request.CommandPrefix) == 0 {
+				emitDeniedPermission(options, call, requestEvent, decisionReason)
+				return deniedPermissionResult(call, decisionReason, requestEvent), nil
+			}
+			permissionGranted = true
+			requestEvent.DecisionAction = decision.Action
+			decisionCommandPrefix = append([]string(nil), request.CommandPrefix...)
+			if options.Sandbox != nil && len(decisionCommandPrefix) > 0 {
+				if grant, err := persistCommandPrefixGrant(call.Name, decisionCommandPrefix, decisionReason, options); err == nil {
+					decisionCommandPrefix = append([]string(nil), grant.Prefix...)
+				}
 			}
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
@@ -1026,7 +1044,7 @@ func requestPermission(ctx context.Context, request PermissionRequest, options O
 
 func normalizePermissionDecisionAction(action PermissionDecisionAction) PermissionDecisionAction {
 	switch action {
-	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
+	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAlwaysAllowPrefix, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
 		return action
 	default:
 		return PermissionDecisionDeny
@@ -1318,6 +1336,17 @@ func persistSessionPermissionGrant(toolName string, args map[string]any, reason 
 	})
 }
 
+func persistCommandPrefixGrant(toolName string, prefix []string, reason string, options Options) (sandbox.CommandPrefixGrant, error) {
+	if options.Sandbox == nil {
+		return sandbox.CommandPrefixGrant{}, errors.New("sandbox engine is not configured")
+	}
+	return options.Sandbox.GrantCommandPrefix(sandbox.CommandPrefixInput{
+		ToolName: toolName,
+		Prefix:   prefix,
+		Reason:   reason,
+	})
+}
+
 func emitDeniedPermission(options Options, call ToolCall, requestEvent PermissionEvent, reason string) {
 	if options.OnPermission == nil {
 		return
@@ -1564,6 +1593,9 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 		decisions = append(decisions, PermissionDecisionAllowForSession)
 		if event.ToolName == "bash" && len(event.CommandPrefix) > 0 {
 			decisions = append(decisions, PermissionDecisionAllowPrefix)
+			if options.Sandbox.CanPersistGrants() {
+				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
+			}
 		}
 		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) {
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)

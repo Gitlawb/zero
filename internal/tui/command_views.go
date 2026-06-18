@@ -307,10 +307,33 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 			},
 		})
 	}
+	prefixes := []sandbox.CommandPrefixGrant{}
+	if prefixStore, ok := store.(commandPrefixGrantLister); ok {
+		var prefixErr error
+		prefixes, prefixErr = prefixStore.ListCommandPrefixes()
+		if prefixErr != nil {
+			return renderCommandCardTranscript(commandCard{
+				Title:   "Permissions",
+				Summary: []string{mode + " permissions", "grants error"},
+				Sections: []commandCardSection{
+					{
+						Title: "State",
+						Fields: []commandField{
+							{Key: "mode", Value: mode},
+						},
+					},
+					{
+						Title: "Grants",
+						Lines: []string{"error: " + prefixErr.Error()},
+					},
+				},
+			})
+		}
+	}
 
 	snapshots := zerocommands.SandboxGrantSnapshots(grants)
 	grantRows := []commandRow{}
-	if len(snapshots) == 0 {
+	if len(snapshots) == 0 && len(prefixes) == 0 {
 		grantRows = append(grantRows, commandRow{Text: "none"})
 	} else {
 		for _, grant := range snapshots {
@@ -323,11 +346,21 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 			}
 			grantRows = append(grantRows, commandRow{Text: line})
 		}
+		for _, grant := range prefixes {
+			line := fmt.Sprintf("%s `%s` [command-prefix]", grant.ToolName, strings.Join(grant.Prefix, " "))
+			if grant.ApprovedAt != "" {
+				line += " approved " + grant.ApprovedAt
+			}
+			if grant.Reason != "" {
+				line += " - " + grant.Reason
+			}
+			grantRows = append(grantRows, commandRow{Text: line})
+		}
 	}
 
 	return renderCommandCardTranscript(commandCard{
 		Title:   "Permissions",
-		Summary: []string{mode + " permissions", formatGrantCount(len(snapshots))},
+		Summary: []string{mode + " permissions", formatGrantCount(len(snapshots) + len(prefixes))},
 		Sections: []commandCardSection{
 			{
 				Title: "State",
@@ -348,6 +381,10 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 // filesystem path.
 type grantLister interface {
 	List() ([]sandbox.Grant, error)
+}
+
+type commandPrefixGrantLister interface {
+	ListCommandPrefixes() ([]sandbox.CommandPrefixGrant, error)
 }
 
 func formatGrantCount(count int) string {

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
@@ -68,6 +70,22 @@ func TestBuildSystemPromptOmitsWorkspaceSeedWithoutCwd(t *testing.T) {
 
 	if strings.Contains(prompt, "<workspace_seed>") || strings.Contains(prompt, "Workspace context seed") {
 		t.Fatalf("workspace seed should be absent without cwd, got:\n%s", prompt)
+	}
+}
+
+func TestBuildSystemPromptIncludesApprovedCommandPrefixes(t *testing.T) {
+	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.GrantCommandPrefix(sandbox.CommandPrefixInput{ToolName: "bash", Prefix: []string{"git", "status"}}); err != nil {
+		t.Fatalf("GrantCommandPrefix returned error: %v", err)
+	}
+	prompt := buildSystemPrompt(Options{Sandbox: sandbox.NewEngine(sandbox.EngineOptions{Store: store})})
+	for _, want := range []string{"Approved Command Prefixes", "bash: git status"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 

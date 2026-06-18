@@ -39,13 +39,14 @@ const (
 )
 
 const (
-	PermissionDecisionAllow           PermissionDecisionAction = "allow"
-	PermissionDecisionAllowStrict     PermissionDecisionAction = "allow_with_strict_auto_review"
-	PermissionDecisionAllowForSession PermissionDecisionAction = "allow_for_session"
-	PermissionDecisionAllowPrefix     PermissionDecisionAction = "allow_prefix_for_session"
-	PermissionDecisionDeny            PermissionDecisionAction = "deny"
-	PermissionDecisionAlwaysAllow     PermissionDecisionAction = "always_allow"
-	PermissionDecisionCancel          PermissionDecisionAction = "cancel"
+	PermissionDecisionAllow             PermissionDecisionAction = "allow"
+	PermissionDecisionAllowStrict       PermissionDecisionAction = "allow_with_strict_auto_review"
+	PermissionDecisionAllowForSession   PermissionDecisionAction = "allow_for_session"
+	PermissionDecisionAllowPrefix       PermissionDecisionAction = "allow_prefix_for_session"
+	PermissionDecisionAlwaysAllowPrefix PermissionDecisionAction = "always_allow_prefix"
+	PermissionDecisionDeny              PermissionDecisionAction = "deny"
+	PermissionDecisionAlwaysAllow       PermissionDecisionAction = "always_allow"
+	PermissionDecisionCancel            PermissionDecisionAction = "cancel"
 )
 
 type ToolResult struct {

@@ -105,6 +105,41 @@ func TestRunSandboxGrantsAllowListDenyRevokeAndClear(t *testing.T) {
 	}
 }
 
+func TestRunSandboxGrantsListIncludesCommandPrefixes(t *testing.T) {
+	store := newSandboxTestStore(t)
+	if _, err := store.GrantCommandPrefix(sandbox.CommandPrefixInput{ToolName: "bash", Prefix: []string{"git", "status"}, Reason: "status checks"}); err != nil {
+		t.Fatalf("GrantCommandPrefix: %v", err)
+	}
+	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil }}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"sandbox", "grants", "list", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("list json exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	var payload struct {
+		CommandPrefixes []sandbox.CommandPrefixGrant `json:"commandPrefixes"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.CommandPrefixes) != 1 || !reflect.DeepEqual(payload.CommandPrefixes[0].Prefix, []string{"git", "status"}) {
+		t.Fatalf("unexpected commandPrefixes payload: %#v", payload.CommandPrefixes)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"sandbox", "grants", "list"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("list text exit = %d, stderr %q", exitCode, stderr.String())
+	}
+	for _, want := range []string{"bash", "`git status`", "command-prefix", "status checks"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("list text = %q, missing %q", stdout.String(), want)
+		}
+	}
+}
+
 func TestRunSandboxGrantsCreateAndRevokeByPath(t *testing.T) {
 	store := newSandboxTestStore(t)
 	deps := appDeps{newSandboxStore: func() (*sandbox.GrantStore, error) { return store, nil }}
