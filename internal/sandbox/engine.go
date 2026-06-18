@@ -167,13 +167,11 @@ func (engine *Engine) ReadExclusionGlobs() []string {
 	return ReadExclusionGlobs(policy, engine.scope)
 }
 
-// effectiveNetworkMode is the single source of truth for the engine's active
-// network mode: it collapses an empty-allowlist scoped policy to deny, and ALSO
+// effectiveNetworkMode is the single source of truth for sandboxed command
+// egress: it collapses an empty-allowlist scoped policy to deny, and ALSO
 // downgrades scoped to deny when the backend cannot actually route scoped egress
 // (only sandbox-exec can; bubblewrap's isolated netns and policy-only cannot), so
-// a scoped policy that can't be enforced fails closed. Both Evaluate and
-// NetworkHostAllowed go through this so the engine-level decision and the
-// per-tool gate never diverge.
+// a scoped policy that can't be enforced fails closed.
 func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 	mode := effectiveNetwork(policy)
 	if mode == NetworkScoped && !engine.backend.EnforcesScopedEgress() {
@@ -182,57 +180,13 @@ func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 	return mode
 }
 
-// NetworkHostAllowed reports whether the engine's policy permits a network
-// connection to host, plus the effective network mode that decided it. It is the
-// shared gate so non-shell network tools (e.g. web_fetch) honor the SAME
-// allow/deny/scoped policy — including the backend-aware fail-closed downgrade —
-// that Evaluate and the bash egress proxy enforce, rather than each tool
-// reimplementing domain matching. host may include a :port; only the hostname is
-// matched. A disabled policy or nil engine allows everything (network tools keep
-// their pre-sandbox behaviour); deny blocks everything; scoped allows only hosts
-// in AllowedDomains minus DeniedDomains (an empty allowlist, or a backend that
-// can't enforce scoped egress, collapses to deny).
-//
-// By default the first-party, in-process tools that consult this gate are NOT
-// subject to the network policy (EnforceToolNetwork is off): that policy exists
-// to confine the sandboxed SHELL's egress, which these tools don't use, and they
-// retain their own SSRF/port/redirect safeguards. Set EnforceToolNetwork to also
-// hold them to the allow/scoped/deny policy. The sandboxed-shell egress decision
-// lives in Evaluate via effectiveNetworkMode and is unaffected by this flag.
-func (engine *Engine) NetworkHostAllowed(host string) (bool, NetworkMode) {
-	if engine == nil {
-		return true, NetworkAllow
-	}
-	policy := engine.effectivePolicy(engine.policy)
-	if policy.Mode == ModeDisabled {
-		return true, NetworkAllow
-	}
-	if !policy.EnforceToolNetwork {
-		// First-party in-process tools are exempt unless the operator opts in.
-		return true, NetworkAllow
-	}
-	switch mode := engine.effectiveNetworkMode(policy); mode {
-	case NetworkAllow:
-		return true, mode
-	case NetworkScoped:
-		allowed := domainAllowed(host, normalizeDomains(policy.AllowedDomains), normalizeDomains(policy.DeniedDomains))
-		return allowed, mode
-	default:
-		return false, NetworkDeny
-	}
-}
-
 // toolNetworkExempt reports whether a request is exempt from the engine-level
-// network deny because it is a first-party, in-process network TOOL — one that
-// declares SideEffectNetwork (web_search / web_fetch) — and the operator has not
-// opted into EnforceToolNetwork. Such tools do not use the sandboxed shell's
-// egress; they keep their own SSRF/host safeguards, and NetworkHostAllowed (also
-// gated by EnforceToolNetwork) governs them at run time. A SHELL command merely
-// classified as network (SideEffectShell) is NOT exempt, so shell egress stays
-// blocked under deny. Mirrors the NetworkHostAllowed exemption so the Evaluate
-// gate and the per-tool gate never diverge.
-func (engine *Engine) toolNetworkExempt(policy Policy, request Request) bool {
-	return !policy.EnforceToolNetwork && request.SideEffect == SideEffectNetwork
+// network deny because it is a first-party, in-process network tool. Such tools
+// do not use sandboxed shell egress; they keep their own SSRF/host safeguards. A
+// shell command merely classified as network (SideEffectShell) is NOT exempt, so
+// shell egress stays blocked under deny.
+func (engine *Engine) toolNetworkExempt(request Request) bool {
+	return request.SideEffect == SideEffectNetwork
 }
 
 // scopeFor returns the scope to validate request paths against. The engine's
@@ -367,10 +321,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// downgrades scoped to deny when the backend can't route through the filtering
 	// proxy (bubblewrap's isolated netns has no bridge, policy-only has no
 	// isolation) — so a scoped policy that can't be enforced fails closed rather
-	// than running with unrestricted networking. Shared with NetworkHostAllowed so
-	// the per-tool gate can't diverge from this decision. Allow is unchanged.
+	// than running with unrestricted networking. Allow is unchanged.
 	netMode := engine.effectiveNetworkMode(policy)
-	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(policy, request) {
+	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
 		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonNetworkBlocked}
 		}

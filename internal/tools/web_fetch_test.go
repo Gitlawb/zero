@@ -204,7 +204,7 @@ func TestWebFetchToolConfiguresDialTimeSafetyForDefaultTransport(t *testing.T) {
 		t.Fatalf("NewWebFetchTool returned %T, want webFetchTool", NewWebFetchTool())
 	}
 
-	client := tool.clientForRun(nil)
+	client := tool.clientForRun()
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("client transport = %T, want *http.Transport", client.Transport)
@@ -347,95 +347,64 @@ func httpStatusLine(statusCode int) string {
 	return strings.TrimSpace(strings.Join([]string{strconv.Itoa(statusCode), http.StatusText(statusCode)}, " "))
 }
 
-type fakeNetworkGate struct {
-	allowed bool
-	mode    zeroSandbox.NetworkMode
-}
-
-func (g fakeNetworkGate) NetworkHostAllowed(string) (bool, zeroSandbox.NetworkMode) {
-	return g.allowed, g.mode
-}
-
-func TestEnforceScopedNetworkPolicy(t *testing.T) {
-	if err := enforceScopedNetworkPolicy(nil, "example.com"); err != nil {
-		t.Fatalf("nil gate must impose no restriction, got %v", err)
-	}
-	if err := enforceScopedNetworkPolicy(fakeNetworkGate{allowed: true, mode: zeroSandbox.NetworkAllow}, "example.com"); err != nil {
-		t.Fatalf("allowed host must pass, got %v", err)
-	}
-	denied := enforceScopedNetworkPolicy(fakeNetworkGate{allowed: false, mode: zeroSandbox.NetworkScoped}, "evil.test")
-	if denied == nil || !strings.Contains(denied.Error(), "allowlist") {
-		t.Fatalf("scoped block must mention the allowlist, got %v", denied)
-	}
-	blocked := enforceScopedNetworkPolicy(fakeNetworkGate{allowed: false, mode: zeroSandbox.NetworkDeny}, "example.com")
-	if blocked == nil || !strings.Contains(blocked.Error(), "disabled") {
-		t.Fatalf("deny block must mention the policy, got %v", blocked)
-	}
-}
-
-func TestWebFetchRunWithSandboxBlocksDeniedHost(t *testing.T) {
-	// A transport that fails the test if it is ever reached: the policy check must
-	// short-circuit before any network call.
-	failingClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("web_fetch must not dial a host the sandbox policy denies")
-		return nil, nil
-	})}
-	tool, ok := newWebFetchToolWithClient(failingClient).(webFetchTool)
+func TestWebFetchRunWithSandboxAllowsUnderShellNetworkDeny(t *testing.T) {
+	called := false
+	client := webFetchTestClient(func(request *http.Request) (*http.Response, error) {
+		called = true
+		return webFetchTestResponse(request, http.StatusOK, "text/plain", "ok"), nil
+	})
+	tool, ok := newWebFetchToolWithClientAndResolver(client, publicWebFetchResolver(t, "example.com")).(webFetchTool)
 	if !ok {
-		t.Fatalf("newWebFetchToolWithClient returned %T", newWebFetchToolWithClient(failingClient))
+		t.Fatalf("newWebFetchToolWithClientAndResolver returned %T", newWebFetchToolWithClientAndResolver(client, nil))
 	}
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		// EnforceToolNetwork opts the in-process tool into the network policy; off
-		// (the default) would let web_fetch run despite deny.
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny, EnforceToolNetwork: true},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny},
 	})
 	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://example.com"}, engine)
-	if result.Status != StatusError {
-		t.Fatalf("denied host must yield an error result, got %q: %s", result.Status, result.Output)
+	if result.Status != StatusOK {
+		t.Fatalf("web_fetch must run under shell network deny, got %q: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "disabled") {
-		t.Fatalf("error must explain the network policy, got %q", result.Output)
+	if !called {
+		t.Fatal("web_fetch transport must be called")
 	}
 }
 
-func TestWebFetchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
-	failingClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("web_fetch must not dial a host outside the scoped allowlist")
-		return nil, nil
-	})}
-	tool := newWebFetchToolWithClient(failingClient).(webFetchTool)
+func TestWebFetchRunWithSandboxAllowsUnderScopedShellNetworkPolicy(t *testing.T) {
+	called := false
+	client := webFetchTestClient(func(request *http.Request) (*http.Response, error) {
+		called = true
+		return webFetchTestResponse(request, http.StatusOK, "text/plain", "ok"), nil
+	})
+	tool := newWebFetchToolWithClientAndResolver(client, publicWebFetchResolver(t, "evil.test")).(webFetchTool)
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
 		Backend: zeroSandbox.Backend{
 			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
 		},
 	})
 	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://evil.test"}, engine)
-	if result.Status != StatusError {
-		t.Fatalf("unlisted host must yield an error result, got %q: %s", result.Status, result.Output)
+	if result.Status != StatusOK {
+		t.Fatalf("web_fetch must run under scoped shell network policy, got %q: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "allowlist") {
-		t.Fatalf("error must explain the scoped allowlist, got %q", result.Output)
+	if !called {
+		t.Fatal("web_fetch transport must be called")
 	}
 }
 
-// TestRegistryRoutesWebFetchThroughSandboxScopedPolicy proves the full wiring:
-// the registry runs Evaluate (which passes a scoped, egress-capable backend),
-// then routes web_fetch through RunWithSandbox, whose per-host allowlist check
-// blocks an unlisted host before any network dial.
-func TestRegistryRoutesWebFetchThroughSandboxScopedPolicy(t *testing.T) {
-	failingClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("web_fetch must not dial: the registry must enforce the scoped policy first")
-		return nil, nil
-	})}
+func TestRegistryRoutesWebFetchThroughSandboxPath(t *testing.T) {
+	called := false
+	client := webFetchTestClient(func(request *http.Request) (*http.Response, error) {
+		called = true
+		return webFetchTestResponse(request, http.StatusOK, "text/plain", "ok"), nil
+	})
 	registry := NewRegistry()
-	registry.Register(newWebFetchToolWithClient(failingClient))
+	registry.Register(newWebFetchToolWithClientAndResolver(client, publicWebFetchResolver(t, "evil.test")))
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
 		Backend: zeroSandbox.Backend{
 			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
@@ -445,7 +414,20 @@ func TestRegistryRoutesWebFetchThroughSandboxScopedPolicy(t *testing.T) {
 		Sandbox:           engine,
 		PermissionGranted: true,
 	})
-	if res.Status != StatusError || !strings.Contains(res.Output, "allowlist") {
-		t.Fatalf("registry must block an unlisted host via RunWithSandbox, got %q: %s", res.Status, res.Output)
+	if res.Status != StatusOK {
+		t.Fatalf("registry must route web_fetch through RunWithSandbox, got %q: %s", res.Status, res.Output)
 	}
+	if !called {
+		t.Fatal("web_fetch transport must be called")
+	}
+}
+
+func publicWebFetchResolver(t *testing.T, expectedHost string) webFetchResolver {
+	t.Helper()
+	return webFetchResolverFunc(func(_ context.Context, network string, host string) ([]netip.Addr, error) {
+		if network != "ip" || host != expectedHost {
+			t.Fatalf("unexpected lookup network=%q host=%q", network, host)
+		}
+		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
+	})
 }

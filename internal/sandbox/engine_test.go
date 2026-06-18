@@ -9,41 +9,25 @@ import (
 	"time"
 )
 
-// TestEvaluateExemptsNetworkToolsFromDenyByDefault reproduces the web_search
-// hard-deny: under NetworkDeny, the engine-level network gate must NOT deny a
-// first-party network TOOL (SideEffect=network) by default, so it follows its
-// normal tool permission metadata instead of being blocked outright. EnforceToolNetwork
-// restores the strict deny, and a network SHELL command becomes a recoverable
-// sandbox prompt instead of a hard preflight denial.
-func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
+// TestEvaluateExemptsNetworkToolsFromShellNetworkPolicy verifies that the
+// sandbox network policy gates sandboxed shell egress, not first-party
+// in-process web tools.
+func TestEvaluateExemptsNetworkToolsFromShellNetworkPolicy(t *testing.T) {
 	base := Policy{Mode: ModeEnforce, Network: NetworkDeny, MaxAutonomy: AutonomyHigh}
 
-	// Default (EnforceToolNetwork off): web_search is NOT network-denied.
 	engine := NewEngine(EngineOptions{Policy: base})
 	d := engine.Evaluate(context.Background(), Request{
 		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow,
 	})
-	if d.Action != ActionAllow {
-		t.Fatalf("web_search must be allowed by default, got %q: %s", d.Action, d.ErrorString())
+	if d.Action != ActionAllow || d.Violation != nil {
+		t.Fatalf("web_search must be allowed by the sandbox gate, got %#v", d)
 	}
 
-	// Granted permission also runs, not blocked.
 	allowed := engine.Evaluate(context.Background(), Request{
 		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow, PermissionGranted: true,
 	})
-	if allowed.Action != ActionAllow {
-		t.Fatalf("granted web_search must be allowed under deny by default, got %q (%s)", allowed.Action, allowed.ErrorString())
-	}
-
-	// EnforceToolNetwork on → strict: the network tool is denied at the gate.
-	strict := base
-	strict.EnforceToolNetwork = true
-	strictEngine := NewEngine(EngineOptions{Policy: strict})
-	ds := strictEngine.Evaluate(context.Background(), Request{
-		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow, PermissionGranted: true,
-	})
-	if ds.Action != ActionDeny || ds.Violation == nil || ds.Violation.Code != ViolationNetwork {
-		t.Fatalf("with EnforceToolNetwork, web_search must be network-denied, got %q (%+v)", ds.Action, ds.Violation)
+	if allowed.Action != ActionAllow || allowed.Violation != nil {
+		t.Fatalf("granted web_search must be allowed under deny, got %#v", allowed)
 	}
 
 	// A network SHELL command (SideEffect=shell) is not exempt; it prompts for an
@@ -525,30 +509,21 @@ func TestEngineClassifiesNetworkAndDestructiveShellCommands(t *testing.T) {
 	}
 }
 
-func TestEngineDeniesNetworkSideEffectWhenPolicyBlocksNetwork(t *testing.T) {
-	// EnforceToolNetwork opts the in-process network tools into the policy; by
-	// default they are exempt (see TestEvaluateExemptsNetworkToolsFromDenyByDefault).
+func TestEngineAllowsNetworkSideEffectWhenShellPolicyBlocksNetwork(t *testing.T) {
 	policy := DefaultPolicy()
-	policy.EnforceToolNetwork = true
 	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: policy})
 
 	decision := engine.Evaluate(context.Background(), Request{
 		ToolName:       "web_fetch",
 		SideEffect:     SideEffectNetwork,
 		Permission:     PermissionPrompt,
-		PermissionMode: PermissionUnsafe,
+		PermissionMode: PermissionModeAsk,
 		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"url": "https://example.com"},
 	})
 
-	if decision.Action != ActionDeny || decision.Violation == nil {
-		t.Fatalf("network tool decision = %#v, want deny violation", decision)
-	}
-	if decision.Violation.Code != ViolationNetwork {
-		t.Fatalf("violation code = %q, want %q", decision.Violation.Code, ViolationNetwork)
-	}
-	if decision.Risk.Level != RiskHigh {
-		t.Fatalf("risk level = %q, want %q", decision.Risk.Level, RiskHigh)
+	if decision.Action != ActionPrompt || decision.Violation != nil {
+		t.Fatalf("network prompt tool should follow permission metadata, got %#v", decision)
 	}
 }
 
@@ -949,66 +924,5 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 	})
 	if inside.Action != ActionAllow {
 		t.Fatalf("scope-only engine, in-workspace write Action=%q (%s), want allow", inside.Action, inside.Reason)
-	}
-}
-
-func TestEngineNetworkHostAllowed(t *testing.T) {
-	// scoped enforcement requires a backend that can actually route scoped egress
-	// (only sandbox-exec); otherwise scoped fails closed (collapses to deny).
-	egressBackend := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
-	noEgressBackend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox"}
-	cases := []struct {
-		name    string
-		policy  Policy
-		backend Backend
-		host    string
-		allowed bool
-		mode    NetworkMode
-	}{
-		{"deny blocks all", Policy{Mode: ModeEnforce, Network: NetworkDeny}, egressBackend, "example.com", false, NetworkDeny},
-		{"allow permits all", Policy{Mode: ModeEnforce, Network: NetworkAllow}, noEgressBackend, "example.com", true, NetworkAllow},
-		{"scoped allows listed host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, egressBackend, "api.example.com", true, NetworkScoped},
-		{"scoped blocks unlisted host", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, egressBackend, "evil.test", false, NetworkScoped},
-		{"scoped honors denylist", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}, DeniedDomains: []string{"secret.example.com"}}, egressBackend, "secret.example.com", false, NetworkScoped},
-		{"scoped empty allowlist collapses to deny", Policy{Mode: ModeEnforce, Network: NetworkScoped}, egressBackend, "example.com", false, NetworkDeny},
-		{"scoped without egress-capable backend fails closed", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, noEgressBackend, "example.com", false, NetworkDeny},
-		{"disabled policy allows all", Policy{Mode: ModeDisabled, Network: NetworkDeny}, noEgressBackend, "example.com", true, NetworkAllow},
-		{"host with port matched on hostname", Policy{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"example.com"}}, egressBackend, "example.com:443", true, NetworkScoped},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			// This table exercises the ENFORCED tool-network gate; the default
-			// (exempt) posture is covered by TestEngineNetworkHostAllowedToolNetworkDefaultExempt.
-			policy := tc.policy
-			policy.EnforceToolNetwork = true
-			engine := NewEngine(EngineOptions{Policy: policy, Backend: tc.backend})
-			allowed, mode := engine.NetworkHostAllowed(tc.host)
-			if allowed != tc.allowed || mode != tc.mode {
-				t.Fatalf("NetworkHostAllowed(%q) = (%v, %q), want (%v, %q)", tc.host, allowed, mode, tc.allowed, tc.mode)
-			}
-		})
-	}
-
-	var nilEngine *Engine
-	if allowed, mode := nilEngine.NetworkHostAllowed("example.com"); !allowed || mode != NetworkAllow {
-		t.Fatalf("nil engine NetworkHostAllowed = (%v, %q), want (true, allow)", allowed, mode)
-	}
-}
-
-// TestEngineNetworkHostAllowedToolNetworkDefaultExempt verifies the default
-// posture: with EnforceToolNetwork off, the in-process tool gate is exempt from
-// the network policy, so even a deny / scoped-unlisted host is allowed (the
-// sandboxed-shell egress decision is separate and unaffected).
-func TestEngineNetworkHostAllowedToolNetworkDefaultExempt(t *testing.T) {
-	egressBackend := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/bin/sandbox-exec", ScopedEgress: true}
-	policies := []Policy{
-		{Mode: ModeEnforce, Network: NetworkDeny},
-		{Mode: ModeEnforce, Network: NetworkScoped, AllowedDomains: []string{"allowed.test"}},
-	}
-	for _, policy := range policies {
-		engine := NewEngine(EngineOptions{Policy: policy, Backend: egressBackend})
-		if allowed, _ := engine.NetworkHostAllowed("evil.test"); !allowed {
-			t.Fatalf("default (EnforceToolNetwork off) must allow the tool host under network=%q", policy.Network)
-		}
 	}
 }

@@ -65,18 +65,27 @@ func TestGrantRequestPermissionsReadDoesNotGrantWrite(t *testing.T) {
 
 func TestGrantRequestPermissionsNetworkOverlaysPolicyForTurn(t *testing.T) {
 	workspace := t.TempDir()
-	policy := DefaultPolicy()
-	policy.EnforceToolNetwork = true
-	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: policy})
-	request := Request{
+	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
-		ToolName:      "web_fetch",
-		SideEffect:    SideEffectNetwork,
-		Permission:    PermissionAllow,
-		Args:          map[string]any{"url": "https://example.com"},
+		Policy:        DefaultPolicy(),
+		Backend: Backend{
+			Name:            BackendLinuxBwrap,
+			Available:       true,
+			Executable:      "/usr/bin/zero-linux-sandbox",
+			CommandWrapping: true,
+			NativeIsolation: true,
+		},
+	})
+	request := Request{
+		WorkspaceRoot:  workspace,
+		ToolName:       "bash",
+		SideEffect:     SideEffectShell,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Args:           map[string]any{"command": "curl https://example.com"},
 	}
-	if before := engine.Evaluate(context.Background(), request); before.Action != ActionDeny {
-		t.Fatalf("default policy should deny shell network, got %#v", before)
+	if before := engine.Evaluate(context.Background(), request); before.Action != ActionPrompt || before.Reason != ReasonNetworkBlocked {
+		t.Fatalf("default policy should prompt for shell network, got %#v", before)
 	}
 	enabled := true
 	cleanup, err := engine.GrantRequestPermissions(RequestPermissionProfile{
@@ -89,7 +98,7 @@ func TestGrantRequestPermissionsNetworkOverlaysPolicyForTurn(t *testing.T) {
 		t.Fatalf("network turn grant should allow shell network, got %#v", after)
 	}
 	cleanup()
-	if afterCleanup := engine.Evaluate(context.Background(), request); afterCleanup.Action != ActionDeny {
+	if afterCleanup := engine.Evaluate(context.Background(), request); afterCleanup.Action != ActionPrompt || afterCleanup.Reason != ReasonNetworkBlocked {
 		t.Fatalf("network turn grant should be cleaned up, got %#v", afterCleanup)
 	}
 }

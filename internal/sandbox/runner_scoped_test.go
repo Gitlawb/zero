@@ -6,36 +6,28 @@ import (
 	"testing"
 )
 
-// TestScopedNetworkGateInEvaluate verifies the preflight network gate: a populated
-// scoped policy permits a network-risk tool ONLY when the active backend can
-// actually route through the filtering proxy. A backend that cannot enforce scoped
-// egress (Linux helper netns has no bridge; policy-only has no isolation)
-// fails closed and denies, exactly like an empty-allowlist scoped policy.
+// TestScopedNetworkGateInEvaluate verifies the preflight shell network gate: a
+// populated scoped policy permits a network-risk shell command only when the
+// active backend can actually route through the filtering proxy. A backend that
+// cannot enforce scoped egress fails closed into the same prompt path as deny.
 func TestScopedNetworkGateInEvaluate(t *testing.T) {
 	root := t.TempDir()
 	networkRequest := Request{
-		ToolName:       "web_fetch",
-		SideEffect:     SideEffectNetwork,
-		Permission:     PermissionAllow,
-		PermissionMode: PermissionModeAuto,
-		Autonomy:       AutonomyHigh,
-		Args:           map[string]any{"url": "https://github.com"},
+		ToolName:          "bash",
+		SideEffect:        SideEffectShell,
+		Permission:        PermissionPrompt,
+		PermissionGranted: true,
+		PermissionMode:    PermissionModeAuto,
+		Autonomy:          AutonomyHigh,
+		Args:              map[string]any{"command": "curl https://github.com"},
 	}
 	seatbelt := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true}
 
-	// This test exercises the network GATE for a network tool, so it opts the
-	// in-process tools into the network policy (EnforceToolNetwork); by default
-	// those tools are exempt and would not be gated here.
-	enforcedScoped := func(allowed, denied []string) Policy {
-		p := scopedPolicy(allowed, denied)
-		p.EnforceToolNetwork = true
-		return p
-	}
-
-	// An enforcing backend lets a populated scoped policy permit a network tool.
-	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped([]string{"github.com"}, nil), Backend: seatbelt})
-	if decision := enforcing.Evaluate(context.Background(), networkRequest); decision.Action == ActionDeny {
-		t.Fatalf("enforcing backend + scoped policy denied a network tool: %#v", decision)
+	// An enforcing backend lets a populated scoped policy proceed to native
+	// sandbox execution, where egress is constrained by the backend/proxy.
+	enforcing := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: seatbelt})
+	if decision := enforcing.Evaluate(context.Background(), networkRequest); decision.Action == ActionDeny || decision.Action == ActionPrompt {
+		t.Fatalf("enforcing backend + scoped policy blocked a shell network command: %#v", decision)
 	}
 
 	// Backends that cannot enforce scoped egress must fail closed (deny).
@@ -44,18 +36,18 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 		"policy-only": {},
 	}
 	for name, backend := range unenforceable {
-		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped([]string{"github.com"}, nil), Backend: backend})
+		engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy([]string{"github.com"}, nil), Backend: backend})
 		decision := engine.Evaluate(context.Background(), networkRequest)
-		if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
-			t.Fatalf("%s backend must deny scoped network it cannot enforce, got %#v", name, decision)
+		if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+			t.Fatalf("%s backend must prompt for scoped network it cannot enforce, got %#v", name, decision)
 		}
 	}
 
 	// Empty allowlist still fails closed regardless of backend.
-	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: enforcedScoped(nil, nil), Backend: seatbelt})
+	empty := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: scopedPolicy(nil, nil), Backend: seatbelt})
 	decision := empty.Evaluate(context.Background(), networkRequest)
-	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationNetwork {
-		t.Fatalf("empty scoped policy must deny network like NetworkDeny, got %#v", decision)
+	if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+		t.Fatalf("empty scoped policy must prompt like NetworkDeny, got %#v", decision)
 	}
 }
 

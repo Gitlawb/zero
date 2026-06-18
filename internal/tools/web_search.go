@@ -82,9 +82,8 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 				AdditionalProperties: false,
 			},
 			// Hosted search is a read-only discovery action. It remains marked as
-			// network for sandbox policy accounting, but it does not interrupt every
-			// search with a permission prompt. Operators that want search held to the
-			// sandbox network allowlist can enable EnforceToolNetwork.
+			// network for metadata, but sandbox network policy is the shell egress
+			// boundary; web_search keeps its own result-domain filtering safeguards.
 			safety: Safety{
 				SideEffect: SideEffectNetwork,
 				Permission: PermissionAllow,
@@ -95,26 +94,9 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 	}
 }
 
-// hostedSearchBackend is implemented by backends that talk to a known HTTP
-// endpoint, so the sandbox network policy can be enforced against that host.
-type hostedSearchBackend interface {
-	endpointHost() string
-}
-
-// RunWithSandbox enforces the engine's network policy against the search
-// backend's endpoint before searching, so web_search honors the same
-// scoped/deny posture as web_fetch and sandboxed shell egress. A nil engine (or
-// an unconfigured backend) falls through to the normal Run path.
+// RunWithSandbox follows the normal web_search path. The sandbox network policy
+// gates sandboxed shell egress, not this in-process hosted search tool.
 func (tool webSearchTool) RunWithSandbox(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine) Result {
-	if engine != nil && tool.backend != nil {
-		host := ""
-		if hosted, ok := tool.backend.(hostedSearchBackend); ok {
-			host = hosted.endpointHost()
-		}
-		if err := enforceScopedNetworkPolicy(engine, host); err != nil {
-			return errorResult("Error: web_search blocked: " + err.Error())
-		}
-	}
 	return tool.Run(ctx, args)
 }
 
@@ -220,10 +202,8 @@ func defaultSearchBackend() searchBackend {
 }
 
 // sameHostRedirectPolicy confines the search backend to redirects that stay on
-// the originally-requested host. RunWithSandbox only policy-checks the configured
-// endpoint host, so a cross-host redirect could otherwise egress to a host the
-// sandbox network policy never authorized; refusing it keeps the check
-// fail-closed across redirects.
+// the originally-requested host, so a configured hosted backend cannot silently
+// redirect the request to a different network origin.
 func sameHostRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= webSearchRedirectLimit {
 		return fmt.Errorf("stopped after %d redirects", webSearchRedirectLimit)
@@ -249,16 +229,6 @@ type httpSearchBackend struct {
 	baseURL  string
 	apiKey   string
 	provider string
-}
-
-// endpointHost returns the hostname of the configured search endpoint, or "" if
-// the base URL cannot be parsed. Used to enforce the sandbox network policy.
-func (backend *httpSearchBackend) endpointHost() string {
-	parsed, err := url.Parse(backend.baseURL)
-	if err != nil {
-		return ""
-	}
-	return parsed.Hostname()
 }
 
 func (backend *httpSearchBackend) Search(ctx context.Context, query string, limit int) ([]searchResult, error) {

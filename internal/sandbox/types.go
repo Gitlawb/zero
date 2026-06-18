@@ -168,14 +168,6 @@ type Policy struct {
 	// NetworkDeny so existing policies keep their exact behaviour.
 	AllowedDomains []string `json:"allowedDomains,omitempty"`
 	DeniedDomains  []string `json:"deniedDomains,omitempty"`
-	// EnforceToolNetwork, when true, subjects the first-party in-process network
-	// tools (web_search / web_fetch) to the sandbox network policy via
-	// NetworkHostAllowed. It is OFF by default: that policy exists to confine the
-	// sandboxed SHELL's egress, which these tools do not use, so by default they
-	// are allowed to run (keeping their own SSRF/port/redirect/redaction
-	// safeguards). The sandboxed-shell egress decision is independent of this flag.
-	// Turn it on to also hold web_search/web_fetch to the allow/scoped/deny policy.
-	EnforceToolNetwork bool `json:"enforceToolNetwork,omitempty"`
 	// BlockUnixSockets, when true on the Linux helper backend, installs a
 	// best-effort seccomp filter in the inner helper stage that denies AF_UNIX
 	// socket creation. It is an extra hardening layer over the native sandbox and

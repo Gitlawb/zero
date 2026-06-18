@@ -157,7 +157,6 @@ func TestHTTPSearchBackendSendsProviderAndParsesResults(t *testing.T) {
 }
 
 type fakeHostedBackend struct {
-	host    string
 	results []searchResult
 	called  bool
 }
@@ -167,72 +166,26 @@ func (b *fakeHostedBackend) Search(context.Context, string, int) ([]searchResult
 	return b.results, nil
 }
 
-func (b *fakeHostedBackend) endpointHost() string { return b.host }
-
-func TestHTTPSearchBackendEndpointHost(t *testing.T) {
-	backend := &httpSearchBackend{baseURL: "https://api.search.example:8443/v1/search"}
-	if got := backend.endpointHost(); got != "api.search.example" {
-		t.Fatalf("endpointHost = %q, want api.search.example", got)
-	}
-}
-
-// TestWebSearchRunWithSandboxAllowsByDefaultUnderDeny verifies the default
-// posture: a first-party in-process tool is NOT subject to the sandbox network
-// policy unless EnforceToolNetwork is set, so web_search runs even under deny.
-func TestWebSearchRunWithSandboxAllowsByDefaultUnderDeny(t *testing.T) {
-	backend := &fakeHostedBackend{host: "search.example", results: []searchResult{{Title: "T", URL: "https://x.test"}}}
+func TestWebSearchRunWithSandboxAllowsUnderShellNetworkDeny(t *testing.T) {
+	backend := &fakeHostedBackend{results: []searchResult{{Title: "T", URL: "https://x.test"}}}
 	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
 		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny},
 	})
 	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
 	if res.Status != StatusOK {
-		t.Fatalf("web_search must run by default even under deny, got %q: %s", res.Status, res.Output)
+		t.Fatalf("web_search must run under shell network deny, got %q: %s", res.Status, res.Output)
 	}
 	if !backend.called {
-		t.Fatal("search backend must be called when tool-network enforcement is off (default)")
+		t.Fatal("search backend must be called")
 	}
 }
 
-func TestWebSearchRunWithSandboxBlocksUnderDenyWhenEnforced(t *testing.T) {
-	backend := &fakeHostedBackend{host: "search.example"}
+func TestWebSearchRunWithSandboxAllowsUnderScopedShellNetworkPolicy(t *testing.T) {
+	backend := &fakeHostedBackend{results: []searchResult{{Title: "T", URL: "https://x.test"}}}
 	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny, EnforceToolNetwork: true},
-	})
-	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
-	if res.Status != StatusError || !strings.Contains(res.Output, "disabled") {
-		t.Fatalf("expected deny block, got %q: %s", res.Status, res.Output)
-	}
-	if backend.called {
-		t.Fatal("search backend must not be called under network deny when enforced")
-	}
-}
-
-func TestWebSearchRunWithSandboxScopedBlocksUnlistedHost(t *testing.T) {
-	backend := &fakeHostedBackend{host: "search.example"}
-	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
-	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}, EnforceToolNetwork: true},
-		Backend: zeroSandbox.Backend{
-			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
-			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
-		},
-	})
-	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
-	if res.Status != StatusError || !strings.Contains(res.Output, "allowlist") {
-		t.Fatalf("expected scoped block, got %q: %s", res.Status, res.Output)
-	}
-	if backend.called {
-		t.Fatal("search backend must not be called for an unlisted host")
-	}
-}
-
-func TestWebSearchRunWithSandboxScopedAllowsListedHost(t *testing.T) {
-	backend := &fakeHostedBackend{host: "search.example", results: []searchResult{{Title: "T", URL: "https://x.test"}}}
-	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
-	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"search.example"}, EnforceToolNetwork: true},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
 		Backend: zeroSandbox.Backend{
 			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
 			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
@@ -240,10 +193,10 @@ func TestWebSearchRunWithSandboxScopedAllowsListedHost(t *testing.T) {
 	})
 	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
 	if res.Status != StatusOK {
-		t.Fatalf("listed host must be allowed, got %q: %s", res.Status, res.Output)
+		t.Fatalf("web_search must run under scoped shell network policy, got %q: %s", res.Status, res.Output)
 	}
 	if !backend.called {
-		t.Fatal("search backend must be called when the host is allowlisted")
+		t.Fatal("search backend must be called")
 	}
 }
 
