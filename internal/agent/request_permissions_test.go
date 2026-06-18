@@ -48,6 +48,17 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	}
 	var requests []PermissionRequest
 	var results []ToolResult
+	normalizedProfile, err := sandbox.NormalizeRequestPermissionProfile(sandbox.RequestPermissionProfile{
+		FileSystem: &sandbox.FileSystemPermissions{Write: []string{target}},
+	}, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedGrantProfile, err := sandbox.RequestPermissionGrantProfile(normalizedProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedWriteRoot := expectedGrantProfile.FileSystem.Write[0]
 
 	result, err := Run(context.Background(), "write the file", provider, Options{
 		Registry:       registry,
@@ -73,8 +84,20 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	if len(requests) != 1 || requests[0].ToolName != tools.RequestPermissionsToolName {
 		t.Fatalf("permission requests = %#v, want one request_permissions prompt", requests)
 	}
+	if !strings.Contains(requests[0].Scope, "write "+expectedWriteRoot) || strings.Contains(requests[0].Scope, target) {
+		t.Fatalf("permission request scope = %q, want widened directory root %q and not file %q", requests[0].Scope, expectedWriteRoot, target)
+	}
 	if len(results) != 2 || results[0].Status != tools.StatusOK || results[1].Status != tools.StatusOK {
 		t.Fatalf("tool results = %#v, want request_permissions and write_file ok", results)
+	}
+	var grantResponse sandbox.RequestPermissionsResponse
+	if err := json.Unmarshal([]byte(results[0].Output), &grantResponse); err != nil {
+		t.Fatalf("unmarshal grant response %q: %v", results[0].Output, err)
+	}
+	if grantResponse.Permissions.FileSystem == nil ||
+		len(grantResponse.Permissions.FileSystem.Write) != 1 ||
+		grantResponse.Permissions.FileSystem.Write[0] != expectedWriteRoot {
+		t.Fatalf("grant response permissions = %#v, want write root %q", grantResponse.Permissions, expectedWriteRoot)
 	}
 	content, err := os.ReadFile(target)
 	if err != nil {

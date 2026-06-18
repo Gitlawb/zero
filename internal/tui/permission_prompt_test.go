@@ -117,8 +117,8 @@ func TestRequestPermissionsPromptUsesGrantLabelsAndEscDenies(t *testing.T) {
 	for _, want := range []string{
 		"Grant requested permissions?",
 		"permissions: write /tmp/project",
-		"Grant for this turn",
-		"Grant for this turn and review commands",
+		"Grant for this task",
+		"Grant for this task and ask model to review commands",
 		"Grant for this session",
 		"Continue without permissions",
 		"[esc] continue without permissions",

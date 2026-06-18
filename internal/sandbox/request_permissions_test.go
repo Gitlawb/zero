@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -139,6 +140,50 @@ func TestPermissionProfileIncludesReadOnlyGrantAsReadRootOnly(t *testing.T) {
 		if root.Root == expectedReadRoot {
 			t.Fatalf("read-only grant must not become writable, write roots = %#v", profile.FileSystem.WriteRoots)
 		}
+	}
+}
+
+func TestRequestPermissionGrantProfileWidensFilesToGrantRoots(t *testing.T) {
+	workspace := t.TempDir()
+	readDir := filepath.Join(workspace, "read")
+	writeDir := filepath.Join(workspace, "write")
+	if err := os.MkdirAll(readDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(writeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readFile := filepath.Join(readDir, "secret.txt")
+	writeFile := filepath.Join(writeDir, "output.txt")
+	if err := os.WriteFile(readFile, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	grant, err := RequestPermissionGrantProfile(RequestPermissionProfile{
+		FileSystem: &FileSystemPermissions{
+			Read:  []string{readFile},
+			Write: []string{writeFile},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.FileSystem == nil {
+		t.Fatal("expected filesystem grant")
+	}
+	expectedReadRoot, err := normalizeScopeRoot(readDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedWriteRoot, err := normalizeScopeRoot(writeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grant.FileSystem.Read) != 1 || grant.FileSystem.Read[0] != expectedReadRoot {
+		t.Fatalf("read grant roots = %#v, want %#v", grant.FileSystem.Read, []string{expectedReadRoot})
+	}
+	if len(grant.FileSystem.Write) != 1 || grant.FileSystem.Write[0] != expectedWriteRoot {
+		t.Fatalf("write grant roots = %#v, want %#v", grant.FileSystem.Write, []string{expectedWriteRoot})
 	}
 }
 

@@ -1031,8 +1031,17 @@ func executeRequestPermissions(ctx context.Context, call ToolCall, args map[stri
 			Output:     "Error: request_permissions requires at least one permission.",
 		}, nil
 	}
+	grantProfile, err := sandbox.RequestPermissionGrantProfile(normalized)
+	if err != nil {
+		return ToolResult{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Status:     tools.StatusError,
+			Output:     "Error: Invalid permissions for request_permissions: " + err.Error(),
+		}, nil
+	}
 
-	request := requestPermissionsPrompt(call, parsed, normalized, permissionMode, options)
+	request := requestPermissionsPrompt(call, parsed, grantProfile, permissionMode, options)
 	if options.OnPermissionRequest == nil {
 		response := sandbox.RequestPermissionsResponse{
 			Permissions: sandbox.RequestPermissionProfile{},
@@ -1058,16 +1067,16 @@ func executeRequestPermissions(ctx context.Context, call ToolCall, args map[stri
 	permissionGranted := false
 	switch decision.Action {
 	case PermissionDecisionAllow:
-		response.Permissions = normalized
+		response.Permissions = grantProfile
 		response.Scope = sandbox.PermissionGrantScopeTurn
 		permissionGranted = true
 	case PermissionDecisionAllowStrict:
-		response.Permissions = normalized
+		response.Permissions = grantProfile
 		response.Scope = sandbox.PermissionGrantScopeTurn
 		response.StrictAutoReview = true
 		permissionGranted = true
 	case PermissionDecisionAllowForSession:
-		response.Permissions = normalized
+		response.Permissions = grantProfile
 		response.Scope = sandbox.PermissionGrantScopeSession
 		permissionGranted = true
 	case PermissionDecisionCancel:
@@ -1158,7 +1167,7 @@ func requestPermissionsPrompt(call ToolCall, parsed requestPermissionsArgs, prof
 func requestPermissionsScope(profile sandbox.RequestPermissionProfile) string {
 	parts := []string{}
 	if profile.Network != nil && profile.Network.Enabled != nil && *profile.Network.Enabled {
-		parts = append(parts, "network")
+		parts = append(parts, "network all outbound access")
 	}
 	if profile.FileSystem != nil {
 		for _, path := range profile.FileSystem.Read {
@@ -1171,7 +1180,7 @@ func requestPermissionsScope(profile sandbox.RequestPermissionProfile) string {
 			parts = append(parts, "deny read "+path)
 		}
 	}
-	return truncateScope(strings.Join(parts, ", "))
+	return strings.Join(parts, ", ")
 }
 
 func emitRequestPermissionsDecision(options Options, call ToolCall, request PermissionRequest, action PermissionDecisionAction, reason string, granted bool) {

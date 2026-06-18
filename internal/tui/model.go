@@ -2216,7 +2216,7 @@ func permissionDecisionReason(decision permissionDecision) string {
 	case permissionDecisionAllow:
 		return "approved in TUI"
 	case permissionDecisionAllowStrict:
-		return "approved with strict review in TUI"
+		return "approved with model review request in TUI"
 	case permissionDecisionAllowForSession:
 		return "approved for this session in TUI"
 	case permissionDecisionAlwaysAllow:

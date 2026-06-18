@@ -902,9 +902,9 @@ func permissionOptionLabel(option permissionOption, request agent.PermissionRequ
 	if request.ToolName == tools.RequestPermissionsToolName {
 		switch option.choice {
 		case permissionDecisionAllow:
-			return "Grant for this turn"
+			return "Grant for this task"
 		case permissionDecisionAllowStrict:
-			return "Grant for this turn and review commands"
+			return "Grant for this task and ask model to review commands"
 		case permissionDecisionAllowForSession:
 			return "Grant for this session"
 		case permissionDecisionDeny, permissionDecisionCancel:

@@ -105,6 +105,51 @@ func NormalizeRequestPermissionProfile(profile RequestPermissionProfile, basePat
 	return normalized, nil
 }
 
+// RequestPermissionGrantProfile returns the effective grant profile the engine
+// can enforce. File-like read/write requests become their normalized parent
+// directory roots, matching GrantRequestPermissions and native sandbox profiles.
+func RequestPermissionGrantProfile(profile RequestPermissionProfile) (RequestPermissionProfile, error) {
+	var grant RequestPermissionProfile
+	if profile.Network != nil && profile.Network.Enabled != nil && *profile.Network.Enabled {
+		enabled := true
+		grant.Network = &NetworkPermissions{Enabled: &enabled}
+	}
+	if profile.FileSystem != nil {
+		read, err := grantPermissionRoots(profile.FileSystem.Read)
+		if err != nil {
+			return RequestPermissionProfile{}, err
+		}
+		write, err := grantPermissionRoots(profile.FileSystem.Write)
+		if err != nil {
+			return RequestPermissionProfile{}, err
+		}
+		fs := FileSystemPermissions{
+			Read:     read,
+			Write:    write,
+			DenyRead: append([]string{}, profile.FileSystem.DenyRead...),
+		}
+		if len(fs.Read) > 0 || len(fs.Write) > 0 || len(fs.DenyRead) > 0 {
+			grant.FileSystem = &fs
+		}
+	}
+	return grant, nil
+}
+
+func grantPermissionRoots(paths []string) ([]string, error) {
+	roots := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		root, err := normalizeScopeRoot(permissionRoot(path))
+		if err != nil {
+			return nil, err
+		}
+		roots = append(roots, root)
+	}
+	return dedupeStrings(roots), nil
+}
+
 func normalizeFileSystemPermissions(fs FileSystemPermissions, basePath string) (FileSystemPermissions, error) {
 	var out FileSystemPermissions
 	var err error
