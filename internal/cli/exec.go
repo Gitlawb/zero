@@ -1073,7 +1073,7 @@ func sessionPermissionEventType(event agent.PermissionEvent) sessions.EventType 
 	if event.Action == agent.PermissionActionPrompt {
 		return sessions.EventPermissionRequest
 	}
-	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny {
+	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny || event.Action == agent.PermissionActionCancel {
 		return sessions.EventPermissionDecision
 	}
 	return sessions.EventPermission

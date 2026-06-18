@@ -35,6 +35,7 @@ const (
 	PermissionActionAllow  PermissionAction = "allow"
 	PermissionActionPrompt PermissionAction = "prompt"
 	PermissionActionDeny   PermissionAction = "deny"
+	PermissionActionCancel PermissionAction = "cancel"
 )
 
 const (
@@ -42,6 +43,7 @@ const (
 	PermissionDecisionAllowForSession PermissionDecisionAction = "allow_for_session"
 	PermissionDecisionDeny            PermissionDecisionAction = "deny"
 	PermissionDecisionAlwaysAllow     PermissionDecisionAction = "always_allow"
+	PermissionDecisionCancel          PermissionDecisionAction = "cancel"
 )
 
 type ToolResult struct {
@@ -74,6 +76,7 @@ const (
 	DenialNone             DenialCategory = ""
 	DenialFiltered         DenialCategory = "filtered"          // tool not enabled for this run
 	DenialPermissionDenied DenialCategory = "permission_denied" // approval declined
+	DenialApprovalCanceled DenialCategory = "approval_canceled" // approval canceled and run aborted
 	DenialSandboxViolation DenialCategory = "sandbox_violation" // blocked by the sandbox
 	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
 )

@@ -318,6 +318,7 @@ const (
 	permissionDecisionAllowForSession permissionDecision = agent.PermissionDecisionAllowForSession
 	permissionDecisionDeny            permissionDecision = agent.PermissionDecisionDeny
 	permissionDecisionAlwaysAllow     permissionDecision = agent.PermissionDecisionAlwaysAllow
+	permissionDecisionCancel          permissionDecision = agent.PermissionDecisionCancel
 )
 
 type permissionRequestMsg struct {
@@ -2214,6 +2215,8 @@ func permissionDecisionReason(decision permissionDecision) string {
 		return "approved for this session in TUI"
 	case permissionDecisionAlwaysAllow:
 		return "persistently approved in TUI"
+	case permissionDecisionCancel:
+		return "cancelled in TUI"
 	case permissionDecisionDeny:
 		return "denied in TUI"
 	default:
@@ -3123,7 +3126,7 @@ func tuiPermissionEventType(event agent.PermissionEvent) sessions.EventType {
 	if event.Action == agent.PermissionActionPrompt {
 		return sessions.EventPermissionRequest
 	}
-	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny {
+	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny || event.Action == agent.PermissionActionCancel {
 		return sessions.EventPermissionDecision
 	}
 	return sessions.EventPermission

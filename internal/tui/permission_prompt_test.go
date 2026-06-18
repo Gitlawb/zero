@@ -12,12 +12,17 @@ import (
 
 func pendingPermissionModel(t *testing.T, decide func(agent.PermissionDecision)) model {
 	t.Helper()
+	return pendingPermissionModelWithRequest(t, testPromptPermissionRequest(), decide)
+}
+
+func pendingPermissionModelWithRequest(t *testing.T, request agent.PermissionRequest, decide func(agent.PermissionDecision)) model {
+	t.Helper()
 	m := newModel(context.Background(), Options{})
 	m.pending = true
 	m.activeRunID = 7
 	updated, _ := m.Update(permissionRequestMsg{
 		runID:   7,
-		request: testPromptPermissionRequest(),
+		request: request,
 		decide:  decide,
 	})
 	next := updated.(model)
@@ -41,6 +46,55 @@ func TestPermissionOptionsEmptyDecisionsUseRecoverableFallback(t *testing.T) {
 	}
 	if options[0].choice != permissionDecisionAllow || options[1].choice != permissionDecisionDeny {
 		t.Fatalf("fallback options = %#v, want allow then deny", options)
+	}
+}
+
+func TestPermissionOptionsExposeApprovalCancelWhenSupplied(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName: "bash",
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowForSession,
+			agent.PermissionDecisionDeny,
+			agent.PermissionDecisionCancel,
+		},
+	}
+	options := permissionOptions(request)
+	if len(options) != 4 {
+		t.Fatalf("options = %#v, want four supplied choices", options)
+	}
+	if options[2].choice != permissionDecisionDeny || options[2].hotkey != "d" {
+		t.Fatalf("recoverable deny option = %#v, want deny on d", options[2])
+	}
+	if options[3].choice != permissionDecisionCancel || options[3].hotkey != "n" {
+		t.Fatalf("cancel option = %#v, want cancel on n", options[3])
+	}
+
+	card, _ := renderFocusedPermissionPrompt(request, 3, 80)
+	got := plainRender(t, card)
+	for _, want := range []string{"continue without running it", "[d]", "tell Zero what to do differently", "[n]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("permission card = %q, missing %q", got, want)
+		}
+	}
+}
+
+func TestPermissionOptionsCanExposePatchCancelWithoutRecoverableDeny(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName: "apply_patch",
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAllowForSession,
+			agent.PermissionDecisionCancel,
+		},
+	}
+	card, _ := renderFocusedPermissionPrompt(request, 2, 80)
+	got := plainRender(t, card)
+	if !strings.Contains(got, "tell Zero what to do differently") || !strings.Contains(got, "[n]") {
+		t.Fatalf("permission card = %q, missing cancel option", got)
+	}
+	if strings.Contains(got, "continue without running it") || strings.Contains(got, "[d]") {
+		t.Fatalf("apply_patch approval must not show recoverable deny, got %q", got)
 	}
 }
 
@@ -89,8 +143,28 @@ func TestPermissionHotkeysStillResolveDirectly(t *testing.T) {
 	}
 }
 
+func TestPermissionCancelHotkeyResolvesDirectly(t *testing.T) {
+	request := testPromptPermissionRequest()
+	request.ToolName = "bash"
+	request.AvailableDecisions = []agent.PermissionDecisionAction{
+		agent.PermissionDecisionAllow,
+		agent.PermissionDecisionDeny,
+		agent.PermissionDecisionCancel,
+	}
+	got := []permissionDecision{}
+	m := pendingPermissionModelWithRequest(t, request, func(d agent.PermissionDecision) {
+		got = append(got, permissionDecision(d.Action))
+	})
+	if _, cmd := m.Update(testKeyText("n")); cmd != nil {
+		t.Fatal("'n' should resolve synchronously")
+	}
+	if len(got) != 1 || got[0] != permissionDecisionCancel {
+		t.Fatalf("'n' should resolve cancel directly, got %#v", got)
+	}
+}
+
 func TestPermissionRenderEmitsHighlightedClickableOffsets(t *testing.T) {
-	request := agent.PermissionRequest{ToolName: "bash", AvailableDecisions: testAllPermissionDecisions()}
+	request := agent.PermissionRequest{ToolName: "write_file", AvailableDecisions: testAllPermissionDecisions()}
 	card, offsets := renderFocusedPermissionPrompt(request, 2, 60) // cursor on future approval
 	if len(offsets) != len(permissionOptions(request)) {
 		t.Fatalf("offsets = %d, want %d", len(offsets), len(permissionOptions(request)))

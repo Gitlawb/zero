@@ -242,7 +242,7 @@ func streamJSONPermissionEventType(event agent.PermissionEvent) streamjson.Event
 	if event.Action == agent.PermissionActionPrompt {
 		return streamjson.EventPermissionRequest
 	}
-	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny {
+	if event.Action == agent.PermissionActionAllow || event.Action == agent.PermissionActionDeny || event.Action == agent.PermissionActionCancel {
 		return streamjson.EventPermissionDecision
 	}
 	return streamjson.EventPermission

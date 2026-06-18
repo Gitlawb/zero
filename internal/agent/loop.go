@@ -23,6 +23,8 @@ const (
 	toolResultControlSpecReview = "spec_review_required"
 )
 
+var errPermissionApprovalCanceled = errors.New("permission approval cancelled")
+
 // abortedToolResultNotice is the placeholder tool result recorded for a tool
 // call that was advertised by the assistant turn but never executed because the
 // repeated-failure guard halted the run first. It keeps every tool_use paired
@@ -604,6 +606,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 					requestEvent.Grant = &grant
 				}
 			}
+		case PermissionDecisionCancel:
+			emitCanceledPermission(options, call, requestEvent, decisionReason)
+			return canceledPermissionResult(call, decisionReason, requestEvent), fmt.Errorf("%w for %s", errPermissionApprovalCanceled, call.Name)
 		default:
 			emitDeniedPermission(options, call, requestEvent, decisionReason)
 			return deniedPermissionResult(call, decisionReason, requestEvent), nil
@@ -952,7 +957,7 @@ func requestPermission(ctx context.Context, request PermissionRequest, options O
 
 func normalizePermissionDecisionAction(action PermissionDecisionAction) PermissionDecisionAction {
 	switch action {
-	case PermissionDecisionAllow, PermissionDecisionAllowForSession, PermissionDecisionAlwaysAllow:
+	case PermissionDecisionAllow, PermissionDecisionAllowForSession, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
 		return action
 	default:
 		return PermissionDecisionDeny
@@ -1024,6 +1029,25 @@ func emitDeniedPermission(options Options, call ToolCall, requestEvent Permissio
 	options.OnPermission(event)
 }
 
+func emitCanceledPermission(options Options, call ToolCall, requestEvent PermissionEvent, reason string) {
+	if options.OnPermission == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "cancelled in TUI"
+	}
+	event := requestEvent
+	event.ToolCallID = call.ID
+	event.ToolName = call.Name
+	event.Action = PermissionActionCancel
+	event.DecisionAction = PermissionDecisionCancel
+	event.PermissionGranted = false
+	event.DecisionReason = reason
+	event.Reason = reason
+	options.OnPermission(event)
+}
+
 func deniedPermissionResult(call ToolCall, reason string, requestEvent PermissionEvent) ToolResult {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -1055,6 +1079,32 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 		Status:       tools.StatusError,
 		Output:       "Error: Permission denied for " + call.Name + ": " + reason,
 		DenialReason: denial,
+		Meta: map[string]string{
+			"permission_action": string(event.Action),
+		},
+	}
+}
+
+func canceledPermissionResult(call ToolCall, reason string, requestEvent PermissionEvent) ToolResult {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "cancelled in TUI"
+	}
+	event := requestEvent
+	event.Action = PermissionActionCancel
+	event.DecisionAction = PermissionDecisionCancel
+	event.PermissionGranted = false
+	event.DecisionReason = reason
+	event.Reason = reason
+	if requestEvent.ToolName == "" {
+		event.ToolName = call.Name
+	}
+	return ToolResult{
+		ToolCallID:   call.ID,
+		Name:         call.Name,
+		Status:       tools.StatusError,
+		Output:       "Error: Permission approval cancelled for " + call.Name + ": " + reason,
+		DenialReason: DenialApprovalCanceled,
 		Meta: map[string]string{
 			"permission_action": string(event.Action),
 		},
@@ -1203,12 +1253,28 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 	decisions := []PermissionDecisionAction{PermissionDecisionAllow}
 	if options.Sandbox != nil {
 		decisions = append(decisions, PermissionDecisionAllowForSession)
-		if options.Sandbox.CanPersistGrants() {
+		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) {
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)
 		}
 	}
-	decisions = append(decisions, PermissionDecisionDeny)
+	switch event.ToolName {
+	case "bash":
+		decisions = append(decisions, PermissionDecisionDeny, PermissionDecisionCancel)
+	case "apply_patch":
+		decisions = append(decisions, PermissionDecisionCancel)
+	default:
+		decisions = append(decisions, PermissionDecisionDeny)
+	}
 	return decisions
+}
+
+func permissionSupportsPersistentDecision(toolName string) bool {
+	switch toolName {
+	case "bash", "apply_patch":
+		return false
+	default:
+		return true
+	}
 }
 
 func cloneArgs(args map[string]any) map[string]any {

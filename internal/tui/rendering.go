@@ -114,6 +114,8 @@ func buildRowContext(rows []transcriptRow) rowContext {
 				}
 			case agent.PermissionActionDeny:
 				rc.decided[key] = true
+			case agent.PermissionActionCancel:
+				rc.decided[key] = true
 			}
 		}
 	}
@@ -788,6 +790,19 @@ func renderPermissionRow(row transcriptRow, width int) string {
 			out += "\n" + wrapDetailBlock(detail, width)
 		}
 		return out
+	case agent.PermissionActionCancel:
+		line := zeroTheme.red.Render("cancelled") + dot + zeroTheme.red.Render(name)
+		if scope := strings.TrimSpace(event.Scope); scope != "" {
+			line += dot + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
+		}
+		if reason := strings.TrimSpace(event.Reason); reason != "" {
+			line += zeroTheme.faint.Render(" — " + truncateRunes(reason, maxInt(16, width-lipgloss.Width(name)-16)))
+		}
+		out := fitStyledLine(line, width)
+		if detail := strings.TrimSpace(row.detail); detail != "" {
+			out += "\n" + wrapDetailBlock(detail, width)
+		}
+		return out
 	default:
 		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
@@ -899,6 +914,8 @@ func permissionOptionLabel(option permissionOption, request agent.PermissionRequ
 		return option.label
 	case permissionDecisionDeny:
 		return "No, continue without running it"
+	case permissionDecisionCancel:
+		return "No, and tell Zero what to do differently"
 	default:
 		return option.label
 	}

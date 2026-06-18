@@ -54,6 +54,7 @@ func TestIsRetriableToolError(t *testing.T) {
 		// Structured denial categories are authoritative regardless of message text.
 		{"denial: filtered", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialFiltered}, false},
 		{"denial: permission", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialPermissionDenied}, false},
+		{"denial: approval canceled", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialApprovalCanceled}, false},
 		{"denial: sandbox", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialSandboxViolation}, false},
 	}
 	for _, c := range cases {
@@ -889,6 +890,98 @@ func TestRunDeniesPromptToolWhenPermissionRequestDenied(t *testing.T) {
 	}
 }
 
+func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWriteFileTool(root))
+	provider := providerCallingWriteFileThenAnswer("write should not continue")
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write notes", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+			return PermissionDecision{Action: PermissionDecisionCancel, Reason: "redirect needed"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if !errors.Is(err, errPermissionApprovalCanceled) {
+		t.Fatalf("expected permission approval cancel error, got %v", err)
+	}
+	if result.FinalAnswer != "" {
+		t.Fatalf("canceled run must not continue to final answer, got %q", result.FinalAnswer)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("canceled permission prompt should stop after first turn, got %d provider requests", len(provider.requests))
+	}
+	if _, err := os.Stat(filepath.Join(root, "notes.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected canceled write to leave file missing, stat error: %v", err)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one cancel permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionCancel || event.DecisionAction != PermissionDecisionCancel || event.PermissionGranted {
+		t.Fatalf("expected final cancel event, got %#v", event)
+	}
+	if event.DecisionReason != "redirect needed" {
+		t.Fatalf("expected cancel reason in final event, got %#v", event)
+	}
+}
+
+func TestAvailablePermissionDecisionsSplitDenyAndCancel(t *testing.T) {
+	options := Options{Sandbox: sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})}
+	cases := []struct {
+		name string
+		tool string
+		want []PermissionDecisionAction
+	}{
+		{
+			name: "bash keeps recoverable deny and explicit cancel",
+			tool: "bash",
+			want: []PermissionDecisionAction{
+				PermissionDecisionAllow,
+				PermissionDecisionAllowForSession,
+				PermissionDecisionDeny,
+				PermissionDecisionCancel,
+			},
+		},
+		{
+			name: "apply patch uses cancel without recoverable deny",
+			tool: "apply_patch",
+			want: []PermissionDecisionAction{
+				PermissionDecisionAllow,
+				PermissionDecisionAllowForSession,
+				PermissionDecisionCancel,
+			},
+		},
+		{
+			name: "file write keeps recoverable deny",
+			tool: "write_file",
+			want: []PermissionDecisionAction{
+				PermissionDecisionAllow,
+				PermissionDecisionAllowForSession,
+				PermissionDecisionDeny,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := availablePermissionDecisions(PermissionEvent{
+				ToolName: tc.tool,
+				Action:   PermissionActionPrompt,
+			}, options)
+			if !equalPermissionDecisions(got, tc.want) {
+				t.Fatalf("decisions = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	root := t.TempDir()
 	store, err := sandbox.NewGrantStore(sandbox.StoreOptions{FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json")})
@@ -1353,6 +1446,18 @@ func providerCallingWritePathThenAnswer(path string, answer string) *mockProvide
 func quoteJSONString(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+func equalPermissionDecisions(a, b []PermissionDecisionAction) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRunAppendsConfirmationPolicyToSystemPrompt(t *testing.T) {
