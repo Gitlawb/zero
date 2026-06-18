@@ -34,6 +34,16 @@ func TestPermissionCursorDefaultsToAllowOnce(t *testing.T) {
 	}
 }
 
+func TestPermissionOptionsEmptyDecisionsUseRecoverableFallback(t *testing.T) {
+	options := permissionOptions(agent.PermissionRequest{})
+	if len(options) != 2 {
+		t.Fatalf("fallback options = %#v, want allow and deny only", options)
+	}
+	if options[0].choice != permissionDecisionAllow || options[1].choice != permissionDecisionDeny {
+		t.Fatalf("fallback options = %#v, want allow then deny", options)
+	}
+}
+
 func TestPermissionCursorMovesAndEnterConfirms(t *testing.T) {
 	decisions := []permissionDecision{}
 	m := pendingPermissionModel(t, func(d agent.PermissionDecision) {
@@ -80,7 +90,7 @@ func TestPermissionHotkeysStillResolveDirectly(t *testing.T) {
 }
 
 func TestPermissionRenderEmitsHighlightedClickableOffsets(t *testing.T) {
-	request := agent.PermissionRequest{ToolName: "bash"}
+	request := agent.PermissionRequest{ToolName: "bash", AvailableDecisions: testAllPermissionDecisions()}
 	card, offsets := renderFocusedPermissionPrompt(request, 2, 60) // cursor on future approval
 	if len(offsets) != len(permissionOptions(request)) {
 		t.Fatalf("offsets = %d, want %d", len(offsets), len(permissionOptions(request)))
@@ -97,9 +107,10 @@ func TestPermissionRenderEmitsHighlightedClickableOffsets(t *testing.T) {
 
 func TestPermissionRenderShowsNetworkTargetAndHostScopedAlways(t *testing.T) {
 	request := agent.PermissionRequest{
-		ToolName:   "web_fetch",
-		SideEffect: "network",
-		Scope:      "example.com",
+		ToolName:           "web_fetch",
+		SideEffect:         "network",
+		Scope:              "example.com",
+		AvailableDecisions: testAllPermissionDecisions(),
 	}
 	card, _ := renderFocusedPermissionPrompt(request, 1, 72)
 	got := plainRender(t, card)

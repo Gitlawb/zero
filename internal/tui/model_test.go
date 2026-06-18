@@ -1682,15 +1682,25 @@ func testPromptPermissionEvent() agent.PermissionEvent {
 func testPromptPermissionRequest() agent.PermissionRequest {
 	event := testPromptPermissionEvent()
 	return agent.PermissionRequest{
-		ToolCallID:     event.ToolCallID,
-		ToolName:       event.ToolName,
-		Action:         event.Action,
-		Permission:     event.Permission,
-		PermissionMode: event.PermissionMode,
-		Autonomy:       event.Autonomy,
-		SideEffect:     event.SideEffect,
-		Reason:         event.Reason,
-		Risk:           event.Risk,
+		ToolCallID:         event.ToolCallID,
+		ToolName:           event.ToolName,
+		Action:             event.Action,
+		Permission:         event.Permission,
+		PermissionMode:     event.PermissionMode,
+		Autonomy:           event.Autonomy,
+		SideEffect:         event.SideEffect,
+		Reason:             event.Reason,
+		Risk:               event.Risk,
+		AvailableDecisions: testAllPermissionDecisions(),
+	}
+}
+
+func testAllPermissionDecisions() []agent.PermissionDecisionAction {
+	return []agent.PermissionDecisionAction{
+		agent.PermissionDecisionAllow,
+		agent.PermissionDecisionAllowForSession,
+		agent.PermissionDecisionAlwaysAllow,
+		agent.PermissionDecisionDeny,
 	}
 }
 

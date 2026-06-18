@@ -1242,10 +1242,11 @@ func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
 
 func TestFocusedPermissionCardShowsBadgeAndKeys(t *testing.T) {
 	request := agent.PermissionRequest{
-		ToolName:   "edit_file",
-		Reason:     "writes internal/agent/exec.go",
-		SideEffect: "write",
-		Risk:       sandbox.Risk{Level: sandbox.RiskMedium},
+		ToolName:           "edit_file",
+		Reason:             "writes internal/agent/exec.go",
+		SideEffect:         "write",
+		Risk:               sandbox.Risk{Level: sandbox.RiskMedium},
+		AvailableDecisions: testAllPermissionDecisions(),
 	}
 	card, offsets := renderFocusedPermissionPrompt(request, 0, 80)
 	got := plainRender(t, card)

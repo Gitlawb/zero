@@ -23,8 +23,6 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 	if len(decisions) == 0 {
 		decisions = []agent.PermissionDecisionAction{
 			agent.PermissionDecisionAllow,
-			agent.PermissionDecisionAllowForSession,
-			agent.PermissionDecisionAlwaysAllow,
 			agent.PermissionDecisionDeny,
 		}
 	}

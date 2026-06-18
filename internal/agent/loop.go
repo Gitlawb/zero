@@ -580,6 +580,8 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
 			if options.Sandbox != nil {
+				// The current call stays allowed if recording the session grant
+				// fails; the user is simply prompted again for a later match.
 				if grant, err := persistSessionPermissionGrant(call.Name, args, decisionReason, options); err == nil {
 					requestEvent.GrantMatched = true
 					requestEvent.Grant = &grant
