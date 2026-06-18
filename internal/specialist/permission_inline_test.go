@@ -19,7 +19,7 @@ func TestTaskToolForwardsPermissionMode(t *testing.T) {
 	}{
 		{"non-unsafe parent yields non-unsafe child", "auto", "low"},
 		{"unsafe parent yields unsafe child", "unsafe", "high"},
-		{"empty preserves historical high", "", "high"},
+		{"empty is fail-safe low (no silent escalation)", "", "low"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			zero := 0

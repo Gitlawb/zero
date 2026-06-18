@@ -58,10 +58,10 @@ type BuildArgsInput struct {
 	CurrentDepth          int
 	Description           string
 	Cwd                   string
-	// PermissionMode is the parent's resolved permission mode. Empty preserves
-	// the historical "--auto high" (the Task tool omits it); a caller that
-	// passes a non-unsafe mode (e.g. the swarm propagating a non-unsafe
-	// orchestrator) gets a non-unsafe child so authority is never widened.
+	// PermissionMode is the parent's resolved permission mode. Only an explicit
+	// unsafe mode runs the child at "--auto high"; empty or any other value is
+	// fail-safe "low", so a caller that forgets to wire it never escalates the
+	// child to unsafe. Authority is therefore never widened beyond the parent.
 	PermissionMode string
 }
 
@@ -103,23 +103,25 @@ type TaskRunOptions struct {
 	CurrentDepth          int
 	Cwd                   string
 	// PermissionMode propagates the parent's resolved permission mode to the
-	// child. Empty keeps the historical "--auto high"; a non-unsafe value runs
-	// the child non-unsafe so it never gains more authority than the parent.
+	// child. Only an explicit unsafe mode runs the child unsafe; empty or any
+	// other value is fail-safe "low", so the child never gains more authority
+	// than the parent.
 	PermissionMode string
 }
 
 // specialistAutonomy maps a parent permission mode to the child's "--auto"
 // level. A headless specialist child cannot answer interactive prompts, so it
-// runs autonomously — but only at "high" (unsafe) when the parent is itself
-// unsafe (or when no mode is provided, preserving the Task tool's behavior).
-// Any other parent mode yields the non-unsafe "low" level, so the child's
-// authority never exceeds the parent's.
+// runs autonomously — but only at "high" (unsafe) when the parent is EXPLICITLY
+// unsafe. An empty or unrecognized mode is fail-safe "low": an orchestrator that
+// forgets to wire PermissionMode never silently escalates the child to unsafe.
+// (Both the Task tool and the swarm propagate a resolved mode, so "" only occurs
+// for a caller that omitted it.) The child's authority never exceeds the parent's.
 func specialistAutonomy(permissionMode string) string {
 	switch strings.TrimSpace(permissionMode) {
-	case "", string(permissionModeUnsafe):
+	case string(permissionModeUnsafe):
 		return "high"
 	default:
-		return "low"
+		return "low" // unset/unknown modes do NOT inherit unsafe autonomy
 	}
 }
 

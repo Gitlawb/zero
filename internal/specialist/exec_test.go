@@ -44,7 +44,7 @@ func TestBuildArgsCreatesFreshSpecialistExecInvocation(t *testing.T) {
 		result.Args[3],
 		"--model", "claude-sonnet-4.5",
 		"--reasoning-effort", "high",
-		"--auto", "high",
+		"--auto", "low", // no PermissionMode set -> fail-safe low (not unsafe high)
 		"--output-format", "stream-json",
 		"--enabled-tools", "grep,read_file",
 		"--depth", "2",
@@ -66,7 +66,7 @@ func TestBuildArgsCreatesFreshSpecialistExecInvocation(t *testing.T) {
 
 func TestSpecialistAutonomyByPermissionMode(t *testing.T) {
 	cases := map[string]string{
-		"":           "high", // back-compat: the Task tool omits the mode
+		"":           "low", // fail-safe: an unset mode does NOT inherit unsafe autonomy
 		"unsafe":     "high",
 		"auto":       "low",
 		"ask":        "low",
@@ -97,15 +97,23 @@ func TestBuildArgsAutonomyHonorsPermissionMode(t *testing.T) {
 		t.Fatalf("non-unsafe parent must NOT yield --auto high: %v", res.Args)
 	}
 
-	// An unsafe parent (and the empty back-compat case) keep --auto high.
-	for _, mode := range []string{"unsafe", ""} {
-		out, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: mode})
-		if err != nil {
-			t.Fatalf("BuildArgs(%q): %v", mode, err)
-		}
-		if !containsSequence(out.Args, []string{"--auto", "high"}) {
-			t.Fatalf("mode %q must yield --auto high, got %v", mode, out.Args)
-		}
+	// Only an explicit unsafe parent keeps --auto high.
+	out, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "unsafe"})
+	if err != nil {
+		t.Fatalf("BuildArgs(unsafe): %v", err)
+	}
+	if !containsSequence(out.Args, []string{"--auto", "high"}) {
+		t.Fatalf("unsafe parent must yield --auto high, got %v", out.Args)
+	}
+
+	// An unset mode is fail-safe low (the foot-gun fix): a caller that forgets to
+	// wire PermissionMode does NOT silently get an unsafe child.
+	empty, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: ""})
+	if err != nil {
+		t.Fatalf("BuildArgs(empty): %v", err)
+	}
+	if !containsSequence(empty.Args, []string{"--auto", "low"}) {
+		t.Fatalf("empty mode must yield --auto low (fail-safe), got %v", empty.Args)
 	}
 }
 
@@ -243,7 +251,7 @@ func TestBuildResumeArgsUsesExistingSession(t *testing.T) {
 	if !reflect.DeepEqual(result.Args[:3], wantPrefix) {
 		t.Fatalf("resume args prefix = %#v", result.Args[:3])
 	}
-	if !containsSequence(result.Args, []string{"--auto", "high"}) ||
+	if !containsSequence(result.Args, []string{"--auto", "low"}) || // no PermissionMode -> fail-safe low
 		!containsSequence(result.Args, []string{"--output-format", "stream-json"}) ||
 		!containsSequence(result.Args, []string{"--depth", "3"}) ||
 		!containsSequence(result.Args, []string{"--tag", "specialist"}) {
