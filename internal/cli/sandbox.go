@@ -33,6 +33,8 @@ func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return runSandboxPolicy(args[1:], stdout, stderr, deps)
 	case "setup":
 		return runSandboxSetup(args[1:], stdout, stderr, deps)
+	case "check":
+		return runSandboxCheck(args[1:], stdout, stderr, deps)
 	case "grants":
 		return runSandboxGrants(args[1:], stdout, stderr, deps)
 	default:
@@ -639,6 +641,7 @@ func writeSandboxHelp(w io.Writer) error {
 Commands:
   policy      Inspect active sandbox policy and platform backend
   setup       Run native platform sandbox setup
+  check       Evaluate the sandbox decision for a hypothetical tool action
   grants      Manage persistent sandbox grants
 
 `)

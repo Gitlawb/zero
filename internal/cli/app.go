@@ -19,7 +19,9 @@ import (
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
+	"github.com/Gitlawb/zero/internal/provideronboarding"
 	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
 	"github.com/Gitlawb/zero/internal/sessions"
@@ -45,6 +47,7 @@ type appDeps struct {
 	resolveMCPConfig      func(workspaceRoot string) (config.MCPConfig, error)
 	newProvider           func(config.ProviderProfile) (zeroruntime.Provider, error)
 	probeProviderHealth   func(context.Context, providerhealth.Options) providerhealth.Result
+	detectLocalRuntimes   func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
 	newSessionStore       func() *sessions.Store
 	loadPlugins           func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks             func(hooks.LoadOptions) (hooks.LoadResult, error)
@@ -72,11 +75,16 @@ type appDeps struct {
 
 type mcpToolRuntime interface {
 	Close() error
+	Skipped() []mcp.SkippedServer
 }
 
 type noopMCPRuntime struct{}
 
 func (noopMCPRuntime) Close() error {
+	return nil
+}
+
+func (noopMCPRuntime) Skipped() []mcp.SkippedServer {
 	return nil
 }
 
@@ -113,6 +121,7 @@ func defaultAppDeps() appDeps {
 			})
 		},
 		probeProviderHealth: providerhealth.Probe,
+		detectLocalRuntimes: provideronboarding.DetectLocalRuntimes,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -345,6 +354,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.probeProviderHealth == nil {
 		deps.probeProviderHealth = defaults.probeProviderHealth
 	}
+	if deps.detectLocalRuntimes == nil {
+		deps.detectLocalRuntimes = defaults.detectLocalRuntimes
+	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
 	}
@@ -506,6 +518,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		return writeAppError(stderr, err.Error(), 1)
 	}
 	defer closeMCPRuntime(stderr, mcpRuntime)
+	// A server that could not be reached or validated is skipped, not fatal (one
+	// bad MCP server must not abort startup) — surface each so a missing tool set is
+	// explained rather than silently absent.
+	for _, skipped := range mcpRuntime.Skipped() {
+		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
+	}
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the

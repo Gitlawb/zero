@@ -6,21 +6,56 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+// defaultConnectTimeout bounds how long startup waits for ONE MCP server to
+// connect and list its tools. A server that exceeds it is abandoned and skipped
+// so a slow or unreachable server (e.g. a hosted endpoint blocked by the local
+// network) cannot delay the first model response. Servers connect concurrently,
+// so total startup cost is the slowest reachable server, not the sum.
+const defaultConnectTimeout = 8 * time.Second
+
 type RegisterOptions struct {
 	PermissionStore *PermissionStore
 	Autonomy        PermissionAutonomy
 	ClientFactory   func(context.Context, Server) (ToolClient, error)
+	// ConnectTimeout bounds the per-server connect+list at startup. Zero uses
+	// defaultConnectTimeout.
+	ConnectTimeout time.Duration
+}
+
+// SkippedServer records an MCP server that was not registered because it could
+// not be reached or its tools could not be validated. Registration is
+// best-effort per server: one unreachable server is skipped (and reported here)
+// rather than aborting startup or disabling the others.
+type SkippedServer struct {
+	Name string
+	Err  error
 }
 
 type Runtime struct {
 	clients []ToolClient
+	// cancels releases the per-server connect contexts of the clients we KEPT.
+	// A stdio server's subprocess is tied to its context, so the context must
+	// stay live for the session and be cancelled only at Close (after the client
+	// is closed). Same length/order as clients is not required.
+	cancels []context.CancelFunc
+	skipped []SkippedServer
 	once    sync.Once
 	err     error
+}
+
+// Skipped returns the servers that were skipped during registration (unreachable
+// or invalid), so the caller can warn the user without failing the launch.
+func (runtime *Runtime) Skipped() []SkippedServer {
+	if runtime == nil {
+		return nil
+	}
+	return runtime.skipped
 }
 
 var unsafeToolNameChars = regexp.MustCompile(`[^A-Za-z0-9_]+`)
@@ -45,52 +80,143 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		}
 	}
 
-	// Registration is atomic per call: validate and stage every server's tools
-	// first, then commit to the caller's registry only once they all succeed. If a
-	// LATER server fails mid-registration, nothing was committed, so the registry
-	// never ends up holding dead tools that point at a (now-closed) client for an
-	// earlier server.
+	timeout := options.ConnectTimeout
+	if timeout <= 0 {
+		timeout = defaultConnectTimeout
+	}
+
+	// Connect every server CONCURRENTLY: connect + list-tools is network/process
+	// I/O, so connecting serially makes startup wait for the SUM of all servers —
+	// one slow or unreachable server would block every other server AND the first
+	// model response. Each server gets its own cancelable context bounded by the
+	// startup timeout; a server that does not connect + list in time is abandoned
+	// (its context cancelled to tear down the half-open connection/subprocess) and
+	// recorded as skipped. The concurrent phase does ONLY I/O and touches no shared
+	// state; all validation, conflict detection, and registration happen in the
+	// deterministic serial phase below, so the result is identical regardless of
+	// completion order.
+	type connectResult struct {
+		client ToolClient
+		remote []RemoteTool
+		cancel context.CancelFunc
+		err    error
+	}
+	results := make([]connectResult, len(servers))
+	var wg sync.WaitGroup
+	for index := range servers {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			server := servers[index]
+			serverCtx, cancel := context.WithCancel(ctx)
+			done := make(chan connectResult, 1)
+			go func() {
+				client, remote, err := connectAndList(serverCtx, factory, server)
+				done <- connectResult{client: client, remote: remote, err: err}
+			}()
+			select {
+			case res := <-done:
+				if res.err != nil {
+					cancel() // failed: nothing to keep
+				} else {
+					res.cancel = cancel // keep the context alive; released at Close
+				}
+				results[index] = res
+			case <-time.After(timeout):
+				cancel() // abandon the slow connect: tears down the conn/subprocess
+				// Reap the goroutine + any partial client in the background so a
+				// slow server never blocks startup.
+				go func() {
+					if res := <-done; res.client != nil {
+						_ = res.client.Close()
+					}
+				}()
+				results[index] = connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+			}
+		}(index)
+	}
+	wg.Wait()
+
+	// Serial, deterministic commit in server order. Building tools reads the
+	// permission store and the registry, so it stays single-goroutine. A server is
+	// best-effort: one that failed to connect, timed out, returned a nameless tool,
+	// or conflicts with an already-committed tool is SKIPPED (recorded, not fatal),
+	// and still contributes its tools all-or-none. The conflict check spans the
+	// registry plus every tool committed by an earlier server.
 	staged := make([]registryTool, 0)
 	stagedNames := make(map[string]struct{})
-	for _, server := range servers {
-		client, err := factory(ctx, server)
-		if err != nil {
-			_ = runtime.Close()
-			return nil, err
+	for index, server := range servers {
+		res := results[index]
+		if res.err != nil {
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err})
+			continue
 		}
-		runtime.clients = append(runtime.clients, client)
-
-		remoteTools, err := client.ListTools(ctx)
-		if err != nil {
-			_ = runtime.Close()
-			return nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
+		serverTools, validateErr := buildServerTools(registry, server, res.remote, res.client, options, stagedNames)
+		if validateErr != nil {
+			if res.cancel != nil {
+				res.cancel()
+			}
+			_ = res.client.Close()
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr})
+			continue
 		}
-		for _, remote := range remoteTools {
-			if strings.TrimSpace(remote.Name) == "" {
-				_ = runtime.Close()
-				return nil, fmt.Errorf("MCP server %s returned a tool without a name", server.Name)
-			}
-			tool := newRegistryTool(server, remote, client, options)
-			// Conflict detection spans both the existing registry and tools staged so
-			// far in this call (two MCP tools whose names collapse to the same
-			// sanitized name conflict even though neither is in the registry yet).
-			if existing, ok := registry.Get(tool.Name()); ok {
-				_ = runtime.Close()
-				return nil, fmt.Errorf("MCP tool %s from %s conflicts with existing tool %s", remote.Name, server.Name, existing.Name())
-			}
-			if _, ok := stagedNames[tool.Name()]; ok {
-				_ = runtime.Close()
-				return nil, fmt.Errorf("MCP tool %s from %s conflicts with another MCP tool named %s", remote.Name, server.Name, tool.Name())
-			}
+		runtime.clients = append(runtime.clients, res.client)
+		if res.cancel != nil {
+			runtime.cancels = append(runtime.cancels, res.cancel)
+		}
+		for _, tool := range serverTools {
 			stagedNames[tool.Name()] = struct{}{}
 			staged = append(staged, tool)
 		}
 	}
-	// Every server succeeded — commit the staged tools to the registry.
 	for _, tool := range staged {
 		registry.Register(tool)
 	}
 	return runtime, nil
+}
+
+// connectAndList connects to one server and lists its tools. It does ONLY I/O
+// (no registry, permission-store, or other shared state), so it is safe to run
+// concurrently for every server. On a list error it closes the client.
+func connectAndList(ctx context.Context, factory func(context.Context, Server) (ToolClient, error), server Server) (ToolClient, []RemoteTool, error) {
+	client, err := factory(ctx, server)
+	if err != nil {
+		return nil, nil, err
+	}
+	remoteTools, err := client.ListTools(ctx)
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
+	}
+	return client, remoteTools, nil
+}
+
+// buildServerTools validates a server's remote tools against the registry and the
+// names already committed by earlier servers, returning the server's tools only
+// when every one is named and conflict-free. It runs in the serial commit phase
+// (single goroutine), so its registry and permission-store reads are race-free.
+// On error the caller closes the client (it owns the result), so this never does.
+func buildServerTools(registry *tools.Registry, server Server, remoteTools []RemoteTool, client ToolClient, options RegisterOptions, stagedNames map[string]struct{}) ([]registryTool, error) {
+	serverTools := make([]registryTool, 0, len(remoteTools))
+	localNames := make(map[string]struct{})
+	for _, remote := range remoteTools {
+		if strings.TrimSpace(remote.Name) == "" {
+			return nil, fmt.Errorf("MCP server %s returned a tool without a name", server.Name)
+		}
+		tool := newRegistryTool(server, remote, client, options)
+		if existing, ok := registry.Get(tool.Name()); ok {
+			return nil, fmt.Errorf("MCP tool %s from %s conflicts with existing tool %s", remote.Name, server.Name, existing.Name())
+		}
+		if _, ok := stagedNames[tool.Name()]; ok {
+			return nil, fmt.Errorf("MCP tool %s from %s conflicts with another MCP tool named %s", remote.Name, server.Name, tool.Name())
+		}
+		if _, ok := localNames[tool.Name()]; ok {
+			return nil, fmt.Errorf("MCP tool %s from %s conflicts with another tool from the same server", remote.Name, server.Name)
+		}
+		localNames[tool.Name()] = struct{}{}
+		serverTools = append(serverTools, tool)
+	}
+	return serverTools, nil
 }
 
 func (runtime *Runtime) Close() error {
@@ -102,6 +228,12 @@ func (runtime *Runtime) Close() error {
 			if err := client.Close(); err != nil && runtime.err == nil {
 				runtime.err = err
 			}
+		}
+		// Release the kept servers' connect contexts AFTER closing the clients: a
+		// stdio subprocess is already terminated by Close, so cancelling is then a
+		// no-op; it frees the context (and any tied subprocess) either way.
+		for _, cancel := range runtime.cancels {
+			cancel()
 		}
 	})
 	return runtime.err

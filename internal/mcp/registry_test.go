@@ -118,14 +118,15 @@ func TestRegisterToolsMarksPersistentlyApprovedToolsAllow(t *testing.T) {
 	}
 }
 
-func TestRegisterToolsRollsBackEarlierServerToolsWhenLaterServerFails(t *testing.T) {
+func TestRegisterToolsSkipsUnreachableServerAndKeepsOthers(t *testing.T) {
 	// NormalizeConfig sorts server names, so "alpha" registers before "zebra".
-	// "zebra" fails mid-registration; registration must be atomic, so "alpha"'s
-	// tools must NOT be left dangling in the caller's registry.
+	// "zebra" is unreachable; it must be SKIPPED (recorded in Skipped()), not fatal,
+	// and "alpha"'s tools must still register — one bad server can't disable the rest
+	// or abort startup. A server still contributes its tools all-or-none.
 	registry := tools.NewRegistry()
 	alphaClient := &fakeToolClient{listed: []RemoteTool{{Name: "lookup", Description: "Lookup documentation"}}}
 
-	_, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 		"alpha": {Type: "stdio", Command: "alpha-mcp"},
 		"zebra": {Type: "stdio", Command: "zebra-mcp"},
 	}}, RegisterOptions{
@@ -136,21 +137,29 @@ func TestRegisterToolsRollsBackEarlierServerToolsWhenLaterServerFails(t *testing
 			return alphaClient, nil
 		},
 	})
-	if err == nil {
-		t.Fatal("expected RegisterTools to fail when a later server fails")
+	if err != nil {
+		t.Fatalf("RegisterTools returned error, want a skip: %v", err)
 	}
-	if _, ok := registry.Get("mcp_alpha_lookup"); ok {
-		t.Fatal("expected earlier server's tools to be rolled back when a later server fails")
+	defer runtime.Close()
+	if _, ok := registry.Get("mcp_alpha_lookup"); !ok {
+		t.Fatal("expected the reachable server's tools to register when another is skipped")
+	}
+	skipped := runtime.Skipped()
+	if len(skipped) != 1 || skipped[0].Name != "zebra" {
+		t.Fatalf("Skipped() = %#v, want exactly one entry for zebra", skipped)
+	}
+	if skipped[0].Err == nil {
+		t.Fatal("expected the skipped server to record why it was skipped")
 	}
 }
 
-func TestRegisterToolsPreservesPriorRegistryStateOnFailure(t *testing.T) {
-	// A tool that predates the MCP registration must survive a failed RegisterTools
-	// call: rollback removes only what this call added.
+func TestRegisterToolsKeepsPriorStateAndReachableServersWhenOneIsSkipped(t *testing.T) {
+	// A tool that predates registration must survive, the reachable server's tools
+	// must register, and the unreachable server is skipped (recorded), not fatal.
 	registry := tools.NewRegistry()
 	registry.Register(&fakePreexistingTool{name: "preexisting"})
 
-	_, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 		"alpha": {Type: "stdio", Command: "alpha-mcp"},
 		"zebra": {Type: "stdio", Command: "zebra-mcp"},
 	}}, RegisterOptions{
@@ -161,14 +170,53 @@ func TestRegisterToolsPreservesPriorRegistryStateOnFailure(t *testing.T) {
 			return &fakeToolClient{listed: []RemoteTool{{Name: "lookup"}}}, nil
 		},
 	})
-	if err == nil {
-		t.Fatal("expected RegisterTools to fail when a later server fails")
+	if err != nil {
+		t.Fatalf("RegisterTools returned error, want a skip: %v", err)
 	}
+	defer runtime.Close()
 	if _, ok := registry.Get("preexisting"); !ok {
-		t.Fatal("expected pre-existing tool to survive a failed MCP registration")
+		t.Fatal("expected the pre-existing tool to survive registration")
 	}
-	if _, ok := registry.Get("mcp_alpha_lookup"); ok {
-		t.Fatal("expected the failed call to add no MCP tools")
+	if _, ok := registry.Get("mcp_alpha_lookup"); !ok {
+		t.Fatal("expected the reachable server's tools to register")
+	}
+	if skipped := runtime.Skipped(); len(skipped) != 1 || skipped[0].Name != "zebra" {
+		t.Fatalf("Skipped() = %#v, want exactly one entry for zebra", skipped)
+	}
+}
+
+func TestRegisterToolsSkipsServerThatExceedsConnectTimeout(t *testing.T) {
+	// A slow server must not block startup: it is abandoned after ConnectTimeout
+	// and skipped, while a fast server registers normally. This is the latency fix
+	// — one unreachable server can't hold up the first response.
+	registry := tools.NewRegistry()
+	fastClient := &fakeToolClient{listed: []RemoteTool{{Name: "lookup", Description: "fast"}}}
+
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"fast": {Type: "stdio", Command: "fast-mcp"},
+		"slow": {Type: "stdio", Command: "slow-mcp"},
+	}}, RegisterOptions{
+		ConnectTimeout: 50 * time.Millisecond,
+		ClientFactory: func(ctx context.Context, server Server) (ToolClient, error) {
+			if server.Name == "slow" {
+				// Block past the timeout, honoring ctx cancellation so the abandoned
+				// connect tears down cleanly instead of leaking.
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return fastClient, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("RegisterTools error: %v", err)
+	}
+	defer runtime.Close()
+	if _, ok := registry.Get("mcp_fast_lookup"); !ok {
+		t.Fatal("expected the fast server's tools to register despite the slow one timing out")
+	}
+	skipped := runtime.Skipped()
+	if len(skipped) != 1 || skipped[0].Name != "slow" {
+		t.Fatalf("Skipped() = %#v, want exactly one entry for slow", skipped)
 	}
 }
 

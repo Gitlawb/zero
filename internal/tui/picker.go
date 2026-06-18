@@ -569,15 +569,18 @@ func (m *model) selectPickerValue(value string) {
 }
 
 // newEffortPicker lists the reasoning efforts the active model supports plus an
-// "auto" option, preselecting the current preference. Returns nil when the model
-// exposes no effort controls so the caller falls back to status text.
+// "auto" option, preselecting the current preference. When the model exposes no
+// effort controls, still returns a single "auto" picker so the user gets the
+// popup affordance on /effort instead of a static status card; handleEffortCommand
+// reports "Active model does not expose reasoning effort controls" if they pick
+// anything other than auto.
 func (m model) newEffortPicker() *commandPicker {
 	efforts := m.availableReasoningEfforts()
-	if len(efforts) == 0 {
-		return nil
-	}
 	items := []pickerItem{{Label: "auto", Value: "auto"}}
 	selected := 0
+	if m.reasoningEffort == "" {
+		selected = 0
+	}
 	for _, effort := range efforts {
 		items = append(items, pickerItem{Label: string(effort), Value: string(effort)})
 		if m.reasoningEffort != "" && effort == m.reasoningEffort {

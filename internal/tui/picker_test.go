@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -675,4 +676,47 @@ func readTUIConfigFixture(t *testing.T, path string) config.FileConfig {
 		t.Fatalf("decode config: %v", err)
 	}
 	return cfg
+}
+
+func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
+	// glm-5.1 is not in the hard-coded registry, so availableReasoningEfforts is
+	// empty. /effort should still open a picker (offering auto only) instead of
+	// rendering a static "Effort / available: none for active model" status card.
+	m := newModel(context.Background(), Options{ModelName: "glm-5.1"})
+	m.input.SetValue("/effort")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.picker == nil || m.picker.kind != pickerEffort {
+		t.Fatalf("expected an open effort picker, got %#v", m.picker)
+	}
+	if len(m.picker.items) != 1 || m.picker.items[0].Value != "auto" {
+		t.Fatalf("expected [auto] as the only effort option on an unsupported model, got %#v", m.picker.items)
+	}
+	if m.picker.title != "select reasoning effort" {
+		t.Fatalf("picker title = %q, want %q", m.picker.title, "select reasoning effort")
+	}
+}
+
+func TestEffortPickerAutoSelectionKeepsEffortUnset(t *testing.T) {
+	// Picking "auto" on a model without effort controls clears any stale
+	// preference and emits the success status text (handleEffortCommand("auto")).
+	m := newModel(context.Background(), Options{ModelName: "glm-5.1"})
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	m.input.SetValue("/effort")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.picker == nil {
+		t.Fatal("expected the effort picker to open")
+	}
+
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	m = updated.(model)
+	if m.picker != nil {
+		t.Fatal("enter should close the picker")
+	}
+	if m.reasoningEffort != "" {
+		t.Fatalf("auto selection should clear reasoning effort, got %q", m.reasoningEffort)
+	}
 }

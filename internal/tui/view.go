@@ -169,6 +169,15 @@ func (m model) composerDividerLine(width int) string {
 	model := displayValue(strings.TrimSpace(m.modelName), "no model")
 	label, style := m.modeLabel()
 	meta := zeroTheme.muted.Render(model) + zeroTheme.muted.Render(" · ") + style.Render(label)
+	if m.reasoningEffort != "" {
+		// Show the active reasoning effort in the brand lime so a just-cycled
+		// value (Ctrl+T) draws the eye. Omitted on "auto" (m.reasoningEffort ==
+		// "") so the segment appearing/disappearing is itself the auto-state
+		// feedback. Models without effort controls can't set a non-empty value
+		// here (handleModelCommand and the /effort picker both gate on
+		// availableReasoningEfforts), so no extra check is needed.
+		meta += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
+	}
 	metaWidth := lipgloss.Width(meta)
 	if width < 8 {
 		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))

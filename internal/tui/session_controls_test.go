@@ -25,9 +25,23 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /effort list to be handled without starting an agent run")
 	}
-	for _, want := range []string{"Effort", "active effort: auto", "available: low, medium, high"} {
-		if !transcriptContains(next.transcript, want) {
-			t.Fatalf("expected effort transcript to contain %q, got %#v", want, next.transcript)
+	// The output is now a command card payload, so the effort list and the
+	// active effort appear inside the same row's text rather than as separate
+	// transcript rows. Strip the card prefix and assert against the rendered
+	// payload.
+	var cardPayload string
+	for _, row := range next.transcript {
+		if strings.HasPrefix(row.text, "\x00command-card\x00") {
+			cardPayload = strings.TrimPrefix(row.text, "\x00command-card\x00")
+			break
+		}
+	}
+	if cardPayload == "" {
+		t.Fatalf("expected an effort command card row, got %#v", next.transcript)
+	}
+	for _, want := range []string{"Effort", "active effort: auto", "available", "low, medium, high"} {
+		if !strings.Contains(cardPayload, want) {
+			t.Fatalf("expected card to contain %q, got %q", want, cardPayload)
 		}
 	}
 
@@ -58,6 +72,69 @@ func TestEffortCommandRejectsUnsupportedActiveModel(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "does not expose reasoning effort controls") {
 		t.Fatalf("expected unsupported model message, got %#v", next.transcript)
+	}
+}
+
+// The Ctrl+T cycle walks the active model's supported ring opencode-style:
+// auto ("") -> first supported -> ... -> last supported -> auto. These cover
+// every branch of cycleReasoningEffort: empty/auto start, mid-ring advance,
+// last-slot wrap, an effort the model doesn't support, and a model with no
+// effort controls at all.
+
+func TestCycleReasoningEffortAutoToFirst(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	if m.reasoningEffort != "" {
+		t.Fatalf("expected default effort auto, got %q", m.reasoningEffort)
+	}
+	next, cmd := m.cycleReasoningEffort()
+	if cmd != nil {
+		t.Fatal("expected cycle to produce no command")
+	}
+	if next.reasoningEffort != modelregistry.ReasoningEffortLow {
+		t.Fatalf("expected cycle from auto to land on first supported effort (low), got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortAdvancesToNext(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	m.reasoningEffort = modelregistry.ReasoningEffortLow
+	next, _ := m.cycleReasoningEffort()
+	if next.reasoningEffort != modelregistry.ReasoningEffortMedium {
+		t.Fatalf("expected cycle low -> medium, got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortWrapsToAuto(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	next, _ := m.cycleReasoningEffort()
+	if next.reasoningEffort != "" {
+		t.Fatalf("expected cycle from last supported (high) to wrap to auto, got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortUnknownResetsToAuto(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "claude-sonnet-4.5"})
+	// Use a sentinel that is guaranteed to be unplaceable in any supported ring,
+	// so this test stays correct even if Minimal gets supported later.
+	m.reasoningEffort = modelregistry.ReasoningEffort("__unknown_effort__")
+	next, _ := m.cycleReasoningEffort()
+	if next.reasoningEffort != "" {
+		t.Fatalf("expected unknown effort to reset to auto, got %q", next.reasoningEffort)
+	}
+}
+
+func TestCycleReasoningEffortNoOpOnUnsupportedModel(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4.1"})
+	// gpt-4.1 exposes no effort controls; set a value directly (the /effort command
+	// would reject this) to prove the cycle is a true no-op and leaves it untouched.
+	m.reasoningEffort = modelregistry.ReasoningEffortHigh
+	next, cmd := m.cycleReasoningEffort()
+	if cmd != nil {
+		t.Fatal("expected cycle on unsupported model to produce no command")
+	}
+	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
+		t.Fatalf("expected cycle to be a no-op on a model without effort controls, got %q", next.reasoningEffort)
 	}
 }
 

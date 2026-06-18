@@ -540,6 +540,15 @@ func (m *model) stopPRWatcher() {
 	m.prWatcherStop = nil
 }
 
+// noBlockingModal reports that no modal surface (permission prompt, ask_user,
+// spec review, provider/MCP wizard, MCP manager, or picker) is up, so a global
+// shortcut may act instead of falling through to a modal's own handler. Shared
+// by every shortcut that should defer to whichever modal is focused.
+func (m model) noBlockingModal() bool {
+	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
+		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil
+}
+
 func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
 	return m, tea.Quit
@@ -765,9 +774,22 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// nextPermissionMode), but only when nothing modal is up: a permission
 			// prompt, ask_user questionnaire, or open picker all take precedence
 			// and let the key fall through to their own handlers below.
-			if m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil && m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil {
+			if m.noBlockingModal() {
 				m.permissionMode = nextPermissionMode(m.permissionMode)
 				return m, nil
+			}
+		case keyCtrl(msg, 't'):
+			if m.transcriptDetailed {
+				return m, nil
+			}
+			// Ctrl+T cycles reasoning effort opencode-style (auto -> low ->
+			// medium -> high -> auto), but only when nothing modal is up — the
+			// same gate shift+tab uses above. Not gated on m.pending: cycling
+			// mid-run is allowed and takes effect on the next turn, matching
+			// /effort. cycleReasoningEffort is a silent no-op on models with no
+			// effort controls.
+			if m.noBlockingModal() {
+				return m.cycleReasoningEffort()
 			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
@@ -1382,6 +1404,10 @@ func (m model) footerView(width int) string {
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))
+	if hint := m.composerDescriptionHint(width); hint != "" {
+		footer.WriteString("\n")
+		footer.WriteString(hint)
+	}
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
 		footer.WriteString("\n")
 		footer.WriteString(queued)
@@ -2066,6 +2092,37 @@ func (m model) composerBox(width int) string {
 	}
 	rendered = append(rendered, m.composerDividerLine(width))
 	return strings.Join(rendered, "\n")
+}
+
+// composerDescriptionHint returns the description line that sits below the
+// composer box, claude-code style, when the input is a single unambiguous
+// slash command. Returns "" when the user is mid-prompt, the palette is closed,
+// or more than one command matches. Slash commands only; the @file palette
+// already shows its rows. The inline argument hint ([low|medium|...]) is
+// unchanged and continues to render inside the composer box.
+func (m model) composerDescriptionHint(width int) string {
+	if width < 8 {
+		return ""
+	}
+	if m.suggestionsAreFiles {
+		return ""
+	}
+	if !m.commandPaletteOpen || len(m.suggestions) != 1 {
+		return ""
+	}
+	if m.suggestionIdx != 0 {
+		return ""
+	}
+	value := strings.TrimSpace(m.input.Value())
+	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, " \t\n") {
+		return ""
+	}
+	suggestion := m.suggestions[0]
+	desc := strings.TrimSpace(suggestion.Desc)
+	if desc == "" {
+		return ""
+	}
+	return fitStyledLine(zeroTheme.muted.Render(desc), width)
 }
 
 // startsTurn reports whether a row begins a new conversational turn and therefore

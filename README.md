@@ -179,6 +179,40 @@ The model registry tracks each model's capabilities, context window, and cost �
 
 Every mutating tool routes through the permission policy **before** any side effect.
 
+### Web search & scraping (free, no API key)
+
+`web_fetch` is built in and always available: it pulls a single URL into clean
+markdown locally, with no third party. For **search**, JS-rendered scraping,
+whole-site crawls, PDF→markdown, and structured extraction, Zero ships the
+[Firecrawl](https://firecrawl.dev) **keyless** MCP server **enabled by default**, so
+web search and scraping work out of the box with **no setup and no API key** (1,000
+free credits/month). It is a normal MCP server, so you stay in control:
+
+```bash
+zero mcp tools list           # see the firecrawl_* tools it exposes
+zero mcp disable firecrawl    # turn it off — web_fetch stays as the local floor
+```
+
+- **Privacy / disclosure:** keyless requests route through `firecrawl.dev`. If you
+  prefer nothing leaves your machine, `zero mcp disable firecrawl` and rely on
+  `web_fetch`, or self-host below.
+- **Self-host (unlimited, private):** Firecrawl is open source (AGPL-3.0). Run your
+  own instance and override the default URL — Zero only *calls* it over the network,
+  so the AGPL never reaches into Zero's own code:
+  ```jsonc
+  // config.json
+  { "mcp": { "servers": { "firecrawl": { "type": "http", "url": "http://localhost:3002/v2/mcp" } } } }
+  ```
+- **Bring your own key (higher limits):** add an auth header over the default:
+  ```bash
+  zero mcp add firecrawl --type http --url https://mcp.firecrawl.dev/v2/mcp \
+    --header "Authorization: Bearer fc-your-key"
+  ```
+
+An MCP server that can't be reached at startup (e.g. Firecrawl on an offline
+machine) is **skipped with a warning, not fatal** — Zero still launches and the
+rest of its tools, including `web_fetch`, keep working.
+
 ### Extra write directories (`--add-dir`)
 
 Zero confines writes to the workspace by default. To let the agent write somewhere
