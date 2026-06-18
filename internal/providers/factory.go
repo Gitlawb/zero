@@ -252,11 +252,11 @@ func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 // newCodexProvider builds a Codex-flavored openai provider for the chatgpt
 // catalog. The Codex headers (`originator`, `chatgpt-account-id`) are
 // injected by the CodexProvider wrapper. The `chatgpt-account-id` is
-// resolved dynamically from the stored OAuth token's Account field so a
-// refresh that rotates the token (rare, but possible) keeps the right id
-// on the wire.
+// resolved dynamically from the stored OAuth token's Account field on
+// every request so a refresh that rotates the token (and its account
+// claim) takes effect immediately — a static AccountID captured at
+// construction would go stale on the first refresh.
 func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, options Options) (zeroruntime.Provider, error) {
-	codexAccount := codexAccountFromStore(profile.Name)
 	resolver := openai.CodexAccountResolver(func(ctx context.Context) (string, bool, error) {
 		account := codexAccountFromStore(profile.Name)
 		if account == "" {
@@ -281,8 +281,9 @@ func newCodexProvider(profile config.ProviderProfile, resolved resolvedProfile, 
 		// The chatgpt catalog overrides this with the Codex baseURL
 		// (https://chatgpt.com/backend-api/codex) when the user does not
 		// pin one, so this branch only needs to handle a user-supplied
-		// override.
-		AccountID:       codexAccount,
+		// override. The codex provider's constructor derives the
+		// `/responses` endpoint from BaseURL, so the factory stays out of
+		// the path.
 		AccountResolver: resolver,
 	})
 }

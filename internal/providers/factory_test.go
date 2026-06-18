@@ -291,10 +291,12 @@ func TestNewRoutesChatGPTCatalogToCodexProvider(t *testing.T) {
 	if transport.request == nil {
 		t.Fatal("HTTP client was not used")
 	}
-	// The chatgpt catalog's baseURL is the Codex backend. With no override,
-	// the Codex provider's stream hits that URL on /chat/completions.
-	if !strings.HasSuffix(transport.request.URL.Path, "/chat/completions") {
-		t.Fatalf("request URL path = %q, want .../chat/completions", transport.request.URL.Path)
+	// The chatgpt catalog's baseURL is the Codex backend. The Codex
+	// provider targets the Responses API at `{baseURL}/responses`, not
+	// `/chat/completions` (a chat-completions body on this path would 404
+	// or be misrouted by the Codex gateway).
+	if !strings.HasSuffix(transport.request.URL.Path, "/responses") {
+		t.Fatalf("request URL path = %q, want .../responses", transport.request.URL.Path)
 	}
 	wantHost := "chatgpt.com"
 	if !strings.Contains(transport.request.URL.Host, wantHost) {

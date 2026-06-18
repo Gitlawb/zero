@@ -47,13 +47,21 @@ type CodexOptions struct {
 	// Codex backend logs the User-Agent for diagnostics, so a "codex_cli_rs"
 	// / "zero" branded value is recommended.
 	UserAgent string
-	// AccountID is the static `chatgpt-account-id` to inject on every
-	// request. When set, the AccountResolver is not consulted. The factory
-	// wires this from the OAuth token's `Account` field.
+	// AccountID is a static `chatgpt-account-id` that bypasses the resolver.
+	// Leave empty in production wiring so the AccountResolver is consulted on
+	// every request — that path reads the live OAuth token from the store and
+	// survives a refresh that rotates the bearer (and its account claim).
+	// The field exists for tests that want a pinned value without standing up
+	// a resolver.
 	AccountID string
 	// AccountResolver, when set, returns the account id dynamically per
-	// request. It is used as a fallback when AccountID is empty. Most callers
-	// (the factory) use AccountID instead; the resolver is for tests.
+	// request (including the 401-refresh retry). The factory wires this so a
+	// refresh that updates the stored token's Account field takes effect on
+	// the next outgoing request without restarting the agent.
+	//
+	// ok=false means "no account id known" — the Codex provider simply omits
+	// the header in that case (the request will 401, but that's recoverable:
+	// the user re-auths and the next login persists a fresh id).
 	AccountResolver CodexAccountResolver
 	// RequestTimeout caps each outbound Codex request. 0 => 60s. The Codex
 	// backend is hosted behind Cloudflare, so a few seconds is plenty for a
@@ -65,9 +73,11 @@ type CodexOptions struct {
 // CodexProvider is the Codex-flavored variant of the openai provider. It is
 // a thin shim that adds the Codex-specific request headers
 // (`originator`, `chatgpt-account-id`, branded `User-Agent`) on top of the
-// generic OpenAI chat-completions transport. The Codex backend accepts the
-// same `/chat/completions` body shape today, so the request body is
-// byte-for-byte the same as the openai provider.
+// generic OpenAI chat-completions transport. The Codex backend speaks the
+// Responses API at `{baseURL}/responses` (not `/chat/completions`), so the
+// constructor overrides the endpoint the wrapped openai provider would
+// otherwise default to. The request body is byte-for-byte the same
+// chat-completions shape today; the path difference is the only divergence.
 type CodexProvider struct {
 	inner          *Provider
 	originator     string
@@ -100,6 +110,14 @@ func NewCodexProvider(options CodexOptions) (*CodexProvider, error) {
 	// constructor sees the full struct; here we set SetRequestExtra below.
 	openaiOpts := options.Options
 	openaiOpts.UserAgent = userAgent
+	// The Codex backend serves the Responses API at `{baseURL}/responses`,
+	// not `/chat/completions`. Override the endpoint the openai transport
+	// would otherwise default to so the Codex provider hits the right path.
+	// (The chat-completions request body is still accepted; only the path
+	// diverges.)
+	if baseURL := strings.TrimRight(strings.TrimSpace(openaiOpts.BaseURL), "/"); baseURL != "" {
+		openaiOpts.Endpoint = baseURL + "/responses"
+	}
 
 	provider := &CodexProvider{
 		originator:     originator,

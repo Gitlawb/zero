@@ -25,8 +25,14 @@ const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures an OpenAI-compatible chat completions provider.
 type Options struct {
-	APIKey          string
-	BaseURL         string
+	APIKey  string
+	BaseURL string
+	// Endpoint, when non-empty, overrides the default `{BaseURL}/chat/completions`
+	// request URL. Used by flavors (notably the Codex provider) that speak a
+	// different path on the same host — e.g. `/responses` on the ChatGPT Codex
+	// backend. When empty, the openai provider falls back to its default
+	// chat-completions path so every existing caller is unchanged.
+	Endpoint        string
 	Model           string
 	AuthHeader      string
 	AuthScheme      string
@@ -60,6 +66,7 @@ type Options struct {
 type Provider struct {
 	apiKey            string
 	baseURL           string
+	endpoint          string
 	model             string
 	authHeader        string
 	authScheme        string
@@ -90,6 +97,15 @@ func New(options Options) (*Provider, error) {
 		return nil, fmt.Errorf("invalid OpenAI base URL: %w", err)
 	}
 
+	// Endpoint overrides the default chat-completions path. When empty we
+	// append `/chat/completions` to the (trimmed) baseURL. When non-empty we
+	// trust the caller's value verbatim so a flavor (Codex) can target a
+	// sibling path on the same host without re-implementing the transport.
+	endpoint := strings.TrimSpace(options.Endpoint)
+	if endpoint == "" {
+		endpoint = baseURL + "/chat/completions"
+	}
+
 	httpClient := options.HTTPClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -108,6 +124,7 @@ func New(options Options) (*Provider, error) {
 	return &Provider{
 		apiKey:            options.APIKey,
 		baseURL:           baseURL,
+		endpoint:          endpoint,
 		model:             model,
 		authHeader:        strings.TrimSpace(options.AuthHeader),
 		authScheme:        strings.TrimSpace(options.AuthScheme),
@@ -143,7 +160,7 @@ func (provider *Provider) StreamCompletion(
 }
 
 func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
-	endpoint := provider.baseURL + "/chat/completions"
+	endpoint := provider.endpoint
 
 	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
 	// the request, rather than closing response.Body directly (which would race

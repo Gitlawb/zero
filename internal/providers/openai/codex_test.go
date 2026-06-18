@@ -27,11 +27,13 @@ type codexRequest struct {
 }
 
 // newCodexTestServer returns an httptest.Server that records each request's
-// Codex headers and writes a minimal [DONE] SSE stream.
+// Codex headers and writes a minimal [DONE] SSE stream. The Codex provider
+// targets `{BaseURL}/responses` (the Responses API on the chatgpt backend),
+// so the handler is mounted on that path.
 func newCodexTestServer(t *testing.T, rec *codexRequest) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/responses", func(w http.ResponseWriter, r *http.Request) {
 		rec.method = r.Method
 		rec.path = r.URL.Path
 		rec.originator = r.Header.Get(codexOriginatorHeader)
@@ -89,8 +91,8 @@ func TestCodexProviderSetsExpectedHeaders(t *testing.T) {
 	if rec.method != http.MethodPost {
 		t.Fatalf("method = %q, want POST", rec.method)
 	}
-	if rec.path != "/chat/completions" {
-		t.Fatalf("path = %q, want /chat/completions", rec.path)
+	if rec.path != "/responses" {
+		t.Fatalf("path = %q, want /responses", rec.path)
 	}
 	if rec.originator != "codex_cli_rs" {
 		t.Fatalf("originator = %q, want codex_cli_rs", rec.originator)
@@ -112,9 +114,9 @@ func TestCodexProviderSetsExpectedHeaders(t *testing.T) {
 func TestCodexProviderUsesConfiguredBaseURL(t *testing.T) {
 	var rec codexRequest
 	// Run the test server on a custom path to confirm the request goes
-	// through {BaseURL}/chat/completions, not a hard-coded host.
+	// through {BaseURL}/responses, not a hard-coded host.
 	mux := http.NewServeMux()
-	customPath := "/api/v1/codex/chat/completions"
+	customPath := "/api/v1/codex/responses"
 	var hit atomic.Int32
 	mux.HandleFunc(customPath, func(w http.ResponseWriter, r *http.Request) {
 		hit.Add(1)
@@ -251,6 +253,88 @@ func TestCodexProviderAccountResolverIsUsedWhenAccountIDEmpty(t *testing.T) {
 	}
 }
 
+func TestCodexProviderResolverIsConsultedOnEveryRequest(t *testing.T) {
+	// The factory wires the AccountResolver from the OAuth store so a refresh
+	// that updates the stored token's Account field takes effect on the next
+	// outgoing request — not just the first. This test asserts the resolver
+	// runs once per request (and that the second request picks up the
+	// account id the resolver starts returning on call #2).
+	var hits atomic.Int32
+	var rec1, rec2 codexRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/responses", func(w http.ResponseWriter, r *http.Request) {
+		n := hits.Add(1)
+		var rec *codexRequest
+		if n == 1 {
+			rec = &rec1
+		} else {
+			rec = &rec2
+		}
+		rec.path = r.URL.Path
+		rec.originator = r.Header.Get(codexOriginatorHeader)
+		rec.accountID = r.Header.Get(codexAccountHeader)
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resolverCalls := atomic.Int32{}
+	provider, err := NewCodexProvider(CodexOptions{
+		Options: Options{
+			BaseURL: srv.URL,
+			Model:   "gpt-5",
+			// Wire an OAuth resolver so the openai provider's 401-retry
+			// path runs. The Codex resolver (AccountResolver) is what
+			// this test actually exercises.
+			OAuthResolver: func(_ context.Context, _ bool) (string, string, bool, error) {
+				return "Authorization", "Bearer oauth-tok", true, nil
+			},
+		},
+		// Static AccountID intentionally empty so the resolver is the
+		// source. The first call returns ok=false (no account); the second
+		// call (after the 401 refresh) returns the new id.
+		AccountResolver: func(_ context.Context) (string, bool, error) {
+			n := resolverCalls.Add(1)
+			if n == 1 {
+				return "", false, nil
+			}
+			return "acc-from-store", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	drainCodexEvents(t, stream)
+
+	if hits.Load() != 2 {
+		t.Fatalf("server hit %d times, want 2 (initial + retry)", hits.Load())
+	}
+	if resolverCalls.Load() != 2 {
+		t.Fatalf("resolver called %d times, want 2 (once per request, including the 401 retry)", resolverCalls.Load())
+	}
+	if rec1.accountID != "" {
+		t.Fatalf("first attempt account id = %q, want empty (resolver returned ok=false on call 1)", rec1.accountID)
+	}
+	if rec2.accountID != "acc-from-store" {
+		t.Fatalf("retry account id = %q, want acc-from-store (resolver must re-run on every request)", rec2.accountID)
+	}
+}
+
 func TestCodexProviderOmitsAccountIDWhenResolverSaysNo(t *testing.T) {
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
@@ -319,7 +403,7 @@ func TestCodexProviderRetriesHeadersAfter401(t *testing.T) {
 	var hits atomic.Int32
 	var rec1, rec2 codexRequest
 	mux := http.NewServeMux()
-	mux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/responses", func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
 		var rec *codexRequest
 		if n == 1 {
