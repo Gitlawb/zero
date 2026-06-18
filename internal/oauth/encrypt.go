@@ -78,7 +78,7 @@ func (c *aesGCMCrypter) open(blob []byte) ([]byte, error) {
 
 // loadOrCreateSecret reads the 32-byte secret at path. When create is set and
 // the file is absent, it generates a random secret and creates the file
-// exclusively (0600). A wrong-sized existing secret fails closed (corruption).
+// atomically (0600). A wrong-sized existing secret fails closed (corruption).
 func loadOrCreateSecret(path string, create bool) ([]byte, error) {
 	if data, err := readSecretFile(path); err == nil {
 		return data, nil
@@ -88,44 +88,68 @@ func loadOrCreateSecret(path string, create bool) ([]byte, error) {
 	if !create {
 		return nil, fmt.Errorf("oauth: token secret %s is missing; cannot decrypt the token file", path)
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	return createSecretFile(path)
+}
+
+func createSecretFile(path string) ([]byte, error) {
+	lockPath := path + ".lock"
+	var lastErr error
+	for attempt := 0; attempt < 500; attempt++ {
+		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_ = lock.Close()
+			defer os.Remove(lockPath)
+			if data, rerr := readSecretFile(path); rerr == nil {
+				return data, nil
+			} else if !errors.Is(rerr, os.ErrNotExist) {
+				return nil, rerr
+			}
+			return writeNewSecretFile(path)
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("oauth: create token secret lock: %w", err)
+		}
+		if data, rerr := readSecretFile(path); rerr == nil {
+			return data, nil
+		} else {
+			lastErr = rerr
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("oauth: timed out waiting for token secret %s: %w", path, lastErr)
+	}
+	return nil, fmt.Errorf("oauth: timed out waiting for token secret lock %s", lockPath)
+}
+
+func writeNewSecretFile(path string) ([]byte, error) {
 	secret := make([]byte, secretBytes)
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
 		return nil, fmt.Errorf("oauth: generate token secret: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	// Create exclusively: an os.Rename publish would clobber on POSIX, so two
-	// concurrent first-run processes could each generate a secret and the loser
-	// would silently orphan the tokens it encrypts. O_EXCL lets exactly one
-	// process win; everyone else adopts the winner's on-disk secret.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			// The winner may not have finished writing yet, so a read here can see a
-			// short/absent file. Retry briefly so concurrent first-run invocations
-			// converge on the winner's secret instead of failing transiently.
-			var lastErr error
-			for attempt := 0; attempt < 50; attempt++ {
-				secret, rerr := readSecretFile(path)
-				if rerr == nil {
-					return secret, nil
-				}
-				lastErr = rerr
-				time.Sleep(2 * time.Millisecond)
-			}
-			return nil, lastErr
-		}
-		return nil, fmt.Errorf("oauth: create token secret: %w", err)
+		return nil, fmt.Errorf("oauth: create token secret temp file: %w", err)
 	}
-	if _, werr := f.Write(secret); werr != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("oauth: chmod token secret temp file: %w", err)
+	}
+	if _, werr := tmp.Write(secret); werr != nil {
+		_ = tmp.Close()
 		return nil, fmt.Errorf("oauth: write token secret: %w", werr)
 	}
-	if cerr := f.Close(); cerr != nil {
-		_ = os.Remove(path)
+	if cerr := tmp.Close(); cerr != nil {
 		return nil, fmt.Errorf("oauth: write token secret: %w", cerr)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return nil, fmt.Errorf("oauth: publish token secret: %w", err)
 	}
 	return secret, nil
 }
