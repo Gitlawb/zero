@@ -1370,9 +1370,18 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 
 func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 	root := t.TempDir()
-	fakeCurl := filepath.Join(root, "curl")
-	if err := os.WriteFile(fakeCurl, []byte("#!/bin/sh\necho fake curl \"$@\"\n"), 0o755); err != nil {
-		t.Fatal(err)
+	command := "PATH=.:$PATH curl https://example.com"
+	if runtime.GOOS == "windows" {
+		command = "set PATH=.;%PATH% && curl https://example.com"
+		fakeCurl := filepath.Join(root, "curl.cmd")
+		if err := os.WriteFile(fakeCurl, []byte("@echo fake curl %*\r\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		fakeCurl := filepath.Join(root, "curl")
+		if err := os.WriteFile(fakeCurl, []byte("#!/bin/sh\necho fake curl \"$@\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewBashTool(root))
@@ -1380,7 +1389,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		turns: [][]zeroruntime.StreamEvent{
 			{
 				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
-				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"PATH=.:$PATH curl https://example.com"}`},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":` + quoteJSONString(command) + `}`},
 				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
 				{Type: zeroruntime.StreamEventDone},
 			},
