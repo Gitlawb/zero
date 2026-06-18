@@ -543,6 +543,15 @@ func (store *Store) appendEventLocked(sessionID string, input AppendEventInput) 
 		return Event{}, err
 	}
 	sequence := session.EventCount + 1
+	// The events log is the source of truth for sequencing. metadata.EventCount is
+	// persisted separately (after the event line below), so a crash between the two
+	// can leave it behind the log; deriving from the log's last sequence then avoids
+	// reusing a number (a duplicate that would mis-target /rewind). Best-effort: a
+	// log read error falls back to the metadata count. Only triggers on a real
+	// desync (log at/ahead of the metadata-derived sequence).
+	if logSeq, err := store.lastEventSequence(sessionID); err == nil && logSeq >= sequence {
+		sequence = logSeq + 1
+	}
 	timestamp := store.timestamp()
 	event := Event{
 		ID:        fmt.Sprintf("%s:%d", sessionID, sequence),
@@ -793,6 +802,98 @@ func writeFileSync(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return file.Close()
+}
+
+// writeFileAtomicSync durably writes content to path with the same crash-safe
+// sequence writeMetadata uses: write a temp file and fsync it, atomically rename
+// it into place, then fsync the parent directory. Checkpoint blobs and rewind
+// restores go through this so they are as durable as session metadata (plain
+// WriteFile+Rename leaves the bytes in the page cache, so a crash can surface a
+// torn or empty file).
+func (store *Store) writeFileAtomicSync(path string, content []byte, perm os.FileMode) error {
+	tmp := fmt.Sprintf("%s.tmp-%d", path, store.idCounter.Add(1))
+	if err := writeFileSync(tmp, content, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// lastEventSequence returns the sequence of the last COMPLETE (newline-
+// terminated) event in the session log, or 0 if the log is empty/absent. A torn
+// trailing partial line (an interrupted append) is ignored, matching ReadEvents.
+// It reads only the file's tail, so it is O(1) regardless of log length. It lets
+// the events log — not the separately-persisted metadata.EventCount — be the
+// source of truth for the next sequence number, so a crash between the event
+// append and the metadata write can never cause a reused (duplicate) sequence.
+func (store *Store) lastEventSequence(sessionID string) (int, error) {
+	file, err := os.Open(store.eventsPath(sessionID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	size := info.Size()
+	if size == 0 {
+		return 0, nil
+	}
+	// Read the tail, growing the window until it contains the last complete line
+	// (events are usually small; a very large last event grows it up to the file).
+	window := int64(64 * 1024)
+	for {
+		if window > size {
+			window = size
+		}
+		buf := make([]byte, window)
+		if _, err := file.ReadAt(buf, size-window); err != nil {
+			return 0, err
+		}
+		lastNL := bytes.LastIndexByte(buf, '\n')
+		if lastNL < 0 {
+			if window >= size {
+				return 0, nil // no newline in the whole file -> no complete event
+			}
+			window *= 2
+			continue
+		}
+		prevNL := bytes.LastIndexByte(buf[:lastNL], '\n')
+		if prevNL < 0 && window < size {
+			window *= 2 // the last complete line may start before the window
+			continue
+		}
+		line := bytes.TrimSpace(buf[prevNL+1 : lastNL])
+		if len(line) == 0 {
+			return 0, nil
+		}
+		var probe struct {
+			Sequence int `json:"sequence"`
+		}
+		if err := json.Unmarshal(line, &probe); err != nil {
+			// A complete-but-corrupt last line: defer to the full, recovery-aware
+			// read so a single bad line never silently mis-sequences the next event.
+			events, rerr := store.ReadEvents(sessionID)
+			if rerr != nil {
+				return 0, rerr
+			}
+			maxSeq := 0
+			for _, event := range events {
+				if event.Sequence > maxSeq {
+					maxSeq = event.Sequence
+				}
+			}
+			return maxSeq, nil
+		}
+		return probe.Sequence, nil
+	}
 }
 
 func rawPayload(payload any) (json.RawMessage, error) {

@@ -185,13 +185,8 @@ func (store *Store) writeBlob(sessionID string, content []byte) (string, error) 
 	if _, err := os.Stat(path); err == nil {
 		return hash, nil // dedup: identical content already stored
 	}
-	tmp := fmt.Sprintf("%s.tmp-%d", path, store.idCounter.Add(1))
-	if err := os.WriteFile(tmp, content, 0o600); err != nil {
+	if err := store.writeFileAtomicSync(path, content, 0o600); err != nil {
 		return "", fmt.Errorf("write checkpoint blob: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return "", fmt.Errorf("commit checkpoint blob: %w", err)
 	}
 	return hash, nil
 }
@@ -230,13 +225,8 @@ func (store *Store) copyBlobs(srcSessionID, dstSessionID string) error {
 			}
 			madeDir = true
 		}
-		tmp := fmt.Sprintf("%s.tmp-%d", dstPath, store.idCounter.Add(1))
-		if err := os.WriteFile(tmp, content, 0o600); err != nil {
+		if err := store.writeFileAtomicSync(dstPath, content, 0o600); err != nil {
 			return fmt.Errorf("write checkpoint blob: %w", err)
-		}
-		if err := os.Rename(tmp, dstPath); err != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("commit checkpoint blob: %w", err)
 		}
 	}
 	return nil

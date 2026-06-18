@@ -217,13 +217,8 @@ func (store *Store) truncateEventsLocked(sessionID string, keepThroughSequence i
 		encoded = append(bytes.Join(kept, []byte{'\n'}), '\n')
 	}
 	path := store.eventsPath(sessionID)
-	tmp := fmt.Sprintf("%s.tmp-%d", path, store.idCounter.Add(1))
-	if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
+	if err := store.writeFileAtomicSync(path, encoded, 0o600); err != nil {
 		return fmt.Errorf("write truncated events: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit truncated events: %w", err)
 	}
 	session, err := store.readMetadata(sessionID)
 	if err != nil {
@@ -284,11 +279,13 @@ func (store *Store) writeFileAtomic(path string, content []byte, mode uint32) er
 		perm = info.Mode().Perm()
 	}
 	tmp := fmt.Sprintf("%s.zero-restore-tmp-%d", path, store.idCounter.Add(1))
-	if err := os.WriteFile(tmp, content, perm); err != nil {
+	// fsync the temp so a restored file's bytes are durable, not just in the page
+	// cache, before it is renamed into place.
+	if err := writeFileSync(tmp, content, perm); err != nil {
 		return err
 	}
-	// WriteFile only applies perm on creation and is subject to umask; force the
-	// exact bits so an executable script's mode is faithfully restored.
+	// writeFileSync applies perm only on creation and is subject to umask; force
+	// the exact bits so an executable script's mode is faithfully restored.
 	if err := os.Chmod(tmp, perm); err != nil {
 		_ = os.Remove(tmp)
 		return err
@@ -297,5 +294,6 @@ func (store *Store) writeFileAtomic(path string, content []byte, mode uint32) er
 		_ = os.Remove(tmp)
 		return err
 	}
-	return nil
+	// fsync the parent dir so the rename itself survives a crash.
+	return syncDir(filepath.Dir(path))
 }
