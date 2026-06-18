@@ -11,7 +11,7 @@ Zero is an open-source terminal coding agent in the same family as Claude Code, 
 If you only want to *use* Zero, the [README](README.md) is enough. This page is for the other three jobs:
 
 1. Tell the agent about *your* project (drop an `AGENTS.md` in your repo).
-2. Add new specialist sub-agents (custom droids).
+2. Add new specialist sub-agents.
 3. Wire Zero into the rest of your toolchain (MCP, skills, hooks, plugins).
 
 ## 1. Drop a project `AGENTS.md`
@@ -31,12 +31,6 @@ Matching is **case-insensitive** on the basename, so `AGENTS.md`, `Agents.md`, a
 Both files use the same format. YAML frontmatter is optional; the markdown body is loaded as instructions for the agent. Zero reads the file once at session start, so changes take effect on the next `zero` launch — not mid-session.
 
 ```markdown
----
-description: One-line summary the agent sees in its prompt.
-globs: "*.go, *.py"
-alwaysApply: false
----
-
 # Project conventions for <your project>
 
 - Build with `make`, not `go build` directly.
@@ -48,12 +42,12 @@ alwaysApply: false
 Tips:
 
 - Keep each file under ~8 KiB. Zero caps the **total** across all matched files at 32 KiB; everything past the cap is dropped.
-- Use `globs:` to scope which files the rules apply to (mirrors Claude Code's `settings.json` scoping).
 - Re-state rules in the imperative voice: "Run `make lint`", not "you should consider running the linter".
 - Don't put secrets, model IDs, or environment-specific paths in `AGENTS.md`. Use `config.json` for those.
 - In a monorepo, drop a narrower `AGENTS.md` in each sub-tree (e.g. `services/api/AGENTS.md`). Zero picks those up automatically when you launch from inside the sub-tree.
+- A YAML frontmatter block (`---\n...\n---`) at the top is preserved verbatim in the injected prompt but is not parsed for `globs:` or `alwaysApply:` scoping today — keep the body self-contained.
 
-## 2. Custom specialists (droids)
+## 2. Custom specialists
 
 Specialists are Zero's sub-agents. Three scopes, in priority order:
 
@@ -85,7 +79,7 @@ that ends in `_api.go`:
 Reply with one JSON object per finding: `{"file", "line", "severity", "message", "fix"}`.
 ```
 
-CLI management:
+CLI management (the prompt is passed inline via `--prompt`):
 
 ```bash
 zero specialist list
@@ -94,14 +88,15 @@ zero specialist create api-reviewer \
     --project \
     --description "Reviews API changes" \
     --tools read-only,plan \
-    --prompt-file api-reviewer.md
+    --prompt "$(cat api-reviewer.md)"
 zero specialist edit api-reviewer --project
 zero specialist delete api-reviewer --project
+zero specialist path                       # prints the resolved specialists directory
 ```
 
 The full format spec (frontmatter fields, tool scopes, prompt conventions) is in [`docs/SPECIALISTS.md`](docs/SPECIALISTS.md).
 
-> **Roadmap.** `zero /droids` will open an in-UI manager (create / edit / delete / preview) the same way the `/mcp` manager works. Today you use the `zero specialist` CLI subcommands above.
+> **Roadmap.** An in-UI specialist manager (create / edit / delete / preview) is on the backlog. Today you use the `zero specialist` CLI subcommands above.
 
 ## 3. Skills
 
@@ -151,18 +146,29 @@ Hooks fire shell commands on lifecycle events. Configure them in JSON:
       "event": "beforeTool",
       "matcher": "bash",
       "command": "/usr/local/bin/zero-hook-block-rmrf.sh",
-      "args": ["${tool}", "${input}"],
       "enabled": true
     },
     {
       "id": "log-session",
       "event": "sessionStart",
       "command": "/usr/local/bin/zero-hook-log.sh",
-      "args": ["start"],
       "enabled": true
     }
   ]
 }
+```
+
+The `args` array (when present) is passed verbatim to `exec.CommandContext`. The actual hook payload — event name, matcher, tool call id, tool name, tool input, tool output, status — is delivered to the command as **JSON on stdin**, not via `${...}` substitution. A typical handler reads stdin and decides what to do:
+
+```bash
+#!/usr/bin/env bash
+# /usr/local/bin/zero-hook-block-rmrf.sh
+set -euo pipefail
+payload="$(cat)"
+if printf '%s' "$payload" | grep -q '"input":"[^"]*rm[[:space:]]+-rf'; then
+  echo "refusing rm -rf" >&2
+  exit 1
+fi
 ```
 
 Events the agent emits (in dispatch order):
@@ -176,9 +182,9 @@ Events the agent emits (in dispatch order):
 | `specialistStart` | A sub-agent is spawned | yes (specialist name) |
 | `specialistStop` | A sub-agent ends | yes (specialist name) |
 
-A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). Hooks that misbehave are recorded in the audit log; use `zero doctor` to surface them.
+A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
 
-> **Roadmap.** `zero /hooks` will open an in-UI manager that generates this file for you (similar to the `/droids` and `/plugins` managers). Today you edit the JSON directly.
+> **Roadmap.** An in-UI hooks manager is on the backlog. Today you edit the JSON directly.
 
 ## 5. MCP — Model Context Protocol
 
@@ -198,7 +204,7 @@ Zero is both an **MCP client** (it can call external MCP servers) and an **MCP s
       "github": {
         "type": "http",
         "url": "https://api.example.com/mcp",
-        "headers": { "Authorization": "Bearer ${env:GITHUB_TOKEN}" }
+        "headers": { "Authorization": "Bearer YOUR_TOKEN_HERE" }
       }
     }
   }
@@ -209,14 +215,19 @@ Manage via CLI:
 
 ```bash
 zero mcp add docs --type stdio -- docs-mcp --port 7777
-zero mcp add github --type http --url https://api.example.com/mcp
+zero mcp add github --type http --url https://api.example.com/mcp \
+    --header "Authorization=Bearer YOUR_TOKEN_HERE"
 zero mcp list
 zero mcp check docs
 zero mcp remove github
 zero mcp oauth login github
 ```
 
-Servers are merged from user and project configs (project wins on conflicts). Token-bearing values come from environment variables — never inline them.
+Servers are merged from user and project configs (project wins on conflicts). Token-bearing values in `config.json` are sent verbatim — there is no `${env:...}` expansion — so prefer one of:
+
+- A wrapper script that sources the secret and execs the real command.
+- A `--header` value produced by command substitution (`"Authorization=Bearer $(print-token)"`) in a private shell config that you keep out of git.
+- A secret manager that injects the env var your MCP server reads on its own (the `command` and `args` then run inside that environment).
 
 ### As a server — expose Zero's tools to another agent
 
@@ -256,16 +267,16 @@ Each plugin has a `plugin.json` manifest:
 Install and manage:
 
 ```bash
-zero plugins install ./github-pr-review
+zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
 zero plugins list
-zero plugins enable github-pr-review
-zero plugins disable github-pr-review
-zero plugins remove github-pr-review
+zero plugins remove github-pr-review    # alias: rm
 ```
+
+A plugin is enabled by being present in the plugins directory and disabled by removing it (or by the user setting `"enabled": false` in its `plugin.json`). Plugins are not enabled or disabled by a CLI subcommand today.
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 
-> **Roadmap.** `zero /plugins` will open an in-UI manager (browse, install, enable / disable). Today you use the `zero plugins` CLI subcommands above. Skills declared inside a plugin's `plugin.json` are not yet merged into the `skill` tool's discovery (see section 3).
+> **Roadmap.** An in-UI plugins manager (browse, install, enable / disable) is on the backlog. Today you use the `zero plugins` CLI subcommands above. Skills declared inside a plugin's `plugin.json` are not yet merged into the `skill` tool's discovery (see section 3).
 
 ## 7. Configuration locations
 
@@ -289,7 +300,7 @@ A team that wants every contributor's Zero to behave the same way commits:
 
 - `AGENTS.md` — project conventions, build commands, do-not-edit lists.
 - `.zero/config.json` — provider catalog, default model, allowed tools.
-- `.zero/specialists/api-reviewer.md` — the team's PR-review droid.
+- `.zero/specialists/api-reviewer.md` — the team's PR-review specialist.
 - `.zero/hooks.json` — block `rm -rf` and `git push --force` on `beforeTool`.
 - `.zero/plugins/internal-tooling/` — a plugin that adds the team's internal CLI tools to the agent's toolset.
 
