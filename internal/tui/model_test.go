@@ -121,6 +121,7 @@ func TestPromptSubmitStoresReasoningSeparatelyFromAnswer(t *testing.T) {
 	})
 	base := time.Date(2026, 6, 14, 10, 0, 0, 0, time.UTC)
 	times := []time.Time{
+		base, // run start: consumed by turnStartedAt (the working-line elapsed clock)
 		base,
 		base.Add(1 * time.Second),
 		base.Add(1800 * time.Millisecond),

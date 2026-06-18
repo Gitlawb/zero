@@ -124,11 +124,15 @@ type model struct {
 	workingVerb      *workingWords
 	workingVerbTicks int
 	pending          bool
-	queuedMessage    string
-	exiting          bool
-	runCancel        context.CancelFunc
-	runID            int
-	activeRunID      int
+	// turnStartedAt is when the in-flight run began; the working status line
+	// renders the live elapsed time from it so a long or stalled turn never looks
+	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
+	turnStartedAt time.Time
+	queuedMessage string
+	exiting       bool
+	runCancel     context.CancelFunc
+	runID         int
+	activeRunID   int
 	// flushRunIDs holds the ids of runs cancelled while still in flight, mapped
 	// to the session they were recording into AT CANCEL TIME. Each cancelled
 	// agent goroutine keeps running to completion and returns its accumulated
@@ -1797,10 +1801,15 @@ func (m model) interimBlock(width int) string {
 		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0))
 	}
 	if strings.TrimSpace(text) == "" {
-		if len(blocks) > 0 {
-			return strings.Join(blocks, "\n")
+		blocks = append(blocks, m.workingStatusLine())
+		// During a long think the reasoning block is collapsed to just its header;
+		// show a live tail of the streaming reasoning beneath the working line so
+		// the screen keeps changing (never looks stuck) and the user can see WHAT
+		// the model is reasoning about. Skipped when expanded (the full body shows).
+		if reasoning != "" && !m.streamingReasoningExpanded {
+			blocks = append(blocks, reasoningPreviewLines(reasoning, width)...)
 		}
-		return zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
+		return strings.Join(blocks, "\n")
 	}
 	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
 	for index, line := range lines {
@@ -1814,7 +1823,78 @@ func (m model) interimBlock(width int) string {
 	}
 	lines = appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
+	// Always show the live working line (spinner + verb + elapsed) BELOW the
+	// streamed text so an upstream stall keeps animating, never a frozen screen.
+	blocks = append(blocks, m.workingStatusLine())
 	return strings.Join(blocks, "\n")
+}
+
+// workingStatusLine renders the live "working" indicator shown on every pending
+// render: an animated spinner, the rotating working verb, and the elapsed time.
+// It is shown even once partial text has streamed so an upstream stall never
+// looks like a frozen terminal — the spinner tick (~80ms, time-based) drives the
+// re-render, so the elapsed clock keeps advancing for ANY provider/model even
+// when no stream data arrives.
+func (m model) workingStatusLine() string {
+	line := zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
+	if !m.turnStartedAt.IsZero() {
+		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
+	}
+	return line
+}
+
+// formatWorkingElapsed renders a turn's running time compactly: "8s", "1m04s".
+func formatWorkingElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return fmt.Sprintf("%dm%02ds", int(d/time.Minute), int(d.Seconds())%60)
+}
+
+// reasoningPreviewLines renders the last 1-2 lines of the in-flight reasoning
+// stream as a dimmed preview so a long "Thinking" phase shows live, changing
+// content instead of a static header. Each line shows its TAIL (the most recent
+// text) so a single continuously-growing reasoning line still visibly moves as
+// tokens arrive. Returns nil when there is no reasoning text.
+func reasoningPreviewLines(reasoning string, width int) []string {
+	var lines []string
+	for _, raw := range strings.Split(strings.TrimSpace(reasoning), "\n") {
+		if t := strings.TrimSpace(raw); t != "" {
+			lines = append(lines, t)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	if len(lines) > 2 {
+		lines = lines[len(lines)-2:]
+	}
+	avail := width - 2
+	if avail < 8 {
+		avail = 8
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, "  "+zeroTheme.faint.Render(previewTail(line, avail)))
+	}
+	return out
+}
+
+// previewTail returns the last `width` runes of s, prefixed with "…" when text
+// was dropped, so a streaming preview shows the newest content. s is plain text
+// (reasoning deltas carry no ANSI), so rune counting is a safe width proxy.
+func previewTail(s string, width int) string {
+	runes := []rune(s)
+	if width <= 0 || len(runes) <= width {
+		return s
+	}
+	if width == 1 {
+		return string(runes[len(runes)-1:])
+	}
+	return "…" + string(runes[len(runes)-(width-1):])
 }
 
 func appendStreamingCursor(lines []string, width int) []string {
@@ -2707,6 +2787,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
+	m.turnStartedAt = m.now()
 	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
 	// the new run starts (instead of mid-rotation from a prior turn). Also
 	// reset the step counter so the cadence doesn't carry over a partial
