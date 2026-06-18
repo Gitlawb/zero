@@ -225,6 +225,111 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 	}
 }
 
+func TestEngineDoesNotAutoAllowProtectedMetadataWrites(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "write_file git hook", args: map[string]any{"path": ".git/hooks/pre-commit"}},
+		{name: "edit_file zero config", args: map[string]any{"path": ".zero/config.json"}},
+		{name: "apply_patch agents metadata", args: map[string]any{"patch": "--- /dev/null\n+++ b/.agents/config.json\n@@ -0,0 +1 @@\n+{}\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := engine.Evaluate(context.Background(), Request{
+				ToolName:       strings.Fields(tc.name)[0],
+				SideEffect:     SideEffectWrite,
+				Permission:     PermissionPrompt,
+				PermissionMode: PermissionModeAsk,
+				Autonomy:       AutonomyMedium,
+				Args:           tc.args,
+			})
+			if decision.Action != ActionPrompt || decision.AutoAllowed {
+				t.Fatalf("protected metadata decision = %#v, want prompt without auto-allow", decision)
+			}
+		})
+	}
+}
+
+func TestEngineDeniesApplyPatchEscapesFromPatchBody(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "apply_patch",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       AutonomyMedium,
+		Args: map[string]any{
+			"patch": "--- a/notes.txt\n+++ b/../escape.txt\n@@ -0,0 +1 @@\n+escape\n",
+		},
+	})
+
+	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationOutsideWorkspace {
+		t.Fatalf("escaping apply_patch decision = %#v, want outside-workspace deny", decision)
+	}
+}
+
+func TestEngineSessionGrantDoesNotMatchSiblingFile(t *testing.T) {
+	root := t.TempDir()
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: promptWorkspaceWritePolicy()})
+
+	if _, err := engine.GrantForSession(GrantInput{
+		ToolName:    "write_file",
+		Decision:    GrantAllow,
+		MaxAutonomy: AutonomyMedium,
+		Scope:       "src/a.txt",
+		ScopeKind:   ScopeFile,
+	}); err != nil {
+		t.Fatalf("GrantForSession file: %v", err)
+	}
+
+	request := func(path string) Request {
+		return Request{
+			ToolName:       "write_file",
+			SideEffect:     SideEffectWrite,
+			Permission:     PermissionPrompt,
+			PermissionMode: PermissionModeAsk,
+			Autonomy:       AutonomyMedium,
+			Args:           map[string]any{"path": path},
+		}
+	}
+
+	if decision := engine.Evaluate(context.Background(), request("src/a.txt")); decision.Action != ActionAllow || !decision.GrantMatched || decision.Grant == nil || !decision.Grant.Session {
+		t.Fatalf("same file session grant decision = %#v, want matched session allow", decision)
+	}
+	if decision := engine.Evaluate(context.Background(), request("src/b.txt")); decision.Action != ActionPrompt || decision.GrantMatched {
+		t.Fatalf("sibling file session grant decision = %#v, want prompt without grant match", decision)
+	}
+}
+
+func TestEngineDeniesAutoAllowedSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "apply_patch",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       AutonomyMedium,
+		Args: map[string]any{
+			"patch": "--- /dev/null\n+++ b/linked/escape.txt\n@@ -0,0 +1 @@\n+escape\n",
+		},
+	})
+
+	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationSymlinkTraversal {
+		t.Fatalf("symlink apply_patch decision = %#v, want symlink traversal deny", decision)
+	}
+}
+
 func TestEngineGrantScopesWebFetchToHost(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),

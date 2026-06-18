@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -290,6 +291,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// workspace boundary itself needs a root, so it is gated on having one. Mode is
 	// already known to be enforcing here (ModeDisabled returned above).
 	enforceWorkspace := policy.EnforceWorkspace && request.WorkspaceRoot != ""
+	if violation := applyPatchPathViolation(request); violation != nil {
+		return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
+	}
 	for _, requested := range requestPaths(request) {
 		if violation := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
 			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
@@ -360,7 +364,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if request.Permission == PermissionAllow {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
-	if workspaceWriteAutoAllowed(policy, request) {
+	if workspaceWriteAutoAllowed(policy, request, scope) {
 		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
 		}
@@ -457,18 +461,80 @@ func (engine *Engine) lookupSessionGrant(toolName string, reqScope string, reque
 	return lookupGrantBucket(engine.sessionGrants[strings.TrimSpace(toolName)], reqScope, requested)
 }
 
-func workspaceWriteAutoAllowed(policy Policy, request Request) bool {
+func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) bool {
 	if !policy.EnforceWorkspace || request.WorkspaceRoot == "" || request.SideEffect != SideEffectWrite {
 		return false
 	}
+	paths := requestPaths(request)
+	if len(paths) == 0 || requestPathsTouchProtectedMetadata(scope, request.WorkspaceRoot, paths) {
+		return false
+	}
 	switch request.ToolName {
-	case "write_file", "edit_file":
-		return len(requestPaths(request)) > 0
-	case "apply_patch":
+	case "write_file", "edit_file", "apply_patch":
 		return true
 	default:
 		return false
 	}
+}
+
+func requestPathsTouchProtectedMetadata(scope *Scope, workspaceRoot string, paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, path := range paths {
+		if pathTouchesProtectedMetadata(scope, workspaceRoot, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathTouchesProtectedMetadata(scope *Scope, workspaceRoot string, path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	if !filepath.IsAbs(path) {
+		return relativePathTouchesProtectedMetadata(path)
+	}
+	roots := []string{}
+	if scope != nil {
+		roots = scope.Roots()
+	} else if workspaceRoot != "" {
+		roots = []string{workspaceRoot}
+	}
+	for _, root := range roots {
+		root = normalizeWorkspaceRootBestEffort(root)
+		if root == "" {
+			continue
+		}
+		normalized := NormalizePrefixForRoot(filepath.Clean(path), root)
+		relative, err := filepath.Rel(root, normalized)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+			continue
+		}
+		if relativePathTouchesProtectedMetadata(relative) {
+			return true
+		}
+	}
+	return false
+}
+
+func relativePathTouchesProtectedMetadata(path string) bool {
+	cleaned := filepath.Clean(filepath.FromSlash(strings.TrimSpace(path)))
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) || filepath.IsAbs(cleaned) {
+		return false
+	}
+	first := cleaned
+	if index := strings.Index(first, string(filepath.Separator)); index >= 0 {
+		first = first[:index]
+	}
+	for _, protected := range protectedMetadataNames {
+		if first == protected {
+			return true
+		}
+	}
+	return false
 }
 
 func deny(request Request, risk Risk, code ViolationCode, path string, reason string, recoverable bool) Decision {
