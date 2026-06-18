@@ -16,7 +16,6 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
 	"github.com/Gitlawb/zero/internal/update"
@@ -1314,8 +1313,8 @@ func assertAgentOptions(t *testing.T, options tui.Options, maxTurns int, permiss
 	if options.AgentOptions.PermissionMode != permissionMode {
 		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", options.AgentOptions.PermissionMode, permissionMode)
 	}
-	if options.AgentOptions.Autonomy != string(sandbox.AutonomyLow) {
-		t.Fatalf("AgentOptions.Autonomy = %q, want %q", options.AgentOptions.Autonomy, sandbox.AutonomyLow)
+	if options.AgentOptions.Autonomy != "low" {
+		t.Fatalf("AgentOptions.Autonomy = %q, want %q", options.AgentOptions.Autonomy, "low")
 	}
 	if options.AgentOptions.Sandbox == nil {
 		t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")

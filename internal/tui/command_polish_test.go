@@ -250,10 +250,9 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
 	if _, err := store.Grant(sandbox.GrantInput{
-		ToolName:    "bash",
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: sandbox.AutonomyHigh,
-		Reason:      "sk-proj-sensitive approved shell",
+		ToolName: "bash",
+		Decision: sandbox.GrantAllow,
+		Reason:   "sk-proj-sensitive approved shell",
 	}); err != nil {
 		t.Fatalf("Grant returned error: %v", err)
 	}
@@ -307,7 +306,7 @@ func TestContextAndPermissionsCommandsRenderProductState(t *testing.T) {
 		"State",
 		"mode  ask",
 		"Grants",
-		"bash [allow/high]",
+		"bash [allow]",
 		"[REDACTED]",
 	} {
 		assertContains(t, permissionText, want)

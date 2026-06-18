@@ -57,7 +57,6 @@ func HasProviderProfile(profile ProviderProfile) bool {
 }
 
 type SandboxConfig struct {
-	MaxAutonomy string `json:"maxAutonomy,omitempty"`
 	// Network controls whether shell commands classified as network-touching
 	// (curl, git push, package installs, …) are allowed: "allow" or "deny".
 	// Empty keeps the built-in default (deny). Without this knob the engine's

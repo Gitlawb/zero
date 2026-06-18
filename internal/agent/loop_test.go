@@ -594,7 +594,7 @@ func TestRunDefersSelfCorrectFeedbackUntilAfterToolBatch(t *testing.T) {
 	if _, err := Run(context.Background(), "go", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		SelfCorrect:    corrector,
 		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
 			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "test"}, nil
@@ -669,7 +669,7 @@ func TestRunBatchesSelfCorrectOncePerTurn(t *testing.T) {
 	if _, err := Run(context.Background(), "go", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		SelfCorrect:    corrector,
 		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
 			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "test"}, nil
@@ -748,7 +748,7 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
 			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approved for test"}, nil
@@ -778,7 +778,7 @@ func TestRunRequestsPromptToolPermissionBeforeExecution(t *testing.T) {
 	if request.ToolCallID != "call-1" || request.ToolName != "write_file" || request.Action != PermissionActionPrompt {
 		t.Fatalf("unexpected permission request: %#v", request)
 	}
-	if request.PermissionMode != PermissionModeAsk || request.SideEffect != string(tools.SideEffectWrite) || request.Autonomy != string(sandbox.AutonomyMedium) {
+	if request.PermissionMode != PermissionModeAsk || request.SideEffect != string(tools.SideEffectWrite) || request.Autonomy != "medium" {
 		t.Fatalf("unexpected request metadata: %#v", request)
 	}
 	if len(permissionEvents) != 1 {
@@ -803,7 +803,7 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -998,7 +998,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        policy,
@@ -1024,7 +1024,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 	// The grant is scoped to exactly the file the call wrote, anchored to the
 	// workspace — not a blanket tool-wide allow.
 	notesPath := filepath.Join(root, "notes.txt")
-	lookup, err := store.Lookup("write_file", notesPath, sandbox.AutonomyMedium)
+	lookup, err := store.Lookup("write_file", notesPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func TestRunPersistsAlwaysAllowPermissionDecision(t *testing.T) {
 		t.Fatalf("expected file-scoped grant for %q, got %#v", notesPath, lookup.Grant)
 	}
 	// A different file in the same workspace is NOT covered by that grant.
-	other, err := store.Lookup("write_file", filepath.Join(root, "other.txt"), sandbox.AutonomyMedium)
+	other, err := store.Lookup("write_file", filepath.Join(root, "other.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1090,7 +1090,7 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 	result, err := Run(context.Background(), "write notes twice", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        policy,
@@ -1130,7 +1130,7 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 	if !permissionEvents[1].GrantMatched || permissionEvents[1].Grant == nil || !permissionEvents[1].Grant.Session {
 		t.Fatalf("expected second event to be session-grant matched, got %#v", permissionEvents[1])
 	}
-	lookup, err := store.Lookup("write_file", filepath.Join(root, "notes.txt"), sandbox.AutonomyMedium)
+	lookup, err := store.Lookup("write_file", filepath.Join(root, "notes.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1169,7 +1169,7 @@ func TestRunCommandPrefixApprovalSkipsLaterMatchingBashPrompt(t *testing.T) {
 	result, err := Run(context.Background(), "run twice", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -1239,7 +1239,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 	if _, err := Run(context.Background(), "run once", firstProvider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        policy,
@@ -1291,7 +1291,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 	if _, err := Run(context.Background(), "run again", secondProvider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        policy,
@@ -1343,7 +1343,7 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 	if _, err := Run(context.Background(), "curl", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -1404,7 +1404,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 	result, err := Run(context.Background(), "curl", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -1470,7 +1470,7 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	_, err := Run(context.Background(), "run unsafe", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -1515,7 +1515,7 @@ func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 	result, err := Run(context.Background(), "run dangerous command", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -1570,7 +1570,7 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox:        nil, // no sandbox engine configured
 		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
 			return PermissionDecision{Action: PermissionDecisionAlwaysAllow, Reason: "trust it"}, nil
@@ -1671,10 +1671,9 @@ func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	grant, err := store.Grant(sandbox.GrantInput{
-		ToolName:    "write_file",
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: sandbox.AutonomyHigh,
-		Reason:      "trusted workspace edits",
+		ToolName: "write_file",
+		Decision: sandbox.GrantAllow,
+		Reason:   "trusted workspace edits",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1687,7 +1686,7 @@ func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
@@ -1739,7 +1738,7 @@ func TestRunPromptsAndAllowsOutsideWorkspaceWrite(t *testing.T) {
 	result, err := Run(context.Background(), "write outside", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox:        engine,
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
@@ -1817,7 +1816,7 @@ func TestRunSessionAllowsLaterOutsideWorkspaceWrite(t *testing.T) {
 	result, err := Run(context.Background(), "write outside twice", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Sandbox:        engine,
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
@@ -1866,7 +1865,7 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	result, err := Run(context.Background(), "write outside", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeUnsafe,
-		Autonomy:       string(sandbox.AutonomyHigh),
+		Autonomy:       "high",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),

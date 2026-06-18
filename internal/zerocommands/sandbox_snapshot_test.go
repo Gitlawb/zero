@@ -10,11 +10,10 @@ import (
 
 func TestSandboxGrantSnapshotFromGrantRedactsReasonAndTrimsFields(t *testing.T) {
 	grant := sandbox.Grant{
-		ToolName:    "  bash  ",
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: sandbox.AutonomyHigh,
-		ApprovedAt:  "  2026-06-04T10:00:00Z  ",
-		Reason:      "auth token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 leaked",
+		ToolName:   "  bash  ",
+		Decision:   sandbox.GrantAllow,
+		ApprovedAt: "  2026-06-04T10:00:00Z  ",
+		Reason:     "auth token sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 leaked",
 	}
 
 	snapshot := SandboxGrantSnapshotFromGrant(grant)
@@ -28,9 +27,6 @@ func TestSandboxGrantSnapshotFromGrantRedactsReasonAndTrimsFields(t *testing.T) 
 	if snapshot.Decision != string(sandbox.GrantAllow) {
 		t.Fatalf("Decision = %q, want %q", snapshot.Decision, sandbox.GrantAllow)
 	}
-	if snapshot.MaxAutonomy != string(sandbox.AutonomyHigh) {
-		t.Fatalf("MaxAutonomy = %q, want %q", snapshot.MaxAutonomy, sandbox.AutonomyHigh)
-	}
 	if strings.Contains(snapshot.Reason, "sk-proj-") {
 		t.Fatalf("expected reason secret to be redacted, got %q", snapshot.Reason)
 	}
@@ -41,11 +37,10 @@ func TestSandboxGrantSnapshotFromGrantRedactsReasonAndTrimsFields(t *testing.T) 
 
 func TestSandboxGrantSnapshotFromGrantEmptyReasonBecomesEmpty(t *testing.T) {
 	grant := sandbox.Grant{
-		ToolName:    "bash",
-		Decision:    sandbox.GrantDeny,
-		MaxAutonomy: sandbox.AutonomyLow,
-		ApprovedAt:  "2026-06-04T10:00:00Z",
-		Reason:      "   ",
+		ToolName:   "bash",
+		Decision:   sandbox.GrantDeny,
+		ApprovedAt: "2026-06-04T10:00:00Z",
+		Reason:     "   ",
 	}
 	snapshot := SandboxGrantSnapshotFromGrant(grant)
 	if snapshot.Reason != "" {
@@ -55,9 +50,9 @@ func TestSandboxGrantSnapshotFromGrantEmptyReasonBecomesEmpty(t *testing.T) {
 
 func TestSandboxGrantSnapshotsSortsByToolNameAndReturnsEmptySliceForEmptyInput(t *testing.T) {
 	grants := []sandbox.Grant{
-		{ToolName: "write_file", Decision: sandbox.GrantAllow, MaxAutonomy: sandbox.AutonomyMedium, ApprovedAt: "2026-06-04T10:00:00Z"},
-		{ToolName: "bash", Decision: sandbox.GrantAllow, MaxAutonomy: sandbox.AutonomyHigh, ApprovedAt: "2026-06-04T10:00:00Z"},
-		{ToolName: "edit_file", Decision: sandbox.GrantDeny, MaxAutonomy: sandbox.AutonomyLow, ApprovedAt: "2026-06-04T10:00:00Z"},
+		{ToolName: "write_file", Decision: sandbox.GrantAllow, ApprovedAt: "2026-06-04T10:00:00Z"},
+		{ToolName: "bash", Decision: sandbox.GrantAllow, ApprovedAt: "2026-06-04T10:00:00Z"},
+		{ToolName: "edit_file", Decision: sandbox.GrantDeny, ApprovedAt: "2026-06-04T10:00:00Z"},
 	}
 	snapshots := SandboxGrantSnapshots(grants)
 	if len(snapshots) != 3 {
@@ -87,11 +82,10 @@ func TestSandboxGrantMatchSnapshotFromLookupMatchedAndUnmatched(t *testing.T) {
 	matched := SandboxGrantMatchSnapshotFromLookup("  bash  ", sandbox.GrantLookup{
 		Matched: true,
 		Grant: sandbox.Grant{
-			ToolName:    "bash",
-			Decision:    sandbox.GrantAllow,
-			MaxAutonomy: sandbox.AutonomyHigh,
-			ApprovedAt:  "2026-06-04T10:00:00Z",
-			Reason:      "user pressed always",
+			ToolName:   "bash",
+			Decision:   sandbox.GrantAllow,
+			ApprovedAt: "2026-06-04T10:00:00Z",
+			Reason:     "user pressed always",
 		},
 	})
 	if !matched.Matched {
@@ -121,11 +115,10 @@ func TestSandboxGrantMatchSnapshotFromLookupMatchedAndUnmatched(t *testing.T) {
 
 func TestSandboxGrantSnapshotJSONShapeIsStable(t *testing.T) {
 	snapshot := SandboxGrantSnapshot{
-		ToolName:    "bash",
-		Decision:    "allow",
-		MaxAutonomy: "high",
-		ApprovedAt:  "2026-06-04T10:00:00Z",
-		Reason:      "user approved",
+		ToolName:   "bash",
+		Decision:   "allow",
+		ApprovedAt: "2026-06-04T10:00:00Z",
+		Reason:     "user approved",
 	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
@@ -135,9 +128,12 @@ func TestSandboxGrantSnapshotJSONShapeIsStable(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatalf("json.Unmarshal returned error: %v", err)
 	}
-	for _, key := range []string{"toolName", "decision", "maxAutonomy", "approvedAt", "reason"} {
+	for _, key := range []string{"toolName", "decision", "approvedAt", "reason"} {
 		if _, ok := decoded[key]; !ok {
 			t.Fatalf("expected key %q in JSON output, got %q", key, string(encoded))
 		}
+	}
+	if _, ok := decoded["maxAutonomy"]; ok {
+		t.Fatalf("maxAutonomy should not be present in JSON output: %q", string(encoded))
 	}
 }

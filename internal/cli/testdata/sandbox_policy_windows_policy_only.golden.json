@@ -3,8 +3,7 @@
     "mode": "enforce",
     "network": "deny",
     "enforceWorkspace": true,
-    "allowPolicyOnlyRunner": true,
-    "maxAutonomy": "high"
+    "allowPolicyOnlyRunner": true
   },
   "backend": {
     "name": "policy-only",
@@ -31,8 +30,7 @@
       "mode": "enforce",
       "network": "deny",
       "enforceWorkspace": true,
-      "allowPolicyOnlyRunner": true,
-      "maxAutonomy": "high"
+      "allowPolicyOnlyRunner": true
     },
     "permissionProfile": {
       "fileSystem": {

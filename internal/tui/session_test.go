@@ -227,7 +227,7 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 			runtimeMessageCh <- msg
 		},
 		AgentOptions: agent.Options{
-			Autonomy: string(sandbox.AutonomyMedium),
+			Autonomy: "medium",
 			Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 				WorkspaceRoot: root,
 				Policy:        promptWritePolicy(),
@@ -373,7 +373,7 @@ func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 	next := submitAndDrivePermissionRun(t, m, "write first", "y", runtimeMessageCh, 4)
 
 	// The always-decision persists a grant scoped to exactly the file written.
-	lookup, err := grantStore.Lookup("write_file", filepath.Join(root, "notes.txt"), sandbox.AutonomyMedium)
+	lookup, err := grantStore.Lookup("write_file", filepath.Join(root, "notes.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +491,7 @@ func newPermissionTestModel(root string, provider zeroruntime.Provider, registry
 			runtimeMessages <- msg
 		},
 		AgentOptions: agent.Options{
-			Autonomy: string(sandbox.AutonomyMedium),
+			Autonomy: "medium",
 			Sandbox:  sandbox.NewEngine(engineOptions),
 		},
 	})

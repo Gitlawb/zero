@@ -372,13 +372,13 @@ func (set *memoryGrantSet) add(grant Grant) {
 	set.grants[grant.ToolName] = append(bucket, grant)
 }
 
-func (set *memoryGrantSet) lookup(toolName string, reqScope string, requested Autonomy) GrantLookup {
+func (set *memoryGrantSet) lookup(toolName string, reqScope string) GrantLookup {
 	if set == nil {
 		return GrantLookup{}
 	}
 	set.mu.Lock()
 	defer set.mu.Unlock()
-	return lookupGrantBucket(set.grants[strings.TrimSpace(toolName)], reqScope, requested)
+	return lookupGrantBucket(set.grants[strings.TrimSpace(toolName)], reqScope)
 }
 
 type permissionProfileGrantSet struct {

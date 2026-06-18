@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-// reasonAboveCeiling is the Decision.Reason emitted when a grant-allow or unsafe
-// escalation is clamped to a prompt because it exceeds the configured autonomy ceiling.
-const reasonAboveCeiling = "above policy ceiling"
-
 type EngineOptions struct {
 	WorkspaceRoot string
 	Policy        Policy
@@ -267,31 +263,10 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()
 	}
-	if policy.MaxAutonomy == "" {
-		// A directly-constructed Policy{} (bypassing DefaultPolicy) leaves the
-		// ceiling empty, which NormalizeAutonomy would read as Low and clamp every
-		// Medium/High decision to Prompt. Default empty to High so the ceiling is a
-		// no-op unless explicitly configured (fail-open is correct here: the empty
-		// value signals "unset", not "lock everything down").
-		policy.MaxAutonomy = AutonomyHigh
-	}
 	request.WorkspaceRoot = firstNonEmpty(request.WorkspaceRoot, engine.workspaceRoot)
 	request.Permission = NormalizePermission(request.Permission)
 	request.PermissionMode = NormalizePermissionMode(request.PermissionMode)
 	request.SideEffect = NormalizeSideEffect(request.SideEffect)
-	// Preserve the raw requested autonomy for the ceiling checks below. A
-	// genuinely-invalid value (NormalizeAutonomy("") is Low, not an error, so only
-	// bogus values land here) gets a safe High placeholder for risk classification
-	// and grant lookup, but the ceiling check uses rawAutonomy so autonomyAllowed's
-	// unknown-tier guard fails it CLOSED (clamps to Prompt) under ANY ceiling —
-	// including the default High, where a normalized-High value would wrongly pass
-	// autonomyAllowed(High, High).
-	rawAutonomy := request.Autonomy
-	autonomy, err := NormalizeAutonomy(request.Autonomy)
-	if err != nil {
-		autonomy = AutonomyHigh
-	}
-	request.Autonomy = autonomy
 	scope := engine.scopeFor(request.WorkspaceRoot)
 	risk := classifyWithScope(request, scope)
 
@@ -343,7 +318,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
 	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
 	if engine.store != nil {
-		match, err := engine.store.Lookup(request.ToolName, reqScope, request.Autonomy)
+		match, err := engine.store.Lookup(request.ToolName, reqScope)
 		if err == nil && match.Matched {
 			grant := match.Grant
 			if grant.Decision == GrantDeny {
@@ -351,15 +326,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 				decision.GrantMatched = true
 				decision.Grant = &grant
 				return decision
-			}
-			if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
-				return Decision{
-					Action:       ActionPrompt,
-					Reason:       reasonAboveCeiling,
-					Risk:         risk,
-					GrantMatched: true,
-					Grant:        &grant,
-				}
 			}
 			return Decision{
 				Action:       ActionAllow,
@@ -370,17 +336,8 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			}
 		}
 	}
-	if match := engine.lookupSessionGrant(request.ToolName, reqScope, request.Autonomy); match.Matched {
+	if match := engine.lookupSessionGrant(request.ToolName, reqScope); match.Matched {
 		grant := match.Grant
-		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
-			return Decision{
-				Action:       ActionPrompt,
-				Reason:       reasonAboveCeiling,
-				Risk:         risk,
-				GrantMatched: true,
-				Grant:        &grant,
-			}
-		}
 		return Decision{
 			Action:       ActionAllow,
 			Reason:       "session sandbox allow grant matched",
@@ -393,9 +350,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	if workspaceWriteAutoAllowed(policy, request, scope) {
-		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
-			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
-		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write permitted by sandbox policy", AutoAllowed: true}
 	}
 	// Auto-allow an ordinary shell command when the active native sandbox is the
@@ -403,15 +357,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// this branch, so they still prompt or deny as configured. If the backend is
 	// policy-only/disabled, shell commands keep the normal approval prompt.
 	if request.SideEffect == SideEffectShell && engine.shellSandboxActive(policy) {
-		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
-			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
-		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "auto-allowed: sandbox is active for this shell command", AutoAllowed: true}
 	}
 	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
-		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
-			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
-		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
@@ -461,15 +409,11 @@ func (engine *Engine) normalizeGrantInput(input GrantInput) (GrantInput, error) 
 	return input, nil
 }
 
-func (engine *Engine) lookupSessionGrant(toolName string, reqScope string, requestedAutonomy Autonomy) GrantLookup {
+func (engine *Engine) lookupSessionGrant(toolName string, reqScope string) GrantLookup {
 	if engine == nil {
 		return GrantLookup{}
 	}
-	requested, err := NormalizeAutonomy(requestedAutonomy)
-	if err != nil {
-		return GrantLookup{}
-	}
-	return engine.sessionGrants.lookup(toolName, reqScope, requested)
+	return engine.sessionGrants.lookup(toolName, reqScope)
 }
 
 func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) bool {

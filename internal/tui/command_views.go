@@ -337,7 +337,7 @@ func (m model) permissionsTextWithStore(store grantLister) string {
 		grantRows = append(grantRows, commandRow{Text: "none"})
 	} else {
 		for _, grant := range snapshots {
-			line := fmt.Sprintf("%s [%s/%s]", grant.ToolName, grant.Decision, grant.MaxAutonomy)
+			line := fmt.Sprintf("%s [%s]", grant.ToolName, grant.Decision)
 			if grant.ApprovedAt != "" {
 				line += " approved " + grant.ApprovedAt
 			}

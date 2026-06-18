@@ -189,7 +189,7 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 		PermissionGranted: true,
 		Sandbox:           engine,
 		PermissionMode:    string(sandbox.PermissionUnsafe),
-		Autonomy:          string(sandbox.AutonomyHigh),
+		Autonomy:          "high",
 	})
 
 	if result.Status != StatusError {
@@ -219,7 +219,7 @@ func TestRegistrySandboxGatesPathAliasKeys(t *testing.T) {
 			PermissionGranted: true,
 			Sandbox:           engine,
 			PermissionMode:    string(sandbox.PermissionUnsafe),
-			Autonomy:          string(sandbox.AutonomyHigh),
+			Autonomy:          "high",
 		})
 
 		if result.Status != StatusError || !strings.Contains(result.Output, "outside_workspace") {
@@ -240,10 +240,9 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
 	if _, err := store.Grant(sandbox.GrantInput{
-		ToolName:    "write_file",
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: sandbox.AutonomyMedium,
-		Reason:      "workspace writes",
+		ToolName: "write_file",
+		Decision: sandbox.GrantAllow,
+		Reason:   "workspace writes",
 	}); err != nil {
 		t.Fatalf("Grant returned error: %v", err)
 	}
@@ -264,7 +263,7 @@ func TestRegistryAllowsPromptToolWithPersistentSandboxGrant(t *testing.T) {
 		PermissionGranted: false,
 		Sandbox:           engine,
 		PermissionMode:    string(sandbox.PermissionModeAsk),
-		Autonomy:          string(sandbox.AutonomyMedium),
+		Autonomy:          "medium",
 	})
 
 	if result.Status != StatusOK {

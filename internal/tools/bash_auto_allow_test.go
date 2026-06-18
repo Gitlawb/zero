@@ -45,7 +45,7 @@ func TestBashAutoAllowedWhenSandboxActive(t *testing.T) {
 		PermissionGranted: false,
 		Sandbox:           engine,
 		PermissionMode:    string(sandbox.PermissionModeAsk),
-		Autonomy:          string(sandbox.AutonomyHigh),
+		Autonomy:          "high",
 	})
 
 	if strings.Contains(result.Output, permissionRequiredFragment) {
@@ -72,7 +72,7 @@ func TestBashStillPromptsWithoutActiveSandbox(t *testing.T) {
 		PermissionGranted: false,
 		Sandbox:           engine,
 		PermissionMode:    string(sandbox.PermissionModeAsk),
-		Autonomy:          string(sandbox.AutonomyHigh),
+		Autonomy:          "high",
 	})
 
 	if result.Status != StatusError || !strings.Contains(result.Output, "Sandbox approval required for bash") {

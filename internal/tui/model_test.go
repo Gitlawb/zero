@@ -362,17 +362,15 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
 	if _, err := store.Grant(sandbox.GrantInput{
-		ToolName:    "bash",
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: sandbox.AutonomyHigh,
-		Reason:      "sk-proj-sensitive trusted shell",
+		ToolName: "bash",
+		Decision: sandbox.GrantAllow,
+		Reason:   "sk-proj-sensitive trusted shell",
 	}); err != nil {
 		t.Fatalf("Grant bash returned error: %v", err)
 	}
 	if _, err := store.Grant(sandbox.GrantInput{
-		ToolName:    "write_file",
-		Decision:    sandbox.GrantDeny,
-		MaxAutonomy: sandbox.AutonomyLow,
+		ToolName: "write_file",
+		Decision: sandbox.GrantDeny,
 	}); err != nil {
 		t.Fatalf("Grant write_file returned error: %v", err)
 	}
@@ -394,8 +392,8 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 		"ask permissions",
 		"mode  ask",
 		"Grants",
-		"bash [allow/high]",
-		"write_file [deny/low]",
+		"bash [allow]",
+		"write_file [deny]",
 		"[REDACTED]",
 	} {
 		assertContains(t, text, want)
@@ -1185,7 +1183,7 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 		Action:         agent.PermissionActionPrompt,
 		Permission:     "prompt",
 		PermissionMode: agent.PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		SideEffect:     "write",
 		Reason:         "Creates or overwrites files.",
 		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},
@@ -1345,7 +1343,7 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 		Action:         agent.PermissionActionDeny,
 		Permission:     "prompt",
 		PermissionMode: agent.PermissionModeUnsafe,
-		Autonomy:       string(sandbox.AutonomyHigh),
+		Autonomy:       "high",
 		SideEffect:     "write",
 		Reason:         "workspace boundary enforced",
 		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},
@@ -1672,7 +1670,7 @@ func testPromptPermissionEvent() agent.PermissionEvent {
 		Action:         agent.PermissionActionPrompt,
 		Permission:     "prompt",
 		PermissionMode: agent.PermissionModeAsk,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		SideEffect:     "write",
 		Reason:         "Creates or overwrites files.",
 		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},

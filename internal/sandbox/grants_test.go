@@ -16,10 +16,10 @@ func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
 
-	if _, err := store.Grant(GrantInput{ToolName: "bash", Decision: GrantDeny, MaxAutonomy: AutonomyHigh, Reason: "network blocked"}); err != nil {
+	if _, err := store.Grant(GrantInput{ToolName: "bash", Decision: GrantDeny, Reason: "network blocked"}); err != nil {
 		t.Fatalf("Grant deny returned error: %v", err)
 	}
-	allowed, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyMedium, Reason: "workspace edits"})
+	allowed, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, Reason: "workspace edits"})
 	if err != nil {
 		t.Fatalf("Grant allow returned error: %v", err)
 	}
@@ -39,19 +39,12 @@ func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
 		t.Fatalf("unexpected sorted grants: %#v", grants)
 	}
 
-	match, err := reopened.Lookup("write_file", "", AutonomyLow)
+	match, err := reopened.Lookup("write_file", "")
 	if err != nil {
 		t.Fatalf("Lookup returned error: %v", err)
 	}
 	if !match.Matched || match.Grant.Decision != GrantAllow {
 		t.Fatalf("lookup allow = %#v, want matched allow", match)
-	}
-	match, err = reopened.Lookup("write_file", "", AutonomyHigh)
-	if err != nil {
-		t.Fatalf("Lookup high returned error: %v", err)
-	}
-	if match.Matched {
-		t.Fatalf("high-autonomy lookup should not match medium grant: %#v", match)
 	}
 
 	revoked, err := reopened.Revoke("bash")
@@ -166,10 +159,9 @@ func TestGrantStoreRejectsUnsafeInputsAndMalformedFiles(t *testing.T) {
 		t.Fatalf("NewGrantStore returned error: %v", err)
 	}
 	for _, input := range []GrantInput{
-		{ToolName: "", Decision: GrantAllow, MaxAutonomy: AutonomyLow},
-		{ToolName: "../escape", Decision: GrantAllow, MaxAutonomy: AutonomyLow},
-		{ToolName: "write_file", Decision: GrantDecision("maybe"), MaxAutonomy: AutonomyLow},
-		{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: Autonomy("root")},
+		{ToolName: "", Decision: GrantAllow},
+		{ToolName: "../escape", Decision: GrantAllow},
+		{ToolName: "write_file", Decision: GrantDecision("maybe")},
 	} {
 		if _, err := store.Grant(input); err == nil {
 			t.Fatalf("Grant(%#v) succeeded, want validation error", input)
@@ -226,13 +218,12 @@ func TestFormatGrantList(t *testing.T) {
 		t.Fatalf("unexpected empty list text: %q", empty)
 	}
 	text := FormatGrantList([]Grant{{
-		ToolName:    "write_file",
-		Decision:    GrantAllow,
-		MaxAutonomy: AutonomyMedium,
-		ApprovedAt:  "2026-06-05T14:30:00Z",
-		Reason:      "workspace edits",
+		ToolName:   "write_file",
+		Decision:   GrantAllow,
+		ApprovedAt: "2026-06-05T14:30:00Z",
+		Reason:     "workspace edits",
 	}})
-	for _, want := range []string{"Sandbox Grants:", "write_file", "allow", "medium", "workspace edits"} {
+	for _, want := range []string{"Sandbox Grants:", "write_file", "allow", "workspace edits"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in formatted grants: %q", want, text)
 		}
@@ -258,12 +249,12 @@ func TestGrantStoreRevokePathRemovesOnlyMatchingScope(t *testing.T) {
 	fileA := filepath.Join(dir, "a.txt")
 	fileB := filepath.Join(dir, "b.txt")
 	for _, scope := range []string{fileA, fileB} {
-		if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyLow, Scope: scope, ScopeKind: ScopeFile}); err != nil {
+		if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, Scope: scope, ScopeKind: ScopeFile}); err != nil {
 			t.Fatalf("Grant %s: %v", scope, err)
 		}
 	}
 	// A tool-wide grant for the same tool must survive a path-scoped revoke.
-	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow, MaxAutonomy: AutonomyLow}); err != nil {
+	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow}); err != nil {
 		t.Fatalf("Grant tool-wide: %v", err)
 	}
 

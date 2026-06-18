@@ -104,7 +104,6 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			Permission:        sandbox.Permission(tool.Safety().Permission),
 			PermissionGranted: options.PermissionGranted,
 			PermissionMode:    sandbox.PermissionMode(options.PermissionMode),
-			Autonomy:          sandbox.Autonomy(options.Autonomy),
 			Args:              args,
 			Reason:            tool.Safety().Reason,
 		})

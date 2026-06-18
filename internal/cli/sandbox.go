@@ -14,7 +14,6 @@ type sandboxCommandOptions struct {
 	json      bool
 	confirm   bool
 	effective bool
-	autonomy  string
 	reason    string
 	path      string
 }
@@ -62,9 +61,7 @@ func runSandboxPolicy(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	// Surface config resolution failures instead of silently falling back to
-	// DefaultPolicy() (High): an unresolvable config (e.g. an invalid
-	// sandbox.maxAutonomy that now errors at resolve time) would otherwise
-	// misreport the trust posture as the permissive default.
+	// DefaultPolicy(), which would otherwise misreport the active sandbox posture.
 	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitProvider)
@@ -287,7 +284,6 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 	}
 	lines = append(lines,
 		"allow_policy_only_runner: "+fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
-		"max_autonomy: "+string(policy.MaxAutonomy),
 		"backend: "+string(backend.Name),
 		"target_backend: "+string(plan.TargetBackend),
 		"support_level: "+string(plan.SupportLevel),
@@ -390,7 +386,7 @@ func runSandboxGrantSet(command string, args []string, stdout io.Writer, stderr 
 		return exitSuccess
 	}
 	if len(positional) != 1 {
-		return writeExecUsageError(stderr, "usage: zero sandbox grants "+command+" <tool> [--path file] [--auto low|medium|high] [--reason text] [--json]")
+		return writeExecUsageError(stderr, "usage: zero sandbox grants "+command+" <tool> [--path file] [--reason text] [--json]")
 	}
 	decision := zeroSandbox.GrantAllow
 	if command == "deny" {
@@ -401,10 +397,9 @@ func runSandboxGrantSet(command string, args []string, stdout io.Writer, stderr 
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	input := zeroSandbox.GrantInput{
-		ToolName:    positional[0],
-		Decision:    decision,
-		MaxAutonomy: zeroSandbox.Autonomy(options.autonomy),
-		Reason:      options.reason,
+		ToolName: positional[0],
+		Decision: decision,
+		Reason:   options.reason,
 	}
 	if options.path != "" {
 		// --path persists an exact-file grant. Resolve to an absolute path so it
@@ -428,7 +423,7 @@ func runSandboxGrantSet(command string, args []string, stdout io.Writer, stderr 
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintf(stdout, "Sandbox grant saved: %s [%s/%s]\n", grant.ToolName, grant.Decision, grant.MaxAutonomy); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Sandbox grant saved: %s [%s]\n", grant.ToolName, grant.Decision); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -519,7 +514,7 @@ type sandboxCommandFlags struct {
 }
 
 func parseSandboxCommandOptions(args []string, flags sandboxCommandFlags) (sandboxCommandOptions, bool, error) {
-	options := sandboxCommandOptions{autonomy: string(zeroSandbox.AutonomyLow)}
+	options := sandboxCommandOptions{}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
@@ -541,7 +536,7 @@ func parseSandboxCommandOptions(args []string, flags sandboxCommandFlags) (sandb
 }
 
 func parseSandboxPositionalOptions(args []string) (sandboxCommandOptions, []string, bool, error) {
-	options := sandboxCommandOptions{autonomy: string(zeroSandbox.AutonomyLow)}
+	options := sandboxCommandOptions{}
 	positional := []string{}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -550,15 +545,6 @@ func parseSandboxPositionalOptions(args []string) (sandboxCommandOptions, []stri
 			return options, positional, true, nil
 		case arg == "--json":
 			options.json = true
-		case arg == "--auto":
-			value, next, err := nextFlagValue(args, index, arg)
-			if err != nil {
-				return options, positional, false, err
-			}
-			options.autonomy = value
-			index = next
-		case strings.HasPrefix(arg, "--auto="):
-			options.autonomy = strings.TrimSpace(strings.TrimPrefix(arg, "--auto="))
 		case arg == "--reason":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -593,9 +579,6 @@ func parseSandboxPositionalOptions(args []string) (sandboxCommandOptions, []stri
 			positional = append(positional, strings.TrimSpace(arg))
 		}
 	}
-	if _, err := zeroSandbox.NormalizeAutonomy(zeroSandbox.Autonomy(options.autonomy)); err != nil {
-		return options, positional, false, execUsageError{err.Error()}
-	}
 	return options, positional, false, nil
 }
 
@@ -605,7 +588,6 @@ func formatSandboxPolicy(workspaceRoot string, policy zeroSandbox.Policy, backen
 		"root: " + workspaceRoot,
 		"mode: " + string(policy.Mode),
 		"network: " + string(policy.Network),
-		"max_autonomy: " + string(policy.MaxAutonomy),
 		"backend: " + string(backend.Name),
 		"target_backend: " + string(plan.TargetBackend),
 		"support_level: " + string(plan.SupportLevel),
@@ -680,8 +662,8 @@ func writeSandboxGrantsHelp(w io.Writer) error {
 
 Commands:
   list        List persistent sandbox grants
-  allow       Persistently allow a tool up to an autonomy level
-  deny        Persistently deny a tool up to an autonomy level
+  allow       Persistently allow a tool
+  deny        Persistently deny a tool
   revoke      Revoke a tool grant
   clear       Clear all sandbox grants
 `)
@@ -694,7 +676,6 @@ func writeSandboxGrantSetHelp(w io.Writer) error {
   zero sandbox grants deny <tool> [flags]
 
 Flags:
-      --auto <level>      Maximum autonomy covered by the grant
       --reason <text>     Human-readable reason for the grant
       --path <path>       Scope the grant to one exact file (default: tool-wide)
       --json              Print JSON output

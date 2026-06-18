@@ -123,7 +123,6 @@ func TestRunSandboxCheckRejectsInvalidFlags(t *testing.T) {
 	deps, _ := sandboxCheckDeps(t)
 	for _, args := range [][]string{
 		{"sandbox", "check", "read_file", "--side-effect", "wrtie"},
-		{"sandbox", "check", "read_file", "--autonomy", "supreme"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := runWithDeps(args, &stdout, &stderr, deps); code == exitSuccess {
@@ -151,16 +150,15 @@ func TestRunSandboxCheckMatchedGrantRedactsReason(t *testing.T) {
 	// Seed a tool-wide allow grant whose reason embeds a secret; the matched-grant
 	// snapshot must redact it.
 	if _, err := store.Grant(sandbox.GrantInput{
-		ToolName:    "read_file",
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: sandbox.AutonomyHigh,
-		Reason:      "approved with sk-test-secret1234567890",
+		ToolName: "read_file",
+		Decision: sandbox.GrantAllow,
+		Reason:   "approved with sk-test-secret1234567890",
 	}); err != nil {
 		t.Fatalf("seed grant: %v", err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	exitCode := runWithDeps([]string{"sandbox", "check", "read_file", "--autonomy", "high", "--json"}, &stdout, &stderr, deps)
+	exitCode := runWithDeps([]string{"sandbox", "check", "read_file", "--json"}, &stdout, &stderr, deps)
 	if exitCode != exitSuccess {
 		t.Fatalf("check exit=%d stderr=%s", exitCode, stderr.String())
 	}

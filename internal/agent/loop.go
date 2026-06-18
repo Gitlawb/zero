@@ -1060,7 +1060,6 @@ func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permi
 		Permission:        sandbox.Permission(safety.Permission),
 		PermissionGranted: permissionGranted,
 		PermissionMode:    sandbox.PermissionMode(permissionMode),
-		Autonomy:          sandbox.Autonomy(options.Autonomy),
 		Args:              args,
 		Reason:            safety.Reason,
 	}
@@ -1254,9 +1253,6 @@ func parseRequestPermissionsArgs(args map[string]any) (requestPermissionsArgs, e
 
 func requestPermissionsPrompt(call ToolCall, parsed requestPermissionsArgs, profile sandbox.RequestPermissionProfile, permissionMode PermissionMode, options Options) PermissionRequest {
 	autonomy := options.Autonomy
-	if normalized, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(autonomy)); err == nil {
-		autonomy = string(normalized)
-	}
 	reason := strings.TrimSpace(parsed.Reason)
 	if reason == "" {
 		reason = "The agent is requesting additional permissions."
@@ -1361,24 +1357,16 @@ func persistPermissionGrant(toolName string, args map[string]any, reason string,
 	if options.Sandbox == nil {
 		return sandbox.Grant{}, errors.New("sandbox engine is not configured")
 	}
-	maxAutonomy := sandbox.Autonomy(options.Autonomy)
-	if maxAutonomy == "" {
-		maxAutonomy = sandbox.AutonomyMedium
-	}
-	if normalized, err := sandbox.NormalizeAutonomy(maxAutonomy); err == nil {
-		maxAutonomy = normalized
-	}
 	// Scope the grant to exactly what the permission card showed (the file or
 	// directory the call touches); engine.Grant anchors it to the workspace. A
 	// call with no path-like argument yields an empty scope — a tool-wide grant.
 	scope, kind := sandbox.DeriveScope(toolName, args)
 	return options.Sandbox.Grant(sandbox.GrantInput{
-		ToolName:    toolName,
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: maxAutonomy,
-		Reason:      reason,
-		Scope:       scope,
-		ScopeKind:   kind,
+		ToolName:  toolName,
+		Decision:  sandbox.GrantAllow,
+		Reason:    reason,
+		Scope:     scope,
+		ScopeKind: kind,
 	})
 }
 
@@ -1386,21 +1374,13 @@ func persistSessionPermissionGrant(toolName string, args map[string]any, reason 
 	if options.Sandbox == nil {
 		return sandbox.Grant{}, errors.New("sandbox engine is not configured")
 	}
-	maxAutonomy := sandbox.Autonomy(options.Autonomy)
-	if maxAutonomy == "" {
-		maxAutonomy = sandbox.AutonomyMedium
-	}
-	if normalized, err := sandbox.NormalizeAutonomy(maxAutonomy); err == nil {
-		maxAutonomy = normalized
-	}
 	scope, kind := sandbox.DeriveScope(toolName, args)
 	return options.Sandbox.GrantForSession(sandbox.GrantInput{
-		ToolName:    toolName,
-		Decision:    sandbox.GrantAllow,
-		MaxAutonomy: maxAutonomy,
-		Reason:      reason,
-		Scope:       scope,
-		ScopeKind:   kind,
+		ToolName:  toolName,
+		Decision:  sandbox.GrantAllow,
+		Reason:    reason,
+		Scope:     scope,
+		ScopeKind: kind,
 	})
 }
 
@@ -1552,7 +1532,6 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Permission:        sandbox.Permission(safety.Permission),
 		PermissionGranted: permissionGranted,
 		PermissionMode:    sandbox.PermissionMode(permissionMode),
-		Autonomy:          sandbox.Autonomy(options.Autonomy),
 		Args:              args,
 		Reason:            safety.Reason,
 	})
@@ -1588,11 +1567,6 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		return PermissionEvent{}, false
 	}
 
-	autonomy := options.Autonomy
-	if normalized, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(autonomy)); err == nil {
-		autonomy = string(normalized)
-	}
-
 	return PermissionEvent{
 		ToolCallID:        call.ID,
 		ToolName:          call.Name,
@@ -1601,7 +1575,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Permission:        string(safety.Permission),
 		PermissionGranted: permissionGranted,
 		PermissionMode:    permissionMode,
-		Autonomy:          autonomy,
+		Autonomy:          options.Autonomy,
 		SideEffect:        string(safety.SideEffect),
 		Reason:            reason,
 		Scope:             permissionScope(call.Name, args),

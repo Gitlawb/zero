@@ -20,7 +20,6 @@ func bashRequest() Request {
 		SideEffect:     SideEffectShell,
 		Permission:     PermissionPrompt,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"command": "echo hi"},
 	}
 }
@@ -59,7 +58,6 @@ func TestSandboxedBashAutoAllowDoesNotAffectNonShell(t *testing.T) {
 		SideEffect:     SideEffectWrite,
 		Permission:     PermissionPrompt,
 		PermissionMode: PermissionModeAsk,
-		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"path": "notes.txt"},
 	})
 	if decision.Action != ActionPrompt {

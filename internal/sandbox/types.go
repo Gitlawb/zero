@@ -33,7 +33,6 @@ func IsAlreadySandboxed() bool {
 type SideEffect string
 type Permission string
 type PermissionMode string
-type Autonomy string
 type PolicyMode string
 type NetworkMode string
 type Action string
@@ -67,12 +66,6 @@ const (
 	PermissionModeAuto PermissionMode = "auto"
 	PermissionModeAsk  PermissionMode = "ask"
 	PermissionUnsafe   PermissionMode = "unsafe"
-)
-
-const (
-	AutonomyLow    Autonomy = "low"
-	AutonomyMedium Autonomy = "medium"
-	AutonomyHigh   Autonomy = "high"
 )
 
 const (
@@ -161,7 +154,6 @@ type Policy struct {
 	Network               NetworkMode `json:"network"`
 	EnforceWorkspace      bool        `json:"enforceWorkspace"`
 	AllowPolicyOnlyRunner bool        `json:"allowPolicyOnlyRunner"`
-	MaxAutonomy           Autonomy    `json:"maxAutonomy,omitempty"`
 	// AllowedDomains / DeniedDomains apply only when Network is NetworkScoped:
 	// the sandboxed process may reach the allowed domains (exact host or any
 	// subdomain) minus the denied ones. They are ignored for NetworkAllow and
@@ -223,7 +215,6 @@ type Request struct {
 	Permission        Permission     `json:"permission"`
 	PermissionGranted bool           `json:"permissionGranted,omitempty"`
 	PermissionMode    PermissionMode `json:"permissionMode"`
-	Autonomy          Autonomy       `json:"autonomy"`
 	Args              map[string]any `json:"args,omitempty"`
 	Reason            string         `json:"reason,omitempty"`
 }
@@ -282,6 +273,5 @@ func DefaultPolicy() Policy {
 		Network:               NetworkDeny,
 		EnforceWorkspace:      true,
 		AllowPolicyOnlyRunner: true,
-		MaxAutonomy:           AutonomyHigh,
 	}
 }

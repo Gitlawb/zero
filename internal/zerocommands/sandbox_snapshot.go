@@ -13,14 +13,13 @@ import (
 // automation. The snapshot guarantees that no secret material from
 // the grant's Reason field is leaked: the field is always run
 // through the standard redaction pipeline before it is copied into
-// the snapshot. ToolName, Decision, MaxAutonomy, and ApprovedAt
-// are non-secret metadata and are copied verbatim.
+// the snapshot. ToolName, Decision, and ApprovedAt are non-secret
+// metadata and are copied verbatim.
 type SandboxGrantSnapshot struct {
-	ToolName    string `json:"toolName"`
-	Decision    string `json:"decision"`
-	MaxAutonomy string `json:"maxAutonomy"`
-	ApprovedAt  string `json:"approvedAt,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	ToolName   string `json:"toolName"`
+	Decision   string `json:"decision"`
+	ApprovedAt string `json:"approvedAt,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // SandboxGrantMatchSnapshot is the typed view returned to consumers
@@ -43,11 +42,10 @@ type SandboxGrantMatchSnapshot struct {
 // consumers.
 func SandboxGrantSnapshotFromGrant(grant sandbox.Grant) SandboxGrantSnapshot {
 	return SandboxGrantSnapshot{
-		ToolName:    strings.TrimSpace(grant.ToolName),
-		Decision:    string(grant.Decision),
-		MaxAutonomy: string(grant.MaxAutonomy),
-		ApprovedAt:  strings.TrimSpace(grant.ApprovedAt),
-		Reason:      redaction.RedactString(strings.TrimSpace(grant.Reason), redaction.Options{}),
+		ToolName:   strings.TrimSpace(grant.ToolName),
+		Decision:   string(grant.Decision),
+		ApprovedAt: strings.TrimSpace(grant.ApprovedAt),
+		Reason:     redaction.RedactString(strings.TrimSpace(grant.Reason), redaction.Options{}),
 	}
 }
 

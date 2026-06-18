@@ -18,7 +18,6 @@ func TestScopedNetworkGateInEvaluate(t *testing.T) {
 		Permission:        PermissionPrompt,
 		PermissionGranted: true,
 		PermissionMode:    PermissionModeAuto,
-		Autonomy:          AutonomyHigh,
 		Args:              map[string]any{"command": "curl https://github.com"},
 	}
 	seatbelt := Backend{Name: BackendMacOSSeatbelt, Available: true, Executable: "/usr/sbin/sandbox-exec", ScopedEgress: true}

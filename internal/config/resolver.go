@@ -71,15 +71,6 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		return ResolvedConfig{}, fmt.Errorf("invalid swarm.maxTeamSize %d: must be >= 0 (0 uses the default)", cfg.Swarm.MaxTeamSize)
 	}
 
-	if maxAutonomy := strings.TrimSpace(cfg.Sandbox.MaxAutonomy); maxAutonomy != "" {
-		// Fail loud on an invalid ceiling. An unvalidated typo (e.g. "moderate")
-		// would otherwise survive Resolve untouched, reach the sandbox bridge,
-		// fail to normalize there, and silently leave the default High ceiling in
-		// place — fail-open on a security boundary. Reject it here instead.
-		if _, err := sandbox.NormalizeAutonomy(sandbox.Autonomy(maxAutonomy)); err != nil {
-			return ResolvedConfig{}, fmt.Errorf("invalid sandbox.maxAutonomy %q: expected low, medium, or high", maxAutonomy)
-		}
-	}
 	if network := strings.TrimSpace(cfg.Sandbox.Network); network != "" {
 		switch sandbox.NetworkMode(network) {
 		case sandbox.NetworkAllow, sandbox.NetworkDeny:
@@ -165,9 +156,6 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		mergeProvider(dst, provider)
 	}
 	mergeMCPConfig(&dst.MCP, src.MCP)
-	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
-		dst.Sandbox.MaxAutonomy = maxAutonomy
-	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
@@ -215,9 +203,6 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	// config: a cloned repo's .zero/config.json must not be able to grant
 	// itself write access outside the workspace. Global config and CLI flags
 	// are the only config sources for write roots.
-	if maxAutonomy := strings.TrimSpace(src.Sandbox.MaxAutonomy); maxAutonomy != "" {
-		dst.Sandbox.MaxAutonomy = maxAutonomy
-	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
 	}
@@ -439,10 +424,6 @@ func applyEnv(cfg *FileConfig, env map[string]string) {
 		cfg.ActiveProvider = activeProvider
 	}
 
-	if maxAutonomy := strings.TrimSpace(envValue(env, "ZERO_SANDBOX_MAX_AUTONOMY")); maxAutonomy != "" {
-		cfg.Sandbox.MaxAutonomy = maxAutonomy
-	}
-
 	applyProviderEnv(cfg, ProviderKindOpenAI, envProfile{
 		Name:    string(ProviderKindOpenAI),
 		APIKey:  envValue(env, "OPENAI_API_KEY"),
@@ -540,9 +521,6 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
-	}
-	if maxAutonomy := strings.TrimSpace(overrides.Sandbox.MaxAutonomy); maxAutonomy != "" {
-		cfg.Sandbox.MaxAutonomy = maxAutonomy
 	}
 	if overrides.Sandbox.BlockUnixSockets {
 		cfg.Sandbox.BlockUnixSockets = true

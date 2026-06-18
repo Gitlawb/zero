@@ -63,7 +63,7 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	result, err := Run(context.Background(), "write the file", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAuto,
-		Autonomy:       string(sandbox.AutonomyMedium),
+		Autonomy:       "medium",
 		Cwd:            workspace,
 		Sandbox:        engine,
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
@@ -113,7 +113,6 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 		SideEffect:     sandbox.SideEffectWrite,
 		Permission:     sandbox.PermissionPrompt,
 		PermissionMode: sandbox.PermissionModeAuto,
-		Autonomy:       sandbox.AutonomyMedium,
 		Args:           map[string]any{"path": target},
 	})
 	if decision.Action != sandbox.ActionPrompt {

@@ -18,14 +18,13 @@ import (
 const grantSchemaVersion = 2
 
 type Grant struct {
-	ToolName    string        `json:"toolName"`
-	Scope       string        `json:"scope,omitempty"`     // absolute path, host, or "" for tool-wide
-	ScopeKind   ScopeKind     `json:"scopeKind,omitempty"` // file | dir | host | "" (tool-wide)
-	Decision    GrantDecision `json:"decision"`
-	MaxAutonomy Autonomy      `json:"maxAutonomy"`
-	ApprovedAt  string        `json:"approvedAt"`
-	Reason      string        `json:"reason,omitempty"`
-	Session     bool          `json:"session,omitempty"`
+	ToolName   string        `json:"toolName"`
+	Scope      string        `json:"scope,omitempty"`     // absolute path, host, or "" for tool-wide
+	ScopeKind  ScopeKind     `json:"scopeKind,omitempty"` // file | dir | host | "" (tool-wide)
+	Decision   GrantDecision `json:"decision"`
+	ApprovedAt string        `json:"approvedAt"`
+	Reason     string        `json:"reason,omitempty"`
+	Session    bool          `json:"session,omitempty"`
 }
 
 type StoreOptions struct {
@@ -35,10 +34,9 @@ type StoreOptions struct {
 }
 
 type GrantInput struct {
-	ToolName    string
-	Decision    GrantDecision
-	MaxAutonomy Autonomy
-	Reason      string
+	ToolName string
+	Decision GrantDecision
+	Reason   string
 	// Scope is the raw path or host the grant covers; ScopeKind classifies it.
 	// engine.Grant resolves path scopes to absolute paths and normalizes host
 	// scopes before persisting. Both empty means a tool-wide grant.
@@ -184,15 +182,10 @@ func (store *GrantStore) GrantCommandPrefix(input CommandPrefixInput) (CommandPr
 
 // Lookup returns the grant that governs a tool call whose normalized scope is
 // reqScope (empty for a tool-wide request, e.g. a shell command with no cwd).
-// Among the tool's grants that cover the request, a covering deny wins outright
-// (regardless of autonomy); otherwise the most-specific covering allow whose
-// recorded MaxAutonomy admits the requested autonomy is returned.
-func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAutonomy Autonomy) (GrantLookup, error) {
+// Among the tool's grants that cover the request, a covering deny wins outright;
+// otherwise the most-specific covering allow is returned.
+func (store *GrantStore) Lookup(toolName string, reqScope string) (GrantLookup, error) {
 	if err := ValidateToolName(toolName); err != nil {
-		return GrantLookup{}, err
-	}
-	requested, err := NormalizeAutonomy(requestedAutonomy)
-	if err != nil {
 		return GrantLookup{}, err
 	}
 	store.mu.Lock()
@@ -202,7 +195,7 @@ func (store *GrantStore) Lookup(toolName string, reqScope string, requestedAuton
 		return GrantLookup{}, err
 	}
 	bucket := state.Grants[strings.TrimSpace(toolName)]
-	return lookupGrantBucket(bucket, reqScope, requested), nil
+	return lookupGrantBucket(bucket, reqScope), nil
 }
 
 func (store *GrantStore) LookupCommandPrefix(toolName string, command []string) (CommandPrefixGrant, bool, error) {
@@ -228,7 +221,7 @@ func (store *GrantStore) LookupCommandPrefix(toolName string, command []string) 
 	return CommandPrefixGrant{}, false, nil
 }
 
-func lookupGrantBucket(bucket []Grant, reqScope string, requested Autonomy) GrantLookup {
+func lookupGrantBucket(bucket []Grant, reqScope string) GrantLookup {
 	var bestAllow *Grant
 	for i := range bucket {
 		grant := bucket[i]
@@ -238,9 +231,6 @@ func lookupGrantBucket(bucket []Grant, reqScope string, requested Autonomy) Gran
 		if grant.Decision == GrantDeny {
 			covering := grant
 			return GrantLookup{Matched: true, Grant: covering}
-		}
-		if !autonomyAllowed(requested, grant.MaxAutonomy) {
-			continue
 		}
 		if bestAllow == nil || moreSpecific(grant, *bestAllow) {
 			covering := grant
@@ -415,7 +405,7 @@ func FormatGrantListWithCommandPrefixes(grants []Grant, prefixes []CommandPrefix
 		if scope == "" {
 			scope = "*" // tool-wide
 		}
-		line := fmt.Sprintf("  %s (%s) [%s/%s] approved %s", grant.ToolName, scope, grant.Decision, grant.MaxAutonomy, grant.ApprovedAt)
+		line := fmt.Sprintf("  %s (%s) [%s] approved %s", grant.ToolName, scope, grant.Decision, grant.ApprovedAt)
 		if grant.Reason != "" {
 			line += " - " + redaction.RedactString(grant.Reason, redaction.Options{})
 		}
@@ -448,10 +438,6 @@ func createGrant(input GrantInput, now func() time.Time) (Grant, error) {
 	if err != nil {
 		return Grant{}, err
 	}
-	autonomy, err := NormalizeAutonomy(input.MaxAutonomy)
-	if err != nil {
-		return Grant{}, err
-	}
 	kind, err := normalizeScopeKind(input.ScopeKind)
 	if err != nil {
 		return Grant{}, err
@@ -459,13 +445,12 @@ func createGrant(input GrantInput, now func() time.Time) (Grant, error) {
 	scope := strings.TrimSpace(input.Scope)
 	scope, kind = reconcileScope(scope, kind)
 	return Grant{
-		ToolName:    toolName,
-		Scope:       scope,
-		ScopeKind:   kind,
-		Decision:    decision,
-		MaxAutonomy: autonomy,
-		ApprovedAt:  now().UTC().Format(time.RFC3339),
-		Reason:      redaction.RedactString(strings.TrimSpace(input.Reason), redaction.Options{}),
+		ToolName:   toolName,
+		Scope:      scope,
+		ScopeKind:  kind,
+		Decision:   decision,
+		ApprovedAt: now().UTC().Format(time.RFC3339),
+		Reason:     redaction.RedactString(strings.TrimSpace(input.Reason), redaction.Options{}),
 	}, nil
 }
 
@@ -542,19 +527,6 @@ func (store *GrantStore) readState() (grantFile, error) {
 	buckets := map[string][]Grant{}
 	commandPrefixBuckets := map[string][]CommandPrefixGrant{}
 	switch head.SchemaVersion {
-	case 1:
-		var legacy map[string]Grant
-		if len(head.Grants) > 0 {
-			if err := json.Unmarshal(head.Grants, &legacy); err != nil {
-				return grantFile{}, store.invalidGrantFile(err)
-			}
-		}
-		for name, grant := range legacy {
-			// A v1 grant was tool-wide; carry it forward as such.
-			grant.Scope = ""
-			grant.ScopeKind = ScopeToolWide
-			buckets[name] = append(buckets[name], grant)
-		}
 	case grantSchemaVersion:
 		if len(head.Grants) > 0 {
 			if err := json.Unmarshal(head.Grants, &buckets); err != nil {
@@ -640,16 +612,11 @@ func normalizeStoredGrant(name string, grant Grant) (Grant, error) {
 	if err != nil {
 		return Grant{}, err
 	}
-	autonomy, err := NormalizeAutonomy(grant.MaxAutonomy)
-	if err != nil {
-		return Grant{}, err
-	}
 	kind, err := normalizeScopeKind(grant.ScopeKind)
 	if err != nil {
 		return Grant{}, err
 	}
 	grant.Decision = decision
-	grant.MaxAutonomy = autonomy
 	grant.Scope, grant.ScopeKind = reconcileScope(strings.TrimSpace(grant.Scope), kind)
 	grant.ApprovedAt = strings.TrimSpace(grant.ApprovedAt)
 	grant.Reason = redaction.RedactString(strings.TrimSpace(grant.Reason), redaction.Options{})

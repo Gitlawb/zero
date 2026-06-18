@@ -309,7 +309,7 @@ func TestRegistryRunsBashThroughSandboxEngine(t *testing.T) {
 		PermissionGranted: true,
 		Sandbox:           engine,
 		PermissionMode:    string(sandbox.PermissionUnsafe),
-		Autonomy:          string(sandbox.AutonomyMedium),
+		Autonomy:          "medium",
 	})
 
 	if result.Status != StatusOK {

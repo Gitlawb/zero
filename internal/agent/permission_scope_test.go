@@ -59,7 +59,7 @@ func TestPersistPermissionGrantScopesWebFetchToHost(t *testing.T) {
 
 	grant, err := persistPermissionGrant("web_fetch", map[string]any{"url": "https://Example.COM:443/docs"}, "trust this host", Options{
 		Sandbox:  engine,
-		Autonomy: string(sandbox.AutonomyMedium),
+		Autonomy: "medium",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -67,10 +67,10 @@ func TestPersistPermissionGrantScopesWebFetchToHost(t *testing.T) {
 	if grant.ScopeKind != sandbox.ScopeHost || grant.Scope != "example.com" {
 		t.Fatalf("grant = %#v, want host-scoped example.com", grant)
 	}
-	if lookup, err := store.Lookup("web_fetch", "example.com", sandbox.AutonomyMedium); err != nil || !lookup.Matched {
+	if lookup, err := store.Lookup("web_fetch", "example.com"); err != nil || !lookup.Matched {
 		t.Fatalf("expected exact host lookup to match: lookup=%#v err=%v", lookup, err)
 	}
-	if lookup, err := store.Lookup("web_fetch", "api.example.com", sandbox.AutonomyMedium); err != nil || lookup.Matched {
+	if lookup, err := store.Lookup("web_fetch", "api.example.com"); err != nil || lookup.Matched {
 		t.Fatalf("expected subdomain lookup to re-prompt: lookup=%#v err=%v", lookup, err)
 	}
 }

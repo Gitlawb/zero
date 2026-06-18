@@ -605,7 +605,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,
 			PermissionMode: permissionMode,
-			Autonomy:       string(sandbox.AutonomyLow),
+			Autonomy:       "low",
 			Sandbox:        sandboxEngine,
 			FileTracker:    tools.NewFileTracker(),
 			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),

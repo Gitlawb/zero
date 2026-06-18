@@ -207,11 +207,10 @@ func TestSandboxDecisionSnapshotFromDecisionPersistentDenyCarriesGrantAndViolati
 		Risk:         sandbox.Risk{Level: sandbox.RiskHigh, Categories: []string{"shell"}, Reason: "high risk: shell"},
 		GrantMatched: true,
 		Grant: &sandbox.Grant{
-			ToolName:    "bash",
-			Decision:    sandbox.GrantDeny,
-			MaxAutonomy: sandbox.AutonomyHigh,
-			ApprovedAt:  "2026-06-04T10:00:00Z",
-			Reason:      "user marked bash as destructive",
+			ToolName:   "bash",
+			Decision:   sandbox.GrantDeny,
+			ApprovedAt: "2026-06-04T10:00:00Z",
+			Reason:     "user marked bash as destructive",
 		},
 		Violation: &sandbox.Violation{
 			Code:        sandbox.ViolationPersistentDeny,
@@ -282,15 +281,5 @@ func TestSandboxPolicySnapshotJSONOmitsEmptyEffectiveMode(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), `"effectiveMode"`) {
 		t.Fatalf("expected effectiveMode omitted when empty, got %q", string(encoded))
-	}
-}
-
-func TestSandboxPolicySnapshotCopiesMaxAutonomy(t *testing.T) {
-	policy := sandbox.DefaultPolicy()
-	policy.MaxAutonomy = sandbox.AutonomyMedium
-
-	snapshot := SandboxPolicySnapshotFromPolicy(policy)
-	if snapshot.MaxAutonomy != string(sandbox.AutonomyMedium) {
-		t.Fatalf("snapshot.MaxAutonomy = %q, want medium", snapshot.MaxAutonomy)
 	}
 }

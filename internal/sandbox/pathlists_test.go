@@ -263,7 +263,7 @@ func TestEvaluatePathListsWithoutWorkspaceRoot(t *testing.T) {
 	secret := resolvedTempDir(t)
 	other := resolvedTempDir(t)
 	engine := NewEngine(EngineOptions{
-		Policy: Policy{Mode: ModeEnforce, MaxAutonomy: AutonomyHigh, DenyWrite: []string{secret}},
+		Policy: Policy{Mode: ModeEnforce, DenyWrite: []string{secret}},
 	})
 
 	denied := engine.Evaluate(context.Background(), Request{
@@ -321,7 +321,6 @@ func TestEvaluateAppliesReadDeny(t *testing.T) {
 		Policy: Policy{
 			Mode:             ModeEnforce,
 			EnforceWorkspace: true,
-			MaxAutonomy:      AutonomyHigh,
 			DenyRead:         []string{secret},
 		},
 	})
@@ -352,7 +351,7 @@ func TestEvaluateAppliesWriteAllow(t *testing.T) {
 	ext := resolvedTempDir(t)
 	build := mkdir(t, filepath.Join(ext, "build"))
 
-	base := Policy{Mode: ModeEnforce, EnforceWorkspace: true, MaxAutonomy: AutonomyHigh}
+	base := Policy{Mode: ModeEnforce, EnforceWorkspace: true}
 	target := filepath.Join(build, "out.o")
 
 	denyEngine := NewEngine(EngineOptions{WorkspaceRoot: ws, Policy: base})

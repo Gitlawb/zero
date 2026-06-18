@@ -185,7 +185,7 @@ func TestFormatCommandOutputRedactsTokenLikeText(t *testing.T) {
 		Sections: []commandSection{{
 			Title: "Sandbox grants",
 			Lines: []string{
-				"bash [allow/high] - sk-proj-sensitive-token-value approved shell",
+				"bash [allow] - sk-proj-sensitive-token-value approved shell",
 				"anthropic: sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
 				"google: AIza1234567890abcdef",
 			},
