@@ -13,7 +13,7 @@ func TestScrubWorkerEnvRemovesReentrancyMarkers(t *testing.T) {
 	in := []string{
 		"PATH=/bin",
 		sandbox.EnvSandboxed + "=1",
-		"ZERO_SANDBOX_AUTO_ALLOW_BASH=1", // policy config — must be PRESERVED
+		"ZERO_USER_SETTING=1",
 		sandbox.EnvSandboxBackend + "=bubblewrap",
 		"HOME=/home/u",
 	}
@@ -24,7 +24,7 @@ func TestScrubWorkerEnvRemovesReentrancyMarkers(t *testing.T) {
 			t.Fatalf("re-entrancy marker not scrubbed: %q", kv)
 		}
 	}
-	want := map[string]bool{"PATH=/bin": true, "ZERO_SANDBOX_AUTO_ALLOW_BASH=1": true, "HOME=/home/u": true}
+	want := map[string]bool{"PATH=/bin": true, "ZERO_USER_SETTING=1": true, "HOME=/home/u": true}
 	got := map[string]bool{}
 	for _, kv := range out {
 		got[kv] = true

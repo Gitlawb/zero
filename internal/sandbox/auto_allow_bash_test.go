@@ -2,17 +2,14 @@ package sandbox
 
 import (
 	"context"
-	"os"
 	"testing"
 )
 
-func autoAllowBashEngine(t *testing.T, autoAllow bool, backend Backend) *Engine {
+func sandboxedShellEngine(t *testing.T, backend Backend) *Engine {
 	t.Helper()
-	policy := DefaultPolicy()
-	policy.AutoAllowBashWhenSandboxed = autoAllow
 	return NewEngine(EngineOptions{
 		WorkspaceRoot: t.TempDir(),
-		Policy:        policy,
+		Policy:        DefaultPolicy(),
 		Backend:       backend,
 	})
 }
@@ -36,42 +33,24 @@ var nativeWrappingBackend = Backend{
 	NativeIsolation: true,
 }
 
-// TestAutoAllowBashWhenSandboxedActive: flag on + a real wrapping backend means
-// the bash prompt is skipped (auto-allow), because the sandbox is the safety
-// boundary.
-func TestAutoAllowBashWhenSandboxedActive(t *testing.T) {
-	engine := autoAllowBashEngine(t, true, nativeWrappingBackend)
+func TestSandboxedBashAutoAllowedWhenSandboxActive(t *testing.T) {
+	engine := sandboxedShellEngine(t, nativeWrappingBackend)
 	decision := engine.Evaluate(context.Background(), bashRequest())
 	if decision.Action != ActionAllow {
-		t.Fatalf("decision = %#v, want allow (sandbox active + flag on)", decision)
+		t.Fatalf("decision = %#v, want allow (sandbox active)", decision)
 	}
 }
 
-// TestAutoAllowBashIgnoredWithoutSandbox: flag on but NO active sandbox
-// (policy-only backend) must NOT auto-allow; the normal prompt policy stands.
-func TestAutoAllowBashIgnoredWithoutSandbox(t *testing.T) {
-	engine := autoAllowBashEngine(t, true, Backend{Name: BackendPolicyOnly})
+func TestSandboxedBashStillPromptsWithoutSandbox(t *testing.T) {
+	engine := sandboxedShellEngine(t, Backend{Name: BackendPolicyOnly})
 	decision := engine.Evaluate(context.Background(), bashRequest())
 	if decision.Action != ActionPrompt {
-		t.Fatalf("decision = %#v, want prompt (no active sandbox, flag must be ignored)", decision)
+		t.Fatalf("decision = %#v, want prompt (no active sandbox)", decision)
 	}
 }
 
-// TestAutoAllowBashOffStillPrompts: flag off + active sandbox keeps the normal
-// prompt policy.
-func TestAutoAllowBashOffStillPrompts(t *testing.T) {
-	engine := autoAllowBashEngine(t, false, nativeWrappingBackend)
-	decision := engine.Evaluate(context.Background(), bashRequest())
-	if decision.Action != ActionPrompt {
-		t.Fatalf("decision = %#v, want prompt (flag off)", decision)
-	}
-}
-
-// TestAutoAllowBashDisabledPolicyMode: when the policy is disabled the sandbox
-// is not enforcing, so the flag must not change the (already-allow) outcome and
-// must not error.
-func TestAutoAllowBashDoesNotAffectNonShell(t *testing.T) {
-	engine := autoAllowBashEngine(t, true, nativeWrappingBackend)
+func TestSandboxedBashAutoAllowDoesNotAffectNonShell(t *testing.T) {
+	engine := sandboxedShellEngine(t, nativeWrappingBackend)
 	// A non-shell prompt tool must still prompt; auto-allow is shell-only. Use a
 	// generic write tool name so the workspace file-tool auto-allow does not
 	// apply.
@@ -85,49 +64,6 @@ func TestAutoAllowBashDoesNotAffectNonShell(t *testing.T) {
 	})
 	if decision.Action != ActionPrompt {
 		t.Fatalf("decision = %#v, want prompt (auto-allow is shell-only)", decision)
-	}
-}
-
-// TestAutoAllowBashEnvSurface verifies the ZERO_SANDBOX_AUTO_ALLOW_BASH env var
-// is off by default and only enables on a truthy value, and that the overlay
-// never disables an already-enabled config field.
-func TestAutoAllowBashEnvSurface(t *testing.T) {
-	cases := []struct {
-		value string
-		set   bool
-		want  bool
-	}{
-		{set: false, want: false},
-		{value: "", set: true, want: false},
-		{value: "0", set: true, want: false},
-		{value: "false", set: true, want: false},
-		{value: "nonsense", set: true, want: false},
-		{value: "1", set: true, want: true},
-		{value: "true", set: true, want: true},
-		{value: "TRUE", set: true, want: true},
-	}
-	for _, tc := range cases {
-		if tc.set {
-			t.Setenv(EnvAutoAllowBash, tc.value)
-		} else {
-			os.Unsetenv(EnvAutoAllowBash)
-		}
-		if got := AutoAllowBashEnvEnabled(); got != tc.want {
-			t.Fatalf("AutoAllowBashEnvEnabled() with %q (set=%v) = %v, want %v", tc.value, tc.set, got, tc.want)
-		}
-		overlaid := ApplyAutoAllowBashEnv(DefaultPolicy())
-		if overlaid.AutoAllowBashWhenSandboxed != tc.want {
-			t.Fatalf("ApplyAutoAllowBashEnv with %q = %v, want %v", tc.value, overlaid.AutoAllowBashWhenSandboxed, tc.want)
-		}
-	}
-
-	// The overlay must not clear an already-enabled config opt-in when the env is
-	// unset.
-	os.Unsetenv(EnvAutoAllowBash)
-	enabled := DefaultPolicy()
-	enabled.AutoAllowBashWhenSandboxed = true
-	if got := ApplyAutoAllowBashEnv(enabled); !got.AutoAllowBashWhenSandboxed {
-		t.Fatal("ApplyAutoAllowBashEnv cleared an already-enabled config opt-in")
 	}
 }
 

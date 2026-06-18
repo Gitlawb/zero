@@ -3,14 +3,8 @@ package sandbox
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
-
-// EnvAutoAllowBash is the environment variable that opts in to auto-allowing the
-// bash tool when the sandbox is active for the command. It is OFF by default;
-// only an explicit truthy value enables it.
-const EnvAutoAllowBash = "ZERO_SANDBOX_AUTO_ALLOW_BASH"
 
 // EnvSandboxed marks a process that zero has already wrapped in a sandbox: every
 // wrapped command carries ZERO_SANDBOXED=1 in its environment. When such a
@@ -188,12 +182,6 @@ type Policy struct {
 	// socket creation. It is an extra hardening layer over the native sandbox and
 	// is ignored on non-Linux backends.
 	BlockUnixSockets bool `json:"blockUnixSockets,omitempty"`
-	// AutoAllowBashWhenSandboxed, when true, auto-allows the bash tool WITHOUT a
-	// permission prompt — but only when the sandbox is actually active (a
-	// native-isolation backend wraps the command). The sandbox is then the safety
-	// boundary. When the sandbox is not active the flag is ignored: unsandboxed
-	// bash is never auto-allowed. Off by default.
-	AutoAllowBashWhenSandboxed bool `json:"autoAllowBashWhenSandboxed,omitempty"`
 	// MonitorDenials, when true on macOS, tags the sandbox-exec profile's denials
 	// and tails `log stream` for them so blocked operations can be surfaced back to
 	// the agent. Off by default: it starts a `log stream` subprocess per command and
@@ -306,29 +294,4 @@ func DefaultPolicy() Policy {
 		AllowPolicyOnlyRunner: true,
 		MaxAutonomy:           AutonomyHigh,
 	}
-}
-
-// AutoAllowBashEnvEnabled reports whether the EnvAutoAllowBash environment
-// variable is set to a truthy value. It is the env surface for
-// AutoAllowBashWhenSandboxed and is OFF for any unset/blank/falsey value, so the
-// safe default (prompt) holds unless the operator explicitly opts in.
-func AutoAllowBashEnvEnabled() bool {
-	value := strings.TrimSpace(os.Getenv(EnvAutoAllowBash))
-	if value == "" {
-		return false
-	}
-	enabled, err := strconv.ParseBool(value)
-	return err == nil && enabled
-}
-
-// ApplyAutoAllowBashEnv overlays the EnvAutoAllowBash opt-in onto a policy: when
-// the env var is truthy it enables AutoAllowBashWhenSandboxed. It never disables
-// an already-enabled policy field, so an explicit config opt-in is preserved
-// even when the env var is unset. Wire this where the engine policy is built so
-// the env surface takes effect.
-func ApplyAutoAllowBashEnv(policy Policy) Policy {
-	if AutoAllowBashEnvEnabled() {
-		policy.AutoAllowBashWhenSandboxed = true
-	}
-	return policy
 }

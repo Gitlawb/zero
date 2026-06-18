@@ -253,8 +253,8 @@ func (engine *Engine) scopeFor(requestRoot string) *Scope {
 // wrap a shell command under the given policy. It is true only when the policy
 // is enforcing and the engine's backend can wrap commands with native isolation
 // (bubblewrap / sandbox-exec available). A policy-only fallback, a disabled
-// policy, or a nil engine all report false — so AutoAllowBashWhenSandboxed never
-// auto-allows an unsandboxed command.
+// policy, or a nil engine all report false, so ordinary shell auto-allow never
+// runs an unsandboxed command.
 func (engine *Engine) shellSandboxActive(policy Policy) bool {
 	if engine == nil {
 		return false
@@ -437,13 +437,11 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write permitted by sandbox policy", AutoAllowed: true}
 	}
-	// Auto-allow a sandboxed shell command when the operator opted in: the active
-	// native sandbox is the safety boundary, so the bash prompt is skipped. This
-	// only applies to shell commands AND only when a wrapping sandbox is actually
-	// active; an inactive sandbox (policy-only / disabled) ignores the flag so
-	// unsandboxed bash is never silently allowed. It still respects the autonomy
-	// ceiling, matching how an explicit permission grant is clamped.
-	if policy.AutoAllowBashWhenSandboxed && request.SideEffect == SideEffectShell && engine.shellSandboxActive(policy) {
+	// Auto-allow an ordinary shell command when the active native sandbox is the
+	// safety boundary. Network, destructive, and path policy checks run before
+	// this branch, so they still prompt or deny as configured. If the backend is
+	// policy-only/disabled, shell commands keep the normal approval prompt.
+	if request.SideEffect == SideEffectShell && engine.shellSandboxActive(policy) {
 		if !autonomyAllowed(rawAutonomy, policy.MaxAutonomy) {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: reasonAboveCeiling}
 		}
