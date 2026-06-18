@@ -164,6 +164,45 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 	})
 }
 
+func TestLegacySandboxEntrypointsAreExplicitAndExist(t *testing.T) {
+	t.Run("linux still requires bubblewrap behind helper", func(t *testing.T) {
+		lookups := map[string]string{
+			LinuxSandboxHelperName: "/usr/bin/" + LinuxSandboxHelperName,
+			"bwrap":                "/usr/bin/bwrap",
+		}
+		backend := SelectBackend(BackendOptions{
+			GOOS: "linux",
+			LookupExecutable: func(name string) (string, error) {
+				path, ok := lookups[name]
+				if !ok {
+					return "", errors.New("missing")
+				}
+				return path, nil
+			},
+		})
+
+		if backend.Name != BackendLinuxBwrap || backend.Executable != lookups[LinuxSandboxHelperName] {
+			t.Fatalf("linux backend = %#v, want Linux helper backed by bwrap", backend)
+		}
+	})
+
+	t.Run("macos still uses sandbox-exec behind seatbelt backend", func(t *testing.T) {
+		backend := SelectBackend(BackendOptions{
+			GOOS: "darwin",
+			LookupExecutable: func(name string) (string, error) {
+				if name == "sandbox-exec" {
+					return "/usr/bin/sandbox-exec", nil
+				}
+				return "", errors.New("missing")
+			},
+		})
+
+		if backend.Name != BackendMacOSSeatbelt || backend.Executable != "/usr/bin/sandbox-exec" {
+			t.Fatalf("darwin backend = %#v, want Seatbelt backend through sandbox-exec", backend)
+		}
+	})
+}
+
 func TestBackendBuildPlanDocumentsBestEffortIsolation(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()

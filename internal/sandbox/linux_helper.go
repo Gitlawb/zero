@@ -23,6 +23,7 @@ type LinuxSandboxCommandArgsOptions struct {
 	PermissionProfile    PermissionProfile
 	UseLandlock          bool
 	ApplySeccompThenExec bool
+	BlockUnixSockets     bool
 	AllowNetworkForProxy bool
 	ProxyRouteSpec       string
 	NoProc               bool
@@ -35,6 +36,7 @@ type LinuxSandboxHelperConfig struct {
 	PermissionProfile    PermissionProfile
 	UseLandlock          bool
 	ApplySeccompThenExec bool
+	BlockUnixSockets     bool
 	AllowNetworkForProxy bool
 	ProxyRouteSpec       string
 	NoProc               bool
@@ -81,6 +83,9 @@ func BuildLinuxSandboxCommandArgs(options LinuxSandboxCommandArgsOptions) ([]str
 	if options.ApplySeccompThenExec {
 		args = append(args, "--apply-seccomp-then-exec")
 	}
+	if options.BlockUnixSockets {
+		args = append(args, "--block-unix-sockets")
+	}
 	if options.AllowNetworkForProxy {
 		args = append(args, "--allow-network-for-proxy")
 	}
@@ -105,6 +110,7 @@ func ParseLinuxSandboxHelperArgs(args []string) (LinuxSandboxHelperConfig, error
 	flags.StringVar(&profileJSON, "permission-profile", "", "permission profile JSON")
 	flags.BoolVar(&config.UseLandlock, "use-landlock", false, "use Landlock backend")
 	flags.BoolVar(&config.ApplySeccompThenExec, "apply-seccomp-then-exec", false, "apply seccomp before exec")
+	flags.BoolVar(&config.BlockUnixSockets, "block-unix-sockets", false, "block AF_UNIX sockets before exec")
 	flags.BoolVar(&config.AllowNetworkForProxy, "allow-network-for-proxy", false, "allow proxy-routed network")
 	flags.StringVar(&config.ProxyRouteSpec, "proxy-route-spec", "", "proxy route spec")
 	flags.BoolVar(&config.NoProc, "no-proc", false, "skip proc mount")
@@ -154,6 +160,7 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 		CommandCWD:           commandCWD,
 		PermissionProfile:    config.PermissionProfile,
 		ApplySeccompThenExec: true,
+		BlockUnixSockets:     config.BlockUnixSockets,
 		AllowNetworkForProxy: config.AllowNetworkForProxy,
 		ProxyRouteSpec:       config.ProxyRouteSpec,
 		NoProc:               config.NoProc,

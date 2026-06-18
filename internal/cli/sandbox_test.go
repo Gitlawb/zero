@@ -823,19 +823,22 @@ func TestApplyConfiguredAutonomyCeiling(t *testing.T) {
 
 func TestApplyConfiguredSandboxPolicyDiagnosticsFlags(t *testing.T) {
 	base := sandbox.DefaultPolicy()
-	if base.MonitorDenials {
-		t.Fatalf("precondition: monitor denials must default off")
+	if base.BlockUnixSockets || base.MonitorDenials {
+		t.Fatalf("precondition: diagnostic flags must default off")
 	}
 
 	// Omitted keys leave the (off) defaults untouched.
-	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.MonitorDenials {
-		t.Fatalf("empty config must not enable monitor denials")
+	if got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{}); got.BlockUnixSockets || got.MonitorDenials {
+		t.Fatalf("empty config must not enable diagnostic flags: %#v", got)
 	}
 
-	// The flag opts in.
-	got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{MonitorDenials: true})
-	if !got.MonitorDenials {
-		t.Fatal("MonitorDenials config not applied to policy")
+	// The flags opt in.
+	got := applyConfiguredSandboxPolicy(sandbox.DefaultPolicy(), config.SandboxConfig{
+		BlockUnixSockets: true,
+		MonitorDenials:   true,
+	})
+	if !got.BlockUnixSockets || !got.MonitorDenials {
+		t.Fatalf("diagnostic config not applied to policy: %#v", got)
 	}
 }
 

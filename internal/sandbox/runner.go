@@ -285,6 +285,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 		SandboxPolicyCWD:  execRequest.WorkspaceRoot,
 		CommandCWD:        spec.Dir,
 		PermissionProfile: execRequest.PermissionProfile,
+		BlockUnixSockets:  policy.BlockUnixSockets,
 		Command:           command,
 	})
 	if err != nil {

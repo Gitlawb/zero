@@ -362,9 +362,11 @@ func TestCopyPackageFilesStagesLinuxSandboxHelper(t *testing.T) {
 	staging := t.TempDir()
 	artifact := filepath.Join(root, "zero")
 	helper := filepath.Join(root, "zero-linux-sandbox")
+	seccomp := filepath.Join(root, "zero-seccomp")
 	for path, content := range map[string]string{
 		artifact:                              "zero",
 		helper:                                "helper",
+		seccomp:                               "seccomp",
 		filepath.Join(root, "README.md"):      "readme",
 		filepath.Join(root, "package.json"):   `{"version":"0.1.0"}`,
 		filepath.Join(root, "bin", "zero.js"): "wrapper",
@@ -373,11 +375,15 @@ func TestCopyPackageFilesStagesLinuxSandboxHelper(t *testing.T) {
 	}
 	if err := copyPackageFiles(root, staging, artifact, filepath.Join(staging, "zero"), "linux", "0.1.0", map[string]string{
 		"zero-linux-sandbox": helper,
+		"zero-seccomp":       seccomp,
 	}); err != nil {
 		t.Fatalf("copyPackageFiles: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(staging, "zero-linux-sandbox")); err != nil {
 		t.Fatalf("staged helper missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(staging, "zero-seccomp")); err != nil {
+		t.Fatalf("staged seccomp compatibility helper missing: %v", err)
 	}
 }
 

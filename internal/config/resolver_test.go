@@ -1269,6 +1269,26 @@ func TestResolveSandboxMaxAutonomyFromFile(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxBlockUnixSocketsFromFile(t *testing.T) {
+	path := writeConfig(t, `{
+		"sandbox": {"blockUnixSockets": true},
+		"providers": [{
+			"name": "openai",
+			"provider": "openai",
+			"api_key": "sk-test",
+			"model": "gpt-test"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !resolved.Sandbox.BlockUnixSockets {
+		t.Fatal("resolved.Sandbox.BlockUnixSockets = false, want true")
+	}
+}
+
 func TestResolveSandboxMaxAutonomyPrecedence(t *testing.T) {
 	userPath := writeConfig(t, `{
 		"sandbox": {"maxAutonomy": "low"},

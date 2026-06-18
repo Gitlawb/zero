@@ -70,6 +70,10 @@ type SandboxConfig struct {
 	// flags only — deliberately not project config, so a cloned repo cannot
 	// grant itself write access. Session-only grants use /add-dir instead.
 	AdditionalWriteRoots []string `json:"additionalWriteRoots,omitempty"`
+	// BlockUnixSockets, when true, asks the Linux sandbox helper to install a
+	// best-effort seccomp filter that denies AF_UNIX socket creation inside the
+	// sandboxed command. Off by default; ignored on non-Linux backends.
+	BlockUnixSockets bool `json:"blockUnixSockets,omitempty"`
 	// MonitorDenials, when true on macOS, tails the unified log for this run's
 	// sandbox denials and appends them to a command's stderr so blocked operations
 	// are visible to the agent. Off by default. No-op on platforms/OS versions that

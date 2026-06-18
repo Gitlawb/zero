@@ -68,9 +68,10 @@ func runLinuxSandboxInnerStage(config LinuxSandboxHelperConfig, stderr io.Writer
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": proxy networking requires --proxy-route-spec")
 		return 125
 	}
-	if err := ApplyUnixSocketBlock(); err != nil {
-		fmt.Fprintln(stderr, LinuxSandboxHelperName+": apply seccomp: "+err.Error())
-		return 126
+	if config.BlockUnixSockets {
+		if err := ApplyUnixSocketBlock(); err != nil {
+			fmt.Fprintln(stderr, LinuxSandboxHelperName+": warning: "+err.Error()+"; running without the Unix-socket filter")
+		}
 	}
 	binary, err := exec.LookPath(config.Command[0])
 	if err != nil {

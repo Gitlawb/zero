@@ -158,6 +158,12 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		dst.Sandbox.Network = network
 	}
 	dst.Sandbox.AdditionalWriteRoots = unionStrings(dst.Sandbox.AdditionalWriteRoots, src.Sandbox.AdditionalWriteRoots)
+	if src.Sandbox.BlockUnixSockets {
+		dst.Sandbox.BlockUnixSockets = true
+	}
+	if src.Sandbox.MonitorDenials {
+		dst.Sandbox.MonitorDenials = true
+	}
 	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
 		dst.Notify.Mode = mode
 	}
@@ -197,6 +203,12 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if network := strings.TrimSpace(src.Sandbox.Network); network != "" {
 		dst.Sandbox.Network = network
+	}
+	if src.Sandbox.BlockUnixSockets {
+		dst.Sandbox.BlockUnixSockets = true
+	}
+	if src.Sandbox.MonitorDenials {
+		dst.Sandbox.MonitorDenials = true
 	}
 	if mode := strings.TrimSpace(src.Notify.Mode); mode != "" {
 		dst.Notify.Mode = mode
@@ -511,6 +523,12 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if maxAutonomy := strings.TrimSpace(overrides.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		cfg.Sandbox.MaxAutonomy = maxAutonomy
+	}
+	if overrides.Sandbox.BlockUnixSockets {
+		cfg.Sandbox.BlockUnixSockets = true
+	}
+	if overrides.Sandbox.MonitorDenials {
+		cfg.Sandbox.MonitorDenials = true
 	}
 	if mode := strings.TrimSpace(overrides.Notify.Mode); mode != "" {
 		cfg.Notify.Mode = mode

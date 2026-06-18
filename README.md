@@ -238,9 +238,14 @@ still resolve against the workspace only, and network and destructive-shell poli
 are unchanged. A write denied outside all roots returns an error that suggests
 `/add-dir`.
 
-An extra diagnostic flag is available in the `sandbox` config block, **off by
-default** and safe to leave unset:
+Two extra hardening/diagnostic flags are available in the `sandbox` config block,
+both **off by default** and safe to leave unset:
 
+- `sandbox.blockUnixSockets` (Linux) — asks the Linux sandbox helper to install a
+  best-effort seccomp filter that denies `AF_UNIX` socket creation in the
+  sandboxed command. Linux packages also continue to ship `zero-seccomp` as a
+  compatibility wrapper for existing direct uses; new sandbox plans do not depend
+  on that external wrapper.
 - `sandbox.monitorDenials` (macOS) — tails the unified log for this run's seatbelt
   denials and appends them to a command's stderr as a `<sandbox_violations>` block
   so blocked operations are visible. A no-op on OS versions that do not deliver

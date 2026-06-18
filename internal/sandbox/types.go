@@ -181,6 +181,11 @@ type Policy struct {
 	// safeguards). The sandboxed-shell egress decision is independent of this flag.
 	// Turn it on to also hold web_search/web_fetch to the allow/scoped/deny policy.
 	EnforceToolNetwork bool `json:"enforceToolNetwork,omitempty"`
+	// BlockUnixSockets, when true on the Linux helper backend, installs a
+	// best-effort seccomp filter in the inner helper stage that denies AF_UNIX
+	// socket creation. It is an extra hardening layer over the native sandbox and
+	// is ignored on non-Linux backends.
+	BlockUnixSockets bool `json:"blockUnixSockets,omitempty"`
 	// AutoAllowBashWhenSandboxed, when true, auto-allows the bash tool WITHOUT a
 	// permission prompt — but only when the sandbox is actually active (a
 	// native-isolation backend wraps the command). The sandbox is then the safety

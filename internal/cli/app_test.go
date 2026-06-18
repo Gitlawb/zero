@@ -112,6 +112,9 @@ func TestRunNoArgsLaunchesSetupTUIWithNilProviderWhenNoProviderConfigured(t *tes
 		userConfigPath: func() (string, error) {
 			return userConfigPath, nil
 		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			launchedOptions = options
 			return 7
@@ -445,6 +448,9 @@ func TestRunNoArgsLaunchesTUIWithResolvedProviderMetadata(t *testing.T) {
 		},
 		userConfigPath: func() (string, error) {
 			return userConfigPath, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			launchedOptions = options
@@ -844,6 +850,9 @@ func TestRunSetupNoArgsForcesSetupTUI(t *testing.T) {
 		},
 		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
 			return &cliFakeProvider{}, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
 		},
 		runTUI: func(ctx context.Context, options tui.Options) int {
 			launchedOptions = options

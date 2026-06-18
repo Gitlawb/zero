@@ -88,6 +88,7 @@ func TestSandboxManagerBuildsExecutionRequestFromProfile(t *testing.T) {
 func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 	backend := Backend{Name: BackendLinuxBwrap, Available: true, Executable: "/usr/bin/zero-linux-sandbox", Platform: "linux"}
 	policy := DefaultPolicy()
+	policy.BlockUnixSockets = true
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend})
 	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     "/workspace",
@@ -108,6 +109,7 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 	}
 	assertArgsContainSequence(t, plan.Args, "--sandbox-policy-cwd", "/workspace")
 	assertArgsContainSequence(t, plan.Args, "--command-cwd", "/workspace/nested")
+	assertArgsContainSequence(t, plan.Args, "--block-unix-sockets")
 	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
 }
 
