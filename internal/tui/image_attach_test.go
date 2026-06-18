@@ -80,8 +80,8 @@ func TestImageCommandAttachRendersChip(t *testing.T) {
 	}
 	if chips := renderImageChips(next.pendingImageLabels); chips == "" {
 		t.Fatal("expected a chip row for pending images")
-	} else if !strings.Contains(chips, "photo.png") {
-		t.Fatalf("chip row %q should name the image", chips)
+	} else if !strings.Contains(chips, "[Image #1]") || strings.Contains(chips, "photo.png") {
+		t.Fatalf("chip row %q should be the compact numbered chip, not the file name", chips)
 	}
 }
 
@@ -144,8 +144,8 @@ func TestTranscriptViewShowsImageChips(t *testing.T) {
 	m.pendingImageLabels = []string{"photo.png", "diagram.gif"}
 
 	view := m.transcriptView()
-	if !strings.Contains(view, "photo.png") || !strings.Contains(view, "diagram.gif") {
-		t.Fatalf("transcript view should show pending image chips, got:\n%s", view)
+	if !strings.Contains(view, "[Image #1]") || !strings.Contains(view, "[Image #2]") {
+		t.Fatalf("transcript view should show numbered image chips, got:\n%s", view)
 	}
 }
 
@@ -324,9 +324,8 @@ func TestImageCommandAttachesPDFTextOnNonVisionModel(t *testing.T) {
 	if len(next.pendingImages) != 0 {
 		t.Fatalf("no rasterizer: expected 0 page images, got %d", len(next.pendingImages))
 	}
-	if notice := lastTranscriptText(next); !strings.Contains(notice, "spec.pdf") {
-		t.Fatalf("expected an attach notice naming the PDF, got %q", notice)
-	}
+	// A successful attach is silent now (the [Doc #N] composer chip is the
+	// confirmation); the pending-document assertions above verify it.
 }
 
 // A real PDF whose path lacks a ".pdf" extension is still routed to the document
@@ -401,7 +400,7 @@ func TestTranscriptViewShowsDocumentChips(t *testing.T) {
 	m.pendingDocuments = []pendingDocument{{label: "spec.pdf", text: "body"}}
 
 	view := m.transcriptView()
-	if !strings.Contains(view, "spec.pdf") {
+	if !strings.Contains(view, "[Doc #1]") {
 		t.Fatalf("transcript view should show the document chip, got:\n%s", view)
 	}
 }
@@ -471,11 +470,15 @@ func TestRenderAttachmentChips(t *testing.T) {
 	if got := renderAttachmentChips(nil, nil); got != "" {
 		t.Fatalf("empty attachments should render no chips, got %q", got)
 	}
-	got := renderAttachmentChips([]string{"a.png"}, []pendingDocument{{label: "spec.pdf"}})
-	if !strings.Contains(got, "[img: a.png]") {
-		t.Fatalf("chip row %q should include the image", got)
+	got := renderAttachmentChips([]string{"a.png", "b.png"}, []pendingDocument{{label: "spec.pdf"}})
+	if !strings.Contains(got, "[Image #1]") || !strings.Contains(got, "[Image #2]") {
+		t.Fatalf("chip row %q should include numbered images", got)
 	}
-	if !strings.Contains(got, "[doc: spec.pdf]") {
+	if !strings.Contains(got, "[Doc #1]") {
 		t.Fatalf("chip row %q should include the document", got)
+	}
+	// The long file name must NOT appear — compact numbered chips only.
+	if strings.Contains(got, "a.png") || strings.Contains(got, "spec.pdf") {
+		t.Fatalf("chip row %q should not show file names", got)
 	}
 }

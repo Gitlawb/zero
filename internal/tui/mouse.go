@@ -159,6 +159,9 @@ func (m *model) clearMouseSelection() {
 }
 
 func (m model) wantsMouseCapture() bool {
+	if m.mouseReleased {
+		return false // user released the mouse for native text selection/copy
+	}
 	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
 }
 

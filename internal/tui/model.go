@@ -106,6 +106,7 @@ type model struct {
 	input                 textinput.Model
 	composer              composerState
 	composerActive        bool
+	composerCursorVisible bool
 	composerPastePreviews []composerPastePreview
 	altScreen             bool
 	setup                 setupState
@@ -206,6 +207,10 @@ type model struct {
 	suggestionsAreFiles bool
 	lastMouseSelection  mouseSelectionTarget
 	mouseCapture        bool
+	// mouseReleased, when true, forces terminal mouse capture OFF so the user can
+	// drag-select and copy text natively (Ctrl+E toggles it). App mouse features
+	// (clickable suggestions, right-click paste, transcript select) pause while on.
+	mouseReleased       bool
 	transcriptSelection transcriptSelectionState
 	copyStatus          string
 	copyStatusSeq       int
@@ -437,6 +442,7 @@ func newModel(ctx context.Context, options Options) model {
 	m := model{
 		ctx:                    ctx,
 		cwd:                    cwd,
+		composerCursorVisible:  true,
 		userConfigPath:         options.UserConfigPath,
 		doctorUserConfigPath:   doctorUserConfigPath,
 		projectConfigPath:      options.ProjectConfigPath,
@@ -514,8 +520,22 @@ const (
 	composerMaxVisibleLines = 4
 )
 
+// composerCursorBlinkInterval is the on/off period of the composer text cursor.
+const composerCursorBlinkInterval = 530 * time.Millisecond
+
+// composerBlinkMsg toggles the composer cursor's visibility each tick. The custom
+// composer render draws its own cursor (not textinput's), so it drives its own
+// blink rather than relying on textinput.Blink.
+type composerBlinkMsg struct{}
+
+func composerBlinkCmd() tea.Cmd {
+	return tea.Tick(composerCursorBlinkInterval, func(time.Time) tea.Msg {
+		return composerBlinkMsg{}
+	})
+}
+
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textinput.Blink}
+	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd()}
 	if m.prService != nil && m.runtimeMessageSink != nil {
 		service := m.prService
 		sink := m.runtimeMessageSink
@@ -593,6 +613,9 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case composerBlinkMsg:
+		m.composerCursorVisible = !m.composerCursorVisible
+		return m, composerBlinkCmd()
 	case tea.MouseMsg:
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
@@ -662,6 +685,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.quit()
 		case keyCtrl(msg, 'o'):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'e'):
+			// Release/recapture the mouse so the user can drag-select and copy text
+			// natively (mouse capture otherwise intercepts terminal selection).
+			m.mouseReleased = !m.mouseReleased
+			if m.mouseReleased {
+				return m.appendSystemNotice("Mouse released — drag to select and copy text. Press Ctrl+E again to re-enable mouse interaction (clicks, right-click paste)."), nil
+			}
+			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
 		case keyIs(msg, tea.KeyEsc):
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
@@ -806,6 +837,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.picker.deleteQueryRune()
 				return m, nil
+			}
+			// On an empty composer, Backspace removes the last attachment chip
+			// ([Image #N] / [Doc #N]) so you can drop one you don't need without
+			// clearing them all. With text present it deletes a character as usual.
+			if m.composerValue() == "" {
+				if next, removed := m.removeLastAttachment(); removed {
+					return next, nil
+				}
 			}
 		case keyIs(msg, tea.KeyTab):
 			if m.transcriptDetailed {
@@ -1400,10 +1439,6 @@ func (m model) footerView(width int) string {
 	} else {
 		footer.WriteString("\n")
 	}
-	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
-		footer.WriteString(fitStyledLine(zeroTheme.muted.Render(chips), width))
-		footer.WriteString("\n")
-	}
 	footer.WriteString(m.composerBox(width))
 	if hint := m.composerDescriptionHint(width); hint != "" {
 		footer.WriteString("\n")
@@ -1810,7 +1845,7 @@ func (m model) composerLine(width int) string {
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
 	displayState := composerDisplayStateForPastePreviews(state, previews)
-	return renderComposerInput(input, displayState, width)
+	return renderComposerInput(input, displayState, width, m.composerCursorVisible)
 }
 
 type composerVisualLine struct {
@@ -1819,13 +1854,20 @@ type composerVisualLine struct {
 	end   int
 }
 
-func renderComposerInput(input textinput.Model, state composerState, width int) string {
+func renderComposerInput(input textinput.Model, state composerState, width int, cursorVisible bool) string {
 	state = normalizeComposerState(state)
 	if width <= 0 {
 		return ""
 	}
 	if state.text == "" {
-		return fitStyledLine(composerVisualLinePrefix(input, true)+zeroTheme.faint.Render(input.Placeholder), width)
+		// Empty box: show a (blinking) cursor before the placeholder so the focused
+		// input always has a visible caret. A plain space when blinked off keeps the
+		// placeholder column stable.
+		cursor := " "
+		if cursorVisible {
+			cursor = composerCursor(" ")
+		}
+		return fitStyledLine(composerVisualLinePrefix(input, true)+cursor+zeroTheme.faint.Render(input.Placeholder), width)
 	}
 
 	segments := composerWrappedVisualLines(input, state, width)
@@ -1842,7 +1884,7 @@ func renderComposerInput(input textinput.Model, state composerState, width int) 
 
 	lines := make([]string, 0, len(segments))
 	for index, segment := range segments {
-		lines = append(lines, fitStyledLine(renderComposerVisualLine(input, state, segment, index == cursorLine), width))
+		lines = append(lines, fitStyledLine(renderComposerVisualLine(input, state, segment, index == cursorLine, cursorVisible), width))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1908,7 +1950,7 @@ func composerCursorVisualLine(segments []composerVisualLine, cursor int) int {
 	return len(segments) - 1
 }
 
-func renderComposerVisualLine(input textinput.Model, state composerState, segment composerVisualLine, hasCursor bool) string {
+func renderComposerVisualLine(input textinput.Model, state composerState, segment composerVisualLine, hasCursor bool, cursorVisible bool) string {
 	runes := []rune(state.text)
 	prefix := composerVisualLinePrefix(input, segment.first)
 	textStyle := zeroTheme.ink.Inline(true)
@@ -1920,10 +1962,21 @@ func renderComposerVisualLine(input textinput.Model, state composerState, segmen
 	cursorIndex := segment.start + offset
 	before := string(runes[segment.start:cursorIndex])
 	if cursorIndex < segment.end {
+		cursorChar := string(runes[cursorIndex])
 		after := string(runes[cursorIndex+1 : segment.end])
-		return prefix + textStyle.Render(before) + composerCursor(string(runes[cursorIndex])) + textStyle.Render(after)
+		// Blinked off: draw the character normally (no caret highlight).
+		cell := textStyle.Render(cursorChar)
+		if cursorVisible {
+			cell = composerCursor(cursorChar)
+		}
+		return prefix + textStyle.Render(before) + cell + textStyle.Render(after)
 	}
-	return prefix + textStyle.Render(before) + composerCursor(" ")
+	// Cursor at end of line: a caret block when on, nothing when blinked off.
+	end := ""
+	if cursorVisible {
+		end = composerCursor(" ")
+	}
+	return prefix + textStyle.Render(before) + end
 }
 
 func composerVisualLinePrefix(input textinput.Model, first bool) string {
@@ -2084,8 +2137,15 @@ func (m model) composerBox(width int) string {
 	content := m.composerLine(innerWidth)
 	lines := strings.Split(content, "\n")
 
-	rendered := make([]string, 0, len(lines)+2)
+	rendered := make([]string, 0, len(lines)+3)
 	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", width-2)+"╮"))
+	// Attachment chips ([Image #1] …) render INSIDE the box, above the input line,
+	// instead of as a separate row above the box.
+	if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
+		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
+		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
+		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │"))
+	}
 	for _, line := range lines {
 		fitted := fitStyledLine(line, innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
@@ -2292,6 +2352,14 @@ func (m model) chooseSuggestion() (tea.Model, tea.Cmd) {
 
 func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	input := m.composerValue()
+	// A drag-dropped image/PDF path that reached the composer (e.g. inserted as
+	// text) attaches instead of being parsed as an unknown "/…" command.
+	if path, ok := droppedAttachmentPath(input, m.cwd); ok {
+		m = m.handleImageCommand(path)
+		m.clearComposer()
+		m.clearSuggestions()
+		return m, nil
+	}
 	command := parseCommand(input)
 	// While exiting (Ctrl+C waiting on the cancelled run's checkpoint flush) a
 	// new run must not start: the deferred tea.Quit would abort it mid-flight
