@@ -2783,18 +2783,25 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
 	runCtx, cancel := context.WithCancel(m.ctx)
+	m = m.beginRun(cancel)
+	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+}
+
+// beginRun stamps the shared run-start state for a new agent turn: a fresh run
+// ID, the cancel func, pending = true, the turn-start timestamp (the source for
+// the working status line's live elapsed clock), and a reset working-verb
+// rotation so the brand word shows first. Centralized so every launch path
+// (normal prompt + spec draft/impl) keeps these in sync — a missing
+// turnStartedAt previously dropped the elapsed timer on spec-mode runs.
+func (m model) beginRun(cancel context.CancelFunc) model {
 	m.runID++
 	m.activeRunID = m.runID
 	m.runCancel = cancel
 	m.pending = true
 	m.turnStartedAt = m.now()
-	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
-	// the new run starts (instead of mid-rotation from a prior turn). Also
-	// reset the step counter so the cadence doesn't carry over a partial
-	// countdown from the previous run.
 	m.workingVerbTicks = 0
 	m.workingVerb.Reset()
-	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, turnImages), m.spinner.Tick)
+	return m
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
