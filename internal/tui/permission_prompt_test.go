@@ -94,3 +94,21 @@ func TestPermissionRenderEmitsHighlightedClickableOffsets(t *testing.T) {
 		t.Fatalf("the highlighted (cursor) option line should carry ▸, got %q", lines[deny])
 	}
 }
+
+func TestPermissionRenderShowsNetworkTargetAndHostScopedAlways(t *testing.T) {
+	request := agent.PermissionRequest{
+		ToolName:   "web_fetch",
+		SideEffect: "network",
+		Scope:      "example.com",
+	}
+	card, _ := renderFocusedPermissionPrompt(request, 1, 72)
+	got := plainRender(t, card)
+	for _, want := range []string{"target: example.com", "always for this host", "[y]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("permission card = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "scope: example.com") {
+		t.Fatalf("network prompt should render target label, got %q", got)
+	}
+}

@@ -165,6 +165,8 @@ func TestDeriveScope(t *testing.T) {
 		{name: "path wins over cwd", tool: "x", args: map[string]any{"cwd": "a", "path": "b"}, wantRaw: "b", wantKind: ScopeFile},
 		{name: "non-string path ignored", tool: "write_file", args: map[string]any{"path": 42}, wantRaw: "", wantKind: ScopeToolWide},
 		{name: "whitespace path is tool-wide", tool: "write_file", args: map[string]any{"path": "  "}, wantRaw: "", wantKind: ScopeToolWide},
+		{name: "web fetch url host", tool: "web_fetch", args: map[string]any{"url": "https://Example.COM:443/path?q=1"}, wantRaw: "example.com", wantKind: ScopeHost},
+		{name: "web fetch invalid url is tool-wide", tool: "web_fetch", args: map[string]any{"url": "://bad"}, wantRaw: "", wantKind: ScopeToolWide},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -224,6 +226,7 @@ func TestGrantCovers(t *testing.T) {
 	toolWide := Grant{ScopeKind: ScopeToolWide}
 	fileGrant := Grant{Scope: file, ScopeKind: ScopeFile}
 	dirGrant := Grant{Scope: dir, ScopeKind: ScopeDir}
+	hostGrant := Grant{Scope: "example.com", ScopeKind: ScopeHost}
 
 	cases := []struct {
 		name  string
@@ -241,6 +244,9 @@ func TestGrantCovers(t *testing.T) {
 		{"dir does not cover a sibling dir prefix", dirGrant, siblingDir, false},
 		{"dir does not cover its parent", dirGrant, parent, false},
 		{"dir does not cover an empty request", dirGrant, "", false},
+		{"host covers exact host case-insensitively", hostGrant, "EXAMPLE.com", true},
+		{"host does not cover subdomain", hostGrant, "api.example.com", false},
+		{"host does not cover empty request", hostGrant, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

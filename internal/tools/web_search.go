@@ -81,15 +81,14 @@ func newWebSearchToolWithBackend(backend searchBackend) Tool {
 				Required:             []string{"query"},
 				AdditionalProperties: false,
 			},
-			// Network egress, so it carries the same prompt-gated posture as web_fetch
-			// (the codebase enforces this for every CoreNetworkTools entry). It only
-			// discovers public URLs and mutates nothing, but the query still leaves
-			// the machine for an operator-configured endpoint, which warrants a prompt.
+			// Hosted search is a read-only discovery action. It remains marked as
+			// network for sandbox policy accounting, but it does not interrupt every
+			// search with a permission prompt. Operators that want search held to the
+			// sandbox network allowlist can enable EnforceToolNetwork.
 			safety: Safety{
-				SideEffect:      SideEffectNetwork,
-				Permission:      PermissionPrompt,
-				Reason:          "Performs a web search over the network.",
-				AdvertiseInAuto: true,
+				SideEffect: SideEffectNetwork,
+				Permission: PermissionAllow,
+				Reason:     "Performs a web search over the network.",
 			},
 		},
 		backend: backend,

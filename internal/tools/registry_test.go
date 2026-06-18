@@ -46,15 +46,14 @@ func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	}
 }
 
-func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
+func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
 	// web_search is only registered when a backend is configured.
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	byName := map[string]Tool{}
 	for _, tool := range CoreNetworkTools() {
 		byName[tool.Name()] = tool
-		// Every core network tool shares the same prompt-gated egress posture.
 		safety := tool.Safety()
-		if safety.SideEffect != SideEffectNetwork || safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
+		if safety.SideEffect != SideEffectNetwork {
 			t.Fatalf("network tool %q has unexpected safety metadata: %#v", tool.Name(), safety)
 		}
 	}
@@ -67,6 +66,9 @@ func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
 	if property, ok := fetch.Parameters().Properties["url"]; !ok || property.Type != "string" {
 		t.Fatalf("web_fetch must expose a string url property, got %#v", fetch.Parameters().Properties["url"])
 	}
+	if safety := fetch.Safety(); safety.Permission != PermissionPrompt || !safety.AdvertiseInAuto {
+		t.Fatalf("web_fetch safety = %#v, want prompt and advertised in auto", safety)
+	}
 
 	// web_search discovers URLs; its key parameter is "query".
 	search, ok := byName["web_search"]
@@ -75,6 +77,9 @@ func TestCoreNetworkToolsExposePromptMetadata(t *testing.T) {
 	}
 	if property, ok := search.Parameters().Properties["query"]; !ok || property.Type != "string" {
 		t.Fatalf("web_search must expose a string query property, got %#v", search.Parameters().Properties["query"])
+	}
+	if safety := search.Safety(); safety.Permission != PermissionAllow || safety.AdvertiseInAuto {
+		t.Fatalf("web_search safety = %#v, want allow without prompt-advertise override", safety)
 	}
 }
 

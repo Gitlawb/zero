@@ -1215,6 +1215,7 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 
 func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	request := testPromptPermissionRequest()
+	request.Scope = "src/main.go"
 	m := newModel(context.Background(), Options{})
 	m.pending = true
 	m.activeRunID = 7
@@ -1235,8 +1236,12 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	if countTranscriptRows(next.transcript, rowPermission) != 1 {
 		t.Fatalf("expected permission request to append one permission row, got %#v", next.transcript)
 	}
+	row, ok := findTranscriptRow(next.transcript, rowPermission)
+	if !ok || row.permission == nil || row.permission.Scope != request.Scope {
+		t.Fatalf("expected permission row to preserve scope %q, got %#v", request.Scope, row)
+	}
 	view := next.View()
-	for _, want := range []string{"write_file", "allow once", "[a]", "deny", "[d]", "always", "[y]", "risk:high", "Creates or overwrites files."} {
+	for _, want := range []string{"write_file", "allow once", "[a]", "deny", "[d]", "always for this scope", "[y]", "scope: src/main.go", "risk:high", "Creates or overwrites files."} {
 		assertContains(t, view, want)
 	}
 }

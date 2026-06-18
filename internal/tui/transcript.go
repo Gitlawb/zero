@@ -256,6 +256,7 @@ func permissionEventFromRequest(request agent.PermissionRequest) agent.Permissio
 		Autonomy:       request.Autonomy,
 		SideEffect:     request.SideEffect,
 		Reason:         request.Reason,
+		Scope:          request.Scope,
 		Risk:           request.Risk,
 		Violation:      request.Violation,
 		GrantMatched:   request.GrantMatched,

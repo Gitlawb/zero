@@ -11,8 +11,8 @@ import (
 
 // TestEvaluateExemptsNetworkToolsFromDenyByDefault reproduces the web_search
 // hard-deny: under NetworkDeny, the engine-level network gate must NOT deny a
-// first-party network TOOL (SideEffect=network) by default, so it follows the
-// normal permission flow instead of being blocked outright. EnforceToolNetwork
+// first-party network TOOL (SideEffect=network) by default, so it follows its
+// normal tool permission metadata instead of being blocked outright. EnforceToolNetwork
 // restores the strict deny, and a network SHELL command stays denied either way.
 func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
 	base := Policy{Mode: ModeEnforce, Network: NetworkDeny, MaxAutonomy: AutonomyHigh}
@@ -20,15 +20,15 @@ func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
 	// Default (EnforceToolNetwork off): web_search is NOT network-denied.
 	engine := NewEngine(EngineOptions{Policy: base})
 	d := engine.Evaluate(context.Background(), Request{
-		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt,
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow,
 	})
-	if d.Action == ActionDeny {
-		t.Fatalf("web_search must not be network-denied by default, got deny: %s", d.ErrorString())
+	if d.Action != ActionAllow {
+		t.Fatalf("web_search must be allowed by default, got %q: %s", d.Action, d.ErrorString())
 	}
 
-	// Granted permission → it actually runs (ActionAllow), not blocked.
+	// Granted permission also runs, not blocked.
 	allowed := engine.Evaluate(context.Background(), Request{
-		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt, PermissionGranted: true,
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow, PermissionGranted: true,
 	})
 	if allowed.Action != ActionAllow {
 		t.Fatalf("granted web_search must be allowed under deny by default, got %q (%s)", allowed.Action, allowed.ErrorString())
@@ -39,7 +39,7 @@ func TestEvaluateExemptsNetworkToolsFromDenyByDefault(t *testing.T) {
 	strict.EnforceToolNetwork = true
 	strictEngine := NewEngine(EngineOptions{Policy: strict})
 	ds := strictEngine.Evaluate(context.Background(), Request{
-		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionPrompt, PermissionGranted: true,
+		ToolName: "web_search", SideEffect: SideEffectNetwork, Permission: PermissionAllow, PermissionGranted: true,
 	})
 	if ds.Action != ActionDeny || ds.Violation == nil || ds.Violation.Code != ViolationNetwork {
 		t.Fatalf("with EnforceToolNetwork, web_search must be network-denied, got %q (%+v)", ds.Action, ds.Violation)
@@ -182,6 +182,44 @@ func TestEngineGrantScopesToFileAndDirectory(t *testing.T) {
 	denied.Autonomy = AutonomyHigh
 	if d := engine.Evaluate(context.Background(), denied); d.Action != ActionDeny || !d.GrantMatched || d.Violation == nil || d.Violation.Code != ViolationPersistentDeny {
 		t.Fatalf("path under deny subtree should be denied, got %#v", d)
+	}
+}
+
+func TestEngineGrantScopesWebFetchToHost(t *testing.T) {
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy(), Store: store})
+	if _, err := engine.Grant(GrantInput{
+		ToolName:    "web_fetch",
+		Decision:    GrantAllow,
+		MaxAutonomy: AutonomyMedium,
+		Scope:       "Example.COM:443",
+		ScopeKind:   ScopeHost,
+	}); err != nil {
+		t.Fatalf("engine.Grant host: %v", err)
+	}
+
+	request := func(rawURL string) Request {
+		return Request{
+			ToolName:       "web_fetch",
+			SideEffect:     SideEffectNetwork,
+			Permission:     PermissionPrompt,
+			PermissionMode: PermissionModeAsk,
+			Autonomy:       AutonomyMedium,
+			Args:           map[string]any{"url": rawURL},
+		}
+	}
+
+	if d := engine.Evaluate(context.Background(), request("https://example.com/docs")); d.Action != ActionAllow || !d.GrantMatched {
+		t.Fatalf("same host should auto-allow, got %#v", d)
+	}
+	if d := engine.Evaluate(context.Background(), request("https://api.example.com/docs")); d.Action != ActionPrompt || d.GrantMatched {
+		t.Fatalf("different host should re-prompt, got %#v", d)
 	}
 }
 

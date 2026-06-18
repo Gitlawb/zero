@@ -1,19 +1,23 @@
 package sandbox
 
 import (
+	"net"
+	"net/url"
 	"path/filepath"
 	"strings"
 )
 
-// ScopeKind classifies what a grant's scope covers. An empty kind is a tool-wide
-// grant (it authorizes the whole tool, the pre-scoping behavior); a file scope
-// matches one exact path; a dir scope matches the directory and any descendant.
+// ScopeKind classifies what a grant's scope covers. An empty kind is a
+// tool-wide grant (it authorizes the whole tool, the pre-scoping behavior); a
+// file scope matches one exact path; a dir scope matches the directory and any
+// descendant; a host scope matches one normalized network host.
 type ScopeKind string
 
 const (
 	ScopeToolWide ScopeKind = ""
 	ScopeFile     ScopeKind = "file"
 	ScopeDir      ScopeKind = "dir"
+	ScopeHost     ScopeKind = "host"
 )
 
 // scopeArgKeys lists the path-like argument keys in priority order (most specific
@@ -31,11 +35,16 @@ var scopeArgKeys = []struct {
 	{"cwd", ScopeDir},
 }
 
-// DeriveScope inspects a tool call's arguments and returns the raw (un-resolved)
-// scope string and its kind. It returns ("", ScopeToolWide) when no path-like
-// argument is present, the value is not a string, or the value points at the
-// workspace root (".") — in those cases the grant is plainly tool-wide.
+// DeriveScope inspects a tool call's arguments and returns the raw
+// (un-resolved) scope string and its kind. It returns ("", ScopeToolWide) when
+// no scoped argument is present, the value is not a string, or the value points
+// at the workspace root (".") -- in those cases the grant is plainly tool-wide.
 func DeriveScope(toolName string, args map[string]any) (string, ScopeKind) {
+	if toolName == "web_fetch" {
+		if host, ok := deriveHostScope(args["url"]); ok {
+			return host, ScopeHost
+		}
+	}
 	for _, candidate := range scopeArgKeys {
 		value, ok := args[candidate.key].(string)
 		if !ok {
@@ -53,6 +62,19 @@ func DeriveScope(toolName string, args map[string]any) (string, ScopeKind) {
 		return trimmed, candidate.kind
 	}
 	return "", ScopeToolWide
+}
+
+func deriveHostScope(value any) (string, bool) {
+	raw, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		return "", false
+	}
+	host := normalizeHostScope(parsed.Hostname())
+	return host, host != ""
 }
 
 // resolveScopeAbs converts a raw scope to an absolute, cleaned path. A relative
@@ -75,35 +97,65 @@ func resolveScopeAbs(raw string, workspaceRoot string) string {
 	return filepath.Clean(trimmed)
 }
 
+func resolveScopeForKind(raw string, kind ScopeKind, workspaceRoot string) string {
+	scope, kind := reconcileScope(strings.TrimSpace(raw), kind)
+	switch kind {
+	case ScopeFile, ScopeDir:
+		return resolveScopeAbs(scope, workspaceRoot)
+	case ScopeHost:
+		return normalizeHostScope(scope)
+	default:
+		return ""
+	}
+}
+
+func normalizeHostScope(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Host != "" {
+		trimmed = parsed.Hostname()
+	} else if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		trimmed = host
+	}
+	trimmed = strings.Trim(trimmed, "[]")
+	trimmed = strings.TrimSuffix(trimmed, ".")
+	return strings.ToLower(strings.TrimSpace(trimmed))
+}
+
 // grantCovers reports whether a stored grant covers a request whose absolute
-// scope is reqAbs. A tool-wide grant covers everything (including a tool-wide
+// scope is reqScope. A tool-wide grant covers everything (including a tool-wide
 // request); a file grant matches its exact path; a dir grant matches the
-// directory itself or any descendant. A narrower grant never covers a tool-wide
-// request (reqAbs == ""), so such a request re-prompts (fail-safe).
-func grantCovers(grant Grant, reqAbs string) bool {
+// directory itself or any descendant; a host grant matches its exact normalized
+// host. A narrower grant never covers a tool-wide request (reqScope == ""), so
+// such a request re-prompts (fail-safe).
+func grantCovers(grant Grant, reqScope string) bool {
 	switch grant.ScopeKind {
 	case ScopeToolWide:
 		return true
 	case ScopeFile:
-		return reqAbs != "" && reqAbs == grant.Scope
+		return reqScope != "" && reqScope == grant.Scope
 	case ScopeDir:
-		if reqAbs == "" || grant.Scope == "" {
+		if reqScope == "" || grant.Scope == "" {
 			return false
 		}
-		if reqAbs == grant.Scope {
+		if reqScope == grant.Scope {
 			return true
 		}
-		return strings.HasPrefix(reqAbs, grant.Scope+string(filepath.Separator))
+		return strings.HasPrefix(reqScope, grant.Scope+string(filepath.Separator))
+	case ScopeHost:
+		return reqScope != "" && normalizeHostScope(reqScope) == normalizeHostScope(grant.Scope)
 	default:
 		return false
 	}
 }
 
 // scopeSpecificity ranks scope kinds so the most precise covering allow wins when
-// several grants match the same request (file > dir > tool-wide).
+// several grants match the same request.
 func scopeSpecificity(kind ScopeKind) int {
 	switch kind {
-	case ScopeFile:
+	case ScopeFile, ScopeHost:
 		return 2
 	case ScopeDir:
 		return 1

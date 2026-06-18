@@ -770,13 +770,13 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		}
 		line := zeroTheme.green.Render(label) + dot + zeroTheme.green.Render(name)
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
-			line += dot + zeroTheme.muted.Render("scope:"+scope)
+			line += dot + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
 		}
 		return fitStyledLine(line, width)
 	case agent.PermissionActionDeny:
 		line := zeroTheme.red.Render("denied") + dot + zeroTheme.red.Render(name)
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
-			line += dot + zeroTheme.muted.Render("scope:"+scope)
+			line += dot + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
 		}
 		if event.Risk.Level != "" {
 			line += dot + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
@@ -792,7 +792,7 @@ func renderPermissionRow(row transcriptRow, width int) string {
 	default:
 		line := zeroTheme.amber.Render("permission") + "  " + zeroTheme.ink.Render(name) + "  " + zeroTheme.amber.Render("prompt")
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
-			line += "  " + zeroTheme.muted.Render("scope:"+scope)
+			line += "  " + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
 		}
 		if event.Risk.Level != "" {
 			line += "  " + zeroTheme.muted.Render("risk:"+string(event.Risk.Level))
@@ -839,10 +839,10 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	if reason := strings.TrimSpace(request.Reason); reason != "" {
 		lines = append(lines, fill(zeroTheme.muted).Render(reason))
 	}
-	// Surface exactly what the grant covers (the file/dir the call touches) so
-	// "always" is a clear, bounded choice rather than a blind tool-wide yes.
+	// Surface exactly what the grant covers (file/dir/host) so "always" is a
+	// clear, bounded choice rather than a blind tool-wide yes.
 	if scope := strings.TrimSpace(request.Scope); scope != "" {
-		lines = append(lines, fill(zeroTheme.muted).Render("scope: "+scope))
+		lines = append(lines, fill(zeroTheme.muted).Render(permissionScopeLine(request, scope)))
 	}
 
 	lines = append(lines, "")
@@ -858,12 +858,13 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	for index, option := range options {
 		offsets[index] = 1 + len(lines)
 		hotkey := fill(zeroTheme.faint).Render(" [" + option.hotkey + "]")
+		optionLabel := permissionOptionLabel(option, request)
 		if index == cursor {
 			marker := fill(zeroTheme.accent).Render("▸ ")
-			label := zeroTheme.badge.Render(" " + option.label + " ")
+			label := zeroTheme.badge.Render(" " + optionLabel + " ")
 			lines = append(lines, marker+label+hotkey)
 		} else {
-			label := fill(zeroTheme.ink).Render(option.label)
+			label := fill(zeroTheme.ink).Render(optionLabel)
 			lines = append(lines, "  "+label+hotkey)
 		}
 	}
@@ -872,6 +873,30 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	lines = append(lines, fill(zeroTheme.faint).Render("↑↓ move · enter or click to confirm · [esc] cancel run"))
 
 	return styledBlockFill(width, lines, zeroTheme.permBorder, zeroTheme.permBg), offsets
+}
+
+func permissionScopeLine(request agent.PermissionRequest, scope string) string {
+	if request.SideEffect == string(tools.SideEffectNetwork) {
+		return "target: " + scope
+	}
+	return "scope: " + scope
+}
+
+func permissionOptionLabel(option permissionOption, request agent.PermissionRequest) string {
+	if option.choice != permissionDecisionAlwaysAllow || strings.TrimSpace(request.Scope) == "" {
+		return option.label
+	}
+	if request.SideEffect == string(tools.SideEffectNetwork) {
+		return "always for this host"
+	}
+	return "always for this scope"
+}
+
+func permissionEventScopeLabel(event *agent.PermissionEvent) string {
+	if event != nil && event.SideEffect == string(tools.SideEffectNetwork) {
+		return "target"
+	}
+	return "scope"
 }
 
 // renderFocusedAskUserPrompt draws the ask-user questionnaire in the same

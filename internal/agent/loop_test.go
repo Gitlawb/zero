@@ -315,6 +315,37 @@ func TestRunAdvertisesWebFetchInAutoMode(t *testing.T) {
 	}
 }
 
+func TestRunAdvertisesAllowedWebSearchInAutoMode(t *testing.T) {
+	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
+	registry := tools.NewRegistry()
+	for _, tool := range tools.CoreNetworkTools() {
+		if tool.Name() == "web_search" {
+			registry.Register(tool)
+		}
+	}
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		}},
+	}
+
+	_, err := Run(context.Background(), "what tools exist?", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "web_search" {
+		t.Fatalf("expected web_search to be advertised in auto mode, got %#v", provider.requests[0].Tools)
+	}
+}
+
 func TestRunFiltersAdvertisedTools(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()

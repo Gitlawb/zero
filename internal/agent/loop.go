@@ -1017,11 +1017,11 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 }
 
 // permissionScope returns a concise, human-readable description of what a tool
-// call will actually touch — the file path, directory, or working dir lifted
-// from its arguments — so the permission card and the persisted decision can
-// show the user exactly what "allow" covers. It is empty when the tool exposes
-// no path-like argument (the grant is then plainly tool-wide). The first
-// matching key wins, ordered most-specific (a concrete file) first.
+// call will actually touch -- a file path, directory, working dir, or network
+// host lifted from its arguments -- so the permission card and persisted
+// decision can show the user exactly what "allow" covers. It is empty when the
+// tool exposes no scoped argument (the grant is then plainly tool-wide). The
+// first matching key wins, ordered most-specific (a concrete file) first.
 func permissionScope(toolName string, args map[string]any) string {
 	// sandbox.DeriveScope is the single source of truth for which arguments carry
 	// a scope, shared with grant persistence and matching so the card display can

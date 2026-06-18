@@ -460,6 +460,7 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 		Autonomy:          payloadString(payload, "autonomy"),
 		SideEffect:        payloadString(payload, "sideEffect"),
 		Reason:            payloadString(payload, "reason"),
+		Scope:             payloadString(payload, "scope"),
 		DecisionReason:    payloadString(payload, "decisionReason"),
 		GrantMatched:      payloadBool(payload, "grantMatched"),
 	}

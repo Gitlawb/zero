@@ -575,6 +575,7 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 		"permission":     "allow",
 		"permissionMode": "auto",
 		"sideEffect":     "read",
+		"scope":          "src",
 		"risk":           map[string]any{"level": "low"},
 	})
 	appendTestEvent(t, store, session.SessionID, sessions.EventToolResult, map[string]any{"toolCallId": "call_1", "name": "grep", "status": "error", "output": "matches"})
@@ -602,6 +603,9 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	permissionRow, ok := findTranscriptRow(next.transcript, rowPermission)
 	if !ok || permissionRow.tool != "grep" || permissionRow.permission == nil || permissionRow.permission.Action != agent.PermissionActionAllow {
 		t.Fatalf("expected hydrated permission metadata, got ok=%v row=%#v", ok, permissionRow)
+	}
+	if permissionRow.permission.Scope != "src" {
+		t.Fatalf("expected hydrated permission scope, got %#v", permissionRow.permission)
 	}
 	toolResult, ok := findTranscriptRow(next.transcript, rowToolResult)
 	if !ok || toolResult.tool != "grep" || toolResult.status != tools.StatusError || toolResult.detail != "matches" {

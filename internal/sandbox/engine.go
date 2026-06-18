@@ -301,9 +301,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command is blocked by sandbox policy", false)
 	}
 	if engine.store != nil {
-		reqRaw, _ := DeriveScope(request.ToolName, request.Args)
-		reqScopeAbs := resolveScopeAbs(reqRaw, request.WorkspaceRoot)
-		match, err := engine.store.Lookup(request.ToolName, reqScopeAbs, request.Autonomy)
+		reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
+		reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
+		match, err := engine.store.Lookup(request.ToolName, reqScope, request.Autonomy)
 		if err == nil && match.Matched {
 			grant := match.Grant
 			if grant.Decision == GrantDeny {
@@ -364,9 +364,9 @@ func (engine *Engine) Grant(input GrantInput) (Grant, error) {
 	}
 	scope, kind := reconcileScope(strings.TrimSpace(input.Scope), kind)
 	if kind != ScopeToolWide {
-		// Anchor a relative scope to this workspace so the grant cannot match a
-		// same-named path in another project.
-		scope = resolveScopeAbs(scope, engine.workspaceRoot)
+		// Anchor relative path scopes to this workspace so the grant cannot match
+		// a same-named path in another project. Host scopes remain network hosts.
+		scope = resolveScopeForKind(scope, kind, engine.workspaceRoot)
 	}
 	input.Scope = scope
 	input.ScopeKind = kind

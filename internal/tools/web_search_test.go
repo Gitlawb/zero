@@ -116,6 +116,20 @@ func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 	}
 }
 
+func TestWebSearchSafetyAllowsHostedSearchWithoutPrompt(t *testing.T) {
+	tool := newWebSearchToolWithBackend(&fakeSearchBackend{})
+	safety := tool.Safety()
+	if safety.SideEffect != SideEffectNetwork {
+		t.Fatalf("side effect = %s, want network", safety.SideEffect)
+	}
+	if safety.Permission != PermissionAllow {
+		t.Fatalf("permission = %s, want allow", safety.Permission)
+	}
+	if safety.AdvertiseInAuto {
+		t.Fatal("web_search should not need the prompt-tool auto advertisement override")
+	}
+}
+
 func TestHTTPSearchBackendSendsProviderAndParsesResults(t *testing.T) {
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
