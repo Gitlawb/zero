@@ -113,6 +113,7 @@ type model struct {
 	plan        planPanelState
 	specialists specialistTracker
 	taskTable   taskTableState
+	subchat     subchatState
 	altScreen   bool
 	setup       setupState
 	setupSave   func(SetupSelection) (SetupResult, error)
@@ -735,6 +736,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.appendSystemNotice("Mouse interaction re-enabled."), nil
 		case keyIs(msg, tea.KeyEsc):
+			// Subchat view exits on Esc (returns to main chat).
+			if m.subchat.active {
+				m.chatScrollOffset = m.subchat.exit()
+				return m, nil
+			}
 			// Task table overlay closes on Esc before other Esc handlers.
 			if m.taskTable.visible {
 				m.taskTable.hide()
@@ -800,6 +806,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case keyIs(msg, tea.KeyEnter):
+			// Task table Enter: drill into selected specialist's subchat.
+			if m.taskTable.visible {
+				specialists := m.specialists.all()
+				if len(specialists) > 0 {
+					sid := m.taskTable.selectedSessionID(specialists)
+					if sid != "" {
+						info, _ := m.specialists.getBySessionID(sid)
+						title := info.name + " · " + info.description
+						if errMsg := m.subchat.enter(m.sessionStore, sid, title, m.chatScrollOffset); errMsg != "" {
+							m = m.appendSystemNotice(errMsg)
+						}
+						m.taskTable.hide()
+						m.chatScrollOffset = 0
+						return m, nil
+					}
+				}
+				return m, nil
+			}
 			if m.transcriptDetailed {
 				if command := parseCommand(m.input.Value()); command.kind == commandTranscript {
 					m.input.SetValue("")
@@ -982,6 +1006,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.recallHistory(1), nil
 			}
 		case keyIs(msg, tea.KeyUp):
+			// ArrowUp exits subchat view (returns to main chat).
+			if m.subchat.active {
+				m.chatScrollOffset = m.subchat.exit()
+				return m, nil
+			}
 			if m.taskTable.visible {
 				specialists := m.specialists.all()
 				m.taskTable.moveCursor(-1, len(specialists))
@@ -1479,6 +1508,20 @@ func (m model) transcriptEmpty() bool {
 // always rendered here.
 func (m model) transcriptView() string {
 	width := chatWidth(m.width)
+
+	// Subchat drill-in: when active, show the child session's transcript with
+	// a nav bar instead of the main chat.
+	if m.subchat.active {
+		navBar := renderSubchatNavBar(m.subchat.childSessionTitle, width)
+		childBodyItems := m.transcriptBodyItemsFromRows(m.subchat.childRows, width)
+		footer := m.footerView(width)
+		if m.altScreen && m.height > 0 {
+			return m.scrollableTranscriptItemsView(navBar, childBodyItems, footer, width, "")
+		}
+		bodyLayout := layoutTranscriptBodyItems(childBodyItems)
+		body := navBar + "\n\n" + bodyLayout.String()
+		return body + footer
+	}
 
 	suggestionOverlay := m.suggestionOverlay(width)
 	providerOverlay := m.providerWizardOverlay(width)

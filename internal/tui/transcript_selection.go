@@ -240,6 +240,47 @@ func transcriptBlankBodyItem() transcriptBodyItem {
 	}
 }
 
+// transcriptBodyItemsFromRows builds body items from an arbitrary set of
+// transcript rows (used by the subchat drill-in view to render a child
+// session's events). It mirrors the main loop's logic but operates on the
+// provided rows instead of m.transcript, and skips pending/permission state.
+func (m model) transcriptBodyItemsFromRows(rows []transcriptRow, width int) []transcriptBodyItem {
+	items := []transcriptBodyItem{}
+	if len(rows) == 0 {
+		items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, "No events in this subagent session."))
+		return items
+	}
+	rc := buildRowContext(rows)
+	shownAny := false
+	var previousKind rowKind
+	havePreviousKind := false
+	for index, row := range rows {
+		if row.kind == rowWelcome || rc.skip(row) {
+			continue
+		}
+		if shownAny && startsTurn(row.kind) {
+			items = append(items, transcriptBlankBodyItem())
+		}
+		if shownAny && havePreviousKind && previousKind == rowUser && row.kind == rowReasoning {
+			items = append(items, transcriptBlankBodyItem())
+		}
+		rowIndex, transcriptRow := index, row
+		items = append(items, transcriptBodyItem{
+			kind:           transcriptBodyItemRow,
+			rowIndex:       rowIndex,
+			heightCacheKey: "subchat:" + strconv.Itoa(index),
+			render: func(startBodyY int) transcriptBodyRenderedItem {
+				rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, width, rc, startBodyY)
+				return transcriptBodyRenderedItem{lines: viewLines(rendered), selectable: selectable}
+			},
+		})
+		shownAny = true
+		previousKind = row.kind
+		havePreviousKind = true
+	}
+	return items
+}
+
 func layoutTranscriptBodyItems(items []transcriptBodyItem) transcriptBodyLayout {
 	layout := transcriptBodyLayout{}
 	for _, item := range items {
