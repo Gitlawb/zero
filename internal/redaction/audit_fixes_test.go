@@ -79,6 +79,42 @@ func TestRedactString_AuthHeaderSchemes(t *testing.T) {
 	}
 }
 
+// Parameterized schemes spread the secret across comma-separated params, so the
+// WHOLE value after the scheme must be redacted — not just the first token.
+func TestRedactString_MultiPartAuthSchemes(t *testing.T) {
+	o := Options{}
+	cases := []struct {
+		in      string
+		leaked  []string // every one of these must be gone
+		keepsch string   // scheme name that should remain visible
+	}{
+		{
+			in:      `Authorization: Digest username="alice", realm="api", nonce="abc123", uri="/x", response="deadbeefcafef00ddeadbeefcafef00d", qop=auth`,
+			leaked:  []string{"deadbeefcafef00ddeadbeefcafef00d", `nonce="abc123"`, `username="alice"`},
+			keepsch: "Digest",
+		},
+		{
+			in:      `Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260618/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024`,
+			leaked:  []string{"fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024", "SignedHeaders=host;x-amz-date", "AKIAIOSFODNN7EXAMPLE"},
+			keepsch: "AWS4-HMAC-SHA256",
+		},
+	}
+	for _, c := range cases {
+		out := RedactString(c.in, o)
+		for _, secret := range c.leaked {
+			if strings.Contains(out, secret) {
+				t.Errorf("multi-part header leaked %q\n  in:  %s\n  out: %s", secret, c.in, out)
+			}
+		}
+		if !strings.Contains(out, c.keepsch) {
+			t.Errorf("scheme %q should remain visible, got: %s", c.keepsch, out)
+		}
+		if !strings.Contains(out, RedactedSecret) {
+			t.Errorf("expected a redaction marker, got: %s", out)
+		}
+	}
+}
+
 // Guard against re-introducing an over-broad "key: value" pattern: a
 // "file.go:line: message" line (universal in test/compiler output, where the
 // filename may even contain a secret-looking segment) must keep its structure so

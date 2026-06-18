@@ -83,9 +83,14 @@ var (
 	privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
 	jsonStringPattern = regexp.MustCompile(`("([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*)"([^"\\]*(?:\\.[^"\\]*)*)"`)
 	assignPattern     = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]*)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s&]+))`)
-	headerPattern     = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\s*:\s*(bearer|basic|token|apikey|api-key|digest|negotiate|oauth|aws4-hmac-sha256)\s+([^\s,;]+)`)
-	secretHeader      = regexp.MustCompile(`(?i)\b(x-api-key|api-key|cookie|set-cookie)\s*:\s*([^\r\n]+)`)
-	queryPattern      = regexp.MustCompile(`([?&])([^=&#\s]+)=([^&#\s]+)`)
+	// Redact the ENTIRE credential after the scheme (to end of line), not just the
+	// first token: parameterized schemes (Digest, OAuth, AWS4-HMAC-SHA256) spread
+	// the secret across comma-separated params (…, response=…, Signature=…), so a
+	// single-token capture would leave the actual secret visible. The scheme name
+	// is kept; only the value is replaced.
+	headerPattern = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\s*:\s*(bearer|basic|token|apikey|api-key|digest|negotiate|oauth|aws4-hmac-sha256)\s+([^\r\n]+)`)
+	secretHeader  = regexp.MustCompile(`(?i)\b(x-api-key|api-key|cookie|set-cookie)\s*:\s*([^\r\n]+)`)
+	queryPattern  = regexp.MustCompile(`([?&])([^=&#\s]+)=([^&#\s]+)`)
 )
 
 func IsSensitiveKey(key string, options Options) bool {
