@@ -51,15 +51,31 @@ func visionCapableByName(modelID string) bool {
 		strings.HasPrefix(id, "o3-") || strings.HasPrefix(id, "o4-"):
 		return true // OpenAI o-series accept images
 	case strings.Contains(id, "grok-4"),
-		strings.Contains(id, "grok") && strings.Contains(id, "vision"):
+		strings.Contains(id, "grok") && mentionsVision(id):
 		return true // Grok 4 (and grok vision variants) are multimodal
 	case strings.Contains(id, "llava"), strings.Contains(id, "pixtral"),
 		strings.Contains(id, "internvl"), strings.Contains(id, "minicpm-v"),
 		strings.Contains(id, "moondream"), strings.Contains(id, "bakllava"),
 		strings.Contains(id, "-vl"), strings.Contains(id, "vl-"),
-		strings.Contains(id, "vision"):
+		mentionsVision(id):
 		return true // common open multimodal families + *-vl / *-vision
 	default:
 		return false
 	}
+}
+
+// mentionsVision reports whether id advertises vision via the word "vision",
+// excluding negated forms (vision-less / no-vision): a model named for LACKING
+// vision must not be treated as multimodal.
+func mentionsVision(id string) bool {
+	if !strings.Contains(id, "vision") {
+		return false
+	}
+	switch {
+	case strings.Contains(id, "vision-less"), strings.Contains(id, "visionless"),
+		strings.Contains(id, "no-vision"), strings.Contains(id, "non-vision"),
+		strings.Contains(id, "novision"), strings.Contains(id, "nonvision"):
+		return false
+	}
+	return true
 }

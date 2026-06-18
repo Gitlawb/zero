@@ -13,6 +13,8 @@ func TestVisionCapableByName(t *testing.T) {
 	textOnly := []string{
 		"gpt-oss:120b", "kimi-for-coding", "deepseek-coder", "qwen2.5-coder",
 		"codestral", "llama3.1-8b", "grok-text-only", "mistral-large",
+		// Negated "vision" names must NOT match the bare-"vision" fallback.
+		"my-custom-vision-less-model", "no-vision-model", "grok-vision-less",
 	}
 	for _, m := range vision {
 		if !visionCapableByName(m) {
