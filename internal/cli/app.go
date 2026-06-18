@@ -18,6 +18,7 @@ import (
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/plugins"
 	"github.com/Gitlawb/zero/internal/providerhealth"
+	"github.com/Gitlawb/zero/internal/provideronboarding"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/selfverify"
@@ -44,6 +45,7 @@ type appDeps struct {
 	resolveMCPConfig     func(workspaceRoot string) (config.MCPConfig, error)
 	newProvider          func(config.ProviderProfile) (zeroruntime.Provider, error)
 	probeProviderHealth  func(context.Context, providerhealth.Options) providerhealth.Result
+	detectLocalRuntimes  func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
 	newSessionStore      func() *sessions.Store
 	loadPlugins          func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks            func(hooks.LoadOptions) (hooks.LoadResult, error)
@@ -111,6 +113,7 @@ func defaultAppDeps() appDeps {
 			})
 		},
 		probeProviderHealth: providerhealth.Probe,
+		detectLocalRuntimes: provideronboarding.DetectLocalRuntimes,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -336,6 +339,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	}
 	if deps.probeProviderHealth == nil {
 		deps.probeProviderHealth = defaults.probeProviderHealth
+	}
+	if deps.detectLocalRuntimes == nil {
+		deps.detectLocalRuntimes = defaults.detectLocalRuntimes
 	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
