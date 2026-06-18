@@ -1208,8 +1208,11 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 		t.Fatalf("permission metadata was not preserved: %#v", row)
 	}
 	rendered := next.renderRow(row, 96, buildRowContext(next.transcript))
-	for _, want := range []string{"permission", "write_file", "prompt", "risk:high", "mode=ask", "Creates or overwrites"} {
+	for _, want := range []string{"permission", "write_file", "prompt", "mode=ask", "Creates or overwrites"} {
 		assertContains(t, rendered, want)
+	}
+	if strings.Contains(rendered, "risk:") || strings.Contains(rendered, "risk=") {
+		t.Fatalf("normal permission row must not render risk labels, got %q", rendered)
 	}
 }
 
@@ -1240,9 +1243,12 @@ func TestPermissionRequestShowsFocusedPrompt(t *testing.T) {
 	if !ok || row.permission == nil || row.permission.Scope != request.Scope {
 		t.Fatalf("expected permission row to preserve scope %q, got %#v", request.Scope, row)
 	}
-	view := next.View()
-	for _, want := range []string{"write_file", "Yes, proceed", "[a]", "these files in this session", "[s]", "don't ask again for this scope", "[y]", "tell Zero", "[d]", "scope: src/main.go", "risk:high", "Creates or overwrites files."} {
+	view := plainRender(t, next.View())
+	for _, want := range []string{"write_file", "Yes, proceed", "[a]", "these files in this session", "[s]", "don't ask again for this scope", "[y]", "continue without running it", "[d]", "scope: src/main.go", "Creates or overwrites files."} {
 		assertContains(t, view, want)
+	}
+	if strings.Contains(view, "risk:") || strings.Contains(view, "risk=") {
+		t.Fatalf("focused permission prompt must not render risk labels, got %q", view)
 	}
 }
 
@@ -1348,8 +1354,11 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 
 	rendered := newModel(context.Background(), Options{}).renderRow(permissionTranscriptRow(event), 96, buildRowContext(nil))
 
-	for _, want := range []string{"write_file", "denied", "risk:high", "violation=outside_workspace risk=critical", "../secret.txt"} {
+	for _, want := range []string{"write_file", "denied", "violation=outside_workspace", "../secret.txt"} {
 		assertContains(t, rendered, want)
+	}
+	if strings.Contains(rendered, "risk:") || strings.Contains(rendered, "risk=") {
+		t.Fatalf("denied permission row must not render risk labels, got %q", rendered)
 	}
 }
 

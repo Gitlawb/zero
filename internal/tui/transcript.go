@@ -272,9 +272,6 @@ func permissionRowText(event agent.PermissionEvent) string {
 	if event.Action != "" {
 		parts = append(parts, string(event.Action))
 	}
-	if event.Risk.Level != "" {
-		parts = append(parts, "risk:"+string(event.Risk.Level))
-	}
 	if event.Violation != nil && event.Violation.Code != "" {
 		parts = append(parts, "violation:"+string(event.Violation.Code))
 	}
@@ -298,9 +295,6 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.SideEffect != "" {
 		parts = append(parts, "side_effect="+event.SideEffect)
 	}
-	if event.Risk.Level != "" {
-		parts = append(parts, "risk="+string(event.Risk.Level))
-	}
 	if event.GrantMatched {
 		parts = append(parts, "grant=matched")
 	}
@@ -309,9 +303,6 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	}
 	if event.Violation != nil {
 		violation := "violation=" + string(event.Violation.Code)
-		if event.Violation.Risk.Level != "" {
-			violation += " risk=" + string(event.Violation.Risk.Level)
-		}
 		if event.Violation.Path != "" {
 			violation += " path=" + event.Violation.Path
 		}

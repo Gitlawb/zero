@@ -1240,7 +1240,7 @@ func TestGrepCardHeadShowsTargetAndPatternColumns(t *testing.T) {
 
 // --- Stage 3: interactive surfaces ------------------------------------------
 
-func TestFocusedPermissionCardShowsBadgeRiskAndKeys(t *testing.T) {
+func TestFocusedPermissionCardShowsBadgeAndKeys(t *testing.T) {
 	request := agent.PermissionRequest{
 		ToolName:   "edit_file",
 		Reason:     "writes internal/agent/exec.go",
@@ -1249,10 +1249,13 @@ func TestFocusedPermissionCardShowsBadgeRiskAndKeys(t *testing.T) {
 	}
 	card, offsets := renderFocusedPermissionPrompt(request, 0, 80)
 	got := plainRender(t, card)
-	for _, want := range []string{"PERMISSION", "risk: medium", "edit_file", "writes internal/agent/exec.go", "Yes, proceed", "[a]", "this session", "[s]", "don't ask again", "[y]", "tell Zero", "[d]", "[esc]"} {
+	for _, want := range []string{"PERMISSION", "edit_file", "writes internal/agent/exec.go", "Yes, proceed", "[a]", "this session", "[s]", "don't ask again", "[y]", "continue without running it", "[d]", "[esc]"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("permission card = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "risk:") {
+		t.Fatalf("normal permission prompt must not render risk labels, got %q", got)
 	}
 	if len(offsets) != len(permissionOptions(request)) {
 		t.Fatalf("offsets = %d, want one per option (%d)", len(offsets), len(permissionOptions(request)))
