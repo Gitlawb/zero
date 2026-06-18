@@ -361,8 +361,8 @@ func TestEvaluateAppliesWriteAllow(t *testing.T) {
 		SideEffect: SideEffectWrite,
 		Args:       map[string]any{"path": target},
 	})
-	if denied.Action != ActionDeny {
-		t.Fatalf("external write without AllowWrite = %q, want deny", denied.Action)
+	if denied.Action != ActionPrompt {
+		t.Fatalf("external write without AllowWrite = %q, want prompt", denied.Action)
 	}
 
 	allowPolicy := base

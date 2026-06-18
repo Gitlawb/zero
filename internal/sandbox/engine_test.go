@@ -205,8 +205,8 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 		Autonomy:       AutonomyMedium,
 		Args:           map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
 	})
-	if outside.Action != ActionDeny || outside.Violation == nil || outside.Violation.Code != ViolationOutsideWorkspace {
-		t.Fatalf("outside workspace mutation decision = %#v, want deny", outside)
+	if outside.Action != ActionPrompt || outside.Violation == nil || outside.Violation.Code != ViolationOutsideWorkspace || !outside.Violation.Recoverable {
+		t.Fatalf("outside workspace mutation decision = %#v, want recoverable prompt", outside)
 	}
 }
 
@@ -800,7 +800,7 @@ func TestEvaluateOverrideRootDoesNotInheritEngineScope(t *testing.T) {
 
 	// A request that overrides the workspace root must NOT see the engine's
 	// extra roots: scopeFor hands it a single-root scope, so a path inside
-	// the engine-level extra root is denied for the override request.
+	// the engine-level extra root prompts as outside the override request.
 	overrideRoot := t.TempDir()
 	denied := engine.Evaluate(context.Background(), Request{
 		ToolName:      "write_file",
@@ -809,8 +809,8 @@ func TestEvaluateOverrideRootDoesNotInheritEngineScope(t *testing.T) {
 		WorkspaceRoot: overrideRoot,
 		Args:          map[string]any{"path": filepath.Join(extra, "leak.txt")},
 	})
-	if denied.Action != ActionDeny || denied.Violation == nil {
-		t.Fatalf("override-root request into engine extra root: Action=%q want deny", denied.Action)
+	if denied.Action != ActionPrompt || denied.Violation == nil {
+		t.Fatalf("override-root request into engine extra root: Action=%q want prompt", denied.Action)
 	}
 
 	// An engine with no workspace root exposes no scope, and an override
@@ -877,8 +877,8 @@ func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {
 		Permission: PermissionAllow,
 		Args:       map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
 	})
-	if outside.Action != ActionDeny || outside.Violation == nil {
-		t.Fatalf("outside write Action=%q, want deny with violation", outside.Action)
+	if outside.Action != ActionPrompt || outside.Violation == nil || !outside.Violation.Recoverable {
+		t.Fatalf("outside write Action=%q, want recoverable prompt with violation", outside.Action)
 	}
 	if !strings.Contains(outside.Violation.Reason, "--add-dir") {
 		t.Fatalf("outside violation reason=%q, want --add-dir hint", outside.Violation.Reason)
@@ -903,7 +903,7 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 		t.Fatalf("workspaceRoot=%q, want derived %q", got, scope.Roots()[0])
 	}
 
-	// Enforcement is live: a write outside every root is denied rather than
+	// Enforcement is live: a write outside every root prompts rather than
 	// allowed-through on an empty workspace root.
 	outside := engine.Evaluate(context.Background(), Request{
 		ToolName:   "write_file",
@@ -911,8 +911,8 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 		Permission: PermissionAllow,
 		Args:       map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
 	})
-	if outside.Action != ActionDeny || outside.Violation == nil {
-		t.Fatalf("scope-only engine, out-of-scope write Action=%q, want deny with violation", outside.Action)
+	if outside.Action != ActionPrompt || outside.Violation == nil {
+		t.Fatalf("scope-only engine, out-of-scope write Action=%q, want prompt with violation", outside.Action)
 	}
 
 	// The derived workspace root still allows in-workspace writes.

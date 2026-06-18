@@ -642,6 +642,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				return deniedPermissionResult(call, reason, requestEvent), nil
 			}
 			permissionCleanups = append(permissionCleanups, cleanup)
+			cleanup, err = grantFilesystemForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeTurn, options)
+			if err != nil {
+				reason := "failed to grant filesystem permission: " + err.Error()
+				emitDeniedPermission(options, call, requestEvent, reason)
+				return deniedPermissionResult(call, reason, requestEvent), nil
+			}
+			permissionCleanups = append(permissionCleanups, cleanup)
 		case PermissionDecisionAllowForSession:
 			permissionGranted = true
 			requestEvent.DecisionAction = decision.Action
@@ -649,6 +656,14 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 				cleanup, err := grantNetworkForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeSession, options)
 				if err != nil {
 					reason := "failed to grant session network permission: " + err.Error()
+					emitDeniedPermission(options, call, requestEvent, reason)
+					return deniedPermissionResult(call, reason, requestEvent), nil
+				}
+				permissionCleanups = append(permissionCleanups, cleanup)
+			} else if filesystemSandboxPrompt(requestEvent) {
+				cleanup, err := grantFilesystemForSandboxPrompt(requestEvent, sandbox.PermissionGrantScopeSession, options)
+				if err != nil {
+					reason := "failed to grant session filesystem permission: " + err.Error()
 					emitDeniedPermission(options, call, requestEvent, reason)
 					return deniedPermissionResult(call, reason, requestEvent), nil
 				}
@@ -1063,6 +1078,9 @@ func effectivePermission(tool tools.Tool, args map[string]any) tools.Permission 
 }
 
 func shouldRequestPermission(tool tools.Tool, permissionGranted bool, decision *sandbox.Decision) bool {
+	if decision != nil && decision.Action == sandbox.ActionPrompt {
+		return true
+	}
 	if tool.Safety().Permission != tools.PermissionPrompt {
 		return false
 	}
@@ -1647,7 +1665,7 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
 			}
 		}
-		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) {
+		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) && !filesystemSandboxPrompt(event) {
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)
 		}
 	}
@@ -1675,6 +1693,32 @@ func grantNetworkForSandboxPrompt(event PermissionEvent, scope sandbox.Permissio
 	enabled := true
 	return options.Sandbox.GrantRequestPermissions(sandbox.RequestPermissionProfile{
 		Network: &sandbox.NetworkPermissions{Enabled: &enabled},
+	}, scope)
+}
+
+func filesystemSandboxPrompt(event PermissionEvent) bool {
+	return event.Violation != nil &&
+		event.Violation.Code == sandbox.ViolationOutsideWorkspace &&
+		event.Violation.Recoverable &&
+		strings.TrimSpace(event.Violation.Path) != ""
+}
+
+func grantFilesystemForSandboxPrompt(event PermissionEvent, scope sandbox.PermissionGrantScope, options Options) (func(), error) {
+	if !filesystemSandboxPrompt(event) || options.Sandbox == nil {
+		return nil, nil
+	}
+	path := event.Violation.Path
+	fs := sandbox.FileSystemPermissions{}
+	switch sandbox.SideEffect(event.SideEffect) {
+	case sandbox.SideEffectRead:
+		fs.Read = []string{path}
+	case sandbox.SideEffectWrite, sandbox.SideEffectOutOfWorkspace:
+		fs.Write = []string{path}
+	default:
+		return nil, nil
+	}
+	return options.Sandbox.GrantRequestPermissions(sandbox.RequestPermissionProfile{
+		FileSystem: &fs,
 	}, scope)
 }
 

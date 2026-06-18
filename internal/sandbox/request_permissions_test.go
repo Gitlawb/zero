@@ -46,7 +46,7 @@ func TestGrantRequestPermissionsReadDoesNotGrantWrite(t *testing.T) {
 		Permission:    PermissionAllow,
 		Args:          map[string]any{"path": target},
 	})
-	if write.Action != ActionDeny {
+	if write.Action != ActionPrompt || write.Violation == nil || write.Violation.Code != ViolationOutsideWorkspace {
 		t.Fatalf("read grant must not allow writes, got %#v", write)
 	}
 
@@ -58,7 +58,7 @@ func TestGrantRequestPermissionsReadDoesNotGrantWrite(t *testing.T) {
 		Permission:    PermissionAllow,
 		Args:          map[string]any{"path": target},
 	})
-	if readAfterCleanup.Action != ActionDeny {
+	if readAfterCleanup.Action != ActionPrompt {
 		t.Fatalf("turn read grant should be cleaned up, got %#v", readAfterCleanup)
 	}
 }

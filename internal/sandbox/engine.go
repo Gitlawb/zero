@@ -314,6 +314,9 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	for _, requested := range requestPaths(request) {
 		if violation := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
+			if promptablePathViolation(request, violation) {
+				return promptPathViolation(request, risk, violation)
+			}
 			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 		}
 	}
@@ -482,6 +485,49 @@ func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) boo
 		return true
 	default:
 		return false
+	}
+}
+
+func promptablePathViolation(request Request, violation *pathViolation) bool {
+	if violation == nil || violation.Code != ViolationOutsideWorkspace {
+		return false
+	}
+	if request.PermissionMode == PermissionUnsafe {
+		return false
+	}
+	if request.ToolName == "apply_patch" {
+		return false
+	}
+	switch request.SideEffect {
+	case SideEffectRead, SideEffectWrite, SideEffectOutOfWorkspace:
+	default:
+		return false
+	}
+	path := strings.TrimSpace(violation.Path)
+	if path == "" {
+		return false
+	}
+	if !filepath.IsAbs(path) && strings.TrimSpace(request.WorkspaceRoot) == "" {
+		return false
+	}
+	return !strings.Contains(violation.Reason, "cannot be validated without a workspace root")
+}
+
+func promptPathViolation(request Request, risk Risk, violation *pathViolation) Decision {
+	promptViolation := &Violation{
+		Code:        violation.Code,
+		ToolName:    request.ToolName,
+		Action:      ActionPrompt,
+		Risk:        risk,
+		Path:        violation.Path,
+		Reason:      violation.Reason,
+		Recoverable: true,
+	}
+	return Decision{
+		Action:    ActionPrompt,
+		Reason:    violation.Reason,
+		Risk:      risk,
+		Violation: promptViolation,
 	}
 }
 

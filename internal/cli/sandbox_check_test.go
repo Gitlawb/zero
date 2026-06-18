@@ -74,8 +74,8 @@ func TestRunSandboxCheckJSONDeniesOutOfWorkspaceWrite(t *testing.T) {
 	if payload.Plan.Backend.Name != string(sandbox.BackendPolicyOnly) {
 		t.Fatalf("backend = %q", payload.Plan.Backend.Name)
 	}
-	if payload.Decision.Action != string(sandbox.ActionDeny) {
-		t.Fatalf("expected deny for out-of-workspace write, got %q\n%s", payload.Decision.Action, stdout.String())
+	if payload.Decision.Action != string(sandbox.ActionPrompt) {
+		t.Fatalf("expected prompt for out-of-workspace write, got %q\n%s", payload.Decision.Action, stdout.String())
 	}
 	if payload.Decision.Violation == nil {
 		t.Fatalf("expected a violation for the out-of-workspace write")

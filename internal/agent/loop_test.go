@@ -1714,6 +1714,138 @@ func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
 	}
 }
 
+func TestRunPromptsAndAllowsOutsideWorkspaceWrite(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedWriteFileTool(root, engine.Scope()))
+	provider := providerCallingWritePathThenAnswer(outside, "write done")
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write outside", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox:        engine,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approve outside write"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "write done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "hello" {
+		t.Fatalf("expected outside write content, got %q", content)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	request := requests[0]
+	if request.Action != PermissionActionPrompt || request.Violation == nil || request.Violation.Code != sandbox.ViolationOutsideWorkspace || !request.Violation.Recoverable {
+		t.Fatalf("expected recoverable outside-workspace prompt, got %#v", request)
+	}
+	if !containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAllowForSession) {
+		t.Fatalf("expected session allow decision for outside-workspace prompt, got %#v", request.AvailableDecisions)
+	}
+	if containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAlwaysAllow) {
+		t.Fatalf("outside-workspace prompt must not offer unsupported persistent allow, got %#v", request.AvailableDecisions)
+	}
+	if len(permissionEvents) != 1 {
+		t.Fatalf("expected one permission event, got %#v", permissionEvents)
+	}
+	event := permissionEvents[0]
+	if event.Action != PermissionActionAllow || !event.PermissionGranted || event.DecisionAction != PermissionDecisionAllow {
+		t.Fatalf("expected approved permission event, got %#v", event)
+	}
+}
+
+func TestRunSessionAllowsLaterOutsideWorkspaceWrite(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedWriteFileTool(root, engine.Scope()))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":` + quoteJSONString(outside) + `,"content":"first"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "write_file"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"path":` + quoteJSONString(outside) + `,"content":"second","overwrite":true}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "write outside twice", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox:        engine,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllowForSession, Reason: "trust outside file this session"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	content, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second" {
+		t.Fatalf("expected second outside write content, got %q", content)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	if len(permissionEvents) != 2 {
+		t.Fatalf("expected two permission events, got %#v", permissionEvents)
+	}
+	if permissionEvents[0].DecisionAction != PermissionDecisionAllowForSession || !permissionEvents[0].PermissionGranted {
+		t.Fatalf("expected first event to approve session grant, got %#v", permissionEvents[0])
+	}
+	if permissionEvents[1].Action != PermissionActionAllow || permissionEvents[1].PermissionGranted {
+		t.Fatalf("expected second event to run from session filesystem grant, got %#v", permissionEvents[1])
+	}
+}
+
 func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "escape.txt")

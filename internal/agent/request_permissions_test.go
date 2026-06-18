@@ -116,7 +116,7 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 		Autonomy:       sandbox.AutonomyMedium,
 		Args:           map[string]any{"path": target},
 	})
-	if decision.Action != sandbox.ActionDeny {
+	if decision.Action != sandbox.ActionPrompt {
 		t.Fatalf("turn grant should be cleaned up after Run, got decision %#v", decision)
 	}
 }
