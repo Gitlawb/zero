@@ -155,12 +155,27 @@ func TestUpdatePlanToolAdvertisesItemSchema(t *testing.T) {
 	if plan.Type != "array" {
 		t.Fatalf("expected plan to be an array, got %q", plan.Type)
 	}
-	// The structured nested-object Items schema is deferred until the agent's
-	// PropertySchema serializer passes nested Properties/Required through to
-	// providers; until then the item structure is documented in the description.
-	for _, want := range []string{"content", "status"} {
-		if !strings.Contains(plan.Description, want) {
-			t.Fatalf("plan description should document the %q field, got %q", want, plan.Description)
-		}
+	if plan.Items == nil {
+		t.Fatal("plan should have a structured Items schema")
+	}
+	if plan.Items.Type != "object" {
+		t.Fatalf("plan items should be objects, got %q", plan.Items.Type)
+	}
+	contentProp, ok := plan.Items.Properties["content"]
+	if !ok {
+		t.Fatal("plan items should have a 'content' property")
+	}
+	if contentProp.Type != "string" {
+		t.Fatalf("content property should be string, got %q", contentProp.Type)
+	}
+	statusProp, ok := plan.Items.Properties["status"]
+	if !ok {
+		t.Fatal("plan items should have a 'status' property")
+	}
+	if len(statusProp.Enum) == 0 {
+		t.Fatal("status property should have an enum")
+	}
+	if len(plan.Items.Required) == 0 || plan.Items.Required[0] != "content" {
+		t.Fatalf("plan items should require 'content', got %v", plan.Items.Required)
 	}
 }
