@@ -12,8 +12,13 @@ import (
 	"time"
 )
 
-// secretBytes is the AES-256 key length kept in the per-user secret file.
-const secretBytes = 32
+const (
+	// secretBytes is the AES-256 key length kept in the per-user secret file.
+	secretBytes = 32
+
+	secretRetryAttempts = 500
+	secretRetryDelay    = 2 * time.Millisecond
+)
 
 // aesGCMCrypter encrypts the token file at rest with AES-256-GCM under a
 // per-user random secret persisted (0600) beside the token file. The on-disk
@@ -80,7 +85,7 @@ func (c *aesGCMCrypter) open(blob []byte) ([]byte, error) {
 // the file is absent, it generates a random secret and creates the file
 // atomically (0600). A wrong-sized existing secret fails closed (corruption).
 func loadOrCreateSecret(path string, create bool) ([]byte, error) {
-	if data, err := readSecretFile(path); err == nil {
+	if data, err := readSecretFileRetry(path); err == nil {
 		return data, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -97,12 +102,12 @@ func loadOrCreateSecret(path string, create bool) ([]byte, error) {
 func createSecretFile(path string) ([]byte, error) {
 	lockPath := path + ".lock"
 	var lastErr error
-	for attempt := 0; attempt < 500; attempt++ {
+	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
 		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
 			_ = lock.Close()
 			defer os.Remove(lockPath)
-			if data, rerr := readSecretFile(path); rerr == nil {
+			if data, rerr := readSecretFileRetry(path); rerr == nil {
 				return data, nil
 			} else if !errors.Is(rerr, os.ErrNotExist) {
 				return nil, rerr
@@ -112,12 +117,12 @@ func createSecretFile(path string) ([]byte, error) {
 		if !errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("oauth: create token secret lock: %w", err)
 		}
-		if data, rerr := readSecretFile(path); rerr == nil {
+		if data, rerr := readSecretFileRetry(path); rerr == nil {
 			return data, nil
 		} else {
 			lastErr = rerr
 		}
-		time.Sleep(2 * time.Millisecond)
+		time.Sleep(secretRetryDelay)
 	}
 	if lastErr != nil {
 		return nil, fmt.Errorf("oauth: timed out waiting for token secret %s: %w", path, lastErr)
@@ -152,6 +157,19 @@ func writeNewSecretFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("oauth: publish token secret: %w", err)
 	}
 	return secret, nil
+}
+
+func readSecretFileRetry(path string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < secretRetryAttempts; attempt++ {
+		data, err := readSecretFile(path)
+		if !isTransientSecretAccessError(err) {
+			return data, err
+		}
+		lastErr = err
+		time.Sleep(secretRetryDelay)
+	}
+	return nil, fmt.Errorf("oauth: timed out waiting for token secret %s: %w", path, lastErr)
 }
 
 // readSecretFile reads and validates the secret at path, returning a wrapped
