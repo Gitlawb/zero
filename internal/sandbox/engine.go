@@ -29,6 +29,7 @@ type Engine struct {
 	sessionGrants   *memoryGrantSet
 	sessionProfiles *permissionProfileGrantSet
 	turnProfiles    *permissionProfileGrantSet
+	commandPrefixes *commandPrefixGrantSet
 }
 
 func NewEngine(options EngineOptions) *Engine {
@@ -60,6 +61,7 @@ func NewEngine(options EngineOptions) *Engine {
 		sessionGrants:   newMemoryGrantSet(),
 		sessionProfiles: newPermissionProfileGrantSet(),
 		turnProfiles:    newPermissionProfileGrantSet(),
+		commandPrefixes: newCommandPrefixGrantSet(),
 	}
 }
 
@@ -75,6 +77,23 @@ func (engine *Engine) Scope() *Scope {
 
 func (engine *Engine) CanPersistGrants() bool {
 	return engine != nil && engine.store != nil
+}
+
+func (engine *Engine) GrantCommandPrefixForSession(toolName string, prefix []string) {
+	if engine == nil || len(prefix) == 0 {
+		return
+	}
+	engine.commandPrefixes.add(CommandPrefixGrant{
+		ToolName: toolName,
+		Prefix:   prefix,
+	})
+}
+
+func (engine *Engine) LookupCommandPrefixForSession(toolName string, command []string) (CommandPrefixGrant, bool) {
+	if engine == nil || len(command) == 0 {
+		return CommandPrefixGrant{}, false
+	}
+	return engine.commandPrefixes.match(toolName, command)
 }
 
 // ReadExclusions returns the resolved DenyRead/AllowRead exclusion matcher for

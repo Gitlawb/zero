@@ -42,6 +42,7 @@ const (
 	PermissionDecisionAllow           PermissionDecisionAction = "allow"
 	PermissionDecisionAllowStrict     PermissionDecisionAction = "allow_with_strict_auto_review"
 	PermissionDecisionAllowForSession PermissionDecisionAction = "allow_for_session"
+	PermissionDecisionAllowPrefix     PermissionDecisionAction = "allow_prefix_for_session"
 	PermissionDecisionDeny            PermissionDecisionAction = "deny"
 	PermissionDecisionAlwaysAllow     PermissionDecisionAction = "always_allow"
 	PermissionDecisionCancel          PermissionDecisionAction = "cancel"
@@ -97,6 +98,7 @@ type PermissionRequest struct {
 	Violation          *sandbox.Violation         `json:"violation,omitempty"`
 	GrantMatched       bool                       `json:"grantMatched,omitempty"`
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
+	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
 	AvailableDecisions []PermissionDecisionAction `json:"availableDecisions,omitempty"`
 }
 
@@ -122,6 +124,7 @@ type PermissionEvent struct {
 	Violation         *sandbox.Violation       `json:"violation,omitempty"`
 	GrantMatched      bool                     `json:"grantMatched,omitempty"`
 	Grant             *sandbox.Grant           `json:"grant,omitempty"`
+	CommandPrefix     []string                 `json:"commandPrefix,omitempty"`
 }
 
 // AskUserQuestion is one clarifying question the agent wants answered.

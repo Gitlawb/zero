@@ -1139,6 +1139,119 @@ func TestRunSessionAllowSkipsMatchingPromptWithoutPersistentGrant(t *testing.T) 
 	}
 }
 
+func TestRunCommandPrefixApprovalSkipsLaterMatchingBashPrompt(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo prefix-ok"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"command":"echo prefix-ok again"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var permissionEvents []PermissionEvent
+
+	result, err := Run(context.Background(), "run twice", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			if !containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAllowPrefix) {
+				t.Fatalf("bash prompt missing prefix approval decision: %#v", request.AvailableDecisions)
+			}
+			if !equalStringSlices(request.CommandPrefix, []string{"echo", "prefix-ok"}) {
+				t.Fatalf("request command prefix = %#v", request.CommandPrefix)
+			}
+			return PermissionDecision{Action: PermissionDecisionAllowPrefix, Reason: "trust this command prefix"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			permissionEvents = append(permissionEvents, event)
+		},
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected only the first bash call to prompt, got %#v", requests)
+	}
+	if len(permissionEvents) != 2 {
+		t.Fatalf("expected two bash permission events, got %#v", permissionEvents)
+	}
+	for index, event := range permissionEvents {
+		if event.DecisionAction != PermissionDecisionAllowPrefix || !event.PermissionGranted {
+			t.Fatalf("event %d = %#v, want prefix allow", index, event)
+		}
+	}
+}
+
+func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo hi && echo bye","prefix_rule":["echo"]}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+
+	_, err := Run(context.Background(), "run unsafe", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			if len(request.CommandPrefix) != 0 {
+				t.Fatalf("unsafe command should not have a command prefix: %#v", request.CommandPrefix)
+			}
+			if containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAllowPrefix) {
+				t.Fatalf("unsafe command should not offer prefix approval: %#v", request.AvailableDecisions)
+			}
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "deny unsafe"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	// Choosing "always allow" with NO sandbox engine configured must still allow
 	// THIS call (there is just nowhere to persist a grant for future calls). The
@@ -1175,6 +1288,15 @@ func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	if len(permissionEvents) != 1 || permissionEvents[0].Action != PermissionActionAllow || !permissionEvents[0].PermissionGranted {
 		t.Fatalf("expected one allow event with permission granted, got %#v", permissionEvents)
 	}
+}
+
+func containsPermissionDecision(decisions []PermissionDecisionAction, want PermissionDecisionAction) bool {
+	for _, decision := range decisions {
+		if decision == want {
+			return true
+		}
+	}
+	return false
 }
 
 // cancelMidStreamProvider cancels the run while the provider stream is open and

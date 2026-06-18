@@ -37,9 +37,10 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"command":    {Type: "string", Description: "Shell command to execute using the host shell. " + shellGuidance},
-					"cwd":        {Type: "string", Description: "Directory to run the command in. Relative paths stay in the workspace; use an absolute path to run in a granted extra directory. Defaults to workspace root. Prefer cwd over cd when changing directories.", Default: "."},
-					"timeout_ms": {Type: "integer", Description: "Command timeout in milliseconds.", Default: defaultBashTimeoutMS, Minimum: intPtr(1), Maximum: intPtr(maxBashTimeoutMS)},
+					"command":     {Type: "string", Description: "Shell command to execute using the host shell. " + shellGuidance},
+					"cwd":         {Type: "string", Description: "Directory to run the command in. Relative paths stay in the workspace; use an absolute path to run in a granted extra directory. Defaults to workspace root. Prefer cwd over cd when changing directories.", Default: "."},
+					"timeout_ms":  {Type: "integer", Description: "Command timeout in milliseconds.", Default: defaultBashTimeoutMS, Minimum: intPtr(1), Maximum: intPtr(maxBashTimeoutMS)},
+					"prefix_rule": {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Optional reusable approval prefix for this command, for example [\"git\", \"status\"]. Only simple command prefixes are accepted."},
 				},
 				Required:             []string{"command"},
 				AdditionalProperties: false,

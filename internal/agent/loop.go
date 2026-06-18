@@ -587,14 +587,24 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		permissionGranted = true
 	}
 
+	decisionReason := ""
+	var decisionAction PermissionDecisionAction
+	var decisionCommandPrefix []string
+	if toolFound && !permissionGranted {
+		if grant, ok := matchSessionCommandPrefix(call.Name, args, options); ok {
+			permissionGranted = true
+			decisionAction = PermissionDecisionAllowPrefix
+			decisionReason = "session command prefix approval matched"
+			decisionCommandPrefix = grant.Prefix
+		}
+	}
+
 	var preflightDecision *sandbox.Decision
 	if toolFound && options.Sandbox != nil {
 		decision := options.Sandbox.Evaluate(ctx, sandboxRequest(call.Name, tool, args, permissionGranted, permissionMode, options))
 		preflightDecision = &decision
 	}
 
-	decisionReason := ""
-	var decisionAction PermissionDecisionAction
 	if toolFound && options.OnPermissionRequest != nil && shouldRequestPermission(tool, permissionGranted, preflightDecision) {
 		requestEvent, ok := buildPermissionEvent(call, tool, args, permissionGranted, permissionMode, options, preflightDecision)
 		if !ok {
@@ -622,6 +632,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 					requestEvent.GrantMatched = true
 					requestEvent.Grant = &grant
 				}
+			}
+		case PermissionDecisionAllowPrefix:
+			if len(request.CommandPrefix) == 0 {
+				emitDeniedPermission(options, call, requestEvent, decisionReason)
+				return deniedPermissionResult(call, decisionReason, requestEvent), nil
+			}
+			permissionGranted = true
+			requestEvent.DecisionAction = decision.Action
+			decisionCommandPrefix = append([]string(nil), request.CommandPrefix...)
+			if options.Sandbox != nil && len(decisionCommandPrefix) > 0 {
+				options.Sandbox.GrantCommandPrefixForSession(call.Name, decisionCommandPrefix)
 			}
 		case PermissionDecisionAlwaysAllow:
 			permissionGranted = true
@@ -683,6 +704,9 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			event.DecisionReason = decisionReason
 			if decisionAction != "" {
 				event.DecisionAction = decisionAction
+			}
+			if len(decisionCommandPrefix) > 0 {
+				event.CommandPrefix = append([]string(nil), decisionCommandPrefix...)
 			}
 			options.OnPermission(event)
 		}
@@ -1002,7 +1026,7 @@ func requestPermission(ctx context.Context, request PermissionRequest, options O
 
 func normalizePermissionDecisionAction(action PermissionDecisionAction) PermissionDecisionAction {
 	switch action {
-	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
+	case PermissionDecisionAllow, PermissionDecisionAllowStrict, PermissionDecisionAllowForSession, PermissionDecisionAllowPrefix, PermissionDecisionAlwaysAllow, PermissionDecisionCancel:
 		return action
 	default:
 		return PermissionDecisionDeny
@@ -1488,6 +1512,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Violation:         violation,
 		GrantMatched:      grantMatched,
 		Grant:             grant,
+		CommandPrefix:     proposedCommandPrefix(call.Name, args),
 	}, true
 }
 
@@ -1525,6 +1550,7 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any, opti
 		Violation:          event.Violation,
 		GrantMatched:       event.GrantMatched,
 		Grant:              event.Grant,
+		CommandPrefix:      append([]string(nil), event.CommandPrefix...),
 		AvailableDecisions: availablePermissionDecisions(event, options),
 	}
 }
@@ -1536,6 +1562,9 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 	decisions := []PermissionDecisionAction{PermissionDecisionAllow}
 	if options.Sandbox != nil {
 		decisions = append(decisions, PermissionDecisionAllowForSession)
+		if event.ToolName == "bash" && len(event.CommandPrefix) > 0 {
+			decisions = append(decisions, PermissionDecisionAllowPrefix)
+		}
 		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) {
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)
 		}

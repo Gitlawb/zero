@@ -40,6 +40,8 @@ func permissionOptions(request agent.PermissionRequest) []permissionOption {
 			options = append(options, permissionOption{label: "allow with review", hotkey: "r", choice: permissionDecisionAllowStrict})
 		case agent.PermissionDecisionAllowForSession:
 			options = append(options, permissionOption{label: "allow for session", hotkey: "s", choice: permissionDecisionAllowForSession})
+		case agent.PermissionDecisionAllowPrefix:
+			options = append(options, permissionOption{label: "allow command prefix for session", hotkey: "p", choice: permissionDecisionAllowPrefix})
 		case agent.PermissionDecisionAlwaysAllow:
 			options = append(options, permissionOption{label: "always", hotkey: "y", choice: permissionDecisionAlwaysAllow})
 		case agent.PermissionDecisionDeny:

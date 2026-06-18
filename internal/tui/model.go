@@ -326,6 +326,7 @@ const (
 	permissionDecisionAllow           permissionDecision = agent.PermissionDecisionAllow
 	permissionDecisionAllowStrict     permissionDecision = agent.PermissionDecisionAllowStrict
 	permissionDecisionAllowForSession permissionDecision = agent.PermissionDecisionAllowForSession
+	permissionDecisionAllowPrefix     permissionDecision = agent.PermissionDecisionAllowPrefix
 	permissionDecisionDeny            permissionDecision = agent.PermissionDecisionDeny
 	permissionDecisionAlwaysAllow     permissionDecision = agent.PermissionDecisionAlwaysAllow
 	permissionDecisionCancel          permissionDecision = agent.PermissionDecisionCancel
@@ -2283,6 +2284,8 @@ func permissionDecisionReason(decision permissionDecision) string {
 		return "approved with model review request in TUI"
 	case permissionDecisionAllowForSession:
 		return "approved for this session in TUI"
+	case permissionDecisionAllowPrefix:
+		return "approved command prefix for this session in TUI"
 	case permissionDecisionAlwaysAllow:
 		return "persistently approved in TUI"
 	case permissionDecisionCancel:
