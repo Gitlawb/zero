@@ -124,8 +124,8 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 func runProviderChatGPTLogin() error {
 	env := buildOAuthPresetEnv()
 	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
-		Env:        env,
-		HTTPClient: &http.Client{Timeout: 60 * time.Second},
+		Env:         env,
+		HTTPClient:  &http.Client{Timeout: 60 * time.Second},
 		OpenBrowser: browser.OpenURL,
 		Timeout:     3 * time.Minute,
 	})

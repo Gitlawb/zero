@@ -136,11 +136,11 @@ func chatgptTestEnv() map[string]string {
 // records which client_id it sees and returns a token response with a chosen
 // id_token.
 type chatgptTestServer struct {
-	srv        *httptest.Server
-	gotClient  *atomic.Value
-	gotScopes  *atomic.Value
-	gotRedir   *atomic.Value
-	gotPKCE    *atomic.Value
+	srv       *httptest.Server
+	gotClient *atomic.Value
+	gotScopes *atomic.Value
+	gotRedir  *atomic.Value
+	gotPKCE   *atomic.Value
 }
 
 func newChatGPTTestServer(t *testing.T, idToken string) *chatgptTestServer {
