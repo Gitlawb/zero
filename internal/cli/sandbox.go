@@ -218,7 +218,6 @@ func displayPlatform(platform string) string {
 // backend and the always-on static guards.
 type sandboxGuards struct {
 	InteractiveCommand bool `json:"interactiveCommand"`
-	DestructiveShell   bool `json:"destructiveShell"`
 	Network            bool `json:"network"`
 	Workspace          bool `json:"workspace"`
 }
@@ -228,7 +227,6 @@ func resolveSandboxGuards(policy zeroSandbox.Policy) sandboxGuards {
 		// Interactive-command detection is a static pre-exec guard that always
 		// runs in the bash tool regardless of policy toggles.
 		InteractiveCommand: true,
-		DestructiveShell:   policy.DenyDestructiveShell,
 		Network:            policy.Network == zeroSandbox.NetworkDeny,
 		Workspace:          policy.EnforceWorkspace,
 	}
@@ -288,7 +286,6 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 		lines = append(lines, "write_roots_error: "+writeRootsErr.Error())
 	}
 	lines = append(lines,
-		"deny_destructive_shell: "+fmt.Sprintf("%t", policy.DenyDestructiveShell),
 		"allow_policy_only_runner: "+fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
 		"max_autonomy: "+string(policy.MaxAutonomy),
 		"backend: "+string(backend.Name),
@@ -298,7 +295,6 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 		"enforcement_level: "+string(plan.EnforcementLevel),
 		"requires_platform_sandbox: "+fmt.Sprintf("%t", plan.RequiresPlatformSandbox),
 		"interactive_command_guard: "+enabledLabel(guards.InteractiveCommand),
-		"destructive_shell_guard: "+enabledLabel(guards.DestructiveShell),
 		"network_guard: "+enabledLabel(guards.Network),
 		"workspace_guard: "+enabledLabel(guards.Workspace),
 		"grants: "+grantsPath,

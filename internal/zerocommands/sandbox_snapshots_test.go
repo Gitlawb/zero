@@ -13,13 +13,12 @@ func TestSandboxPolicySnapshotFromPolicyFillsEffectiveMode(t *testing.T) {
 		Mode:                  sandbox.ModeEnforce,
 		Network:               sandbox.NetworkDeny,
 		EnforceWorkspace:      true,
-		DenyDestructiveShell:  true,
 		AllowPolicyOnlyRunner: true,
 	})
 	if enforced.EffectiveMode != string(sandbox.ModeEnforce) {
 		t.Fatalf("EffectiveMode = %q, want %q", enforced.EffectiveMode, sandbox.ModeEnforce)
 	}
-	if !enforced.EnforceWorkspace || !enforced.DenyDestructiveShell || !enforced.AllowPolicyOnlyRunner {
+	if !enforced.EnforceWorkspace || !enforced.AllowPolicyOnlyRunner {
 		t.Fatalf("boolean fields not preserved: %#v", enforced)
 	}
 

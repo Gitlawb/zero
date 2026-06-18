@@ -376,8 +376,13 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		}
 		return deny(request, risk, ViolationNetwork, "", ReasonNetworkBlocked, false)
 	}
-	if policy.DenyDestructiveShell && HasRiskCategory(risk, "destructive") {
-		return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command is blocked by sandbox policy", false)
+	if HasRiskCategory(risk, "destructive") {
+		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: "destructive shell command requires approval"}
+		}
+		if request.SideEffect == SideEffectShell && !request.PermissionGranted {
+			return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command requires approval", false)
+		}
 	}
 	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
 	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)

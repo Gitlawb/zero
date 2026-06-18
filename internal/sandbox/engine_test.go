@@ -473,12 +473,12 @@ func TestEngineClassifiesNetworkAndDestructiveShellCommands(t *testing.T) {
 		ToolName:       "bash",
 		SideEffect:     SideEffectShell,
 		Permission:     PermissionPrompt,
-		PermissionMode: PermissionUnsafe,
+		PermissionMode: PermissionModeAsk,
 		Autonomy:       AutonomyHigh,
 		Args:           map[string]any{"command": "rm -rf /"},
 	})
-	if destructive.Action != ActionDeny || destructive.Risk.Level != RiskCritical || destructive.Violation == nil || destructive.Violation.Code != ViolationDestructiveCommand {
-		t.Fatalf("destructive shell decision = %#v, want critical destructive deny", destructive)
+	if destructive.Action != ActionPrompt || destructive.Risk.Level != RiskCritical || destructive.Violation != nil {
+		t.Fatalf("destructive shell decision = %#v, want critical destructive prompt", destructive)
 	}
 
 	// A remote fetch piped into a shell is the dangerous fetch-and-execute idiom.

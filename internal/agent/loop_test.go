@@ -1482,6 +1482,72 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	}
 }
 
+func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewBashTool(root))
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"echo rm -rf /"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var events []PermissionEvent
+
+	result, err := Run(context.Background(), "run dangerous command", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       string(sandbox.AutonomyMedium),
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approve once"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected one permission request, got %#v", requests)
+	}
+	request := requests[0]
+	if request.Action != PermissionActionPrompt || request.Reason != "destructive shell command requires approval" || !sandbox.HasRiskCategory(request.Risk, "destructive") {
+		t.Fatalf("expected destructive shell prompt, got %#v", request)
+	}
+	if request.Violation != nil {
+		t.Fatalf("destructive shell prompt should not be a sandbox violation: %#v", request.Violation)
+	}
+	if len(events) != 1 || events[0].Action != PermissionActionAllow || events[0].DecisionAction != PermissionDecisionAllow {
+		t.Fatalf("expected approved permission event, got %#v", events)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
+	}
+	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(lastMessage.Content, "rm -rf /") {
+		t.Fatalf("expected approved command output, got %q", lastMessage.Content)
+	}
+}
+
 func TestRunAlwaysAllowWithoutSandboxStillAllowsCall(t *testing.T) {
 	// Choosing "always allow" with NO sandbox engine configured must still allow
 	// THIS call (there is just nowhere to persist a grant for future calls). The

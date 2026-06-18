@@ -234,7 +234,7 @@ func TestBackendCapabilitiesReflectDisabledPolicy(t *testing.T) {
 	})
 	plan := backend.BuildPlan(t.TempDir(), Policy{Mode: ModeDisabled})
 
-	for _, key := range []string{"policy_evaluation", "workspace_write_guard", "network_guard", "destructive_shell_guard"} {
+	for _, key := range []string{"policy_evaluation", "workspace_write_guard", "network_guard"} {
 		if got := capabilityStatus(plan.Capabilities, key); got != CapabilityDisabled {
 			t.Fatalf("capability %s = %q, want disabled in %#v", key, got, plan.Capabilities)
 		}

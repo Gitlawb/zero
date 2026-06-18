@@ -160,7 +160,6 @@ type Policy struct {
 	Mode                  PolicyMode  `json:"mode"`
 	Network               NetworkMode `json:"network"`
 	EnforceWorkspace      bool        `json:"enforceWorkspace"`
-	DenyDestructiveShell  bool        `json:"denyDestructiveShell"`
 	AllowPolicyOnlyRunner bool        `json:"allowPolicyOnlyRunner"`
 	MaxAutonomy           Autonomy    `json:"maxAutonomy,omitempty"`
 	// AllowedDomains / DeniedDomains apply only when Network is NetworkScoped:
@@ -290,7 +289,6 @@ func DefaultPolicy() Policy {
 		Mode:                  ModeEnforce,
 		Network:               NetworkDeny,
 		EnforceWorkspace:      true,
-		DenyDestructiveShell:  true,
 		AllowPolicyOnlyRunner: true,
 		MaxAutonomy:           AutonomyHigh,
 	}

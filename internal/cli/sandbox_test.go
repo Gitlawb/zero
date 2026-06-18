@@ -536,7 +536,6 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 			"mode: enforce",
 			"network: deny",
 			"enforce_workspace: true",
-			"deny_destructive_shell: true",
 			"interactive_command_guard: enabled",
 			"support_level: policy-only",
 		} {
@@ -554,10 +553,9 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 		}
 		var payload struct {
 			Policy struct {
-				Mode                 string `json:"mode"`
-				Network              string `json:"network"`
-				EnforceWorkspace     bool   `json:"enforceWorkspace"`
-				DenyDestructiveShell bool   `json:"denyDestructiveShell"`
+				Mode             string `json:"mode"`
+				Network          string `json:"network"`
+				EnforceWorkspace bool   `json:"enforceWorkspace"`
 			} `json:"policy"`
 			Backend struct {
 				Name string `json:"name"`
@@ -567,7 +565,6 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 			} `json:"plan"`
 			Guards struct {
 				InteractiveCommand bool `json:"interactiveCommand"`
-				DestructiveShell   bool `json:"destructiveShell"`
 				Network            bool `json:"network"`
 				Workspace          bool `json:"workspace"`
 			} `json:"guards"`
@@ -579,10 +576,10 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 		if payload.Policy.Mode != "enforce" || payload.Policy.Network != "deny" {
 			t.Fatalf("unexpected effective policy: %#v", payload.Policy)
 		}
-		if !payload.Policy.EnforceWorkspace || !payload.Policy.DenyDestructiveShell {
-			t.Fatalf("expected workspace + destructive guards enabled: %#v", payload.Policy)
+		if !payload.Policy.EnforceWorkspace {
+			t.Fatalf("expected workspace guard enabled: %#v", payload.Policy)
 		}
-		if !payload.Guards.InteractiveCommand || !payload.Guards.DestructiveShell {
+		if !payload.Guards.InteractiveCommand {
 			t.Fatalf("expected guards reported: %#v", payload.Guards)
 		}
 		if payload.Plan.SupportLevel != string(sandbox.BackendSupportPolicyOnly) || payload.GrantsPath == "" {

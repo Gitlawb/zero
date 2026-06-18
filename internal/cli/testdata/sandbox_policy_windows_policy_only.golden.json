@@ -3,7 +3,6 @@
     "mode": "enforce",
     "network": "deny",
     "enforceWorkspace": true,
-    "denyDestructiveShell": true,
     "allowPolicyOnlyRunner": true,
     "maxAutonomy": "high"
   },
@@ -32,7 +31,6 @@
       "mode": "enforce",
       "network": "deny",
       "enforceWorkspace": true,
-      "denyDestructiveShell": true,
       "allowPolicyOnlyRunner": true,
       "maxAutonomy": "high"
     },
@@ -81,11 +79,6 @@
         "detail": "network-capable tool requests are denied before execution"
       },
       {
-        "key": "destructive_shell_guard",
-        "status": "preflight",
-        "detail": "destructive shell patterns are denied before execution"
-      },
-      {
         "key": "native_process_isolation",
         "status": "unavailable",
         "detail": "Windows sandbox command runner is not available"
@@ -99,7 +92,6 @@
     "restrictions": [
       "filesystem writes must stay inside workspace",
       "network access denied unless a future adapter grants it explicitly",
-      "destructive shell patterns denied before execution",
       "native process isolation unavailable on windows; policy engine still evaluates tool requests before execution",
       "shell commands are not wrapped by a native platform sandbox"
     ],

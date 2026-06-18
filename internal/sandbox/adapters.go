@@ -188,9 +188,6 @@ func (backend Backend) restrictions(policy Policy) []string {
 			restrictions = append(restrictions, "network access denied unless a future adapter grants it explicitly")
 		}
 	}
-	if effectivePolicy.DenyDestructiveShell {
-		restrictions = append(restrictions, "destructive shell patterns denied before execution")
-	}
 	if backend.Name == BackendPolicyOnly {
 		platform := backend.Platform
 		if platform == "" {
@@ -308,11 +305,6 @@ func (backend Backend) Capabilities(policy Policy) []BackendCapability {
 			Detail: "filesystem writes are checked against the workspace root before execution",
 		},
 		networkGuard,
-		{
-			Key:    "destructive_shell_guard",
-			Status: policyCapabilityStatus(policy.Mode, policy.DenyDestructiveShell),
-			Detail: "destructive shell patterns are denied before execution",
-		},
 	}
 	nativeIsolation := BackendCapability{
 		Key:    "native_process_isolation",
