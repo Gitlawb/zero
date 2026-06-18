@@ -547,7 +547,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 
 	permissionGranted := permissionMode == PermissionModeUnsafe
-	if toolFound && tool.Safety().Permission == tools.PermissionAllow {
+	if toolFound && effectivePermission(tool, args) == tools.PermissionAllow {
 		permissionGranted = true
 	}
 
@@ -910,6 +910,17 @@ func sandboxRequest(toolName string, tool tools.Tool, args map[string]any, permi
 		Args:              args,
 		Reason:            safety.Reason,
 	}
+}
+
+// effectivePermission returns the permission for THIS specific call. A tool that
+// implements tools.ArgsPermissioner may relax its static permission for arguments
+// it can prove are safe (the Task tool auto-allows a read-only sub-agent); every
+// other tool falls back to its static Safety().Permission unchanged.
+func effectivePermission(tool tools.Tool, args map[string]any) tools.Permission {
+	if p, ok := tool.(tools.ArgsPermissioner); ok {
+		return p.PermissionForArgs(args)
+	}
+	return tool.Safety().Permission
 }
 
 func shouldRequestPermission(tool tools.Tool, permissionGranted bool, decision *sandbox.Decision) bool {

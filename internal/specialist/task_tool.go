@@ -66,6 +66,26 @@ func (tool *TaskTool) Safety() tools.Safety {
 	}
 }
 
+// PermissionForArgs auto-approves delegating to a READ-ONLY specialist — it can
+// only read the workspace, so spawning it is harmless — while keeping the static
+// prompt for write-capable specialists (e.g. worker) and for resume. This lets
+// the orchestrator delegate exploration/review off a normal prompt without an
+// approval wall. Implements tools.ArgsPermissioner.
+func (tool *TaskTool) PermissionForArgs(args map[string]any) tools.Permission {
+	params, err := parseTaskParameters(args)
+	if err != nil {
+		return tools.PermissionPrompt
+	}
+	// Resuming could continue a previously write-capable session; never auto-allow.
+	if params.Resume != "" {
+		return tools.PermissionPrompt
+	}
+	if tool.executor.IsReadOnlySpecialist(params.Name) {
+		return tools.PermissionAllow
+	}
+	return tools.PermissionPrompt
+}
+
 func (tool *TaskTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
 }
@@ -82,6 +102,11 @@ func (tool *TaskTool) RunWithOptions(ctx context.Context, args map[string]any, o
 		ParentReasoningEffort: options.ReasoningEffort,
 		CurrentDepth:          options.Depth,
 		Cwd:                   options.Cwd,
+		// Propagate the parent's permission mode so the child never gains more
+		// authority than the parent: a non-unsafe parent yields a non-unsafe
+		// child (exec.go specialistAutonomy). Dropping this made every Task
+		// sub-agent run at "--auto high" (unsafe) regardless of the parent.
+		PermissionMode: options.PermissionMode,
 	})
 	if err != nil {
 		return taskError(err)

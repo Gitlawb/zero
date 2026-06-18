@@ -164,8 +164,16 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	var specialistRuntime *agentToolRuntime
 	if shouldRegisterExecSpecialistTools(options) {
+		// Specialist tools register before the full config resolve below (so
+		// --list-tools stays offline). swarm.maxTeamSize is not affected by
+		// overrides, so an empty-overrides resolve yields the same value; a resolve
+		// error falls back to the swarm's built-in default (0 => 8).
+		maxTeamSize := 0
+		if swarmCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
+			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
+		}
 		var err error
-		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot)
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize)
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}
@@ -478,6 +486,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		MaxTurns:         resolved.MaxTurns,
 		ContextWindow:    modelContextWindow(modelRegistry, resolved.Provider.Model),
 		DeferThreshold:   effectiveDeferThreshold,
+		Specialists:      specialistRuntime.specialistInfos(),
 		SessionID:        preparedSession.Session.SessionID,
 		CallingSessionID: options.callingSessionID,
 		CallingToolUseID: options.callingToolUseID,

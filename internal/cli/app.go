@@ -487,7 +487,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot)
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
@@ -610,6 +610,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			FileTracker:    tools.NewFileTracker(),
 			Hooks:          newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks),
 			DeferThreshold: resolved.Tools.DeferThreshold,
+			Specialists:    specialistRuntime.specialists,
 		},
 		PermissionMode: permissionMode,
 		Notify:         resolved.Notify,
@@ -665,9 +666,22 @@ func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.R
 type agentToolRuntime struct {
 	specialist *specialist.Runtime
 	swarm      *swarm.Swarm
+	// specialists summarizes the registered specialists (name + description) for
+	// the orchestrator's system-prompt delegation section. Populated alongside the
+	// tools, so it is present exactly when the Task tool is.
+	specialists []agent.SpecialistInfo
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) (*agentToolRuntime, error) {
+// specialistInfos returns the runtime's specialist summaries, nil-safe so the
+// exec path can call it whether or not specialist tools were registered.
+func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
+	if r == nil {
+		return nil
+	}
+	return r.specialists
+}
+
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
@@ -680,16 +694,41 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string) (*a
 	// The swarm reuses the same specialist executor to launch each member, so
 	// every member runs under the orchestrator's sandbox + policy. Mailbox state
 	// lives under the workspace so its files fall within the sandbox write rules.
+	// MaxTeamSize (0 => the swarm's default of 8) caps concurrent members per team.
 	sw, err := swarm.New(swarm.Options{
-		BaseDir:  filepath.Join(workspaceRoot, ".zero", "swarm"),
-		Launcher: swarm.NewSpecialistLauncher(executor),
+		BaseDir:     filepath.Join(workspaceRoot, ".zero", "swarm"),
+		Launcher:    swarm.NewSpecialistLauncher(executor),
+		MaxTeamSize: maxTeamSize,
 	})
 	if err != nil {
 		runtime.Close()
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
-	return &agentToolRuntime{specialist: runtime, swarm: sw}, nil
+	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
+}
+
+// specialistSummaries loads the available specialists (built-ins + user/project
+// profiles) and returns their name + description for the orchestrator's
+// delegation prompt. A load error yields no summaries (the prompt simply omits
+// the delegation section) rather than failing the run.
+func specialistSummaries(paths specialist.Paths) []agent.SpecialistInfo {
+	result, err := specialist.Load(specialist.LoadOptions{Paths: paths})
+	if err != nil {
+		return nil
+	}
+	summaries := make([]agent.SpecialistInfo, 0, len(result.Specialists))
+	for _, manifest := range result.Specialists {
+		name := strings.TrimSpace(manifest.Metadata.Name)
+		if name == "" {
+			continue
+		}
+		summaries = append(summaries, agent.SpecialistInfo{
+			Name:      name,
+			WhenToUse: strings.TrimSpace(manifest.Metadata.Description),
+		})
+	}
+	return summaries
 }
 
 func shouldRegisterExecSpecialistTools(options execOptions) bool {
@@ -699,7 +738,13 @@ func shouldRegisterExecSpecialistTools(options execOptions) bool {
 	if strings.EqualFold(strings.TrimSpace(options.tag), specialist.SessionTagSpecialist) {
 		return false
 	}
-	return options.skipPermissionsUnsafe || strings.EqualFold(strings.TrimSpace(options.autonomy), "high")
+	// Register at medium/high (and unsafe). The Task tool's permission gate
+	// auto-approves only read-only specialist spawns and prompts for write-capable
+	// ones, so a non-trivial exec can auto-delegate exploration safely (a headless
+	// write spawn still gets denied at the prompt). Default "low" stays clean — no
+	// specialist tooling or swarm runtime for trivial/CI one-shots.
+	autonomy := strings.ToLower(strings.TrimSpace(options.autonomy))
+	return options.skipPermissionsUnsafe || autonomy == "high" || autonomy == "medium"
 }
 
 func closeMCPRuntime(stderr io.Writer, runtime mcpToolRuntime) {

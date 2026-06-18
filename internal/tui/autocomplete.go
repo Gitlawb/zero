@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/workspaceindex"
 )
 
@@ -66,6 +67,7 @@ func (m *model) clearSuggestions() {
 	m.suggestions = nil
 	m.suggestionIdx = 0
 	m.suggestionsAreFiles = false
+	m.suggestionsAreSpecialists = false
 	m.commandPaletteOpen = false
 	m.filePaletteOpen = false
 }
@@ -81,10 +83,25 @@ func (m *model) recomputeSuggestions() {
 	}
 
 	value := m.input.Value()
+	m.suggestionsAreSpecialists = false
 
 	// File reference: a trailing "@token" (even mid-prompt) drives a workspace
 	// file picker. Checked before the slash path so "@" is handled distinctly.
 	if query := extractPathQuery(value, m.input.Position()); query != nil {
+		// A LEADING "@token" (the first word of the message) instead offers the
+		// delegatable specialists, so "@explorer" routes to a sub-agent rather than
+		// a file. Mid-message "@token" stays a file reference.
+		if specs := m.leadingSpecialistSuggestions(value, query); len(specs) > 0 {
+			m.commandPaletteOpen = false
+			m.filePaletteOpen = true
+			m.suggestionsAreFiles = true
+			m.suggestionsAreSpecialists = true
+			m.suggestions = specs
+			if m.suggestionIdx >= len(specs) || m.suggestionIdx < 0 {
+				m.suggestionIdx = 0
+			}
+			return
+		}
 		m.commandPaletteOpen = false
 		m.filePaletteOpen = true
 		m.suggestionsAreFiles = true
@@ -236,10 +253,13 @@ func (m model) completeSuggestion() model {
 		idx = 0
 	}
 	chosen := m.suggestions[idx].Name
-	if m.suggestionsAreFiles {
+	switch {
+	case m.suggestionsAreSpecialists:
+		m = m.completeSpecialistSuggestion(chosen)
+	case m.suggestionsAreFiles:
 		isDir := fileSuggestionIsDirectory(m.suggestions[idx])
 		m = m.completeFileSuggestion(chosen, !isDir)
-	} else {
+	default:
 		if commandSelectionRequiresInput(chosen) {
 			m.input.SetValue(chosen)
 		} else {
@@ -250,6 +270,7 @@ func (m model) completeSuggestion() model {
 	m.suggestions = nil
 	m.suggestionIdx = 0
 	m.suggestionsAreFiles = false
+	m.suggestionsAreSpecialists = false
 	m.commandPaletteOpen = false
 	m.filePaletteOpen = false
 	return m
@@ -321,6 +342,89 @@ func replaceTrailingAtToken(value, path string) string {
 		return value[:i+1] + path
 	}
 	return path
+}
+
+// leadingSpecialistSuggestions returns the delegatable specialists matching a
+// LEADING "@token" (the first word of the message), so "@explorer" routes to a
+// sub-agent. A non-leading "@token" stays a file reference, so this returns nil
+// there. Rows reuse commandSuggestion: Name is the "@name" insert text, Desc the
+// specialist's description.
+func (m model) leadingSpecialistSuggestions(value string, query *pathQuery) []commandSuggestion {
+	if query == nil || len(m.agentOptions.Specialists) == 0 {
+		return nil
+	}
+	runes := []rune(value)
+	if query.StartIndex < 0 || query.StartIndex > len(runes) {
+		return nil
+	}
+	if strings.TrimSpace(string(runes[:query.StartIndex])) != "" {
+		return nil // "@" is not the first word: treat as a file reference
+	}
+	prefix := strings.ToLower(strings.TrimSpace(query.Query))
+	out := make([]commandSuggestion, 0, len(m.agentOptions.Specialists))
+	for _, spec := range m.agentOptions.Specialists {
+		name := strings.TrimSpace(spec.Name)
+		if name == "" {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(strings.ToLower(name), prefix) {
+			continue
+		}
+		out = append(out, commandSuggestion{Name: "@" + name, Desc: strings.TrimSpace(spec.WhenToUse)})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// completeSpecialistSuggestion replaces the leading "@token" with the chosen
+// "@name " and keeps the composer open so the user can type the task.
+func (m model) completeSpecialistSuggestion(chosen string) model {
+	state := m.fileSuggestionComposerState()
+	query := extractPathQuery(state.text, state.cursor)
+	if query == nil {
+		m.input.SetValue(chosen + " ")
+		m.input.CursorEnd()
+		m.resetComposerFromInput()
+		return m
+	}
+	return m.replaceComposerRangeWithPastePreviews(state, query.StartIndex, query.EndIndex, chosen+" ")
+}
+
+// expandSpecialistMention rewrites a message that begins with "@<specialist> <task>"
+// into an explicit Task-delegation directive for the agent. It returns ok=false
+// unless the first word is "@<known-specialist>" with a task following, so normal
+// prompts and mid-message "@file" references are untouched. Callers keep the
+// user's verbatim "@mention" in the transcript and expand only the agent-facing
+// text.
+func expandSpecialistMention(prompt string, specialists []agent.SpecialistInfo) (string, bool) {
+	trimmed := strings.TrimLeft(prompt, " \t")
+	if !strings.HasPrefix(trimmed, "@") {
+		return "", false
+	}
+	rest := trimmed[1:]
+	name := rest
+	task := ""
+	if i := strings.IndexAny(rest, " \t\n"); i >= 0 {
+		name = rest[:i]
+		task = strings.TrimSpace(rest[i+1:])
+	}
+	if name = strings.TrimSpace(name); name == "" || task == "" {
+		return "", false
+	}
+	matched := ""
+	for _, spec := range specialists {
+		if strings.EqualFold(strings.TrimSpace(spec.Name), name) {
+			matched = strings.TrimSpace(spec.Name)
+			break
+		}
+	}
+	if matched == "" {
+		return "", false
+	}
+	return "Use the Task tool to delegate this to the " + matched +
+		" specialist, then report its result back to me:\n\n" + task, true
 }
 
 func completePathQuery(value string, cursorPos int, selectedPath string) (string, int) {

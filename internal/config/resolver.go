@@ -58,6 +58,10 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		return ResolvedConfig{}, fmt.Errorf("invalid tools.deferThreshold %d: must be >= 0", cfg.Tools.DeferThreshold)
 	}
 
+	if cfg.Swarm.MaxTeamSize < 0 {
+		return ResolvedConfig{}, fmt.Errorf("invalid swarm.maxTeamSize %d: must be >= 0 (0 uses the default)", cfg.Swarm.MaxTeamSize)
+	}
+
 	if maxAutonomy := strings.TrimSpace(cfg.Sandbox.MaxAutonomy); maxAutonomy != "" {
 		// Fail loud on an invalid ceiling. An unvalidated typo (e.g. "moderate")
 		// would otherwise survive Resolve untouched, reach the sandbox bridge,
@@ -103,6 +107,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Sandbox:        cfg.Sandbox,
 		Notify:         cfg.Notify,
 		Tools:          cfg.Tools,
+		Swarm:          cfg.Swarm,
 		Preferences:    cfg.Preferences,
 	}, nil
 }
@@ -174,6 +179,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
 		dst.Tools.deferThresholdSet = true
 	}
+	if src.Swarm.MaxTeamSize != 0 {
+		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
+	}
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
@@ -219,6 +227,9 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if src.Tools.deferThresholdSet {
 		dst.Tools.DeferThreshold = src.Tools.DeferThreshold
 		dst.Tools.deferThresholdSet = true
+	}
+	if src.Swarm.MaxTeamSize != 0 {
+		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
 	return nil
 }

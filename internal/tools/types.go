@@ -97,6 +97,17 @@ type Tool interface {
 	Run(ctx context.Context, args map[string]any) Result
 }
 
+// ArgsPermissioner is an optional interface a Tool can implement to refine its
+// permission for a SPECIFIC call based on its arguments. When a tool implements
+// it, the agent loop consults PermissionForArgs(args) instead of the static
+// Safety().Permission when deciding whether the call needs approval. It exists to
+// safely RELAX a prompt to allow for arguments the tool can prove are harmless
+// (e.g. delegating to a read-only sub-agent); a tool must return its static,
+// stricter permission whenever it cannot prove the call is safe.
+type ArgsPermissioner interface {
+	PermissionForArgs(args map[string]any) Permission
+}
+
 type baseTool struct {
 	name        string
 	description string

@@ -136,6 +136,15 @@ type AskUserResponse struct {
 	Answers []string `json:"answers"`
 }
 
+// SpecialistInfo is a one-line summary of a delegatable sub-agent (its name and
+// when-to-use description) surfaced to the orchestrator's system prompt so it can
+// route work to the right specialist. It is plain data so the agent package needs
+// no dependency on internal/specialist.
+type SpecialistInfo struct {
+	Name      string
+	WhenToUse string
+}
+
 type Options struct {
 	MaxTurns int
 	// DeferThreshold activates deferred MCP-tool loading: when the number of
@@ -144,6 +153,13 @@ type Options struct {
 	// 0 (or below the eligible count) keeps every tool eager — byte-identical to
 	// the pre-deferral behavior.
 	DeferThreshold int
+	// Specialists lists the sub-agents the orchestrator may delegate to via the
+	// Task tool; when non-empty the system prompt gains a delegation section that
+	// names them and nudges the model to offload read-heavy work (search,
+	// exploration) so verbose tool output stays out of the main context. It is
+	// populated only where the Task tool is actually registered, so an empty slice
+	// (the default) reproduces the previous prompt byte-for-byte.
+	Specialists []SpecialistInfo
 	// Specialist/sub-agent metadata is carried through exec now and consumed by
 	// the specialist runtime in later slices.
 	SessionID        string

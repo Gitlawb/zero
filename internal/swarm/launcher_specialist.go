@@ -30,10 +30,19 @@ func NewSpecialistLauncher(executor specialist.Executor) MemberLauncher {
 		if permissionMode == "" {
 			permissionMode = permissionModeAuto
 		}
+		// Run the member from its swarm agent definition (its own system prompt),
+		// NOT by resolving spec.AgentType against the specialist registry — swarm
+		// agent types (e.g. "subagent"/"teammate") are not registered specialists,
+		// so a name lookup fails with "specialist not found" and the member never
+		// executes. The inline manifest carries the member's prompt plus a general
+		// task-executor toolset; authority is still clamped to permissionMode
+		// below, so a member never exceeds the orchestrator's authority.
+		manifest := specialistManifestForMember(spec)
 		res, err := executor.Run(ctx, specialist.TaskParameters{
 			Name:        spec.AgentType,
 			Prompt:      spec.Task,
 			Description: spec.AgentType + " · team " + spec.Team,
+			Manifest:    &manifest,
 		}, specialist.TaskRunOptions{
 			ParentModel:    spec.Model,
 			Cwd:            spec.Cwd,
@@ -44,4 +53,27 @@ func NewSpecialistLauncher(executor specialist.Executor) MemberLauncher {
 		}
 		return MemberResult{Result: res.Result.Output, SessionID: res.SessionID}, nil
 	}}
+}
+
+// swarmMemberToolGroups is the tool allowance for a swarm member running as a
+// specialist. It mirrors the built-in "worker" specialist (a general-purpose
+// task executor) since swarm members execute delegated work; the member still
+// runs under the orchestrator's clamped permission mode, so write/execute tools
+// stay gated unless the orchestrator is itself unsafe.
+var swarmMemberToolGroups = []string{"read-only", "edit", "execute", "plan"}
+
+// specialistManifestForMember builds an inline specialist manifest from a swarm
+// member spec so the executor runs the member with the swarm definition's system
+// prompt and a general toolset, without requiring a registered specialist.
+func specialistManifestForMember(spec MemberSpec) specialist.Manifest {
+	return specialist.Manifest{
+		Metadata: specialist.Metadata{
+			Name:        spec.AgentType,
+			Description: "Swarm " + spec.AgentType + " member.",
+			Tools:       swarmMemberToolGroups,
+		},
+		SystemPrompt: spec.SystemPrompt,
+		Location:     specialist.LocationBuiltin,
+		FilePath:     "(swarm)",
+	}
 }

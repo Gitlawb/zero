@@ -95,6 +95,14 @@ type PreferencesConfig struct {
 	FavoriteModels []string `json:"favoriteModels,omitempty"`
 }
 
+// SwarmConfig tunes the multi-agent swarm. MaxTeamSize caps how many members run
+// concurrently per team; 0 uses the built-in default (8). Spawns past the cap
+// queue and launch as slots free, so lowering it bounds parallelism (and provider
+// load / rate-limit pressure) without dropping work.
+type SwarmConfig struct {
+	MaxTeamSize int `json:"maxTeamSize,omitempty"`
+}
+
 // ToolsOverride builds a ToolsConfig that explicitly overrides the deferred-tool
 // threshold (including to 0, which disables deferral). Use this for programmatic
 // Overrides — a bare ToolsConfig{DeferThreshold: 0} is indistinguishable from
@@ -128,6 +136,7 @@ type FileConfig struct {
 	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
 	Notify         NotifyConfig      `json:"notify,omitempty"`
 	Tools          ToolsConfig       `json:"tools,omitempty"`
+	Swarm          SwarmConfig       `json:"swarm,omitempty"`
 	Preferences    PreferencesConfig `json:"preferences,omitempty"`
 }
 
@@ -159,6 +168,7 @@ type ResolvedConfig struct {
 	Sandbox        SandboxConfig
 	Notify         NotifyConfig
 	Tools          ToolsConfig
+	Swarm          SwarmConfig
 	Preferences    PreferencesConfig
 }
 
@@ -203,6 +213,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Sandbox         SandboxConfig              `json:"sandbox"`
 		Notify          NotifyConfig               `json:"notify"`
 		Tools           ToolsConfig                `json:"tools"`
+		Swarm           SwarmConfig                `json:"swarm"`
 		Preferences     PreferencesConfig          `json:"preferences"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
@@ -227,6 +238,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Sandbox = raw.Sandbox
 	cfg.Notify = raw.Notify
 	cfg.Tools = raw.Tools
+	cfg.Swarm = raw.Swarm
 	cfg.Preferences = raw.Preferences
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
