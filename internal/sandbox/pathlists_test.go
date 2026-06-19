@@ -407,7 +407,7 @@ func TestSandboxExecProfileEmitsDenyWriteRule(t *testing.T) {
 	secret := mkdir(t, filepath.Join(ws, "secret"))
 
 	policy := Policy{Mode: ModeEnforce, EnforceWorkspace: true, DenyWrite: []string{secret}}
-	profile := sandboxExecProfile([]string{ws}, policy, "", "", "")
+	profile := sandboxExecProfile([]string{ws}, policy, "")
 
 	// The path is escaped the same way the profile escapes it (e.g. Windows
 	// backslashes are doubled), so the assertion holds on every platform.

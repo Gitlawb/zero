@@ -370,7 +370,7 @@ func TestWebFetchRunWithSandboxAllowsUnderShellNetworkDeny(t *testing.T) {
 	}
 }
 
-func TestWebFetchRunWithSandboxAllowsUnderScopedShellNetworkPolicy(t *testing.T) {
+func TestWebFetchRunWithSandboxAllowsUnderShellNetworkAllow(t *testing.T) {
 	called := false
 	client := webFetchTestClient(func(request *http.Request) (*http.Response, error) {
 		called = true
@@ -379,15 +379,11 @@ func TestWebFetchRunWithSandboxAllowsUnderScopedShellNetworkPolicy(t *testing.T)
 	tool := newWebFetchToolWithClientAndResolver(client, publicWebFetchResolver(t, "evil.test")).(webFetchTool)
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
-		Backend: zeroSandbox.Backend{
-			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
-			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
-		},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkAllow},
 	})
 	result := tool.RunWithSandbox(context.Background(), map[string]any{"url": "https://evil.test"}, engine)
 	if result.Status != StatusOK {
-		t.Fatalf("web_fetch must run under scoped shell network policy, got %q: %s", result.Status, result.Output)
+		t.Fatalf("web_fetch must run under shell network allow, got %q: %s", result.Status, result.Output)
 	}
 	if !called {
 		t.Fatal("web_fetch transport must be called")
@@ -404,11 +400,7 @@ func TestRegistryRoutesWebFetchThroughSandboxPath(t *testing.T) {
 	registry.Register(newWebFetchToolWithClientAndResolver(client, publicWebFetchResolver(t, "evil.test")))
 
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
-		Backend: zeroSandbox.Backend{
-			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
-			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
-		},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkDeny},
 	})
 	res := registry.RunWithOptions(context.Background(), "web_fetch", map[string]any{"url": "https://evil.test"}, RunOptions{
 		Sandbox:           engine,

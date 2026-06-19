@@ -23,13 +23,12 @@ func TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
-		SandboxPolicyCWD:     "/workspace",
-		CommandCWD:           "/workspace/app",
-		PermissionProfile:    profile,
-		UseLandlock:          true,
-		BlockUnixSockets:     true,
-		AllowNetworkForProxy: true,
-		Command:              []string{"/bin/sh", "-c", "pwd"},
+		SandboxPolicyCWD:  "/workspace",
+		CommandCWD:        "/workspace/app",
+		PermissionProfile: profile,
+		UseLandlock:       true,
+		BlockUnixSockets:  true,
+		Command:           []string{"/bin/sh", "-c", "pwd"},
 	})
 	if err != nil {
 		t.Fatalf("BuildLinuxSandboxCommandArgs: %v", err)
@@ -53,7 +52,7 @@ func TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile(t *testing.T) {
 	if !reflect.DeepEqual(args[separator+1:], []string{"/bin/sh", "-c", "pwd"}) {
 		t.Fatalf("command args = %#v", args[separator+1:])
 	}
-	if !stringSliceContains(args, "--use-landlock") || !stringSliceContains(args, "--block-unix-sockets") || !stringSliceContains(args, "--allow-network-for-proxy") {
+	if !stringSliceContains(args, "--use-landlock") || !stringSliceContains(args, "--block-unix-sockets") {
 		t.Fatalf("args missing helper feature flags: %#v", args)
 	}
 }
@@ -65,7 +64,6 @@ func TestParseLinuxSandboxHelperArgs(t *testing.T) {
 		PermissionProfile:    profile,
 		ApplySeccompThenExec: true,
 		BlockUnixSockets:     true,
-		ProxyRouteSpec:       "proxy=127.0.0.1:9999",
 		NoProc:               true,
 		Command:              []string{"true"},
 	})
@@ -79,7 +77,7 @@ func TestParseLinuxSandboxHelperArgs(t *testing.T) {
 	if config.SandboxPolicyCWD != "/workspace" || config.CommandCWD != "/workspace" {
 		t.Fatalf("cwd config = %#v", config)
 	}
-	if !config.ApplySeccompThenExec || !config.BlockUnixSockets || !config.NoProc || config.ProxyRouteSpec != "proxy=127.0.0.1:9999" {
+	if !config.ApplySeccompThenExec || !config.BlockUnixSockets || !config.NoProc {
 		t.Fatalf("feature config = %#v", config)
 	}
 	if !reflect.DeepEqual(config.PermissionProfile, profile) || !reflect.DeepEqual(config.Command, []string{"true"}) {

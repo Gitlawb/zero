@@ -6,6 +6,6 @@ import "errors"
 
 var ErrLandlockUnsupported = errors.New("Landlock is only supported on Linux")
 
-func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string, allowNetworkForProxy bool, proxyRouteSpec string) error {
+func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string) error {
 	return ErrLandlockUnsupported
 }

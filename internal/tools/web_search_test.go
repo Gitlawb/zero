@@ -181,19 +181,15 @@ func TestWebSearchRunWithSandboxAllowsUnderShellNetworkDeny(t *testing.T) {
 	}
 }
 
-func TestWebSearchRunWithSandboxAllowsUnderScopedShellNetworkPolicy(t *testing.T) {
+func TestWebSearchRunWithSandboxAllowsUnderShellNetworkAllow(t *testing.T) {
 	backend := &fakeHostedBackend{results: []searchResult{{Title: "T", URL: "https://x.test"}}}
 	tool := newWebSearchToolWithBackend(backend).(webSearchTool)
 	engine := zeroSandbox.NewEngine(zeroSandbox.EngineOptions{
-		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkScoped, AllowedDomains: []string{"allowed.test"}},
-		Backend: zeroSandbox.Backend{
-			Name: zeroSandbox.BackendMacOSSeatbelt, Available: true,
-			Executable: "/usr/bin/sandbox-exec", ScopedEgress: true,
-		},
+		Policy: zeroSandbox.Policy{Mode: zeroSandbox.ModeEnforce, Network: zeroSandbox.NetworkAllow},
 	})
 	res := tool.RunWithSandbox(context.Background(), map[string]any{"query": "hi"}, engine)
 	if res.Status != StatusOK {
-		t.Fatalf("web_search must run under scoped shell network policy, got %q: %s", res.Status, res.Output)
+		t.Fatalf("web_search must run under shell network allow, got %q: %s", res.Status, res.Output)
 	}
 	if !backend.called {
 		t.Fatal("search backend must be called")
@@ -209,7 +205,7 @@ func TestSameHostRedirectPolicy(t *testing.T) {
 		t.Fatalf("same-host redirect must be allowed, got %v", err)
 	}
 	if err := sameHostRedirectPolicy(cross, []*http.Request{orig}); err == nil {
-		t.Fatal("cross-host redirect must be refused so scoped/deny can't be bypassed via a hop")
+		t.Fatal("cross-host redirect must be refused so host checks cannot be bypassed via a hop")
 	}
 	// A same-host HTTPS→HTTP downgrade must be refused (it would leak the query and
 	// bearer token over plaintext).

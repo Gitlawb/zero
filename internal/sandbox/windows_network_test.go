@@ -16,32 +16,22 @@ func TestValidateWindowsNetworkPolicyAllowsNativeModes(t *testing.T) {
 	}
 }
 
-func TestValidateWindowsNetworkPolicyFailsClosedForScoped(t *testing.T) {
-	err := ValidateWindowsNetworkPolicy(NetworkPolicy{Mode: NetworkScoped})
-	if !errors.Is(err, ErrWindowsScopedNetworkUnavailable) {
-		t.Fatalf("ValidateWindowsNetworkPolicy(scoped) = %v, want scoped unavailable", err)
+func TestValidateWindowsNetworkPolicyRejectsMissingMode(t *testing.T) {
+	err := ValidateWindowsNetworkPolicy(NetworkPolicy{})
+	if !errors.Is(err, ErrWindowsNetworkEnforcementUnavailable) {
+		t.Fatalf("ValidateWindowsNetworkPolicy(empty) = %v, want enforcement unavailable", err)
 	}
-	if !strings.Contains(err.Error(), string(NetworkScoped)) {
-		t.Fatalf("ValidateWindowsNetworkPolicy(scoped) error = %q, want mode detail", err)
+	if !strings.Contains(err.Error(), "missing network mode") {
+		t.Fatalf("ValidateWindowsNetworkPolicy(empty) error = %q, want missing mode detail", err)
 	}
 }
 
-func TestWindowsNetworkPolicyHashNormalizesDomainOrder(t *testing.T) {
-	left, err := WindowsNetworkPolicyHash(NetworkPolicy{
-		Mode:           NetworkScoped,
-		AllowedDomains: []string{"API.Example.com", "example.com"},
-		DeniedDomains:  []string{"blocked.example.com"},
-		ProxyRequired:  true,
-	})
+func TestWindowsNetworkPolicyHashIsStableForMode(t *testing.T) {
+	left, err := WindowsNetworkPolicyHash(NetworkPolicy{Mode: NetworkDeny})
 	if err != nil {
 		t.Fatalf("WindowsNetworkPolicyHash left: %v", err)
 	}
-	right, err := WindowsNetworkPolicyHash(NetworkPolicy{
-		Mode:           NetworkScoped,
-		AllowedDomains: []string{"example.com", "api.example.com"},
-		DeniedDomains:  []string{"blocked.example.com"},
-		ProxyRequired:  true,
-	})
+	right, err := WindowsNetworkPolicyHash(NetworkPolicy{Mode: NetworkDeny})
 	if err != nil {
 		t.Fatalf("WindowsNetworkPolicyHash right: %v", err)
 	}
@@ -95,27 +85,6 @@ func TestBuildWindowsNetworkPlanForDenyUsesCapabilityIdentity(t *testing.T) {
 	}
 	if len(plan.Filters) != 2 {
 		t.Fatalf("network filters = %#v, want v4/v6 connect filters", plan.Filters)
-	}
-}
-
-func TestBuildWindowsNetworkPlanFailsClosedForScoped(t *testing.T) {
-	root := t.TempDir()
-	config := WindowsSandboxCommandConfig{
-		SandboxHome:    t.TempDir(),
-		CommandCWD:     root,
-		WorkspaceRoots: []string{root},
-		PermissionProfile: PermissionProfile{
-			FileSystem: FileSystemPolicy{
-				Kind:       FileSystemRestricted,
-				ReadRoots:  []string{root},
-				WriteRoots: []WritableRoot{{Root: root}},
-			},
-			Network: NetworkPolicy{Mode: NetworkScoped, AllowedDomains: []string{"example.com"}, ProxyRequired: true},
-		},
-	}
-	_, err := BuildWindowsNetworkPlan(config)
-	if !errors.Is(err, ErrWindowsScopedNetworkUnavailable) {
-		t.Fatalf("BuildWindowsNetworkPlan scoped = %v, want scoped unavailable", err)
 	}
 }
 

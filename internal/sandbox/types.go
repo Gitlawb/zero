@@ -76,11 +76,6 @@ const (
 const (
 	NetworkDeny  NetworkMode = "deny"
 	NetworkAllow NetworkMode = "allow"
-	// NetworkScoped is the middle ground between deny and allow: the sandboxed
-	// process may reach only the policy's AllowedDomains (minus DeniedDomains) and
-	// nothing else, routed through a local filtering egress proxy. An empty
-	// effective allowlist makes it behave exactly like NetworkDeny (fail closed).
-	NetworkScoped NetworkMode = "scoped"
 )
 
 const (
@@ -153,12 +148,6 @@ type Policy struct {
 	Mode             PolicyMode  `json:"mode"`
 	Network          NetworkMode `json:"network"`
 	EnforceWorkspace bool        `json:"enforceWorkspace"`
-	// AllowedDomains / DeniedDomains apply only when Network is NetworkScoped:
-	// the sandboxed process may reach the allowed domains (exact host or any
-	// subdomain) minus the denied ones. They are ignored for NetworkAllow and
-	// NetworkDeny so existing policies keep their exact behaviour.
-	AllowedDomains []string `json:"allowedDomains,omitempty"`
-	DeniedDomains  []string `json:"deniedDomains,omitempty"`
 	// BlockUnixSockets, when true on the Linux helper backend, installs a
 	// best-effort seccomp filter in the inner helper stage that denies AF_UNIX
 	// socket creation. It is an extra hardening layer over the native sandbox and
@@ -192,19 +181,6 @@ type Policy struct {
 	DenyRead   []string `json:"denyRead,omitempty"`
 	AllowWrite []string `json:"allowWrite,omitempty"`
 	DenyWrite  []string `json:"denyWrite,omitempty"`
-	// InspectTLS, when true, lets the in-process scoped-egress proxy TERMINATE TLS
-	// (using a locally generated, ephemeral CA) so it can enforce the per-host
-	// allow/deny rules on the DECRYPTED request Host — today a CONNECT tunnel only
-	// reveals the host once. OFF by default: the proxy stays a pure CONNECT
-	// passthrough, byte-for-byte unchanged. SECURITY/TRUST: enabling this means the
-	// sandbox can read the plaintext of the sandboxed process's TLS traffic. The
-	// MITM only re-signs toward the sandboxed client; the upstream connection is
-	// ALWAYS validated against the system roots (never InsecureSkipVerify), and the
-	// decrypted Host still passes the SAME authorize()/domainAllowed() gate — MITM
-	// widens visibility, never authority. The generated CA's public cert is written
-	// to the sandbox runtime dir and surfaced via ZERO_SANDBOX_CA_CERT so the
-	// sandboxed client can trust it.
-	InspectTLS bool `json:"inspectTLS,omitempty"`
 }
 
 type Request struct {

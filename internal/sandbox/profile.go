@@ -36,10 +36,7 @@ type WritableRoot struct {
 }
 
 type NetworkPolicy struct {
-	Mode           NetworkMode `json:"mode"`
-	AllowedDomains []string    `json:"allowedDomains,omitempty"`
-	DeniedDomains  []string    `json:"deniedDomains,omitempty"`
-	ProxyRequired  bool        `json:"proxyRequired,omitempty"`
+	Mode NetworkMode `json:"mode"`
 }
 
 var protectedMetadataNames = []string{".git", ".zero", ".agents"}
@@ -81,12 +78,7 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
 		},
-		Network: NetworkPolicy{
-			Mode:           effectiveNetwork(policy),
-			AllowedDomains: normalizeDomains(policy.AllowedDomains),
-			DeniedDomains:  normalizeDomains(policy.DeniedDomains),
-			ProxyRequired:  effectiveNetwork(policy) == NetworkScoped,
-		},
+		Network: NetworkPolicy{Mode: policy.Network},
 	}
 }
 
@@ -94,10 +86,7 @@ func (profile PermissionProfile) RequiresPlatformSandbox() bool {
 	if profile.FileSystem.Kind == FileSystemRestricted {
 		return true
 	}
-	if profile.Network.ProxyRequired {
-		return true
-	}
-	return profile.Network.Mode == NetworkDeny || profile.Network.Mode == NetworkScoped
+	return profile.Network.Mode == NetworkDeny
 }
 
 func permissionProfileRoots(workspaceRoot string, scope *Scope) []string {

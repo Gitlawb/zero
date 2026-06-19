@@ -214,7 +214,7 @@ func resolvedTestPath(t *testing.T, path string) string {
 }
 
 func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
+	profile := sandboxExecProfile([]string{"/ws", "/extra root"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 	if !strings.Contains(profile, "(allow file-write*") {
 		t.Fatalf("profile missing file-write rule:\n%s", profile)
 	}
@@ -244,7 +244,7 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 		},
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
-	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "", "", "")
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
 	for _, want := range []string{
 		`(subpath "/read-root")`,
 		`(subpath "/write-root")`,
@@ -265,7 +265,7 @@ func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 }
 
 func TestSeatbeltProfileIncludesRuntimeStartupAllowances(t *testing.T) {
-	sbpl := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
+	sbpl := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 	for _, want := range []string{
 		`(allow file-map-executable`,
 		`(subpath "/System/Library/Frameworks")`,
@@ -335,7 +335,7 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 		},
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
-	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "", "", "")
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
 	normalizedSecretRead := sandboxProfileString(normalizeProfilePath("/repo/secret-read"))
 	normalizedSecretWrite := sandboxProfileString(normalizeProfilePath("/repo/secret-write"))
 	denySecretReadRule := `(deny file-read* (subpath "` + normalizedSecretRead + `"))`
@@ -364,7 +364,7 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 }
 
 func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
-	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
+	off := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 	if strings.Contains(off, "with message") {
 		t.Fatalf("denials must not be tagged when monitoring is off:\n%s", off)
 	}
@@ -372,7 +372,7 @@ func TestSandboxExecProfileTagsDenialsWhenMonitoring(t *testing.T) {
 		t.Fatalf("profile missing the plain default-deny:\n%s", off)
 	}
 
-	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "", "", "run-tag-123")
+	on := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true, MonitorDenials: true}, "run-tag-123")
 	if !strings.Contains(on, `(deny default (with message "run-tag-123"))`) {
 		t.Fatalf("denials must be tagged when monitoring is on:\n%s", on)
 	}
@@ -384,8 +384,8 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 	spec := CommandSpec{Name: "/bin/sh", Args: []string{"-c", "true"}, Dir: "/ws"}
 	profile := seatbeltCompatibilityPermissionProfile([]string{"/ws"}, policy)
 
-	p1 := seatbeltCommandPlanWithProfile(spec, "/ws", profile, policy, backend, nil)
-	p2 := seatbeltCommandPlanWithProfile(spec, "/ws", profile, policy, backend, nil)
+	p1 := seatbeltCommandPlanWithProfile(spec, "/ws", profile, policy, backend)
+	p2 := seatbeltCommandPlanWithProfile(spec, "/ws", profile, policy, backend)
 	if p1.MonitorTag == "" || p2.MonitorTag == "" {
 		t.Fatalf("monitored plans must carry a denial tag: %q %q", p1.MonitorTag, p2.MonitorTag)
 	}
@@ -399,14 +399,14 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 	}
 
 	offPolicy := Policy{Mode: ModeEnforce, EnforceWorkspace: true}
-	off := seatbeltCommandPlanWithProfile(spec, "/ws", seatbeltCompatibilityPermissionProfile([]string{"/ws"}, offPolicy), offPolicy, backend, nil)
+	off := seatbeltCommandPlanWithProfile(spec, "/ws", seatbeltCompatibilityPermissionProfile([]string{"/ws"}, offPolicy), offPolicy, backend)
 	if off.MonitorTag != "" {
 		t.Fatalf("a non-monitored plan must carry no tag, got %q", off.MonitorTag)
 	}
 }
 
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
-	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "", "", "")
+	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 
 	// Signalling own process group lets a sandboxed script kill the children it
 	// spawns; without it seatbelt denies kill() with "Operation not permitted".
@@ -507,70 +507,4 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
 	}
 	assertArgsContainSequence(t, bwrapArgs, "--chdir", resolvedExtra)
-}
-
-func TestProxyEnv(t *testing.T) {
-	env := map[string]string{}
-	for _, kv := range ProxyEnv("127.0.0.1:8899") {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			env[kv[:i]] = kv[i+1:]
-		}
-	}
-	const proxyURL = "http://127.0.0.1:8899"
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"} {
-		if env[key] != proxyURL {
-			t.Fatalf("ProxyEnv[%s] = %q, want %q", key, env[key], proxyURL)
-		}
-		if lower := strings.ToLower(key); env[lower] != proxyURL {
-			t.Fatalf("ProxyEnv missing lowercase %s=%q", lower, proxyURL)
-		}
-	}
-	// Loopback must bypass the proxy so the proxy itself is reachable directly.
-	if !strings.Contains(env["NO_PROXY"], "127.0.0.1") || !strings.Contains(env["no_proxy"], "127.0.0.1") {
-		t.Fatalf("ProxyEnv NO_PROXY must exclude loopback, got %q/%q", env["NO_PROXY"], env["no_proxy"])
-	}
-}
-
-func TestProxyEnvWithSocks(t *testing.T) {
-	env := map[string]string{}
-	for _, kv := range ProxyEnvWithSocks("127.0.0.1:8899", "127.0.0.1:1080") {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			env[kv[:i]] = kv[i+1:]
-		}
-	}
-	// HTTP_PROXY/HTTPS_PROXY stay on the HTTP listener...
-	const httpURL = "http://127.0.0.1:8899"
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
-		if env[key] != httpURL {
-			t.Fatalf("ProxyEnvWithSocks[%s] = %q, want %q", key, env[key], httpURL)
-		}
-	}
-	// ...while ALL_PROXY/all_proxy point at the SOCKS5 front-end.
-	const socksURL = "socks5://127.0.0.1:1080"
-	for _, key := range []string{"ALL_PROXY", "all_proxy"} {
-		if env[key] != socksURL {
-			t.Fatalf("ProxyEnvWithSocks[%s] = %q, want %q", key, env[key], socksURL)
-		}
-	}
-	if !strings.Contains(env["NO_PROXY"], "127.0.0.1") {
-		t.Fatalf("ProxyEnvWithSocks NO_PROXY must exclude loopback, got %q", env["NO_PROXY"])
-	}
-}
-
-// TestProxyEnvWithSocksEmptyFallsBackToHTTP verifies the SOCKS upgrade is purely
-// additive: with no SOCKS address, ALL_PROXY falls back to the HTTP proxy exactly
-// as the legacy ProxyEnv produced, never weakening the default.
-func TestProxyEnvWithSocksEmptyFallsBackToHTTP(t *testing.T) {
-	env := map[string]string{}
-	for _, kv := range ProxyEnvWithSocks("127.0.0.1:8899", "") {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			env[kv[:i]] = kv[i+1:]
-		}
-	}
-	const httpURL = "http://127.0.0.1:8899"
-	for _, key := range []string{"ALL_PROXY", "all_proxy"} {
-		if env[key] != httpURL {
-			t.Fatalf("ProxyEnvWithSocks(empty socks)[%s] = %q, want HTTP fallback %q", key, env[key], httpURL)
-		}
-	}
 }

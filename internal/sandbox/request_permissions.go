@@ -335,8 +335,6 @@ func (engine *Engine) effectivePolicy(policy Policy) Policy {
 func applyRequestPermissionProfile(policy Policy, profile RequestPermissionProfile) Policy {
 	if profile.Network != nil && profile.Network.Enabled != nil && *profile.Network.Enabled {
 		policy.Network = NetworkAllow
-		policy.AllowedDomains = nil
-		policy.DeniedDomains = nil
 	}
 	if profile.FileSystem != nil {
 		policy.AllowRead = dedupeStrings(append(policy.AllowRead, profile.FileSystem.Read...))

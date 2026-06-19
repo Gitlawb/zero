@@ -207,8 +207,5 @@ func inferBackendCapabilities(backend Backend) Backend {
 			backend.NativeIsolation = true
 		}
 	}
-	if backend.Name == BackendMacOSSeatbelt && backend.Available && backend.Executable != "" {
-		backend.ScopedEgress = true
-	}
 	return backend
 }

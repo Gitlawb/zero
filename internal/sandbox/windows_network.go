@@ -11,7 +11,6 @@ import (
 )
 
 var ErrWindowsNetworkEnforcementUnavailable = errors.New("Windows sandbox network enforcement is not available")
-var ErrWindowsScopedNetworkUnavailable = errors.New("Windows sandbox scoped network enforcement is not available")
 
 const (
 	windowsWFPProviderKey = "0c3ee192-413b-4029-8a9e-991ea237ee91"
@@ -37,8 +36,6 @@ func ValidateWindowsNetworkPolicy(network NetworkPolicy) error {
 	switch network.Mode {
 	case NetworkAllow, NetworkDeny:
 		return nil
-	case NetworkScoped:
-		return fmt.Errorf("%w for mode %q", ErrWindowsScopedNetworkUnavailable, network.Mode)
 	case "":
 		return fmt.Errorf("%w: missing network mode", ErrWindowsNetworkEnforcementUnavailable)
 	default:
@@ -70,8 +67,6 @@ func BuildWindowsNetworkPlan(config WindowsSandboxCommandConfig) (WindowsNetwork
 			IdentitySIDs: identitySIDs,
 			Filters:      windowsDenyWFPFilterSpecs(),
 		}, nil
-	case NetworkScoped:
-		return WindowsNetworkPlan{}, fmt.Errorf("%w for mode %q", ErrWindowsScopedNetworkUnavailable, network.Mode)
 	case "":
 		return WindowsNetworkPlan{}, fmt.Errorf("%w: missing network mode", ErrWindowsNetworkEnforcementUnavailable)
 	default:
@@ -99,21 +94,9 @@ func WindowsNetworkPlanHash(plan WindowsNetworkPlan) (string, error) {
 }
 
 func WindowsNetworkPolicyHash(network NetworkPolicy) (string, error) {
-	allowed := normalizeDomains(network.AllowedDomains)
-	denied := normalizeDomains(network.DeniedDomains)
-	sort.Strings(allowed)
-	sort.Strings(denied)
 	canonical := struct {
-		Mode           NetworkMode `json:"mode"`
-		AllowedDomains []string    `json:"allowedDomains,omitempty"`
-		DeniedDomains  []string    `json:"deniedDomains,omitempty"`
-		ProxyRequired  bool        `json:"proxyRequired,omitempty"`
-	}{
-		Mode:           network.Mode,
-		AllowedDomains: allowed,
-		DeniedDomains:  denied,
-		ProxyRequired:  network.ProxyRequired,
-	}
+		Mode NetworkMode `json:"mode"`
+	}{Mode: network.Mode}
 	bytes, err := json.Marshal(canonical)
 	if err != nil {
 		return "", fmt.Errorf("marshal windows network policy hash input: %w", err)

@@ -45,12 +45,12 @@ func TestParseWSL(t *testing.T) {
 }
 
 func wslBackendForTest() Backend {
-	return Backend{Name: BackendWSL, Platform: "linux", Fallback: true, ProxyEgress: true}
+	return Backend{Name: BackendWSL, Platform: "linux", Fallback: true}
 }
 
 func TestWSLPlanFailsClosedWithoutPolicyOnly(t *testing.T) {
 	root := t.TempDir()
-	policy := scopedPolicy([]string{"github.com"}, nil)
+	policy := DefaultPolicy()
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: wslBackendForTest()})
 
 	_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: root})

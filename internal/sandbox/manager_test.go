@@ -20,9 +20,6 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 		t.Fatalf("NewScope: %v", err)
 	}
 	policy := DefaultPolicy()
-	policy.Network = NetworkScoped
-	policy.AllowedDomains = []string{"example.com", "api.example.com"}
-	policy.DeniedDomains = []string{"blocked.example.com"}
 	policy.DenyRead = []string{denyRead}
 	policy.DenyWrite = []string{denyWrite}
 
@@ -42,11 +39,11 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	if len(profile.FileSystem.DenyRead) != 1 || len(profile.FileSystem.DenyWrite) != 1 {
 		t.Fatalf("deny paths = %#v / %#v, want one each", profile.FileSystem.DenyRead, profile.FileSystem.DenyWrite)
 	}
-	if profile.Network.Mode != NetworkScoped || !profile.Network.ProxyRequired {
-		t.Fatalf("network profile = %#v, want scoped proxy-required", profile.Network)
+	if profile.Network.Mode != NetworkDeny {
+		t.Fatalf("network profile = %#v, want deny", profile.Network)
 	}
 	if !profile.RequiresPlatformSandbox() {
-		t.Fatal("workspace-write scoped profile must require a platform sandbox")
+		t.Fatal("workspace-write profile must require a platform sandbox")
 	}
 }
 

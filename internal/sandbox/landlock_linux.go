@@ -16,8 +16,8 @@ import (
 // ApplyLandlockFilesystemProfile applies the helper's fallback Linux filesystem
 // sandbox to the current process. The caller must exec the final command after
 // this returns.
-func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string, allowNetworkForProxy bool, proxyRouteSpec string) error {
-	if err := validateLandlockProfile(profile, allowNetworkForProxy, proxyRouteSpec); err != nil {
+func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string) error {
+	if err := validateLandlockProfile(profile); err != nil {
 		return err
 	}
 	needsFilesystemRules := profile.FileSystem.Kind != FileSystemUnrestricted
@@ -43,13 +43,7 @@ func ApplyLandlockFilesystemProfile(profile PermissionProfile, cwd string, allow
 	return installLandlockFilesystemRules(writeRoots)
 }
 
-func validateLandlockProfile(profile PermissionProfile, allowNetworkForProxy bool, proxyRouteSpec string) error {
-	if allowNetworkForProxy || strings.TrimSpace(proxyRouteSpec) != "" {
-		return errors.New("proxy-routed networking requires the bubblewrap helper mode")
-	}
-	if profile.Network.ProxyRequired || profile.Network.Mode == NetworkScoped {
-		return errors.New("scoped networking requires a backend with proxy routing support")
-	}
+func validateLandlockProfile(profile PermissionProfile) error {
 	fs := profile.FileSystem
 	if fs.Kind != FileSystemRestricted {
 		return nil

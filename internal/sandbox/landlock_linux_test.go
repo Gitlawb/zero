@@ -20,29 +20,15 @@ func TestValidateLandlockProfileRejectsRestrictedReadRoots(t *testing.T) {
 		},
 		Network: NetworkPolicy{Mode: NetworkAllow},
 	}
-	err := validateLandlockProfile(profile, false, "")
+	err := validateLandlockProfile(profile)
 	if err == nil || !strings.Contains(err.Error(), "restricted read roots") {
 		t.Fatalf("validateLandlockProfile error = %v, want restricted read roots rejection", err)
 	}
 }
 
-func TestValidateLandlockProfileRejectsScopedAndProxyNetworking(t *testing.T) {
-	profile := landlockTestProfile(t.TempDir(), NetworkPolicy{Mode: NetworkScoped, ProxyRequired: true})
-	if err := validateLandlockProfile(profile, false, ""); err == nil || !strings.Contains(err.Error(), "scoped networking") {
-		t.Fatalf("validateLandlockProfile scoped error = %v", err)
-	}
-	profile.Network = NetworkPolicy{Mode: NetworkAllow}
-	if err := validateLandlockProfile(profile, true, ""); err == nil || !strings.Contains(err.Error(), "proxy-routed networking") {
-		t.Fatalf("validateLandlockProfile proxy error = %v", err)
-	}
-	if err := validateLandlockProfile(profile, false, "proxy=127.0.0.1:1"); err == nil || !strings.Contains(err.Error(), "proxy-routed networking") {
-		t.Fatalf("validateLandlockProfile proxy spec error = %v", err)
-	}
-}
-
 func TestValidateLandlockProfileAllowsNetworkDeny(t *testing.T) {
 	profile := landlockTestProfile(t.TempDir(), NetworkPolicy{Mode: NetworkDeny})
-	if err := validateLandlockProfile(profile, false, ""); err != nil {
+	if err := validateLandlockProfile(profile); err != nil {
 		t.Fatalf("validateLandlockProfile network deny: %v", err)
 	}
 }
@@ -50,17 +36,17 @@ func TestValidateLandlockProfileAllowsNetworkDeny(t *testing.T) {
 func TestValidateLandlockProfileRejectsUnsupportedFilesystemCarveouts(t *testing.T) {
 	profile := landlockTestProfile(t.TempDir(), NetworkPolicy{Mode: NetworkAllow})
 	profile.FileSystem.DenyRead = []string{t.TempDir()}
-	if err := validateLandlockProfile(profile, false, ""); err == nil || !strings.Contains(err.Error(), "deny-read") {
+	if err := validateLandlockProfile(profile); err == nil || !strings.Contains(err.Error(), "deny-read") {
 		t.Fatalf("validateLandlockProfile deny-read error = %v", err)
 	}
 	profile = landlockTestProfile(t.TempDir(), NetworkPolicy{Mode: NetworkAllow})
 	profile.FileSystem.DenyWrite = []string{t.TempDir()}
-	if err := validateLandlockProfile(profile, false, ""); err == nil || !strings.Contains(err.Error(), "deny-write") {
+	if err := validateLandlockProfile(profile); err == nil || !strings.Contains(err.Error(), "deny-write") {
 		t.Fatalf("validateLandlockProfile deny-write error = %v", err)
 	}
 	profile = landlockTestProfile(t.TempDir(), NetworkPolicy{Mode: NetworkAllow})
 	profile.FileSystem.WriteRoots[0].ProtectedMetadataNames = []string{".git"}
-	if err := validateLandlockProfile(profile, false, ""); err == nil || !strings.Contains(err.Error(), "read-only write-root subpaths") {
+	if err := validateLandlockProfile(profile); err == nil || !strings.Contains(err.Error(), "read-only write-root subpaths") {
 		t.Fatalf("validateLandlockProfile metadata error = %v", err)
 	}
 }

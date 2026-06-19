@@ -124,7 +124,7 @@ func TestPolicyOnlyFailClosedForTargetPlatforms(t *testing.T) {
 		},
 		{
 			name:    "wsl",
-			backend: Backend{Name: BackendWSL, Platform: "linux", Fallback: true, ProxyEgress: true},
+			backend: Backend{Name: BackendWSL, Platform: "linux", Fallback: true},
 		},
 	}
 

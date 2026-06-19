@@ -58,9 +58,8 @@ type WebhookConfig struct {
 	// Links are optional labeled URLs attached to every emitted payload.
 	Links []WebhookLink
 	// Client is the HTTP client used for delivery. When nil a client with a
-	// conservative timeout is used; its default transport honors HTTP(S)_PROXY,
-	// so a sandboxed run's scoped-egress proxy (and any deny of the webhook host)
-	// is respected automatically.
+	// conservative timeout is used; its default transport honors HTTP(S)_PROXY
+	// when a proxy is configured.
 	Client *http.Client
 	// Logf records a single line per failed delivery. Lines are passed through
 	// the repo redaction before being written, so a token in the URL or message

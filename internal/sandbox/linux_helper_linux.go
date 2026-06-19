@@ -64,10 +64,6 @@ func runLinuxSandboxInnerStage(config LinuxSandboxHelperConfig, stderr io.Writer
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": inner seccomp stage is incompatible with Landlock mode")
 		return 2
 	}
-	if config.AllowNetworkForProxy && config.ProxyRouteSpec == "" {
-		fmt.Fprintln(stderr, LinuxSandboxHelperName+": proxy networking requires --proxy-route-spec")
-		return 125
-	}
 	if config.BlockUnixSockets {
 		if err := ApplyUnixSocketBlock(); err != nil {
 			fmt.Fprintln(stderr, LinuxSandboxHelperName+": warning: "+err.Error()+"; running without the Unix-socket filter")
@@ -86,7 +82,7 @@ func runLinuxSandboxInnerStage(config LinuxSandboxHelperConfig, stderr io.Writer
 }
 
 func runLinuxSandboxLandlockStage(config LinuxSandboxHelperConfig, stderr io.Writer) int {
-	if err := ApplyLandlockFilesystemProfile(config.PermissionProfile, config.CommandCWD, config.AllowNetworkForProxy, config.ProxyRouteSpec); err != nil {
+	if err := ApplyLandlockFilesystemProfile(config.PermissionProfile, config.CommandCWD); err != nil {
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": apply Landlock: "+err.Error())
 		return 125
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,87 +54,17 @@ type CommandPlan struct {
 	// policy-only fallback noting that native isolation was unavailable. Surfaced to
 	// the operator; never affects enforcement.
 	Notes []string `json:"notes,omitempty"`
-	// cleanup releases resources tied to the plan's lifetime — currently the
-	// scoped-egress proxy, which must outlive the command run and be shut down
-	// afterwards. It is never serialized; callers invoke it via Cleanup() once the
-	// command has finished.
+	// cleanup releases resources tied to the plan's lifetime. It is never
+	// serialized; callers invoke it via Cleanup() once the command has finished.
 	cleanup func()
 }
 
-// Cleanup releases any resources the plan holds (e.g. a scoped-egress proxy). It
-// is safe to call on a zero plan and to call more than once. Callers that run a
-// plan's command must defer Cleanup so a started proxy does not leak.
+// Cleanup releases any resources the plan holds. It is safe to call on a zero
+// plan and to call more than once.
 func (plan CommandPlan) Cleanup() {
 	if plan.cleanup != nil {
 		plan.cleanup()
 	}
-}
-
-// startEgressProxy is the constructor for the scoped-egress proxy, kept as a
-// package var so tests can force a start failure and assert the build fails
-// closed (never degrading to open network).
-var startEgressProxy = newEgressProxy
-
-// effectiveNetwork resolves the network mode actually enforced for a policy.
-// NetworkScoped with no usable allowlisted domains collapses to NetworkDeny so
-// scoped egress fails closed; NetworkAllow and NetworkDeny are returned as-is.
-func effectiveNetwork(policy Policy) NetworkMode {
-	if policy.Network == NetworkScoped && len(normalizeDomains(policy.AllowedDomains)) == 0 {
-		return NetworkDeny
-	}
-	return policy.Network
-}
-
-// ProxyEnv returns the proxy environment variables that route a process's
-// HTTP(S) traffic through the local filtering proxy at addr. It is the single
-// source of truth for proxy-env injection so every network-capable child (the
-// sandboxed shell today; MCP spawns and others when wired to a session proxy)
-// uses identical settings. Both upper- and lower-case forms are set because
-// different clients read different casings; loopback is excluded via NO_PROXY so
-// the proxy itself is reached directly.
-//
-// Note: clients that honor these vars include Go's default HTTP transport (so the
-// web_fetch tool, which clones http.DefaultTransport, already routes through a
-// configured proxy) and MCP child processes (mergeProcessEnv inherits os.Environ).
-// Routing those through a SCOPED proxy therefore only needs a session-level proxy
-// whose address is exposed to the agent process — but that must allowlist the
-// active LLM provider's domain first, or the agent's own provider calls would be
-// blocked. That session-proxy lifecycle is intentionally not wired here.
-func ProxyEnv(addr string) []string {
-	proxyURL := "http://" + addr
-	return []string{
-		"HTTP_PROXY=" + proxyURL,
-		"HTTPS_PROXY=" + proxyURL,
-		"ALL_PROXY=" + proxyURL,
-		"http_proxy=" + proxyURL,
-		"https_proxy=" + proxyURL,
-		"all_proxy=" + proxyURL,
-		"NO_PROXY=localhost,127.0.0.1",
-		"no_proxy=localhost,127.0.0.1",
-	}
-}
-
-// ProxyEnvWithSocks is the SOCKS-aware form of ProxyEnv built ON TOP of it:
-// HTTP_PROXY/HTTPS_PROXY stay on the HTTP listener (httpAddr) for HTTP(S)-aware
-// clients, while ALL_PROXY/all_proxy are re-pointed at the SOCKS5 front-end
-// (socksAddr) so a client that honors ALL_PROXY tunnels arbitrary TCP through the
-// same allow/deny gate. When socksAddr is empty it returns exactly ProxyEnv's
-// output, so the SOCKS upgrade is purely additive and never weakens the default.
-func ProxyEnvWithSocks(httpAddr, socksAddr string) []string {
-	env := ProxyEnv(httpAddr)
-	if socksAddr == "" {
-		return env
-	}
-	socksURL := "socks5://" + socksAddr
-	for i, kv := range env {
-		switch {
-		case strings.HasPrefix(kv, "ALL_PROXY="):
-			env[i] = "ALL_PROXY=" + socksURL
-		case strings.HasPrefix(kv, "all_proxy="):
-			env[i] = "all_proxy=" + socksURL
-		}
-	}
-	return env
 }
 
 func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*exec.Cmd, CommandPlan, error) {
@@ -241,11 +170,7 @@ func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy
 		}
 	case BackendMacOSSeatbelt:
 		if backend.Available && backend.Executable != "" {
-			egress, err := startScopedEgress(policy, backend)
-			if err != nil {
-				return CommandPlan{}, err
-			}
-			return withSandboxExecutionMetadata(seatbeltCommandPlan(execRequest, policy, backend, egress), execRequest), nil
+			return withSandboxExecutionMetadata(seatbeltCommandPlan(execRequest, policy, backend), execRequest), nil
 		}
 	case BackendWindowsRestrictedToken:
 		if backend.Available && backend.Executable != "" {
@@ -312,128 +237,6 @@ func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequ
 	return plan
 }
 
-// wslCommandPlan builds the WSL policy-only fallback plan: the command runs
-// DIRECTLY (no native wrap, since bubblewrap is unavailable under WSL) but with
-// the sandbox env markers (ZERO_SANDBOXED=1, ZERO_SANDBOX_BACKEND=wsl) and, when
-// a scoped-egress proxy was started, the proxy env so well-behaved clients route
-// through the allow/deny gate. It carries a least-privilege downgrade note.
-func wslCommandPlan(spec CommandSpec, workspaceRoot string, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
-	// The WSL fallback runs the command DIRECTLY (no native wrap), so it inherits
-	// the caller's environment like the generic policy-only runner; the sandbox
-	// markers are appended last so they cannot be shadowed by the caller's env.
-	var env []string
-	if spec.Env != nil {
-		env = cloneStrings(spec.Env)
-	} else {
-		env = append(env, os.Environ()...)
-	}
-	env = append(env,
-		EnvSandboxBackend+"="+string(BackendWSL),
-		"ZERO_SANDBOX_NETWORK="+string(policy.Network),
-		EnvSandboxed+"=1",
-	)
-	note := "WSL: native process isolation (bubblewrap) is unavailable; downgraded to the policy-only runner " +
-		"(least privilege). The engine still enforces the full policy."
-	if egress != nil {
-		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
-		env = appendCACertEnv(env, egress)
-		note = "WSL: native process isolation (bubblewrap) is unavailable; downgraded to the policy-only runner " +
-			"with proxy egress (least privilege). The engine still enforces the full policy."
-	}
-	plan := CommandPlan{
-		Backend:           backend,
-		TargetBackend:     backend.TargetBackend(),
-		WorkspaceRoot:     workspaceRoot,
-		Policy:            policy,
-		Wrapped:           false,
-		SandboxEnvMarkers: backend.SandboxEnvMarkers(policy),
-		EnforcementLevel:  backend.EnforcementLevel(policy),
-		DowngradeReason:   note,
-		Name:              spec.Name,
-		Args:              cloneStrings(spec.Args),
-		Dir:               spec.Dir,
-		Env:               env,
-		Notes:             []string{note},
-	}
-	if egress != nil {
-		plan.cleanup = egress.cleanup
-	}
-	return plan
-}
-
-// scopedEgress holds the address of a started scoped-egress proxy and the
-// cleanup that shuts it down. A nil *scopedEgress means scoped egress is not in
-// effect for this command (the network mode is allow or deny-equivalent).
-type scopedEgress struct {
-	addr string
-	// socksAddr is the loopback address of the proxy's SOCKS5 front-end, used to
-	// set ALL_PROXY=socks5://<socksAddr>. Empty when the proxy exposes no SOCKS
-	// listener, in which case ALL_PROXY falls back to the HTTP proxy.
-	socksAddr string
-	// caCertPath is the path to the MITM CA's public cert (PEM), set only when
-	// Policy.InspectTLS started a TLS-terminating proxy. Surfaced to the sandboxed
-	// client via ZERO_SANDBOX_CA_CERT so it can trust the minted leaves.
-	caCertPath string
-	cleanup    func()
-}
-
-// EnvCACert is the env var pointing the sandboxed client at the MITM CA's public
-// cert so it can trust the proxy's minted leaf certificates (only set when
-// Policy.InspectTLS is on).
-const EnvCACert = "ZERO_SANDBOX_CA_CERT"
-
-// appendCACertEnv adds ZERO_SANDBOX_CA_CERT when the egress proxy is terminating
-// TLS (InspectTLS). It is a no-op for a plain passthrough proxy.
-func appendCACertEnv(env []string, egress *scopedEgress) []string {
-	if egress == nil || egress.caCertPath == "" {
-		return env
-	}
-	return append(env, EnvCACert+"="+egress.caCertPath)
-}
-
-// startScopedEgress starts the local filtering proxy when the policy's effective
-// network mode is NetworkScoped AND the backend can actually route through it,
-// returning its address. It fails closed: a proxy-start error is returned so the
-// build aborts rather than degrading to an unproxied (open) plan. A non-scoped or
-// empty-allowlist policy, or a backend that cannot enforce scoped egress (e.g.
-// bubblewrap's isolated netns), returns (nil, nil); the caller then wires the
-// command with the backend's deny-equivalent network isolation.
-func startScopedEgress(policy Policy, backend Backend) (*scopedEgress, error) {
-	if effectiveNetwork(policy) != NetworkScoped {
-		return nil, nil
-	}
-	if !backend.EnforcesScopedEgress() {
-		return nil, nil
-	}
-	proxy, err := startEgressProxy(egressOptions{
-		Allowed:    policy.AllowedDomains,
-		Denied:     policy.DeniedDomains,
-		InspectTLS: policy.InspectTLS,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("scoped egress unavailable, denying network: %w", err)
-	}
-	se := &scopedEgress{addr: proxy.Addr(), socksAddr: proxy.SocksAddr(), cleanup: func() { _ = proxy.Close() }}
-	if policy.InspectTLS {
-		// Write the MITM CA's PUBLIC cert so the sandboxed client can trust the
-		// minted leaves; surface it via ZERO_SANDBOX_CA_CERT and clean it up with
-		// the proxy. Reuses no new bind path: sandbox-exec already allows file-read,
-		// and the WSL policy-only runner shares the host filesystem.
-		caPath, werr := writeMITMCAFile(proxy.CACertPEM())
-		if werr != nil {
-			_ = proxy.Close()
-			return nil, werr
-		}
-		se.caCertPath = caPath
-		base := se.cleanup
-		se.cleanup = func() {
-			base()
-			_ = os.Remove(caPath)
-		}
-	}
-	return se, nil
-}
-
 func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspaceRoot string) CommandPlan {
 	return CommandPlan{
 		Backend:           backend,
@@ -497,35 +300,22 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 	return workspaceRoot, commandDir, nil
 }
 
-func seatbeltCommandPlan(execRequest SandboxExecutionRequest, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
-	return seatbeltCommandPlanWithProfile(execRequest.Command, execRequest.WorkspaceRoot, execRequest.PermissionProfile, policy, backend, egress)
+func seatbeltCommandPlan(execRequest SandboxExecutionRequest, policy Policy, backend Backend) CommandPlan {
+	return seatbeltCommandPlanWithProfile(execRequest.Command, execRequest.WorkspaceRoot, execRequest.PermissionProfile, policy, backend)
 }
 
-func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, profile PermissionProfile, policy Policy, backend Backend, egress *scopedEgress) CommandPlan {
-	var proxyPort, socksPort string
-	if egress != nil {
-		if _, port, err := net.SplitHostPort(egress.addr); err == nil {
-			proxyPort = port
-		}
-		if _, port, err := net.SplitHostPort(egress.socksAddr); err == nil {
-			socksPort = port
-		}
-	}
+func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, profile PermissionProfile, policy Policy, backend Backend) CommandPlan {
 	denialTag := ""
 	if policy.MonitorDenials {
 		denialTag = nextSandboxDenialTag()
 	}
-	args := []string{"-p", seatbeltProfileFromPermissionProfile(profile, policy, proxyPort, socksPort, denialTag), spec.Name}
+	args := []string{"-p", seatbeltProfileFromPermissionProfile(profile, policy, denialTag), spec.Name}
 	args = append(args, spec.Args...)
 	envBackend := backend.Name
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
 	env := sandboxEnvironment(policy, envBackend, workspaceRoot)
-	if egress != nil {
-		env = append(env, ProxyEnvWithSocks(egress.addr, egress.socksAddr)...)
-		env = appendCACertEnv(env, egress)
-	}
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -539,9 +329,6 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 		Dir:               spec.Dir,
 		Env:               env,
 		SandboxDir:        spec.Dir,
-	}
-	if egress != nil {
-		plan.cleanup = egress.cleanup
 	}
 	// The plan's monitor tag MUST equal the one embedded in the profile above so the
 	// monitor matches exactly this run's denials.
@@ -567,12 +354,7 @@ func seatbeltCompatibilityPermissionProfile(writeRoots []string, policy Policy) 
 	fs.DenyWrite = normalizeProfilePaths(policy.DenyWrite)
 	return PermissionProfile{
 		FileSystem: fs,
-		Network: NetworkPolicy{
-			Mode:           effectiveNetwork(policy),
-			AllowedDomains: normalizeDomains(policy.AllowedDomains),
-			DeniedDomains:  normalizeDomains(policy.DeniedDomains),
-			ProxyRequired:  effectiveNetwork(policy) == NetworkScoped,
-		},
+		Network:    NetworkPolicy{Mode: policy.Network},
 	}
 }
 
@@ -707,12 +489,12 @@ func sandboxMachLookupRule() string {
 	return "(allow mach-lookup\n  " + strings.Join(filters, "\n  ") + ")"
 }
 
-func sandboxExecProfile(writeRoots []string, policy Policy, proxyPort string, socksPort string, denialTag string) string {
-	return seatbeltProfileFromPermissionProfile(seatbeltCompatibilityPermissionProfile(writeRoots, policy), policy, proxyPort, socksPort, denialTag)
+func sandboxExecProfile(writeRoots []string, policy Policy, denialTag string) string {
+	return seatbeltProfileFromPermissionProfile(seatbeltCompatibilityPermissionProfile(writeRoots, policy), policy, denialTag)
 }
 
-func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Policy, proxyPort string, socksPort string, denialTag string) string {
-	networkRule := networkRuleForProfile(profile.Network, proxyPort, socksPort)
+func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Policy, denialTag string) string {
+	networkRule := networkRuleForProfile(profile.Network)
 	readRule := seatbeltReadRule(profile.FileSystem)
 	writeRule := seatbeltWriteRule(profile.FileSystem)
 	denyDefault := "(deny default)"
@@ -890,43 +672,15 @@ func denySeatbeltPathRules(action string, paths []string) []string {
 	return out
 }
 
-// networkRuleFor returns the seatbelt network clause for a policy. allow opens
-// all network; deny (and an empty-allowlist scoped policy, which effectiveNetwork
-// collapses to deny) blocks all network; scoped denies general network but
-// permits only outbound to the local proxy ports on localhost, so traffic must
-// flow through the filtering proxy. Both the HTTP proxy port and the SOCKS5
-// front-end port are allowed (a sandboxed process configured with
-// ALL_PROXY=socks5://... must reach the SOCKS listener). A scoped policy with no
-// resolvable proxy port falls back to a full deny (fail closed).
-func networkRuleFor(policy Policy, proxyPort string, socksPort string) string {
-	return networkRuleForProfile(NetworkPolicy{Mode: effectiveNetwork(policy)}, proxyPort, socksPort)
+// networkRuleFor returns the seatbelt network clause for a policy.
+func networkRuleFor(policy Policy) string {
+	return networkRuleForProfile(NetworkPolicy{Mode: policy.Network})
 }
 
-func networkRuleForProfile(network NetworkPolicy, proxyPort string, socksPort string) string {
+func networkRuleForProfile(network NetworkPolicy) string {
 	switch network.Mode {
 	case NetworkAllow:
 		return "(allow network*)"
-	case NetworkScoped:
-		rules := []string{"(deny network*)"}
-		seen := map[string]struct{}{}
-		// Deny by default, then allow only outbound to each distinct proxy port on
-		// loopback. Duplicate/empty ports are skipped so the clause stays minimal.
-		for _, port := range []string{proxyPort, socksPort} {
-			port = strings.TrimSpace(port)
-			if port == "" {
-				continue
-			}
-			if _, ok := seen[port]; ok {
-				continue
-			}
-			seen[port] = struct{}{}
-			rules = append(rules, `(allow network-outbound (remote ip "localhost:`+sandboxProfileString(port)+`"))`)
-		}
-		if len(rules) == 1 {
-			// No resolvable proxy port: fail closed.
-			return "(deny network*)"
-		}
-		return strings.Join(rules, "\n")
 	default:
 		return "(deny network*)"
 	}

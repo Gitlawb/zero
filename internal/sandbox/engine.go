@@ -164,16 +164,10 @@ func (engine *Engine) ReadExclusionGlobs() []string {
 }
 
 // effectiveNetworkMode is the single source of truth for sandboxed command
-// egress: it collapses an empty-allowlist scoped policy to deny, and ALSO
-// downgrades scoped to deny when the backend cannot actually route scoped egress
-// (only sandbox-exec can; bubblewrap's isolated netns and policy-only cannot), so
-// a scoped policy that can't be enforced fails closed.
+// egress. Shell network policy is binary: restricted commands use NetworkDeny,
+// and approved network access widens it to NetworkAllow.
 func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
-	mode := effectiveNetwork(policy)
-	if mode == NetworkScoped && !engine.backend.EnforcesScopedEgress() {
-		return NetworkDeny
-	}
-	return mode
+	return policy.Network
 }
 
 // toolNetworkExempt reports whether a request is exempt from the engine-level
@@ -295,11 +289,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 		}
 	}
-	// effectiveNetworkMode collapses an empty-allowlist scoped policy to deny, and
-	// downgrades scoped to deny when the backend can't route through the filtering
-	// proxy (bubblewrap's isolated netns has no bridge, policy-only has no
-	// isolation) — so a scoped policy that can't be enforced fails closed rather
-	// than running with unrestricted networking. Allow is unchanged.
 	netMode := engine.effectiveNetworkMode(policy)
 	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
 		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {

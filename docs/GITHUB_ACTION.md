@@ -198,5 +198,4 @@ webhook:
 - **Redaction:** the message, summary, links, and the webhook URL itself are run
   through ZERO's redaction before being sent or logged, so tokens never leak.
 - **Egress/proxy:** the notifier uses the default HTTP transport, which honors
-  `HTTP_PROXY`/`HTTPS_PROXY`. In a sandboxed run the scoped-egress proxy is
-  respected, so a webhook host that is not on the allowlist is denied.
+  `HTTP_PROXY`/`HTTPS_PROXY` when a proxy is configured.

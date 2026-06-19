@@ -16,33 +16,8 @@ type Backend struct {
 	Fallback        bool        `json:"fallback"`
 	CommandWrapping bool        `json:"commandWrapping"`
 	NativeIsolation bool        `json:"nativeIsolation"`
-	// ScopedEgress reports whether this backend can route a sandboxed process's
-	// traffic through the local filtering proxy so a NetworkScoped allowlist is
-	// actually enforced. Only sandbox-exec can today (it shares the host network
-	// under a seatbelt profile that restricts outbound to the proxy port);
-	// bubblewrap isolates the network namespace with no bridge to the host proxy,
-	// so scoped egress there collapses to deny until a real relay exists.
-	ScopedEgress bool `json:"scopedEgress,omitempty"`
-	// ProxyEgress reports a backend that routes scoped egress through the local
-	// filtering proxy on a BEST-EFFORT basis (the child must honor the proxy env)
-	// rather than via OS-level network isolation. The WSL policy-only fallback uses
-	// this: there is no netns/seatbelt to enforce egress, but the proxy still
-	// applies the allow/deny gate to well-behaved clients.
-	ProxyEgress bool   `json:"proxyEgress,omitempty"`
-	Executable  string `json:"executable,omitempty"`
-	Message     string `json:"message,omitempty"`
-}
-
-// EnforcesScopedEgress reports whether a populated NetworkScoped allowlist can be
-// routed through the filtering proxy by this backend. When false, scoped egress
-// must fail closed (collapse to deny) rather than silently run with unrestricted
-// networking. A native backend needs an executable; the WSL fallback uses
-// best-effort proxy egress (ProxyEgress) with no native isolation.
-func (backend Backend) EnforcesScopedEgress() bool {
-	if backend.ProxyEgress {
-		return true
-	}
-	return backend.Available && backend.Executable != "" && backend.ScopedEgress
+	Executable      string      `json:"executable,omitempty"`
+	Message         string      `json:"message,omitempty"`
 }
 
 type BackendPlan struct {
@@ -116,7 +91,6 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 		Fallback:        false,
 		CommandWrapping: true,
 		NativeIsolation: true,
-		ScopedEgress:    name == BackendMacOSSeatbelt,
 		Executable:      executable,
 		Message:         message,
 	}
@@ -124,9 +98,9 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 
 // wslBackend records WSL native isolation unavailability for diagnostics.
 func wslBackend(goos string, info WSLInfo) Backend {
-	msg := "policy-only WSL fallback: bubblewrap unavailable under WSL; egress routed through the filtering proxy"
+	msg := "policy-only WSL fallback: bubblewrap unavailable under WSL"
 	if info.IsWSL2 {
-		msg = "policy-only WSL2 fallback: bubblewrap unavailable/unreliable under WSL2; egress routed through the filtering proxy"
+		msg = "policy-only WSL2 fallback: bubblewrap unavailable/unreliable under WSL2"
 	}
 	return Backend{
 		Name:            BackendWSL,
@@ -135,7 +109,6 @@ func wslBackend(goos string, info WSLInfo) Backend {
 		Fallback:        true,
 		CommandWrapping: false,
 		NativeIsolation: false,
-		ProxyEgress:     true,
 		Message:         msg,
 	}
 }
