@@ -47,6 +47,23 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	}
 }
 
+func TestUnknownNetworkModeFailsClosed(t *testing.T) {
+	if got := NormalizeNetworkMode(NetworkMode("scoped")); got != NetworkDeny {
+		t.Fatalf("NormalizeNetworkMode(scoped) = %q, want %q", got, NetworkDeny)
+	}
+	profile := PermissionProfileFromPolicy(t.TempDir(), Policy{
+		Mode:             ModeEnforce,
+		Network:          NetworkMode("scoped"),
+		EnforceWorkspace: true,
+	}, nil)
+	if profile.Network.Mode != NetworkDeny {
+		t.Fatalf("unknown network mode profile = %#v, want deny", profile.Network)
+	}
+	if !shouldUnshareLinuxNetwork(NetworkPolicy{Mode: NetworkMode("scoped")}) {
+		t.Fatal("unknown Linux network mode must unshare network")
+	}
+}
+
 func TestPermissionProfileFromDisabledPolicyDoesNotRequirePlatformSandbox(t *testing.T) {
 	policy := DefaultPolicy()
 	policy.Mode = ModeDisabled

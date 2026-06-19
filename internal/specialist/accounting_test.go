@@ -154,10 +154,10 @@ func TestOutputToolRollsUpCompletedBackgroundUsageOnce(t *testing.T) {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	if err := os.WriteFile(outputFile, []byte(strings.Join([]string{
-		`{"schemaVersion":1,"type":"run_start","runId":"run_1","sessionId":"child_task"}`,
-		`{"schemaVersion":1,"type":"usage","runId":"run_1","promptTokens":20,"completionTokens":8,"totalTokens":28}`,
-		`{"schemaVersion":1,"type":"final","runId":"run_1","text":"done"}`,
-		`{"schemaVersion":1,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
+		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child_task"}`,
+		`{"schemaVersion":2,"type":"usage","runId":"run_1","promptTokens":20,"completionTokens":8,"totalTokens":28}`,
+		`{"schemaVersion":2,"type":"final","runId":"run_1","text":"done"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
 		"",
 	}, "\n")), 0o600); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)

@@ -129,7 +129,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
 	// ZERO_SANDBOXED=1 and ZERO_SANDBOX_BACKEND set in its env — see
 	// IsAlreadySandboxed) must not be wrapped again — nested platform wrappers
-	// fails and a second egress proxy would be redundant. Return a pass-through
+	// fail and a second sandbox wrapper would be redundant. Return a pass-through
 	// plan.
 	if IsAlreadySandboxed() {
 		preference = SandboxPreferenceForbid

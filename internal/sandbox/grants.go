@@ -527,6 +527,16 @@ func (store *GrantStore) readState() (grantFile, error) {
 	buckets := map[string][]Grant{}
 	commandPrefixBuckets := map[string][]CommandPrefixGrant{}
 	switch head.SchemaVersion {
+	case 1:
+		legacy := map[string]Grant{}
+		if len(head.Grants) > 0 {
+			if err := json.Unmarshal(head.Grants, &legacy); err != nil {
+				return grantFile{}, store.invalidGrantFile(err)
+			}
+		}
+		for name, grant := range legacy {
+			buckets[name] = []Grant{grant}
+		}
 	case grantSchemaVersion:
 		if len(head.Grants) > 0 {
 			if err := json.Unmarshal(head.Grants, &buckets); err != nil {

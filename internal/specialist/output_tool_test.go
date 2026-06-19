@@ -27,10 +27,10 @@ func TestOutputToolReadsCompletedTaskSummary(t *testing.T) {
 		t.Fatalf("Register returned error: %v", err)
 	}
 	if err := os.WriteFile(outputFile, []byte(strings.Join([]string{
-		`{"schemaVersion":1,"type":"run_start","runId":"run_1","sessionId":"child_task"}`,
-		`{"schemaVersion":1,"type":"tool_call","runId":"run_1","id":"call_1","name":"Read"}`,
-		`{"schemaVersion":1,"type":"final","runId":"run_1","text":"done"}`,
-		`{"schemaVersion":1,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
+		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child_task"}`,
+		`{"schemaVersion":2,"type":"tool_call","runId":"run_1","id":"call_1","name":"Read"}`,
+		`{"schemaVersion":2,"type":"final","runId":"run_1","text":"done"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
 		"",
 	}, "\n")), 0o600); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -69,7 +69,7 @@ func TestOutputToolReadsTaskAfterManagerReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
-	if err := os.WriteFile(outputFile, []byte(`{"schemaVersion":1,"type":"final","runId":"run_1","text":"persisted output"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(outputFile, []byte(`{"schemaVersion":2,"type":"final","runId":"run_1","text":"persisted output"}`+"\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	if err := manager.UpdateStatus("child_task", background.StatusCompleted, 0); err != nil {
@@ -118,7 +118,7 @@ func TestOutputToolBlocksUntilTaskCompletes(t *testing.T) {
 	}
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		_ = os.WriteFile(outputFile, []byte(`{"schemaVersion":1,"type":"final","runId":"run_1","text":"finished"}`+"\n"), 0o600)
+		_ = os.WriteFile(outputFile, []byte(`{"schemaVersion":2,"type":"final","runId":"run_1","text":"finished"}`+"\n"), 0o600)
 		_ = manager.UpdateStatus("child_task", background.StatusCompleted, 0)
 	}()
 	tool := NewOutputTool(manager)
@@ -145,8 +145,8 @@ func TestOutputToolRejectsInvalidParameters(t *testing.T) {
 func TestSummarizeTaskDataCollectsErrors(t *testing.T) {
 	exitCode := 3
 	summary, raw := summarizeTaskData(strings.Join([]string{
-		`{"schemaVersion":1,"type":"error","runId":"run_1","message":"failed"}`,
-		`{"schemaVersion":1,"type":"run_end","runId":"run_1","status":"error","exitCode":3}`,
+		`{"schemaVersion":2,"type":"error","runId":"run_1","message":"failed"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"error","exitCode":3}`,
 		`  stderr text  `,
 	}, "\n"), 0)
 	if summary.ExitCode != exitCode || len(summary.Errors) != 1 || summary.Errors[0] != "failed" {

@@ -37,6 +37,14 @@ func NormalizeSideEffect(value SideEffect) SideEffect {
 	}
 }
 
+func NormalizeNetworkMode(value NetworkMode) NetworkMode {
+	normalized := NetworkMode(strings.ToLower(strings.TrimSpace(string(value))))
+	if normalized == NetworkAllow {
+		return NetworkAllow
+	}
+	return NetworkDeny
+}
+
 func NormalizeGrantDecision(value GrantDecision) (GrantDecision, error) {
 	normalized := GrantDecision(strings.ToLower(strings.TrimSpace(string(value))))
 	switch normalized {

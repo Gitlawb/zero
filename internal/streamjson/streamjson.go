@@ -14,7 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type EventType string
 

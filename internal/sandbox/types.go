@@ -10,7 +10,8 @@ import (
 // wrapped command carries ZERO_SANDBOXED=1 in its environment. When such a
 // process spawns another command through the engine, the re-entrancy guard
 // returns a pass-through plan instead of double-wrapping it; nested platform
-// wrappers fail, and a second egress proxy would be redundant. Unset by default.
+// wrappers fail, and a second sandbox wrapper would be redundant. Unset by
+// default.
 const EnvSandboxed = "ZERO_SANDBOXED"
 
 // EnvSandboxBackend records which backend wrapped the command. sandboxEnvironment

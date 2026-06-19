@@ -70,6 +70,37 @@ func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
 	}
 }
 
+func TestGrantStoreReadsV1GrantFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sandbox-grants.json")
+	if err := writeText(path, `{"schemaVersion":1,"grants":{"bash":{"toolName":"bash","decision":"allow","approvedAt":"2026-06-05T14:30:00Z","reason":"legacy"}}}`); err != nil {
+		t.Fatalf("write v1 grants: %v", err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path, Now: fixedSandboxTime("2026-06-05T15:00:00Z")})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+
+	grants, err := store.List()
+	if err != nil {
+		t.Fatalf("List v1 grants returned error: %v", err)
+	}
+	if len(grants) != 1 || grants[0].ToolName != "bash" || grants[0].Decision != GrantAllow || grants[0].Reason != "legacy" {
+		t.Fatalf("unexpected v1 grants: %#v", grants)
+	}
+
+	if _, err := store.Grant(GrantInput{ToolName: "write_file", Decision: GrantAllow}); err != nil {
+		t.Fatalf("Grant after v1 read returned error: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rewritten grant file: %v", err)
+	}
+	if !strings.Contains(string(raw), `"schemaVersion": 2`) || !strings.Contains(string(raw), `"bash": [`) {
+		t.Fatalf("grant file was not rewritten as v2 buckets:\n%s", raw)
+	}
+}
+
 func TestGrantStorePersistsCommandPrefixes(t *testing.T) {
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),

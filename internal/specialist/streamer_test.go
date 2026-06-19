@@ -9,12 +9,12 @@ import (
 
 func TestParseStreamAndBuildFinalResultSuccess(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
-		`{"schemaVersion":1,"type":"run_start","runId":"run_1","sessionId":"child","cwd":"/repo"}`,
-		`{"schemaVersion":1,"type":"text","runId":"run_1","delta":"part "}`,
-		`{"schemaVersion":1,"type":"text","runId":"run_1","delta":"one"}`,
-		`{"schemaVersion":1,"type":"tool_call","runId":"run_1","id":"call_1","name":"grep"}`,
-		`{"schemaVersion":1,"type":"final","runId":"run_1","text":"done"}`,
-		`{"schemaVersion":1,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
+		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child","cwd":"/repo"}`,
+		`{"schemaVersion":2,"type":"text","runId":"run_1","delta":"part "}`,
+		`{"schemaVersion":2,"type":"text","runId":"run_1","delta":"one"}`,
+		`{"schemaVersion":2,"type":"tool_call","runId":"run_1","id":"call_1","name":"grep"}`,
+		`{"schemaVersion":2,"type":"final","runId":"run_1","text":"done"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
 		"",
 	}, "\n")))
 	if err != nil {
@@ -33,9 +33,9 @@ func TestParseStreamAndBuildFinalResultSuccess(t *testing.T) {
 
 func TestBuildFinalResultUsesTextDeltasWhenFinalMissing(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
-		`{"schemaVersion":1,"type":"run_start","runId":"run_1","sessionId":"child"}`,
-		`{"schemaVersion":1,"type":"text","runId":"run_1","delta":"hello"}`,
-		`{"schemaVersion":1,"type":"text","runId":"run_1","delta":" world"}`,
+		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child"}`,
+		`{"schemaVersion":2,"type":"text","runId":"run_1","delta":"hello"}`,
+		`{"schemaVersion":2,"type":"text","runId":"run_1","delta":" world"}`,
 		"",
 	}, "\n")))
 	if err != nil {
@@ -49,8 +49,8 @@ func TestBuildFinalResultUsesTextDeltasWhenFinalMissing(t *testing.T) {
 
 func TestSummarizeStreamAccumulatesMixedUsageFormats(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
-		`{"schemaVersion":1,"type":"usage","runId":"run_1","promptTokens":10,"completionTokens":4,"totalTokens":14}`,
-		`{"schemaVersion":1,"type":"usage","runId":"run_1","promptTokens":8,"completionTokens":3}`,
+		`{"schemaVersion":2,"type":"usage","runId":"run_1","promptTokens":10,"completionTokens":4,"totalTokens":14}`,
+		`{"schemaVersion":2,"type":"usage","runId":"run_1","promptTokens":8,"completionTokens":3}`,
 		"",
 	}, "\n")))
 	if err != nil {
@@ -73,10 +73,10 @@ func TestSummarizeStreamAccumulatesMixedUsageFormats(t *testing.T) {
 
 func TestBuildFinalResultErrorIncludesDiagnostics(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
-		`{"schemaVersion":1,"type":"run_start","runId":"run_1","sessionId":"child"}`,
-		`{"schemaVersion":1,"type":"tool_call","runId":"run_1","id":"call_1","name":"bash"}`,
-		`{"schemaVersion":1,"type":"error","runId":"run_1","code":"provider_error","message":"model failed"}`,
-		`{"schemaVersion":1,"type":"run_end","runId":"run_1","status":"error","exitCode":3}`,
+		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child"}`,
+		`{"schemaVersion":2,"type":"tool_call","runId":"run_1","id":"call_1","name":"bash"}`,
+		`{"schemaVersion":2,"type":"error","runId":"run_1","code":"provider_error","message":"model failed"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"error","exitCode":3}`,
 		"",
 	}, "\n")))
 	if err != nil {
@@ -94,7 +94,7 @@ func TestBuildFinalResultErrorIncludesDiagnostics(t *testing.T) {
 }
 
 func TestParseStreamRejectsInvalidLines(t *testing.T) {
-	_, err := ParseStream(strings.NewReader(`{"schemaVersion":1,"runId":"run_1"}` + "\n"))
+	_, err := ParseStream(strings.NewReader(`{"schemaVersion":2,"runId":"run_1"}` + "\n"))
 	if err == nil || !strings.Contains(err.Error(), "type is required") {
 		t.Fatalf("expected missing type error, got %v", err)
 	}
@@ -109,7 +109,7 @@ func TestParseStreamHandlesLineLargerThan1MiB(t *testing.T) {
 	// A single stream-json line bigger than the old bufio.Scanner 1 MiB cap (e.g.
 	// a large final answer or tool result) must parse instead of aborting the run.
 	huge := strings.Repeat("a", 2*1024*1024)
-	line := `{"schemaVersion":1,"type":"final","runId":"run_1","text":"` + huge + `"}`
+	line := `{"schemaVersion":2,"type":"final","runId":"run_1","text":"` + huge + `"}`
 
 	events, err := ParseStream(strings.NewReader(line + "\n"))
 	if err != nil {

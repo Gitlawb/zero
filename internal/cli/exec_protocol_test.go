@@ -661,7 +661,7 @@ func TestRunExecReadsStreamJSONPromptFromStdin(t *testing.T) {
 	var stderr bytes.Buffer
 
 	exitCode := runWithDeps([]string{"exec", "--input-format", "stream-json", "--output-format", "stream-json"}, &stdout, &stderr, appDeps{
-		stdin: strings.NewReader(`{"schemaVersion":1,"type":"prompt","content":"from stdin"}` + "\n"),
+		stdin: strings.NewReader(`{"schemaVersion":2,"type":"prompt","content":"from stdin"}` + "\n"),
 		getwd: func() (string, error) {
 			return cwd, nil
 		},

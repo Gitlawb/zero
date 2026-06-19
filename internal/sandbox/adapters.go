@@ -152,7 +152,7 @@ func (backend Backend) restrictions(policy Policy) []string {
 	if effectivePolicy.EnforceWorkspace {
 		restrictions = append(restrictions, "filesystem writes must stay inside workspace")
 	}
-	if effectivePolicy.Network == NetworkDeny {
+	if NormalizeNetworkMode(effectivePolicy.Network) == NetworkDeny {
 		if backend.Name == BackendWindowsRestrictedToken && backend.NativeIsolation {
 			restrictions = append(restrictions, "Windows WFP filters block outbound network for sandbox identities")
 		} else {

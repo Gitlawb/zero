@@ -41,6 +41,35 @@ func TestEvaluateExemptsNetworkToolsFromShellNetworkPolicy(t *testing.T) {
 	}
 }
 
+func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	if _, err := store.Grant(GrantInput{ToolName: "bash", Decision: GrantAllow, Reason: "regular commands"}); err != nil {
+		t.Fatalf("Grant bash allow returned error: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: t.TempDir(), Policy: DefaultPolicy(), Store: store})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "bash",
+		SideEffect:     SideEffectShell,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Args:           map[string]any{"command": "curl https://example.com"},
+	})
+
+	if decision.Action != ActionPrompt || decision.Reason != ReasonNetworkBlocked {
+		t.Fatalf("network bash command with allow grant = %#v, want network prompt", decision)
+	}
+	if decision.GrantMatched {
+		t.Fatalf("network prompt must not report the bash allow grant as matched: %#v", decision)
+	}
+}
+
 func TestEngineEvaluatesReadPromptAndPersistentDecisions(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewGrantStore(StoreOptions{

@@ -270,7 +270,7 @@ func appendUnreadableLinuxPathArgs(args []string, path string) []string {
 }
 
 func shouldUnshareLinuxNetwork(policy NetworkPolicy) bool {
-	return policy.Mode == NetworkDeny
+	return NormalizeNetworkMode(policy.Mode) == NetworkDeny
 }
 
 func linuxHelperSandboxEnvironment(profile PermissionProfile, home string) []string {

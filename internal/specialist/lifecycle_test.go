@@ -68,9 +68,9 @@ func TestRegisteredSpecialistToolsLifecycle(t *testing.T) {
 				return 0, err
 			}
 			return 9876, os.WriteFile(outputFile, []byte(strings.Join([]string{
-				`{"schemaVersion":1,"type":"run_start","runId":"run_background","sessionId":"child_task"}`,
-				`{"schemaVersion":1,"type":"tool_call","runId":"run_background","id":"call_read","name":"read_file"}`,
-				`{"schemaVersion":1,"type":"text","runId":"run_background","delta":"background ready"}`,
+				`{"schemaVersion":2,"type":"run_start","runId":"run_background","sessionId":"child_task"}`,
+				`{"schemaVersion":2,"type":"tool_call","runId":"run_background","id":"call_read","name":"read_file"}`,
+				`{"schemaVersion":2,"type":"text","runId":"run_background","delta":"background ready"}`,
 				"",
 			}, "\n")), 0o600)
 		},

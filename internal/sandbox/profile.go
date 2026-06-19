@@ -78,7 +78,7 @@ func PermissionProfileFromPolicy(workspaceRoot string, policy Policy, scope *Sco
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
 		},
-		Network: NetworkPolicy{Mode: policy.Network},
+		Network: NetworkPolicy{Mode: NormalizeNetworkMode(policy.Network)},
 	}
 }
 
@@ -86,7 +86,7 @@ func (profile PermissionProfile) RequiresPlatformSandbox() bool {
 	if profile.FileSystem.Kind == FileSystemRestricted {
 		return true
 	}
-	return profile.Network.Mode == NetworkDeny
+	return NormalizeNetworkMode(profile.Network.Mode) == NetworkDeny
 }
 
 func permissionProfileRoots(workspaceRoot string, scope *Scope) []string {

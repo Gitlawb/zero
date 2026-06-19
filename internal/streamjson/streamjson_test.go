@@ -137,8 +137,8 @@ func TestFormatEventIncludesPermissionDecisionReason(t *testing.T) {
 
 func TestParseInputPromptCombinesPromptAndUserMessages(t *testing.T) {
 	input := strings.Join([]string{
-		`{"schemaVersion":1,"type":"message","role":"user","content":"Inspect this repo."}`,
-		`{"schemaVersion":1,"type":"prompt","content":"Focus on failing tests."}`,
+		`{"schemaVersion":2,"type":"message","role":"user","content":"Inspect this repo."}`,
+		`{"schemaVersion":2,"type":"prompt","content":"Focus on failing tests."}`,
 		"",
 	}, "\n")
 
@@ -161,7 +161,7 @@ func TestParseInputRejectsMalformedLinesWithLineNumbers(t *testing.T) {
 }
 
 func TestParseInputRejectsUnknownFields(t *testing.T) {
-	_, err := ParseInput(`{"schemaVersion":1,"type":"prompt","content":"hello","extra":true}`)
+	_, err := ParseInput(`{"schemaVersion":2,"type":"prompt","content":"hello","extra":true}`)
 
 	if err == nil || !strings.Contains(err.Error(), "Invalid stream-json input at line 1") {
 		t.Fatalf("expected strict input error, got %v", err)
@@ -188,10 +188,10 @@ func TestResolveImagesDecodesNormalizesAndCaps(t *testing.T) {
 	rawPNG := []byte("\x89PNG fake bytes")
 	rawJPG := []byte("\xff\xd8\xff fake jpeg")
 	events := []InputEvent{
-		{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a", Images: []InputImage{
+		{SchemaVersion: SchemaVersion, Type: InputMessage, Role: "user", Content: "a", Images: []InputImage{
 			{MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(rawPNG)},
 		}},
-		{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "b", Images: []InputImage{
+		{SchemaVersion: SchemaVersion, Type: InputMessage, Role: "user", Content: "b", Images: []InputImage{
 			{MediaType: "jpg", Data: base64.StdEncoding.EncodeToString(rawJPG)},
 		}},
 	}
@@ -210,7 +210,7 @@ func TestResolveImagesDecodesNormalizesAndCaps(t *testing.T) {
 	}
 
 	// no images -> nil, no error
-	none, err := ResolveImages([]InputEvent{{SchemaVersion: 1, Type: InputPrompt, Content: "x"}})
+	none, err := ResolveImages([]InputEvent{{SchemaVersion: SchemaVersion, Type: InputPrompt, Content: "x"}})
 	if err != nil {
 		t.Fatalf("ResolveImages with no images errored: %v", err)
 	}
@@ -221,14 +221,14 @@ func TestResolveImagesDecodesNormalizesAndCaps(t *testing.T) {
 
 func TestResolveImagesRejectsBadInputs(t *testing.T) {
 	// invalid base64
-	badB64 := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+	badB64 := []InputEvent{{SchemaVersion: SchemaVersion, Type: InputMessage, Role: "user", Content: "a",
 		Images: []InputImage{{MediaType: "image/png", Data: "not base64!!"}}}}
 	if _, err := ResolveImages(badB64); err == nil || !strings.Contains(err.Error(), "base64") {
 		t.Fatalf("expected base64 decode error, got %v", err)
 	}
 
 	// unsupported media type
-	badType := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+	badType := []InputEvent{{SchemaVersion: SchemaVersion, Type: InputMessage, Role: "user", Content: "a",
 		Images: []InputImage{{MediaType: "image/svg+xml", Data: base64.StdEncoding.EncodeToString([]byte("x"))}}}}
 	if _, err := ResolveImages(badType); err == nil || !strings.Contains(err.Error(), "unsupported image media type") {
 		t.Fatalf("expected unsupported media type error, got %v", err)
@@ -236,7 +236,7 @@ func TestResolveImagesRejectsBadInputs(t *testing.T) {
 
 	// oversized image (> 10 MiB decoded)
 	oversize := make([]byte, (10<<20)+1)
-	bigEvent := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+	bigEvent := []InputEvent{{SchemaVersion: SchemaVersion, Type: InputMessage, Role: "user", Content: "a",
 		Images: []InputImage{{MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(oversize)}}}}
 	if _, err := ResolveImages(bigEvent); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("expected oversize rejection, got %v", err)
@@ -254,7 +254,7 @@ func TestResolveImagesRejectsOversizedEncodedLengthBeforeDecode(t *testing.T) {
 	// so a decode attempt would fail loudly rather than silently allocate.
 	encodedLen := base64.StdEncoding.EncodedLen(maxStreamImageBytes) + 8
 	huge := strings.Repeat("@", encodedLen)
-	event := []InputEvent{{SchemaVersion: 1, Type: InputMessage, Role: "user", Content: "a",
+	event := []InputEvent{{SchemaVersion: SchemaVersion, Type: InputMessage, Role: "user", Content: "a",
 		Images: []InputImage{{MediaType: "image/png", Data: huge}}}}
 
 	_, err := ResolveImages(event)
@@ -268,7 +268,7 @@ func TestResolveImagesRejectsOversizedEncodedLengthBeforeDecode(t *testing.T) {
 
 func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
 	// image-only message (empty content) is valid
-	imageOnly := `{"schemaVersion":1,"type":"message","role":"user","content":"","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	imageOnly := `{"schemaVersion":2,"type":"message","role":"user","content":"","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
 	events, err := ParseInput(imageOnly)
 	if err != nil {
 		t.Fatalf("image-only message should be valid, got %v", err)
@@ -278,13 +278,13 @@ func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
 	}
 
 	// empty content AND no images is still rejected
-	empty := `{"schemaVersion":1,"type":"message","role":"user","content":""}`
+	empty := `{"schemaVersion":2,"type":"message","role":"user","content":""}`
 	if _, err := ParseInput(empty); err == nil || !strings.Contains(err.Error(), "content is required") {
 		t.Fatalf("expected empty-content rejection, got %v", err)
 	}
 
 	// prompt event with empty content is still rejected (no images allowed there)
-	emptyPrompt := `{"schemaVersion":1,"type":"prompt","content":""}`
+	emptyPrompt := `{"schemaVersion":2,"type":"prompt","content":""}`
 	if _, err := ParseInput(emptyPrompt); err == nil || !strings.Contains(err.Error(), "content is required") {
 		t.Fatalf("expected empty prompt rejection, got %v", err)
 	}
@@ -292,7 +292,7 @@ func TestValidateInputEventAllowsImageOnlyMessage(t *testing.T) {
 
 func TestParseInputImagesAcceptedOnlyOnMessageEvents(t *testing.T) {
 	// images allowed on a message event
-	msg := `{"schemaVersion":1,"type":"message","role":"user","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	msg := `{"schemaVersion":2,"type":"message","role":"user","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
 	events, err := ParseInput(msg)
 	if err != nil {
 		t.Fatalf("message+images should parse, got %v", err)
@@ -302,13 +302,13 @@ func TestParseInputImagesAcceptedOnlyOnMessageEvents(t *testing.T) {
 	}
 
 	// images rejected on a prompt event (not whitelisted there)
-	prompt := `{"schemaVersion":1,"type":"prompt","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
+	prompt := `{"schemaVersion":2,"type":"prompt","content":"look","images":[{"mediaType":"image/png","data":"aGVsbG8="}]}`
 	if _, err := ParseInput(prompt); err == nil || !strings.Contains(err.Error(), "unknown field images") {
 		t.Fatalf("expected images rejected on prompt event, got %v", err)
 	}
 
 	// truly unknown field still rejected on a message event
-	bad := `{"schemaVersion":1,"type":"message","role":"user","content":"look","extra":true}`
+	bad := `{"schemaVersion":2,"type":"message","role":"user","content":"look","extra":true}`
 	if _, err := ParseInput(bad); err == nil || !strings.Contains(err.Error(), "unknown field extra") {
 		t.Fatalf("expected unknown field still rejected, got %v", err)
 	}
@@ -316,7 +316,7 @@ func TestParseInputImagesAcceptedOnlyOnMessageEvents(t *testing.T) {
 
 func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
 	ev := InputEvent{
-		SchemaVersion: 1,
+		SchemaVersion: SchemaVersion,
 		Type:          InputMessage,
 		Role:          "user",
 		Content:       "look at this",
@@ -344,7 +344,7 @@ func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
 	}
 
 	// omitempty: a text-only event must not emit the new key.
-	bare, _ := json.Marshal(InputEvent{SchemaVersion: 1, Type: InputPrompt, Content: "hi"})
+	bare, _ := json.Marshal(InputEvent{SchemaVersion: SchemaVersion, Type: InputPrompt, Content: "hi"})
 	if strings.Contains(string(bare), "images") {
 		t.Fatalf("expected images omitted on text-only event, got %s", bare)
 	}
@@ -352,7 +352,7 @@ func TestInputEventImagesRoundTripAndOmitempty(t *testing.T) {
 
 func TestParseInputThenResolveImagesRoundTrip(t *testing.T) {
 	raw := []byte("\x89PNG round trip bytes")
-	line := `{"schemaVersion":1,"type":"message","role":"user","content":"describe","images":[{"mediaType":"png","data":"` +
+	line := `{"schemaVersion":2,"type":"message","role":"user","content":"describe","images":[{"mediaType":"png","data":"` +
 		base64.StdEncoding.EncodeToString(raw) + `"}]}`
 
 	events, err := ParseInput(line)
@@ -378,7 +378,7 @@ func TestParseInputThenResolveImagesRoundTrip(t *testing.T) {
 	}
 
 	// text-only input still resolves to nil images, non-empty prompt
-	textOnly, err := ParseInput(`{"schemaVersion":1,"type":"prompt","content":"hello"}`)
+	textOnly, err := ParseInput(`{"schemaVersion":2,"type":"prompt","content":"hello"}`)
 	if err != nil {
 		t.Fatalf("ParseInput text-only: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {
 	redacted := true
 	truncated := false
 	ev := Event{
-		SchemaVersion: 1,
+		SchemaVersion: SchemaVersion,
 		Type:          EventToolResult,
 		Output:        "Edited f.go",
 		Truncated:     &truncated,
@@ -421,7 +421,7 @@ func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {
 		t.Errorf("display lost: %+v", back.Display)
 	}
 	// omitempty: a bare event must not emit the new keys
-	bare, _ := json.Marshal(Event{SchemaVersion: 1, Type: EventText})
+	bare, _ := json.Marshal(Event{SchemaVersion: SchemaVersion, Type: EventText})
 	for _, k := range []string{"redacted", "changedFiles", "display"} {
 		if strings.Contains(string(bare), k) {
 			t.Errorf("expected %q omitted on bare event, got %s", k, bare)
@@ -431,7 +431,7 @@ func TestEventRoundTripsStructuredToolResultFields(t *testing.T) {
 
 func TestEventRoundTripsCheckpointInfo(t *testing.T) {
 	ev := Event{
-		SchemaVersion: 1,
+		SchemaVersion: SchemaVersion,
 		Type:          EventCheckpoint,
 		Checkpoint:    &CheckpointInfo{Sequence: 5, Tool: "edit_file", Files: []string{"a.go"}},
 	}
@@ -443,7 +443,7 @@ func TestEventRoundTripsCheckpointInfo(t *testing.T) {
 	if back.Checkpoint == nil || back.Checkpoint.Tool != "edit_file" || back.Checkpoint.Sequence != 5 {
 		t.Errorf("checkpoint lost: %+v", back.Checkpoint)
 	}
-	bare, _ := json.Marshal(Event{SchemaVersion: 1, Type: EventText})
+	bare, _ := json.Marshal(Event{SchemaVersion: SchemaVersion, Type: EventText})
 	if strings.Contains(string(bare), "checkpoint") {
 		t.Errorf("checkpoint should be omitted on bare event: %s", bare)
 	}

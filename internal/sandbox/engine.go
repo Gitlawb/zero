@@ -167,7 +167,7 @@ func (engine *Engine) ReadExclusionGlobs() []string {
 // egress. Shell network policy is binary: restricted commands use NetworkDeny,
 // and approved network access widens it to NetworkAllow.
 func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
-	return policy.Network
+	return NormalizeNetworkMode(policy.Network)
 }
 
 // toolNetworkExempt reports whether a request is exempt from the engine-level
@@ -313,6 +313,21 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			return deny(request, risk, block.Code, block.Path, block.Reason, false)
 		}
 	}
+	netMode := engine.effectiveNetworkMode(policy)
+	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
+		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonNetworkBlocked}
+		}
+		return deny(request, risk, BlockNetwork, "", ReasonNetworkBlocked, false)
+	}
+	if HasRiskCategory(risk, "destructive") {
+		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: "destructive shell command requires approval"}
+		}
+		if request.SideEffect == SideEffectShell && !request.PermissionGranted {
+			return deny(request, risk, BlockDestructiveCommand, "", "destructive shell command requires approval", false)
+		}
+	}
 	if persistentAllow != nil {
 		return Decision{
 			Action:       ActionAllow,
@@ -333,21 +348,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	if promptableBlock != nil {
 		return promptPathBlock(request, risk, promptableBlock)
-	}
-	netMode := engine.effectiveNetworkMode(policy)
-	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
-		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
-			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonNetworkBlocked}
-		}
-		return deny(request, risk, BlockNetwork, "", ReasonNetworkBlocked, false)
-	}
-	if HasRiskCategory(risk, "destructive") {
-		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
-			return Decision{Action: ActionPrompt, Risk: risk, Reason: "destructive shell command requires approval"}
-		}
-		if request.SideEffect == SideEffectShell && !request.PermissionGranted {
-			return deny(request, risk, BlockDestructiveCommand, "", "destructive shell command requires approval", false)
-		}
 	}
 	if request.Permission == PermissionAllow {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
