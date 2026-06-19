@@ -320,6 +320,23 @@ func specialistBorderStyle(status specialistStatus) lipgloss.Style {
 	}
 }
 
+// specialistTitleFor returns the display title (name + " · " + description) for
+// the specialist with the given childSessionID, for the subchat nav bar. Returns
+// "" when the specialist is not found in the tracker. Falls back to the
+// specialist info carried by transcript rows when the tracker has been cleared.
+func (m model) specialistTitleFor(childSessionID string) string {
+	info, ok := m.specialists.getBySessionID(childSessionID)
+	if ok {
+		return info.name + " · " + info.description
+	}
+	for _, row := range m.transcript {
+		if row.kind == rowSpecialist && row.specialistInfo != nil && row.specialistInfo.childSessionID == childSessionID {
+			return row.specialistInfo.name + " · " + row.specialistInfo.description
+		}
+	}
+	return ""
+}
+
 // truncateRunes is provided by view.go; specialist_card.go relies on it for
 // rune-safe description and error-message truncation.
 

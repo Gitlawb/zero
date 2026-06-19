@@ -703,6 +703,18 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			next, cmd := m.resolvePermission(line.permChoice)
 			return next.(model), cmd, true
 		}
+		if line.specialistCard {
+			// Click on a specialist card drills into its child session and
+			// records the selection so a follow-up Enter re-enters the same
+			// subchat (keyboard fallback to the click path).
+			title := m.specialistTitleFor(line.specialistID)
+			if errMsg := m.subchat.enter(m.sessionStore, line.specialistID, title, m.chatScrollOffset); errMsg != "" {
+				m = m.appendSystemNotice(errMsg)
+			}
+			m.selectedSpecialistID = line.specialistID
+			m.chatScrollOffset = 0
+			return m, nil, true
+		}
 		if line.toggle {
 			if line.live {
 				m.streamingReasoningExpanded = !m.streamingReasoningExpanded

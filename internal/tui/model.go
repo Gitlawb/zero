@@ -113,6 +113,11 @@ type model struct {
 	plan        planPanelState
 	specialists specialistTracker
 	subchat     subchatState
+	// selectedSpecialistID is the childSessionID of the last specialist card
+	// the user clicked. It bridges the mouse-click selection and the keyboard
+	// Enter fallback so Enter drills into the same subchat the click would.
+	// Cleared in beginRun so it doesn't persist across turns.
+	selectedSpecialistID string
 	altScreen   bool
 	setup       setupState
 	setupSave   func(SetupSelection) (SetupResult, error)
@@ -820,6 +825,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.submitAskUserAnswer()
 			}
 			if m.pendingSpecReview != nil {
+				return m, nil
+			}
+			// Enter drills into the last-clicked specialist's subchat (keyboard
+			// fallback to the mouse click — the click sets selectedSpecialistID).
+			// Only fires when subchat isn't already active so Enter still submits
+			// the composer after drilling in. Placed after the pending-prompt
+			// guards so an active permission/ask-user/spec-review prompt is never
+			// bypassed by a stale card selection.
+			if m.selectedSpecialistID != "" && !m.subchat.active {
+				title := m.specialistTitleFor(m.selectedSpecialistID)
+				if errMsg := m.subchat.enter(m.sessionStore, m.selectedSpecialistID, title, m.chatScrollOffset); errMsg != "" {
+					m = m.appendSystemNotice(errMsg)
+				}
+				m.chatScrollOffset = 0
 				return m, nil
 			}
 			if m.providerWizard != nil {
@@ -2900,6 +2919,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
+	m.selectedSpecialistID = ""
 	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
 	// the new run starts (instead of mid-rotation from a prior turn). Also
 	// reset the step counter so the cadence doesn't carry over a partial
