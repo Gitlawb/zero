@@ -133,6 +133,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 		rc := buildRowContext(m.transcript)
 		shownAny := false
 		previousKind, havePreviousKind := previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
+		specialistSummaryEmitted := false
 		for index := m.flushed; index < len(m.transcript); index++ {
 			row := m.transcript[index]
 			// A welcome row carries no Lime visual (the empty state replaced it)
@@ -147,6 +148,29 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			}
 			if (shownAny || (m.flushedAny && havePreviousKind)) && previousKind == rowUser && row.kind == rowReasoning {
 				items = append(items, transcriptBlankBodyItem())
+			}
+			// Inject the specialist summary line once, before the first
+			// specialist card in this turn's contiguous group.
+			if row.kind == rowSpecialist && !specialistSummaryEmitted {
+				specialistSummaryEmitted = true
+				specialists := m.specialists.all()
+				if len(specialists) == 0 {
+					// Fall back to the specialist info carried by the
+					// transcript rows themselves (covers tests and any path
+					// where the tracker has been cleared).
+					for j := index; j < len(m.transcript); j++ {
+						r := m.transcript[j]
+						if r.kind != rowSpecialist || r.specialistInfo == nil {
+							break
+						}
+						specialists = append(specialists, *r.specialistInfo)
+					}
+				}
+				summary := renderSpecialistSummary(specialists, m.spinner.View())
+				if summary != "" {
+					items = append(items, transcriptBlockBodyItem(transcriptBodyItemRow, -1, summary))
+					items = append(items, transcriptBlankBodyItem())
+				}
 			}
 			rowIndex, transcriptRow := index, row
 			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKey(transcriptRow, width, rc)
