@@ -835,11 +835,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// bypassed by a stale card selection.
 			if m.selectedSpecialistID != "" && !m.subchat.active {
 				title := m.specialistTitleFor(m.selectedSpecialistID)
-				if errMsg := m.subchat.enter(m.sessionStore, m.selectedSpecialistID, title, m.chatScrollOffset); errMsg != "" {
-					m = m.appendSystemNotice(errMsg)
-				}
-				m.chatScrollOffset = 0
-				return m, nil
+			if errMsg := m.subchat.enter(m.sessionStore, m.selectedSpecialistID, title, m.chatScrollOffset); errMsg != "" {
+				m = m.appendSystemNotice(errMsg)
+			}
+			m.chatScrollOffset = 0
+			m.selectedSpecialistID = ""
+			return m, nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
