@@ -112,7 +112,6 @@ type model struct {
 	// synced from the update_plan tool. See plan_panel.go.
 	plan        planPanelState
 	specialists specialistTracker
-	taskTable   taskTableState
 	subchat     subchatState
 	altScreen   bool
 	setup       setupState
@@ -745,11 +744,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chatScrollOffset = m.subchat.exit()
 				return m, nil
 			}
-			// Task table overlay closes on Esc before other Esc handlers.
-			if m.taskTable.visible {
-				m.taskTable.hide()
-				return m, nil
-			}
 			if m.mcpCommandCancel != nil {
 				m.cancelMCPCommand()
 				if m.mcpAddWizard != nil {
@@ -810,24 +804,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case keyIs(msg, tea.KeyEnter):
-			// Task table Enter: drill into selected specialist's subchat.
-			if m.taskTable.visible {
-				specialists := m.specialists.all()
-				if len(specialists) > 0 {
-					sid := m.taskTable.selectedSessionID(specialists)
-					if sid != "" {
-						info, _ := m.specialists.getBySessionID(sid)
-						title := info.name + " · " + info.description
-						if errMsg := m.subchat.enter(m.sessionStore, sid, title, m.chatScrollOffset); errMsg != "" {
-							m = m.appendSystemNotice(errMsg)
-						}
-						m.taskTable.hide()
-						m.chatScrollOffset = 0
-						return m, nil
-					}
-				}
-				return m, nil
-			}
 			if m.transcriptDetailed {
 				if command := parseCommand(m.input.Value()); command.kind == commandTranscript {
 					m.input.SetValue("")
@@ -906,18 +882,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
-		case keyCtrl(msg, 'g'):
-			// Ctrl+G toggles the task table overlay showing all specialists.
-			if m.noBlockingModal() {
-				m.taskTable.toggle()
-				if m.taskTable.visible {
-					specialists := m.specialists.all()
-					if len(specialists) > 0 && m.taskTable.cursor >= len(specialists) {
-						m.taskTable.cursor = len(specialists) - 1
-					}
-				}
-				return m, nil
-			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -972,11 +936,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.scrollChat(-m.chatPageScrollLines()), nil
 		case keyIs(msg, tea.KeyDown):
-			if m.taskTable.visible {
-				specialists := m.specialists.all()
-				m.taskTable.moveCursor(1, len(specialists))
-				return m, nil
-			}
 			if m.transcriptDetailed {
 				return m, nil
 			}
@@ -1013,11 +972,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// ArrowUp exits subchat view (returns to main chat).
 			if m.subchat.active {
 				m.chatScrollOffset = m.subchat.exit()
-				return m, nil
-			}
-			if m.taskTable.visible {
-				specialists := m.specialists.all()
-				m.taskTable.moveCursor(-1, len(specialists))
 				return m, nil
 			}
 			if m.transcriptDetailed {
@@ -1556,18 +1510,6 @@ func (m model) transcriptView() string {
 	overlayForViewport := viewportOverlay
 	if m.transcriptEmpty() && !m.pending && viewportOverlay != "" {
 		overlayForViewport = ""
-	}
-
-	// Task table overlay takes priority over other overlays when toggled.
-	if m.taskTable.visible {
-		taskOverlay := m.renderTaskTable(width)
-		if m.altScreen && m.height > 0 {
-			return m.scrollableTranscriptItemsView(m.pinnedTitleBar(width), bodyItems, footer, width, taskOverlay)
-		}
-		bodyLayout := layoutTranscriptBodyItems(bodyItems)
-		body := bodyLayout.String()
-		body += "\n" + taskOverlay + "\n"
-		return body + footer
 	}
 
 	// Plan panel is pinned between the title bar and the transcript body.
@@ -2958,7 +2900,6 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
-	m.taskTable.hide()
 	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
 	// the new run starts (instead of mid-rotation from a prior turn). Also
 	// reset the step counter so the cadence doesn't carry over a partial
