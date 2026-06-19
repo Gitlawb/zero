@@ -786,7 +786,7 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
 			line += dot + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
 		}
-		if reason := strings.TrimSpace(event.Reason); reason != "" {
+		if reason := permissionDisplayReason(event.Reason); reason != "" {
 			line += zeroTheme.faint.Render(" — " + truncateRunes(reason, maxInt(16, width-lipgloss.Width(name)-16)))
 		}
 		out := fitStyledLine(line, width)
@@ -799,7 +799,7 @@ func renderPermissionRow(row transcriptRow, width int) string {
 		if scope := strings.TrimSpace(event.Scope); scope != "" {
 			line += dot + zeroTheme.muted.Render(permissionEventScopeLabel(event)+":"+scope)
 		}
-		if reason := strings.TrimSpace(event.Reason); reason != "" {
+		if reason := permissionDisplayReason(event.Reason); reason != "" {
 			line += zeroTheme.faint.Render(" — " + truncateRunes(reason, maxInt(16, width-lipgloss.Width(name)-16)))
 		}
 		out := fitStyledLine(line, width)
@@ -849,7 +849,7 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 		body += fill(zeroTheme.ink).Render("  " + request.SideEffect)
 	}
 	lines := []string{top, body}
-	if reason := strings.TrimSpace(request.Reason); reason != "" {
+	if reason := permissionDisplayReason(request.Reason); reason != "" {
 		lines = append(lines, fill(zeroTheme.muted).Render(reason))
 	}
 	// Surface exactly what the grant covers (file/dir/host) so "always" is a

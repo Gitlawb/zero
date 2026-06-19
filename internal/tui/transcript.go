@@ -272,46 +272,96 @@ func permissionRowText(event agent.PermissionEvent) string {
 	if event.Action != "" {
 		parts = append(parts, string(event.Action))
 	}
-	if event.Violation != nil && event.Violation.Code != "" {
-		parts = append(parts, "violation:"+string(event.Violation.Code))
-	}
 	return strings.Join(parts, " ")
 }
 
 func permissionDetailText(event agent.PermissionEvent) string {
 	parts := []string{}
-	if event.Permission != "" {
-		parts = append(parts, "permission="+event.Permission)
-	}
 	if event.DecisionAction != "" {
-		parts = append(parts, "decision="+string(event.DecisionAction))
-	}
-	if event.PermissionMode != "" {
-		parts = append(parts, "mode="+string(event.PermissionMode))
-	}
-	if event.Autonomy != "" {
-		parts = append(parts, "autonomy="+event.Autonomy)
-	}
-	if event.SideEffect != "" {
-		parts = append(parts, "side_effect="+event.SideEffect)
+		parts = append(parts, permissionDecisionDetail(event.DecisionAction))
 	}
 	if event.GrantMatched {
-		parts = append(parts, "grant=matched")
+		parts = append(parts, "approved by saved permission")
 	}
 	if event.Reason != "" {
-		parts = append(parts, event.Reason)
+		parts = append(parts, permissionDisplayReason(event.Reason))
 	}
 	if event.Violation != nil {
-		violation := "violation=" + string(event.Violation.Code)
-		if event.Violation.Path != "" {
-			violation += " path=" + event.Violation.Path
-		}
-		if event.Violation.Reason != "" {
-			violation += " " + event.Violation.Reason
-		}
-		parts = append(parts, violation)
+		parts = append(parts, permissionViolationDetail(event))
 	}
 	return strings.Join(parts, "  ")
+}
+
+func permissionDecisionDetail(decision agent.PermissionDecisionAction) string {
+	switch decision {
+	case agent.PermissionDecisionAllow:
+		return "approved once"
+	case agent.PermissionDecisionAllowStrict:
+		return "approved with review"
+	case agent.PermissionDecisionAllowForSession:
+		return "approved for this session"
+	case agent.PermissionDecisionAllowPrefix:
+		return "approved command prefix for this session"
+	case agent.PermissionDecisionAlwaysAllowPrefix:
+		return "always approved command prefix"
+	case agent.PermissionDecisionAlwaysAllow:
+		return "always approved"
+	case agent.PermissionDecisionDeny:
+		return "denied by user"
+	case agent.PermissionDecisionCancel:
+		return "cancelled by user"
+	default:
+		return strings.ReplaceAll(string(decision), "_", " ")
+	}
+}
+
+func permissionViolationDetail(event agent.PermissionEvent) string {
+	if event.Violation == nil {
+		return ""
+	}
+	parts := []string{"blocked: " + permissionViolationLabel(string(event.Violation.Code))}
+	if path := strings.TrimSpace(event.Violation.Path); path != "" {
+		parts = append(parts, "path: "+path)
+	}
+	if reason := permissionDisplayReason(event.Violation.Reason); reason != "" {
+		parts = append(parts, reason)
+	}
+	return strings.Join(parts, "  ")
+}
+
+func permissionViolationLabel(code string) string {
+	switch code {
+	case "outside_workspace":
+		return "outside workspace"
+	case "symlink_traversal":
+		return "symlink traversal"
+	case "network":
+		return "network access"
+	case "destructive_command":
+		return "destructive command"
+	case "persistent_deny":
+		return "saved deny"
+	case "denied_permission":
+		return "permission denied"
+	case "context_canceled":
+		return "request cancelled"
+	case "policy_denied":
+		return "not allowed"
+	default:
+		return strings.ReplaceAll(code, "_", " ")
+	}
+}
+
+func permissionDisplayReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	switch reason {
+	case "network access is blocked by sandbox policy":
+		return "Network access requires approval."
+	case "workspace write permitted by sandbox policy":
+		return "Workspace write is allowed."
+	default:
+		return reason
+	}
 }
 
 func truncateTUIOutput(output string, limit int) string {

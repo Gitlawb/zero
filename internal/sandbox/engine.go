@@ -270,6 +270,27 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if request.Permission == PermissionDeny {
 		return deny(request, risk, ViolationDeniedPermission, "", permissionReason(request), false)
 	}
+	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
+	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
+	var persistentAllow *Grant
+	if engine.store != nil {
+		match, err := engine.store.Lookup(request.ToolName, reqScope)
+		if err == nil && match.Matched {
+			grant := match.Grant
+			if grant.Decision == GrantDeny {
+				decision := deny(request, risk, ViolationPersistentDeny, "", "persistent sandbox deny grant matched", true)
+				decision.GrantMatched = true
+				decision.Grant = &grant
+				return decision
+			}
+			persistentAllow = &grant
+		}
+	}
+	var sessionAllow *Grant
+	if match := engine.lookupSessionGrant(request.ToolName, reqScope); match.Matched {
+		grant := match.Grant
+		sessionAllow = &grant
+	}
 	// The fine-grained path lists (DenyRead/DenyWrite/AllowRead/AllowWrite) apply
 	// whenever the sandbox is enforcing, independent of EnforceWorkspace and even
 	// when there is no workspace root (absolute paths are still resolved and
@@ -281,13 +302,38 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if violation := applyPatchPathViolation(request); violation != nil {
 		return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 	}
+	var promptableViolation *pathViolation
 	for _, requested := range requestPaths(request) {
 		if violation := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
 			if promptablePathViolation(request, violation) {
-				return promptPathViolation(request, risk, violation)
+				if promptableViolation == nil {
+					promptableViolation = violation
+				}
+				continue
 			}
 			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
 		}
+	}
+	if persistentAllow != nil {
+		return Decision{
+			Action:       ActionAllow,
+			Reason:       "persistent sandbox allow grant matched",
+			Risk:         risk,
+			GrantMatched: true,
+			Grant:        persistentAllow,
+		}
+	}
+	if sessionAllow != nil {
+		return Decision{
+			Action:       ActionAllow,
+			Reason:       "session sandbox allow grant matched",
+			Risk:         risk,
+			GrantMatched: true,
+			Grant:        sessionAllow,
+		}
+	}
+	if promptableViolation != nil {
+		return promptPathViolation(request, risk, promptableViolation)
 	}
 	netMode := engine.effectiveNetworkMode(policy)
 	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
@@ -302,37 +348,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		}
 		if request.SideEffect == SideEffectShell && !request.PermissionGranted {
 			return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command requires approval", false)
-		}
-	}
-	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
-	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
-	if engine.store != nil {
-		match, err := engine.store.Lookup(request.ToolName, reqScope)
-		if err == nil && match.Matched {
-			grant := match.Grant
-			if grant.Decision == GrantDeny {
-				decision := deny(request, risk, ViolationPersistentDeny, "", "persistent sandbox deny grant matched", true)
-				decision.GrantMatched = true
-				decision.Grant = &grant
-				return decision
-			}
-			return Decision{
-				Action:       ActionAllow,
-				Reason:       "persistent sandbox allow grant matched",
-				Risk:         risk,
-				GrantMatched: true,
-				Grant:        &grant,
-			}
-		}
-	}
-	if match := engine.lookupSessionGrant(request.ToolName, reqScope); match.Matched {
-		grant := match.Grant
-		return Decision{
-			Action:       ActionAllow,
-			Reason:       "session sandbox allow grant matched",
-			Risk:         risk,
-			GrantMatched: true,
-			Grant:        &grant,
 		}
 	}
 	if request.Permission == PermissionAllow {

@@ -1206,11 +1206,13 @@ func TestAgentResponsePreservesPermissionMetadata(t *testing.T) {
 		t.Fatalf("permission metadata was not preserved: %#v", row)
 	}
 	rendered := next.renderRow(row, 96, buildRowContext(next.transcript))
-	for _, want := range []string{"permission", "write_file", "prompt", "mode=ask", "Creates or overwrites"} {
+	for _, want := range []string{"permission", "write_file", "prompt", "Creates or overwrites"} {
 		assertContains(t, rendered, want)
 	}
-	if strings.Contains(rendered, "risk:") || strings.Contains(rendered, "risk=") {
-		t.Fatalf("normal permission row must not render risk labels, got %q", rendered)
+	for _, blocked := range []string{"risk:", "risk=", "mode=", "permission=", "side_effect=", "autonomy="} {
+		if strings.Contains(rendered, blocked) {
+			t.Fatalf("normal permission row must not render %q, got %q", blocked, rendered)
+		}
 	}
 }
 
@@ -1352,11 +1354,13 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 
 	rendered := newModel(context.Background(), Options{}).renderRow(permissionTranscriptRow(event), 96, buildRowContext(nil))
 
-	for _, want := range []string{"write_file", "denied", "violation=outside_workspace", "../secret.txt"} {
+	for _, want := range []string{"write_file", "denied", "outside workspace", "../secret.txt"} {
 		assertContains(t, rendered, want)
 	}
-	if strings.Contains(rendered, "risk:") || strings.Contains(rendered, "risk=") {
-		t.Fatalf("denied permission row must not render risk labels, got %q", rendered)
+	for _, blocked := range []string{"risk:", "risk=", "violation=", "mode=", "permission=", "side_effect=", "autonomy="} {
+		if strings.Contains(rendered, blocked) {
+			t.Fatalf("denied permission row must not render %q, got %q", blocked, rendered)
+		}
 	}
 }
 

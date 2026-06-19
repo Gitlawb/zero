@@ -277,6 +277,82 @@ func TestEngineSessionGrantDoesNotMatchSiblingFile(t *testing.T) {
 	}
 }
 
+func TestEnginePersistentGrantAllowsPromptableOutsideWorkspacePath(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "escape.txt")
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Store: store})
+	grant, err := engine.Grant(GrantInput{
+		ToolName:  "write_file",
+		Decision:  GrantAllow,
+		Scope:     outside,
+		ScopeKind: ScopeFile,
+	})
+	if err != nil {
+		t.Fatalf("Grant outside file: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Args:           map[string]any{"path": outside},
+	})
+
+	if decision.Action != ActionAllow || !decision.GrantMatched || decision.Grant == nil {
+		t.Fatalf("outside file grant decision = %#v, want grant-backed allow", decision)
+	}
+	if decision.Grant.Scope != grant.Scope || decision.Violation != nil {
+		t.Fatalf("outside file grant = %#v violation=%#v, want grant %#v with no violation", decision.Grant, decision.Violation, grant)
+	}
+}
+
+func TestEnginePersistentGrantDoesNotBypassSymlinkTraversal(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	store, err := NewGrantStore(StoreOptions{
+		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
+		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
+	})
+	if err != nil {
+		t.Fatalf("NewGrantStore returned error: %v", err)
+	}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Store: store})
+	if _, err := engine.Grant(GrantInput{
+		ToolName:  "write_file",
+		Decision:  GrantAllow,
+		Scope:     filepath.Join("linked", "escape.txt"),
+		ScopeKind: ScopeFile,
+	}); err != nil {
+		t.Fatalf("Grant symlink path: %v", err)
+	}
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:       "write_file",
+		SideEffect:     SideEffectWrite,
+		Permission:     PermissionPrompt,
+		PermissionMode: PermissionModeAsk,
+		Args:           map[string]any{"path": filepath.Join("linked", "escape.txt")},
+	})
+
+	if decision.Action != ActionDeny || decision.Violation == nil || decision.Violation.Code != ViolationSymlinkTraversal {
+		t.Fatalf("symlink traversal grant decision = %#v, want symlink traversal deny", decision)
+	}
+	if decision.GrantMatched {
+		t.Fatalf("symlink traversal hard-deny must not report grant match: %#v", decision)
+	}
+}
+
 func TestEngineDeniesAutoAllowedSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
