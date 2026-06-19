@@ -36,6 +36,10 @@ type transcriptSelectableLine struct {
 	// text (they are buttons, not content).
 	permOption bool
 	permChoice permissionDecision
+	// specialistCard marks a clickable specialist card row. specialistID is
+	// the childSessionID to drill into on click or Enter.
+	specialistCard bool
+	specialistID   string
 }
 
 type transcriptCopiedMsg struct {
@@ -416,6 +420,8 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 		return m.renderSelectableReasoningRow(rowIndex, row, width, startBodyY)
 	case rowToolResult:
 		return m.renderSelectableToolResultRow(rowIndex, row, width, rc, startBodyY)
+	case rowSpecialist:
+		return m.renderSelectableSpecialistRow(rowIndex, row, width, rc, startBodyY)
 	default:
 		return m.renderRow(row, width, rc), nil
 	}
@@ -429,6 +435,27 @@ func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, wi
 		return "", nil
 	}
 	return rendered, []transcriptSelectableLine{{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}}
+}
+
+// renderSelectableSpecialistRow renders a specialist card and marks every line
+// as a clickable specialistCard selectable line carrying the childSessionID.
+// A left-click or Enter on any card line drills into that specialist's subchat.
+func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	rendered := m.renderRow(row, width, rc)
+	if rendered == "" || row.specialistInfo == nil {
+		return "", nil
+	}
+	lines := viewLines(rendered)
+	selectable := make([]transcriptSelectableLine, len(lines))
+	for i := range lines {
+		selectable[i] = transcriptSelectableLine{
+			bodyY:          startBodyY + i,
+			rowIndex:       rowIndex,
+			specialistCard: true,
+			specialistID:   row.specialistInfo.childSessionID,
+		}
+	}
+	return rendered, selectable
 }
 
 func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
