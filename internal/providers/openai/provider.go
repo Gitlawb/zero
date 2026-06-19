@@ -25,8 +25,14 @@ const defaultStreamIdleTimeout = 90 * time.Second
 
 // Options configures an OpenAI-compatible chat completions provider.
 type Options struct {
-	APIKey          string
-	BaseURL         string
+	APIKey  string
+	BaseURL string
+	// Endpoint, when non-empty, overrides the default `{BaseURL}/chat/completions`
+	// request URL. Used by flavors (notably the Codex provider) that speak a
+	// different path on the same host — e.g. `/responses` on the ChatGPT Codex
+	// backend. When empty, the openai provider falls back to its default
+	// chat-completions path so every existing caller is unchanged.
+	Endpoint        string
 	Model           string
 	AuthHeader      string
 	AuthScheme      string
@@ -47,12 +53,20 @@ type Options struct {
 	// ParseThinkTags converts streamed <think>...</think> content into reasoning
 	// events for OpenAI-compatible models known to emit that legacy format.
 	ParseThinkTags bool
+	// SetRequestExtra, when non-nil, is invoked on every outgoing request after
+	// the provider's built-in headers (Content-Type, User-Agent) are set, so a
+	// wrapper (notably the Codex provider) can inject request-specific headers
+	// — e.g. an account id resolved from the OAuth token, or a hard-coded
+	// "originator" value. It is also called on the 401-refresh retry, so any
+	// per-request state must be re-derivable from the live request.
+	SetRequestExtra func(*http.Request)
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
 type Provider struct {
 	apiKey            string
 	baseURL           string
+	endpoint          string
 	model             string
 	authHeader        string
 	authScheme        string
@@ -64,6 +78,7 @@ type Provider struct {
 	userAgent         string
 	streamIdleTimeout time.Duration
 	parseThinkTags    bool
+	setRequestExtra   func(*http.Request)
 }
 
 // New creates an OpenAI-compatible provider.
@@ -80,6 +95,15 @@ func New(options Options) (*Provider, error) {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if _, err := url.ParseRequestURI(baseURL); err != nil {
 		return nil, fmt.Errorf("invalid OpenAI base URL: %w", err)
+	}
+
+	// Endpoint overrides the default chat-completions path. When empty we
+	// append `/chat/completions` to the (trimmed) baseURL. When non-empty we
+	// trust the caller's value verbatim so a flavor (Codex) can target a
+	// sibling path on the same host without re-implementing the transport.
+	endpoint := strings.TrimSpace(options.Endpoint)
+	if endpoint == "" {
+		endpoint = baseURL + "/chat/completions"
 	}
 
 	httpClient := options.HTTPClient
@@ -100,6 +124,7 @@ func New(options Options) (*Provider, error) {
 	return &Provider{
 		apiKey:            options.APIKey,
 		baseURL:           baseURL,
+		endpoint:          endpoint,
 		model:             model,
 		authHeader:        strings.TrimSpace(options.AuthHeader),
 		authScheme:        strings.TrimSpace(options.AuthScheme),
@@ -111,6 +136,7 @@ func New(options Options) (*Provider, error) {
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: idleTimeout,
 		parseThinkTags:    options.ParseThinkTags,
+		setRequestExtra:   options.SetRequestExtra,
 	}, nil
 }
 
@@ -134,7 +160,7 @@ func (provider *Provider) StreamCompletion(
 }
 
 func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
-	endpoint := provider.baseURL + "/chat/completions"
+	endpoint := provider.endpoint
 
 	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
 	// the request, rather than closing response.Body directly (which would race
@@ -160,6 +186,9 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 			request.Header.Set("Content-Type", "application/json")
 			if provider.userAgent != "" {
 				request.Header.Set("User-Agent", provider.userAgent)
+			}
+			if provider.setRequestExtra != nil {
+				provider.setRequestExtra(request)
 			}
 		}, 0)
 	if err != nil {

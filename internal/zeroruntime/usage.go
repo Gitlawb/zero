@@ -22,6 +22,16 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		cachedInputTokens = inputTokens
 	}
 
+	cacheWriteTokens, err := nonNegative(input.CacheWriteTokens, "cache write tokens")
+	if err != nil {
+		return Usage{}, err
+	}
+	// Cache-read and cache-write are disjoint subsets of the input; together they
+	// can never exceed it. Clamp the write portion to whatever input remains.
+	if cacheWriteTokens > inputTokens-cachedInputTokens {
+		cacheWriteTokens = inputTokens - cachedInputTokens
+	}
+
 	reasoningTokens, err := nonNegative(input.ReasoningTokens, "reasoning tokens")
 	if err != nil {
 		return Usage{}, err
@@ -33,6 +43,7 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 		PromptTokens:      inputTokens,
 		CompletionTokens:  outputTokens,
 		CachedInputTokens: cachedInputTokens,
+		CacheWriteTokens:  cacheWriteTokens,
 		ReasoningTokens:   reasoningTokens,
 	}, nil
 }

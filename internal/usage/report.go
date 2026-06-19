@@ -11,15 +11,46 @@ import (
 )
 
 // usageEventPayload mirrors the persisted EventUsage payload written by the exec
-// runtime. Token counts are always stored; Model is persisted only on escalation
-// runs (the model in force can change mid-run only under --allow-escalation).
-// When Model is absent, cost is reconstructed from the session's Metadata.ModelID
-// and is a labeled estimate.
+// runtime. Prompt/completion/total are always stored; the cache and reasoning
+// breakdown is stored when present (omitempty) so cost reconstruction matches the
+// live tracker instead of over-pricing cache-heavy or reasoning-heavy turns.
+// Older events without those fields decode to zero and price exactly as before.
+// Model is persisted only on escalation runs (the model in force can change
+// mid-run only under --allow-escalation); when absent, cost is reconstructed from
+// the session's Metadata.ModelID and is a labeled estimate.
 type usageEventPayload struct {
-	PromptTokens     int    `json:"promptTokens"`
-	CompletionTokens int    `json:"completionTokens"`
-	TotalTokens      int    `json:"totalTokens"`
-	Model            string `json:"model,omitempty"`
+	PromptTokens      int    `json:"promptTokens"`
+	CompletionTokens  int    `json:"completionTokens"`
+	TotalTokens       int    `json:"totalTokens"`
+	CachedInputTokens int    `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  int    `json:"cacheWriteTokens,omitempty"`
+	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
+	Model             string `json:"model,omitempty"`
+}
+
+// EventUsagePayload builds the persisted EventUsage payload for a usage record.
+// It is the single writer paired with usageEventPayload (the reader), so the JSON
+// keys can never drift. Cache and reasoning counts are written only when non-zero,
+// keeping payloads compact and older readers unaffected; BuildReport reads them
+// back to price a turn exactly (cache discount + cache-write premium + reasoning)
+// rather than estimating from prompt/completion alone. Callers add "model"
+// afterward on escalation runs.
+func EventUsagePayload(u zeroruntime.Usage) map[string]any {
+	payload := map[string]any{
+		"promptTokens":     u.EffectiveInputTokens(),
+		"completionTokens": u.EffectiveOutputTokens(),
+		"totalTokens":      u.TotalTokens(),
+	}
+	if u.CachedInputTokens > 0 {
+		payload["cachedInputTokens"] = u.CachedInputTokens
+	}
+	if u.CacheWriteTokens > 0 {
+		payload["cacheWriteTokens"] = u.CacheWriteTokens
+	}
+	if u.ReasoningTokens > 0 {
+		payload["reasoningTokens"] = u.ReasoningTokens
+	}
+	return payload
 }
 
 // DayBucket aggregates usage events sharing the same UTC calendar date.
@@ -116,8 +147,11 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			continue
 		}
 		cost, err := modelregistry.CalculateCost(model, zeroruntime.Usage{
-			InputTokens:  payload.PromptTokens,
-			OutputTokens: payload.CompletionTokens,
+			InputTokens:       payload.PromptTokens,
+			OutputTokens:      payload.CompletionTokens,
+			CachedInputTokens: payload.CachedInputTokens,
+			CacheWriteTokens:  payload.CacheWriteTokens,
+			ReasoningTokens:   payload.ReasoningTokens,
 		})
 		if err != nil {
 			continue

@@ -68,10 +68,7 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 	specRegistry := cloneToolRegistry(m.registry)
 	specmode.RegisterDraftTools(specRegistry, m.cwd, m.now)
 	runCtx, cancel := context.WithCancel(m.ctx)
-	m.runID++
-	m.activeRunID = m.runID
-	m.runCancel = cancel
-	m.pending = true
+	m = m.beginRun(cancel)
 	return m, tea.Batch(m.runAgentWithOptions(m.activeRunID, runCtx, task, turnImages, tuiAgentRunOptions{
 		registry:       specRegistry,
 		permissionMode: agent.PermissionModeSpecDraft,
@@ -204,22 +201,13 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
-	m.runID++
-	m.activeRunID = m.runID
-	m.runCancel = cancel
-	m.pending = true
-	// Seed the streaming-text fade state for the spec-impl run. The
-	// normal launchPrompt path lets the first agentTextMsg do this; the
-	// spec-impl path calls runAgent directly, so we seed explicitly. The
-	// first incoming delta will re-stamp the in-progress entry and the
-	// fade will start naturally.
+	m = m.beginRun(cancel)
+	// Seed the streaming-text fade state for the spec-impl run. The normal
+	// launchPrompt path lets the first agentTextMsg do this; the spec-impl path
+	// calls runAgent directly, so we seed explicitly. The first incoming delta
+	// will re-stamp the in-progress entry and the fade will start naturally.
 	m.resetStreamingFade()
 	m.fadeActive = true
-	// Reset the working-verb rotation so the user sees the brand word
-	// first when the implementation session starts. Also reset the step
-	// counter so the cadence doesn't carry over a partial countdown.
-	m.workingVerbTicks = 0
-	m.workingVerb.Reset()
 	return m, tea.Batch(m.runAgent(m.activeRunID, runCtx, prompt, nil), m.spinner.Tick)
 }
 

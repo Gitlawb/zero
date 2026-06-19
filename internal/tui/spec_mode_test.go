@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -238,4 +239,44 @@ func providerRequestsContain(requests []zeroruntime.CompletionRequest, text stri
 		}
 	}
 	return false
+}
+
+// Regression (PR #254 review): spec-mode launches must seed turnStartedAt so the
+// working status line's live elapsed clock renders on spec runs — previously only
+// the normal prompt path set it. Both draft and impl now route through beginRun.
+func TestSpecLaunchesSeedElapsedClock(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+		textScript("implemented from approved spec"),
+	}}
+	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	m.input.SetValue("/spec add review flow")
+
+	// Draft launch must seed the clock.
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil || !next.pending {
+		t.Fatal("expected /spec to start a pending draft run")
+	}
+	if next.turnStartedAt.IsZero() {
+		t.Fatal("draft launch did not seed turnStartedAt (elapsed clock would not render)")
+	}
+
+	updated, _ = next.Update(execCmd(cmd))
+	next = updated.(model)
+	if next.pendingSpecReview == nil {
+		t.Fatal("expected pending spec review")
+	}
+	next.turnStartedAt = time.Time{} // zero it to prove the impl path re-seeds independently
+
+	// Approval launches the implementation run, which must also seed the clock.
+	updated, cmd = next.Update(testKeyText("a"))
+	next = updated.(model)
+	if cmd == nil || !next.pending {
+		t.Fatal("expected approval to start a pending implementation run")
+	}
+	if next.turnStartedAt.IsZero() {
+		t.Fatal("impl launch did not seed turnStartedAt (elapsed clock would not render)")
+	}
 }

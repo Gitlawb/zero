@@ -22,6 +22,7 @@ type tokenResponse struct {
 	TokenType        string `json:"token_type"`
 	ExpiresIn        int64  `json:"expires_in"`
 	Scope            string `json:"scope"`
+	IDToken          string `json:"id_token"`
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
 }
@@ -143,7 +144,7 @@ func Refresh(ctx context.Context, client *http.Client, cfg Config, current Token
 	if len(cfg.Scopes) > 0 {
 		form.Set("scope", strings.Join(cfg.Scopes, " "))
 	}
-	base := Token{Scopes: current.Scopes, RefreshToken: refresh, Account: current.Account}
+	base := Token{Scopes: current.Scopes, RefreshToken: refresh, Account: current.Account, IDToken: current.IDToken}
 	return PostToken(ctx, client, cfg.TokenEndpoint, form, base, now)
 }
 
@@ -207,6 +208,13 @@ func PostToken(ctx context.Context, client *http.Client, tokenEndpoint string, f
 	}
 	if scope := trimmed(parsed.Scope); scope != "" {
 		token.Scopes = strings.Fields(scope)
+	}
+	// A new ID token is honored on every exchange (login and refresh) — both
+	// can rotate it. The previous ID token is preserved when the response omits
+	// one, so a refresh that returns a new access token without a new id_token
+	// (the common case) doesn't drop the chatgpt_account_id claim.
+	if trimmed(parsed.IDToken) != "" {
+		token.IDToken = parsed.IDToken
 	}
 	return token, nil
 }

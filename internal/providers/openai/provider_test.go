@@ -566,6 +566,7 @@ func newTestProviderWithOptions(t *testing.T, options Options, handler http.Hand
 		MaxTokens:         options.MaxTokens,
 		StreamIdleTimeout: options.StreamIdleTimeout,
 		ParseThinkTags:    options.ParseThinkTags,
+		SetRequestExtra:   options.SetRequestExtra,
 	})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)

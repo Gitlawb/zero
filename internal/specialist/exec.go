@@ -135,11 +135,12 @@ const permissionModeUnsafe = "unsafe"
 // modify the workspace or run commands, so spawning it is harmless and the Task
 // tool auto-approves it (no permission prompt).
 var readOnlySpecialistTools = map[string]bool{
-	"read_file":      true,
-	"list_directory": true,
-	"grep":           true,
-	"glob":           true,
-	"update_plan":    true,
+	"read_file":          true,
+	"read_minified_file": true,
+	"list_directory":     true,
+	"grep":               true,
+	"glob":               true,
+	"update_plan":        true,
 }
 
 // IsReadOnlySpecialist reports whether the named specialist resolves to a

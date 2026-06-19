@@ -88,11 +88,15 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 }
 
 // providerWizardOAuthCmdFor runs the chosen provider's browser OAuth login off the
-// UI goroutine and reports the outcome. OpenRouter mints an API key; other OAuth
-// providers (xAI) run the generic engine login which stores a refreshable token.
+// UI goroutine and reports the outcome. OpenRouter mints an API key; ChatGPT
+// (Codex) needs the bespoke flow that extracts the `chatgpt_account_id` claim
+// from the ID token and stores it on the saved token so the Codex provider can
+// inject it as a header on every request; other OAuth providers (xAI) run the
+// generic engine login which stores a refreshable token.
 func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
 	providerID := provider.ID
-	if provider.OAuthMintsKey {
+	switch {
+	case provider.OAuthMintsKey:
 		return func() tea.Msg {
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
@@ -100,10 +104,53 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 			})
 			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, apiKey: key, err: err}
 		}
+	case providerID == "chatgpt":
+		return func() tea.Msg {
+			err := runProviderChatGPTLogin()
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: err}
+		}
+	default:
+		return func() tea.Msg {
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
+		}
 	}
-	return func() tea.Msg {
-		return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
+}
+
+// runProviderChatGPTLogin runs the ChatGPT (Codex) bespoke login (which
+// extracts the `chatgpt_account_id` claim from the ID token and stores it on
+// the token's Account field) and persists the resulting token via the oauth
+// store. The runtime resolver then attaches the bearer to Codex calls and the
+// Codex provider reads the Account field for the `chatgpt-account-id` header.
+func runProviderChatGPTLogin() error {
+	env := buildOAuthPresetEnv()
+	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
+		Env:         env,
+		HTTPClient:  &http.Client{Timeout: 60 * time.Second},
+		OpenBrowser: browser.OpenURL,
+		Timeout:     3 * time.Minute,
+	})
+	if err != nil {
+		return err
 	}
+	store, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		return err
+	}
+	return store.Save(oauth.ProviderKey("chatgpt"), token)
+}
+
+// buildOAuthPresetEnv layers the process env with the preset opt-in so a
+// `zero` launch from a TUI session can use the baked-in ChatGPT client_id
+// without requiring the user to export ZERO_OAUTH_ALLOW_PRESETS themselves.
+func buildOAuthPresetEnv() map[string]string {
+	env := map[string]string{}
+	for _, kv := range os.Environ() {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			env[kv[:eq]] = kv[eq+1:]
+		}
+	}
+	env["ZERO_OAUTH_ALLOW_PRESETS"] = "1"
+	return env
 }
 
 // runProviderTokenLogin runs the generic OAuth engine login for a provider that
@@ -178,7 +225,7 @@ func (m model) startProviderDeviceLogin() (model, tea.Cmd) {
 	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID)
 }
 
-const maxProviderWizardProvidersVisible = 8
+const maxProviderWizardProvidersVisible = 10
 const maxProviderWizardModelsVisible = 10
 const providerWizardMinWidth = 48
 const providerWizardProviderWidth = 64
@@ -212,7 +259,7 @@ func providerWizardMethodOptions() []providerWizardMethodOption {
 		options = append(options, providerWizardMethodOption{
 			oauth:    true,
 			label:    "Sign in with OAuth",
-			subtitle: "One-click browser login, no API key to copy (OpenRouter, xAI).",
+			subtitle: "One-click browser login, no API key to copy (OpenRouter, xAI, ChatGPT, Hugging Face).",
 		})
 	}
 	options = append(options, providerWizardMethodOption{

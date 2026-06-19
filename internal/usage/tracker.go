@@ -11,6 +11,7 @@ import (
 type Normalized struct {
 	InputTokens       int
 	CachedInputTokens int
+	CacheWriteTokens  int
 	OutputTokens      int
 	ReasoningTokens   int
 	TotalTokens       int
@@ -39,11 +40,13 @@ type ModelSummary struct {
 	RecordCount        int
 	InputTokens        int
 	CachedInputTokens  int
+	CacheWriteTokens   int
 	OutputTokens       int
 	ReasoningTokens    int
 	TotalTokens        int
 	InputCost          float64
 	CachedInputCost    float64
+	CacheWriteCost     float64
 	OutputCost         float64
 	TotalCost          float64
 	FormattedTotalCost string
@@ -54,11 +57,13 @@ type Summary struct {
 	Currency           string
 	InputTokens        int
 	CachedInputTokens  int
+	CacheWriteTokens   int
 	OutputTokens       int
 	ReasoningTokens    int
 	TotalTokens        int
 	InputCost          float64
 	CachedInputCost    float64
+	CacheWriteCost     float64
 	OutputCost         float64
 	TotalCost          float64
 	FormattedTotalCost string
@@ -176,6 +181,13 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 	if cachedInputTokens > inputTokens {
 		cachedInputTokens = inputTokens
 	}
+	cacheWriteTokens, err := nonNegative(usage.CacheWriteTokens, "cacheWriteTokens")
+	if err != nil {
+		return Normalized{}, zeroruntime.Usage{}, err
+	}
+	if cacheWriteTokens > inputTokens-cachedInputTokens {
+		cacheWriteTokens = inputTokens - cachedInputTokens
+	}
 	reasoningTokens, err := nonNegative(usage.ReasoningTokens, "reasoningTokens")
 	if err != nil {
 		return Normalized{}, zeroruntime.Usage{}, err
@@ -183,6 +195,7 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 	normalized := Normalized{
 		InputTokens:       inputTokens,
 		CachedInputTokens: cachedInputTokens,
+		CacheWriteTokens:  cacheWriteTokens,
 		OutputTokens:      outputTokens,
 		ReasoningTokens:   reasoningTokens,
 		TotalTokens:       inputTokens + outputTokens + reasoningTokens,
@@ -191,6 +204,7 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		InputTokens:       inputTokens,
 		PromptTokens:      inputTokens,
 		CachedInputTokens: cachedInputTokens,
+		CacheWriteTokens:  cacheWriteTokens,
 		OutputTokens:      outputTokens,
 		CompletionTokens:  outputTokens,
 		ReasoningTokens:   reasoningTokens,
@@ -208,6 +222,7 @@ func FormatSummary(summary Summary) string {
 func addUsageToSummary(summary *Summary, usage Normalized) {
 	summary.InputTokens += usage.InputTokens
 	summary.CachedInputTokens += usage.CachedInputTokens
+	summary.CacheWriteTokens += usage.CacheWriteTokens
 	summary.OutputTokens += usage.OutputTokens
 	summary.ReasoningTokens += usage.ReasoningTokens
 	summary.TotalTokens += usage.TotalTokens
@@ -217,6 +232,7 @@ func addUsageToModel(summary *ModelSummary, usage Normalized) {
 	summary.RecordCount++
 	summary.InputTokens += usage.InputTokens
 	summary.CachedInputTokens += usage.CachedInputTokens
+	summary.CacheWriteTokens += usage.CacheWriteTokens
 	summary.OutputTokens += usage.OutputTokens
 	summary.ReasoningTokens += usage.ReasoningTokens
 	summary.TotalTokens += usage.TotalTokens
@@ -225,6 +241,7 @@ func addUsageToModel(summary *ModelSummary, usage Normalized) {
 func addCostToSummary(summary *Summary, cost modelregistry.CostBreakdown) {
 	summary.InputCost += cost.InputCost
 	summary.CachedInputCost += cost.CachedInputCost
+	summary.CacheWriteCost += cost.CacheWriteCost
 	summary.OutputCost += cost.OutputCost
 	summary.TotalCost += cost.TotalCost
 }
@@ -232,6 +249,7 @@ func addCostToSummary(summary *Summary, cost modelregistry.CostBreakdown) {
 func addCostToModel(summary *ModelSummary, cost modelregistry.CostBreakdown) {
 	summary.InputCost += cost.InputCost
 	summary.CachedInputCost += cost.CachedInputCost
+	summary.CacheWriteCost += cost.CacheWriteCost
 	summary.OutputCost += cost.OutputCost
 	summary.TotalCost += cost.TotalCost
 }

@@ -212,7 +212,13 @@ func anthropicModel(id string, displayName string, apiModel string, status Model
 	cost.Unit = "per_1m_tokens"
 	cost.Source = anthropicPricingSource
 	cost.SourceLastVerified = sourceLastVerified
-	cost.Notes = append(cost.Notes, "Claude cached input pricing models cache hits and refreshes.")
+	// Anthropic bills cache writes (5-minute TTL) at 1.25x the base input rate.
+	// Derive it from the input rate so every cacheable Claude model is priced
+	// without restating it per entry; explicit values still win if ever set.
+	if cost.CacheWritePerMillion == 0 && cost.InputPerMillion > 0 {
+		cost.CacheWritePerMillion = cost.InputPerMillion * 1.25
+	}
+	cost.Notes = append(cost.Notes, "Claude cached input pricing models cache hits and refreshes; cache writes bill at 1.25x input.")
 	return ModelEntry{
 		ID:               id,
 		DisplayName:      displayName,

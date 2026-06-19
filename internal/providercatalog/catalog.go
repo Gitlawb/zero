@@ -89,6 +89,25 @@ var descriptors = []Descriptor{
 	localOpenAI("ollama", "Ollama Local", "http://localhost:11434/v1", "llama3.1", "ollama local"),
 	localOpenAI("lmstudio", "LM Studio", "http://localhost:1234/v1", "local-model", "lm-studio", "lm studio"),
 	oauthProvider(openAICompat("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4.1", []string{"OPENROUTER_API_KEY"}), true, false),
+	// Hugging Face Inference Providers — OpenAI-compatible router at
+	// https://router.huggingface.co/v1 exposes hundreds of OSS models. OAuth
+	// requires a one-time app registration at huggingface.co/settings/applications/new
+	// (no client secret needed for "public" apps); the preset pre-fills scopes,
+	// endpoints, and the OIDC issuer. Free tier has strict rate limits; Pro
+	// removes them.
+	oauthProvider(openAICompat("huggingface", "Hugging Face", "https://router.huggingface.co/v1", "meta-llama/Llama-3.3-70B-Instruct", []string{"HUGGINGFACE_API_KEY"}), false, true),
+	// ChatGPT (Codex backend) — the bearer from a ChatGPT Plus/Pro subscription
+	// OAuth login routes to chatgpt.com/backend-api/codex/responses (NOT
+	// api.openai.com). The Codex path injects `originator: codex_cli_rs` and the
+	// `chatgpt-account-id` claim as headers; see internal/providers/openai/codex.go.
+	// AuthEnvVars is empty (no API-key path) and the OAuth preset is the only
+	// way in; RequiresAuth is forced true so catalog consumers know the provider
+	// needs an interactive login before a request will succeed.
+	func() Descriptor {
+		d := openAICompat("chatgpt", "ChatGPT", "https://chatgpt.com/backend-api/codex", "gpt-5", nil)
+		d.RequiresAuth = true
+		return oauthProvider(d, false, false)
+	}(),
 	openAICompat("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", []string{"GROQ_API_KEY"}),
 	openAICompat("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", []string{"DEEPSEEK_API_KEY"}),
 	openAICompat("together", "Together AI", "https://api.together.xyz/v1", "meta-llama/Llama-3.3-70B-Instruct-Turbo", []string{"TOGETHER_API_KEY"}),

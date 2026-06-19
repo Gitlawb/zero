@@ -37,29 +37,37 @@ before. Tokens are stored 0600 (or the OS keyring with
 Running `/provider` opens a **"How do you want to connect?"** chooser:
 
 ```text
-❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI)
+❯ Sign in with OAuth                 One-click browser login (OpenRouter, xAI, ChatGPT, Hugging Face)
   Paste an API key / browse providers  Any of 20+ providers, local, or a proxy
 ```
 
 Pick **Sign in with OAuth** → the list of providers that do real OAuth → choose one:
 
 ```text
-❯ OpenRouter    browser sign-in · creates a key
-  xAI (Grok)    browser or device code
+❯ OpenRouter      browser sign-in · creates a key
+  xAI (Grok)      browser or device code
+  ChatGPT         browser (Codex backend, ChatGPT Plus/Pro)
+  Hugging Face    browser or device code
 ```
 
-- **OpenRouter / xAI** are real OAuth: your browser opens to approve → done (no
-  key to paste). OpenRouter mints a key; xAI stores a refreshable token. The same
-  chooser appears in first-run onboarding. (xAI uses an opt-in preset — set
+- **OpenRouter / xAI / ChatGPT / Hugging Face** are real OAuth: your browser
+  opens to approve → done (no key to paste). OpenRouter mints a key; xAI /
+  ChatGPT / Hugging Face store a refreshable bearer. Hugging Face requires a
+  one-time OAuth-app registration (no secret needed for "public" apps); the
+  preset pre-fills scopes, endpoints, and the OIDC issuer. The same chooser
+  appears in first-run onboarding. (xAI uses an opt-in preset — set
   `ZERO_OAUTH_ALLOW_PRESETS=1` or your own `ZERO_OAUTH_XAI_*`; see below.)
-- **Device code (headless / SSH):** for a provider that supports it (xAI), press
-  **d** on the list to get a code to enter on another device instead of opening a
-  browser. On an SSH session or headless Linux box (no `DISPLAY`) device code is
-  used automatically; set `ZERO_OAUTH_DEVICE=1` to force it anywhere. The CLI
-  equivalent is `zero auth login xai --device`.
-- **ChatGPT / Claude are intentionally not in this list** — they can't do in-app
-  OAuth (see §2). Use *Paste an API key / browse providers* + a local proxy
-  (`chatgpt-proxy` / `custom-anthropic-compatible`), as described below.
+- **Device code (headless / SSH):** for a provider that supports it (xAI,
+  Hugging Face), press **d** on the list to get a code to enter on another
+  device instead of opening a browser. On an SSH session or headless Linux box
+  (no `DISPLAY`) device code is used automatically; set `ZERO_OAUTH_DEVICE=1`
+  to force it anywhere. The CLI equivalent is
+  `zero auth login <name> --device`.
+- **ChatGPT / Claude are intentionally not in this list for the proxy path** —
+  use the dedicated `chatgpt-proxy` / `custom-anthropic-compatible` preset
+  (see §2) for subscription-via-proxy. ChatGPT *is* a first-class OAuth
+  provider in this version (routes to the Codex backend) — see "Built-in OAuth
+  providers" below.
 
 ### Built-in OAuth providers
 
@@ -78,6 +86,30 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
   fully overridable by `ZERO_OAUTH_XAI_*` (env wins), and it requires a
   SuperGrok / X Premium+ subscription; the client_id is an undocumented public
   Grok-CLI client that may change without notice.
+- **ChatGPT (Codex) — opt-in preset** — `zero auth chatgpt` opens a browser, you
+  approve with your ChatGPT Plus/Pro/Business/Enterprise account, and the bearer is
+  stored. The bearer routes to `https://chatgpt.com/backend-api/codex/responses`
+  (the same endpoint the openai/codex CLI uses), with `originator: codex_cli_rs` and
+  the `chatgpt-account-id` claim injected as headers on every request. The
+  `chatgpt-account-id` is extracted from the OIDC ID token and stored alongside the
+  bearer; if the claim is missing (older ChatGPT accounts, or a rotated
+  authorization server), the Codex backend will 401 and `zero auth status chatgpt`
+  will show the warning. Like xAI, the preset uses the publicly-shipped Codex CLI
+  client identity (`app_EMoamEEZ73f0CkXaXp7hrann`) and is opt-in via
+  `ZERO_OAUTH_ALLOW_PRESETS=1`. As of mid-2026 the Codex backend is
+  Cloudflare-gated: requests from a non-Codex client can still be challenged, and
+  the `chatgpt-proxy` route in §2 is the conservative fallback.
+- **Hugging Face — opt-in preset, BYO client_id** — `zero auth login huggingface`
+  (or `--device` for headless) opens a Hugging Face OAuth flow. The bearer works on
+  the OpenAI-compatible router at `https://router.huggingface.co/v1` for hundreds
+  of OSS models (Llama, Qwen, DeepSeek, Mistral, etc.). HF does not ship a
+  globally-known client_id, so the preset ships endpoints + scopes + the OIDC
+  issuer pre-filled; you must register a "public" OAuth app (no secret) at
+  <https://huggingface.co/settings/applications/new> and set the resulting
+  `client_id` via `ZERO_OAUTH_HUGGINGFACE_CLIENT_ID`. Enable the preset with
+  `ZERO_OAUTH_ALLOW_PRESETS=1` (or omit it — the BYO client_id path uses
+  `client_credentials = none` and doesn't need the opt-in). Free tier has strict
+  rate limits; Pro removes them.
 
 Any field of a preset is overridable via `ZERO_OAUTH_<NAME>_*`. For a fully custom
 OAuth/OIDC provider, set those env vars (see `zero auth --help`) and
@@ -95,6 +127,12 @@ We researched this carefully. As of mid-2026, a **subscription** OAuth token doe
   API), **not** `api.openai.com`. That backend is **Cloudflare bot-protected** —
   non-browser / headless clients get `cf-mitigated: challenge` → `403`. It also
   requires mimicking the official Codex client (originator + account-id header).
+  **First-class path (this version):** `zero auth chatgpt` does exactly that
+  mimicking (`originator: codex_cli_rs`, `chatgpt-account-id: <claim>`) and
+  routes requests to the Codex backend, no proxy required — see §1. The
+  `chatgpt-proxy` route below is the conservative fallback when Cloudflare
+  challenges become an issue, and is the only path that works without a
+  browser-based ChatGPT OAuth login.
 - **Anthropic (Claude):** the Messages API **rejects** subscription OAuth tokens
   for third-party use unless the request spoofs the Claude Code identity
   (`anthropic-beta: oauth-2025-04-20`, `claude-cli` UA, and a verbatim

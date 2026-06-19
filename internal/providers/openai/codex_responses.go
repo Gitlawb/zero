@@ -1,0 +1,717 @@
+package openai
+
+// Codex Responses API adapter.
+//
+// The ChatGPT Codex backend (chatgpt.com/backend-api/codex/responses) serves
+// the OpenAI Responses API, NOT the chat-completions API. The two schemas
+// differ in both request and stream shape:
+//
+//	Chat-completions (what the openai provider speaks):
+//	  request:  { model, messages, tools, stream, stream_options, max_completion_tokens }
+//	  stream:   data: {"choices":[{"delta":{"content","tool_calls",...}}]}
+//	            data: [DONE]
+//
+//	Responses (what the Codex backend speaks):
+//	  request:  { model, input, tools, stream, max_output_tokens }
+//	  input item types: "message" (role: user/assistant/system, content parts),
+//	                    "function_call" (id, call_id, name, arguments),
+//	                    "function_call_output" (call_id, output)
+//	  stream:   event: response.created | response.in_progress
+//	            event: response.output_item.added
+//	            event: response.content_part.added
+//	            event: response.output_text.delta / response.output_text.done
+//	            event: response.function_call_arguments.delta
+//	            event: response.output_item.done
+//	            event: response.completed
+//	            event: response.error | response.failed
+//
+// The previous Codex implementation reused the openai chat-completions transport
+// verbatim and only changed the URL — that sent a chat-completions body to
+// /responses, which the Codex backend rejects. This file replaces the transport
+// with a Responses-shaped request builder, a typed SSE event dispatcher, and a
+// tool-call accumulator that emits normalized StreamEventToolCallStart /
+// StreamEventToolCallDelta / StreamEventToolCallEnd / StreamEventUsage /
+// StreamEventDone events for the runtime.
+//
+// The Codex provider still uses providerio for the HTTP/auth/retry/idle-timeout
+// plumbing so the OAuth 401-refresh and bearer rotation paths stay identical
+// to the rest of the openai-compatible surface.
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
+)
+
+// Codex Responses API event type names. Only the ones the Codex backend
+// actually emits are listed; unknown event types are ignored.
+const (
+	responsesEventCreated           = "response.created"
+	responsesEventInProgress        = "response.in_progress"
+	responsesEventOutputItemAdded   = "response.output_item.added"
+	responsesEventContentPartAdded  = "response.content_part.added"
+	responsesEventOutputTextDelta   = "response.output_text.delta"
+	responsesEventOutputTextDone    = "response.output_text.done"
+	responsesEventFunctionArgsDelta = "response.function_call_arguments.delta"
+	responsesEventContentPartDone   = "response.content_part.done"
+	responsesEventOutputItemDone    = "response.output_item.done"
+	responsesEventCompleted         = "response.completed"
+	responsesEventFailed            = "response.failed"
+	responsesEventError             = "response.error"
+	responsesEventIncomplete        = "response.incomplete"
+)
+
+// responsesRequest is the wire shape POSTed to {baseURL}/responses.
+type responsesRequest struct {
+	Model           string          `json:"model"`
+	Input           []inputItem     `json:"input"`
+	Stream          bool            `json:"stream"`
+	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
+	Tools           []responsesTool `json:"tools,omitempty"`
+}
+
+// inputItem is one element of the Responses `input` array. The Type field
+// dispatches between message / function_call / function_call_output.
+type inputItem struct {
+	Type    string        `json:"type"`
+	Role    string        `json:"role,omitempty"`
+	Content []contentItem `json:"content,omitempty"`
+	// function_call fields
+	ID        string `json:"id,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	// function_call_output fields
+	Output any `json:"output,omitempty"`
+}
+
+// contentItem is one element of a message's `content` array. Type dispatches
+// between input_text / output_text / input_image.
+type contentItem struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+}
+
+type responsesTool struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+// responsesEvent is the decoded form of one Responses SSE data payload.
+// Only the fields each event type actually carries are populated.
+type responsesEvent struct {
+	Type string `json:"type"`
+	// delta payloads (response.output_text.delta / function_call_arguments.delta)
+	Delta string `json:"delta,omitempty"`
+	// item payloads (response.output_item.added / done)
+	ItemID      string       `json:"item_id,omitempty"`
+	OutputIndex int          `json:"output_index,omitempty"`
+	Item        *itemPayload `json:"item,omitempty"`
+	// completed / failed / incomplete
+	Response *responsePayload `json:"response,omitempty"`
+	// error
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+	Param   string `json:"param,omitempty"`
+}
+
+type itemPayload struct {
+	Type      string `json:"type"`
+	ID        string `json:"id,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+	Status    string `json:"status,omitempty"`
+}
+
+type responsePayload struct {
+	ID     string        `json:"id"`
+	Status string        `json:"status"`
+	Usage  *usagePayload `json:"usage,omitempty"`
+	Error  *errorPayload `json:"error,omitempty"`
+}
+
+type usagePayload struct {
+	InputTokens         int            `json:"input_tokens"`
+	OutputTokens        int            `json:"output_tokens"`
+	TotalTokens         int            `json:"total_tokens"`
+	OutputTokensDetails *outputDetails `json:"output_tokens_details,omitempty"`
+	InputTokensDetails  *inputDetails  `json:"input_tokens_details,omitempty"`
+}
+
+type outputDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+type inputDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+type errorPayload struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// toolCallBuilder accumulates one in-flight function_call across its
+// response.output_item.added, the argument deltas, and the final
+// response.output_item.done.
+type toolCallBuilder struct {
+	ID        string
+	Name      string
+	Arguments strings.Builder
+	started   bool
+	ended     bool
+}
+
+// responsesState tracks in-flight tool calls and whether the terminal
+// event has been emitted. It is the Responses-API equivalent of the
+// chat-completions toolState in provider.go.
+type responsesState struct {
+	toolCalls map[string]*toolCallBuilder
+	usage     *usagePayload
+	done      bool
+}
+
+func newResponsesState() *responsesState {
+	return &responsesState{toolCalls: map[string]*toolCallBuilder{}}
+}
+
+// buildResponsesRequest converts a runtime CompletionRequest into the
+// Responses API wire format. System messages fold into a top-level
+// `instructions` field; everything else (user/assistant turns, tool
+// calls, tool results) becomes items in the `input` array.
+func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequest) (*responsesRequest, error) {
+	if p.inner == nil || strings.TrimSpace(p.inner.model) == "" {
+		return nil, errors.New("codex provider: model is required")
+	}
+	req := &responsesRequest{
+		Model:           p.inner.model,
+		Stream:          true,
+		MaxOutputTokens: p.inner.maxTokens,
+	}
+	for _, msg := range request.Messages {
+		switch msg.Role {
+		case zeroruntime.MessageRoleSystem:
+			// System → first-class user message in Responses API. Keeping it as
+			// an input message (rather than a separate `instructions` field)
+			// matches the chat-completions semantics the runtime was already
+			// producing — every system turn reaches the model in order.
+			req.Input = append(req.Input, inputItem{
+				Type:    "message",
+				Role:    "system",
+				Content: []contentItem{{Type: "input_text", Text: msg.Content}},
+			})
+		case zeroruntime.MessageRoleUser:
+			req.Input = append(req.Input, p.userInputItem(msg))
+		case zeroruntime.MessageRoleAssistant:
+			items, err := p.assistantInputItems(msg)
+			if err != nil {
+				return nil, err
+			}
+			req.Input = append(req.Input, items...)
+		case zeroruntime.MessageRoleTool:
+			if msg.ToolCallID == "" {
+				return nil, fmt.Errorf("codex provider: tool message missing tool call id")
+			}
+			req.Input = append(req.Input, inputItem{
+				Type:   "function_call_output",
+				CallID: msg.ToolCallID,
+				Output: msg.Content,
+			})
+		default:
+			return nil, fmt.Errorf("codex provider: unsupported message role %q", msg.Role)
+		}
+	}
+	for _, tool := range request.Tools {
+		req.Tools = append(req.Tools, responsesTool{
+			Type:        "function",
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  tool.Parameters,
+		})
+	}
+	return req, nil
+}
+
+// userInputItem renders a user message as a Responses `message` item with
+// one input_text part (and one input_image part per attached image, if
+// any). The image bytes are base64-encoded into a data: URI exactly like
+// the chat-completions transport does.
+func (p *CodexProvider) userInputItem(msg zeroruntime.Message) inputItem {
+	parts := []contentItem{}
+	if msg.Content != "" {
+		parts = append(parts, contentItem{Type: "input_text", Text: msg.Content})
+	}
+	for _, image := range msg.Images {
+		encoded := base64.StdEncoding.EncodeToString(image.Data)
+		parts = append(parts, contentItem{
+			Type:     "input_image",
+			ImageURL: "data:" + image.MediaType + ";base64," + encoded,
+		})
+	}
+	return inputItem{Type: "message", Role: "user", Content: parts}
+}
+
+// assistantInputItems renders an assistant turn as either a single
+// `message` (text-only) or a `message` followed by one `function_call`
+// per tool call. Tool-call IDs use ToolCall.ID directly — Responses
+// accepts `id` and `call_id` interchangeably, and the runtime already
+// guarantees non-empty IDs at construction time.
+func (p *CodexProvider) assistantInputItems(msg zeroruntime.Message) ([]inputItem, error) {
+	items := []inputItem{}
+	if msg.Content != "" {
+		items = append(items, inputItem{
+			Type:    "message",
+			Role:    "assistant",
+			Content: []contentItem{{Type: "output_text", Text: msg.Content}},
+		})
+	}
+	for _, tc := range msg.ToolCalls {
+		if tc.ID == "" {
+			return nil, errors.New("codex provider: assistant tool call missing id")
+		}
+		if tc.Name == "" {
+			return nil, errors.New("codex provider: assistant tool call missing name")
+		}
+		items = append(items, inputItem{
+			Type:      "function_call",
+			ID:        tc.ID,
+			CallID:    tc.ID,
+			Name:      tc.Name,
+			Arguments: tc.Arguments,
+		})
+	}
+	return items, nil
+}
+
+// streamResponses sends the prebuilt Responses body, parses the typed SSE
+// event stream from the Codex backend, and emits runtime events. It
+// uses the shared providerio plumbing for auth (including the 401
+// OAuth-refresh retry), the SSE scanner (with the idle watchdog), and
+// the upstream-unreachable humanizer. Returns when the stream is
+// exhausted, an error event is emitted, or ctx is cancelled.
+func (p *CodexProvider) streamResponses(
+	ctx context.Context,
+	body []byte,
+	events chan<- zeroruntime.StreamEvent,
+) {
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+
+	inner := p.inner
+	response, err := providerio.SendWithAuthRetry(streamCtx, inner.httpClient, http.MethodPost, inner.endpoint, body,
+		providerio.AuthHeaders{
+			APIKey:            inner.apiKey,
+			DefaultAuthHeader: "Authorization",
+			DefaultAuthScheme: "Bearer",
+			AuthHeader:        inner.authHeader,
+			AuthScheme:        inner.authScheme,
+			AuthHeaderValue:   inner.authHeaderValue,
+			CustomHeaders:     inner.customHeaders,
+		},
+		inner.oauthResolver,
+		func(request *http.Request) {
+			request.Header.Set("Content-Type", "application/json")
+			// injectCodexHeaders sets originator, chatgpt-account-id, and a
+			// branded User-Agent. It also runs on the 401-refresh retry, so
+			// per-request state (account id, fresh token) is re-derivable.
+			p.injectCodexHeaders(request)
+		}, 0)
+	if err != nil {
+		// Surface ctx errors verbatim so caller-driven cancels are not
+		// mislabeled as upstream outages (same posture as the openai
+		// provider's stream()).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+				Type:  zeroruntime.StreamEventError,
+				Error: p.redact("provider stream error: " + ctxErr.Error()),
+			})
+			return
+		}
+		if humanized, ok := providerio.UpstreamUnreachable(err.Error()); ok {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+				Type:  zeroruntime.StreamEventError,
+				Error: p.redact(humanized),
+			})
+			return
+		}
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact("provider stream error: " + err.Error()),
+		})
+		return
+	}
+	defer func() {
+		_ = response.Body.Close()
+	}()
+
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		p.emitResponsesHTTPError(ctx, response, events)
+		return
+	}
+
+	state := newResponsesState()
+	err = providerio.ScanSSEDataWithContext(streamCtx, cancelStream, response.Body, inner.streamIdleTimeout, func(data string) bool {
+		return p.emitResponsesEvent(ctx, data, state, events)
+	})
+	if errors.Is(err, providerio.ErrStreamIdle) {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact(fmt.Sprintf("provider stream error: idle timeout after %s (upstream stopped sending data)", inner.streamIdleTimeout)),
+		})
+		return
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact("provider stream error: " + err.Error()),
+		})
+		return
+	}
+	if !state.done {
+		// The Codex backend closed the stream without emitting response.completed
+		// (e.g. it ran out of output tokens or hit an internal limit). Surface a
+		// length-truncation finish so the runtime can react.
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:         zeroruntime.StreamEventDone,
+			FinishReason: zeroruntime.FinishReasonLength,
+		})
+	}
+}
+
+// emitResponsesHTTPError maps a non-2xx Codex response into a single
+// StreamEventError, redacting API keys / bearer tokens that may appear
+// in the body. Mirrors the openai provider's emitHTTPError so callers
+// see the same error shape regardless of which provider produced it.
+func (p *CodexProvider) emitResponsesHTTPError(
+	ctx context.Context,
+	response *http.Response,
+	events chan<- zeroruntime.StreamEvent,
+) {
+	body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	// The Codex backend may return either the chat-completions error shape
+	// (`{"error":{"message":...}}`) or a Responses-API error
+	// (`{"message":...}` directly). Try both so we surface a useful
+	// message either way.
+	message := strings.TrimSpace(string(body))
+	var chatError struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &chatError); err == nil && chatError.Error.Message != "" {
+		message = chatError.Error.Message
+	}
+	var responsesError responsesEvent
+	if err := json.Unmarshal(body, &responsesError); err == nil && responsesError.Message != "" {
+		message = responsesError.Message
+	}
+	if message == "" {
+		message = response.Status
+	}
+	if humanized, ok := providerio.UpstreamUnreachable(message); ok {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact(humanized),
+		})
+		return
+	}
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:  zeroruntime.StreamEventError,
+		Error: p.classifiedError(response.StatusCode, message),
+	})
+}
+
+// emitResponsesEvent decodes one Responses SSE data payload and converts
+// it into zero or more runtime events. Returns false to stop the scan
+// after emitting a terminal event (error / completion-with-error).
+func (p *CodexProvider) emitResponsesEvent(
+	ctx context.Context,
+	data string,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) bool {
+	var event responsesEvent
+	if err := json.Unmarshal([]byte(data), &event); err != nil {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact("provider stream error: malformed Responses event: " + err.Error()),
+		})
+		state.done = true
+		return false
+	}
+	if event.Type == "" {
+		// A payload that parses as JSON but carries no `type` field is a
+		// malformed Responses event — the type is the discriminator that
+		// tells us how to interpret the rest of the payload. Surface it as
+		// a stream error so the runtime doesn't hang on a phantom
+		// completion that will never come.
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact("provider stream error: Responses event missing required `type` field"),
+		})
+		state.done = true
+		return false
+	}
+	switch event.Type {
+	case responsesEventCreated, responsesEventInProgress,
+		responsesEventContentPartAdded, responsesEventContentPartDone,
+		responsesEventOutputTextDone, responsesEventIncomplete:
+		// Informational or terminal-without-error events we don't surface to
+		// the runtime. response.incomplete is folded into a length finish at
+		// scan-end (state.done stays false so the wrapper emits the
+		// StreamEventDone with FinishReasonLength).
+		return true
+	case responsesEventOutputItemAdded:
+		p.handleOutputItemAdded(ctx, &event, state, events)
+		return true
+	case responsesEventOutputTextDelta:
+		if event.Delta != "" {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+				Type:    zeroruntime.StreamEventText,
+				Content: event.Delta,
+			})
+		}
+		return true
+	case responsesEventFunctionArgsDelta:
+		p.handleFunctionArgsDelta(ctx, &event, state, events)
+		return true
+	case responsesEventOutputItemDone:
+		p.handleOutputItemDone(ctx, &event, state, events)
+		return true
+	case responsesEventCompleted, responsesEventFailed:
+		return p.handleTerminalResponse(ctx, &event, state, events)
+	case responsesEventError:
+		message := event.Message
+		if event.Code != "" {
+			message = strings.TrimSpace(event.Code + " " + message)
+		}
+		if message == "" {
+			message = "provider error"
+		}
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact(message),
+		})
+		state.done = true
+		return false
+	default:
+		// Unknown event types are ignored (not errors). The Codex backend
+		// may emit Responses events the openai Codex provider doesn't
+		// recognize — surfacing them as errors would block every other
+		// field in the same payload.
+		return true
+	}
+}
+
+// handleOutputItemAdded registers a new function_call item so subsequent
+// argument deltas can be attributed, and emits StreamEventToolCallStart
+// (with the function name once it is known). A `message` item is just
+// tracked in case the backend ever ties text deltas to it — currently
+// text deltas carry their own item_id and the message itself is a
+// no-op for the runtime.
+func (p *CodexProvider) handleOutputItemAdded(
+	ctx context.Context,
+	event *responsesEvent,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) {
+	if event.Item == nil {
+		return
+	}
+	switch event.Item.Type {
+	case "function_call":
+		key := p.toolCallKey(event)
+		if key == "" {
+			return
+		}
+		builder := &toolCallBuilder{
+			ID:   key,
+			Name: event.Item.Name,
+		}
+		state.toolCalls[key] = builder
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:       zeroruntime.StreamEventToolCallStart,
+			ToolCallID: key,
+			ToolName:   event.Item.Name,
+		})
+		builder.started = true
+	}
+}
+
+// handleFunctionArgsDelta appends one function-call argument fragment
+// to the in-flight builder and emits StreamEventToolCallDelta. The
+// Codex backend uses either `item_id` or `output_index` to attribute
+// the delta; we honor both.
+func (p *CodexProvider) handleFunctionArgsDelta(
+	ctx context.Context,
+	event *responsesEvent,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) {
+	key := p.toolCallKey(event)
+	if key == "" {
+		return
+	}
+	builder, ok := state.toolCalls[key]
+	if !ok {
+		// The Codex backend started streaming arguments before the
+		// matching output_item.added (or the added event was dropped by
+		// an intermediate proxy). Treat the delta as the start of a new
+		// tool call with no known name yet — the eventual
+		// response.output_item.done carries the final name.
+		builder = &toolCallBuilder{ID: key}
+		state.toolCalls[key] = builder
+	}
+	builder.Arguments.WriteString(event.Delta)
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:              zeroruntime.StreamEventToolCallDelta,
+		ToolCallID:        key,
+		ArgumentsFragment: event.Delta,
+	})
+}
+
+// handleOutputItemDone finalizes a tool call when the item type is
+// function_call. The accumulated arguments and the (possibly late)
+// function name are written to the builder before StreamEventToolCallEnd
+// is emitted. A non-function_call done event (typically the assistant
+// `message` that wraps the text) is a no-op for the runtime.
+func (p *CodexProvider) handleOutputItemDone(
+	ctx context.Context,
+	event *responsesEvent,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) {
+	if event.Item == nil || event.Item.Type != "function_call" {
+		return
+	}
+	key := p.toolCallKey(event)
+	if key == "" {
+		return
+	}
+	builder, ok := state.toolCalls[key]
+	if !ok {
+		builder = &toolCallBuilder{ID: key}
+		state.toolCalls[key] = builder
+	}
+	if event.Item.Name != "" {
+		builder.Name = event.Item.Name
+	}
+	if event.Item.Arguments != "" && builder.Arguments.Len() == 0 {
+		builder.Arguments.WriteString(event.Item.Arguments)
+	}
+	if !builder.started {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:       zeroruntime.StreamEventToolCallStart,
+			ToolCallID: key,
+			ToolName:   builder.Name,
+		})
+		builder.started = true
+	}
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:       zeroruntime.StreamEventToolCallEnd,
+		ToolCallID: key,
+		ToolName:   builder.Name,
+	})
+	builder.ended = true
+}
+
+// handleTerminalResponse emits the final usage + done event for a
+// response.completed / response.failed. response.failed carries an
+// error payload that we surface as a runtime error after the usage
+// chunk, so token accounting is preserved even on a failure path.
+func (p *CodexProvider) handleTerminalResponse(
+	ctx context.Context,
+	event *responsesEvent,
+	state *responsesState,
+	events chan<- zeroruntime.StreamEvent,
+) bool {
+	if event.Response == nil {
+		state.done = true
+		return false
+	}
+	state.usage = event.Response.Usage
+	if event.Response.Usage != nil {
+		usage := zeroruntime.Usage{
+			InputTokens:  event.Response.Usage.InputTokens,
+			OutputTokens: event.Response.Usage.OutputTokens,
+		}
+		if event.Response.Usage.InputTokensDetails != nil {
+			usage.CachedInputTokens = event.Response.Usage.InputTokensDetails.CachedTokens
+		}
+		if event.Response.Usage.OutputTokensDetails != nil {
+			usage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
+		}
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventUsage,
+			Usage: usage,
+		})
+	}
+	if event.Response.Error != nil {
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: p.redact(event.Response.Error.Message),
+		})
+		state.done = true
+		return false
+	}
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+	state.done = true
+	return false
+}
+
+// toolCallKey returns the canonical id used to track an in-flight
+// function call across multiple SSE events. The Codex backend may emit
+// `item_id` (the call id) or rely on `output_index` (the position in
+// the response.output array); we accept both for robustness.
+func (p *CodexProvider) toolCallKey(event *responsesEvent) string {
+	if event.ItemID != "" {
+		return event.ItemID
+	}
+	if event.Item != nil && event.Item.ID != "" {
+		return event.Item.ID
+	}
+	if event.Item != nil && event.Item.CallID != "" {
+		return event.Item.CallID
+	}
+	if event.OutputIndex > 0 {
+		// OutputIndex is 0-based; offset by one to keep "0" reserved for
+		// "no index known" so it cannot collide with a real zero-indexed
+		// call.
+		return fmt.Sprintf("output-%d", event.OutputIndex+1)
+	}
+	return ""
+}
+
+// redact is the same secret-stripping helper the openai provider uses
+// for its own error messages — provided as a method on CodexProvider so
+// the Responses stream path can call it without reaching across the
+// inner Provider.
+func (p *CodexProvider) redact(message string) string {
+	if p.inner == nil {
+		return providerio.Redact(message)
+	}
+	return providerio.Redact(message, p.inner.apiKey, p.inner.authHeaderValue)
+}
+
+// classifiedError wraps a non-2xx body with the same status-code-aware
+// prefix the openai provider uses ("auth error: ", "rate limit error: ",
+// "provider error: ", "provider request error: ").
+func (p *CodexProvider) classifiedError(statusCode int, message string) string {
+	if p.inner == nil {
+		return providerio.ClassifiedError(statusCode, message)
+	}
+	return providerio.ClassifiedError(statusCode, message, p.inner.apiKey, p.inner.authHeaderValue)
+}

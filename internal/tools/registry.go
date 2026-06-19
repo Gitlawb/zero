@@ -189,6 +189,7 @@ func CoreReadOnlyTools(workspaceRoot string) []Tool {
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 	return []Tool{
 		NewScopedReadFileTool(workspaceRoot, scope),
+		NewScopedReadMinifiedFileTool(workspaceRoot, scope),
 		NewScopedListDirectoryTool(workspaceRoot, scope),
 		NewScopedGlobTool(workspaceRoot, scope),
 		NewScopedGrepTool(workspaceRoot, scope),

@@ -4,8 +4,8 @@ import "testing"
 
 func TestOAuthProviders(t *testing.T) {
 	providers := OAuthProviders()
-	if len(providers) != 2 {
-		t.Fatalf("OAuthProviders() = %d, want 2 (openrouter, xai)", len(providers))
+	if len(providers) != 4 {
+		t.Fatalf("OAuthProviders() = %d, want 4 (openrouter, xai, huggingface, chatgpt)", len(providers))
 	}
 	byID := map[string]Descriptor{}
 	for _, d := range providers {
@@ -21,6 +21,14 @@ func TestOAuthProviders(t *testing.T) {
 	xai, ok := byID["xai"]
 	if !ok || xai.OAuthMintsKey || !xai.OAuthDeviceFlow {
 		t.Fatalf("xai oauth flags wrong: %+v", xai)
+	}
+	hf, ok := byID["huggingface"]
+	if !ok || hf.OAuthMintsKey || !hf.OAuthDeviceFlow {
+		t.Fatalf("huggingface oauth flags wrong: %+v", hf)
+	}
+	cg, ok := byID["chatgpt"]
+	if !ok || cg.OAuthMintsKey || cg.OAuthDeviceFlow {
+		t.Fatalf("chatgpt oauth flags wrong: %+v", cg)
 	}
 }
 
@@ -50,7 +58,7 @@ func TestOAuthProvidersReturnsIndependentClones(t *testing.T) {
 func TestNonOAuthProvidersNotFlagged(t *testing.T) {
 	for _, d := range All() {
 		switch d.ID {
-		case "openrouter", "xai":
+		case "openrouter", "xai", "huggingface", "chatgpt":
 			continue
 		}
 		if d.OAuth {

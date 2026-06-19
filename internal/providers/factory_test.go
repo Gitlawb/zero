@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -262,6 +263,118 @@ func TestNewRejectsUnsupportedProviderKind(t *testing.T) {
 	}
 }
 
+func TestNewRoutesChatGPTCatalogToCodexProvider(t *testing.T) {
+	transport := &captureTransport{
+		responseBody: "data: [DONE]\n\n",
+	}
+	client := &http.Client{Transport: transport}
+
+	provider, err := New(config.ProviderProfile{
+		Name:      "chatgpt",
+		CatalogID: "chatgpt",
+		Model:     "gpt-5",
+	}, Options{
+		HTTPClient: client,
+		UserAgent:  "zero-factory-test",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+	if transport.request == nil {
+		t.Fatal("HTTP client was not used")
+	}
+	// The chatgpt catalog's baseURL is the Codex backend. The Codex
+	// provider targets the Responses API at `{baseURL}/responses`, not
+	// `/chat/completions` (a chat-completions body on this path would 404
+	// or be misrouted by the Codex gateway).
+	if !strings.HasSuffix(transport.request.URL.Path, "/responses") {
+		t.Fatalf("request URL path = %q, want .../responses", transport.request.URL.Path)
+	}
+	wantHost := "chatgpt.com"
+	if !strings.Contains(transport.request.URL.Host, wantHost) {
+		t.Fatalf("request URL host = %q, want the Codex backend (chatgpt.com)", transport.request.URL.Host)
+	}
+	// The Codex-required headers must be present even when the OAuth token
+	// has no account id (the AccountResolver returns ok=false in that case,
+	// so the chatgpt-account-id header is just omitted, not wrongly set).
+	if got := transport.request.Header.Get("originator"); got != "codex_cli_rs" {
+		t.Fatalf("originator = %q, want codex_cli_rs", got)
+	}
+	if got := transport.request.Header.Get("chatgpt-account-id"); got != "" {
+		t.Fatalf("chatgpt-account-id = %q, want empty when no OAuth login is stored", got)
+	}
+}
+
+func TestNewRoutesChatGPTCatalogWithStoredAccountID(t *testing.T) {
+	// The factory reads the stored OAuth token's Account field for the
+	// chatgpt-account-id header. Seed a token in a temp store and point
+	// ZERO_OAUTH_TOKENS_PATH at it so the factory picks it up.
+	dir := t.TempDir()
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", dir+"/tokens.json")
+	store, err := newOAuthStoreForTest()
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{
+		AccessToken: "tok-1",
+		Account:     "acc-stored-42",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	transport := &captureTransport{
+		responseBody: "data: [DONE]\n\n",
+	}
+	provider, err := New(config.ProviderProfile{
+		Name:      "chatgpt",
+		CatalogID: "chatgpt",
+		Model:     "gpt-5",
+	}, Options{
+		HTTPClient: &http.Client{Transport: transport},
+		UserAgent:  "zero-factory-test",
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	for range stream {
+	}
+	if got := transport.request.Header.Get("chatgpt-account-id"); got != "acc-stored-42" {
+		t.Fatalf("chatgpt-account-id = %q, want acc-stored-42", got)
+	}
+}
+
+func TestIsCodexCatalog(t *testing.T) {
+	cases := []struct {
+		catalogID string
+		want      bool
+	}{
+		{"chatgpt", true},
+		{"ChatGPT", true},
+		{"openai", false},
+		{"", false},
+		{"chatgpt-proxy", false}, // the local proxy catalog stays on the openai path
+	}
+	for _, tc := range cases {
+		got := isCodexCatalog(config.ProviderProfile{CatalogID: tc.catalogID}, resolvedProfile{})
+		if got != tc.want {
+			t.Errorf("isCodexCatalog(%q) = %v, want %v", tc.catalogID, got, tc.want)
+		}
+	}
+}
+
 type captureTransport struct {
 	request      *http.Request
 	requestBody  string
@@ -285,4 +398,12 @@ func (transport *captureTransport) RoundTrip(request *http.Request) (*http.Respo
 
 func (transport *captureTransport) body() io.Reader {
 	return strings.NewReader(transport.requestBody)
+}
+
+// newOAuthStoreForTest builds a Store pointed at the current
+// ZERO_OAUTH_TOKENS_PATH (set by the caller). It exists so the chatgpt
+// factory tests can seed a token without copying the path-handling dance
+// from internal/cli.
+func newOAuthStoreForTest() (*oauth.Store, error) {
+	return oauth.NewStore(oauth.StoreOptions{})
 }

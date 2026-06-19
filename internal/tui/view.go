@@ -206,6 +206,13 @@ func (m model) statusLine(width int) string {
 	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
 
 	rightGroups := []string{}
+	// The context-fill gauge needs the room a Medium+ terminal gives; below that
+	// the cumulative tok·cost segment alone keeps the line readable.
+	if tier >= tierMedium {
+		if gauge := m.contextWindowSegment(); gauge != "" {
+			rightGroups = append(rightGroups, gauge)
+		}
+	}
 	if usage := m.usageStatusSegment(); usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
 	}
@@ -295,6 +302,38 @@ func (m model) usageStatusSegment() string {
 		humanCount(summary.InputTokens+summary.OutputTokens),
 		summary.FormattedTotalCost,
 	)
+}
+
+// contextWindowSegment renders a live context-fill gauge: the last request's
+// input tokens against the active model's context window, as "◔ used/window ·
+// NN%", graded green (<75%) → amber (≥75%) → red (≥90%). Empty until a priced
+// request lands or when the model's window is unknown. This is the "you're at
+// X% of context" readout the compaction trigger already reasons about at 80%.
+func (m model) contextWindowSegment() string {
+	if m.usageTracker == nil {
+		return ""
+	}
+	summary := m.usageTracker.Summary()
+	if summary.LastRecord == nil {
+		return ""
+	}
+	used := summary.LastRecord.Usage.InputTokens
+	window := modelContextWindow(m.modelName)
+	if used <= 0 || window <= 0 {
+		return ""
+	}
+	ratio := float64(used) / float64(window)
+	if ratio > 1 {
+		ratio = 1
+	}
+	style := zeroTheme.green
+	switch {
+	case ratio >= 0.90:
+		style = zeroTheme.red
+	case ratio >= 0.75:
+		style = zeroTheme.amber
+	}
+	return style.Render(fmt.Sprintf("◔ %s/%s · %d%%", humanCount(used), humanCount(window), int(ratio*100+0.5)))
 }
 
 // humanCount renders a token count the way the status line wants it: 999,
