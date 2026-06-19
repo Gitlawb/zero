@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 // specialistStatus is the lifecycle state of a single specialist invocation.
@@ -37,6 +39,8 @@ type specialistInfo struct {
 	errorMsg       string
 	toolCount      int // number of tool calls made by this specialist
 	tokenCount     int // total tokens consumed
+	currentTool    string
+	currentDetail   string
 }
 
 // specialistTracker holds the live state for every specialist the parent agent
@@ -101,6 +105,18 @@ func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
 	for index := range t.specialists {
 		if t.specialists[index].childSessionID == childSessionID {
 			t.specialists[index].tokenCount += tokens
+			return
+		}
+	}
+}
+
+// setCurrentTool updates the live tool-call progress for the specialist with
+// childSessionID. Used by specialistProgressMsg to show ↳ toolName detail.
+func (t *specialistTracker) setCurrentTool(childSessionID, toolName, detail string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].currentTool = toolName
+			t.specialists[index].currentDetail = detail
 			return
 		}
 	}
@@ -304,6 +320,15 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 
 	lines := []string{header, body}
 
+	// Live tool-call progress while running.
+	if info.status == specialistRunning && info.currentTool != "" {
+		progressLine := fmt.Sprintf("  ↳ %s", info.currentTool)
+		if info.currentDetail != "" {
+			progressLine += " " + info.currentDetail
+		}
+		lines = append(lines, zeroTheme.muted.Render(progressLine))
+	}
+
 	// Optional error detail line.
 	if info.status == specialistError && strings.TrimSpace(info.errorMsg) != "" {
 		errMax := width - 4
@@ -346,6 +371,36 @@ func (m model) specialistTitleFor(childSessionID string) string {
 		if row.kind == rowSpecialist && row.specialistInfo != nil && row.specialistInfo.childSessionID == childSessionID {
 			return row.specialistInfo.name + " · " + row.specialistInfo.description
 		}
+	}
+	return ""
+}
+
+// toolCallSummary extracts a short detail string from a stream-json tool_call
+// event's arguments, for the live progress line in specialist cards.
+func toolCallSummary(event streamjson.Event) string {
+	args, ok := event.Args.(map[string]any)
+	if !ok {
+		return ""
+	}
+	switch event.Name {
+	case "read_file", "read_minified_file", "list_directory", "write_file", "edit_file":
+		if path, ok := args["path"].(string); ok {
+			return truncateRunes(path, 50)
+		}
+	case "grep":
+		if pattern, ok := args["pattern"].(string); ok {
+			return truncateRunes(pattern, 40)
+		}
+	case "glob":
+		if pattern, ok := args["pattern"].(string); ok {
+			return truncateRunes(pattern, 40)
+		}
+	case "bash":
+		if cmd, ok := args["command"].(string); ok {
+			return truncateRunes(cmd, 40)
+		}
+	case "update_plan":
+		return "plan"
 	}
 	return ""
 }

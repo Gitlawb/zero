@@ -304,3 +304,34 @@ func TestRenderSpecialistSummary(t *testing.T) {
 		t.Errorf("summary should not contain singular '2 error', got %q", got)
 	}
 }
+
+func TestRenderSpecialistCardWithProgress(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.width = 80
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return now.Add(18 * time.Second) }
+
+	info := specialistInfo{
+		name:           "worker",
+		description:    "fix tests",
+		childSessionID: "s1",
+		status:         specialistRunning,
+		startedAt:      now,
+		toolCount:      3,
+		tokenCount:     1840,
+		currentTool:    "read_file",
+		currentDetail:  "internal/tui/model.go",
+	}
+
+	got := m.renderSpecialistCard(info, 80)
+	if got == "" {
+		t.Fatal("expected non-empty card")
+	}
+	plain := ansiPattern.ReplaceAllString(got, "")
+	if !strings.Contains(plain, "↳ read_file") {
+		t.Errorf("card should contain progress line with tool name, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "internal/tui/model.go") {
+		t.Errorf("card should contain progress detail, got:\n%s", plain)
+	}
+}

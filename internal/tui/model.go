@@ -26,6 +26,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -314,6 +315,15 @@ type specialistCompleteMsg struct {
 	childSessionID string
 	status         specialistStatus
 	errorMsg       string
+}
+
+// specialistProgressMsg carries a live tool-call progress update from the
+// specialist child process, sent via OnToolProgress → runtimeMessageSink.
+type specialistProgressMsg struct {
+	runID      int
+	toolCallID string
+	toolName   string
+	detail     string
 }
 
 type mcpCommandOrigin int
@@ -1368,6 +1378,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.transcript = appendTranscriptRow(m.transcript, cardRow)
 		}
+		return m, nil
+	case specialistProgressMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.setCurrentTool(msg.toolCallID, msg.toolName, msg.detail)
 		return m, nil
 	case agentRowMsg:
 		if msg.runID != m.activeRunID {
@@ -3298,6 +3314,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			}
 			if onToolCall != nil {
 				onToolCall(call)
+			}
+		}
+
+		options.OnToolProgress = func(toolCallID string, event streamjson.Event) {
+			if event.Type == streamjson.EventToolCall && m.runtimeMessageSink != nil {
+				m.runtimeMessageSink(specialistProgressMsg{
+					runID:      runID,
+					toolCallID: toolCallID,
+					toolName:   event.Name,
+					detail:     toolCallSummary(event),
+				})
 			}
 		}
 
