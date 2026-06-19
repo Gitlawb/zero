@@ -80,7 +80,17 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 		matches = tool.rankByKeyword(query, deferred)
 	}
 
+	// Names the model asked for that it ALREADY has eagerly. tool_search only
+	// loads DEFERRED tools, so a request for an eager tool (e.g. Task or
+	// update_plan) otherwise falls through to a misleading "no tools matched" —
+	// a common confusion that leaves weaker models looping. Redirect the model to
+	// call those tools directly instead.
+	alreadyAvailable := tool.eagerToolsForQuery(query, options.EnabledTools, options.DisabledTools)
+
 	if len(matches) == 0 {
+		if len(alreadyAvailable) > 0 {
+			return okResult(alreadyAvailableMessage(alreadyAvailable))
+		}
 		return okResult(tool.noMatchMessage(query, deferred))
 	}
 
@@ -88,9 +98,13 @@ func (tool toolSearchTool) RunWithOptions(_ context.Context, args map[string]any
 	for _, match := range matches {
 		names = append(names, match.Name())
 	}
+	output := renderLoadedTools(matches)
+	if len(alreadyAvailable) > 0 {
+		output += "\n\n" + alreadyAvailableMessage(alreadyAvailable)
+	}
 	return Result{
 		Status: StatusOK,
-		Output: renderLoadedTools(matches),
+		Output: output,
 		Meta:   map[string]string{"load_tools": strings.Join(names, ",")},
 	}
 }
@@ -118,6 +132,74 @@ func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []str
 		return deferred[left].Name() < deferred[right].Name()
 	})
 	return deferred
+}
+
+// visibleEagerToolNames returns the names of tools the model ALREADY has in its
+// list this run: registered, NOT deferred, passing the operator filters, and not
+// tool_search itself. These never need (and never resolve through) tool_search.
+func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []string) map[string]bool {
+	names := map[string]bool{}
+	if tool.registry == nil {
+		return names
+	}
+	for _, candidate := range tool.registry.All() {
+		if IsDeferred(candidate) || candidate.Name() == ToolSearchToolName {
+			continue
+		}
+		if !toolAllowedByFilters(candidate.Name(), enabled, disabled) {
+			continue
+		}
+		names[candidate.Name()] = true
+	}
+	return names
+}
+
+// eagerToolsForQuery returns, sorted, the already-available (eager) tool names a
+// tool_search query refers to: exact names for a "select:" query, or eager tools
+// whose name matches a keyword otherwise. Used to steer the model back to calling
+// a tool it already has instead of fruitlessly searching for it.
+func (tool toolSearchTool) eagerToolsForQuery(query string, enabled []string, disabled []string) []string {
+	eager := tool.visibleEagerToolNames(enabled, disabled)
+	if len(eager) == 0 {
+		return nil
+	}
+	hit := map[string]bool{}
+	if rest, ok := strings.CutPrefix(query, "select:"); ok {
+		for _, raw := range strings.Split(rest, ",") {
+			if name := strings.TrimSpace(raw); name != "" && eager[name] {
+				hit[name] = true
+			}
+		}
+	} else {
+		keywords := strings.Fields(strings.ToLower(query))
+		for name := range eager {
+			lower := strings.ToLower(name)
+			for _, keyword := range keywords {
+				if strings.Contains(lower, keyword) {
+					hit[name] = true
+					break
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(hit))
+	for name := range hit {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// alreadyAvailableMessage tells the model the named tools are already in its list
+// and must be called directly — tool_search is only for deferred tools.
+func alreadyAvailableMessage(names []string) string {
+	subject, verb := names[0], "is"
+	if len(names) > 1 {
+		subject, verb = strings.Join(names, ", "), "are"
+	}
+	return subject + " " + verb + " already in your tool list — call " +
+		map[bool]string{true: "them", false: "it"}[len(names) > 1] +
+		" directly. tool_search only loads DEFERRED tools (those in the deferred-tools notice), not tools you already have."
 }
 
 // toolAllowedByFilters mirrors agent.ToolAllowedByFilters (kept here to avoid an
