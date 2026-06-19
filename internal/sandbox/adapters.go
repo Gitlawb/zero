@@ -122,9 +122,7 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 	}
 }
 
-// wslBackend is the policy-only WSL fallback: no native isolation, but scoped
-// egress is routed best-effort through the filtering proxy (ProxyEgress). The
-// runner gates it on Policy.AllowPolicyOnlyRunner and records a downgrade note.
+// wslBackend records WSL native isolation unavailability for diagnostics.
 func wslBackend(goos string, info WSLInfo) Backend {
 	msg := "policy-only WSL fallback: bubblewrap unavailable under WSL; egress routed through the filtering proxy"
 	if info.IsWSL2 {

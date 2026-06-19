@@ -10,15 +10,14 @@ import (
 
 func TestSandboxPolicySnapshotFromPolicyFillsEffectiveMode(t *testing.T) {
 	enforced := SandboxPolicySnapshotFromPolicy(sandbox.Policy{
-		Mode:                  sandbox.ModeEnforce,
-		Network:               sandbox.NetworkDeny,
-		EnforceWorkspace:      true,
-		AllowPolicyOnlyRunner: true,
+		Mode:             sandbox.ModeEnforce,
+		Network:          sandbox.NetworkDeny,
+		EnforceWorkspace: true,
 	})
 	if enforced.EffectiveMode != string(sandbox.ModeEnforce) {
 		t.Fatalf("EffectiveMode = %q, want %q", enforced.EffectiveMode, sandbox.ModeEnforce)
 	}
-	if !enforced.EnforceWorkspace || !enforced.AllowPolicyOnlyRunner {
+	if !enforced.EnforceWorkspace {
 		t.Fatalf("boolean fields not preserved: %#v", enforced)
 	}
 

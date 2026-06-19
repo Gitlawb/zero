@@ -13,14 +13,15 @@ import (
 	"sync/atomic"
 )
 
-var errPolicyOnlyRunnerDisabled = errors.New("policy-only sandbox runner is disabled")
+var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
 
-// errWSLPolicyOnlyDisabled is returned when running under WSL without bubblewrap
-// and the policy has NOT opted into the policy-only runner — fail closed rather
-// than run with no native isolation.
-var errWSLPolicyOnlyDisabled = errors.New("bubblewrap is unavailable under WSL and Policy.AllowPolicyOnlyRunner is disabled: " +
-	"enable AllowPolicyOnlyRunner to run under the policy-only WSL fallback (engine policy + proxy egress, no native isolation), " +
-	"or install/enable bubblewrap")
+func nativeSandboxUnavailableError(backend Backend) error {
+	message := strings.TrimSpace(backend.Message)
+	if message == "" {
+		return errNativeSandboxUnavailable
+	}
+	return fmt.Errorf("%w: %s", errNativeSandboxUnavailable, message)
+}
 
 type CommandSpec struct {
 	Name string
@@ -251,22 +252,9 @@ func buildPlatformCommandPlan(execRequest SandboxExecutionRequest, policy Policy
 			return windowsRestrictedTokenCommandPlan(execRequest, policy)
 		}
 	case BackendWSL:
-		// WSL fallback: no native isolation available. Fail closed unless the policy
-		// opted into the policy-only runner; otherwise run policy-only with the
-		// command's egress routed through the filtering proxy and an auditable note.
-		if !policy.AllowPolicyOnlyRunner {
-			return CommandPlan{}, errWSLPolicyOnlyDisabled
-		}
-		egress, err := startScopedEgress(policy, backend)
-		if err != nil {
-			return CommandPlan{}, err
-		}
-		return withSandboxExecutionMetadata(wslCommandPlan(spec, workspaceRoot, policy, backend, egress), execRequest), nil
+		return CommandPlan{}, nativeSandboxUnavailableError(backend)
 	}
-	if !policy.AllowPolicyOnlyRunner {
-		return CommandPlan{}, errPolicyOnlyRunnerDisabled
-	}
-	return withSandboxExecutionMetadata(directCommandPlan(spec, backend, policy, workspaceRoot), execRequest), nil
+	return CommandPlan{}, nativeSandboxUnavailableError(backend)
 }
 
 func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy Policy) (CommandPlan, error) {

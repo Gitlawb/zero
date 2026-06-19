@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -99,43 +98,33 @@ func TestCommandPlanCarriesSandboxMetadata(t *testing.T) {
 		Policy:        DefaultPolicy(),
 		Backend:       Backend{Name: BackendPolicyOnly, Platform: "linux", Fallback: true, Message: "policy-only fallback"},
 	})
-	direct, err := policyOnly.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root})
-	if err != nil {
-		t.Fatalf("BuildCommandPlan policy-only: %v", err)
-	}
-	if direct.TargetBackend != BackendPolicyOnly || direct.Wrapped || direct.EnforcementLevel != EnforcementDegraded || !strings.Contains(direct.DowngradeReason, "policy-only") {
-		t.Fatalf("policy-only command metadata = %#v, want degraded direct command", direct)
+	if _, err := policyOnly.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root}); !errors.Is(err, errNativeSandboxUnavailable) {
+		t.Fatalf("BuildCommandPlan policy-only error = %v, want native sandbox unavailable", err)
 	}
 }
 
-func TestPolicyOnlyDisabledFailClosedForTargetPlatforms(t *testing.T) {
+func TestPolicyOnlyFailClosedForTargetPlatforms(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()
-	policy.AllowPolicyOnlyRunner = false
 	tests := []struct {
 		name    string
 		backend Backend
-		wantErr error
 	}{
 		{
 			name:    "linux",
 			backend: Backend{Name: BackendPolicyOnly, Platform: "linux", Fallback: true},
-			wantErr: errPolicyOnlyRunnerDisabled,
 		},
 		{
 			name:    "macos",
 			backend: Backend{Name: BackendPolicyOnly, Platform: "darwin", Fallback: true},
-			wantErr: errPolicyOnlyRunnerDisabled,
 		},
 		{
 			name:    "windows",
 			backend: Backend{Name: BackendPolicyOnly, Platform: "windows", Fallback: true},
-			wantErr: errPolicyOnlyRunnerDisabled,
 		},
 		{
 			name:    "wsl",
 			backend: Backend{Name: BackendWSL, Platform: "linux", Fallback: true, ProxyEgress: true},
-			wantErr: errWSLPolicyOnlyDisabled,
 		},
 	}
 
@@ -143,8 +132,8 @@ func TestPolicyOnlyDisabledFailClosedForTargetPlatforms(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: test.backend})
 			_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root})
-			if !errors.Is(err, test.wantErr) {
-				t.Fatalf("BuildCommandPlan error = %v, want %v", err, test.wantErr)
+			if !errors.Is(err, errNativeSandboxUnavailable) {
+				t.Fatalf("BuildCommandPlan error = %v, want native sandbox unavailable", err)
 			}
 		})
 	}

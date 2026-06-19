@@ -150,10 +150,9 @@ const (
 )
 
 type Policy struct {
-	Mode                  PolicyMode  `json:"mode"`
-	Network               NetworkMode `json:"network"`
-	EnforceWorkspace      bool        `json:"enforceWorkspace"`
-	AllowPolicyOnlyRunner bool        `json:"allowPolicyOnlyRunner"`
+	Mode             PolicyMode  `json:"mode"`
+	Network          NetworkMode `json:"network"`
+	EnforceWorkspace bool        `json:"enforceWorkspace"`
 	// AllowedDomains / DeniedDomains apply only when Network is NetworkScoped:
 	// the sandboxed process may reach the allowed domains (exact host or any
 	// subdomain) minus the denied ones. They are ignored for NetworkAllow and
@@ -269,9 +268,8 @@ func (decision Decision) ErrorString() string {
 
 func DefaultPolicy() Policy {
 	return Policy{
-		Mode:                  ModeEnforce,
-		Network:               NetworkDeny,
-		EnforceWorkspace:      true,
-		AllowPolicyOnlyRunner: true,
+		Mode:             ModeEnforce,
+		Network:          NetworkDeny,
+		EnforceWorkspace: true,
 	}
 }

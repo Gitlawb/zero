@@ -15,11 +15,10 @@ import (
 // field is added so consumers do not have to translate the empty
 // string into the enforced default themselves.
 type SandboxPolicySnapshot struct {
-	Mode                  string `json:"mode"`
-	Network               string `json:"network"`
-	EnforceWorkspace      bool   `json:"enforceWorkspace"`
-	AllowPolicyOnlyRunner bool   `json:"allowPolicyOnlyRunner"`
-	EffectiveMode         string `json:"effectiveMode,omitempty"`
+	Mode             string `json:"mode"`
+	Network          string `json:"network"`
+	EnforceWorkspace bool   `json:"enforceWorkspace"`
+	EffectiveMode    string `json:"effectiveMode,omitempty"`
 }
 
 // SandboxRiskSnapshot is the typed view of a sandbox.Risk as it is
@@ -113,11 +112,10 @@ func SandboxPolicySnapshotFromPolicy(policy sandbox.Policy) SandboxPolicySnapsho
 		mode = string(sandbox.ModeEnforce)
 	}
 	return SandboxPolicySnapshot{
-		Mode:                  string(policy.Mode),
-		Network:               string(policy.Network),
-		EnforceWorkspace:      policy.EnforceWorkspace,
-		AllowPolicyOnlyRunner: policy.AllowPolicyOnlyRunner,
-		EffectiveMode:         mode,
+		Mode:             string(policy.Mode),
+		Network:          string(policy.Network),
+		EnforceWorkspace: policy.EnforceWorkspace,
+		EffectiveMode:    mode,
 	}
 }
 

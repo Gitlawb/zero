@@ -124,13 +124,10 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 		enforcementLevel = EnforcementDisabled
 	}
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
-		return SandboxExecutionRequest{}, errPolicyOnlyRunnerDisabled
+		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
-	if request.ValidateExecution && requiresPlatformSandbox && backend.SupportLevel() != BackendSupportNative && !policy.AllowPolicyOnlyRunner {
-		if backend.Name == BackendWSL {
-			return SandboxExecutionRequest{}, errWSLPolicyOnlyDisabled
-		}
-		return SandboxExecutionRequest{}, errPolicyOnlyRunnerDisabled
+	if request.ValidateExecution && requiresPlatformSandbox && backend.SupportLevel() != BackendSupportNative {
+		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
 	targetBackend := manager.targetBackend(preference, policy, requiresPlatformSandbox)
 	downgradeReason := ""

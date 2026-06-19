@@ -283,7 +283,6 @@ func formatEffectiveSandboxPolicy(workspaceRoot string, policy zeroSandbox.Polic
 		lines = append(lines, "write_roots_error: "+writeRootsErr.Error())
 	}
 	lines = append(lines,
-		"allow_policy_only_runner: "+fmt.Sprintf("%t", policy.AllowPolicyOnlyRunner),
 		"backend: "+string(backend.Name),
 		"target_backend: "+string(plan.TargetBackend),
 		"support_level: "+string(plan.SupportLevel),

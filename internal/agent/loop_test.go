@@ -1443,8 +1443,8 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
 	}
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-	if !strings.Contains(lastMessage.Content, "fake curl https://example.com") {
-		t.Fatalf("expected fake curl output after approval, got %q", lastMessage.Content)
+	if !strings.Contains(lastMessage.Content, "native sandbox backend is unavailable") {
+		t.Fatalf("expected native sandbox unavailable error after approval, got %q", lastMessage.Content)
 	}
 }
 
@@ -1552,8 +1552,8 @@ func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
 	}
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-	if !strings.Contains(lastMessage.Content, "rm -rf /") {
-		t.Fatalf("expected approved command output, got %q", lastMessage.Content)
+	if !strings.Contains(lastMessage.Content, "native sandbox backend is unavailable") {
+		t.Fatalf("expected native sandbox unavailable error after approval, got %q", lastMessage.Content)
 	}
 }
 

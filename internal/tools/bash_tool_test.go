@@ -293,7 +293,7 @@ func TestBashToolTimeoutKillsBackgroundChildren(t *testing.T) {
 	}
 }
 
-func TestRegistryRunsBashThroughSandboxEngine(t *testing.T) {
+func TestRegistryReportsUnavailableNativeSandbox(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()
 	registry.Register(NewBashTool(root))
@@ -312,21 +312,17 @@ func TestRegistryRunsBashThroughSandboxEngine(t *testing.T) {
 		Autonomy:          "medium",
 	})
 
-	if result.Status != StatusOK {
-		t.Fatalf("expected ok status, got %s: %s", result.Status, result.Output)
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "hello from bash") {
-		t.Fatalf("expected helper output, got %q", result.Output)
-	}
-	if result.Meta["sandbox_backend"] != string(sandbox.BackendPolicyOnly) || result.Meta["sandbox_wrapped"] != "false" {
-		t.Fatalf("sandbox metadata = %#v, want policy-only fallback", result.Meta)
+	if !strings.Contains(result.Output, "native sandbox backend is unavailable") {
+		t.Fatalf("expected unavailable native sandbox error, got %q", result.Output)
 	}
 }
 
-func TestBashToolReportsDisabledPolicyOnlyRunner(t *testing.T) {
+func TestBashToolReportsUnavailableNativeSandbox(t *testing.T) {
 	root := t.TempDir()
 	policy := sandbox.DefaultPolicy()
-	policy.AllowPolicyOnlyRunner = false
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        policy,
@@ -342,8 +338,8 @@ func TestBashToolReportsDisabledPolicyOnlyRunner(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("expected error status, got %s", result.Status)
 	}
-	if !strings.Contains(result.Output, "policy-only sandbox runner is disabled") {
-		t.Fatalf("expected disabled fallback error, got %q", result.Output)
+	if !strings.Contains(result.Output, "native sandbox backend is unavailable") {
+		t.Fatalf("expected unavailable native sandbox error, got %q", result.Output)
 	}
 	if result.Meta["exit_code"] != "-1" {
 		t.Fatalf("exit_code metadata = %q, want -1", result.Meta["exit_code"])

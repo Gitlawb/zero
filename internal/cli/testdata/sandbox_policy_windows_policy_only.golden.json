@@ -2,8 +2,7 @@
   "policy": {
     "mode": "enforce",
     "network": "deny",
-    "enforceWorkspace": true,
-    "allowPolicyOnlyRunner": true
+    "enforceWorkspace": true
   },
   "backend": {
     "name": "policy-only",
@@ -29,8 +28,7 @@
     "policy": {
       "mode": "enforce",
       "network": "deny",
-      "enforceWorkspace": true,
-      "allowPolicyOnlyRunner": true
+      "enforceWorkspace": true
     },
     "permissionProfile": {
       "fileSystem": {

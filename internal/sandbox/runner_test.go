@@ -101,42 +101,21 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 	}
 }
 
-func TestBuildCommandPlanUsesPolicyOnlyFallback(t *testing.T) {
+func TestBuildCommandPlanRejectsPolicyOnlyFallback(t *testing.T) {
 	root := t.TempDir()
-	resolvedRoot := resolvedTestPath(t, root)
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
 		Backend:       Backend{Name: BackendPolicyOnly, Message: "policy-only fallback"},
 	})
 
-	plan, err := engine.BuildCommandPlan(CommandSpec{
+	_, err := engine.BuildCommandPlan(CommandSpec{
 		Name: "/bin/sh",
 		Args: []string{"-c", "pwd"},
 		Dir:  root,
 	})
-	if err != nil {
-		t.Fatalf("BuildCommandPlan: %v", err)
-	}
-
-	if plan.Wrapped || plan.Name != "/bin/sh" || plan.Dir != resolvedRoot || plan.WorkspaceRoot != resolvedRoot || plan.Backend.Name != BackendPolicyOnly {
-		t.Fatalf("policy-only plan = %#v, want direct command", plan)
-	}
-}
-
-func TestBuildCommandPlanCanRejectPolicyOnlyFallback(t *testing.T) {
-	root := t.TempDir()
-	policy := DefaultPolicy()
-	policy.AllowPolicyOnlyRunner = false
-	engine := NewEngine(EngineOptions{
-		WorkspaceRoot: root,
-		Policy:        policy,
-		Backend:       Backend{Name: BackendPolicyOnly, Message: "policy-only fallback"},
-	})
-
-	_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: root})
-	if !errors.Is(err, errPolicyOnlyRunnerDisabled) {
-		t.Fatalf("error = %v, want policy-only disabled", err)
+	if !errors.Is(err, errNativeSandboxUnavailable) {
+		t.Fatalf("error = %v, want native sandbox unavailable", err)
 	}
 }
 

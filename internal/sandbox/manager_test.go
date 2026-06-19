@@ -155,11 +155,11 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	}
 }
 
-func TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan(t *testing.T) {
+func TestSandboxManagerRejectsPolicyOnlyCommandPlan(t *testing.T) {
 	policy := DefaultPolicy()
 	backend := Backend{Name: BackendPolicyOnly, Platform: "windows", Fallback: true, Message: "policy-only fallback"}
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
-	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+	_, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     `C:\workspace`,
 		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/c", "dir"}, Dir: `C:\workspace`},
 		Policy:            policy,
@@ -167,14 +167,8 @@ func TestSandboxManagerBuildsDegradedPolicyOnlyCommandPlan(t *testing.T) {
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if err != nil {
-		t.Fatalf("BuildCommandPlan: %v", err)
-	}
-	if plan.Wrapped || plan.Name != "cmd.exe" || plan.TargetBackend != BackendWindowsRestrictedToken {
-		t.Fatalf("policy-only plan = %#v, want direct command targeting windows backend", plan)
-	}
-	if plan.EnforcementLevel != EnforcementDegraded || plan.DowngradeReason == "" {
-		t.Fatalf("policy-only metadata = %#v, want degraded fallback", plan)
+	if !errors.Is(err, errNativeSandboxUnavailable) {
+		t.Fatalf("BuildCommandPlan error = %v, want native sandbox unavailable", err)
 	}
 }
 
@@ -252,9 +246,8 @@ func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 	}
 }
 
-func TestSandboxManagerFailsClosedWhenNativeRequiredAndPolicyOnlyDisabled(t *testing.T) {
+func TestSandboxManagerFailsClosedWhenNativeRequiredAndUnavailable(t *testing.T) {
 	policy := DefaultPolicy()
-	policy.AllowPolicyOnlyRunner = false
 	profile := PermissionProfileFromPolicy("/workspace", policy, nil)
 	_, err := NewSandboxManager(SandboxManagerOptions{
 		GOOS:    "windows",
@@ -267,8 +260,8 @@ func TestSandboxManagerFailsClosedWhenNativeRequiredAndPolicyOnlyDisabled(t *tes
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
-	if !errors.Is(err, errPolicyOnlyRunnerDisabled) {
-		t.Fatalf("BuildExecutionRequest error = %v, want policy-only disabled", err)
+	if !errors.Is(err, errNativeSandboxUnavailable) {
+		t.Fatalf("BuildExecutionRequest error = %v, want native sandbox unavailable", err)
 	}
 }
 
