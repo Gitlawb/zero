@@ -26,7 +26,7 @@ func TestSpecialistLauncherRunsUnregisteredSwarmAgent(t *testing.T) {
 		Load: func(specialist.LoadOptions) (specialist.LoadResult, error) {
 			return specialist.LoadResult{}, nil
 		},
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (specialist.ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (specialist.ChildRunResult, error) {
 			ran = true
 			gotArgs = append([]string(nil), args...)
 			return specialist.ChildRunResult{Events: []streamjson.Event{
