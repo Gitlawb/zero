@@ -62,10 +62,15 @@ type ModelCost struct {
 	InputPerMillion       float64
 	OutputPerMillion      float64
 	CachedInputPerMillion float64
-	Tiers                 []ModelCostTier
-	Source                string
-	SourceLastVerified    string
-	Notes                 []string
+	// CacheWritePerMillion is the cache-creation (cache-write) rate, billed at a
+	// premium over input by providers that support it (Anthropic ~1.25x input).
+	// Zero means "not priced separately" — cache-write tokens fall back to the
+	// input rate, preserving prior behavior for models without the rate.
+	CacheWritePerMillion float64
+	Tiers                []ModelCostTier
+	Source               string
+	SourceLastVerified   string
+	Notes                []string
 }
 
 type ModelCostTier struct {
@@ -73,6 +78,7 @@ type ModelCostTier struct {
 	InputPerMillion       float64
 	OutputPerMillion      float64
 	CachedInputPerMillion float64
+	CacheWritePerMillion  float64
 	Note                  string
 }
 

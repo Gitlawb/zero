@@ -16,10 +16,12 @@ type CostBreakdown struct {
 	Currency          string
 	InputTokens       int
 	CachedInputTokens int
+	CacheWriteTokens  int
 	OutputTokens      int
 	ReasoningTokens   int
 	InputCost         float64
 	CachedInputCost   float64
+	CacheWriteCost    float64
 	OutputCost        float64
 	TotalCost         float64
 	PricingTier       *ModelCostTier
@@ -53,13 +55,24 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	if requestedCachedInputTokens > inputTokens {
 		requestedCachedInputTokens = inputTokens
 	}
+	requestedCacheWriteTokens, err := nonNegativeUsage(usage.CacheWriteTokens, "cache write tokens")
+	if err != nil {
+		return CostBreakdown{}, err
+	}
+	// Cache-read and cache-write are disjoint subsets of the input.
+	if requestedCacheWriteTokens > inputTokens-requestedCachedInputTokens {
+		requestedCacheWriteTokens = inputTokens - requestedCachedInputTokens
+		if requestedCacheWriteTokens < 0 {
+			requestedCacheWriteTokens = 0
+		}
+	}
 
 	tier, err := selectCostTier(model.Cost, inputTokens)
 	if err != nil {
 		return CostBreakdown{}, err
 	}
 
-	inputRate, outputRate, cachedRate, err := costRates(model.Cost, tier)
+	inputRate, outputRate, cachedRate, cacheWriteRate, err := costRates(model.Cost, tier)
 	if err != nil {
 		return CostBreakdown{}, err
 	}
@@ -68,10 +81,21 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	if cachedRate > 0 {
 		cachedInputTokens = requestedCachedInputTokens
 	}
-	uncachedInputTokens := inputTokens - cachedInputTokens
+	// Only split cache-write tokens out at the premium rate when one is
+	// configured; otherwise they stay billed at the full input rate (the prior
+	// behavior for every model that lacks a cache-write rate).
+	cacheWriteTokens := 0
+	if cacheWriteRate > 0 {
+		cacheWriteTokens = requestedCacheWriteTokens
+	}
+	uncachedInputTokens := inputTokens - cachedInputTokens - cacheWriteTokens
+	if uncachedInputTokens < 0 {
+		uncachedInputTokens = 0
+	}
 	billableOutputTokens := outputTokens + reasoningTokens
 	inputCost := costForTokens(uncachedInputTokens, inputRate)
 	cachedInputCost := costForTokens(cachedInputTokens, cachedRate)
+	cacheWriteCost := costForTokens(cacheWriteTokens, cacheWriteRate)
 	outputCost := costForTokens(billableOutputTokens, outputRate)
 
 	breakdown := CostBreakdown{
@@ -80,12 +104,14 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 		Currency:          model.Cost.Currency,
 		InputTokens:       inputTokens,
 		CachedInputTokens: cachedInputTokens,
+		CacheWriteTokens:  cacheWriteTokens,
 		OutputTokens:      outputTokens,
 		ReasoningTokens:   reasoningTokens,
 		InputCost:         inputCost,
 		CachedInputCost:   cachedInputCost,
+		CacheWriteCost:    cacheWriteCost,
 		OutputCost:        outputCost,
-		TotalCost:         inputCost + cachedInputCost + outputCost,
+		TotalCost:         inputCost + cachedInputCost + cacheWriteCost + outputCost,
 	}
 	if tier != nil {
 		tierCopy := *tier
@@ -135,25 +161,32 @@ func selectCostTier(cost ModelCost, inputTokens int) (*ModelCostTier, error) {
 	return nil, fmt.Errorf("no model cost tier covers %d input tokens", inputTokens)
 }
 
-func costRates(cost ModelCost, tier *ModelCostTier) (float64, float64, float64, error) {
+func costRates(cost ModelCost, tier *ModelCostTier) (float64, float64, float64, float64, error) {
 	inputRate := cost.InputPerMillion
 	outputRate := cost.OutputPerMillion
 	cachedRate := cost.CachedInputPerMillion
+	cacheWriteRate := cost.CacheWritePerMillion
 	if tier != nil {
 		inputRate = tier.InputPerMillion
 		outputRate = tier.OutputPerMillion
 		cachedRate = tier.CachedInputPerMillion
+		cacheWriteRate = tier.CacheWritePerMillion
 	}
 	if !validRate(inputRate) || inputRate == 0 {
-		return 0, 0, 0, fmt.Errorf("missing model input pricing rate")
+		return 0, 0, 0, 0, fmt.Errorf("missing model input pricing rate")
 	}
 	if !validRate(outputRate) || outputRate == 0 {
-		return 0, 0, 0, fmt.Errorf("missing model output pricing rate")
+		return 0, 0, 0, 0, fmt.Errorf("missing model output pricing rate")
 	}
 	if !validRate(cachedRate) {
-		return 0, 0, 0, fmt.Errorf("invalid model cached input pricing rate")
+		return 0, 0, 0, 0, fmt.Errorf("invalid model cached input pricing rate")
 	}
-	return inputRate, outputRate, cachedRate, nil
+	// Cache-write is optional; 0 means "not priced separately". Only reject a
+	// genuinely invalid (NaN/Inf/negative) rate.
+	if !validRate(cacheWriteRate) {
+		return 0, 0, 0, 0, fmt.Errorf("invalid model cache write pricing rate")
+	}
+	return inputRate, outputRate, cachedRate, cacheWriteRate, nil
 }
 
 func costForTokens(tokens int, perMillionRate float64) float64 {

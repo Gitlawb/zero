@@ -22,6 +22,7 @@ import (
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/worktrees"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -544,18 +545,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 			sessionRecorder.append(sessions.EventToolResult, payload)
 		},
-		OnUsage: func(usage agent.Usage) {
-			writer.usage(usage)
-			payload := map[string]any{
-				"promptTokens":     usage.EffectiveInputTokens(),
-				"completionTokens": usage.EffectiveOutputTokens(),
-				"totalTokens":      usage.TotalTokens(),
-			}
+		OnUsage: func(u agent.Usage) {
+			writer.usage(u)
+			payload := usage.EventUsagePayload(u)
 			// Attribute usage to a specific model ONLY when escalation is enabled:
 			// the model in force can change mid-run only under --allow-escalation, so
 			// the "model" key is meaningful exclusively then. Omitting it otherwise
-			// keeps a non-escalation run's persisted usage payload byte-identical to
-			// before this feature (the origin/main guarantee).
+			// keeps a non-escalation run's persisted usage payload compact.
 			if options.allowEscalation {
 				payload["model"] = currentModel
 			}

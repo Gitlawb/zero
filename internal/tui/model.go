@@ -3141,12 +3141,8 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
-				Type: sessions.EventUsage,
-				Payload: map[string]any{
-					"promptTokens":     event.EffectiveInputTokens(),
-					"completionTokens": event.EffectiveOutputTokens(),
-					"totalTokens":      event.TotalTokens(),
-				},
+				Type:    sessions.EventUsage,
+				Payload: usage.EventUsagePayload(event),
 			})
 			if onUsage != nil {
 				onUsage(event)

@@ -331,11 +331,13 @@ func (provider *Provider) emitDone(ctx context.Context, state *streamState, even
 	if state.hasInputUsage || state.hasOutputUsage {
 		usage, err := zeroruntime.NormalizeUsage(zeroruntime.TokenUsage{
 			// Anthropic reports input_tokens (uncached), cache_read, and
-			// cache_creation SEPARATELY. The runtime models the cached count as a
-			// SUBSET of total input (it clamps cached <= input), so report the full
-			// prompt size as InputTokens and the cache hits as CachedInputTokens.
+			// cache_creation SEPARATELY. The runtime models cache-read and
+			// cache-write as disjoint SUBSETS of total input, so report the full
+			// prompt size as InputTokens, cache hits as CachedInputTokens, and
+			// cache creation as CacheWriteTokens (priced at the premium rate).
 			InputTokens:       state.inputTokens + state.cacheReadTokens + state.cacheCreationTokens,
 			CachedInputTokens: state.cacheReadTokens,
+			CacheWriteTokens:  state.cacheCreationTokens,
 			OutputTokens:      state.outputTokens,
 		})
 		if err == nil {

@@ -16,6 +16,7 @@ import (
 	"github.com/Gitlawb/zero/internal/specmode"
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -152,13 +153,9 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 			}
 			sessionRecorder.append(sessions.EventToolResult, payload)
 		},
-		OnUsage: func(usage agent.Usage) {
-			writer.usage(usage)
-			sessionRecorder.append(sessions.EventUsage, map[string]any{
-				"promptTokens":     usage.EffectiveInputTokens(),
-				"completionTokens": usage.EffectiveOutputTokens(),
-				"totalTokens":      usage.TotalTokens(),
-			})
+		OnUsage: func(u agent.Usage) {
+			writer.usage(u)
+			sessionRecorder.append(sessions.EventUsage, usage.EventUsagePayload(u))
 		},
 	})
 	run.notifier.Notify(notify.Completion, notify.DefaultMessage(notify.Completion))

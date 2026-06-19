@@ -113,18 +113,28 @@ type TokenUsage struct {
 	InputTokens       int
 	PromptTokens      int
 	CachedInputTokens int
-	OutputTokens      int
-	CompletionTokens  int
-	ReasoningTokens   int
+	// CacheWriteTokens is the cache-creation (cache-write) portion of the input,
+	// billed at a premium rate by providers that support it (e.g. Anthropic).
+	// Like CachedInputTokens it is a SUBSET of InputTokens, not additive.
+	CacheWriteTokens int
+	OutputTokens     int
+	CompletionTokens int
+	ReasoningTokens  int
 }
 
 // Usage records normalized token accounting reported by a provider.
+//
+// Token accounting is consistent across providers: InputTokens is the TOTAL
+// prompt size (uncached + cache-read + cache-write); CachedInputTokens (cache
+// read, discounted) and CacheWriteTokens (cache creation, premium) are subsets
+// of it, so uncached input = InputTokens - CachedInputTokens - CacheWriteTokens.
 type Usage struct {
 	InputTokens       int
 	OutputTokens      int
 	PromptTokens      int
 	CompletionTokens  int
 	CachedInputTokens int
+	CacheWriteTokens  int
 	ReasoningTokens   int
 }
 
