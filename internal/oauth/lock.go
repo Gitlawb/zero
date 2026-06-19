@@ -56,7 +56,12 @@ func acquireFileLock(lockPath string, now func() time.Time) (func(), error) {
 				}
 			}, nil
 		}
-		if !errors.Is(err, os.ErrExist) {
+		// On Windows a concurrent holder's os.Remove leaves the lock file in a
+		// "delete pending" state, so an O_EXCL create races it with
+		// ERROR_ACCESS_DENIED (os.ErrPermission) rather than ErrExist. Treat that
+		// as contention and retry, exactly like ErrExist — otherwise the lock
+		// spuriously fails under concurrency on Windows.
+		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return nil, fmt.Errorf("oauth: acquire token lock: %w", err)
 		}
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > fileLockStaleAfter {
