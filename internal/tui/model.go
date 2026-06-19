@@ -1539,21 +1539,16 @@ func (m model) transcriptView() string {
 		overlayForViewport = ""
 	}
 
-	// Plan panel is pinned between the title bar and the transcript body.
-	planPanel := m.renderPlanPanel(width)
+	// Plan panel renders inline in the transcript body (as a transcript row),
+	// not pinned at the top. It appears above the specialist cards like a
+	// chat message, matching how opencode renders todo/plan updates inline.
 	if m.altScreen && m.height > 0 {
 		header := m.pinnedTitleBar(width)
-		if planPanel != "" {
-			header += "\n" + planPanel
-		}
 		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)
 	}
 
 	bodyLayout := layoutTranscriptBodyItems(bodyItems)
 	body := bodyLayout.String()
-	if planPanel != "" {
-		body = planPanel + "\n\n" + body
-	}
 	if overlayForViewport != "" {
 		body += "\n" + overlayForViewport + "\n"
 	}

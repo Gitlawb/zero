@@ -153,6 +153,15 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			if (shownAny || (m.flushedAny && havePreviousKind)) && previousKind == rowUser && row.kind == rowReasoning {
 				items = append(items, transcriptBlankBodyItem())
 			}
+			// Inject the plan panel inline before the specialist cards, so it
+			// appears in the chat flow (not pinned at the top).
+			if row.kind == rowSpecialist && !specialistSummaryEmitted {
+				planPanel := m.renderPlanPanel(width)
+				if planPanel != "" {
+					items = append(items, transcriptBlockBodyItem(transcriptBodyItemRow, -1, planPanel))
+					items = append(items, transcriptBlankBodyItem())
+				}
+			}
 			// Inject the specialist summary line once, before the first
 			// specialist card in this turn's contiguous group.
 			if row.kind == rowSpecialist && !specialistSummaryEmitted {
