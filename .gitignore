@@ -38,3 +38,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 /zero
 /zero.exe
 /snake-game.html
+
+# Superpowers skill artifacts (brainstorm mockups, specs, plans) — local only
+.superpowers/
+docs/superpowers/
