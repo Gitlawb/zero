@@ -33,6 +33,16 @@ func RegisterTools(registry *tools.Registry, sw *Swarm) {
 	registry.Register(&scheduleTool{sw: sw})
 }
 
+// deferredSwarmTool marks a swarm tool as deferred-eligible. Swarm tools are an
+// advanced, rarely-first-move orchestration feature and the base system prompt
+// does not name them, so they are hidden behind tool_search (loaded on demand)
+// instead of shipping their full schemas in the eager per-request tool prefix.
+// Embedding it in each swarm tool struct is enough — partitionTools keys off the
+// shared tools.IsDeferred check, exactly as it does for MCP tools.
+type deferredSwarmTool struct{}
+
+func (deferredSwarmTool) Deferred() bool { return true }
+
 // policyFrom derives the member-inheritance policy from the live tool options so
 // each spawned member runs on the orchestrator's current model + permission mode.
 func policyFrom(options tools.RunOptions) Policy {
@@ -61,7 +71,10 @@ func errResult(format string, a ...any) tools.Result {
 
 // ---- swarm_spawn -----------------------------------------------------------
 
-type spawnTool struct{ sw *Swarm }
+type spawnTool struct {
+	sw *Swarm
+	deferredSwarmTool
+}
 
 func (t *spawnTool) Name() string { return SpawnToolName }
 func (t *spawnTool) Description() string {
@@ -115,7 +128,10 @@ func (t *spawnTool) RunWithOptions(_ context.Context, args map[string]any, optio
 
 // ---- swarm_send ------------------------------------------------------------
 
-type sendTool struct{ sw *Swarm }
+type sendTool struct {
+	sw *Swarm
+	deferredSwarmTool
+}
 
 func (t *sendTool) Name() string { return SendToolName }
 func (t *sendTool) Description() string {
@@ -170,7 +186,10 @@ func (t *sendTool) RunWithOptions(_ context.Context, args map[string]any, _ tool
 
 // ---- swarm_inbox -----------------------------------------------------------
 
-type inboxTool struct{ sw *Swarm }
+type inboxTool struct {
+	sw *Swarm
+	deferredSwarmTool
+}
 
 func (t *inboxTool) Name() string { return InboxToolName }
 func (t *inboxTool) Description() string {
@@ -229,7 +248,10 @@ func (t *inboxTool) RunWithOptions(_ context.Context, args map[string]any, _ too
 
 // ---- swarm_status ----------------------------------------------------------
 
-type statusTool struct{ sw *Swarm }
+type statusTool struct {
+	sw *Swarm
+	deferredSwarmTool
+}
 
 func (t *statusTool) Name() string { return StatusToolName }
 func (t *statusTool) Description() string {
@@ -273,7 +295,10 @@ func (t *statusTool) RunWithOptions(_ context.Context, args map[string]any, _ to
 
 // ---- swarm_handoff ---------------------------------------------------------
 
-type handoffTool struct{ sw *Swarm }
+type handoffTool struct {
+	sw *Swarm
+	deferredSwarmTool
+}
 
 func (t *handoffTool) Name() string { return HandoffToolName }
 func (t *handoffTool) Description() string {
@@ -325,7 +350,10 @@ func (t *handoffTool) RunWithOptions(_ context.Context, args map[string]any, opt
 
 // ---- swarm_collect ---------------------------------------------------------
 
-type collectTool struct{ sw *Swarm }
+type collectTool struct {
+	sw *Swarm
+	deferredSwarmTool
+}
 
 func (t *collectTool) Name() string { return CollectToolName }
 func (t *collectTool) Description() string {

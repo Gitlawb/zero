@@ -21,6 +21,7 @@ const ScheduleToolName = "swarm_schedule"
 type scheduleTool struct {
 	sw  *Swarm
 	now func() time.Time // injectable for tests; nil => time.Now
+	deferredSwarmTool
 }
 
 func (t *scheduleTool) Name() string { return ScheduleToolName }

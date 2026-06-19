@@ -262,6 +262,11 @@ func (backend *httpSearchBackend) endpointHost() string {
 }
 
 func (backend *httpSearchBackend) Search(ctx context.Context, query string, limit int) ([]searchResult, error) {
+	// SearXNG speaks a different shape (GET /search?q=&format=json, keyless), so a
+	// self-hosted instance works as a real engine with no API key.
+	if strings.EqualFold(backend.provider, "searxng") {
+		return backend.searchSearxng(ctx, query, limit)
+	}
 	requestBody := map[string]any{"query": query, "limit": limit}
 	// Forward the configured provider so an aggregating endpoint can route the
 	// query; without this the ZERO_WEBSEARCH_PROVIDER knob would be inert.
@@ -298,6 +303,70 @@ func (backend *httpSearchBackend) Search(ctx context.Context, query string, limi
 		return nil, fmt.Errorf("search backend returned HTTP %d", response.StatusCode)
 	}
 	return parseSearchResults(body)
+}
+
+// searchSearxng queries a SearXNG instance: GET {baseURL}/search?q=&format=json,
+// no API key. SearXNG returns {results:[{title,url,content,score}]}, which differs
+// from the generic POST backend, so it has its own request + parser.
+func (backend *httpSearchBackend) searchSearxng(ctx context.Context, query string, limit int) ([]searchResult, error) {
+	endpoint, err := url.Parse(strings.TrimRight(backend.baseURL, "/") + "/search")
+	if err != nil {
+		return nil, fmt.Errorf("build searxng request: %w", err)
+	}
+	params := endpoint.Query()
+	params.Set("q", query)
+	params.Set("format", "json")
+	endpoint.RawQuery = params.Encode()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build searxng request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "zero-web-search/0.1")
+	if backend.apiKey != "" { // optional, e.g. a reverse-proxy in front of SearXNG
+		request.Header.Set("Authorization", "Bearer "+backend.apiKey)
+	}
+
+	response, err := backend.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("searxng request failed: %w", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(response.Body, webSearchBodyLimit))
+	if err != nil {
+		return nil, fmt.Errorf("read searxng response: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("searxng backend returned HTTP %d", response.StatusCode)
+	}
+	return parseSearxngResults(body, limit)
+}
+
+func parseSearxngResults(body []byte, limit int) ([]searchResult, error) {
+	var payload struct {
+		Results []struct {
+			Title   string  `json:"title"`
+			URL     string  `json:"url"`
+			Content string  `json:"content"`
+			Score   float64 `json:"score"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode searxng response: %w", err)
+	}
+	out := make([]searchResult, 0, len(payload.Results))
+	for _, r := range payload.Results {
+		if strings.TrimSpace(r.URL) == "" {
+			continue
+		}
+		out = append(out, searchResult{Title: r.Title, URL: r.URL, Snippet: r.Content, Score: r.Score})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 // lenientScore decodes a provider "score" that may arrive as a JSON number, a
