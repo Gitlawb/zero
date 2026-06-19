@@ -40,7 +40,7 @@ type specialistInfo struct {
 	toolCount      int // number of tool calls made by this specialist
 	tokenCount     int // total tokens consumed
 	currentTool    string
-	currentDetail   string
+	currentDetail  string
 }
 
 // specialistTracker holds the live state for every specialist the parent agent

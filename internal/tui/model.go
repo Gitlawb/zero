@@ -114,9 +114,9 @@ type model struct {
 	plan        planPanelState
 	specialists specialistTracker
 	subchat     subchatState
-	altScreen            bool
-	setup                setupState
-	setupSave            func(SetupSelection) (SetupResult, error)
+	altScreen   bool
+	setup       setupState
+	setupSave   func(SetupSelection) (SetupResult, error)
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
