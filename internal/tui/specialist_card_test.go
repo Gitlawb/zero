@@ -253,3 +253,42 @@ func TestRenderLeftRuleCard(t *testing.T) {
 		t.Errorf("expected 2 lines, got %d", len(strings.Split(plain, "\n")))
 	}
 }
+
+func TestRenderSpecialistSummary(t *testing.T) {
+	// Empty → no output.
+	if got := renderSpecialistSummary(nil, "⠙"); got != "" {
+		t.Errorf("empty specialists should produce empty string, got %q", got)
+	}
+
+	specialists := []specialistInfo{
+		{status: specialistRunning, tokenCount: 1840},
+		{status: specialistCompleted, tokenCount: 5210},
+	}
+	got := renderSpecialistSummary(specialists, "⠙")
+	if got == "" {
+		t.Fatal("expected non-empty summary for 2 specialists")
+	}
+	if !strings.Contains(got, "2 specialists") {
+		t.Errorf("summary should contain total count, got %q", got)
+	}
+	if !strings.Contains(got, "1 running") {
+		t.Errorf("summary should contain running count, got %q", got)
+	}
+	if !strings.Contains(got, "1 done") {
+		t.Errorf("summary should contain completed count, got %q", got)
+	}
+	if !strings.Contains(got, "7,050") {
+		t.Errorf("summary should contain total tokens, got %q", got)
+	}
+	// No errors → no error segment.
+	if strings.Contains(got, "error") {
+		t.Errorf("summary should omit errors when zero, got %q", got)
+	}
+
+	// With an error.
+	specialists = append(specialists, specialistInfo{status: specialistError, tokenCount: 100})
+	got = renderSpecialistSummary(specialists, "⠙")
+	if !strings.Contains(got, "1 error") {
+		t.Errorf("summary should contain error count, got %q", got)
+	}
+}

@@ -341,3 +341,34 @@ func renderLeftRuleCard(width int, lines []string, ruleStyle lipgloss.Style) str
 	}
 	return strings.Join(out, "\n")
 }
+
+// renderSpecialistSummary renders a one-line rollup shown above the specialist
+// cards: live spinner, total/running/completed/error counts, and total tokens.
+// Returns "" when there are no specialists.
+func renderSpecialistSummary(specialists []specialistInfo, spinnerView string) string {
+	if len(specialists) == 0 {
+		return ""
+	}
+	running, completed, errors, totalTokens := 0, 0, 0, 0
+	for _, sp := range specialists {
+		totalTokens += sp.tokenCount
+		switch sp.status {
+		case specialistRunning:
+			running++
+		case specialistCompleted:
+			completed++
+		case specialistError:
+			errors++
+		}
+	}
+	summary := fmt.Sprintf("  %s %d specialists · %d running · %d done",
+		spinnerView, len(specialists), running, completed)
+	if errors > 0 {
+		summary += fmt.Sprintf(" · %d error", errors)
+		if errors > 1 {
+			summary += "s"
+		}
+	}
+	summary += " · " + formatTokenCount(totalTokens) + " tokens"
+	return zeroTheme.accent.Render(spinnerView) + zeroTheme.muted.Render(summary[len(spinnerView):])
+}
