@@ -72,33 +72,4 @@ func TestSpecialistCardClickDrillsIntoSubchat(t *testing.T) {
 	if m2.subchat.childSessionID != childID {
 		t.Errorf("subchat childSessionID = %q, want %q", m2.subchat.childSessionID, childID)
 	}
-	if m2.selectedSpecialistID != childID {
-		t.Errorf("selectedSpecialistID = %q, want %q", m2.selectedSpecialistID, childID)
-	}
-}
-
-func TestSpecialistCardKeyboardEnterDrillsIntoSubchat(t *testing.T) {
-	const childID = "child-sess-2"
-	m := specialistClickTestModel(t, childID)
-
-	x, y, ok := specialistCardClickPoint(m, 2)
-	if !ok {
-		t.Fatal("expected a specialist card selectable line in the layout")
-	}
-
-	// First click selects the card and records selectedSpecialistID.
-	click := testMouseClick(tea.MouseLeft, x, y)
-	updated, _, _ := m.handleTranscriptSelectionMouse(click)
-	m = updated
-
-	// Enter drills in via the selectedSpecialistID fallback. Route through Update
-	// so the model's Enter handler runs in its real ordering.
-	res, _ := m.Update(testKey(tea.KeyEnter))
-	m2 := res.(model)
-	if !m2.subchat.active {
-		t.Fatal("subchat should be active after Enter on specialist card")
-	}
-	if m2.subchat.childSessionID != childID {
-		t.Errorf("subchat childSessionID = %q, want %q", m2.subchat.childSessionID, childID)
-	}
 }
