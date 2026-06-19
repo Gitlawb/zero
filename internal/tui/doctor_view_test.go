@@ -89,7 +89,7 @@ func TestDoctorCommandOutputGroupsProviderAndPlatformChecks(t *testing.T) {
 		doctorCheck("provider.config", doctor.StatusPass, "Provider config loaded."),
 		doctorCheck("provider.model", doctor.StatusWarn, "Provider model is not configured."),
 		doctorCheck("provider.connectivity", doctor.StatusFail, "Provider connectivity failed."),
-		doctorCheck("sandbox.backend", doctor.StatusWarn, "Native sandbox backend unavailable on windows: policy-only fallback: Windows sandbox command runner is not available."),
+		doctorCheck("sandbox.backend", doctor.StatusWarn, "Native sandbox backend unavailable on windows: Windows sandbox command runner is not available."),
 		doctorCheck("runtime.go", doctor.StatusPass, "Zero Go runtime is available."),
 		doctorCheck("config.files", doctor.StatusPass, "Zero config file inputs are available."),
 	}}, nil)
@@ -155,7 +155,7 @@ func TestDoctorCommandOutputAddsActionableHints(t *testing.T) {
 			ID:      "sandbox.backend",
 			Label:   "Sandbox backend",
 			Status:  doctor.StatusWarn,
-			Message: "Native sandbox backend unavailable on windows: policy-only fallback: Windows sandbox setup helper is not available.",
+			Message: "Native sandbox backend unavailable on windows: Windows sandbox setup helper is not available.",
 			Details: map[string]any{
 				"remedy": "install the Windows sandbox command runner and setup helper together, then run `zero sandbox setup`",
 			},

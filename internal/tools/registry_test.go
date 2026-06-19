@@ -193,10 +193,10 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	})
 
 	if result.Status != StatusError {
-		t.Fatalf("expected sandbox violation status, got %s", result.Status)
+		t.Fatalf("expected sandbox block status, got %s", result.Status)
 	}
-	if !strings.Contains(result.Output, "Sandbox violation") || !strings.Contains(result.Output, "outside_workspace") {
-		t.Fatalf("unexpected sandbox violation output: %q", result.Output)
+	if !strings.Contains(result.Output, "Sandbox block") || !strings.Contains(result.Output, "outside_workspace") {
+		t.Fatalf("unexpected sandbox block output: %q", result.Output)
 	}
 }
 

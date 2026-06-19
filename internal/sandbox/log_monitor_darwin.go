@@ -15,7 +15,7 @@ import (
 const sandboxLogRingSize = 64
 
 // sandboxLogNoise lists daemons whose denials are background chatter, not caused
-// by the agent's command; they are filtered out of the reported violations.
+// by the agent's command; they are filtered out of the reported blocks.
 var sandboxLogNoise = []string{
 	"mDNSResponder",
 	"com.apple.diagnosticd",
@@ -35,8 +35,8 @@ type DenialMonitor struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	mu         sync.Mutex
-	violations []string
+	mu     sync.Mutex
+	blocks []string
 }
 
 // StartDenialMonitor begins streaming sandbox denials tagged with tag. An empty
@@ -82,14 +82,14 @@ func StartDenialMonitor(ctx context.Context, tag string) *DenialMonitor {
 func (monitor *DenialMonitor) record(msg string) {
 	monitor.mu.Lock()
 	defer monitor.mu.Unlock()
-	for _, existing := range monitor.violations {
+	for _, existing := range monitor.blocks {
 		if existing == msg {
 			return // dedupe repeats of the same denial
 		}
 	}
-	monitor.violations = append(monitor.violations, msg)
-	if len(monitor.violations) > sandboxLogRingSize {
-		monitor.violations = monitor.violations[len(monitor.violations)-sandboxLogRingSize:]
+	monitor.blocks = append(monitor.blocks, msg)
+	if len(monitor.blocks) > sandboxLogRingSize {
+		monitor.blocks = monitor.blocks[len(monitor.blocks)-sandboxLogRingSize:]
 	}
 }
 
@@ -101,7 +101,7 @@ func (monitor *DenialMonitor) Stop() []string {
 	<-monitor.done
 	monitor.mu.Lock()
 	defer monitor.mu.Unlock()
-	return append([]string(nil), monitor.violations...)
+	return append([]string(nil), monitor.blocks...)
 }
 
 // parseSandboxDenyLine extracts a human-readable denial from a `log stream` line

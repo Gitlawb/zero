@@ -25,21 +25,21 @@ func TestScopeValidateHandlesVolumePathsOnWindows(t *testing.T) {
 	// A path inside a granted root must be allowed even when the workspace/
 	// extra dirs were created under 8.3 short names and the scope stored their
 	// long forms.
-	if violation := scope.validate(filepath.Join(extra, "ok.txt")); violation != nil {
-		t.Fatalf("validate(extra-root path) = %v, want nil", violation)
+	if block := scope.validate(filepath.Join(extra, "ok.txt")); block != nil {
+		t.Fatalf("validate(extra-root path) = %v, want nil", block)
 	}
-	if violation := scope.validate(filepath.Join(workspace, "in.txt")); violation != nil {
-		t.Fatalf("validate(workspace path) = %v, want nil", violation)
+	if block := scope.validate(filepath.Join(workspace, "in.txt")); block != nil {
+		t.Fatalf("validate(workspace path) = %v, want nil", block)
 	}
 
 	// An absolute path outside all roots must still be denied (no fail-open
 	// from drive-path mangling).
 	outside := filepath.Join(t.TempDir(), "escape.txt")
-	violation := scope.validate(outside)
-	if violation == nil {
-		t.Fatal("validate(outside all roots) = nil, want violation (fail-open regression)")
+	block := scope.validate(outside)
+	if block == nil {
+		t.Fatal("validate(outside all roots) = nil, want block (fail-open regression)")
 	}
-	if violation.Code != ViolationOutsideWorkspace {
-		t.Fatalf("violation.Code=%q want %q", violation.Code, ViolationOutsideWorkspace)
+	if block.Code != BlockOutsideWorkspace {
+		t.Fatalf("block.Code=%q want %q", block.Code, BlockOutsideWorkspace)
 	}
 }

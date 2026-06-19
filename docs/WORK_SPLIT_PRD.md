@@ -61,7 +61,7 @@ Still needed before Zero feels production-ready:
 
 | Owner | Primary Role | Owns | Should Not Own Alone |
 | --- | --- | --- | --- |
-| Vasanth | Product UX and TUI owner | Bubble Tea TUI, startup screen, command palette, slash command UX, tool rendering, permission prompts, sandbox violation rendering, verification/test/git output UX, themes, daily CLI feel | Provider internals, release pipeline, platform adapters |
+| Vasanth | Product UX and TUI owner | Bubble Tea TUI, startup screen, command palette, slash command UX, tool rendering, permission prompts, sandbox block rendering, verification/test/git output UX, themes, daily CLI feel | Provider internals, release pipeline, platform adapters |
 | Gnanam | Runtime core owner | Provider/model registry, provider factory, agent/runtime protocols, stream-json, sessions/search backends, config/doctor/usage/redaction, MCP/hooks/plugins backend, sandbox policy/grants, permission event contract | TUI composition, release packaging, platform-specific install trust |
 | Anandan | Platform product owner | Install/update/release trust, binary/package smoke tests, platform sandbox adapters, Windows behavior, PR/review automation CLI, CI as product verification, performance and release checks | TUI rendering, provider semantics, model registry ownership |
 
@@ -110,13 +110,13 @@ Planned PRs:
 - Vasanth: `feat/tui-sandbox-permissions`
   - permission prompt UX
   - allow, deny, and always-allow flows
-  - sandbox violation rendering
+  - sandbox block rendering
   - `/permissions` or equivalent permission state UI
 - Gnanam: `feat/runtime-permission-events`
   - structured permission request events
   - sandbox grant contract
   - stream-json support
-  - tests for denial, approval, and violation cases
+  - tests for denial, approval, and block cases
 - Anandan: `feat/windows-sandbox-platform`
   - platform sandbox capability checks
   - stronger Windows behavior or explicit safe fallback
@@ -127,7 +127,7 @@ Done when:
 
 - High-autonomy tool attempts produce a clear prompt, decision, and result in TUI and headless modes.
 - Denied commands do not run.
-- Sandbox violations are visible and actionable.
+- Sandbox blocks are visible and actionable.
 - Platform fallback is explicit, tested, and not silently unsafe.
 
 ### B. Command UX And Daily CLI
@@ -227,7 +227,7 @@ These are the next reviewable slices. Do not use the old migration-era next step
 
 Recommended first parallel set:
 
-- Vasanth starts the TUI permission prompt and violation display.
+- Vasanth starts the TUI permission prompt and block display.
 - Gnanam defines the permission event/grant contract.
 - Anandan owns Windows/platform sandbox reporting and tests.
 
@@ -236,7 +236,7 @@ Recommended first parallel set:
 | Command Area | Vasanth | Gnanam | Anandan |
 | --- | --- | --- | --- |
 | `exec` | TUI and interactive UX | Runtime execution contract | Package smoke and platform validation |
-| `sandbox` | Prompt and violation UX | Policy, grants, and events | Platform adapters and Windows behavior |
+| `sandbox` | Prompt and block UX | Policy, grants, and events | Platform adapters and Windows behavior |
 | `update` | Display and user messaging | Config and redacted errors | Primary owner of update verification |
 | `verify` | Result rendering | Verification backend contract | CI and release integration |
 | `changes` | TUI rendering | Change detection backend | PR automation integration |

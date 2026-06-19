@@ -1329,9 +1329,9 @@ func TestPermissionPromptBlocksNormalSubmit(t *testing.T) {
 	}
 }
 
-func TestPermissionRowRendersSandboxViolations(t *testing.T) {
-	violation := sandbox.Violation{
-		Code:        sandbox.ViolationOutsideWorkspace,
+func TestPermissionRowRendersSandboxBlocks(t *testing.T) {
+	block := sandbox.Block{
+		Code:        sandbox.BlockOutsideWorkspace,
 		ToolName:    "write_file",
 		Action:      sandbox.ActionDeny,
 		Risk:        sandbox.Risk{Level: sandbox.RiskCritical},
@@ -1349,7 +1349,7 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 		SideEffect:     "write",
 		Reason:         "workspace boundary enforced",
 		Risk:           sandbox.Risk{Level: sandbox.RiskHigh},
-		Violation:      &violation,
+		Block:          &block,
 	}
 
 	rendered := newModel(context.Background(), Options{}).renderRow(permissionTranscriptRow(event), 96, buildRowContext(nil))
@@ -1357,7 +1357,7 @@ func TestPermissionRowRendersSandboxViolations(t *testing.T) {
 	for _, want := range []string{"write_file", "denied", "outside workspace", "../secret.txt"} {
 		assertContains(t, rendered, want)
 	}
-	for _, blocked := range []string{"risk:", "risk=", "violation=", "mode=", "permission=", "side_effect=", "autonomy="} {
+	for _, blocked := range []string{"risk:", "risk=", "block=", "mode=", "permission=", "side_effect=", "autonomy="} {
 		if strings.Contains(rendered, blocked) {
 			t.Fatalf("denied permission row must not render %q, got %q", blocked, rendered)
 		}

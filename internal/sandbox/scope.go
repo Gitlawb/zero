@@ -192,22 +192,22 @@ func dedupeScopeRoots(roots []string) []string {
 // this is a deliberate semantic widening compared with single-root validation,
 // because the true write target is inside an allowed root.
 //
-// When all roots deny, a ViolationSymlinkTraversal result from any root is
-// preferred over ViolationOutsideWorkspace; the --add-dir hint is appended
-// only on outside_workspace results. The returned violation always carries
+// When all roots deny, a BlockSymlinkTraversal result from any root is
+// preferred over BlockOutsideWorkspace; the --add-dir hint is appended
+// only on outside_workspace results. The returned block always carries
 // the caller's original requestedPath.
-func (s *Scope) validate(requestedPath string) *pathViolation {
+func (s *Scope) validate(requestedPath string) *pathBlock {
 	return s.validateAgainstRoots(requestedPath, s.Roots())
 }
 
-func (s *Scope) validateRead(requestedPath string) *pathViolation {
+func (s *Scope) validateRead(requestedPath string) *pathBlock {
 	return s.validateAgainstRoots(requestedPath, s.ReadRoots())
 }
 
-func (s *Scope) validateAgainstRoots(requestedPath string, roots []string) *pathViolation {
+func (s *Scope) validateAgainstRoots(requestedPath string, roots []string) *pathBlock {
 	if len(roots) == 0 {
-		return &pathViolation{
-			Code:   ViolationOutsideWorkspace,
+		return &pathBlock{
+			Code:   BlockOutsideWorkspace,
 			Path:   requestedPath,
 			Reason: fmt.Sprintf("%s is outside the workspace", requestedPath),
 		}
@@ -218,38 +218,38 @@ func (s *Scope) validateAgainstRoots(requestedPath string, roots []string) *path
 	// For each root, normalize the leading path prefix so that platform-level
 	// symlinks (e.g. macOS /var -> /private/var) are resolved before comparing
 	// against the symlink-resolved scope roots, while leaving workspace-internal
-	// symlinks intact so validateWorkspacePath can detect traversal violations.
-	var outsideViolation *pathViolation
-	var traversalViolation *pathViolation
+	// symlinks intact so validateWorkspacePath can detect traversal blocks.
+	var outsideBlock *pathBlock
+	var traversalBlock *pathBlock
 	for _, root := range roots {
 		normalized := NormalizePrefixForRoot(requestedPath, root)
-		violation := validateWorkspacePath(root, normalized)
-		if violation == nil {
+		block := validateWorkspacePath(root, normalized)
+		if block == nil {
 			return nil
 		}
-		switch violation.Code {
-		case ViolationSymlinkTraversal:
-			if traversalViolation == nil {
-				traversalViolation = violation
+		switch block.Code {
+		case BlockSymlinkTraversal:
+			if traversalBlock == nil {
+				traversalBlock = block
 			}
 		default:
-			if outsideViolation == nil {
-				outsideViolation = violation
+			if outsideBlock == nil {
+				outsideBlock = block
 			}
 		}
 	}
 	// Prefer symlink-traversal: the path was lexically inside a granted root
 	// but crossed an in-root symlink — the --add-dir hint would be misleading.
-	if traversalViolation != nil {
-		return &pathViolation{
-			Code:   ViolationSymlinkTraversal,
+	if traversalBlock != nil {
+		return &pathBlock{
+			Code:   BlockSymlinkTraversal,
 			Path:   requestedPath,
-			Reason: traversalViolation.Reason,
+			Reason: traversalBlock.Reason,
 		}
 	}
 	// Plain outside-workspace denial — rebuild with the original path and hint.
-	return &pathViolation{
-		Code:   ViolationOutsideWorkspace,
+	return &pathBlock{
+		Code:   BlockOutsideWorkspace,
 		Path:   requestedPath,
 		Reason: fmt.Sprintf("%s is outside the workspace (use /add-dir or --add-dir to allow writes there)", requestedPath),
 	}
@@ -258,7 +258,7 @@ func (s *Scope) validateAgainstRoots(requestedPath string, roots []string) *path
 // NormalizePrefixForRoot resolves platform-level symlinks (e.g. macOS
 // /var -> /private/var) in the portion of absPath that lies outside
 // resolvedRoot, while leaving workspace-internal path components intact so
-// that validateWorkspacePath can detect symlink traversal violations there.
+// that validateWorkspacePath can detect symlink traversal blocks there.
 // It is exported because the tools layer shares it to normalize absolute
 // paths per scope root before running its own single-root checks.
 //

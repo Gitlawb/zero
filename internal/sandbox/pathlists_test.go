@@ -140,10 +140,10 @@ func TestWritePrecedenceMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// This matrix exercises the workspace-enforced write precedence.
-			violation := validateWritePath(scope, tc.policy, true, ws, tc.path)
-			gotAllow := violation == nil
+			block := validateWritePath(scope, tc.policy, true, ws, tc.path)
+			gotAllow := block == nil
 			if gotAllow != tc.wantAllow {
-				t.Fatalf("validateWritePath(%q) allow=%v (violation=%v), want allow=%v", tc.path, gotAllow, violation, tc.wantAllow)
+				t.Fatalf("validateWritePath(%q) allow=%v (block=%v), want allow=%v", tc.path, gotAllow, block, tc.wantAllow)
 			}
 		})
 	}

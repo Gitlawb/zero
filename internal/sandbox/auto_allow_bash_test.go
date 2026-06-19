@@ -41,7 +41,7 @@ func TestSandboxedBashAutoAllowedWhenSandboxActive(t *testing.T) {
 }
 
 func TestSandboxedBashStillPromptsWithoutSandbox(t *testing.T) {
-	engine := sandboxedShellEngine(t, Backend{Name: BackendPolicyOnly})
+	engine := sandboxedShellEngine(t, Backend{Name: BackendUnavailable})
 	decision := engine.Evaluate(context.Background(), bashRequest())
 	if decision.Action != ActionPrompt {
 		t.Fatalf("decision = %#v, want prompt (no active sandbox)", decision)
@@ -74,9 +74,9 @@ func TestShellSandboxActive(t *testing.T) {
 		t.Fatal("native wrapping backend must be sandbox-active")
 	}
 
-	policyOnly := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: Backend{Name: BackendPolicyOnly}})
-	if policyOnly.shellSandboxActive(DefaultPolicy()) {
-		t.Fatal("policy-only backend must NOT be sandbox-active")
+	unavailable := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy(), Backend: Backend{Name: BackendUnavailable}})
+	if unavailable.shellSandboxActive(DefaultPolicy()) {
+		t.Fatal("unavailable backend must NOT be sandbox-active")
 	}
 
 	disabled := DefaultPolicy()

@@ -129,15 +129,15 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 			add("path_escape", RiskCritical)
 		}
 		if request.WorkspaceRoot != "" {
-			var violation *pathViolation
+			var block *pathBlock
 			if scope != nil {
-				violation = scope.validate(path)
+				block = scope.validate(path)
 			} else {
-				violation = validateWorkspacePath(request.WorkspaceRoot, path)
+				block = validateWorkspacePath(request.WorkspaceRoot, path)
 			}
-			if violation != nil {
-				switch violation.Code {
-				case ViolationSymlinkTraversal:
+			if block != nil {
+				switch block.Code {
+				case BlockSymlinkTraversal:
 					add("symlink_traversal", RiskCritical)
 				default:
 					add("out_of_workspace", RiskCritical)
@@ -254,7 +254,7 @@ func applyPatchRequestPaths(args map[string]any) []string {
 	return paths
 }
 
-func applyPatchPathViolation(request Request) *pathViolation {
+func applyPatchPathBlock(request Request) *pathBlock {
 	if request.ToolName != "apply_patch" {
 		return nil
 	}
@@ -267,8 +267,8 @@ func applyPatchPathViolation(request Request) *pathViolation {
 			continue
 		}
 		if filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
-			return &pathViolation{
-				Code:   ViolationOutsideWorkspace,
+			return &pathBlock{
+				Code:   BlockOutsideWorkspace,
 				Path:   path,
 				Reason: fmt.Sprintf("patch path %q must stay inside the workspace", path),
 			}

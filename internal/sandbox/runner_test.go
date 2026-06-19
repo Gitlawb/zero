@@ -101,12 +101,12 @@ func TestBuildCommandPlanWrapsSandboxExec(t *testing.T) {
 	}
 }
 
-func TestBuildCommandPlanRejectsPolicyOnlyFallback(t *testing.T) {
+func TestBuildCommandPlanRejectsUnavailableFallback(t *testing.T) {
 	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
-		Backend:       Backend{Name: BackendPolicyOnly, Message: "policy-only fallback"},
+		Backend:       Backend{Name: BackendUnavailable, Message: "native sandbox unavailable"},
 	})
 
 	_, err := engine.BuildCommandPlan(CommandSpec{
@@ -123,12 +123,12 @@ func TestBuildCommandPlanRejectsOutsideDirectory(t *testing.T) {
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: t.TempDir(),
 		Policy:        DefaultPolicy(),
-		Backend:       Backend{Name: BackendPolicyOnly},
+		Backend:       Backend{Name: BackendUnavailable},
 	})
 
 	_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "outside_workspace") {
-		t.Fatalf("error = %v, want outside workspace violation", err)
+		t.Fatalf("error = %v, want outside workspace block", err)
 	}
 }
 
@@ -472,7 +472,7 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 		t.Fatalf("resolveCommandDir(extra root) = %v, want nil", err)
 	}
 	if _, _, err := engine.resolveCommandDir(t.TempDir(), engine.policy); err == nil {
-		t.Fatal("resolveCommandDir(outside all roots) = nil error, want violation")
+		t.Fatal("resolveCommandDir(outside all roots) = nil error, want block")
 	}
 }
 

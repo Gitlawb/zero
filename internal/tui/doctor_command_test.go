@@ -275,7 +275,7 @@ func TestDoctorFixLinesUseSandboxRemedy(t *testing.T) {
 	lines := doctorFixLines(doctor.Report{Checks: []doctor.Check{{
 		ID:      "sandbox.backend",
 		Status:  doctor.StatusWarn,
-		Message: "Native sandbox backend unavailable on windows: policy-only fallback: Windows sandbox setup helper is not available.",
+		Message: "Native sandbox backend unavailable on windows: Windows sandbox setup helper is not available.",
 		Details: map[string]any{
 			"remedy": "install the Windows sandbox command runner and setup helper together, then run `zero sandbox setup`",
 		},

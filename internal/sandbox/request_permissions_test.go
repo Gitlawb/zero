@@ -46,7 +46,7 @@ func TestGrantRequestPermissionsReadDoesNotGrantWrite(t *testing.T) {
 		Permission:    PermissionAllow,
 		Args:          map[string]any{"path": target},
 	})
-	if write.Action != ActionPrompt || write.Violation == nil || write.Violation.Code != ViolationOutsideWorkspace {
+	if write.Action != ActionPrompt || write.Block == nil || write.Block.Code != BlockOutsideWorkspace {
 		t.Fatalf("read grant must not allow writes, got %#v", write)
 	}
 

@@ -247,14 +247,9 @@ both **off by default** and safe to leave unset:
   compatibility wrapper for existing direct uses; new sandbox plans do not depend
   on that external wrapper.
 - `sandbox.monitorDenials` (macOS) — tails the unified log for this run's seatbelt
-  denials and appends them to a command's stderr as a `<sandbox_violations>` block
+  denials and appends them to a command's stderr as a `<sandbox_blocks>` block
   so blocked operations are visible. A no-op on OS versions that do not deliver
   seatbelt denials to the queryable log.
-
-When the network policy is `scoped`, the `web_fetch` and `web_search` tools honor
-the same allow/deny domain list as sandboxed shell egress (host allowlisting is
-enforced on the macOS `sandbox-exec` backend; other backends collapse `scoped` to
-`deny` for these tools).
 
 ## Architecture
 

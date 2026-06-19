@@ -49,13 +49,13 @@ func TestIsRetriableToolError(t *testing.T) {
 		{"disabled tool", ToolResult{Status: tools.StatusError, Output: `Error: Tool "x" is not enabled for this run.`}, false},
 		{"permission denied (meta)", ToolResult{Status: tools.StatusError, Output: "Error: Permission denied for x: needs approval", Meta: map[string]string{"permission_action": "deny"}}, false},
 		{"permission required", ToolResult{Status: tools.StatusError, Output: "Error: Permission required for x: approve first"}, false},
-		{"sandbox violation", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox violation: outside_workspace"}, false},
+		{"sandbox block", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox block: outside_workspace"}, false},
 		{"sandbox approval", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox approval required for x: network"}, false},
 		// Structured denial categories are authoritative regardless of message text.
 		{"denial: filtered", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialFiltered}, false},
 		{"denial: permission", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialPermissionDenied}, false},
 		{"denial: approval canceled", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialApprovalCanceled}, false},
-		{"denial: sandbox", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialSandboxViolation}, false},
+		{"denial: sandbox", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialSandboxBlock}, false},
 	}
 	for _, c := range cases {
 		if got := isRetriableToolError(c.result); got != c.want {
@@ -835,9 +835,9 @@ func TestRunAllowsWorkspaceWriteWithoutPromptWhenSandboxPolicyPermits(t *testing
 	}
 	event := permissionEvents[0]
 	if event.Action != PermissionActionAllow || event.PermissionGranted || event.GrantMatched {
-		t.Fatalf("expected sandbox policy allow without user grant, got %#v", event)
+		t.Fatalf("expected workspace allow without user grant, got %#v", event)
 	}
-	if event.Reason != "workspace write permitted by sandbox policy" {
+	if event.Reason != "workspace write is allowed" {
 		t.Fatalf("expected workspace-write reason, got %#v", event)
 	}
 }
@@ -1173,7 +1173,7 @@ func TestRunCommandPrefixApprovalSkipsLaterMatchingBashPrompt(t *testing.T) {
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
@@ -1244,7 +1244,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 			WorkspaceRoot: root,
 			Policy:        policy,
 			Store:         store,
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			firstRequests = append(firstRequests, request)
@@ -1296,7 +1296,7 @@ func TestRunPersistentCommandPrefixApprovalSkipsFutureSessionPrompt(t *testing.T
 			WorkspaceRoot: root,
 			Policy:        policy,
 			Store:         store,
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			t.Fatalf("persistent command prefix should skip prompt, got %#v", request)
@@ -1348,7 +1348,7 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
 			Store:         store,
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
@@ -1408,7 +1408,7 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
@@ -1474,7 +1474,7 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			if len(request.CommandPrefix) != 0 {
@@ -1519,7 +1519,7 @@ func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
 			Policy:        sandbox.DefaultPolicy(),
-			Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 		}),
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
@@ -1542,8 +1542,8 @@ func TestRunPromptsForDestructiveShellInsteadOfSandboxDeny(t *testing.T) {
 	if request.Action != PermissionActionPrompt || request.Reason != "destructive shell command requires approval" || !sandbox.HasRiskCategory(request.Risk, "destructive") {
 		t.Fatalf("expected destructive shell prompt, got %#v", request)
 	}
-	if request.Violation != nil {
-		t.Fatalf("destructive shell prompt should not be a sandbox violation: %#v", request.Violation)
+	if request.Block != nil {
+		t.Fatalf("destructive shell prompt should not be a sandbox block: %#v", request.Block)
 	}
 	if len(events) != 1 || events[0].Action != PermissionActionAllow || events[0].DecisionAction != PermissionDecisionAllow {
 		t.Fatalf("expected approved permission event, got %#v", events)
@@ -1766,7 +1766,7 @@ func TestRunPromptsAndAllowsOutsideWorkspaceWrite(t *testing.T) {
 		t.Fatalf("expected one permission request, got %#v", requests)
 	}
 	request := requests[0]
-	if request.Action != PermissionActionPrompt || request.Violation == nil || request.Violation.Code != sandbox.ViolationOutsideWorkspace || !request.Violation.Recoverable {
+	if request.Action != PermissionActionPrompt || request.Block == nil || request.Block.Code != sandbox.BlockOutsideWorkspace || !request.Block.Recoverable {
 		t.Fatalf("expected recoverable outside-workspace prompt, got %#v", request)
 	}
 	if !containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAllowForSession) {
@@ -1885,8 +1885,8 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 		t.Fatalf("expected sandbox to prevent outside write, stat error: %v", err)
 	}
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-	if !strings.Contains(lastMessage.Content, "Sandbox violation") || !strings.Contains(lastMessage.Content, "outside_workspace") {
-		t.Fatalf("expected sandbox violation tool result, got %q", lastMessage.Content)
+	if !strings.Contains(lastMessage.Content, "Sandbox block") || !strings.Contains(lastMessage.Content, "outside_workspace") {
+		t.Fatalf("expected sandbox block tool result, got %q", lastMessage.Content)
 	}
 	if len(permissionEvents) != 1 {
 		t.Fatalf("expected one permission event, got %#v", permissionEvents)
@@ -1895,8 +1895,8 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	if event.Action != PermissionActionDeny {
 		t.Fatalf("expected denied permission event, got %#v", event)
 	}
-	if event.Violation == nil || event.Violation.Code != sandbox.ViolationOutsideWorkspace {
-		t.Fatalf("expected outside_workspace violation in permission event, got %#v", event)
+	if event.Block == nil || event.Block.Code != sandbox.BlockOutsideWorkspace {
+		t.Fatalf("expected outside_workspace block in permission event, got %#v", event)
 	}
 	if event.Risk.Level != sandbox.RiskCritical {
 		t.Fatalf("expected critical risk in permission event, got %#v", event)

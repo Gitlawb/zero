@@ -43,6 +43,6 @@ func TestParseSandboxDenyLine(t *testing.T) {
 func TestDenialMonitorEmptyTagIsNoop(t *testing.T) {
 	monitor := StartDenialMonitor(t.Context(), "")
 	if got := monitor.Stop(); got != nil {
-		t.Fatalf("a no-op monitor must return no violations, got %#v", got)
+		t.Fatalf("a no-op monitor must return no blocks, got %#v", got)
 	}
 }

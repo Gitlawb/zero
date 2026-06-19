@@ -37,7 +37,7 @@ type PolicyMode string
 type NetworkMode string
 type Action string
 type RiskLevel string
-type ViolationCode string
+type BlockCode string
 type GrantDecision string
 type BackendName string
 type BackendSupportLevel string
@@ -92,19 +92,19 @@ const (
 )
 
 const (
-	ViolationContextCanceled    ViolationCode = "context_canceled"
-	ViolationDeniedPermission   ViolationCode = "denied_permission"
-	ViolationOutsideWorkspace   ViolationCode = "outside_workspace"
-	ViolationSymlinkTraversal   ViolationCode = "symlink_traversal"
-	ViolationNetwork            ViolationCode = "network"
-	ViolationDestructiveCommand ViolationCode = "destructive_command"
-	ViolationPersistentDeny     ViolationCode = "persistent_deny"
-	// ViolationPolicyDenied is the catch-all for a denied decision that carries no
-	// more specific violation code.
-	ViolationPolicyDenied ViolationCode = "policy_denied"
+	BlockContextCanceled    BlockCode = "context_canceled"
+	BlockDeniedPermission   BlockCode = "denied_permission"
+	BlockOutsideWorkspace   BlockCode = "outside_workspace"
+	BlockSymlinkTraversal   BlockCode = "symlink_traversal"
+	BlockNetwork            BlockCode = "network"
+	BlockDestructiveCommand BlockCode = "destructive_command"
+	BlockPersistentDeny     BlockCode = "persistent_deny"
+	// BlockDenied is the catch-all for a denied decision that carries no more
+	// specific block code.
+	BlockDenied BlockCode = "denied"
 )
 
-const ReasonNetworkBlocked = "network access is blocked by sandbox policy"
+const ReasonNetworkBlocked = "network access requires approval"
 
 const (
 	GrantAllow GrantDecision = "allow"
@@ -118,17 +118,15 @@ const (
 	BackendLinuxLandlock          BackendName = "linux-landlock"
 	BackendWindowsRestrictedToken BackendName = "windows-restricted-token"
 	BackendWindowsElevated        BackendName = "windows-elevated"
-	BackendPolicyOnly             BackendName = "policy-only"
-	// BackendWSL is the policy-only fallback used under WSL when bubblewrap is
-	// unavailable/unreliable: there is no native OS isolation, but network egress
-	// is still routed through the local filtering proxy and the command runs under
-	// the full policy engine. It is surfaced via ZERO_SANDBOX_BACKEND=wsl.
+	BackendUnavailable            BackendName = "unavailable"
+	// BackendWSL records that WSL was detected but native Linux sandbox wrapping
+	// is unavailable or unreliable in that environment.
 	BackendWSL BackendName = "wsl"
 )
 
 const (
-	BackendSupportNative     BackendSupportLevel = "native"
-	BackendSupportPolicyOnly BackendSupportLevel = "policy-only"
+	BackendSupportNative      BackendSupportLevel = "native"
+	BackendSupportUnavailable BackendSupportLevel = "unavailable"
 )
 
 const (
@@ -156,7 +154,7 @@ type Policy struct {
 	// MonitorDenials, when true on macOS, tags the sandbox-exec profile's denials
 	// and tails `log stream` for them so blocked operations can be surfaced back to
 	// the agent. Off by default: it starts a `log stream` subprocess per command and
-	// appends a <sandbox_violations> note to the command's stderr, so it is opt-in.
+	// appends a <sandbox_blocks> note to the command's stderr, so it is opt-in.
 	// Ignored on non-macOS backends, and a no-op where the OS does not deliver
 	// seatbelt denials to the unified log.
 	MonitorDenials bool `json:"monitorDenials,omitempty"`
@@ -195,12 +193,12 @@ type Request struct {
 }
 
 type Decision struct {
-	Action       Action     `json:"action"`
-	Reason       string     `json:"reason,omitempty"`
-	Risk         Risk       `json:"risk"`
-	GrantMatched bool       `json:"grantMatched,omitempty"`
-	Grant        *Grant     `json:"grant,omitempty"`
-	Violation    *Violation `json:"violation,omitempty"`
+	Action       Action `json:"action"`
+	Reason       string `json:"reason,omitempty"`
+	Risk         Risk   `json:"risk"`
+	GrantMatched bool   `json:"grantMatched,omitempty"`
+	Grant        *Grant `json:"grant,omitempty"`
+	Block        *Block `json:"block,omitempty"`
 	// AutoAllowed marks an allow that the sandbox itself authorized without a user
 	// prompt or persistent grant, such as a workspace-write file mutation or an
 	// opted-in sandboxed shell command. Enforcement points treat it like a
@@ -215,26 +213,26 @@ type Risk struct {
 	Reason     string    `json:"reason,omitempty"`
 }
 
-type Violation struct {
-	Code        ViolationCode `json:"code"`
-	ToolName    string        `json:"toolName,omitempty"`
-	Action      Action        `json:"action"`
-	Risk        Risk          `json:"risk"`
-	Path        string        `json:"path,omitempty"`
-	Reason      string        `json:"reason"`
-	Recoverable bool          `json:"recoverable"`
+type Block struct {
+	Code        BlockCode `json:"code"`
+	ToolName    string    `json:"toolName,omitempty"`
+	Action      Action    `json:"action"`
+	Risk        Risk      `json:"risk"`
+	Path        string    `json:"path,omitempty"`
+	Reason      string    `json:"reason"`
+	Recoverable bool      `json:"recoverable"`
 }
 
-func (violation Violation) Error() string {
-	if violation.Path != "" {
-		return fmt.Sprintf("Sandbox violation [%s] for %s at %s: %s", violation.Code, violation.ToolName, violation.Path, violation.Reason)
+func (block Block) Error() string {
+	if block.Path != "" {
+		return fmt.Sprintf("Sandbox block [%s] for %s at %s: %s", block.Code, block.ToolName, block.Path, block.Reason)
 	}
-	return fmt.Sprintf("Sandbox violation [%s] for %s: %s", violation.Code, violation.ToolName, violation.Reason)
+	return fmt.Sprintf("Sandbox block [%s] for %s: %s", block.Code, block.ToolName, block.Reason)
 }
 
 func (decision Decision) ErrorString() string {
-	if decision.Violation != nil {
-		return decision.Violation.Error()
+	if decision.Block != nil {
+		return decision.Block.Error()
 	}
 	if decision.Reason != "" {
 		return "Sandbox decision: " + decision.Reason

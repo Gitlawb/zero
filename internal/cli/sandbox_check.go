@@ -219,10 +219,10 @@ func formatSandboxCheckReport(report sandboxCheckReport) string {
 		riskLine += " [" + strings.Join(risk.Categories, ", ") + "]"
 	}
 	lines = append(lines, riskLine)
-	if violation := report.Decision.Violation; violation != nil {
-		line := "violation: [" + violation.Code + "] " + violation.Reason
-		if violation.Path != "" {
-			line += " (path: " + violation.Path + ")"
+	if block := report.Decision.Block; block != nil {
+		line := "block: [" + block.Code + "] " + block.Reason
+		if block.Path != "" {
+			line += " (path: " + block.Path + ")"
 		}
 		lines = append(lines, line)
 	}
@@ -250,7 +250,7 @@ func writeSandboxCheckHelp(w io.Writer) error {
 
 Evaluates the sandbox decision for a hypothetical tool action against the
 resolved policy, and prints the plan, the decision (allow/prompt/deny with risk
-and any violation), and any persistent grant that matches the tool. Secrets in
+and any block), and any persistent grant that matches the tool. Secrets in
 grant reasons are redacted.
 
 Flags:

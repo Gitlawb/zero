@@ -152,9 +152,9 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	}
 }
 
-func TestSandboxManagerRejectsPolicyOnlyCommandPlan(t *testing.T) {
+func TestSandboxManagerRejectsUnavailableCommandPlan(t *testing.T) {
 	policy := DefaultPolicy()
-	backend := Backend{Name: BackendPolicyOnly, Platform: "windows", Fallback: true, Message: "policy-only fallback"}
+	backend := Backend{Name: BackendUnavailable, Platform: "windows", Fallback: true, Message: "native sandbox unavailable"}
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
 	_, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     `C:\workspace`,
@@ -182,7 +182,7 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 		{name: "linux", goos: "linux", lookupName: LinuxSandboxHelperName, lookupPath: "/usr/bin/zero-linux-sandbox", want: BackendLinuxBwrap, wantTarget: BackendLinuxBwrap},
 		{name: "macos", goos: "darwin", lookupName: "sandbox-exec", lookupPath: "/usr/bin/sandbox-exec", want: BackendMacOSSeatbelt, wantTarget: BackendMacOSSeatbelt},
 		{name: "windows", goos: "windows", lookupName: WindowsSandboxCommandRunnerName, lookupPath: `C:\zero\zero-windows-command-runner.exe`, setupPath: `C:\zero\zero-windows-sandbox-setup.exe`, want: BackendWindowsRestrictedToken, wantTarget: BackendWindowsRestrictedToken},
-		{name: "unsupported", goos: "plan9", want: BackendPolicyOnly, wantTarget: BackendPolicyOnly},
+		{name: "unsupported", goos: "plan9", want: BackendUnavailable, wantTarget: BackendUnavailable},
 	}
 
 	for _, test := range tests {
@@ -248,7 +248,7 @@ func TestSandboxManagerFailsClosedWhenNativeRequiredAndUnavailable(t *testing.T)
 	profile := PermissionProfileFromPolicy("/workspace", policy, nil)
 	_, err := NewSandboxManager(SandboxManagerOptions{
 		GOOS:    "windows",
-		Backend: Backend{Name: BackendPolicyOnly, Platform: "windows", Fallback: true},
+		Backend: Backend{Name: BackendUnavailable, Platform: "windows", Fallback: true},
 	}).BuildExecutionRequest(SandboxManagerRequest{
 		WorkspaceRoot:     "/workspace",
 		Command:           CommandSpec{Name: "cmd.exe", Dir: "/workspace"},

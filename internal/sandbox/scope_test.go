@@ -9,7 +9,7 @@ import (
 
 // TestScopeValidateMultiRootSymlinkTraversalPreferred pins Fix 1: when a
 // symlink inside an extra root escapes outside all roots, validate must return
-// ViolationSymlinkTraversal (not ViolationOutsideWorkspace) with the original
+// BlockSymlinkTraversal (not BlockOutsideWorkspace) with the original
 // requested path and without the --add-dir hint.
 func TestScopeValidateMultiRootSymlinkTraversalPreferred(t *testing.T) {
 	workspace := t.TempDir()
@@ -24,18 +24,18 @@ func TestScopeValidateMultiRootSymlinkTraversalPreferred(t *testing.T) {
 		t.Fatalf("NewScope: %v", err)
 	}
 	requestedPath := filepath.Join(extra, "link", "escape.txt")
-	violation := scope.validate(requestedPath)
-	if violation == nil {
-		t.Fatal("validate(extra/link/escape.txt) = nil, want violation")
+	block := scope.validate(requestedPath)
+	if block == nil {
+		t.Fatal("validate(extra/link/escape.txt) = nil, want block")
 	}
-	if violation.Code != ViolationSymlinkTraversal {
-		t.Fatalf("violation.Code=%q want %q", violation.Code, ViolationSymlinkTraversal)
+	if block.Code != BlockSymlinkTraversal {
+		t.Fatalf("block.Code=%q want %q", block.Code, BlockSymlinkTraversal)
 	}
-	if violation.Path != requestedPath {
-		t.Fatalf("violation.Path=%q want original requestedPath %q", violation.Path, requestedPath)
+	if block.Path != requestedPath {
+		t.Fatalf("block.Path=%q want original requestedPath %q", block.Path, requestedPath)
 	}
-	if strings.Contains(violation.Reason, "--add-dir") {
-		t.Fatalf("violation.Reason=%q must not contain --add-dir hint for symlink traversal", violation.Reason)
+	if strings.Contains(block.Reason, "--add-dir") {
+		t.Fatalf("block.Reason=%q must not contain --add-dir hint for symlink traversal", block.Reason)
 	}
 }
 
@@ -43,7 +43,7 @@ func TestScopeValidateMultiRootSymlinkTraversalPreferred(t *testing.T) {
 // test for normalizePrefixForRoot: builds aliasing by hand via a symlink from
 // an alias parent directory to the real workspace root, then verifies that
 // paths under the alias are accepted (platform alias resolved) and that an
-// in-root symlink escaping outside is still caught as ViolationSymlinkTraversal.
+// in-root symlink escaping outside is still caught as BlockSymlinkTraversal.
 func TestValidateResolvesAliasedPathPrefixes(t *testing.T) {
 	real := t.TempDir()
 	aliasParent := t.TempDir()
@@ -55,16 +55,16 @@ func TestValidateResolvesAliasedPathPrefixes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
 	}
-	if violation := scope.validate(filepath.Join(alias, "new.txt")); violation != nil {
-		t.Fatalf("validate(alias-prefixed path) = %v, want nil", violation)
+	if block := scope.validate(filepath.Join(alias, "new.txt")); block != nil {
+		t.Fatalf("validate(alias-prefixed path) = %v, want nil", block)
 	}
 	outside := t.TempDir()
 	link := filepath.Join(real, "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatalf("Symlink: %v", err)
 	}
-	if violation := scope.validate(filepath.Join(alias, "link", "x.txt")); violation == nil || violation.Code != ViolationSymlinkTraversal {
-		t.Fatalf("validate(alias path through in-root symlink) = %v, want ViolationSymlinkTraversal", violation)
+	if block := scope.validate(filepath.Join(alias, "link", "x.txt")); block == nil || block.Code != BlockSymlinkTraversal {
+		t.Fatalf("validate(alias path through in-root symlink) = %v, want BlockSymlinkTraversal", block)
 	}
 }
 
@@ -188,26 +188,26 @@ func TestScopeValidateAllowsAnyRootButRelativeOnlyWorkspace(t *testing.T) {
 		t.Fatalf("NewScope: %v", err)
 	}
 
-	if violation := scope.validate(filepath.Join(extra, "out.txt")); violation != nil {
-		t.Fatalf("validate(extra-root path) = %v, want nil", violation)
+	if block := scope.validate(filepath.Join(extra, "out.txt")); block != nil {
+		t.Fatalf("validate(extra-root path) = %v, want nil", block)
 	}
-	if violation := scope.validate(filepath.Join(workspace, "in.txt")); violation != nil {
-		t.Fatalf("validate(workspace path) = %v, want nil", violation)
+	if block := scope.validate(filepath.Join(workspace, "in.txt")); block != nil {
+		t.Fatalf("validate(workspace path) = %v, want nil", block)
 	}
-	if violation := scope.validate("nested/in.txt"); violation != nil {
-		t.Fatalf("validate(relative path) = %v, want nil (resolves against workspace)", violation)
+	if block := scope.validate("nested/in.txt"); block != nil {
+		t.Fatalf("validate(relative path) = %v, want nil (resolves against workspace)", block)
 	}
 
 	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
-	violation := scope.validate(outside)
-	if violation == nil {
-		t.Fatal("validate(outside all roots) = nil, want violation")
+	block := scope.validate(outside)
+	if block == nil {
+		t.Fatal("validate(outside all roots) = nil, want block")
 	}
-	if violation.Code != ViolationOutsideWorkspace {
-		t.Fatalf("violation.Code=%q want %q", violation.Code, ViolationOutsideWorkspace)
+	if block.Code != BlockOutsideWorkspace {
+		t.Fatalf("block.Code=%q want %q", block.Code, BlockOutsideWorkspace)
 	}
-	if !strings.Contains(violation.Reason, "--add-dir") {
-		t.Fatalf("violation.Reason=%q want actionable --add-dir hint", violation.Reason)
+	if !strings.Contains(block.Reason, "--add-dir") {
+		t.Fatalf("block.Reason=%q want actionable --add-dir hint", block.Reason)
 	}
 }
 
@@ -222,11 +222,11 @@ func TestScopeValidateKeepsSymlinkTraversalProtection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
 	}
-	violation := scope.validate(filepath.Join(link, "escape.txt"))
-	if violation == nil {
-		t.Fatal("validate(symlink escape) = nil, want violation")
+	block := scope.validate(filepath.Join(link, "escape.txt"))
+	if block == nil {
+		t.Fatal("validate(symlink escape) = nil, want block")
 	}
-	if violation.Code != ViolationSymlinkTraversal {
-		t.Fatalf("violation.Code=%q want %q", violation.Code, ViolationSymlinkTraversal)
+	if block.Code != BlockSymlinkTraversal {
+		t.Fatalf("block.Code=%q want %q", block.Code, BlockSymlinkTraversal)
 	}
 }

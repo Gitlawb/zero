@@ -31,12 +31,12 @@ type SandboxRiskSnapshot struct {
 	Reason     string   `json:"reason"`
 }
 
-// SandboxViolationSnapshot is the typed view of a sandbox.Violation
+// SandboxBlockSnapshot is the typed view of a sandbox.Block
 // as it is exposed to the TUI render path, the audit log, and
 // PR/CI automation. The Path field is preserved because the
 // operator needs it to triage an out-of-workspace or symlink
-// traversal violation.
-type SandboxViolationSnapshot struct {
+// traversal block.
+type SandboxBlockSnapshot struct {
 	Code        string `json:"code"`
 	ToolName    string `json:"toolName,omitempty"`
 	Action      string `json:"action"`
@@ -88,16 +88,16 @@ type SandboxPlanSnapshot struct {
 // as it is exposed to the TUI render path, the audit log, and
 // PR/CI automation. The snapshot includes the resolved grant
 // (when the decision was driven by a persistent grant) and the
-// violation (when the decision was a deny) so consumers do not
+// block (when the decision was a deny) so consumers do not
 // have to reach back into the sandbox package to render the
 // outcome.
 type SandboxDecisionSnapshot struct {
-	Action       string                    `json:"action"`
-	Reason       string                    `json:"reason,omitempty"`
-	Risk         SandboxRiskSnapshot       `json:"risk"`
-	GrantMatched bool                      `json:"grantMatched"`
-	Grant        *SandboxGrantSnapshot     `json:"grant,omitempty"`
-	Violation    *SandboxViolationSnapshot `json:"violation,omitempty"`
+	Action       string                `json:"action"`
+	Reason       string                `json:"reason,omitempty"`
+	Risk         SandboxRiskSnapshot   `json:"risk"`
+	GrantMatched bool                  `json:"grantMatched"`
+	Grant        *SandboxGrantSnapshot `json:"grant,omitempty"`
+	Block        *SandboxBlockSnapshot `json:"block,omitempty"`
 }
 
 // SandboxPolicySnapshotFromPolicy converts a sandbox.Policy into its
@@ -132,21 +132,21 @@ func SandboxRiskSnapshotFromRisk(risk sandbox.Risk) SandboxRiskSnapshot {
 	}
 }
 
-// SandboxViolationSnapshotFromViolation converts a sandbox.Violation
+// SandboxBlockSnapshotFromBlock converts a sandbox.Block
 // into its typed snapshot. A nil input returns a zero snapshot so
 // the helper is safe to call when the decision did not produce a
-// violation.
-func SandboxViolationSnapshotFromViolation(violation *sandbox.Violation) *SandboxViolationSnapshot {
-	if violation == nil {
+// block.
+func SandboxBlockSnapshotFromBlock(block *sandbox.Block) *SandboxBlockSnapshot {
+	if block == nil {
 		return nil
 	}
-	return &SandboxViolationSnapshot{
-		Code:        string(violation.Code),
-		ToolName:    strings.TrimSpace(violation.ToolName),
-		Action:      string(violation.Action),
-		Path:        strings.TrimSpace(violation.Path),
-		Reason:      strings.TrimSpace(violation.Reason),
-		Recoverable: violation.Recoverable,
+	return &SandboxBlockSnapshot{
+		Code:        string(block.Code),
+		ToolName:    strings.TrimSpace(block.ToolName),
+		Action:      string(block.Action),
+		Path:        strings.TrimSpace(block.Path),
+		Reason:      strings.TrimSpace(block.Reason),
+		Recoverable: block.Recoverable,
 	}
 }
 
@@ -188,7 +188,7 @@ func SandboxPlanSnapshotFromPlan(plan sandbox.BackendPlan) SandboxPlanSnapshot {
 }
 
 // SandboxDecisionSnapshotFromDecision converts a sandbox.Decision
-// into its typed snapshot. The optional Grant and Violation fields
+// into its typed snapshot. The optional Grant and Block fields
 // are converted with their respective helpers so the snapshot
 // always carries the same JSON shape regardless of the decision
 // outcome.
@@ -203,6 +203,6 @@ func SandboxDecisionSnapshotFromDecision(decision sandbox.Decision) SandboxDecis
 		grant := SandboxGrantSnapshotFromGrant(*decision.Grant)
 		snapshot.Grant = &grant
 	}
-	snapshot.Violation = SandboxViolationSnapshotFromViolation(decision.Violation)
+	snapshot.Block = SandboxBlockSnapshotFromBlock(decision.Block)
 	return snapshot
 }

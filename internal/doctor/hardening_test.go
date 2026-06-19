@@ -69,8 +69,8 @@ func TestSandboxCheckWarnsWithRemedyWhenBackendMissing(t *testing.T) {
 	if !strings.Contains(remedy, "bwrap") && !strings.Contains(remedy, "bubblewrap") {
 		t.Fatalf("expected actionable bubblewrap remedy, got %q (details %#v)", remedy, check.Details)
 	}
-	// A missing native sandbox is a degradation, not a hard failure: the policy
-	// engine still runs, so the overall report must not fail on it alone.
+	// A missing native sandbox is a degradation, not a hard failure: non-shell
+	// permission checks still run, so the overall report must not fail on it alone.
 	if !report.OK {
 		t.Fatalf("missing sandbox backend should warn, not fail the report: %#v", report.Checks)
 	}

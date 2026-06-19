@@ -124,7 +124,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	err = command.Run()
 	exitCode := commandExitCode(err)
 	meta["exit_code"] = strconv.Itoa(exitCode)
-	stderrText := appendSandboxViolations(stderr.String(), monitor.Stop())
+	stderrText := appendSandboxBlocks(stderr.String(), monitor.Stop())
 
 	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 		return Result{
@@ -155,20 +155,20 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	}
 }
 
-// appendSandboxViolations appends a <sandbox_violations> block listing the denials
+// appendSandboxBlocks appends a <sandbox_blocks> block listing the denials
 // the sandbox log monitor captured, so the model can see what was blocked. With no
-// violations the stderr is returned unchanged.
-func appendSandboxViolations(stderr string, violations []string) string {
-	if len(violations) == 0 {
+// blocks the stderr is returned unchanged.
+func appendSandboxBlocks(stderr string, blocks []string) string {
+	if len(blocks) == 0 {
 		return stderr
 	}
 	var builder strings.Builder
-	builder.WriteString("<sandbox_violations>\n")
-	for _, violation := range violations {
-		builder.WriteString(violation)
+	builder.WriteString("<sandbox_blocks>\n")
+	for _, block := range blocks {
+		builder.WriteString(block)
 		builder.WriteString("\n")
 	}
-	builder.WriteString("</sandbox_violations>")
+	builder.WriteString("</sandbox_blocks>")
 	if strings.TrimSpace(stderr) == "" {
 		return builder.String()
 	}
@@ -201,7 +201,7 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	}
 	plan := zeroSandbox.CommandPlan{
 		Backend: zeroSandbox.Backend{
-			Name:    zeroSandbox.BackendPolicyOnly,
+			Name:    zeroSandbox.BackendUnavailable,
 			Message: "sandbox engine not provided",
 		},
 		Wrapped: false,
@@ -240,7 +240,7 @@ func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
 
 // interactiveBlockResult builds the structured tool Result returned when a
 // command is refused before execution because it would hang the agent. The
-// violation is surfaced both in Output (clearly delimited) and in Meta/Display
+// block is surfaced both in Output (clearly delimited) and in Meta/Display
 // so downstream consumers and the TUI can render it consistently.
 func interactiveBlockResult(detection zeroSandbox.InteractiveCommandResult) Result {
 	message := fmt.Sprintf(

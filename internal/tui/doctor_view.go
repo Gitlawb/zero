@@ -181,7 +181,7 @@ func doctorActions(checks []doctor.Check, backend *zerocommands.BackendLifecycle
 		case "sandbox.backend":
 			if remedy := doctorCheckDetailString(check, "remedy"); remedy != "" {
 				add(remedy)
-			} else if strings.Contains(message, "policy-only") || strings.Contains(message, "unavailable") {
+			} else if strings.Contains(message, "unavailable") {
 				add("zero sandbox policy --effective - inspect sandbox backend and enforcement status")
 			}
 		case "lsp.servers":

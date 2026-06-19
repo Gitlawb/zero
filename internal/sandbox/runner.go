@@ -50,9 +50,9 @@ type CommandPlan struct {
 	// StartDenialMonitor to capture what the sandbox blocked. Empty unless
 	// Policy.MonitorDenials is set on a macOS sandbox-exec plan.
 	MonitorTag string `json:"monitorTag,omitempty"`
-	// Notes records auditable least-privilege downgrade notes — e.g. the WSL
-	// policy-only fallback noting that native isolation was unavailable. Surfaced to
-	// the operator; never affects enforcement.
+	// Notes records auditable least-privilege downgrade notes, such as native
+	// isolation being unavailable in the selected environment. Surfaced to the
+	// operator; never affects enforcement.
 	Notes []string `json:"notes,omitempty"`
 	// cleanup releases resources tied to the plan's lifetime. It is never
 	// serialized; callers invoke it via Cleanup() once the command has finished.
@@ -105,7 +105,7 @@ func (engine *Engine) writeRoots(workspaceRoot string) []string {
 
 func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	if engine == nil {
-		return directCommandPlan(spec, Backend{Name: BackendPolicyOnly, Message: "sandbox disabled"}, Policy{}, ""), nil
+		return directCommandPlan(spec, Backend{Name: BackendUnavailable, Message: "sandbox disabled"}, Policy{}, ""), nil
 	}
 	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == "" {
@@ -123,7 +123,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 
 	backend := engine.backend
 	if backend.Name == "" {
-		backend = Backend{Name: BackendPolicyOnly, Message: "policy-only fallback: sandbox backend was not selected"}
+		backend = Backend{Name: BackendUnavailable, Message: "native sandbox backend was not selected"}
 	}
 	preference := SandboxPreferenceAuto
 	// Re-entrancy guard: a command spawned by a process we already wrapped (both
@@ -282,9 +282,9 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 		commandDir = resolved
 	}
 	if policy.EnforceWorkspace {
-		if violation := engine.scopeFor(engine.workspaceRoot).validate(commandDir); violation != nil {
-			return "", "", Violation{
-				Code:     violation.Code,
+		if block := engine.scopeFor(engine.workspaceRoot).validate(commandDir); block != nil {
+			return "", "", Block{
+				Code:     block.Code,
 				ToolName: "sandbox_command",
 				Action:   ActionDeny,
 				Risk: Risk{
@@ -292,8 +292,8 @@ func (engine *Engine) resolveCommandDir(dir string, policy Policy) (string, stri
 					Categories: []string{"path_escape"},
 					Reason:     "critical risk: path_escape",
 				},
-				Path:   violation.Path,
-				Reason: violation.Reason,
+				Path:   block.Path,
+				Reason: block.Reason,
 			}
 		}
 	}
@@ -475,7 +475,7 @@ var sandboxDenialTagSeq atomic.Uint64
 // nextSandboxDenialTag returns a process-unique denial tag. Without uniqueness,
 // two concurrent monitored commands share one marker and StartDenialMonitor —
 // which filters `log stream` only by tag — would ingest each other's denials,
-// leaking unrelated paths/hosts into the wrong <sandbox_violations> block. The pid
+// leaking unrelated paths/hosts into the wrong <sandbox_blocks> block. The pid
 // disambiguates across processes; the counter across plans within a process.
 func nextSandboxDenialTag() string {
 	return fmt.Sprintf("%s-%d-%d", sandboxDenialLogTag, os.Getpid(), sandboxDenialTagSeq.Add(1))

@@ -63,7 +63,7 @@ func TestBashStillPromptsWithoutActiveSandbox(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandboxedBashPolicy(),
-		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly},
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable},
 	})
 
 	result := registry.RunWithOptions(context.Background(), "bash", map[string]any{

@@ -471,18 +471,18 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 			Reason: payloadString(risk, "reason"),
 		}
 	}
-	if violation, ok := payloadMap(payload, "violation"); ok {
-		event.Violation = &sandbox.Violation{
-			Code:        sandbox.ViolationCode(payloadString(violation, "code")),
-			ToolName:    payloadString(violation, "toolName"),
-			Action:      sandbox.Action(payloadString(violation, "action")),
+	if block, ok := payloadMap(payload, "block"); ok {
+		event.Block = &sandbox.Block{
+			Code:        sandbox.BlockCode(payloadString(block, "code")),
+			ToolName:    payloadString(block, "toolName"),
+			Action:      sandbox.Action(payloadString(block, "action")),
 			Risk:        event.Risk,
-			Path:        payloadString(violation, "path"),
-			Reason:      payloadString(violation, "reason"),
-			Recoverable: payloadBool(violation, "recoverable"),
+			Path:        payloadString(block, "path"),
+			Reason:      payloadString(block, "reason"),
+			Recoverable: payloadBool(block, "recoverable"),
 		}
-		if nestedRisk, ok := payloadMap(violation, "risk"); ok {
-			event.Violation.Risk = sandbox.Risk{
+		if nestedRisk, ok := payloadMap(block, "risk"); ok {
+			event.Block.Risk = sandbox.Risk{
 				Level:  sandbox.RiskLevel(payloadString(nestedRisk, "level")),
 				Reason: payloadString(nestedRisk, "reason"),
 			}

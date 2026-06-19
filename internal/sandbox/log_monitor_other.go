@@ -11,5 +11,5 @@ type DenialMonitor struct{}
 // StartDenialMonitor returns a no-op monitor on non-macOS platforms.
 func StartDenialMonitor(_ context.Context, _ string) *DenialMonitor { return &DenialMonitor{} }
 
-// Stop returns no violations on non-macOS platforms.
+// Stop returns no blocks on non-macOS platforms.
 func (monitor *DenialMonitor) Stop() []string { return nil }

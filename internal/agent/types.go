@@ -80,7 +80,7 @@ const (
 	DenialFiltered         DenialCategory = "filtered"          // tool not enabled for this run
 	DenialPermissionDenied DenialCategory = "permission_denied" // approval declined
 	DenialApprovalCanceled DenialCategory = "approval_canceled" // approval canceled and run aborted
-	DenialSandboxViolation DenialCategory = "sandbox_violation" // blocked by the sandbox
+	DenialSandboxBlock     DenialCategory = "sandbox_block"     // blocked by the sandbox
 	DenialHookBlocked      DenialCategory = "hook_blocked"      // vetoed by a beforeTool hook
 )
 
@@ -96,7 +96,7 @@ type PermissionRequest struct {
 	Scope              string                     `json:"scope,omitempty"`
 	Risk               sandbox.Risk               `json:"risk"`
 	Args               map[string]any             `json:"args,omitempty"`
-	Violation          *sandbox.Violation         `json:"violation,omitempty"`
+	Block              *sandbox.Block             `json:"block,omitempty"`
 	GrantMatched       bool                       `json:"grantMatched,omitempty"`
 	Grant              *sandbox.Grant             `json:"grant,omitempty"`
 	CommandPrefix      []string                   `json:"commandPrefix,omitempty"`
@@ -122,7 +122,7 @@ type PermissionEvent struct {
 	Scope             string                   `json:"scope,omitempty"`
 	DecisionReason    string                   `json:"decisionReason,omitempty"`
 	Risk              sandbox.Risk             `json:"risk"`
-	Violation         *sandbox.Violation       `json:"violation,omitempty"`
+	Block             *sandbox.Block           `json:"block,omitempty"`
 	GrantMatched      bool                     `json:"grantMatched,omitempty"`
 	Grant             *sandbox.Grant           `json:"grant,omitempty"`
 	CommandPrefix     []string                 `json:"commandPrefix,omitempty"`

@@ -12,9 +12,9 @@ import (
 )
 
 // sandboxBackendCheck reports whether the selected platform has a native
-// sandbox backend ready. A missing backend is a WARN, not a FAIL: Zero still
-// evaluates policy before tool calls, but shell execution is degraded to
-// preflight checks instead of native process isolation.
+// sandbox backend ready. A missing backend is a WARN because setup may be
+// optional for non-shell workflows, but sandboxed shell execution remains
+// unavailable until a native backend is installed.
 func sandboxBackendCheck(goos string, lookup func(string) (string, error), workspaceRoot string, sandboxConfig config.SandboxConfig) Check {
 	if goos == "" {
 		goos = runtime.GOOS
@@ -47,7 +47,7 @@ func sandboxBackendWarning(goos string, backend sandbox.Backend) string {
 	if backend.Message != "" {
 		return fmt.Sprintf("Native sandbox backend unavailable on %s: %s.", goos, backend.Message)
 	}
-	return fmt.Sprintf("Native sandbox backend unavailable on %s; shell commands use degraded policy-only preflight checks.", goos)
+	return fmt.Sprintf("Native sandbox backend unavailable on %s; sandboxed shell execution is unavailable.", goos)
 }
 
 // sandboxRemedy returns the platform-specific, actionable step to obtain a

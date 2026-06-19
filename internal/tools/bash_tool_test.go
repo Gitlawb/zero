@@ -300,7 +300,7 @@ func TestRegistryReportsUnavailableNativeSandbox(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
-		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 	})
 
 	result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
@@ -326,7 +326,7 @@ func TestBashToolReportsUnavailableNativeSandbox(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        policy,
-		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 	})
 
 	result := NewBashTool(root).(interface {
@@ -382,7 +382,7 @@ func TestBashToolRunsWithHostSandboxBackendWhenAvailable(t *testing.T) {
 		t.Skip("Windows sandbox adapter is owned by the Windows integration slice")
 	}
 	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
-	if !backend.Available || backend.Name == sandbox.BackendPolicyOnly {
+	if !backend.Available || backend.Name == sandbox.BackendUnavailable {
 		t.Skipf("host sandbox backend unavailable: %s", backend.Message)
 	}
 	root := t.TempDir()
@@ -442,7 +442,7 @@ func TestBashToolBlocksInteractiveCommandThroughSandbox(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
-		Backend:       sandbox.Backend{Name: sandbox.BackendPolicyOnly, Message: "policy-only fallback"},
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
 	})
 
 	result := NewBashTool(root).(interface {
@@ -486,17 +486,17 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-func TestAppendSandboxViolations(t *testing.T) {
-	if got := appendSandboxViolations("err output", nil); got != "err output" {
-		t.Fatalf("no violations must leave stderr unchanged, got %q", got)
+func TestAppendSandboxBlocks(t *testing.T) {
+	if got := appendSandboxBlocks("err output", nil); got != "err output" {
+		t.Fatalf("no blocks must leave stderr unchanged, got %q", got)
 	}
-	got := appendSandboxViolations("err output", []string{"deny file-write-create /etc/x"})
-	for _, want := range []string{"err output", "<sandbox_violations>", "deny file-write-create /etc/x", "</sandbox_violations>"} {
+	got := appendSandboxBlocks("err output", []string{"deny file-write-create /etc/x"})
+	for _, want := range []string{"err output", "<sandbox_blocks>", "deny file-write-create /etc/x", "</sandbox_blocks>"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("annotated stderr missing %q:\n%s", want, got)
 		}
 	}
-	if block := appendSandboxViolations("", []string{"deny x"}); strings.HasPrefix(block, "\n") {
+	if block := appendSandboxBlocks("", []string{"deny x"}); strings.HasPrefix(block, "\n") {
 		t.Fatalf("empty stderr must not yield a leading newline: %q", block)
 	}
 }

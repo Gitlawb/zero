@@ -30,12 +30,12 @@ func TestDeniedPermissionResultCategories(t *testing.T) {
 	if plain.DenialReason != DenialPermissionDenied {
 		t.Fatalf("plain denial = %q, want %q", plain.DenialReason, DenialPermissionDenied)
 	}
-	// Sandbox-violation-driven denial.
+	// Sandbox-block-driven denial.
 	sandboxDenied := deniedPermissionResult(ToolCall{ID: "c2", Name: "bash"}, "outside workspace", PermissionEvent{
-		ToolName:  "bash",
-		Violation: &sandbox.Violation{Code: "outside_workspace"},
+		ToolName: "bash",
+		Block:    &sandbox.Block{Code: "outside_workspace"},
 	})
-	if sandboxDenied.DenialReason != DenialSandboxViolation {
-		t.Fatalf("sandbox denial = %q, want %q", sandboxDenied.DenialReason, DenialSandboxViolation)
+	if sandboxDenied.DenialReason != DenialSandboxBlock {
+		t.Fatalf("sandbox denial = %q, want %q", sandboxDenied.DenialReason, DenialSandboxBlock)
 	}
 }

@@ -252,10 +252,10 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
-				Name:     sandbox.BackendPolicyOnly,
+				Name:     sandbox.BackendUnavailable,
 				Platform: "windows",
 				Fallback: true,
-				Message:  "policy-only fallback: Windows sandbox command runner is not available",
+				Message:  "Windows sandbox command runner is not available",
 			}
 		},
 	}
@@ -293,14 +293,14 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 					t.Fatalf("decode policy JSON: %v\n%s", err, stdout.String())
 				}
-				if payload.Policy.Mode != sandbox.ModeEnforce || payload.Backend.Name != sandbox.BackendPolicyOnly || payload.Grants == "" {
+				if payload.Policy.Mode != sandbox.ModeEnforce || payload.Backend.Name != sandbox.BackendUnavailable || payload.Grants == "" {
 					t.Fatalf("unexpected policy JSON: %#v", payload)
 				}
 				if payload.Backend.Platform != "windows" || !payload.Backend.Fallback || payload.Backend.NativeIsolation || payload.Backend.CommandWrapping {
 					t.Fatalf("unexpected backend capability JSON: %#v", payload.Backend)
 				}
-				if payload.Plan.SupportLevel != string(sandbox.BackendSupportPolicyOnly) {
-					t.Fatalf("support level = %q, want policy-only", payload.Plan.SupportLevel)
+				if payload.Plan.SupportLevel != string(sandbox.BackendSupportUnavailable) {
+					t.Fatalf("support level = %q, want unavailable", payload.Plan.SupportLevel)
 				}
 				if payload.Plan.TargetBackend != sandbox.BackendWindowsRestrictedToken || payload.Plan.CommandWrapped || payload.Plan.EnforcementLevel != sandbox.EnforcementDegraded || payload.Plan.DowngradeReason == "" {
 					t.Fatalf("unexpected manager baseline fields: %#v", payload.Plan)
@@ -318,12 +318,12 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 				output := stdout.String()
 				for _, want := range []string{
 					"Zero sandbox policy",
-					"backend: policy-only",
+					"backend: unavailable",
 					"target_backend: windows-restricted-token",
-					"support_level: policy-only",
+					"support_level: unavailable",
 					"command_wrapped: false",
 					"enforcement_level: degraded",
-					"downgrade_reason: policy-only fallback: Windows sandbox command runner is not available",
+					"downgrade_reason: Windows sandbox command runner is not available",
 					"backend_fallback: true",
 					"backend_command_wrapping: false",
 					"backend_native_isolation: false",
@@ -426,8 +426,8 @@ func TestTUISandboxSetupCommandGatedToWindowsNativeBackend(t *testing.T) {
 	if got := tuiSandboxSetupCommand(sandbox.Backend{Name: sandbox.BackendLinuxBwrap, Platform: "linux", Available: true}, appDeps{}); got != nil {
 		t.Fatal("linux backend should not enable the TUI sandbox setup command")
 	}
-	if got := tuiSandboxSetupCommand(sandbox.Backend{Name: sandbox.BackendPolicyOnly, Platform: "windows", Available: false}, appDeps{}); got != nil {
-		t.Fatal("policy-only Windows backend should not enable the TUI sandbox setup command")
+	if got := tuiSandboxSetupCommand(sandbox.Backend{Name: sandbox.BackendUnavailable, Platform: "windows", Available: false}, appDeps{}); got != nil {
+		t.Fatal("unavailable Windows backend should not enable the TUI sandbox setup command")
 	}
 	got := tuiSandboxSetupCommand(sandbox.Backend{
 		Name:            sandbox.BackendWindowsRestrictedToken,
@@ -453,10 +453,10 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
-				Name:     sandbox.BackendPolicyOnly,
+				Name:     sandbox.BackendUnavailable,
 				Platform: "windows",
 				Fallback: true,
-				Message:  "policy-only fallback: Windows sandbox command runner is not available",
+				Message:  "Windows sandbox command runner is not available",
 			}
 		},
 	}
@@ -470,7 +470,7 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	got := stdout.String()
 	got = replacePathToken(got, workspace, "$WORKSPACE")
 	got = replacePathToken(got, store.FilePath(), "$GRANTS")
-	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox_policy_windows_policy_only.golden.json"))
+	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox_policy_windows_unavailable.golden.json"))
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
@@ -516,10 +516,10 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 		},
 		selectSandboxBackend: func(options sandbox.BackendOptions) sandbox.Backend {
 			return sandbox.Backend{
-				Name:     sandbox.BackendPolicyOnly,
+				Name:     sandbox.BackendUnavailable,
 				Platform: "darwin",
 				Fallback: true,
-				Message:  "policy-only fallback",
+				Message:  "native sandbox unavailable",
 			}
 		},
 	}
@@ -537,7 +537,7 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 			"network: deny",
 			"enforce_workspace: true",
 			"interactive_command_guard: enabled",
-			"support_level: policy-only",
+			"support_level: unavailable",
 		} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("effective text missing %q, got %q", want, output)
@@ -582,7 +582,7 @@ func TestRunSandboxPolicyEffectiveTextAndJSON(t *testing.T) {
 		if !payload.Guards.InteractiveCommand {
 			t.Fatalf("expected guards reported: %#v", payload.Guards)
 		}
-		if payload.Plan.SupportLevel != string(sandbox.BackendSupportPolicyOnly) || payload.GrantsPath == "" {
+		if payload.Plan.SupportLevel != string(sandbox.BackendSupportUnavailable) || payload.GrantsPath == "" {
 			t.Fatalf("unexpected effective plan/grants: %#v %q", payload.Plan, payload.GrantsPath)
 		}
 	})

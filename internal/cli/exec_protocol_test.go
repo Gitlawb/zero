@@ -385,9 +385,9 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 		t.Fatalf("unexpected permission metadata: %#v", permissionEvent)
 	}
 	if permissionEvent["permissionGranted"] == true {
-		t.Fatalf("workspace policy allow should not be recorded as user-granted permission: %#v", permissionEvent)
+		t.Fatalf("workspace allow should not be recorded as user-granted permission: %#v", permissionEvent)
 	}
-	if permissionEvent["reason"] != "workspace write permitted by sandbox policy" {
+	if permissionEvent["reason"] != "workspace write is allowed" {
 		t.Fatalf("unexpected workspace permission reason: %#v", permissionEvent)
 	}
 	risk, ok := permissionEvent["risk"].(map[string]any)

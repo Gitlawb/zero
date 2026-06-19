@@ -5,23 +5,23 @@
     "enforceWorkspace": true
   },
   "backend": {
-    "name": "policy-only",
+    "name": "unavailable",
     "available": false,
     "platform": "windows",
     "fallback": true,
     "commandWrapping": false,
     "nativeIsolation": false,
-    "message": "policy-only fallback: Windows sandbox command runner is not available"
+    "message": "Windows sandbox command runner is not available"
   },
   "plan": {
     "backend": {
-      "name": "policy-only",
+      "name": "unavailable",
       "available": false,
       "platform": "windows",
       "fallback": true,
       "commandWrapping": false,
       "nativeIsolation": false,
-      "message": "policy-only fallback: Windows sandbox command runner is not available"
+      "message": "Windows sandbox command runner is not available"
     },
     "targetBackend": "windows-restricted-token",
     "workspaceRoot": "$WORKSPACE",
@@ -55,14 +55,14 @@
     },
     "commandWrapped": false,
     "enforcementLevel": "degraded",
-    "downgradeReason": "policy-only fallback: Windows sandbox command runner is not available",
-    "supportLevel": "policy-only",
+    "downgradeReason": "Windows sandbox command runner is not available",
+    "supportLevel": "unavailable",
     "requiresPlatformSandbox": true,
     "capabilities": [
       {
-        "key": "policy_evaluation",
+        "key": "permission_review",
         "status": "preflight",
-        "detail": "tool requests are evaluated against sandbox policy before execution"
+        "detail": "tool requests are reviewed before execution"
       },
       {
         "key": "workspace_write_guard",
@@ -88,11 +88,11 @@
     "restrictions": [
       "filesystem writes must stay inside workspace",
       "network access denied unless a future adapter grants it explicitly",
-      "native process isolation unavailable on windows; policy engine still evaluates tool requests before execution",
+      "native process isolation unavailable on windows",
       "shell commands are not wrapped by a native platform sandbox"
     ],
     "warnings": [
-      "Windows sandbox command runner is not available; using policy-only preflight checks",
+      "Windows sandbox command runner is not available",
       "shell commands are not wrapped by a native platform sandbox"
     ]
   },

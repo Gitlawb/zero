@@ -356,7 +356,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// Repeated-failure guard: if a tool keeps failing the same way, hint
 			// once (with its schema) then halt — so no model loops on a bad call.
 			// Only RETRIABLE failures (bad arguments / execution errors) drive it:
-			// policy refusals (disabled tool, permission denial, sandbox violation)
+			// policy refusals (disabled tool, permission denial, sandbox block)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
@@ -902,7 +902,7 @@ func appendHookFeedback(output string, feedback string) (string, bool) {
 // isRetriableToolError reports whether a failed tool result is one the model can
 // plausibly fix by changing its next call (argument or execution failure), as
 // opposed to a policy refusal (disabled tool, permission denial, sandbox
-// violation) that no reformatting will satisfy. Only retriable failures should
+// block) that no reformatting will satisfy. Only retriable failures should
 // drive the repeated-failure schema hint / stop.
 func isRetriableToolError(result ToolResult) bool {
 	if result.Status != tools.StatusError {
@@ -921,7 +921,7 @@ func isRetriableToolError(result ToolResult) bool {
 	case strings.Contains(result.Output, "is not enabled for this run"),
 		strings.Contains(result.Output, "Permission denied for "),
 		strings.Contains(result.Output, "Permission required for "),
-		strings.Contains(result.Output, "Sandbox violation"),
+		strings.Contains(result.Output, "Sandbox block"),
 		strings.Contains(result.Output, "Sandbox approval required for "):
 		return false
 	}
@@ -1451,11 +1451,11 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 	if requestEvent.ToolName == "" {
 		event.ToolName = call.Name
 	}
-	// A denial driven by a sandbox violation is categorized distinctly from a
+	// A denial driven by a sandbox block is categorized distinctly from a
 	// plain approval-declined so a surface can tell policy from user choice.
 	denial := DenialPermissionDenied
-	if requestEvent.Violation != nil {
-		denial = DenialSandboxViolation
+	if requestEvent.Block != nil {
+		denial = DenialSandboxBlock
 	}
 	return ToolResult{
 		ToolCallID:   call.ID,
@@ -1535,7 +1535,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Args:              args,
 		Reason:            safety.Reason,
 	})
-	var violation *sandbox.Violation
+	var block *sandbox.Block
 	grantMatched := false
 	var grant *sandbox.Grant
 
@@ -1545,7 +1545,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 			reason = decision.Reason
 		}
 		risk = decision.Risk
-		violation = decision.Violation
+		block = decision.Block
 		grantMatched = decision.GrantMatched
 		grant = decision.Grant
 	} else {
@@ -1563,7 +1563,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		}
 	}
 
-	if safety.Permission == tools.PermissionAllow && action == PermissionActionAllow && !grantMatched && violation == nil {
+	if safety.Permission == tools.PermissionAllow && action == PermissionActionAllow && !grantMatched && block == nil {
 		return PermissionEvent{}, false
 	}
 
@@ -1580,7 +1580,7 @@ func buildPermissionEvent(call ToolCall, tool tools.Tool, args map[string]any, p
 		Reason:            reason,
 		Scope:             permissionScope(call.Name, args),
 		Risk:              risk,
-		Violation:         violation,
+		Block:             block,
 		GrantMatched:      grantMatched,
 		Grant:             grant,
 		CommandPrefix:     proposedCommandPrefix(call.Name, args),
@@ -1618,7 +1618,7 @@ func permissionRequestFromEvent(event PermissionEvent, args map[string]any, opti
 		Scope:              event.Scope,
 		Risk:               event.Risk,
 		Args:               cloneArgs(args),
-		Violation:          event.Violation,
+		Block:              event.Block,
 		GrantMatched:       event.GrantMatched,
 		Grant:              event.Grant,
 		CommandPrefix:      append([]string(nil), event.CommandPrefix...),
@@ -1671,17 +1671,17 @@ func grantNetworkForSandboxPrompt(event PermissionEvent, scope sandbox.Permissio
 }
 
 func filesystemSandboxPrompt(event PermissionEvent) bool {
-	return event.Violation != nil &&
-		event.Violation.Code == sandbox.ViolationOutsideWorkspace &&
-		event.Violation.Recoverable &&
-		strings.TrimSpace(event.Violation.Path) != ""
+	return event.Block != nil &&
+		event.Block.Code == sandbox.BlockOutsideWorkspace &&
+		event.Block.Recoverable &&
+		strings.TrimSpace(event.Block.Path) != ""
 }
 
 func grantFilesystemForSandboxPrompt(event PermissionEvent, scope sandbox.PermissionGrantScope, options Options) (func(), error) {
 	if !filesystemSandboxPrompt(event) || options.Sandbox == nil {
 		return nil, nil
 	}
-	path := event.Violation.Path
+	path := event.Block.Path
 	fs := sandbox.FileSystemPermissions{}
 	switch sandbox.SideEffect(event.SideEffect) {
 	case sandbox.SideEffectRead:

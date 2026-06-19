@@ -76,19 +76,19 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 	case "linux":
 		if helper, err := lookup(LinuxSandboxHelperName); err == nil && helper != "" {
 			if _, bwrapErr := lookup("bwrap"); bwrapErr != nil {
-				return policyOnlyBackend(goos, "policy-only fallback: bubblewrap is not installed")
+				return unavailableBackend(goos, "bubblewrap is not installed")
 			}
 			return nativeBackend(goos, BackendLinuxBwrap, helper, "Linux sandbox helper available")
 		}
 		if info := detectWSL(); info.IsWSL {
 			return wslBackend(goos, info)
 		}
-		return policyOnlyBackend(goos, "policy-only fallback: Linux sandbox helper is not available")
+		return unavailableBackend(goos, "Linux sandbox helper is not available")
 	case "darwin":
 		if path, err := lookup("sandbox-exec"); err == nil && path != "" {
 			return nativeBackend(goos, BackendMacOSSeatbelt, path, "macOS Seatbelt backend available")
 		}
-		return policyOnlyBackend(goos, "policy-only fallback: sandbox-exec is not available")
+		return unavailableBackend(goos, "sandbox-exec is not available")
 	case "windows":
 		runner := findWindowsSandboxCommandRunner(lookup)
 		setup := findWindowsSandboxSetupHelper(lookup)
@@ -96,11 +96,11 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 			return nativeBackend(goos, BackendWindowsRestrictedToken, runner, "Windows sandbox command runner and setup helper available")
 		}
 		if runner != "" {
-			return policyOnlyBackend(goos, "policy-only fallback: Windows sandbox setup helper is not available")
+			return unavailableBackend(goos, "Windows sandbox setup helper is not available")
 		}
-		return policyOnlyBackend(goos, "policy-only fallback: Windows sandbox command runner is not available")
+		return unavailableBackend(goos, "Windows sandbox command runner is not available")
 	default:
-		return policyOnlyBackend(goos, "policy-only fallback: no platform sandbox adapter is available for "+goos)
+		return unavailableBackend(goos, "no platform sandbox adapter is available for "+goos)
 	}
 }
 
@@ -171,7 +171,7 @@ func (manager SandboxManager) targetBackend(preference SandboxPreference, policy
 		return BackendNone
 	}
 	if manager.backend.Name == BackendWSL {
-		return BackendPolicyOnly
+		return BackendLinuxBwrap
 	}
 	return manager.backend.TargetBackend()
 }

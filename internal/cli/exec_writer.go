@@ -197,8 +197,8 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 			"decision_reason":    event.DecisionReason,
 			"risk":               event.Risk,
 		}
-		if event.Violation != nil {
-			payload["violation"] = event.Violation
+		if event.Block != nil {
+			payload["block"] = event.Block
 		}
 		if event.GrantMatched {
 			payload["grant_matched"] = true
@@ -227,7 +227,7 @@ func (writer *execEventWriter) permission(event agent.PermissionEvent) {
 			Reason:            event.Reason,
 			DecisionReason:    event.DecisionReason,
 			Risk:              &risk,
-			Violation:         event.Violation,
+			Block:             event.Block,
 			GrantMatched:      event.GrantMatched,
 			Grant:             event.Grant,
 		})

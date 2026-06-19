@@ -46,8 +46,8 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				return "", errors.New("missing")
 			},
 		})
-		if backend.Name != BackendPolicyOnly || backend.Available {
-			t.Fatalf("linux backend = %#v, want policy-only fallback without Linux helper", backend)
+		if backend.Name != BackendUnavailable || backend.Available {
+			t.Fatalf("linux backend = %#v, want native sandbox unavailable without Linux helper", backend)
 		}
 		if !strings.Contains(backend.Message, "Linux sandbox helper is not available") {
 			t.Fatalf("linux fallback message = %q, want missing helper", backend.Message)
@@ -113,8 +113,8 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				return "", errors.New("missing")
 			},
 		})
-		if backend.Name != BackendPolicyOnly || backend.Available || backend.Platform != "windows" {
-			t.Fatalf("windows backend = %#v, want policy-only windows fallback", backend)
+		if backend.Name != BackendUnavailable || backend.Available || backend.Platform != "windows" {
+			t.Fatalf("windows backend = %#v, want unavailable windows backend", backend)
 		}
 		if !strings.Contains(backend.Message, "Windows sandbox setup helper is not available") {
 			t.Fatalf("expected Windows setup helper fallback message, got %q", backend.Message)
@@ -126,8 +126,8 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 			GOOS:             "windows",
 			LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
 		})
-		if backend.Name != BackendPolicyOnly || backend.Available || backend.Platform != "windows" {
-			t.Fatalf("windows backend = %#v, want policy-only windows fallback", backend)
+		if backend.Name != BackendUnavailable || backend.Available || backend.Platform != "windows" {
+			t.Fatalf("windows backend = %#v, want unavailable windows backend", backend)
 		}
 		if !backend.Fallback || backend.CommandWrapping || backend.NativeIsolation {
 			t.Fatalf("windows backend capabilities = %#v, want no native wrapping", backend)
@@ -136,8 +136,8 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 			t.Fatalf("expected Windows fallback message, got %q", backend.Message)
 		}
 		plan := backend.BuildPlan(t.TempDir(), DefaultPolicy())
-		if plan.SupportLevel != BackendSupportPolicyOnly {
-			t.Fatalf("windows support level = %q, want policy-only", plan.SupportLevel)
+		if plan.SupportLevel != BackendSupportUnavailable {
+			t.Fatalf("windows support level = %q, want unavailable", plan.SupportLevel)
 		}
 		if capabilityStatus(plan.Capabilities, "native_process_isolation") != CapabilityUnavailable {
 			t.Fatalf("windows native isolation capability = %#v, want unavailable", plan.Capabilities)
@@ -147,18 +147,18 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported platform falls back to policy only", func(t *testing.T) {
+	t.Run("unsupported platform falls back to unavailable", func(t *testing.T) {
 		backend := SelectBackend(BackendOptions{
 			GOOS:             "plan9",
 			LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
 		})
-		if backend.Name != BackendPolicyOnly || backend.Available {
-			t.Fatalf("fallback backend = %#v, want policy-only unavailable adapter", backend)
+		if backend.Name != BackendUnavailable || backend.Available {
+			t.Fatalf("fallback backend = %#v, want unavailable adapter", backend)
 		}
 		if backend.Platform != "plan9" || !backend.Fallback || backend.CommandWrapping || backend.NativeIsolation {
-			t.Fatalf("fallback backend capabilities = %#v, want explicit policy-only fallback", backend)
+			t.Fatalf("fallback backend capabilities = %#v, want explicit native sandbox unavailable", backend)
 		}
-		if !strings.Contains(backend.Message, "policy-only") {
+		if !strings.Contains(backend.Message, "no platform sandbox adapter") {
 			t.Fatalf("expected fallback message, got %q", backend.Message)
 		}
 	})
@@ -222,8 +222,8 @@ func TestBackendBuildPlanDocumentsBestEffortIsolation(t *testing.T) {
 	if plan.Policy.Mode != policy.Mode {
 		t.Fatalf("plan policy = %#v, want %#v", plan.Policy, policy)
 	}
-	if plan.Backend.Name == BackendPolicyOnly && !restrictionContains(plan.Restrictions, "native process isolation unavailable") {
-		t.Fatalf("policy-only plan did not document native isolation fallback: %#v", plan.Restrictions)
+	if plan.Backend.Name == BackendUnavailable && !restrictionContains(plan.Restrictions, "native process isolation unavailable") {
+		t.Fatalf("unavailable plan did not document native isolation fallback: %#v", plan.Restrictions)
 	}
 }
 
@@ -234,7 +234,7 @@ func TestBackendCapabilitiesReflectDisabledPolicy(t *testing.T) {
 	})
 	plan := backend.BuildPlan(t.TempDir(), Policy{Mode: ModeDisabled})
 
-	for _, key := range []string{"policy_evaluation", "workspace_write_guard", "network_guard"} {
+	for _, key := range []string{"permission_review", "workspace_write_guard", "network_guard"} {
 		if got := capabilityStatus(plan.Capabilities, key); got != CapabilityDisabled {
 			t.Fatalf("capability %s = %q, want disabled in %#v", key, got, plan.Capabilities)
 		}

@@ -196,7 +196,7 @@ func (engine *Engine) scopeFor(requestRoot string) *Scope {
 // shellSandboxActive reports whether a native wrapping sandbox would actually
 // wrap a shell command under the given policy. It is true only when the policy
 // is enforcing and the engine's backend can wrap commands with native isolation
-// (bubblewrap / sandbox-exec available). A policy-only fallback, a disabled
+// (bubblewrap / sandbox-exec available). An unavailable backend, a disabled
 // policy, or a nil engine all report false, so ordinary shell auto-allow never
 // runs an unsandboxed command.
 func (engine *Engine) shellSandboxActive(policy Policy) bool {
@@ -210,32 +210,31 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 	return backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation
 }
 
-// Precheck reports the sandbox violations that would block a tool request BEFORE
+// Precheck reports the sandbox blocks that would block a tool request BEFORE
 // it executes, so a caller (e.g. a batch confirmation or a "would this run?"
 // check) can fail fast and surface the reason instead of discovering it mid-run.
 // It reuses Evaluate, so policy is never duplicated: a request the engine would
-// allow or merely prompt for yields no violations; a denied request yields its
-// violation. A nil engine (sandbox disabled) yields no violations.
-func (engine *Engine) Precheck(ctx context.Context, request Request) []Violation {
+// allow or merely prompt for yields no blocks; a denied request yields its
+// block. A nil engine (sandbox disabled) yields no blocks.
+func (engine *Engine) Precheck(ctx context.Context, request Request) []Block {
 	if engine == nil {
 		return nil
 	}
-	return violationsFromDecision(engine.Evaluate(ctx, request))
+	return blocksFromDecision(engine.Evaluate(ctx, request))
 }
 
-// violationsFromDecision extracts the blocking violations from a decision. Only a
-// deny carries one; Evaluate sets Decision.Violation for policy denials, and the
-// fallback synthesizes one for the rare deny without a structured violation so a
-// caller always gets a reason.
-func violationsFromDecision(decision Decision) []Violation {
+// blocksFromDecision extracts the blocking reasons from a decision. Only a deny
+// carries one; the fallback synthesizes one for the rare deny without a
+// structured block so a caller always gets a reason.
+func blocksFromDecision(decision Decision) []Block {
 	if decision.Action != ActionDeny {
 		return nil
 	}
-	if decision.Violation != nil {
-		return []Violation{*decision.Violation}
+	if decision.Block != nil {
+		return []Block{*decision.Block}
 	}
-	return []Violation{{
-		Code:   ViolationPolicyDenied,
+	return []Block{{
+		Code:   BlockDenied,
 		Action: ActionDeny,
 		Risk:   decision.Risk,
 		Reason: decision.ErrorString(),
@@ -248,7 +247,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	if err := ctx.Err(); err != nil {
 		risk := Classify(request)
-		return deny(request, risk, ViolationContextCanceled, "", "sandbox evaluation cancelled: "+err.Error(), false)
+		return deny(request, risk, BlockContextCanceled, "", "sandbox evaluation cancelled: "+err.Error(), false)
 	}
 	if engine == nil {
 		return Decision{Action: ActionAllow, Risk: Classify(request), Reason: "sandbox disabled"}
@@ -265,10 +264,10 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	risk := classifyWithScope(request, scope)
 
 	if policy.Mode == ModeDisabled {
-		return Decision{Action: ActionAllow, Risk: risk, Reason: "sandbox policy disabled"}
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "sandbox disabled"}
 	}
 	if request.Permission == PermissionDeny {
-		return deny(request, risk, ViolationDeniedPermission, "", permissionReason(request), false)
+		return deny(request, risk, BlockDeniedPermission, "", permissionReason(request), false)
 	}
 	reqRaw, reqKind := DeriveScope(request.ToolName, request.Args)
 	reqScope := resolveScopeForKind(reqRaw, reqKind, request.WorkspaceRoot)
@@ -278,7 +277,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		if err == nil && match.Matched {
 			grant := match.Grant
 			if grant.Decision == GrantDeny {
-				decision := deny(request, risk, ViolationPersistentDeny, "", "persistent sandbox deny grant matched", true)
+				decision := deny(request, risk, BlockPersistentDeny, "", "persistent sandbox deny grant matched", true)
 				decision.GrantMatched = true
 				decision.Grant = &grant
 				return decision
@@ -299,19 +298,19 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// workspace boundary itself needs a root, so it is gated on having one. Mode is
 	// already known to be enforcing here (ModeDisabled returned above).
 	enforceWorkspace := policy.EnforceWorkspace && request.WorkspaceRoot != ""
-	if violation := applyPatchPathViolation(request); violation != nil {
-		return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
+	if block := applyPatchPathBlock(request); block != nil {
+		return deny(request, risk, block.Code, block.Path, block.Reason, false)
 	}
-	var promptableViolation *pathViolation
+	var promptableBlock *pathBlock
 	for _, requested := range requestPaths(request) {
-		if violation := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); violation != nil {
-			if promptablePathViolation(request, violation) {
-				if promptableViolation == nil {
-					promptableViolation = violation
+		if block := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); block != nil {
+			if promptablePathBlock(request, block) {
+				if promptableBlock == nil {
+					promptableBlock = block
 				}
 				continue
 			}
-			return deny(request, risk, violation.Code, violation.Path, violation.Reason, false)
+			return deny(request, risk, block.Code, block.Path, block.Reason, false)
 		}
 	}
 	if persistentAllow != nil {
@@ -332,34 +331,34 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			Grant:        sessionAllow,
 		}
 	}
-	if promptableViolation != nil {
-		return promptPathViolation(request, risk, promptableViolation)
+	if promptableBlock != nil {
+		return promptPathBlock(request, risk, promptableBlock)
 	}
 	netMode := engine.effectiveNetworkMode(policy)
 	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
 		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonNetworkBlocked}
 		}
-		return deny(request, risk, ViolationNetwork, "", ReasonNetworkBlocked, false)
+		return deny(request, risk, BlockNetwork, "", ReasonNetworkBlocked, false)
 	}
 	if HasRiskCategory(risk, "destructive") {
 		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: "destructive shell command requires approval"}
 		}
 		if request.SideEffect == SideEffectShell && !request.PermissionGranted {
-			return deny(request, risk, ViolationDestructiveCommand, "", "destructive shell command requires approval", false)
+			return deny(request, risk, BlockDestructiveCommand, "", "destructive shell command requires approval", false)
 		}
 	}
 	if request.Permission == PermissionAllow {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	if workspaceWriteAutoAllowed(policy, request, scope) {
-		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write permitted by sandbox policy", AutoAllowed: true}
+		return Decision{Action: ActionAllow, Risk: risk, Reason: "workspace write is allowed", AutoAllowed: true}
 	}
 	// Auto-allow an ordinary shell command when the active native sandbox is the
-	// safety boundary. Network, destructive, and path policy checks run before
-	// this branch, so they still prompt or deny as configured. If the backend is
-	// policy-only/disabled, shell commands keep the normal approval prompt.
+	// safety boundary. Network, destructive, and path checks run before this
+	// branch, so they still prompt or deny as configured. If the backend is
+	// unavailable or disabled, shell commands keep the normal approval prompt.
 	if request.SideEffect == SideEffectShell && engine.shellSandboxActive(policy) {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "auto-allowed: sandbox is active for this shell command", AutoAllowed: true}
 	}
@@ -436,8 +435,8 @@ func workspaceWriteAutoAllowed(policy Policy, request Request, scope *Scope) boo
 	}
 }
 
-func promptablePathViolation(request Request, violation *pathViolation) bool {
-	if violation == nil || violation.Code != ViolationOutsideWorkspace {
+func promptablePathBlock(request Request, block *pathBlock) bool {
+	if block == nil || block.Code != BlockOutsideWorkspace {
 		return false
 	}
 	if request.PermissionMode == PermissionUnsafe {
@@ -451,31 +450,31 @@ func promptablePathViolation(request Request, violation *pathViolation) bool {
 	default:
 		return false
 	}
-	path := strings.TrimSpace(violation.Path)
+	path := strings.TrimSpace(block.Path)
 	if path == "" {
 		return false
 	}
 	if !filepath.IsAbs(path) && strings.TrimSpace(request.WorkspaceRoot) == "" {
 		return false
 	}
-	return !strings.Contains(violation.Reason, "cannot be validated without a workspace root")
+	return !strings.Contains(block.Reason, "cannot be validated without a workspace root")
 }
 
-func promptPathViolation(request Request, risk Risk, violation *pathViolation) Decision {
-	promptViolation := &Violation{
-		Code:        violation.Code,
+func promptPathBlock(request Request, risk Risk, block *pathBlock) Decision {
+	promptBlock := &Block{
+		Code:        block.Code,
 		ToolName:    request.ToolName,
 		Action:      ActionPrompt,
 		Risk:        risk,
-		Path:        violation.Path,
-		Reason:      violation.Reason,
+		Path:        block.Path,
+		Reason:      block.Reason,
 		Recoverable: true,
 	}
 	return Decision{
-		Action:    ActionPrompt,
-		Reason:    violation.Reason,
-		Risk:      risk,
-		Violation: promptViolation,
+		Action: ActionPrompt,
+		Reason: block.Reason,
+		Risk:   risk,
+		Block:  promptBlock,
 	}
 }
 
@@ -539,8 +538,8 @@ func relativePathTouchesProtectedMetadata(path string) bool {
 	return false
 }
 
-func deny(request Request, risk Risk, code ViolationCode, path string, reason string, recoverable bool) Decision {
-	violation := &Violation{
+func deny(request Request, risk Risk, code BlockCode, path string, reason string, recoverable bool) Decision {
+	block := &Block{
 		Code:        code,
 		ToolName:    request.ToolName,
 		Action:      ActionDeny,
@@ -550,10 +549,10 @@ func deny(request Request, risk Risk, code ViolationCode, path string, reason st
 		Recoverable: recoverable,
 	}
 	return Decision{
-		Action:    ActionDeny,
-		Reason:    reason,
-		Risk:      risk,
-		Violation: violation,
+		Action: ActionDeny,
+		Reason: reason,
+		Risk:   risk,
+		Block:  block,
 	}
 }
 

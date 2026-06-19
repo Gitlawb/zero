@@ -22,7 +22,7 @@ func sandboxCheckDeps(t *testing.T) (appDeps, string) {
 			return config.ResolvedConfig{}, nil
 		},
 		selectSandboxBackend: func(sandbox.BackendOptions) sandbox.Backend {
-			return sandbox.Backend{Name: sandbox.BackendPolicyOnly, Platform: "windows", Fallback: true}
+			return sandbox.Backend{Name: sandbox.BackendUnavailable, Platform: "windows", Fallback: true}
 		},
 	}, root
 }
@@ -53,9 +53,9 @@ func TestRunSandboxCheckJSONDeniesOutOfWorkspaceWrite(t *testing.T) {
 			Risk   struct {
 				Level string `json:"level"`
 			} `json:"risk"`
-			Violation *struct {
+			Block *struct {
 				Code string `json:"code"`
-			} `json:"violation"`
+			} `json:"block"`
 		} `json:"decision"`
 		Grant struct {
 			ToolName string `json:"toolName"`
@@ -71,14 +71,14 @@ func TestRunSandboxCheckJSONDeniesOutOfWorkspaceWrite(t *testing.T) {
 	if payload.Plan.Policy.EffectiveMode != string(sandbox.ModeEnforce) {
 		t.Fatalf("effectiveMode = %q, want enforce", payload.Plan.Policy.EffectiveMode)
 	}
-	if payload.Plan.Backend.Name != string(sandbox.BackendPolicyOnly) {
+	if payload.Plan.Backend.Name != string(sandbox.BackendUnavailable) {
 		t.Fatalf("backend = %q", payload.Plan.Backend.Name)
 	}
 	if payload.Decision.Action != string(sandbox.ActionPrompt) {
 		t.Fatalf("expected prompt for out-of-workspace write, got %q\n%s", payload.Decision.Action, stdout.String())
 	}
-	if payload.Decision.Violation == nil {
-		t.Fatalf("expected a violation for the out-of-workspace write")
+	if payload.Decision.Block == nil {
+		t.Fatalf("expected a block for the out-of-workspace write")
 	}
 	if payload.Grant.ToolName != "write_file" || payload.Grant.Matched {
 		t.Fatalf("expected an unmatched grant for write_file, got %#v", payload.Grant)
@@ -98,7 +98,7 @@ func TestRunSandboxCheckTextRendersDecisionAndPlan(t *testing.T) {
 		"decision: ",
 		"risk: ",
 		"policy: mode=enforce",
-		"backend: policy-only",
+		"backend: unavailable",
 		"grant: no grant matched this action",
 	} {
 		if !strings.Contains(out, want) {
@@ -144,7 +144,7 @@ func TestRunSandboxCheckMatchedGrantRedactsReason(t *testing.T) {
 			return config.ResolvedConfig{}, nil
 		},
 		selectSandboxBackend: func(sandbox.BackendOptions) sandbox.Backend {
-			return sandbox.Backend{Name: sandbox.BackendPolicyOnly}
+			return sandbox.Backend{Name: sandbox.BackendUnavailable}
 		},
 	}
 	// Seed a tool-wide allow grant whose reason embeds a secret; the matched-grant

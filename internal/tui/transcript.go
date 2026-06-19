@@ -258,7 +258,7 @@ func permissionEventFromRequest(request agent.PermissionRequest) agent.Permissio
 		Reason:         request.Reason,
 		Scope:          request.Scope,
 		Risk:           request.Risk,
-		Violation:      request.Violation,
+		Block:          request.Block,
 		GrantMatched:   request.GrantMatched,
 		Grant:          request.Grant,
 	}
@@ -286,8 +286,8 @@ func permissionDetailText(event agent.PermissionEvent) string {
 	if event.Reason != "" {
 		parts = append(parts, permissionDisplayReason(event.Reason))
 	}
-	if event.Violation != nil {
-		parts = append(parts, permissionViolationDetail(event))
+	if event.Block != nil {
+		parts = append(parts, permissionBlockDetail(event))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -315,21 +315,21 @@ func permissionDecisionDetail(decision agent.PermissionDecisionAction) string {
 	}
 }
 
-func permissionViolationDetail(event agent.PermissionEvent) string {
-	if event.Violation == nil {
+func permissionBlockDetail(event agent.PermissionEvent) string {
+	if event.Block == nil {
 		return ""
 	}
-	parts := []string{"blocked: " + permissionViolationLabel(string(event.Violation.Code))}
-	if path := strings.TrimSpace(event.Violation.Path); path != "" {
+	parts := []string{"blocked: " + permissionBlockLabel(string(event.Block.Code))}
+	if path := strings.TrimSpace(event.Block.Path); path != "" {
 		parts = append(parts, "path: "+path)
 	}
-	if reason := permissionDisplayReason(event.Violation.Reason); reason != "" {
+	if reason := permissionDisplayReason(event.Block.Reason); reason != "" {
 		parts = append(parts, reason)
 	}
 	return strings.Join(parts, "  ")
 }
 
-func permissionViolationLabel(code string) string {
+func permissionBlockLabel(code string) string {
 	switch code {
 	case "outside_workspace":
 		return "outside workspace"
@@ -345,7 +345,7 @@ func permissionViolationLabel(code string) string {
 		return "permission denied"
 	case "context_canceled":
 		return "request cancelled"
-	case "policy_denied":
+	case "denied":
 		return "not allowed"
 	default:
 		return strings.ReplaceAll(code, "_", " ")
@@ -355,9 +355,9 @@ func permissionViolationLabel(code string) string {
 func permissionDisplayReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	switch reason {
-	case "network access is blocked by sandbox policy":
+	case "network access requires approval":
 		return "Network access requires approval."
-	case "workspace write permitted by sandbox policy":
+	case "workspace write is allowed":
 		return "Workspace write is allowed."
 	default:
 		return reason

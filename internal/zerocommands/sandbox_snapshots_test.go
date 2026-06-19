@@ -64,25 +64,25 @@ func TestSandboxRiskSnapshotFromRiskSortsCategoriesAndTrimsReason(t *testing.T) 
 	}
 }
 
-func TestSandboxViolationSnapshotFromViolationHandlesNilAndTrims(t *testing.T) {
-	if got := SandboxViolationSnapshotFromViolation(nil); got != nil {
-		t.Fatalf("expected nil snapshot for nil violation, got %#v", got)
+func TestSandboxBlockSnapshotFromBlockHandlesNilAndTrims(t *testing.T) {
+	if got := SandboxBlockSnapshotFromBlock(nil); got != nil {
+		t.Fatalf("expected nil snapshot for nil block, got %#v", got)
 	}
 
-	violation := &sandbox.Violation{
-		Code:        sandbox.ViolationOutsideWorkspace,
+	block := &sandbox.Block{
+		Code:        sandbox.BlockOutsideWorkspace,
 		ToolName:    "  write_file  ",
 		Action:      sandbox.ActionDeny,
 		Path:        "  /etc/hosts  ",
 		Reason:      "  path escapes workspace  ",
 		Recoverable: true,
 	}
-	snapshot := SandboxViolationSnapshotFromViolation(violation)
+	snapshot := SandboxBlockSnapshotFromBlock(block)
 	if snapshot == nil {
-		t.Fatal("expected non-nil snapshot for non-nil violation")
+		t.Fatal("expected non-nil snapshot for non-nil block")
 	}
-	if snapshot.Code != string(sandbox.ViolationOutsideWorkspace) {
-		t.Fatalf("Code = %q, want %q", snapshot.Code, sandbox.ViolationOutsideWorkspace)
+	if snapshot.Code != string(sandbox.BlockOutsideWorkspace) {
+		t.Fatalf("Code = %q, want %q", snapshot.Code, sandbox.BlockOutsideWorkspace)
 	}
 	if snapshot.ToolName != "write_file" {
 		t.Fatalf("ToolName not trimmed: %q", snapshot.ToolName)
@@ -130,7 +130,7 @@ func TestSandboxPlanSnapshotFromPlanSortsRestrictionsAndTrimsRoot(t *testing.T) 
 		Policy:  sandbox.Policy{Mode: sandbox.ModeEnforce, Network: sandbox.NetworkDeny},
 		Restrictions: []string{
 			"  native process isolation unavailable on darwin  ",
-			"network access is blocked by sandbox policy",
+			"network access requires approval",
 		},
 		WorkspaceRoot: "  /repo  ",
 	}
@@ -150,7 +150,7 @@ func TestSandboxPlanSnapshotFromPlanSortsRestrictionsAndTrimsRoot(t *testing.T) 
 	if snapshot.Restrictions[0] != "native process isolation unavailable on darwin" {
 		t.Fatalf("Restrictions[0] not trimmed: %q", snapshot.Restrictions[0])
 	}
-	if snapshot.Restrictions[1] != "network access is blocked by sandbox policy" {
+	if snapshot.Restrictions[1] != "network access requires approval" {
 		t.Fatalf("Restrictions[1] = %q, want %q", snapshot.Restrictions[1], snapshot.Restrictions[1])
 	}
 }
@@ -175,7 +175,7 @@ func TestSandboxPlanSnapshotWriteRootsJSON(t *testing.T) {
 	}
 }
 
-func TestSandboxDecisionSnapshotFromDecisionAllowBranchHasNoViolation(t *testing.T) {
+func TestSandboxDecisionSnapshotFromDecisionAllowBranchHasNoBlock(t *testing.T) {
 	decision := sandbox.Decision{
 		Action: sandbox.ActionAllow,
 		Reason: "tool safety allows execution",
@@ -191,15 +191,15 @@ func TestSandboxDecisionSnapshotFromDecisionAllowBranchHasNoViolation(t *testing
 	if snapshot.Grant != nil {
 		t.Fatalf("Grant should be nil for grantless decision, got %#v", snapshot.Grant)
 	}
-	if snapshot.Violation != nil {
-		t.Fatalf("Violation should be nil for allow decision, got %#v", snapshot.Violation)
+	if snapshot.Block != nil {
+		t.Fatalf("Block should be nil for allow decision, got %#v", snapshot.Block)
 	}
 	if snapshot.Risk.Level != string(sandbox.RiskLow) {
 		t.Fatalf("Risk.Level = %q, want %q", snapshot.Risk.Level, sandbox.RiskLow)
 	}
 }
 
-func TestSandboxDecisionSnapshotFromDecisionPersistentDenyCarriesGrantAndViolation(t *testing.T) {
+func TestSandboxDecisionSnapshotFromDecisionPersistentDenyCarriesGrantAndBlock(t *testing.T) {
 	decision := sandbox.Decision{
 		Action:       sandbox.ActionDeny,
 		Reason:       "persistent sandbox deny grant matched",
@@ -211,8 +211,8 @@ func TestSandboxDecisionSnapshotFromDecisionPersistentDenyCarriesGrantAndViolati
 			ApprovedAt: "2026-06-04T10:00:00Z",
 			Reason:     "user marked bash as destructive",
 		},
-		Violation: &sandbox.Violation{
-			Code:        sandbox.ViolationPersistentDeny,
+		Block: &sandbox.Block{
+			Code:        sandbox.BlockPersistentDeny,
 			ToolName:    "bash",
 			Action:      sandbox.ActionDeny,
 			Reason:      "persistent sandbox deny grant matched",
@@ -232,11 +232,11 @@ func TestSandboxDecisionSnapshotFromDecisionPersistentDenyCarriesGrantAndViolati
 	if snapshot.Grant.Decision != string(sandbox.GrantDeny) {
 		t.Fatalf("Grant.Decision = %q, want %q", snapshot.Grant.Decision, sandbox.GrantDeny)
 	}
-	if snapshot.Violation == nil {
-		t.Fatal("Violation should be present on deny decision")
+	if snapshot.Block == nil {
+		t.Fatal("Block should be present on deny decision")
 	}
-	if snapshot.Violation.Code != string(sandbox.ViolationPersistentDeny) {
-		t.Fatalf("Violation.Code = %q, want %q", snapshot.Violation.Code, sandbox.ViolationPersistentDeny)
+	if snapshot.Block.Code != string(sandbox.BlockPersistentDeny) {
+		t.Fatalf("Block.Code = %q, want %q", snapshot.Block.Code, sandbox.BlockPersistentDeny)
 	}
 }
 
@@ -263,8 +263,8 @@ func TestSandboxDecisionSnapshotJSONShapeIsStable(t *testing.T) {
 			t.Fatalf("expected key %q in decision JSON, got %q", key, string(encoded))
 		}
 	}
-	if _, ok := decoded["violation"]; ok {
-		t.Fatalf("violation should be omitted when nil, got %q", string(encoded))
+	if _, ok := decoded["block"]; ok {
+		t.Fatalf("block should be omitted when nil, got %q", string(encoded))
 	}
 	if _, ok := decoded["grant"]; ok {
 		t.Fatalf("grant should be omitted when nil, got %q", string(encoded))

@@ -208,15 +208,15 @@ func allowWriteScope(policy Policy) *Scope {
 // validateWritePath enforces the write precedence: DenyWrite wins, then (when
 // workspace enforcement is on) a workspace/Scope-writable path is allowed, then
 // an absolute path under an AllowWrite root is allowed, otherwise the base
-// workspace/Scope violation stands. The DenyWrite list applies regardless of
+// workspace/Scope block stands. The DenyWrite list applies regardless of
 // enforceWorkspace; the workspace boundary itself applies only when
 // enforceWorkspace. It never bypasses the symlink/out-of-workspace guards.
-func validateWritePath(scope *Scope, policy Policy, enforceWorkspace bool, workspaceRoot, path string) *pathViolation {
+func validateWritePath(scope *Scope, policy Policy, enforceWorkspace bool, workspaceRoot, path string) *pathBlock {
 	// DenyWrite wins regardless of workspace enforcement.
 	for _, deny := range resolvePolicyPaths(policy.DenyWrite) {
 		if pathUnderPolicyRoot(path, deny, workspaceRoot) {
-			return &pathViolation{
-				Code:   ViolationPolicyDenied,
+			return &pathBlock{
+				Code:   BlockDenied,
 				Path:   path,
 				Reason: path + " is excluded by the sandbox DenyWrite policy",
 			}
@@ -246,15 +246,15 @@ func validateWritePath(scope *Scope, policy Policy, enforceWorkspace bool, works
 // enforceWorkspace, so they match the grep/glob path that also honors DenyRead
 // directly. The workspace boundary (scope.validate) applies only when
 // enforceWorkspace. Behavior is unchanged when the lists are empty.
-func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, enforceWorkspace bool, workspaceRoot, path string) *pathViolation {
+func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, enforceWorkspace bool, workspaceRoot, path string) *pathBlock {
 	// A relative path cannot be anchored without a workspace root, so it cannot be
 	// checked against the (absolute) path lists or workspace boundary. Fail closed
 	// when there is anything to enforce; otherwise it is a no-op (unchanged from the
 	// pre-path-list behavior, where an empty workspace root skipped validation).
 	if workspaceRoot == "" && !filepath.IsAbs(path) {
 		if enforceWorkspace || policyHasPathLists(policy) {
-			return &pathViolation{
-				Code:   ViolationOutsideWorkspace,
+			return &pathBlock{
+				Code:   BlockOutsideWorkspace,
 				Path:   path,
 				Reason: path + " cannot be validated without a workspace root",
 			}
@@ -264,8 +264,8 @@ func validatePathWithPolicy(scope *Scope, policy Policy, sideEffect SideEffect, 
 	switch sideEffect {
 	case SideEffectRead:
 		if readDenied(policy, workspaceRoot, path) {
-			return &pathViolation{
-				Code:   ViolationPolicyDenied,
+			return &pathBlock{
+				Code:   BlockDenied,
 				Path:   path,
 				Reason: path + " is excluded by the sandbox DenyRead policy",
 			}

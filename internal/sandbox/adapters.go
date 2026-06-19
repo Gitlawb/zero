@@ -56,13 +56,13 @@ func TargetBackendForPlatform(goos string, wsl bool) BackendName {
 		return BackendMacOSSeatbelt
 	case "linux":
 		if wsl {
-			return BackendPolicyOnly
+			return BackendLinuxBwrap
 		}
 		return BackendLinuxBwrap
 	case "windows":
 		return BackendWindowsRestrictedToken
 	default:
-		return BackendPolicyOnly
+		return BackendUnavailable
 	}
 }
 
@@ -75,8 +75,8 @@ func (backend Backend) TargetBackend() BackendName {
 	}
 	switch backend.Name {
 	case BackendWSL:
-		return BackendPolicyOnly
-	case BackendNone, BackendMacOSSeatbelt, BackendLinuxBwrap, BackendLinuxLandlock, BackendWindowsRestrictedToken, BackendWindowsElevated, BackendPolicyOnly:
+		return BackendLinuxBwrap
+	case BackendNone, BackendMacOSSeatbelt, BackendLinuxBwrap, BackendLinuxLandlock, BackendWindowsRestrictedToken, BackendWindowsElevated, BackendUnavailable:
 		return backend.Name
 	default:
 		return TargetBackendForPlatform(backend.Platform, false)
@@ -98,9 +98,9 @@ func nativeBackend(goos string, name BackendName, executable string, message str
 
 // wslBackend records WSL native isolation unavailability for diagnostics.
 func wslBackend(goos string, info WSLInfo) Backend {
-	msg := "policy-only WSL fallback: bubblewrap unavailable under WSL"
+	msg := "native Linux sandbox unavailable under WSL"
 	if info.IsWSL2 {
-		msg = "policy-only WSL2 fallback: bubblewrap unavailable/unreliable under WSL2"
+		msg = "native Linux sandbox unavailable or unreliable under WSL2"
 	}
 	return Backend{
 		Name:            BackendWSL,
@@ -113,9 +113,9 @@ func wslBackend(goos string, info WSLInfo) Backend {
 	}
 }
 
-func policyOnlyBackend(goos string, message string) Backend {
+func unavailableBackend(goos string, message string) Backend {
 	return Backend{
-		Name:            BackendPolicyOnly,
+		Name:            BackendUnavailable,
 		Available:       false,
 		Platform:        goos,
 		Fallback:        true,
@@ -159,12 +159,12 @@ func (backend Backend) restrictions(policy Policy) []string {
 			restrictions = append(restrictions, "network access denied unless a future adapter grants it explicitly")
 		}
 	}
-	if backend.Name == BackendPolicyOnly {
+	if backend.Name == BackendUnavailable {
 		platform := backend.Platform
 		if platform == "" {
 			platform = "this platform"
 		}
-		restrictions = append(restrictions, "native process isolation unavailable on "+platform+"; policy engine still evaluates tool requests before execution")
+		restrictions = append(restrictions, "native process isolation unavailable on "+platform)
 		restrictions = append(restrictions, "shell commands are not wrapped by a native platform sandbox")
 	} else if backend.Available {
 		restrictions = append(restrictions, "shell commands are wrapped through "+string(backend.Name)+" when launched by the sandbox engine")
@@ -176,7 +176,7 @@ func (backend Backend) SupportLevel() BackendSupportLevel {
 	if backend.Available && backend.NativeIsolation && backend.CommandWrapping {
 		return BackendSupportNative
 	}
-	return BackendSupportPolicyOnly
+	return BackendSupportUnavailable
 }
 
 func (backend Backend) EnforcementLevel(policy Policy) EnforcementLevel {
@@ -197,7 +197,7 @@ func (backend Backend) DowngradeReason(policy Policy) string {
 		policy = DefaultPolicy()
 	}
 	if policy.Mode == ModeDisabled {
-		return "sandbox policy disabled"
+		return "sandbox disabled"
 	}
 	if backend.SupportLevel() == BackendSupportNative {
 		return ""
@@ -224,7 +224,7 @@ func (backend Backend) SandboxEnvMarkers(policy Policy) []string {
 	}
 	name := backend.Name
 	if name == "" {
-		name = BackendPolicyOnly
+		name = BackendUnavailable
 	}
 	return []string{
 		EnvSandboxed + "=1",
@@ -246,7 +246,7 @@ func (backend Backend) Warnings() []string {
 		"shell commands are not wrapped by a native platform sandbox",
 	}
 	if backend.Platform == "windows" {
-		warnings[0] = "Windows sandbox command runner is not available; using policy-only preflight checks"
+		warnings[0] = "Windows sandbox command runner is not available"
 	}
 	return warnings
 }
@@ -266,9 +266,9 @@ func (backend Backend) Capabilities(policy Policy) []BackendCapability {
 	}
 	capabilities := []BackendCapability{
 		{
-			Key:    "policy_evaluation",
+			Key:    "permission_review",
 			Status: policyCapabilityStatus(policy.Mode, true),
-			Detail: "tool requests are evaluated against sandbox policy before execution",
+			Detail: "tool requests are reviewed before execution",
 		},
 		{
 			Key:    "workspace_write_guard",

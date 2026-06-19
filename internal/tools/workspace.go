@@ -220,7 +220,7 @@ type readPathScope interface {
 // scopedRoots returns the ordered roots to try for an absolute path: the
 // scope's roots when present, else just the workspace root. A non-nil scope
 // must expose at least one root (the workspace root first, per PathScope); an
-// empty Roots() is a contract violation that fails closed with an error so the
+// empty Roots() is a contract block that fails closed with an error so the
 // scoped helpers never silently accept a path with no root to validate against.
 // Returning success there would resolve to an empty path and, e.g., run bash
 // with Cmd.Dir == "" (the process cwd) instead of an allowed root.
@@ -287,7 +287,7 @@ func resolveScopedReadPath(workspaceRoot string, scope PathScope, requestedPath 
 // to which root" is ambiguous for downstream consumers (ChangedFiles, cwd
 // meta, display summaries) that document workspace-relative paths.
 // When all roots deny, the workspace root's error is returned; unlike
-// sandbox.Scope.validate this does not prefer traversal violations — the
+// sandbox.Scope.validate this does not prefer traversal blocks — the
 // engine layer reports those with full fidelity before tools run.
 func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
@@ -327,7 +327,7 @@ func resolveScopedPath(workspaceRoot string, scope PathScope, requestedPath stri
 // ambiguous for downstream consumers (ChangedFiles, cwd meta, display
 // summaries) that document workspace-relative paths.
 // When all roots deny, the workspace root's error is returned; unlike
-// sandbox.Scope.validate this does not prefer traversal violations — the
+// sandbox.Scope.validate this does not prefer traversal blocks — the
 // engine layer reports those with full fidelity before tools run.
 func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPath string) (string, string, error) {
 	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {

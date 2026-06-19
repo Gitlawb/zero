@@ -48,7 +48,7 @@ func wslBackendForTest() Backend {
 	return Backend{Name: BackendWSL, Platform: "linux", Fallback: true}
 }
 
-func TestWSLPlanFailsClosedWithoutPolicyOnly(t *testing.T) {
+func TestWSLPlanFailsClosedWithoutUnavailable(t *testing.T) {
 	root := t.TempDir()
 	policy := DefaultPolicy()
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy, Backend: wslBackendForTest()})

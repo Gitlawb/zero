@@ -7,20 +7,20 @@ import (
 	"strings"
 )
 
-type pathViolation struct {
-	Code   ViolationCode
+type pathBlock struct {
+	Code   BlockCode
 	Path   string
 	Reason string
 }
 
-func validateWorkspacePath(workspaceRoot string, requestedPath string) *pathViolation {
+func validateWorkspacePath(workspaceRoot string, requestedPath string) *pathBlock {
 	root, err := filepath.Abs(workspaceRoot)
 	if err != nil {
-		return &pathViolation{Code: ViolationOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
+		return &pathBlock{Code: BlockOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return &pathViolation{Code: ViolationOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
+		return &pathBlock{Code: BlockOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
 	}
 
 	target := requestedPath
@@ -29,13 +29,13 @@ func validateWorkspacePath(workspaceRoot string, requestedPath string) *pathViol
 	}
 	target, err = filepath.Abs(target)
 	if err != nil {
-		return &pathViolation{Code: ViolationOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
+		return &pathBlock{Code: BlockOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
 	}
 
 	relative, err := filepath.Rel(root, target)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return &pathViolation{
-			Code:   ViolationOutsideWorkspace,
+		return &pathBlock{
+			Code:   BlockOutsideWorkspace,
 			Path:   requestedPath,
 			Reason: fmt.Sprintf("%s is outside the workspace", requestedPath),
 		}
@@ -55,19 +55,19 @@ func validateWorkspacePath(workspaceRoot string, requestedPath string) *pathViol
 			if os.IsNotExist(err) {
 				return nil
 			}
-			return &pathViolation{Code: ViolationOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
+			return &pathBlock{Code: BlockOutsideWorkspace, Path: requestedPath, Reason: err.Error()}
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			continue
 		}
 		resolved, err := filepath.EvalSymlinks(current)
 		if err != nil {
-			return &pathViolation{Code: ViolationSymlinkTraversal, Path: requestedPath, Reason: err.Error()}
+			return &pathBlock{Code: BlockSymlinkTraversal, Path: requestedPath, Reason: err.Error()}
 		}
 		resolvedRelative, err := filepath.Rel(root, resolved)
 		if err != nil || resolvedRelative == ".." || strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) || filepath.IsAbs(resolvedRelative) {
-			return &pathViolation{
-				Code:   ViolationSymlinkTraversal,
+			return &pathBlock{
+				Code:   BlockSymlinkTraversal,
 				Path:   requestedPath,
 				Reason: fmt.Sprintf("%s must not traverse symlink %s", requestedPath, filepath.ToSlash(filepath.Clean(segment))),
 			}

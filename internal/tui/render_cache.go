@@ -186,12 +186,12 @@ func permissionCacheFingerprint(event *agent.PermissionEvent) string {
 		strconv.FormatBool(event.Grant != nil),
 		strconv.FormatBool(event.Grant != nil && event.Grant.Session),
 	}
-	if event.Violation != nil {
+	if event.Block != nil {
 		fields = append(fields,
-			string(event.Violation.Code),
-			string(event.Violation.Risk.Level),
-			event.Violation.Path,
-			event.Violation.Reason,
+			string(event.Block.Code),
+			string(event.Block.Risk.Level),
+			event.Block.Path,
+			event.Block.Reason,
 		)
 	}
 	var b strings.Builder
