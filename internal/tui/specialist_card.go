@@ -228,10 +228,13 @@ func formatSpecialistElapsed(d time.Duration) string {
 	return strconv.Itoa(minutes) + "m" + strconv.Itoa(remainder) + "s"
 }
 
-// renderSpecialistCard renders one specialist as a rounded card of the given
-// width. The card has a header (icon + name + description + elapsed), a body
-// line (status + tool calls + tokens), an optional error detail, and a faint
-// hint line. Widths below the minimum are clamped to 30.
+// renderSpecialistCard renders one specialist as a left-rule card of the given
+// width: a status-tinted │ on the left, no top/right/bottom borders. The card
+// has a header (icon + name + description + elapsed) and a body line (status +
+// tool calls + tokens). An optional error detail line is shown when the
+// specialist errored. The whole card is mouse-clickable to drill into its
+// subchat (wired in transcript_selection.go); no text hint is rendered.
+// Widths below the minimum are clamped to 30.
 func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	if width < 30 {
 		width = 30
@@ -298,12 +301,9 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 		lines = append(lines, zeroTheme.red.Render("  "+errMsg))
 	}
 
-	// Hint line.
-	lines = append(lines, zeroTheme.faint.Render("  [Enter] view subchat"))
-
-	// Wrap in a rounded border whose tint reflects the specialist's status.
-	border := specialistBorderStyle(info.status)
-	return styledBlock(width, lines, border)
+	// Left-rule card: status-tinted │ on the left, no box borders.
+	rule := specialistBorderStyle(info.status)
+	return renderLeftRuleCard(width, lines, rule)
 }
 
 // specialistBorderStyle picks the card border style for a specialist status:

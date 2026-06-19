@@ -187,6 +187,27 @@ func TestRenderSpecialistCard(t *testing.T) {
 	if got == "" {
 		t.Fatal("expected non-empty specialist card")
 	}
+	plain := ansiPattern.ReplaceAllString(got, "")
+	// Left-rule: every line starts with │.
+	for _, line := range strings.Split(plain, "\n") {
+		if !strings.HasPrefix(line, "│") {
+			t.Errorf("card line %q should start with │ (left-rule)", line)
+		}
+	}
+	// No rounded border characters.
+	for _, ch := range "╭╮╰╯" {
+		if strings.ContainsRune(plain, ch) {
+			t.Errorf("card must not contain rounded border %q", ch)
+		}
+	}
+	// No hint line.
+	if strings.Contains(plain, "[Enter]") || strings.Contains(plain, "view subchat") {
+		t.Error("card must not contain the old [Enter] view subchat hint")
+	}
+	// Content present.
+	if !strings.Contains(plain, "worker") {
+		t.Error("card should contain specialist name")
+	}
 }
 
 func TestParseTaskCallArgs(t *testing.T) {
