@@ -12,6 +12,7 @@ import (
 	"github.com/Gitlawb/zero/internal/hooks"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -695,6 +696,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		}
 	}
 
+	// Task tool: wire progress callback so the TUI sees live tool-call events
+	// from the specialist child process.
+	var progressCallback func(streamjson.Event)
+	if call.Name == "Task" && options.OnToolProgress != nil {
+		toolCallID := call.ID
+		onProgress := options.OnToolProgress
+		progressCallback = func(event streamjson.Event) {
+			onProgress(toolCallID, event)
+		}
+	}
+
 	result := registry.RunWithOptions(ctx, call.Name, args, tools.RunOptions{
 		PermissionGranted: permissionGranted,
 		PermissionMode:    string(permissionMode),
@@ -713,6 +725,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// (tool_search) never discloses or loads an operator-hidden deferred tool.
 		EnabledTools:  options.EnabledTools,
 		DisabledTools: options.DisabledTools,
+		Progress:      progressCallback,
 		// The sandbox decision (if any) is returned synchronously on the Result and
 		// used here for permission event building.
 	})
