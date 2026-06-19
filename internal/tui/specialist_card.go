@@ -111,6 +111,19 @@ func (t *specialistTracker) clear() {
 	t.specialists = nil
 }
 
+// reconcileSessionID rewrites the childSessionID of the entry currently keyed
+// by oldID to newID. This bridges the tool-call-ID (used as a temporary key at
+// specialist start time) to the real session ID (known only when the child
+// process reports it on completion). No-op if oldID is not found.
+func (t *specialistTracker) reconcileSessionID(oldID, newID string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == oldID {
+			t.specialists[index].childSessionID = newID
+			return
+		}
+	}
+}
+
 // getBySessionID returns the info for childSessionID and whether it was found.
 func (t *specialistTracker) getBySessionID(childSessionID string) (specialistInfo, bool) {
 	for index := range t.specialists {

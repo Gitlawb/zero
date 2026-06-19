@@ -1348,8 +1348,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.specialists.complete(msg.childSessionID, msg.status, 0, msg.errorMsg, m.now())
-		if info, ok := m.specialists.getBySessionID(msg.toolCallID); ok {
+		// The specialist was started with the tool call ID as a temporary key
+		// (the real session ID isn't known until the child process creates it).
+		// Reconcile: complete by the tool call ID, then rewrite the tracker
+		// entry's childSessionID to the real session ID so subchat.enter can
+		// find the child session's events in the store.
+		m.specialists.complete(msg.toolCallID, msg.status, 0, msg.errorMsg, m.now())
+		if msg.childSessionID != "" && msg.childSessionID != msg.toolCallID {
+			m.specialists.reconcileSessionID(msg.toolCallID, msg.childSessionID)
+		}
+		if info, ok := m.specialists.getBySessionID(msg.childSessionID); ok {
+			if info.childSessionID == "" {
+				info.childSessionID = msg.toolCallID
+			}
 			cardRow := transcriptRow{
 				kind:           rowSpecialist,
 				runID:          msg.runID,
