@@ -370,5 +370,10 @@ func renderSpecialistSummary(specialists []specialistInfo, spinnerView string) s
 		}
 	}
 	summary += " · " + formatTokenCount(totalTokens) + " tokens"
-	return zeroTheme.accent.Render(spinnerView) + zeroTheme.muted.Render(summary[len(spinnerView):])
+	// summary is "  " + spinnerView + " N specialists ...". The spinner sits
+	// at byte offset 2 (after the 2-space indent), so the muted tail must skip
+	// both the indent and the spinner's bytes to avoid splitting a multi-byte
+	// rune and losing the indent.
+	tailStart := 2 + len(spinnerView)
+	return zeroTheme.accent.Render(spinnerView) + zeroTheme.muted.Render(summary[tailStart:])
 }

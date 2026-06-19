@@ -291,4 +291,16 @@ func TestRenderSpecialistSummary(t *testing.T) {
 	if !strings.Contains(got, "1 error") {
 		t.Errorf("summary should contain error count, got %q", got)
 	}
+
+	// Pluralization: two errored specialists → "2 errors", not "2 error".
+	specialists = append(specialists, specialistInfo{status: specialistError, tokenCount: 50})
+	got = renderSpecialistSummary(specialists, "⠙")
+	if !strings.Contains(got, "2 errors") {
+		t.Errorf("summary should pluralize errors, got %q", got)
+	}
+	if strings.Contains(got, "2 error\n") || strings.Contains(got, "2 error\t") ||
+		strings.HasSuffix(got, "2 error") || strings.Contains(got, "2 error·") ||
+		strings.Contains(got, "2 error ") {
+		t.Errorf("summary should not contain singular '2 error', got %q", got)
+	}
 }
