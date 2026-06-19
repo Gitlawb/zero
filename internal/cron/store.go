@@ -171,16 +171,56 @@ func (s *Store) Update(job Job) error {
 	if !validID(job.ID) {
 		return fmt.Errorf("invalid cron job id %q", job.ID)
 	}
+	unlock, err := s.lockJob(job.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if _, err := os.Stat(s.jobDir(job.ID)); err != nil {
 		return fmt.Errorf("cron job %q not found", job.ID)
 	}
 	return s.writeJob(job)
 }
 
+// Mutate atomically updates job id under the per-job cross-process lock, closing
+// the read-modify-write race between concurrent schedulers (and against Update/
+// Remove). It re-reads the CURRENT on-disk job and passes it to mutate along with
+// any read error; mutate returns the job to persist. A removed job aborts with
+// ErrJobNotFound (no recreate). A transient read error (not removal) is surfaced
+// via readErr so the caller can still persist a best-effort state — the fire path
+// advances the schedule regardless, to avoid a re-fire.
+func (s *Store) Mutate(id string, mutate func(current Job, readErr error) (Job, error)) (Job, error) {
+	if !validID(id) {
+		return Job{}, fmt.Errorf("invalid cron job id %q", id)
+	}
+	unlock, err := s.lockJob(id)
+	if err != nil {
+		return Job{}, err
+	}
+	defer unlock()
+	current, readErr := s.Get(id)
+	if errors.Is(readErr, ErrJobNotFound) {
+		return Job{}, ErrJobNotFound
+	}
+	next, err := mutate(current, readErr)
+	if err != nil {
+		return Job{}, err
+	}
+	if err := s.writeJob(next); err != nil {
+		return Job{}, err
+	}
+	return next, nil
+}
+
 func (s *Store) Remove(id string) error {
 	if !validID(id) {
 		return fmt.Errorf("invalid cron job id %q", id)
 	}
+	unlock, err := s.lockJob(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if _, err := os.Stat(s.jobDir(id)); err != nil {
 		return fmt.Errorf("cron job %q not found", id)
 	}

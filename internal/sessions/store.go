@@ -528,6 +528,44 @@ func (store *Store) AppendEvent(sessionID string, input AppendEventInput) (Event
 	return store.appendEventLocked(sessionID, input)
 }
 
+// AppendEventUnlessExists appends input only when exists(currentEvents) is false,
+// performing the existence check and the append atomically under the session lock
+// (in-process mutex + cross-process file lock). It is the safe primitive for
+// "record once" accounting: a plain ReadEvents-then-AppendEvent has a
+// check-then-act race where two callers — even in separate processes — both see
+// the event absent and each append a duplicate. Returns appended=false when the
+// predicate already matched. A nil predicate always appends.
+func (store *Store) AppendEventUnlessExists(sessionID string, input AppendEventInput, exists func([]Event) bool) (Event, bool, error) {
+	if !ValidSessionID(sessionID) {
+		return Event{}, false, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	if strings.TrimSpace(string(input.Type)) == "" {
+		return Event{}, false, fmt.Errorf("zero session event type is required")
+	}
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Event{}, false, err
+	}
+	defer unlock()
+
+	if exists != nil {
+		// Safe under the held lock: ReadEvents only os.ReadFile's the log and never
+		// re-acquires the session lock, so there is no deadlock.
+		events, err := store.ReadEvents(sessionID)
+		if err != nil {
+			return Event{}, false, err
+		}
+		if exists(events) {
+			return Event{}, false, nil
+		}
+	}
+	event, err := store.appendEventLocked(sessionID, input)
+	if err != nil {
+		return Event{}, false, err
+	}
+	return event, true, nil
+}
+
 // appendEventLocked appends an event WITHOUT acquiring the session lock. The
 // caller MUST already hold store.lockSession(sessionID). It exists so multi-step
 // operations (e.g. ApplyRewind) can append the trailing marker atomically under

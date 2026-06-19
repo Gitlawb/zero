@@ -184,6 +184,11 @@ type Options struct {
 	ReasoningEffort  string
 	Cwd              string
 	SystemPrompt     string
+	// ResponseStyle is the operator-selected reply style from the TUI /style
+	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
+	// system prompt as a short directive. Empty or "balanced" adds nothing — the
+	// prompt is then byte-identical to the pre-style behavior.
+	ResponseStyle string
 	// Images are optional image attachments to seed onto the initial user turn.
 	// nil for text-only runs (the seeded message then carries no images, exactly
 	// as before).

@@ -374,9 +374,7 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	}
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	rows := initialTranscript()
-	for _, row := range transcriptRowsFromSessionEvents(events) {
-		rows = appendTranscriptRow(rows, row)
-	}
+	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
 	m.transcript = rows
 	// The rebuilt (post-rewind) transcript flushes fresh below a divider; the
 	// pre-rewind scrollback above it stays, as scrollback cannot be un-printed.
@@ -591,9 +589,7 @@ func (m model) compactActiveSession() (model, CompactResult, error) {
 	}
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	rows := initialTranscript()
-	for _, row := range transcriptRowsFromSessionEvents(events) {
-		rows = appendTranscriptRow(rows, row)
-	}
+	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
 	m.transcript = rows
 	m.resetFlushFrontier("· compacted ·")
 

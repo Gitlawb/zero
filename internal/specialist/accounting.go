@@ -11,12 +11,15 @@ import (
 
 const specialistAccountingSource = "specialist"
 
-// accountingMu serializes the "check for an existing event, then append" pairs
-// below. Without it two concurrent finishers — e.g. a foreground onExit racing a
-// TaskOutput poll, or a background reaper — can both pass specialistEventExists
-// before either appends, writing duplicate stop/usage events. Accounting is
-// low-frequency, so a single process-wide lock is sufficient (Executor is used by
-// value, so a struct field would not be shared across copies).
+// accountingMu serializes the stop/usage accounting paths within this process as
+// a cheap fast path. The real dedup guarantee, however, comes from
+// appendSpecialistEventOnce → Store.AppendEventUnlessExists, which performs the
+// existence check and the append atomically under the session lock (in-process
+// mutex + cross-process file lock). That closes the check-then-append race even
+// across processes — e.g. a foreground onExit racing a TaskOutput poll or a
+// background reaper in a separate process — which accountingMu alone (process-
+// local) could not. Executor is used by value, so a struct field would not be
+// shared across copies; a single process-wide lock is sufficient here.
 var accountingMu sync.Mutex
 
 type specialistAccountingInput struct {
@@ -39,9 +42,6 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	store := accountingStore(executor.SessionStore)
 	accountingMu.Lock()
 	defer accountingMu.Unlock()
-	if specialistEventExists(store, input.ParentSessionID, sessions.EventSpecialistStop, input.ChildSessionID, summary.RunID) {
-		return
-	}
 	payload := baseSpecialistPayload(input)
 	if summary.RunID != "" {
 		payload["runId"] = summary.RunID
@@ -55,7 +55,9 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	if len(summary.Errors) > 0 {
 		payload["errors"] = append([]string(nil), summary.Errors...)
 	}
-	_, _ = appendSpecialistSessionEvent(store, input.ParentSessionID, sessions.EventSpecialistStop, payload)
+	// Atomic check+append under the session lock so a concurrent stop path cannot
+	// also pass the existence check and write a duplicate stop event.
+	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
 }
 
 func (executor Executor) rollUpSpecialistUsage(input specialistAccountingInput, summary StreamResult) bool {
@@ -90,9 +92,6 @@ func appendSpecialistUsageRollup(store *sessions.Store, input specialistAccounti
 	store = accountingStore(store)
 	accountingMu.Lock()
 	defer accountingMu.Unlock()
-	if specialistEventExists(store, input.ParentSessionID, sessions.EventUsage, input.ChildSessionID, summary.RunID) {
-		return false, nil
-	}
 	payload := baseSpecialistPayload(input)
 	if summary.RunID != "" {
 		payload["runId"] = summary.RunID
@@ -101,10 +100,9 @@ func appendSpecialistUsageRollup(store *sessions.Store, input specialistAccounti
 	payload["completionTokens"] = summary.Usage.CompletionTokens
 	payload["totalTokens"] = summary.Usage.EffectiveTotalTokens()
 	payload["usageEvents"] = summary.Usage.Events
-	if _, err := appendSpecialistSessionEvent(store, input.ParentSessionID, sessions.EventUsage, payload); err != nil {
-		return false, err
-	}
-	return true, nil
+	// Atomic check+append under the session lock so the TaskOutput poll and the
+	// onExit path cannot both pass the existence check and double-count usage.
+	return appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventUsage, payload, input.ChildSessionID, summary.RunID)
 }
 
 func appendSpecialistSessionEvent(store *sessions.Store, parentSessionID string, eventType sessions.EventType, payload map[string]any) (sessions.Event, error) {
@@ -116,42 +114,61 @@ func appendSpecialistSessionEvent(store *sessions.Store, parentSessionID string,
 	return store.AppendEvent(parentSessionID, sessions.AppendEventInput{Type: eventType, Payload: payload})
 }
 
-func specialistEventExists(store *sessions.Store, parentSessionID string, eventType sessions.EventType, childSessionID string, runID string) bool {
-	parentSessionID = strings.TrimSpace(parentSessionID)
+// specialistEventMatcher returns a predicate reporting whether a "record once"
+// specialist event of eventType has already been written for this child/run. The
+// catch-all runId rules mirror the dedup the accounting paths depend on.
+func specialistEventMatcher(eventType sessions.EventType, childSessionID, runID string) func([]sessions.Event) bool {
 	childSessionID = strings.TrimSpace(childSessionID)
 	runID = strings.TrimSpace(runID)
-	if parentSessionID == "" || childSessionID == "" || !sessions.ValidSessionID(parentSessionID) {
+	return func(events []sessions.Event) bool {
+		if childSessionID == "" {
+			return false
+		}
+		for _, event := range events {
+			if event.Type != eventType {
+				continue
+			}
+			payload := map[string]any{}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			if specialistPayloadString(payload, "source") != specialistAccountingSource {
+				continue
+			}
+			if specialistPayloadString(payload, "childSessionId") != childSessionID && specialistPayloadString(payload, "taskId") != childSessionID {
+				continue
+			}
+			// An already-recorded event with NO runId is a catch-all for this child
+			// (e.g. the immediate stop written when a PID couldn't be registered) and
+			// must match a later event that does carry a runId — otherwise the same
+			// child gets two stop/usage events. We match when: querying without a runId,
+			// the existing event has none, or the runIds are equal.
+			existingRunID := specialistPayloadString(payload, "runId")
+			if runID == "" || existingRunID == "" || existingRunID == runID {
+				return true
+			}
+		}
 		return false
 	}
-	events, err := store.ReadEvents(parentSessionID)
-	if err != nil {
-		return false
+}
+
+// appendSpecialistEventOnce atomically records a "record once" specialist event:
+// it appends payload only if no matching event already exists, under the session
+// store's lock so concurrent stop/usage callers (even cross-process) cannot both
+// pass an existence check and each write a duplicate. Returns appended=false when
+// an equivalent event was already present.
+func appendSpecialistEventOnce(store *sessions.Store, parentSessionID string, eventType sessions.EventType, payload map[string]any, childSessionID, runID string) (bool, error) {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" || !sessions.ValidSessionID(parentSessionID) {
+		return false, nil
 	}
-	for _, event := range events {
-		if event.Type != eventType {
-			continue
-		}
-		payload := map[string]any{}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			continue
-		}
-		if specialistPayloadString(payload, "source") != specialistAccountingSource {
-			continue
-		}
-		if specialistPayloadString(payload, "childSessionId") != childSessionID && specialistPayloadString(payload, "taskId") != childSessionID {
-			continue
-		}
-		// An already-recorded event with NO runId is a catch-all for this child (e.g.
-		// the immediate stop written when a PID couldn't be registered) and must
-		// match a later event that does carry a runId — otherwise the same child gets
-		// two stop/usage events. We match when: we're querying without a runId, the
-		// existing event has none, or the runIds are equal.
-		existingRunID := specialistPayloadString(payload, "runId")
-		if runID == "" || existingRunID == "" || existingRunID == runID {
-			return true
-		}
-	}
-	return false
+	store = accountingStore(store)
+	_, appended, err := store.AppendEventUnlessExists(
+		parentSessionID,
+		sessions.AppendEventInput{Type: eventType, Payload: payload},
+		specialistEventMatcher(eventType, childSessionID, runID),
+	)
+	return appended, err
 }
 
 func baseSpecialistPayload(input specialistAccountingInput) map[string]any {

@@ -177,31 +177,41 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 	} else {
 		job.NextRunAt = nxt
 	}
-	// Re-read before persisting: the job may have been paused or removed while it
-	// was executing, and this in-memory copy is stale from tick start. Without
-	// this, store.Update would clobber an external pause back to active. (A single
-	// scheduler is the supported model; this narrows but does not fully close the
-	// read-modify-write window — full atomicity needs file locking.)
-	current, err := store.Get(job.ID)
-	switch {
-	case errors.Is(err, cron.ErrJobNotFound):
-		// Genuinely removed mid-run: don't recreate it by persisting.
+	// Re-read and persist the advanced state ATOMICALLY under the per-job lock. The
+	// job may have been paused or removed while it executed, and this in-memory copy
+	// is stale from tick start. Mutate closes the read-modify-write window a single
+	// scheduler alone could only narrow (Store.Mutate took a cross-process lock): a
+	// concurrent scheduler or an external pause/remove landing here can no longer be
+	// clobbered.
+	persisted, err := store.Mutate(job.ID, func(current cron.Job, readErr error) (cron.Job, error) {
+		if readErr != nil {
+			// A transient read failure (IO/permission) is NOT removal — persist the
+			// computed next state anyway so the schedule advances and the job does not
+			// re-fire next tick.
+			fmt.Fprintf(stderr, "warning: could not re-read job %s before persist: %v\n", job.ID, readErr)
+			return job, nil
+		}
+		if current.Status == cron.StatusPaused {
+			// Honor an external pause that landed while the job ran.
+			job.Status = cron.StatusPaused
+		}
+		return job, nil
+	})
+	if errors.Is(err, cron.ErrJobNotFound) {
+		// Genuinely removed mid-run: don't recreate it (no run record, no persist).
 		fmt.Fprintf(stdout, "fired %s -> exit %d (job removed during run)\n", job.ID, code)
 		return
-	case err != nil:
-		// A transient read failure (IO/permission) is NOT removal — warn but still
-		// record the run and persist the computed next state below.
-		fmt.Fprintf(stderr, "warning: could not re-read job %s before persist: %v\n", job.ID, err)
-	case current.Status == cron.StatusPaused:
-		job.Status = cron.StatusPaused
 	}
-	if err := store.AppendRun(job.ID, rec); err != nil {
-		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, err)
+	// Record the fire only after confirming the job was not removed mid-run, so
+	// AppendRun cannot resurrect a deleted job's directory.
+	if aerr := store.AppendRun(job.ID, rec); aerr != nil {
+		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, aerr)
 	}
-	if err := store.Update(job); err != nil {
+	if err != nil {
 		fmt.Fprintf(stderr, "warning: failed to persist job state for %s: %v\n", job.ID, err)
+		persisted = job
 	}
-	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(job.NextRunAt))
+	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(persisted.NextRunAt))
 }
 
 func cronTruncate(s string, max int) string {

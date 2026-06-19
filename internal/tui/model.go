@@ -2863,6 +2863,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
 		options.ReasoningEffort = string(m.reasoningEffort)
+		options.ResponseStyle = m.responseStyle
 		options.Cwd = m.cwd
 		options.Images = images
 		if m.captureRunImages != nil {

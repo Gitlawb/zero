@@ -143,9 +143,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 
 	rows := initialTranscript()
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
-	for _, row := range transcriptRowsFromSessionEvents(events) {
-		rows = appendTranscriptRow(rows, row)
-	}
+	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
 	m.transcript = rows
 	// Every rehydrated row is settled by construction, so resetting the flush
 	// frontier sends the whole resumed history to native scrollback in one

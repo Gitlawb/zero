@@ -86,10 +86,30 @@ func buildSystemPrompt(options Options) string {
 	if delegation := specialistDelegationContext(options); delegation != "" {
 		sections = append(sections, delegation)
 	}
+	if style := responseStyleContext(options); style != "" {
+		sections = append(sections, style)
+	}
 	if policy := strings.TrimSpace(confirmationPolicy); policy != "" {
 		sections = append(sections, policy)
 	}
 	return strings.Join(sections, "\n\n")
+}
+
+// responseStyleContext renders the operator-selected reply style (TUI /style) as
+// a system-prompt directive so the choice actually shapes responses. "balanced"
+// (the default) and unknown/empty values add nothing, keeping the prompt
+// byte-identical to the pre-style behavior.
+func responseStyleContext(options Options) string {
+	switch strings.ToLower(strings.TrimSpace(options.ResponseStyle)) {
+	case "concise":
+		return "Response style: concise. Lead with the result and keep answers short and direct; omit preamble, restating the question, and any explanation not needed to be correct."
+	case "explanatory":
+		return "Response style: explanatory. Explain the reasoning behind your answers and changes, surface relevant trade-offs, and add brief context a learner would want — while staying on task and not padding."
+	case "review":
+		return "Response style: review. Work like a critical reviewer: call out risks, edge cases, and unstated assumptions, flag anything questionable, and prefer precise, evidence-backed statements over reassurance."
+	default:
+		return ""
+	}
 }
 
 func approvedCommandPrefixContext(options Options) string {

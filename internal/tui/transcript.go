@@ -102,6 +102,35 @@ func appendTranscriptRow(rows []transcriptRow, row transcriptRow) []transcriptRo
 	return append(rows, row)
 }
 
+// appendTranscriptRowsDedup appends newRows to rows in a single pass, skipping
+// keyed rows already present (by transcriptRowKey). It is the bulk equivalent of
+// calling appendTranscriptRow per row, but builds the key set ONCE instead of
+// re-scanning every existing row on each append — turning rehydration of a
+// tool-heavy session from O(n²) into O(n). Semantics are identical: unkeyed rows
+// always append; a keyed row is skipped if its key already appeared (in rows, or
+// earlier within newRows).
+func appendTranscriptRowsDedup(rows []transcriptRow, newRows []transcriptRow) []transcriptRow {
+	if len(newRows) == 0 {
+		return rows
+	}
+	seen := make(map[string]struct{}, len(rows)+len(newRows))
+	for _, existing := range rows {
+		if key := transcriptRowKey(existing); key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	for _, row := range newRows {
+		if key := transcriptRowKey(row); key != "" {
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
 func hasTranscriptRow(rows []transcriptRow, row transcriptRow) bool {
 	key := transcriptRowKey(row)
 	if key == "" {
