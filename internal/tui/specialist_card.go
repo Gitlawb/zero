@@ -322,3 +322,22 @@ func specialistBorderStyle(status specialistStatus) lipgloss.Style {
 
 // truncateRunes is provided by view.go; specialist_card.go relies on it for
 // rune-safe description and error-message truncation.
+
+// renderLeftRuleCard renders lines with a single status-tinted left rule and
+// no other borders. Each line is prefixed with "│ " in the rule style; the
+// content is padded to the given width so cards align. No top/bottom/right
+// borders — lighter than styledBlock, matching the borderless inline tool
+// render style used by reference TUIs.
+func renderLeftRuleCard(width int, lines []string, ruleStyle lipgloss.Style) string {
+	if width < 4 {
+		width = 4
+	}
+	inner := width - 2 // "│ " takes 2 cells
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		fitted := fitStyledLine(line, inner)
+		pad := strings.Repeat(" ", maxInt(0, inner-lipgloss.Width(fitted)))
+		out = append(out, ruleStyle.Render("│ ")+fitted+pad)
+	}
+	return strings.Join(out, "\n")
+}

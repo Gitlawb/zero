@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,5 +205,30 @@ func TestParseTaskCallArgs(t *testing.T) {
 	}
 	if desc2 != "map the codebase" {
 		t.Errorf("description = %q, want 'map the codebase'", desc2)
+	}
+}
+
+func TestRenderLeftRuleCard(t *testing.T) {
+	lines := []string{"header line", "body line"}
+	got := renderLeftRuleCard(40, lines, zeroTheme.accent)
+	if got == "" {
+		t.Fatal("expected non-empty left-rule card")
+	}
+	plain := ansiPattern.ReplaceAllString(got, "")
+	// Left rule present on every line.
+	for _, line := range strings.Split(plain, "\n") {
+		if !strings.HasPrefix(line, "│") {
+			t.Errorf("line %q should start with left rule │", line)
+		}
+	}
+	// No rounded border characters.
+	for _, ch := range "╭╮╰╯" {
+		if strings.ContainsRune(plain, ch) {
+			t.Errorf("left-rule card must not contain %q", ch)
+		}
+	}
+	// Two input lines → two output lines.
+	if len(strings.Split(plain, "\n")) != 2 {
+		t.Errorf("expected 2 lines, got %d", len(strings.Split(plain, "\n")))
 	}
 }
