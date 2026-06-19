@@ -439,7 +439,21 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 		case sessions.EventSpecialistStop:
 			info := specialistInfoFromPayload(payload)
 			if info != nil {
-				rows = append(rows, transcriptRow{kind: rowSpecialist, specialistInfo: info})
+				// Reconcile: update the existing Start row with the same
+				// childSessionID instead of appending a duplicate. On resume
+				// this prevents two cards per specialist (running + completed).
+				found := false
+				for i := range rows {
+					if rows[i].kind == rowSpecialist && rows[i].specialistInfo != nil &&
+						rows[i].specialistInfo.childSessionID == info.childSessionID {
+						rows[i].specialistInfo = info
+						found = true
+						break
+					}
+				}
+				if !found {
+					rows = append(rows, transcriptRow{kind: rowSpecialist, specialistInfo: info})
+				}
 			}
 		}
 	}
@@ -607,7 +621,7 @@ func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 		return nil
 	}
 	info := &specialistInfo{
-		name:           payloadString(payload, "specialistName"),
+		name:           payloadString(payload, "specialist"),
 		description:    payloadString(payload, "description"),
 		childSessionID: childSessionID,
 	}
@@ -615,6 +629,8 @@ func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 	switch statusStr {
 	case "running":
 		info.status = specialistRunning
+	case "success":
+		info.status = specialistCompleted
 	case "completed":
 		info.status = specialistCompleted
 	default:

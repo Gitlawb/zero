@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -728,20 +729,29 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string, prog
 		return ChildRunResult{Stderr: stderr.String()}, fmt.Errorf("start specialist child: %w", err)
 	}
 	events := []streamjson.Event{}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
+	reader := bufio.NewReader(stdout)
+	for {
+		line, readErr := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line != "" {
+			var event streamjson.Event
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				// Surface parse errors instead of silently dropping lines —
+				// ParseStream did this too. Accumulate what we have and let
+				// the caller decide via the error.
+				events = append(events, streamjson.Event{Type: streamjson.EventError, Message: fmt.Sprintf("parse stream-json line: %v", err)})
+			} else {
+				events = append(events, event)
+				if progress != nil {
+					progress(event)
+				}
+			}
 		}
-		var event streamjson.Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			continue
-		}
-		events = append(events, event)
-		if progress != nil {
-			progress(event)
+		if readErr != nil {
+			if readErr != io.EOF {
+				events = append(events, streamjson.Event{Type: streamjson.EventError, Message: fmt.Sprintf("read child stdout: %v", readErr)})
+			}
+			break
 		}
 	}
 	exitCode := 0
@@ -751,7 +761,7 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string, prog
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: exitCode, Started: started}, fmt.Errorf("run specialist child: %w", err)
+			return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: -1, Started: started}, fmt.Errorf("run specialist child: %w", err)
 		}
 	}
 	return ChildRunResult{Events: events, Stderr: stderr.String(), ExitCode: exitCode, Started: started}, nil

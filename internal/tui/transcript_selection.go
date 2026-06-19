@@ -137,6 +137,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 		rc := buildRowContext(m.transcript)
 		shownAny := false
 		previousKind, havePreviousKind := previousVisibleTranscriptKind(m.transcript, m.flushed, rc)
+		planPanelEmitted := false
 		specialistSummaryEmitted := false
 		for index := m.flushed; index < len(m.transcript); index++ {
 			row := m.transcript[index]
@@ -155,7 +156,8 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			}
 			// Inject the plan panel inline before the specialist cards, so it
 			// appears in the chat flow (not pinned at the top).
-			if row.kind == rowSpecialist && !specialistSummaryEmitted {
+			if row.kind == rowSpecialist && !planPanelEmitted {
+				planPanelEmitted = true
 				planPanel := m.renderPlanPanel(width)
 				if planPanel != "" {
 					items = append(items, transcriptBlockBodyItem(transcriptBodyItemRow, -1, planPanel))
@@ -200,6 +202,17 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			shownAny = true
 			previousKind = row.kind
 			havePreviousKind = true
+		}
+		// If the plan panel wasn't injected during the row loop (no specialist
+		// rows yet), inject it here so update_plan-only turns still show it.
+		if !planPanelEmitted {
+			planPanel := m.renderPlanPanel(width)
+			if planPanel != "" {
+				if shownAny || m.flushedAny {
+					items = append(items, transcriptBlankBodyItem())
+				}
+				items = append(items, transcriptBlockBodyItem(transcriptBodyItemRow, -1, planPanel))
+			}
 		}
 	}
 
