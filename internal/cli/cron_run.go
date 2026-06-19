@@ -202,8 +202,9 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 		fmt.Fprintf(stdout, "fired %s -> exit %d (job removed during run)\n", job.ID, code)
 		return
 	}
-	// Record the fire only after confirming the job was not removed mid-run, so
-	// AppendRun cannot resurrect a deleted job's directory.
+	// Record the fire. AppendRun takes the per-job lock and bails if the job's
+	// metadata is gone, so a Remove landing here cannot resurrect a deleted job's
+	// directory with an orphaned runs.jsonl.
 	if aerr := store.AppendRun(job.ID, rec); aerr != nil {
 		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, aerr)
 	}

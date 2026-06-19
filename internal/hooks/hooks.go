@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -500,6 +501,17 @@ func (store *AuditStore) append(event AuditEvent) (AuditEvent, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
+	// Cross-process lock around the read-then-append. store.mu only serializes
+	// THIS process; the audit log is a shared global file, so without a
+	// cross-process lock two processes could both read sequence N via
+	// lastSequence() and both write N+1 (duplicate sequences). Held only for the
+	// millisecond read+append, mirroring the cron/oauth file locks.
+	unlock, err := store.lockAudit()
+	if err != nil {
+		return AuditEvent{}, err
+	}
+	defer unlock()
+
 	highest, err := store.lastSequence()
 	if err != nil {
 		return AuditEvent{}, err
@@ -532,9 +544,9 @@ func (store *AuditStore) append(event AuditEvent) (AuditEvent, error) {
 // log (or 0 when empty/absent). It reads only the file's TAIL rather than the
 // whole file, so append stays O(1) instead of O(n) per call (the previous code
 // re-read and scanned every event on every append → O(n²) over a session). It
-// reads fresh from disk each time, so a concurrent process's appends to this
-// shared global file are still observed — unlike an in-memory counter, which
-// would collide sequences across processes.
+// reads fresh from disk each time so a concurrent process's prior appends are
+// observed; the read-then-append is made atomic across processes by the caller's
+// lockAudit — store.mu alone would not prevent a cross-process sequence collision.
 func (store *AuditStore) lastSequence() (int, error) {
 	file, err := os.Open(store.auditPath)
 	if err != nil {
@@ -558,8 +570,15 @@ func (store *AuditStore) lastSequence() (int, error) {
 		start = 0
 	}
 	buf := make([]byte, size-start)
-	if n, err := file.ReadAt(buf, start); err != nil && n < len(buf) {
-		return 0, err
+	// ReadAt may return io.EOF with a short read if the file shrank between Stat
+	// and here; treat EOF as non-fatal and use only the bytes actually read.
+	n, rerr := file.ReadAt(buf, start)
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		return 0, rerr
+	}
+	buf = buf[:n]
+	if len(buf) == 0 {
+		return 0, nil
 	}
 	text := strings.TrimRight(string(buf), "\r\n \t")
 	if text == "" {

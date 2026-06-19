@@ -263,6 +263,21 @@ func (s *Store) AppendRun(id string, rec RunRecord) error {
 	if !validID(id) {
 		return fmt.Errorf("invalid cron job id %q", id)
 	}
+	unlock, err := s.lockJob(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Bail if the job was removed (e.g. mid-run) — otherwise the MkdirAll below
+	// would resurrect a deleted job's directory with an orphaned runs.jsonl and no
+	// metadata.json (which Runs would then still return). Under the per-job lock
+	// this stat-then-write is race-free against a concurrent Remove.
+	if _, err := os.Stat(filepath.Join(s.jobDir(id), "metadata.json")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
 	dir := s.jobDir(id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
