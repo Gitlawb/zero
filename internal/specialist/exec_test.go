@@ -199,7 +199,7 @@ func TestBuildArgsDefaultsToReadOnlyToolAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildArgs returned error: %v", err)
 	}
-	if !containsSequence(result.Args, []string{"--enabled-tools", "glob,grep,list_directory,read_file"}) {
+	if !containsSequence(result.Args, []string{"--enabled-tools", "glob,grep,list_directory,read_file,read_minified_file"}) {
 		t.Fatalf("args missing default read-only allowlist: %#v", result.Args)
 	}
 }
