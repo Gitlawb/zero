@@ -29,7 +29,7 @@ func specialistClickTestModel(t *testing.T, childSessionID string) model {
 		specialistInfo: &specialistInfo{
 			name:           "worker",
 			description:    "fix tests",
-			childSessionID:  childSessionID,
+			childSessionID: childSessionID,
 			status:         specialistRunning,
 			startedAt:      now,
 		},

@@ -118,9 +118,9 @@ type model struct {
 	// Enter fallback so Enter drills into the same subchat the click would.
 	// Cleared in beginRun so it doesn't persist across turns.
 	selectedSpecialistID string
-	altScreen   bool
-	setup       setupState
-	setupSave   func(SetupSelection) (SetupResult, error)
+	altScreen            bool
+	setup                setupState
+	setupSave            func(SetupSelection) (SetupResult, error)
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
@@ -835,12 +835,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// bypassed by a stale card selection.
 			if m.selectedSpecialistID != "" && !m.subchat.active {
 				title := m.specialistTitleFor(m.selectedSpecialistID)
-			if errMsg := m.subchat.enter(m.sessionStore, m.selectedSpecialistID, title, m.chatScrollOffset); errMsg != "" {
-				m = m.appendSystemNotice(errMsg)
-			}
-			m.chatScrollOffset = 0
-			m.selectedSpecialistID = ""
-			return m, nil
+				if errMsg := m.subchat.enter(m.sessionStore, m.selectedSpecialistID, title, m.chatScrollOffset); errMsg != "" {
+					m = m.appendSystemNotice(errMsg)
+				}
+				m.chatScrollOffset = 0
+				m.selectedSpecialistID = ""
+				return m, nil
 			}
 			if m.providerWizard != nil {
 				return m.handleProviderWizardKey(msg)
