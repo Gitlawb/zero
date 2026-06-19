@@ -32,7 +32,7 @@ func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
 				ResolvedTools: []string{"read_file"},
 			}}}, nil
 		},
-		RunChild: func(context.Context, string, []string) (ChildRunResult, error) {
+		RunChild: func(context.Context, string, []string, func(streamjson.Event)) (ChildRunResult, error) {
 			return ChildRunResult{
 				Events: []streamjson.Event{
 					{Type: streamjson.EventRunStart, RunID: "run_1", SessionID: "child_task"},
@@ -107,7 +107,7 @@ func TestExecutorRecordsStartedChildErrorExitCode(t *testing.T) {
 				ResolvedTools: []string{"read_file"},
 			}}}, nil
 		},
-		RunChild: func(context.Context, string, []string) (ChildRunResult, error) {
+		RunChild: func(context.Context, string, []string, func(streamjson.Event)) (ChildRunResult, error) {
 			return ChildRunResult{ExitCode: 7, Started: true}, os.ErrPermission
 		},
 	}

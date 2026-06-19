@@ -74,7 +74,7 @@ func TestRegisteredSpecialistToolsLifecycle(t *testing.T) {
 				"",
 			}, "\n")), 0o600)
 		},
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			if binaryPath != "/usr/local/bin/zero" {
 				t.Fatalf("resume binaryPath = %q", binaryPath)
 			}

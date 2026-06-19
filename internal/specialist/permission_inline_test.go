@@ -34,7 +34,7 @@ func TestTaskToolForwardsPermissionMode(t *testing.T) {
 						ResolvedTools: []string{"grep", "read_file"},
 					}}}, nil
 				},
-				RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+				RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 					gotArgs = append([]string(nil), args...)
 					return ChildRunResult{Events: []streamjson.Event{
 						{Type: streamjson.EventRunStart, SessionID: "child_task"},
@@ -72,7 +72,7 @@ func TestRunFreshUsesInlineManifestWithoutRegistryLookup(t *testing.T) {
 		Load: func(LoadOptions) (LoadResult, error) {
 			return LoadResult{Specialists: []Manifest{}}, nil
 		},
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			ran = true
 			gotArgs = append([]string(nil), args...)
 			return ChildRunResult{Events: []streamjson.Event{

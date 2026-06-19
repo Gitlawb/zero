@@ -33,7 +33,7 @@ func TestTaskToolRunsForegroundSpecialist(t *testing.T) {
 				ResolvedTools: []string{"grep", "read_file"},
 			}}}, nil
 		},
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			gotBinary = binaryPath
 			gotArgs = append([]string(nil), args...)
 			return ChildRunResult{
@@ -110,7 +110,7 @@ func TestTaskToolRunsResumeSpecialist(t *testing.T) {
 				ResolvedTools: []string{"read_file"},
 			}}}, nil
 		},
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			gotArgs = append([]string(nil), args...)
 			return ChildRunResult{Events: []streamjson.Event{{Type: streamjson.EventFinal, Text: "resumed"}}}, nil
 		},
@@ -139,7 +139,7 @@ func TestTaskToolRunsResumeSpecialist(t *testing.T) {
 func TestTaskToolRejectsBackgroundResume(t *testing.T) {
 	calledRunChild := false
 	executor := Executor{
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			calledRunChild = true
 			return ChildRunResult{}, nil
 		},
@@ -301,7 +301,7 @@ func TestTaskToolCleansPromptFileAfterChildRun(t *testing.T) {
 				ResolvedTools: []string{"read_file"},
 			}}}, nil
 		},
-		RunChild: func(ctx context.Context, binaryPath string, args []string) (ChildRunResult, error) {
+		RunChild: func(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 			if _, err := os.Stat(promptFile); err != nil {
 				t.Fatalf("prompt file should exist during child run: %v", err)
 			}

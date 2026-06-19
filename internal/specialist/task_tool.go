@@ -107,6 +107,7 @@ func (tool *TaskTool) RunWithOptions(ctx context.Context, args map[string]any, o
 		// child (exec.go specialistAutonomy). Dropping this made every Task
 		// sub-agent run at "--auto high" (unsafe) regardless of the parent.
 		PermissionMode: options.PermissionMode,
+		Progress:       options.Progress,
 	})
 	if err != nil {
 		return taskError(err)
