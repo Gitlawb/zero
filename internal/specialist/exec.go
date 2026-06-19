@@ -107,6 +107,9 @@ type TaskRunOptions struct {
 	// other value is fail-safe "low", so the child never gains more authority
 	// than the parent.
 	PermissionMode string
+	// Progress, when set, is called with each stream-json event emitted by the
+	// child process while it runs. nil is a no-op.
+	Progress func(streamjson.Event)
 }
 
 // specialistAutonomy maps a parent permission mode to the child's "--auto"

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Gitlawb/zero/internal/streamjson"
 )
 
 type Registry struct {
@@ -34,6 +35,11 @@ type RunOptions struct {
 	// only when listed in it.
 	EnabledTools  []string
 	DisabledTools []string
+	// Progress, when set, is called with each stream-json event emitted by a
+	// specialist child process while it runs. Used by the TUI to show live
+	// tool-call progress in the specialist card. nil is a no-op (the default
+	// for every non-Task tool).
+	Progress func(streamjson.Event)
 }
 
 type sandboxAwareTool interface {
