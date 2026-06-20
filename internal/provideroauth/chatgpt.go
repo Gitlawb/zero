@@ -20,6 +20,11 @@ import (
 // authorization server populates it on the public Codex CLI client.
 const chatgptAccountClaim = "chatgpt_account_id"
 
+// chatgptCallbackPort is the fixed loopback port ChatGPT's public Codex CLI
+// client registration requires in its redirect_uri. Unlike the OS-assigned
+// port other OAuth flows use, this must be exactly 1455.
+const chatgptCallbackPort = 1455
+
 // ChatGPTOptions configures the ChatGPT (Codex) login flow.
 type ChatGPTOptions struct {
 	// Env supplies env-style overrides; nil falls back to the process environment.
@@ -92,13 +97,16 @@ func ChatGPTLogin(ctx context.Context, opts ChatGPTOptions) (oauth.Token, error)
 	if err != nil {
 		return oauth.Token{}, fmt.Errorf("provideroauth: generate CSRF state: %w", err)
 	}
-	listener, err := oauth.NewLoopbackListenerOnPort(state, 1455)
+	listener, err := oauth.NewLoopbackListenerOnPort(state, chatgptCallbackPort)
 	if err != nil {
-		return oauth.Token{}, fmt.Errorf("provideroauth: start loopback listener: %w", err)
+		return oauth.Token{}, fmt.Errorf("provideroauth: start loopback listener on port %d (close any other Zero or Codex login already running and retry): %w", chatgptCallbackPort, err)
 	}
 	defer listener.Close()
 
-	redirectURI := "http://localhost:1455/auth/callback"
+	// ChatGPT's client registration requires the redirect_uri host to be
+	// "localhost" (not 127.0.0.1) at the fixed callback path. The listener still
+	// binds 127.0.0.1 and accepts /auth/callback.
+	redirectURI := listener.RedirectURIWithHost("localhost", "/auth/callback")
 	// ChatGPT's authorize endpoint requires these extra params (the Codex CLI
 	// sends them too) — without them it rejects with authorize_hydra_invalid_request.
 	chatgptExtraParams := map[string]string{

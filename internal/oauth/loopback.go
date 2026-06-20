@@ -70,12 +70,6 @@ func (l *LoopbackListener) RedirectURIWithHost(host, path string) string {
 	return fmt.Sprintf("http://%s:%s%s", host, port, path)
 }
 
-// Port returns the OS-assigned TCP port the listener is bound on.
-func (l *LoopbackListener) Port() string {
-	_, port, _ := net.SplitHostPort(l.listener.Addr().String())
-	return port
-}
-
 func (l *LoopbackListener) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/callback" && r.URL.Path != "/auth/callback" {
 		http.NotFound(w, r)
