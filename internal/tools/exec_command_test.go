@@ -296,29 +296,35 @@ func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
 		t.Fatalf("session_id is not numeric: %v", err)
 	}
 
-	// Send the interrupt, then wait deterministically for the process to be
-	// reaped (session.done closes) before asserting. The previous version relied
-	// on the write_stdin yield window (1000ms) being long enough for the async
-	// SIGKILL + reap to land, which flaked on slow CI (notably Windows smoke).
-	// Waiting on done removes the timing dependence: a generous safety timeout
-	// fails loudly if the kill genuinely hangs, but the common case returns the
-	// instant the process exits.
+	// Capture the live session BEFORE the interrupt so we can wait on its done
+	// channel afterwards (write_stdin removes a finished session from the
+	// manager, so manager.get would miss it post-interrupt).
 	session, ok := manager.get(sessionID)
 	if !ok {
 		t.Fatalf("session %d not found after start", sessionID)
 	}
-	session.terminate()
+
+	// The operation under test: write_stdin "\x03" must itself terminate the
+	// session (exec_command.go's Ctrl-C branch). This is what the regression
+	// guards — terminating the session here directly would let the test pass even
+	// if that branch were deleted.
+	interrupted := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "\x03",
+		"yield_time_ms": 1000,
+	})
+
+	// De-flake: wait deterministically for the process to be reaped rather than
+	// relying on the 1000ms yield window being long enough for the async
+	// SIGKILL + reap to land (which flaked on slow CI, notably Windows smoke). A
+	// generous safety timeout fails loudly if the kill genuinely hangs; the
+	// common case returns the instant the process exits.
 	select {
 	case <-session.done:
 	case <-time.After(30 * time.Second):
 		t.Fatalf("interrupted session %d was not reaped within 30s", sessionID)
 	}
 
-	interrupted := writeTool.Run(context.Background(), map[string]any{
-		"session_id":    sessionID,
-		"chars":         "\x03",
-		"yield_time_ms": 1000,
-	})
 	if interrupted.Status != StatusOK {
 		t.Fatalf("interrupted session status = %s: %s", interrupted.Status, interrupted.Output)
 	}
