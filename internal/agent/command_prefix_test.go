@@ -10,6 +10,14 @@ func TestProposedCommandPrefixUsesSafeSimpleCommands(t *testing.T) {
 	}
 }
 
+func TestProposedCommandPrefixSupportsExecCommand(t *testing.T) {
+	got := proposedCommandPrefix("exec_command", map[string]any{"cmd": "go test ./..."})
+	want := []string{"go", "test", "./..."}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("prefix = %#v, want %#v", got, want)
+	}
+}
+
 func TestProposedCommandPrefixHonorsValidatedRequestedPrefix(t *testing.T) {
 	got := proposedCommandPrefix("bash", map[string]any{
 		"command":     "git status --short",

@@ -316,6 +316,57 @@ func TestRunAdvertisesWebFetchInAutoMode(t *testing.T) {
 	}
 }
 
+func TestRunRejectsLocalWebFetchBeforePermissionRequest(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewWebFetchTool())
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "web_fetch"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"url":"http://localhost:8000/index.html"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+
+	result, err := Run(context.Background(), "fetch local page", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "unexpected permission request"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("expected no permission request, got %#v", requests)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
+	}
+	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if lastMessage.ToolCallID != "call-1" {
+		t.Fatalf("expected tool_call_id call-1, got %q", lastMessage.ToolCallID)
+	}
+	if strings.Contains(lastMessage.Content, "Permission required") {
+		t.Fatalf("local web_fetch must not request permission first: %q", lastMessage.Content)
+	}
+	if !strings.Contains(lastMessage.Content, "bash with curl") {
+		t.Fatalf("expected curl guidance, got %q", lastMessage.Content)
+	}
+}
+
 func TestRunAdvertisesAllowedWebSearchInAutoMode(t *testing.T) {
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
 	registry := tools.NewRegistry()

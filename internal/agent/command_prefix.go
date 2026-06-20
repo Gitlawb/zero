@@ -8,7 +8,7 @@ import (
 )
 
 func proposedCommandPrefix(toolName string, args map[string]any) []string {
-	if toolName != "bash" {
+	if !isShellCommandTool(toolName) {
 		return nil
 	}
 	command, ok := firstStringArg(args, "command", "cmd", "script", "shell")
@@ -32,7 +32,7 @@ func proposedCommandPrefix(toolName string, args map[string]any) []string {
 }
 
 func matchCommandPrefix(toolName string, args map[string]any, options Options) (sandbox.CommandPrefixGrant, bool, bool) {
-	if toolName != "bash" || options.Sandbox == nil {
+	if !isShellCommandTool(toolName) || options.Sandbox == nil {
 		return sandbox.CommandPrefixGrant{}, false, false
 	}
 	command, ok := firstStringArg(args, "command", "cmd", "script", "shell")
@@ -50,6 +50,10 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 		return grant, true, true
 	}
 	return sandbox.CommandPrefixGrant{}, false, false
+}
+
+func isShellCommandTool(toolName string) bool {
+	return toolName == "bash" || toolName == "exec_command"
 }
 
 func firstStringArg(args map[string]any, names ...string) (string, bool) {

@@ -23,6 +23,7 @@ const (
 	webFetchTimeout         = 10 * time.Second
 	webFetchRedirectLimit   = 5
 	webFetchErrorBodyLimit  = 4 * 1024
+	webFetchPublicOnlyHint  = "web_fetch only supports public remote HTTP/HTTPS URLs. For localhost or private network URLs, use bash with curl so sandbox network permission can apply."
 )
 
 type webFetchTool struct {
@@ -104,13 +105,13 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 	return webFetchTool{
 		baseTool: baseTool{
 			name:        "web_fetch",
-			description: "Fetch text from an http or https URL after network permission is granted.",
+			description: "Fetch text from a public remote HTTP or HTTPS URL after network permission is granted. Do not use for localhost, private network URLs, or local dev servers; use bash with curl for those.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"url": {
 						Type:        "string",
-						Description: "HTTP or HTTPS URL to fetch.",
+						Description: "Public remote HTTP or HTTPS URL to fetch. Use bash with curl for localhost or private network URLs.",
 					},
 					"max_bytes": {
 						Type:        "integer",
@@ -139,6 +140,20 @@ func (tool webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.run(ctx, args)
 }
 
+func (tool webFetchTool) RejectBeforePermission(args map[string]any) (Result, bool) {
+	rawURL, err := stringArg(args, "url", "", true)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error()), true
+	}
+	if _, err := intArg(args, "max_bytes", defaultWebFetchMaxBytes, 1, maxWebFetchMaxBytes); err != nil {
+		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error()), true
+	}
+	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
+		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error()), true
+	}
+	return Result{}, false
+}
+
 // RunWithSandbox follows the normal web_fetch path. The sandbox network policy
 // gates sandboxed shell egress; web_fetch is an in-process tool guarded by the
 // permission flow plus URL, redirect, host, and port safety checks.
@@ -154,6 +169,9 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	maxBytes, err := intArg(args, "max_bytes", defaultWebFetchMaxBytes, 1, maxWebFetchMaxBytes)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for web_fetch: " + err.Error())
+	}
+	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
+		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
 	}
 
 	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver)
@@ -328,7 +346,30 @@ func validateWebFetchURL(ctx context.Context, rawURL string, resolver webFetchRe
 	return parsed, nil
 }
 
+func validateWebFetchURLBeforePermission(rawURL string) error {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return fmt.Errorf("url is required")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	return validateParsedWebFetchURLBeforePermission(parsed)
+}
+
 func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver webFetchResolver) error {
+	if err := validateParsedWebFetchURLBeforePermission(parsed); err != nil {
+		return err
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if err := rejectUnsafeWebFetchHost(ctx, host, resolver); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateParsedWebFetchURLBeforePermission(parsed *url.URL) error {
 	if parsed == nil {
 		return fmt.Errorf("url is required")
 	}
@@ -346,10 +387,10 @@ func validateParsedWebFetchURL(ctx context.Context, parsed *url.URL, resolver we
 	if strings.Contains(host, "%") {
 		return fmt.Errorf("URL host zones are not allowed")
 	}
-	if err := validateWebFetchPort(parsed); err != nil {
+	if err := rejectUnsafeWebFetchLiteralHost(host); err != nil {
 		return err
 	}
-	if err := rejectUnsafeWebFetchHost(ctx, host, resolver); err != nil {
+	if err := validateWebFetchPort(parsed); err != nil {
 		return err
 	}
 	return nil
@@ -371,6 +412,30 @@ func validateWebFetchPort(parsed *url.URL) error {
 		}
 	}
 	return fmt.Errorf("only default ports are allowed for %s URLs", parsed.Scheme)
+}
+
+func rejectUnsafeWebFetchLiteralHost(host string) error {
+	normalized := strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
+	if normalized == "" {
+		return fmt.Errorf("URL host is required")
+	}
+	switch {
+	case normalized == "localhost" || strings.HasSuffix(normalized, ".localhost"):
+		return errors.New(webFetchPublicOnlyHint)
+	case normalized == "metadata" || normalized == "metadata.google.internal":
+		return errors.New(webFetchPublicOnlyHint)
+	case strings.HasSuffix(normalized, ".local"):
+		return errors.New(webFetchPublicOnlyHint)
+	}
+
+	addr, err := netip.ParseAddr(normalized)
+	if err != nil {
+		return nil
+	}
+	if err := rejectUnsafeWebFetchAddr(addr); err != nil {
+		return errors.New(webFetchPublicOnlyHint)
+	}
+	return nil
 }
 
 func rejectUnsafeWebFetchHost(ctx context.Context, host string, resolver webFetchResolver) error {

@@ -33,6 +33,7 @@ var scopeArgKeys = []struct {
 	{"directory", ScopeDir},
 	{"dir", ScopeDir},
 	{"cwd", ScopeDir},
+	{"workdir", ScopeDir},
 }
 
 // DeriveScope inspects a tool call's arguments and returns the raw

@@ -572,6 +572,13 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 			DenialReason: DenialFiltered,
 		}, nil
 	}
+	if toolFound {
+		if rejecter, ok := tool.(tools.PrePermissionRejecter); ok {
+			if result, rejected := rejecter.RejectBeforePermission(args); rejected {
+				return toolResultFromPrePermissionReject(call, result), nil
+			}
+		}
+	}
 
 	// ask_user is intercepted in the loop (like permissions) so the question can
 	// be routed to an interactive front-end instead of blocking inside the tool.
@@ -824,6 +831,39 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
 	}, nil
+}
+
+func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolResult {
+	output, outputRedacted := scrubInterceptedOutput(result.Output)
+	display := result.Display
+	summary, summaryRedacted := scrubInterceptedOutput(display.Summary)
+	display.Summary = summary
+
+	meta := result.Meta
+	metaRedacted := false
+	if len(result.Meta) > 0 {
+		meta = make(map[string]string, len(result.Meta))
+		for key, value := range result.Meta {
+			scrubbed := redaction.RedactString(value, redaction.Options{})
+			if scrubbed != value {
+				metaRedacted = true
+			}
+			meta[key] = scrubbed
+		}
+	}
+
+	return ToolResult{
+		ToolCallID:     call.ID,
+		Name:           call.Name,
+		Status:         result.Status,
+		Output:         output,
+		Meta:           meta,
+		Redacted:       result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
+		ChangedFiles:   result.ChangedFiles,
+		Display:        display,
+		LoadedTools:    loadedToolsFromResult(meta),
+		RequestedModel: meta["escalate_to_model"],
+	}
 }
 
 // dispatchBeforeTool runs configured beforeTool hooks for a tool call. A hook
@@ -1646,7 +1686,7 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 	decisions := []PermissionDecisionAction{PermissionDecisionAllow}
 	if options.Sandbox != nil {
 		decisions = append(decisions, PermissionDecisionAllowForSession)
-		if event.ToolName == "bash" && len(event.CommandPrefix) > 0 && !networkSandboxPrompt(event) {
+		if isShellCommandTool(event.ToolName) && len(event.CommandPrefix) > 0 && !networkSandboxPrompt(event) {
 			decisions = append(decisions, PermissionDecisionAllowPrefix)
 			if options.Sandbox.CanPersistGrants() {
 				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
@@ -1656,10 +1696,10 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)
 		}
 	}
-	switch event.ToolName {
-	case "bash":
+	switch {
+	case isShellCommandTool(event.ToolName):
 		decisions = append(decisions, PermissionDecisionDeny, PermissionDecisionCancel)
-	case "apply_patch":
+	case event.ToolName == "apply_patch":
 		decisions = append(decisions, PermissionDecisionCancel)
 	default:
 		decisions = append(decisions, PermissionDecisionDeny)
@@ -1668,7 +1708,7 @@ func availablePermissionDecisions(event PermissionEvent, options Options) []Perm
 }
 
 func networkSandboxPrompt(event PermissionEvent) bool {
-	return event.ToolName == "bash" &&
+	return isShellCommandTool(event.ToolName) &&
 		event.Reason == sandbox.ReasonNetworkBlocked &&
 		sandbox.HasRiskCategory(event.Risk, "network")
 }
@@ -1711,7 +1751,7 @@ func grantFilesystemForSandboxPrompt(event PermissionEvent, scope sandbox.Permis
 
 func permissionSupportsPersistentDecision(toolName string) bool {
 	switch toolName {
-	case "bash", "apply_patch":
+	case "bash", "exec_command", "write_stdin", "apply_patch":
 		return false
 	default:
 		return true

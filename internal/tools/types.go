@@ -108,6 +108,13 @@ type ArgsPermissioner interface {
 	PermissionForArgs(args map[string]any) Permission
 }
 
+// PrePermissionRejecter lets a tool reject a call that cannot safely or validly
+// run before any permission prompt is shown. Implementations must be purely
+// local and deterministic: no filesystem, process, DNS, or network access.
+type PrePermissionRejecter interface {
+	RejectBeforePermission(args map[string]any) (Result, bool)
+}
+
 type baseTool struct {
 	name        string
 	description string

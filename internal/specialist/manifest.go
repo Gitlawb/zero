@@ -83,7 +83,7 @@ var knownMetadataKeys = map[string]bool{
 var toolCategories = map[string][]string{
 	"read-only": {"read_file", "read_minified_file", "list_directory", "grep", "glob"},
 	"edit":      {"read_file", "read_minified_file", "list_directory", "grep", "glob", "write_file", "edit_file", "apply_patch"},
-	"execute":   {"read_file", "read_minified_file", "list_directory", "grep", "glob", "bash"},
+	"execute":   {"read_file", "read_minified_file", "list_directory", "grep", "glob", "exec_command", "write_stdin", "bash"},
 	"plan":      {"update_plan"},
 }
 
@@ -111,6 +111,8 @@ var knownToolNames = map[string]bool{
 	"edit_file":           true,
 	"apply_patch":         true,
 	"update_plan":         true,
+	"exec_command":        true,
+	"write_stdin":         true,
 	"bash":                true,
 	"web_fetch":           true,
 	"web_search":          true,

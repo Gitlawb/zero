@@ -160,6 +160,25 @@ func TestRegistryRequiresPermissionForWebFetch(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsLocalWebFetchBeforePermission(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(NewWebFetchTool())
+
+	result := registry.Run(context.Background(), "web_fetch", map[string]any{
+		"url": "http://localhost:8000/index.html",
+	})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s", result.Status)
+	}
+	if strings.Contains(result.Output, "Permission required") {
+		t.Fatalf("local web_fetch must not request permission first: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "bash with curl") {
+		t.Fatalf("expected curl guidance, got %q", result.Output)
+	}
+}
+
 func TestRegistryReportsUnknownTools(t *testing.T) {
 	result := NewRegistry().Run(context.Background(), "missing", map[string]any{})
 

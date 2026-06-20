@@ -48,22 +48,28 @@ func runBashToolHelper(command string) {
 	}
 }
 
-func TestCoreToolsExposeBashTool(t *testing.T) {
+func TestCoreToolsExposeShellTools(t *testing.T) {
 	toolset := CoreTools(t.TempDir())
 	byName := make(map[string]Tool, len(toolset))
 	for _, tool := range toolset {
 		byName[tool.Name()] = tool
 	}
 
-	tool, ok := byName["bash"]
-	if !ok {
-		t.Fatalf("expected core tools to include bash")
-	}
-	if tool.Safety().SideEffect != SideEffectShell {
-		t.Fatalf("bash side effect = %s, want shell", tool.Safety().SideEffect)
-	}
-	if tool.Safety().Permission != PermissionPrompt {
-		t.Fatalf("bash permission = %s, want prompt", tool.Safety().Permission)
+	for _, name := range []string{"exec_command", "write_stdin", "bash"} {
+		tool, ok := byName[name]
+		if !ok {
+			t.Fatalf("expected core tools to include %s", name)
+		}
+		if tool.Safety().SideEffect != SideEffectShell {
+			t.Fatalf("%s side effect = %s, want shell", name, tool.Safety().SideEffect)
+		}
+		wantPermission := PermissionPrompt
+		if name == "write_stdin" {
+			wantPermission = PermissionAllow
+		}
+		if tool.Safety().Permission != wantPermission {
+			t.Fatalf("%s permission = %s, want %s", name, tool.Safety().Permission, wantPermission)
+		}
 	}
 }
 

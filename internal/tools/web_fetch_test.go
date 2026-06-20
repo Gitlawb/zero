@@ -151,6 +151,126 @@ func TestWebFetchToolRejectsUnsafeURLsBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestWebFetchRejectBeforePermissionClassifiesURLs(t *testing.T) {
+	tool, ok := NewWebFetchTool().(PrePermissionRejecter)
+	if !ok {
+		t.Fatalf("NewWebFetchTool returned %T, want PrePermissionRejecter", NewWebFetchTool())
+	}
+
+	cases := []struct {
+		name         string
+		args         map[string]any
+		wantRejected bool
+		wantContains string
+	}{
+		{
+			name: "public remote",
+			args: map[string]any{"url": "https://example.com/docs"},
+		},
+		{
+			name: "hostname needs resolver later",
+			args: map[string]any{"url": "https://private.example/status"},
+		},
+		{
+			name:         "localhost custom port",
+			args:         map[string]any{"url": "http://localhost:8000/status"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "loopback ipv4",
+			args:         map[string]any{"url": "http://127.0.0.1/admin"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "loopback ipv6",
+			args:         map[string]any{"url": "http://[::1]/admin"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "private ipv4",
+			args:         map[string]any{"url": "http://10.0.0.1/status"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "private ipv6",
+			args:         map[string]any{"url": "http://[fc00::1]/status"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "localhost suffix",
+			args:         map[string]any{"url": "http://app.localhost/status"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "local suffix",
+			args:         map[string]any{"url": "http://printer.local/status"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "metadata host",
+			args:         map[string]any{"url": "http://metadata.google.internal/latest"},
+			wantRejected: true,
+			wantContains: "bash with curl",
+		},
+		{
+			name:         "public non-default port",
+			args:         map[string]any{"url": "https://example.com:8443/docs"},
+			wantRejected: true,
+			wantContains: "default ports",
+		},
+		{
+			name:         "unsupported scheme",
+			args:         map[string]any{"url": "ftp://example.com/file"},
+			wantRejected: true,
+			wantContains: "only http and https",
+		},
+		{
+			name:         "bad max bytes",
+			args:         map[string]any{"url": "https://example.com/docs", "max_bytes": 0},
+			wantRejected: true,
+			wantContains: "Invalid arguments",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, rejected := tool.RejectBeforePermission(tc.args)
+			if rejected != tc.wantRejected {
+				t.Fatalf("rejected = %v, want %v; result=%#v", rejected, tc.wantRejected, result)
+			}
+			if tc.wantContains != "" && !strings.Contains(result.Output, tc.wantContains) {
+				t.Fatalf("expected output to contain %q, got %q", tc.wantContains, result.Output)
+			}
+		})
+	}
+}
+
+func TestWebFetchToolRejectsLocalhostBeforeDefaultPort(t *testing.T) {
+	tool := newWebFetchToolWithClient(webFetchTestClient(func(*http.Request) (*http.Response, error) {
+		t.Fatal("localhost URL should be rejected before network transport")
+		return nil, nil
+	}))
+
+	result := tool.Run(context.Background(), map[string]any{"url": "http://localhost:8000/status"})
+
+	if result.Status != StatusError {
+		t.Fatalf("expected error status, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "bash with curl") {
+		t.Fatalf("expected curl guidance, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, "default port") {
+		t.Fatalf("localhost should be classified before port validation, got %q", result.Output)
+	}
+}
+
 func TestWebFetchToolRejectsNonDefaultPorts(t *testing.T) {
 	tool := newWebFetchToolWithClient(webFetchTestClient(func(*http.Request) (*http.Response, error) {
 		t.Fatal("non-default port should be rejected before network transport")

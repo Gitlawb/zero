@@ -235,7 +235,7 @@ func requestPaths(request Request) []string {
 	// sandbox gates by arg-key name, so any alias a tool resolves but the sandbox
 	// does not inspect would let a model route a write/read around the
 	// workspace+symlink boundary.
-	for _, key := range []string{"path", "file", "file_path", "filepath", "filename", "cwd", "dir", "directory"} {
+	for _, key := range []string{"path", "file", "file_path", "filepath", "filename", "cwd", "workdir", "dir", "directory"} {
 		if value := argString(request.Args, key); value != "" {
 			paths = append(paths, value)
 		}

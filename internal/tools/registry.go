@@ -100,6 +100,11 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	if !ok {
 		return errorResult(`Error: Unknown tool "` + name + `".`)
 	}
+	if rejecter, ok := tool.(PrePermissionRejecter); ok {
+		if res, rejected := rejecter.RejectBeforePermission(args); rejected {
+			return res
+		}
+	}
 
 	sandboxGrantAuthorized := false
 	var sandboxDecision *sandbox.Decision
@@ -218,7 +223,10 @@ func CoreWriteToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 
 func CoreShellTools(workspaceRoot string) []Tool { return CoreShellToolsScoped(workspaceRoot, nil) }
 func CoreShellToolsScoped(workspaceRoot string, scope PathScope) []Tool {
+	execManager := newExecSessionManager()
 	return []Tool{
+		NewScopedExecCommandTool(workspaceRoot, scope, execManager),
+		NewWriteStdinTool(execManager),
 		NewScopedBashTool(workspaceRoot, scope),
 	}
 }
