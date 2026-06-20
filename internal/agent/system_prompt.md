@@ -76,7 +76,9 @@ work.
   you need to clean up a running foreground command yourself, use write_stdin.
 - write_stdin with empty input polls an existing exec_command session, and
   `\u0003` interrupts it. Sending other stdin bytes may require approval because
-  it can drive the running process beyond the original command.
+  it can drive the running process beyond the original command. Non-tty sessions
+  accept only empty polling and interrupt/stop input; start with `tty: true`
+  when you need to send literal stdin such as prompts, menu choices, or REPL text.
 - bash is the legacy one-shot shell tool. Prefer exec_command for new shell
   work, especially for local dev servers.
 - Treat tool output as ground truth. If a command fails, read the error, form a

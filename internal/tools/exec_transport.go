@@ -7,14 +7,23 @@ import (
 
 func startExecProcess(command *exec.Cmd, output *execOutputBuffer, ttyRequested bool) (io.WriteCloser, bool, func(), error) {
 	if ttyRequested {
-		if stdin, cleanup, err := startPTYProcess(command, output); err == nil {
+		if stdin, cleanup, err := startPTYProcessFunc(command, output); err == nil {
 			return stdin, true, cleanup, nil
 		}
-		command.Stdin = nil
-		command.Stdout = nil
-		command.Stderr = nil
+		resetExecCommandForPipeFallback(command)
 	}
 	return startPipeProcess(command, output)
+}
+
+var startPTYProcessFunc = startPTYProcess
+
+func resetExecCommandForPipeFallback(command *exec.Cmd) {
+	command.Stdin = nil
+	command.Stdout = nil
+	command.Stderr = nil
+	command.SysProcAttr = nil
+	command.Cancel = nil
+	command.WaitDelay = 0
 }
 
 func startPipeProcess(command *exec.Cmd, output *execOutputBuffer) (io.WriteCloser, bool, func(), error) {

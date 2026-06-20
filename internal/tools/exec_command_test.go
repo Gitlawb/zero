@@ -2,10 +2,14 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -129,6 +133,121 @@ func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
 			t.Fatalf("session %d was not reaped; manager has %d sessions", sessionID, manager.len())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestStopAllWaitsForSessionsToExit(t *testing.T) {
+	manager := newExecSessionManager()
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	cancelled := make(chan struct{})
+	session := &execSession{
+		id:     1000,
+		output: newExecOutputBuffer(),
+		done:   make(chan struct{}),
+	}
+	session.cancel = func() {
+		close(cancelled)
+		go func() {
+			<-release
+			session.markDone(nil, -1)
+		}()
+	}
+	manager.sessions[session.id] = session
+
+	go func() {
+		manager.stopAll()
+		close(returned)
+	}()
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("stopAll did not terminate the session")
+	}
+	select {
+	case <-returned:
+		t.Fatal("stopAll returned before session.done closed")
+	default:
+	}
+	close(release)
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("stopAll did not return after session.done closed")
+	}
+}
+
+func TestStoreEvictsLiveSessionWithExplanation(t *testing.T) {
+	manager := newExecSessionManager()
+	manager.maxSessions = 9
+	evicted := &execSession{
+		id:         1000,
+		startedAt:  time.Unix(1000, 0),
+		lastUsedAt: time.Unix(1000, 0),
+		output:     newExecOutputBuffer(),
+		done:       make(chan struct{}),
+	}
+	evictedDone := make(chan struct{})
+	evicted.cancel = func() { close(evictedDone) }
+	manager.sessions[evicted.id] = evicted
+	for id := 1001; id <= 1008; id++ {
+		manager.sessions[id] = &execSession{
+			id:         id,
+			startedAt:  time.Unix(int64(id), 0),
+			lastUsedAt: time.Unix(int64(id), 0),
+			output:     newExecOutputBuffer(),
+			done:       make(chan struct{}),
+		}
+	}
+
+	manager.store(&execSession{
+		id:         1009,
+		startedAt:  time.Unix(1009, 0),
+		lastUsedAt: time.Unix(1009, 0),
+		output:     newExecOutputBuffer(),
+		done:       make(chan struct{}),
+	})
+
+	select {
+	case <-evictedDone:
+	case <-time.After(time.Second):
+		t.Fatal("live pruned session was not terminated")
+	}
+	if got := evicted.output.recentString(); !strings.Contains(got, "session evicted") {
+		t.Fatalf("evicted session output = %q, want explanation", got)
+	}
+	if _, ok := manager.get(evicted.id); !ok {
+		t.Fatal("evicted live session should remain visible until its reaper removes it")
+	}
+}
+
+func TestStartExecProcessFallsBackAfterPTYStartMutation(t *testing.T) {
+	original := startPTYProcessFunc
+	t.Cleanup(func() { startPTYProcessFunc = original })
+	startPTYProcessFunc = func(command *exec.Cmd, _ *execOutputBuffer) (io.WriteCloser, func(), error) {
+		command.SysProcAttr = &syscall.SysProcAttr{}
+		command.Cancel = func() error { return nil }
+		command.WaitDelay = time.Second
+		return nil, nil, errors.New("pty start failed")
+	}
+
+	command := exec.CommandContext(context.Background(), os.Args[0], "--zero-bash-helper", "success")
+	output := newExecOutputBuffer()
+	stdin, tty, cleanup, err := startExecProcess(command, output, true)
+	if err != nil {
+		t.Fatalf("startExecProcess fallback failed: %v", err)
+	}
+	if tty {
+		t.Fatal("fallback process must report tty=false")
+	}
+	_ = stdin.Close()
+	if err := command.Wait(); err != nil {
+		t.Fatalf("fallback command wait failed: %v", err)
+	}
+	cleanup()
+	if got := output.drainString(); !strings.Contains(got, "hello from bash") {
+		t.Fatalf("fallback output = %q", got)
 	}
 }
 
@@ -281,6 +400,38 @@ func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
 		}
 		if result.Meta["interrupted"] != "true" {
 			t.Fatalf("stop input %q should report interrupted metadata, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+	}
+}
+
+func TestShouldInterruptExecSession(t *testing.T) {
+	cases := []struct {
+		chars string
+		tty   bool
+		want  bool
+	}{
+		{chars: "\x03", tty: false, want: true},
+		{chars: `\u0003`, tty: false, want: true},
+		{chars: `\\u0003`, tty: false, want: true},
+		{chars: "^C", tty: false, want: true},
+		{chars: "ctrl-c", tty: false, want: true},
+		{chars: "control-c", tty: false, want: true},
+		{chars: "sigint", tty: false, want: true},
+		{chars: "interrupt", tty: false, want: true},
+		{chars: "q", tty: false, want: true},
+		{chars: "quit", tty: false, want: true},
+		{chars: "exit\n", tty: false, want: true},
+		{chars: "stop", tty: false, want: true},
+		{chars: "kill", tty: false, want: true},
+		{chars: "terminate", tty: false, want: true},
+		{chars: "exit\n", tty: true, want: false},
+		{chars: "quit", tty: true, want: false},
+		{chars: "hello\n", tty: false, want: false},
+		{chars: "hello\n", tty: true, want: false},
+	}
+	for _, tc := range cases {
+		if got := shouldInterruptExecSession(tc.chars, tc.tty); got != tc.want {
+			t.Fatalf("shouldInterruptExecSession(%q, tty=%v) = %v, want %v", tc.chars, tc.tty, got, tc.want)
 		}
 	}
 }

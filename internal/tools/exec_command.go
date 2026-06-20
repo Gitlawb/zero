@@ -28,6 +28,8 @@ const (
 	completedSessionRetention = 30 * time.Second
 	maxExecSessions           = 64
 	recentExecOutputBytes     = 4096
+	execSessionStopTimeout    = 3 * time.Second
+	execSessionEvictedMessage = "[zero] session evicted: too many background terminals\n"
 )
 
 type execSessionManager struct {
@@ -60,15 +62,20 @@ func (manager *execSessionManager) allocateID() int {
 func (manager *execSessionManager) store(session *execSession) {
 	manager.mu.Lock()
 	var pruned *execSession
+	removePruned := false
 	if manager.maxSessions > 0 && len(manager.sessions) >= manager.maxSessions {
 		pruned = manager.sessionToPruneLocked()
 		if pruned != nil {
-			delete(manager.sessions, pruned.id)
+			removePruned = pruned.doneClosed()
+			if removePruned {
+				delete(manager.sessions, pruned.id)
+			}
 		}
 	}
 	manager.sessions[session.id] = session
 	manager.mu.Unlock()
-	if pruned != nil {
+	if pruned != nil && !removePruned {
+		pruned.output.Write([]byte(execSessionEvictedMessage))
 		pruned.terminate()
 	}
 }
@@ -169,8 +176,34 @@ func (manager *execSessionManager) stopAll() []int {
 		session.terminate()
 		ids = append(ids, session.id)
 	}
+	waitForExecSessions(sessions, execSessionStopTimeout)
 	sort.Ints(ids)
 	return ids
+}
+
+func waitForExecSessions(sessions []*execSession, timeout time.Duration) {
+	if timeout <= 0 || len(sessions) == 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for _, session := range sessions {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-session.done:
+		case <-timer.C:
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
 }
 
 type ExecSessionSnapshot struct {
