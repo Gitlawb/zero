@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -201,6 +202,110 @@ func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
 	}
 	if interrupted.Meta["exit_code"] == "" {
 		t.Fatalf("interrupted session should report exit_code, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
+	}
+}
+
+func TestWriteStdinRejectsInputForNonTTYSession(t *testing.T) {
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           helperCommand("long-sleep"),
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	result := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "hello\n",
+		"yield_time_ms": 10,
+	})
+	if result.Status != StatusError {
+		t.Fatalf("write_stdin status = %s, want error", result.Status)
+	}
+	if !strings.Contains(result.Output, "does not accept stdin") {
+		t.Fatalf("unexpected output: %q", result.Output)
+	}
+	manager.stop(sessionID)
+}
+
+func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pty transport is currently implemented for linux")
+	}
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           "read line; echo got:$line",
+		"tty":           true,
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	if start.Meta["tty"] != "true" {
+		t.Fatalf("expected tty metadata, got %#v output=%q", start.Meta, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	result := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"chars":         "hello\n",
+		"yield_time_ms": 1000,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("write_stdin status = %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "got:hello") {
+		t.Fatalf("expected PTY input output, got %q", result.Output)
+	}
+	if result.Meta["exit_code"] != "0" {
+		t.Fatalf("expected exited session, got meta=%#v output=%q", result.Meta, result.Output)
+	}
+}
+
+func TestExecSessionSnapshotsAndStopAll(t *testing.T) {
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager).(execCommandTool)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           helperCommand("long-sleep"),
+		"yield_time_ms": 10,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	snapshots := execTool.ExecSessions()
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one session snapshot, got %#v", snapshots)
+	}
+	if snapshots[0].ID != sessionID || snapshots[0].Command == "" || snapshots[0].Status != "running" {
+		t.Fatalf("unexpected snapshot: %#v", snapshots[0])
+	}
+
+	stopped := execTool.StopAllExecSessions()
+	if len(stopped) != 1 || stopped[0] != sessionID {
+		t.Fatalf("StopAllExecSessions = %#v, want [%d]", stopped, sessionID)
 	}
 }
 

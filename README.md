@@ -187,7 +187,9 @@ into clean markdown locally, with no third party. For localhost/private dev-serv
 URLs, use shell commands such as `curl` through `exec_command` so sandbox network
 permission applies. For local dev servers, start the server in the foreground with
 `exec_command` and keep the returned `session_id`; use `write_stdin` to poll or
-interrupt it.
+interrupt it. Use `/ps` to list running background terminals and `/stop` or
+`/stop <session_id>` to close them. Interactive terminal-style commands can set
+`tty: true` on `exec_command` so stdin works like a terminal session.
 
 For **search**, JS-rendered scraping,
 whole-site crawls, PDF→markdown, and structured extraction, Zero ships the

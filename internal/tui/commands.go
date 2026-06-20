@@ -15,6 +15,8 @@ const (
 	commandTools
 	commandMCP
 	commandPermissions
+	commandPS
+	commandStop
 	commandSandboxSetup
 	commandProvider
 	commandModel
@@ -102,6 +104,20 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupRuntime,
 		description: "Show the active permission mode and sandbox grants.",
 		kind:        commandPermissions,
+	},
+	{
+		name:        "/ps",
+		usage:       "/ps",
+		group:       commandGroupRuntime,
+		description: "List running background terminal sessions.",
+		kind:        commandPS,
+	},
+	{
+		name:        "/stop",
+		usage:       "/stop [session_id]",
+		group:       commandGroupRuntime,
+		description: "Stop running background terminal sessions.",
+		kind:        commandStop,
 	},
 	{
 		name:        "/sandbox-setup",

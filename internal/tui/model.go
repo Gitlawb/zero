@@ -2785,6 +2785,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	case commandPermissions:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.permissionsText()})
 		return m, nil
+	case commandPS:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.backgroundTerminalsText()})
+		return m, nil
+	case commandStop:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.stopBackgroundTerminalsText(command.text)})
+		return m, nil
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:

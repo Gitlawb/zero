@@ -204,6 +204,9 @@ func (m model) statusLine(width int) string {
 	}
 
 	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
+	if summary := m.backgroundTerminalSummary(); summary != "" {
+		left += separator + zeroTheme.muted.Render(summary)
+	}
 
 	rightGroups := []string{}
 	// The context-fill gauge needs the room a Medium+ terminal gives; below that

@@ -391,7 +391,7 @@ func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
 	if strings.Contains(plain, "more") {
 		t.Fatalf("bare slash palette should not render a more-count row, got %q", plain)
 	}
-	if !strings.Contains(plain, "│ ❯ provider") || !strings.Contains(plain, "│   context") {
+	if !strings.Contains(plain, "│ ❯ provider") || !strings.Contains(plain, "│   stop") {
 		t.Fatalf("top of palette should render first visible command window, got %q", plain)
 	}
 	if strings.Contains(plain, "compact") {

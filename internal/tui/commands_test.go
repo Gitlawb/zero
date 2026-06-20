@@ -951,6 +951,24 @@ func TestParseImageCommand(t *testing.T) {
 	}
 }
 
+func TestParseBackgroundTerminalCommands(t *testing.T) {
+	cases := []struct {
+		input string
+		kind  commandKind
+		text  string
+	}{
+		{input: "/ps", kind: commandPS, text: ""},
+		{input: "/stop", kind: commandStop, text: ""},
+		{input: "/stop 1000", kind: commandStop, text: "1000"},
+	}
+	for _, tc := range cases {
+		got := parseCommand(tc.input)
+		if got.kind != tc.kind || got.text != tc.text {
+			t.Fatalf("%q: got kind=%v text=%q, want kind=%v text=%q", tc.input, got.kind, got.text, tc.kind, tc.text)
+		}
+	}
+}
+
 func TestCommandSelectionRequiresInputFromUsage(t *testing.T) {
 	cases := []struct {
 		name string
