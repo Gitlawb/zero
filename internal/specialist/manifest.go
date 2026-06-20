@@ -104,6 +104,7 @@ var knownToolNames = map[string]bool{
 	"list_directory":      true,
 	"glob":                true,
 	"grep":                true,
+	"lsp_navigate":        true,
 	"skill":               true,
 	"ask_user":            true,
 	"request_permissions": true,
