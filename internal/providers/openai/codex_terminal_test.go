@@ -56,3 +56,45 @@ func TestHandleTerminalResponseNilPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleTerminalResponseFailedPayloadWithoutError(t *testing.T) {
+	p := &CodexProvider{}
+
+	// A response.failed carrying a payload whose error object is null/omitted (the
+	// reason is in status) must still surface as an error, not fall through to a
+	// clean done — the same silent-failure class the nil-payload branch guards.
+	out := make(chan zeroruntime.StreamEvent, 8)
+	st := &responsesState{}
+	p.handleTerminalResponse(context.Background(),
+		&responsesEvent{Type: responsesEventFailed, Response: &responsePayload{Status: "failed"}}, st, out)
+	close(out)
+	sawError, sawDone := false, false
+	for ev := range out {
+		switch ev.Type {
+		case zeroruntime.StreamEventError:
+			sawError = true
+		case zeroruntime.StreamEventDone:
+			sawDone = true
+		}
+	}
+	if !sawError {
+		t.Error("response.failed with a non-nil payload and nil error must emit StreamEventError, not a clean done")
+	}
+	if sawDone {
+		t.Error("a failed terminal must not also emit a clean StreamEventDone")
+	}
+	if !st.done {
+		t.Error("state.done should be set")
+	}
+
+	// A response.completed with a payload and no error remains a clean done.
+	ok := make(chan zeroruntime.StreamEvent, 8)
+	p.handleTerminalResponse(context.Background(),
+		&responsesEvent{Type: responsesEventCompleted, Response: &responsePayload{Status: "completed"}}, &responsesState{}, ok)
+	close(ok)
+	for ev := range ok {
+		if ev.Type == zeroruntime.StreamEventError {
+			t.Error("response.completed with a non-error payload must NOT emit an error")
+		}
+	}
+}

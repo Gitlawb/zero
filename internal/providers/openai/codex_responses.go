@@ -681,6 +681,24 @@ func (p *CodexProvider) handleTerminalResponse(
 		state.done = true
 		return false
 	}
+	// A response.failed carrying a payload whose `error` object is null/omitted (the
+	// backend can emit a failed terminal with the reason only in `status`) must still
+	// surface as an error — not fall through to a clean Done. Otherwise a real failure
+	// is reported as a normal successful turn, the same silent-failure class the
+	// nil-payload branch above guards (M2). A response.failed with a `status` carries
+	// it in the message for context.
+	if event.Type == responsesEventFailed || event.Response.Status == "failed" {
+		msg := "codex: response.failed with no error detail"
+		if status := strings.TrimSpace(event.Response.Status); status != "" {
+			msg = fmt.Sprintf("codex: response.failed (status %q) with no error detail", status)
+		}
+		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:  zeroruntime.StreamEventError,
+			Error: msg,
+		})
+		state.done = true
+		return false
+	}
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
 	state.done = true
 	return false
