@@ -612,11 +612,12 @@ The 35 surviving findings cluster into four underlying causes:
 
 Implemented in staged commits on branch `fix/audit-2026-06-20` (one finding/tight-cluster per commit; each gated build/vet/gofmt + `-race` on the affected package; full `-race` suite green on the final tree). Each finding was re-confirmed against current code before fixing.
 
-### Fixed (14 findings + 1 test-robustness)
+### Fixed (15 findings + 1 test-robustness)
 
 | ID | Sev | Status | Note |
 |---|---|---|---|
 | M10 | medium | ✅ Fixed | strip auth headers (x-api-key/x-goog-api-key/custom) on cross-host redirect in the health probe |
+| M14 | medium | ✅ Fixed | join the PTY copy goroutine before markDone/remove so a command's final output isn't dropped on exit (also fixes the flaky `TestExecCommandTTYSessionAcceptsInputOnLinux`) |
 | M12 | medium | ✅ Fixed | fsync events.jsonl append so the log is as durable as its metadata |
 | M4 | medium | ✅ Fixed | feed `sched.Next` a minute-aligned instant so the DST fall-back collapse guard engages |
 | M5 | medium | ✅ Fixed | pause an unadvanceable job inside the claim so two schedulers can't both fire it |
@@ -639,7 +640,6 @@ Implemented in staged commits on branch `fix/audit-2026-06-20` (one finding/tigh
 | H1 | high | Wiring `sessionStart/End` + `specialistStart/Stop` correctly is a cross-surface design change: the dispatcher lives only in `agent.Options` (fires per-tool), so session boundaries differ across exec/TUI/daemon and the specialist events need the parent dispatcher threaded through the child boundary. The audit's alternative (delete the events) would disable a documented feature (against the guardrails). Needs a focused design pass, not a surgical edit. |
 | M9 | medium | MCP SSE reconnect is risky concurrency (re-open + re-`initialize`d session state) and not deterministically unit-testable; warrants its own change with a fault-injection harness. |
 | M11 | medium | Making the sandbox AST authoritative is security-sensitive — a wrong call under-blocks a genuinely destructive command. Needs an extensive "still blocks real destructive commands" matrix before flipping the precedence; the guardrails forbid weakening confinement to land a fix. |
-| M14 | medium | PTY drain-on-exit is platform-specific concurrency (Linux PTY copy goroutine ↔ `markDone` sync); needs a `copied` channel + bounded join, carefully tested per platform. |
 | M2 | medium | Merging provider-command MCP into `ResolveMCP` is a real wiring decision (which resolve path the runtime should read); deferred to avoid guessing the intended single source of truth. |
 | M3, M6 | medium | Project-command provenance marker (UX) and cron `--run-now` one-shot marker (schema field) are design choices better made deliberately. |
 | M15 | medium | Streaming-block memoization is perf-only (no correctness risk) and fiddly in the TUI render hot path. |
