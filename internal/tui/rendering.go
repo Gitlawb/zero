@@ -1631,14 +1631,20 @@ func execCommandCardBody(command string, detail string, width int, opts cardRend
 
 	footer := ""
 	section := ""
+	interrupted := false
 	for _, line := range strings.Split(detail, "\n") {
 		switch {
 		case line == "output:":
 			section = "output"
+		case line == "interrupted: true":
+			interrupted = true
+			footer = zeroTheme.green.Render("interrupted")
 		case strings.HasPrefix(line, "exit_code: "):
 			code := strings.TrimPrefix(line, "exit_code: ")
 			if code == "0" {
 				footer = zeroTheme.green.Render("exit 0")
+			} else if interrupted {
+				footer = zeroTheme.green.Render("interrupted")
 			} else {
 				footer = zeroTheme.red.Render("exit " + code)
 			}

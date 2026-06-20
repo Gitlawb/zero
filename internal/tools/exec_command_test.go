@@ -56,6 +56,9 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	if start.Meta["session_id"] == "" {
 		t.Fatalf("expected running session metadata, got %#v output=%q", start.Meta, start.Output)
 	}
+	if !strings.Contains(start.Output, `chars "\u0003"`) {
+		t.Fatalf("running session output should explain Ctrl-C cleanup, got %q", start.Output)
+	}
 	sessionID, err := strconv.Atoi(start.Meta["session_id"])
 	if err != nil {
 		t.Fatalf("session_id is not numeric: %v", err)
@@ -197,11 +200,17 @@ func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
 		"chars":         "\x03",
 		"yield_time_ms": 1000,
 	})
+	if interrupted.Status != StatusOK {
+		t.Fatalf("interrupted session status = %s: %s", interrupted.Status, interrupted.Output)
+	}
 	if interrupted.Meta["session_id"] != "" {
 		t.Fatalf("interrupted session should not remain running, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
 	}
 	if interrupted.Meta["exit_code"] == "" {
 		t.Fatalf("interrupted session should report exit_code, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
+	}
+	if interrupted.Meta["interrupted"] != "true" {
+		t.Fatalf("interrupted session should report interrupted metadata, meta=%#v output=%q", interrupted.Meta, interrupted.Output)
 	}
 }
 
@@ -235,6 +244,45 @@ func TestWriteStdinRejectsInputForNonTTYSession(t *testing.T) {
 		t.Fatalf("unexpected output: %q", result.Output)
 	}
 	manager.stop(sessionID)
+}
+
+func TestWriteStdinStopIntentTerminatesNonTTYSession(t *testing.T) {
+	for _, chars := range []string{`\u0003`, "exit\n"} {
+		root := t.TempDir()
+		manager := newExecSessionManager()
+		execTool := NewScopedExecCommandTool(root, nil, manager)
+		writeTool := NewWriteStdinTool(manager)
+
+		start := execTool.Run(context.Background(), map[string]any{
+			"cmd":           helperCommand("long-sleep"),
+			"yield_time_ms": 10,
+		})
+		if start.Status != StatusOK {
+			t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+		}
+		sessionID, err := strconv.Atoi(start.Meta["session_id"])
+		if err != nil {
+			t.Fatalf("session_id is not numeric: %v", err)
+		}
+
+		result := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"chars":         chars,
+			"yield_time_ms": 1000,
+		})
+		if result.Status != StatusOK {
+			t.Fatalf("stop input %q status = %s: %s", chars, result.Status, result.Output)
+		}
+		if result.Meta["session_id"] != "" {
+			t.Fatalf("stop input %q should not leave session running, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+		if result.Meta["exit_code"] == "" {
+			t.Fatalf("stop input %q should report exit_code, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+		if result.Meta["interrupted"] != "true" {
+			t.Fatalf("stop input %q should report interrupted metadata, meta=%#v output=%q", chars, result.Meta, result.Output)
+		}
+	}
 }
 
 func TestExecCommandTTYSessionAcceptsInputOnLinux(t *testing.T) {
@@ -352,6 +400,22 @@ func TestWriteStdinReportsUnknownSession(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "Unknown exec session_id 1234") {
 		t.Fatalf("unexpected output: %q", result.Output)
+	}
+}
+
+func TestWriteStdinRequiresPositiveSessionID(t *testing.T) {
+	tool := NewWriteStdinTool(newExecSessionManager())
+	for _, args := range []map[string]any{
+		{},
+		{"session_id": 0},
+	} {
+		result := tool.Run(context.Background(), args)
+		if result.Status != StatusError {
+			t.Fatalf("Run(%#v) status = %s, want error", args, result.Status)
+		}
+		if !strings.Contains(result.Output, "Invalid arguments for write_stdin") {
+			t.Fatalf("Run(%#v) output = %q, want invalid arguments", args, result.Output)
+		}
 	}
 }
 

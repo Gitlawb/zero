@@ -835,6 +835,12 @@ func TestExecCommandCardBodyShowsSessionAndExit(t *testing.T) {
 			t.Fatalf("write_stdin card = %q, missing %q", got, want)
 		}
 	}
+
+	interrupted := transcriptRow{kind: rowToolResult, id: "call_3", tool: "write_stdin", status: tools.StatusOK, detail: "output:\n127.0.0.1 GET / HTTP/1.1 200\ninterrupted: true\nexit_code: -1"}
+	got = plainRender(t, m.renderRow(interrupted, 90, buildRowContext(nil)))
+	if !strings.Contains(got, "interrupted") || strings.Contains(got, "exit -1") {
+		t.Fatalf("interrupted write_stdin card = %q", got)
+	}
 }
 
 func TestToolCallSummaryDescribesExecSessions(t *testing.T) {

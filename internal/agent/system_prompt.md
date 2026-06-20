@@ -72,8 +72,8 @@ work.
   foreground with exec_command and use write_stdin to poll or interrupt it;
   do not rely on `nohup`, `disown`, or backgrounding to keep it alive.
 - Use exec_command with `tty: true` for interactive terminal-style commands that
-  need stdin beyond Ctrl-C. Use `/ps` to inspect running background terminals and
-  `/stop` to close them.
+  need stdin beyond Ctrl-C. `/ps` and `/stop` are user-facing TUI commands; when
+  you need to clean up a running foreground command yourself, use write_stdin.
 - write_stdin with empty input polls an existing exec_command session, and
   `\u0003` interrupts it. Sending other stdin bytes may require approval because
   it can drive the running process beyond the original command.

@@ -600,6 +600,9 @@ func (tool writeStdinTool) Run(ctx context.Context, args map[string]any) Result 
 }
 
 func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]any, _ RunOptions) Result {
+	if value, ok := args["session_id"]; !ok || value == nil {
+		return errorResult("Error: Invalid arguments for write_stdin: session_id is required")
+	}
 	sessionID, err := intArg(args, "session_id", 0, 1, 0)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for write_stdin: " + err.Error())
@@ -621,11 +624,13 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 		return errorResult(fmt.Sprintf("Error: Unknown exec session_id %d.", sessionID))
 	}
 	session.touch()
+	interrupted := false
 	if chars != "" {
-		if chars == "\x03" {
+		if shouldInterruptExecSession(chars, session.tty) {
+			interrupted = true
 			session.terminate()
 		} else if !session.tty {
-			return errorResult(fmt.Sprintf("Error: exec session_id %d does not accept stdin; start the command with tty=true for interactive input.", sessionID))
+			return errorResult(fmt.Sprintf("Error: exec session_id %d does not accept stdin. Use empty chars to poll, or send chars \"\\u0003\" to interrupt/stop it.", sessionID))
 		} else if session.stdin != nil {
 			if _, err := io.WriteString(session.stdin, chars); err != nil && !session.doneClosed() {
 				return errorResult("Error writing to exec session: " + err.Error())
@@ -645,9 +650,30 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 		exited:          exited,
 		relativeCwd:     session.relativeCwd,
 		tty:             session.tty,
+		interrupted:     interrupted,
 		plan:            session.plan,
 		maxOutputTokens: maxOutputTokens,
 	})
+}
+
+func shouldInterruptExecSession(chars string, tty bool) bool {
+	if strings.Contains(chars, "\x03") {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(chars))
+	normalizedNoSpace := strings.ReplaceAll(normalized, " ", "")
+	switch normalizedNoSpace {
+	case `\u0003`, `\\u0003`, `\x03`, `\\x03`, "^c", "ctrl-c", "control-c", "sigint", "interrupt":
+		return true
+	}
+	if tty {
+		return false
+	}
+	switch normalized {
+	case "q", "quit", "exit", "stop", "kill", "terminate":
+		return true
+	}
+	return false
 }
 
 type execToolResultInput struct {
@@ -658,6 +684,7 @@ type execToolResultInput struct {
 	exited          bool
 	relativeCwd     string
 	tty             bool
+	interrupted     bool
 	plan            zeroSandbox.CommandPlan
 	maxOutputTokens int
 }
@@ -671,15 +698,18 @@ func execToolResult(input execToolResultInput) Result {
 	addSandboxMeta(meta, input.plan)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
+		if input.interrupted {
+			meta["interrupted"] = "true"
+		}
 	} else {
 		meta["session_id"] = strconv.Itoa(input.sessionID)
 	}
 
 	status := StatusOK
-	if input.exited && input.exitCode != 0 {
+	if input.exited && input.exitCode != 0 && !input.interrupted {
 		status = StatusError
 	}
-	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode)
+	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
 	return Result{
 		Status:    status,
 		Output:    body,
@@ -692,7 +722,7 @@ func execToolResult(input execToolResultInput) Result {
 	}
 }
 
-func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int) string {
+func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool) string {
 	output = strings.TrimRight(output, "\r\n")
 	parts := []string{}
 	if output != "" {
@@ -700,7 +730,14 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 	}
 	if exited {
 		if output == "" {
-			parts = append(parts, "Command completed with no output.")
+			if interrupted {
+				parts = append(parts, "Command interrupted.")
+			} else {
+				parts = append(parts, "Command completed with no output.")
+			}
+		}
+		if interrupted {
+			parts = append(parts, "interrupted: true")
 		}
 		parts = append(parts, fmt.Sprintf("exit_code: %d", exitCode))
 	} else {
@@ -708,7 +745,7 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 			parts = append(parts, "Command is still running.")
 		}
 		parts = append(parts, fmt.Sprintf("session_id: %d", sessionID))
-		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d to poll, send input, or interrupt it.", sessionID))
+		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d and empty chars to poll; send chars \"\\u0003\" to interrupt/stop it.", sessionID))
 	}
 	return strings.Join(parts, "\n")
 }
