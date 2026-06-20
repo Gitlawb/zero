@@ -27,6 +27,27 @@ const (
 
 var errPermissionApprovalCanceled = errors.New("permission approval cancelled")
 
+// isImageRejectionError reports whether err is a provider 400 that rejects
+// image/multimodal content. This is checked BEFORE the compaction-retry path
+// so an image-rejection 400 doesn't loop endlessly (the user hit this with
+// minimax-m3: text-only model, image attached, 400 loop until the process
+// was killed).
+func isImageRejectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "400") {
+		return false
+	}
+	for _, keyword := range []string{"image", "vision", "multimodal", "unsupported content type", "does not support"} {
+		if strings.Contains(msg, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 type permissionRunState struct {
 	mu       sync.Mutex
 	cleanups []func()
@@ -146,6 +167,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 
 		stream, err := provider.StreamCompletion(ctx, request)
 		if err != nil {
+			if isImageRejectionError(err) {
+				result.Messages = copyMessages(messages)
+				return result, fmt.Errorf("model %s rejected the image: %s. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)", options.Model, err.Error())
+			}
 			// REACTIVE compaction: a context-limit failure on the call itself
 			// can be recovered by compacting once and retrying the same turn.
 			if compacted, retried, retryErr := compactor.recover(ctx, provider, messages, request.Tools, err.Error()); retried {
@@ -189,6 +214,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			OnToolCallDelta: options.OnToolCallDelta,
 		})
 		if collected.Error != "" {
+			collectedErr := errors.New(collected.Error)
+			if isImageRejectionError(collectedErr) {
+				result.Messages = copyMessages(messages)
+				return result, fmt.Errorf("model %s rejected the image: %s. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)", options.Model, collected.Error)
+			}
 			// REACTIVE compaction: the streamed error may also be a context
 			// limit (some providers surface it mid-stream). Compact and retry
 			// the same turn once before giving up.
