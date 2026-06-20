@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,5 +169,71 @@ func TestPlanPanelRenderRunning(t *testing.T) {
 	got := m.renderPlanPanel(80)
 	if got == "" {
 		t.Fatal("expected non-empty plan panel render")
+	}
+}
+
+// runningPlanModel builds a model with an n-step running plan for the pinned
+// panel tests.
+func runningPlanModel(t *testing.T, steps int) model {
+	t.Helper()
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.width = 100
+	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return base.Add(15 * time.Second) }
+	items := make([]tools.PlanItem, steps)
+	for i := range items {
+		status := "pending"
+		if i == 0 {
+			status = "in_progress"
+		}
+		items[i] = tools.PlanItem{Content: fmt.Sprintf("Step number %d here", i+1), Status: status}
+	}
+	m.plan.updateFromItems(items, base)
+	return m
+}
+
+func TestPinnedPlanFullWhenItFits(t *testing.T) {
+	m := runningPlanModel(t, 3)
+	// 3 steps => header + bar + 3 lines = 5; budget 10 fits.
+	got := m.renderPinnedPlanPanel(80, 10)
+	if strings.Count(got, "\n")+1 < 5 {
+		t.Fatalf("expected full multi-line panel within budget, got:\n%s", got)
+	}
+	if !strings.Contains(got, "Step number 1") || !strings.Contains(got, "Step number 3") {
+		t.Fatalf("full panel should list every step, got:\n%s", got)
+	}
+}
+
+func TestPinnedPlanCollapsesToSummaryWhenTooTall(t *testing.T) {
+	m := runningPlanModel(t, 12)
+	// 12 steps would be 14 lines; budget 5 forces the one-line summary.
+	got := m.renderPinnedPlanPanel(80, 5)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("over-budget plan should collapse to one line, got:\n%s", got)
+	}
+	if !strings.Contains(got, "PLAN") {
+		t.Fatalf("summary line should still show PLAN, got:\n%s", got)
+	}
+}
+
+func TestPinnedPlanHiddenWhenEmpty(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.width = 100
+	if got := m.renderPinnedPlanPanel(80, 10); got != "" {
+		t.Fatalf("no plan => empty pinned render, got %q", got)
+	}
+}
+
+func TestFooterIncludesPinnedPlanAboveComposer(t *testing.T) {
+	m := runningPlanModel(t, 3)
+	m.height = 40
+	footer := plainRender(t, m.footerView(chatWidth(m.width)))
+	planIdx := strings.Index(footer, "PLAN")
+	composerIdx := strings.Index(footer, "describe a task")
+	if planIdx < 0 {
+		t.Fatalf("footer should contain the pinned plan, got:\n%s", footer)
+	}
+	if composerIdx >= 0 && planIdx > composerIdx {
+		t.Fatalf("pinned plan should render ABOVE the composer, got:\n%s", footer)
 	}
 }

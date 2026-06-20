@@ -199,6 +199,68 @@ func (m model) renderPlanPanel(width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderPinnedPlanPanel renders the plan for the pinned slot above the
+// composer. It returns the full panel when it fits within maxHeight, otherwise
+// a one-line summary (so a long plan can't crowd out the transcript or the
+// input). maxHeight <= 0 means "no budget" and always uses the summary line.
+// Returns "" when the plan is not visible. Ctrl+P (expand) still forces the
+// full list via m.plan.expanded, but the height budget always wins to keep the
+// composer on screen.
+func (m model) renderPinnedPlanPanel(width int, maxHeight int) string {
+	if !m.plan.visible(m.now()) {
+		return ""
+	}
+	full := m.renderPlanPanel(width)
+	if full == "" {
+		return ""
+	}
+	if maxHeight > 0 && strings.Count(full, "\n")+1 <= maxHeight {
+		return full
+	}
+	return m.renderPlanSummaryLine(width)
+}
+
+// renderPlanSummaryLine renders the collapsed one-line plan summary used when
+// the full panel won't fit the pinned slot: a spinner/check, the done/total
+// count, and the current (or first incomplete) step, truncated to width.
+func (m model) renderPlanSummaryLine(width int) string {
+	if width < 20 {
+		width = 20
+	}
+	state := m.plan
+	total := len(state.steps)
+	done := 0
+	current := ""
+	for _, step := range state.steps {
+		switch step.status {
+		case "completed", "failed":
+			done++
+		case "in_progress":
+			if current == "" {
+				current = step.content
+			}
+		}
+	}
+	if current == "" {
+		// No in-progress step: show the first not-yet-done step, else the first.
+		for _, step := range state.steps {
+			if step.status != "completed" && step.status != "failed" {
+				current = step.content
+				break
+			}
+		}
+	}
+	if state.isComplete() {
+		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN · %d/%d complete", done, total))
+	}
+	label := fmt.Sprintf("%s PLAN · %d/%d · ", m.spinner.View(), done, total)
+	room := width - len([]rune(label)) - 1
+	if room < 4 {
+		room = 4
+	}
+	return zeroTheme.accent.Render(label + truncateStep(current, room))
+}
+
 // renderPlanHeader builds the single header line. While running it shows the
 // live spinner, the truncated first step, the done/total count, and the
 // elapsed time in the accent color; once complete it shows a green check and

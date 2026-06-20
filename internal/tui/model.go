@@ -1642,6 +1642,15 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	// Pinned plan panel: sits directly above the composer so it stays visible
+	// while the transcript scrolls underneath (a streaming turn no longer pushes
+	// the plan off-screen). Budgeted to at most a third of the screen height; a
+	// taller plan collapses to a one-line summary so the composer always stays
+	// on screen.
+	if plan := m.renderPinnedPlanPanel(width, m.pinnedPlanMaxHeight()); plan != "" {
+		footer.WriteString(plan)
+		footer.WriteString("\n")
+	}
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
 		footer.WriteString("\n")
@@ -1660,6 +1669,21 @@ func (m model) footerView(width int) string {
 	footer.WriteString("\n")
 	footer.WriteString(m.statusLine(width))
 	return footer.String()
+}
+
+// pinnedPlanMaxHeight is the line budget for the pinned plan panel: at most a
+// third of the screen, so even a long plan can't crowd out the transcript or
+// the composer. Beyond this the panel collapses to its one-line summary. Falls
+// back to a generous cap when the height isn't known yet (unmeasured/headless).
+func (m model) pinnedPlanMaxHeight() int {
+	if m.height <= 0 {
+		return 12
+	}
+	budget := m.height / 3
+	if budget < 3 {
+		budget = 3
+	}
+	return budget
 }
 
 type tuiRect struct {
