@@ -311,7 +311,11 @@ var secretPatterns = []*regexp.Regexp{
 	// "sk-" inside ordinary words (e.g. "task-list") is never redacted while real
 	// keys ("sk-proj-…", "sk-…") still are.
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}`),
-	regexp.MustCompile(`(?i)(api[_-]?key["'=:\s]+)[^"',\s)]+`),
+	// api_key=/api-key:/apiKey "…": require a real assignment delimiter (= or :) and
+	// a credential-length body so ordinary prose ("the api_key: setting", "apiKey
+	// value spans…") is not mangled — a bare space after the marker no longer counts
+	// as a delimiter. (AUDIT-M1)
+	regexp.MustCompile(`(?i)(api[_-]?key)\s*[=:]\s*["']?[A-Za-z0-9._-]{12,}`),
 	// Bearer tokens: require a credential-length token so prose such as
 	// "bearer of bad news" or "bearer token" is not mistaken for a secret.
 	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._-]{16,}`),

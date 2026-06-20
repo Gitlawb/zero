@@ -15,6 +15,10 @@ func TestRedactStringDoesNotOverMatchProse(t *testing.T) {
 		"updated the task-list and the task-runner",
 		"the bearer of bad news arrived",
 		"set the bearer token in the header",
+		// AUDIT-M1: a bare space after the api_key marker is not a delimiter, and a
+		// short word is not a credential — neither must be redacted.
+		"the api_key: foo setting is documented here",
+		"the user's apiKey value spans two lines",
 	} {
 		if got := redactString(clean); got != clean {
 			t.Fatalf("redactString(%q) = %q, want unchanged", clean, got)
@@ -25,6 +29,8 @@ func TestRedactStringDoesNotOverMatchProse(t *testing.T) {
 	for _, secret := range []string{
 		"sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
 		"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9abcdef",
+		"api_key=abcdefghijklmnop1234567890",
+		`apiKey: "sk-svcacct-zyxwvutsrq012345"`,
 	} {
 		if got := redactString(secret); strings.Contains(got, "abcdef") && !strings.Contains(got, "[REDACTED]") {
 			t.Fatalf("redactString(%q) = %q, expected redaction", secret, got)
