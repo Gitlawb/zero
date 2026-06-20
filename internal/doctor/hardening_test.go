@@ -139,34 +139,23 @@ func TestSandboxCheckReportsWindowsNativeSetupStates(t *testing.T) {
 		t.Fatalf("setup warning details = %#v, want missing/out-of-date with setup remedy", needsSetup.Details)
 	}
 
-	setupMissing := Run(Options{
+	// With self-dispatch, the standalone helper .exe files no longer need to be
+	// on PATH for the Windows backend to be usable — the running zero binary acts
+	// as its own command-runner/setup helper. So a missing PATH helper no longer
+	// reports "unavailable"; the backend is available and (with no workspace to
+	// require a setup marker) the check passes. The actionable "run `zero sandbox
+	// setup`" guidance is covered by the marker-missing case above.
+	noPathHelpers := Run(Options{
 		Now:              fixedDoctorClock("2026-06-12T10:09:00Z"),
-		Runtime:          "go",
-		GOOS:             "windows",
-		LookupExecutable: stubLookup(sandbox.WindowsSandboxCommandRunnerName),
-	}).Check("sandbox.backend")
-	if setupMissing == nil || setupMissing.Status != StatusWarn {
-		t.Fatalf("expected setup-missing warning, got %#v", setupMissing)
-	}
-	remedy, _ := setupMissing.Details["remedy"].(string)
-	if !strings.Contains(setupMissing.Message, "setup helper") || !strings.Contains(remedy, "zero sandbox setup") {
-		t.Fatalf("setup-missing check message=%q remedy=%q details=%#v", setupMissing.Message, remedy, setupMissing.Details)
-	}
-	if strings.Contains(setupMissing.Message, "not yet available") || strings.Contains(remedy, "WSL2") {
-		t.Fatalf("windows remedy should not claim native sandboxing is unavailable: message=%q remedy=%q", setupMissing.Message, remedy)
-	}
-
-	runnerMissing := Run(Options{
-		Now:              fixedDoctorClock("2026-06-12T10:10:00Z"),
 		Runtime:          "go",
 		GOOS:             "windows",
 		LookupExecutable: stubLookup(),
 	}).Check("sandbox.backend")
-	if runnerMissing == nil || runnerMissing.Status != StatusWarn {
-		t.Fatalf("expected runner-missing warning, got %#v", runnerMissing)
+	if noPathHelpers == nil || noPathHelpers.Status != StatusPass {
+		t.Fatalf("expected available windows backend via self-dispatch when no PATH helpers, got %#v", noPathHelpers)
 	}
-	if !strings.Contains(runnerMissing.Message, "command runner") {
-		t.Fatalf("runner-missing message = %q, want command runner guidance", runnerMissing.Message)
+	if !strings.Contains(noPathHelpers.Message, string(sandbox.BackendWindowsRestrictedToken)) {
+		t.Fatalf("expected native Windows backend in message, got %q", noPathHelpers.Message)
 	}
 }
 

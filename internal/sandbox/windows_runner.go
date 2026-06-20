@@ -15,23 +15,75 @@ const WindowsSandboxCommandRunnerName = "zero-windows-command-runner.exe"
 
 const windowsCapabilitySIDSchemaVersion = 1
 
-func findWindowsSandboxCommandRunner(lookup func(string) (string, error)) string {
-	return findAdjacentOrPathExecutable(WindowsSandboxCommandRunnerName, lookup)
+// Hidden subcommands the main zero binary answers to when it acts as its own
+// Windows sandbox helper (self-dispatch). The "__" prefix can never collide with
+// a real user subcommand; internal/cli/app.go routes these before normal CLI
+// parsing.
+const (
+	WindowsCommandRunnerSubcommand = "__windows-command-runner"
+	WindowsSandboxSetupSubcommand  = "__windows-sandbox-setup"
+)
+
+// WindowsSandboxHelper locates a Windows sandbox helper to launch. Name is the
+// executable; ArgsPrefix is prepended to the helper's own arguments. For a
+// standalone helper .exe (the release layout) ArgsPrefix is empty; for
+// self-dispatch — the running zero binary acting as its own helper — Name is
+// os.Executable() and ArgsPrefix carries the hidden subcommand token.
+type WindowsSandboxHelper struct {
+	Name       string
+	ArgsPrefix []string
 }
 
-func findAdjacentOrPathExecutable(name string, lookup func(string) (string, error)) string {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), name)
-		if regularFile(candidate) {
-			return candidate
+// Available reports whether a helper executable was resolved.
+func (helper WindowsSandboxHelper) Available() bool {
+	return strings.TrimSpace(helper.Name) != ""
+}
+
+// ResolveWindowsSandboxCommandRunner locates the command-runner helper.
+func ResolveWindowsSandboxCommandRunner(lookup func(string) (string, error)) WindowsSandboxHelper {
+	return resolveWindowsSandboxHelper(WindowsSandboxCommandRunnerName, WindowsCommandRunnerSubcommand, lookup)
+}
+
+// ResolveWindowsSandboxSetupHelper locates the one-time setup helper.
+func ResolveWindowsSandboxSetupHelper(lookup func(string) (string, error)) WindowsSandboxHelper {
+	return resolveWindowsSandboxHelper(WindowsSandboxSetupName, WindowsSandboxSetupSubcommand, lookup)
+}
+
+func findWindowsSandboxCommandRunner(lookup func(string) (string, error)) WindowsSandboxHelper {
+	return ResolveWindowsSandboxCommandRunner(lookup)
+}
+
+func findWindowsSandboxSetupHelper(lookup func(string) (string, error)) WindowsSandboxHelper {
+	return ResolveWindowsSandboxSetupHelper(lookup)
+}
+
+// osExecutable resolves the running binary's path. A package var so tests can
+// pin it deterministically (self-dispatch resolution depends on it).
+var osExecutable = os.Executable
+
+// resolveWindowsSandboxHelper resolves a helper in three tiers, mirroring the
+// Linux helper resolution (linux_helper.go): (1) a standalone .exe adjacent to
+// the running binary — the release layout, kept first so a packaged helper still
+// wins; (2) the same name on PATH; (3) SELF-DISPATCH — the running zero binary
+// itself, invoked with the hidden subcommand. Tier 3 is what makes the sandbox
+// reachable under `go run`/plain `go build` (no separate helper shipped),
+// fixing the dev-only "command runner is not available" failure that hard-failed
+// every bash command. Returns an empty helper only if os.Executable() fails.
+func resolveWindowsSandboxHelper(name, subcommand string, lookup func(string) (string, error)) WindowsSandboxHelper {
+	if exe, err := osExecutable(); err == nil {
+		if candidate := filepath.Join(filepath.Dir(exe), name); regularFile(candidate) {
+			return WindowsSandboxHelper{Name: candidate}
 		}
 	}
 	if lookup != nil {
 		if path, err := lookup(name); err == nil && path != "" {
-			return path
+			return WindowsSandboxHelper{Name: path}
 		}
 	}
-	return ""
+	if exe, err := osExecutable(); err == nil && strings.TrimSpace(exe) != "" {
+		return WindowsSandboxHelper{Name: exe, ArgsPrefix: []string{subcommand}}
+	}
+	return WindowsSandboxHelper{}
 }
 
 func regularFile(path string) bool {
@@ -231,6 +283,11 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	if err != nil {
 		return CommandPlan{}, err
 	}
+	// Prepend the helper's args prefix: for self-dispatch this is the hidden
+	// subcommand token (Name is the running zero binary), so the launched command
+	// is `zero __windows-command-runner <sandbox args>`. Empty for a standalone
+	// helper .exe, where args are passed unchanged.
+	fullArgs := append(append([]string{}, execRequest.Backend.ExecutableArgsPrefix...), args...)
 	return withSandboxExecutionMetadata(CommandPlan{
 		Backend:           execRequest.Backend,
 		TargetBackend:     execRequest.TargetBackend,
@@ -240,7 +297,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 		SandboxEnvMarkers: execRequest.SandboxEnvMarkers,
 		EnforcementLevel:  execRequest.EnforcementLevel,
 		Name:              execRequest.Backend.Executable,
-		Args:              args,
+		Args:              fullArgs,
 		Dir:               spec.Dir,
 		Env:               childEnv,
 		SandboxDir:        spec.Dir,

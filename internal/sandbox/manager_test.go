@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -255,7 +256,7 @@ func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 			return "", errors.New("missing")
 		},
 	}).Backend()
-	if backend != managerBackend {
+	if !reflect.DeepEqual(backend, managerBackend) {
 		t.Fatalf("SelectBackend = %#v, manager backend = %#v", backend, managerBackend)
 	}
 }

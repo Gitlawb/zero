@@ -51,10 +51,15 @@ func TestBackendPlanCarriesPhase0ManagerFields(t *testing.T) {
 		}
 	}
 
+	// Force the Windows backend genuinely unavailable (no self-dispatch) to
+	// exercise the degraded/unwrapped plan representation here.
+	restoreExe := osExecutable
+	osExecutable = func() (string, error) { return "", errors.New("no exe") }
 	windows := SelectBackend(BackendOptions{
 		GOOS:             "windows",
 		LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
 	}).BuildPlan("/workspace", DefaultPolicy())
+	osExecutable = restoreExe
 
 	if windows.TargetBackend != BackendWindowsRestrictedToken {
 		t.Fatalf("windows target backend = %q, want %q", windows.TargetBackend, BackendWindowsRestrictedToken)

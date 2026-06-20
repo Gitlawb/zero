@@ -103,25 +103,37 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("windows setup helper missing", func(t *testing.T) {
+	t.Run("windows missing helper exes self-dispatch", func(t *testing.T) {
+		// No adjacent or PATH helper .exe (the dev / plain `go build` case): the
+		// backend self-dispatches via the running zero binary, so it is AVAILABLE
+		// rather than failing every command. Pin os.Executable for determinism.
+		restore := osExecutable
+		osExecutable = func() (string, error) { return `C:\zero\zero.exe`, nil }
+		defer func() { osExecutable = restore }()
 		backend := SelectBackend(BackendOptions{
-			GOOS: "windows",
-			LookupExecutable: func(name string) (string, error) {
-				if name == WindowsSandboxCommandRunnerName {
-					return `C:\zero\zero-windows-command-runner.exe`, nil
-				}
-				return "", errors.New("missing")
-			},
+			GOOS:             "windows",
+			LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
 		})
-		if backend.Name != BackendUnavailable || backend.Available || backend.Platform != "windows" {
-			t.Fatalf("windows backend = %#v, want unavailable windows backend", backend)
+		if backend.Name != BackendWindowsRestrictedToken || !backend.Available || backend.Platform != "windows" {
+			t.Fatalf("windows backend = %#v, want available via self-dispatch", backend)
 		}
-		if !strings.Contains(backend.Message, "Windows sandbox setup helper is not available") {
-			t.Fatalf("expected Windows setup helper fallback message, got %q", backend.Message)
+		if backend.Executable != `C:\zero\zero.exe` {
+			t.Fatalf("self-dispatch executable = %q, want the running binary", backend.Executable)
+		}
+		if len(backend.ExecutableArgsPrefix) != 1 || backend.ExecutableArgsPrefix[0] != WindowsCommandRunnerSubcommand {
+			t.Fatalf("self-dispatch args prefix = %#v, want [%q]", backend.ExecutableArgsPrefix, WindowsCommandRunnerSubcommand)
+		}
+		if !backend.CommandWrapping || !backend.NativeIsolation {
+			t.Fatalf("windows backend capabilities = %#v, want native wrapping", backend)
 		}
 	})
 
-	t.Run("windows falls back explicitly", func(t *testing.T) {
+	t.Run("windows unavailable only when running binary is unresolvable", func(t *testing.T) {
+		// Self-dispatch removes every other unavailable path; the sole remaining
+		// one is os.Executable failing, which the resolver degrades cleanly.
+		restore := osExecutable
+		osExecutable = func() (string, error) { return "", errors.New("no exe") }
+		defer func() { osExecutable = restore }()
 		backend := SelectBackend(BackendOptions{
 			GOOS:             "windows",
 			LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
@@ -228,6 +240,11 @@ func TestBackendBuildPlanDocumentsBestEffortIsolation(t *testing.T) {
 }
 
 func TestBackendCapabilitiesReflectDisabledPolicy(t *testing.T) {
+	// Force the Windows backend genuinely unavailable (no self-dispatch) so
+	// command_wrapping reflects an unavailable backend under a disabled policy.
+	restore := osExecutable
+	osExecutable = func() (string, error) { return "", errors.New("no exe") }
+	defer func() { osExecutable = restore }()
 	backend := SelectBackend(BackendOptions{
 		GOOS:             "windows",
 		LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },

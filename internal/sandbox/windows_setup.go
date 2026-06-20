@@ -40,10 +40,10 @@ type WindowsSandboxSetupMarker struct {
 	NetworkFilters    int    `json:"networkFilters"`
 }
 
-func findWindowsSandboxSetupHelper(lookup func(string) (string, error)) string {
-	return findAdjacentOrPathExecutable(WindowsSandboxSetupName, lookup)
-}
-
+// WindowsSandboxSetupPathForRunner derives the setup helper's path from a
+// standalone command-runner path (the sibling .exe in the release layout).
+// Retained for that layout; self-dispatch callers use
+// ResolveWindowsSandboxSetupHelper instead.
 func WindowsSandboxSetupPathForRunner(runnerPath string) string {
 	if strings.TrimSpace(runnerPath) == "" {
 		return ""
@@ -247,7 +247,7 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("windows sandbox setup is required: missing %s", filepath.Base(path))
+			return fmt.Errorf("windows sandbox is not initialized for this workspace — run `zero sandbox setup` from an elevated (Administrator) terminal (missing %s)", filepath.Base(path))
 		}
 		return fmt.Errorf("read windows sandbox setup marker: %w", err)
 	}

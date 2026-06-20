@@ -92,10 +92,12 @@ func selectPlatformBackend(goos string, lookup func(string) (string, error)) Bac
 	case "windows":
 		runner := findWindowsSandboxCommandRunner(lookup)
 		setup := findWindowsSandboxSetupHelper(lookup)
-		if runner != "" && setup != "" {
-			return nativeBackend(goos, BackendWindowsRestrictedToken, runner, "Windows sandbox command runner and setup helper available")
+		if runner.Available() && setup.Available() {
+			backend := nativeBackend(goos, BackendWindowsRestrictedToken, runner.Name, "Windows sandbox command runner and setup helper available")
+			backend.ExecutableArgsPrefix = runner.ArgsPrefix
+			return backend
 		}
-		if runner != "" {
+		if runner.Available() {
 			return unavailableBackend(goos, "Windows sandbox setup helper is not available")
 		}
 		return unavailableBackend(goos, "Windows sandbox command runner is not available")

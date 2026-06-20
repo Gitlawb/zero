@@ -155,7 +155,14 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return writeExecUsageError(stderr, err.Error())
 	}
 	profile := zeroSandbox.PermissionProfileFromPolicy(workspaceRoot, policy, scope)
-	setupPath := zeroSandbox.WindowsSandboxSetupPathForRunner(backend.Executable)
+	// Resolve the setup helper the same way the runner is resolved: a standalone
+	// .exe when shipped (release), else self-dispatch via the running zero binary
+	// (dev / plain build). This mirrors the backend's command-runner resolution
+	// so `zero sandbox setup` works in every layout, not just release.
+	setupHelper := zeroSandbox.ResolveWindowsSandboxSetupHelper(nil)
+	if !setupHelper.Available() {
+		return writeAppError(stderr, "Windows sandbox setup helper is not available", exitProvider)
+	}
 	setupArgs, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
 		CommandCWD:        workspaceRoot,
 		WorkspaceRoots:    []string{workspaceRoot},
@@ -164,13 +171,14 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	if err := deps.runSandboxSetupHelper(setupPath, setupArgs, stdout, stderr); err != nil {
+	setupArgs = append(append([]string{}, setupHelper.ArgsPrefix...), setupArgs...)
+	if err := deps.runSandboxSetupHelper(setupHelper.Name, setupArgs, stdout, stderr); err != nil {
 		return writeAppError(stderr, "Windows sandbox setup failed: "+err.Error(), exitProvider)
 	}
 	return writeSandboxSetupResult(stdout, options.json, sandboxSetupResult{
 		Platform: "windows",
 		Backend:  backend.Name,
-		Helper:   setupPath,
+		Helper:   setupHelper.Name,
 		Ran:      true,
 		Message:  "Windows sandbox setup complete",
 	})

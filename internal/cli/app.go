@@ -190,6 +190,21 @@ func defaultUserPluginsDir() string {
 }
 
 func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
+	// Self-dispatch as the Windows sandbox helper. When no standalone helper .exe
+	// is shipped (dev / plain `go build`), the sandbox launches the running zero
+	// binary with one of these hidden subcommands instead of a separate
+	// executable (see resolveWindowsSandboxHelper). Routed before crash-recover,
+	// dep-fill, and --add-dir splitting so it can never collide with a real
+	// subcommand; the "__" prefix is unreachable by normal invocation.
+	if len(args) > 0 {
+		switch args[0] {
+		case sandbox.WindowsCommandRunnerSubcommand:
+			return sandbox.RunWindowsSandboxCommandRunner(args[1:], stderr)
+		case sandbox.WindowsSandboxSetupSubcommand:
+			return sandbox.RunWindowsSandboxSetup(args[1:], stderr)
+		}
+	}
+
 	// Convert an unexpected panic anywhere in the CLI into a saved crash report and
 	// a brief notice, rather than a raw stack trace dumped at the user.
 	defer observability.Recover(observability.DefaultCrashDir(), "cli", stderr, &exitCode)

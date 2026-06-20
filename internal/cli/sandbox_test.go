@@ -339,6 +339,35 @@ func TestRunSandboxPolicyInspectTextAndJSON(t *testing.T) {
 	}
 }
 
+func TestHiddenWindowsSandboxSubcommandsSelfDispatch(t *testing.T) {
+	// The runner/setup sentinels are routed before normal CLI parsing, straight
+	// into the sandbox helper mains — never the unknown-command path. With no
+	// helper-specific flags they fail their own arg validation (non-zero), but
+	// crucially the message is the helper's, proving the dispatch.
+	for _, tc := range []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{"runner", sandbox.WindowsCommandRunnerSubcommand, sandbox.WindowsSandboxCommandRunnerName},
+		{"setup", sandbox.WindowsSandboxSetupSubcommand, sandbox.WindowsSandboxSetupName},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			exit := runWithDeps([]string{tc.arg}, &stdout, &stderr, appDeps{})
+			if exit == 0 {
+				t.Fatalf("expected non-zero exit from the helper's own arg validation, got 0")
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want the %s helper's message (proves self-dispatch)", stderr.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), "unknown command") {
+				t.Fatalf("sentinel %q fell through to normal CLI dispatch: %q", tc.arg, stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunSandboxSetupRunsWindowsHelper(t *testing.T) {
 	workspace := t.TempDir()
 	runnerDir := t.TempDir()
@@ -374,11 +403,22 @@ func TestRunSandboxSetupRunsWindowsHelper(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("setup exit = %d, stderr %q", exitCode, stderr.String())
 	}
-	wantPath := filepath.Join(runnerDir, sandbox.WindowsSandboxSetupName)
-	if gotPath != wantPath {
-		t.Fatalf("setup helper path = %q, want %q", gotPath, wantPath)
+	// The setup helper is now resolved independently of backend.Executable: an
+	// adjacent zero-windows-sandbox-setup.exe in release, else self-dispatch via
+	// the running binary. Under `go test` no sibling helper exists, so it
+	// self-dispatches: path is the running binary and the first arg is the hidden
+	// setup subcommand, followed by the real setup args.
+	wantPath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
 	}
-	config, err := sandbox.ParseWindowsSandboxSetupArgs(gotArgs)
+	if gotPath != wantPath {
+		t.Fatalf("setup helper path = %q, want self-dispatch binary %q", gotPath, wantPath)
+	}
+	if len(gotArgs) == 0 || gotArgs[0] != sandbox.WindowsSandboxSetupSubcommand {
+		t.Fatalf("setup args = %#v, want leading %q subcommand", gotArgs, sandbox.WindowsSandboxSetupSubcommand)
+	}
+	config, err := sandbox.ParseWindowsSandboxSetupArgs(gotArgs[1:])
 	if err != nil {
 		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
 	}
