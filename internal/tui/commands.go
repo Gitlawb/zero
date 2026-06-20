@@ -30,6 +30,7 @@ const (
 	commandResume
 	commandRetitle
 	commandSpec
+	commandInit
 	commandCompact
 	commandRewind
 	commandEffort
@@ -198,6 +199,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Draft an implementation spec for review before editing.",
 		kind:        commandSpec,
+	},
+	{
+		name:        "/init",
+		usage:       "/init",
+		group:       commandGroupSession,
+		description: "Investigate the repo and generate an AGENTS.md for the agent.",
+		kind:        commandInit,
 	},
 	{
 		name:        "/compact",

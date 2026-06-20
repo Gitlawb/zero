@@ -2905,6 +2905,8 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, retitleCmd
 	case commandSpec:
 		return m.handleSpecCommand(command.text)
+	case commandInit:
+		return m.handleInitCommand()
 	case commandCompact:
 		text := ""
 		var compactCmd tea.Cmd

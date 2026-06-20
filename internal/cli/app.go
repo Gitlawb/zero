@@ -284,6 +284,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runSessions(args[1:], stdout, stderr, deps)
 	case "spec":
 		return runSpec(args[1:], stdout, stderr, deps)
+	case "init":
+		return runInit(args[1:], stdout, stderr, deps)
 	case "specialists", "specialist":
 		return runSpecialists(args[1:], stdout, stderr, deps)
 	case "plugins", "plugin":
