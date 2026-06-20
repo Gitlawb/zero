@@ -160,7 +160,7 @@ func TestResolveConfigChatGPTPreset(t *testing.T) {
 	if flow != FlowLoopback {
 		t.Fatalf("flow = %q, want loopback (Codex requires a browser)", flow)
 	}
-	wantScopes := map[string]bool{"openid": true, "profile": true, "email": true, "offline_access": true}
+	wantScopes := map[string]bool{"openid": true, "profile": true, "email": true, "offline_access": true, "api.connectors.read": true, "api.connectors.invoke": true}
 	for _, s := range cfg.Scopes {
 		if !wantScopes[s] {
 			t.Fatalf("unexpected scope %q in %v", s, cfg.Scopes)
