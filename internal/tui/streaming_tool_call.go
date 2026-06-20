@@ -93,9 +93,8 @@ func skipJSONSpace(s string, i int) int {
 	return i
 }
 
-// streamingFilePath / streamingFileContent pull the path and the main content out
-// of a streaming tool-call args buffer, trying the argument names the file tools
-// use.
+// streamingFilePath pulls the file path out of a streaming tool-call args buffer,
+// trying the argument names the file tools use. Used to seed the decoder's path.
 func streamingFilePath(args string) string {
 	for _, key := range []string{"path", "file_path", "filename"} {
 		if v, ok := decodeStreamingJSONString(args, key); ok && v != "" {
@@ -105,50 +104,37 @@ func streamingFilePath(args string) string {
 	return ""
 }
 
-func streamingFileContent(args string) (string, bool) {
-	for _, key := range []string{"content", "new_string", "new_str", "new_text", "new", "replacement", "patch", "input"} {
-		if v, ok := decodeStreamingJSONString(args, key); ok {
-			return v, true
-		}
-	}
-	return "", false
-}
-
 // streamingToolCallView renders the in-progress file-writing tool call — its path,
 // a live line count, and a tail of the streaming content — so a long write/edit
-// shows the code flowing in instead of a frozen spinner. Returns "" when no
+// shows the code flowing in instead of a frozen spinner. It reads the decoder's
+// incrementally-maintained state (O(1) per render); returns "" when no
 // file-writing call is mid-stream.
 func (m model) streamingToolCallView(width int) string {
-	if m.streamCallID == "" || !isFileWritingTool(m.streamCallName) {
+	if m.streamCallID == "" || !isFileWritingTool(m.streamCallName) || m.streamCallDecoder == nil {
 		return ""
 	}
-	path := streamingFilePath(m.streamCallArgs)
-	content, hasContent := streamingFileContent(m.streamCallArgs)
+	d := m.streamCallDecoder
 
 	head := zeroTheme.accent.Render("✎ ") + zeroTheme.toolName.Render(m.streamCallName)
-	if path != "" {
-		head += " " + zeroTheme.toolTarget.Render(path)
+	if d.path != "" {
+		head += " " + zeroTheme.toolTarget.Render(d.path)
 	}
 	switch {
-	case hasContent && strings.TrimSpace(content) != "":
-		head += zeroTheme.faint.Render(fmt.Sprintf("  ·  %d lines", strings.Count(content, "\n")+1))
-	case len(m.streamCallArgs) > 0:
+	case d.hasContent():
+		head += zeroTheme.faint.Render(fmt.Sprintf("  ·  %d lines", d.lineTotal()))
+	case d.rawLen > 0:
 		// Args are streaming but the content field hasn't arrived yet — show a live
 		// byte count so it reads as progressing, never frozen.
-		head += zeroTheme.faint.Render(fmt.Sprintf("  ·  receiving %.1f KB", float64(len(m.streamCallArgs))/1024))
+		head += zeroTheme.faint.Render(fmt.Sprintf("  ·  receiving %.1f KB", float64(d.rawLen)/1024))
 	}
 	lines := []string{head}
-	if hasContent && strings.TrimSpace(content) != "" {
-		body := strings.Split(strings.TrimRight(content, "\n"), "\n")
-		if len(body) > streamingTailLines {
-			body = body[len(body)-streamingTailLines:]
-		}
+	if d.hasContent() {
 		bodyWidth := maxInt(8, width-4)
 		// write_file/edit_file content is brand-new, so every line is an addition;
 		// apply_patch carries a real ± diff. styleStreamingCodeLine colors added
 		// lines green, removed red, and everything else bright (not the old dim gray).
 		newContent := m.streamCallName == "write_file" || m.streamCallName == "edit_file"
-		for _, line := range body {
+		for _, line := range d.tailLines() {
 			line = strings.ReplaceAll(line, "\t", "    ")
 			// Truncate by display WIDTH (ansi.Truncate), not rune count, so wide/CJK
 			// glyphs can't overrun bodyWidth and break the tail layout.

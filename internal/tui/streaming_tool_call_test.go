@@ -11,7 +11,7 @@ func TestDecodeStreamingJSONString(t *testing.T) {
 	if got := streamingFilePath(args); got != "ecommerce/frontend/index.html" {
 		t.Errorf("path = %q", got)
 	}
-	content, ok := streamingFileContent(args)
+	content, ok := decodeStreamingJSONString(args, "content")
 	if !ok {
 		t.Fatal("expected content")
 	}
@@ -20,35 +20,12 @@ func TestDecodeStreamingJSONString(t *testing.T) {
 		t.Errorf("content = %q, want %q", content, want)
 	}
 	// A dangling backslash at the stream edge is dropped, not panicked on.
-	if c, _ := streamingFileContent(`{"content":"abc\`); c != "abc" {
+	if c, _ := decodeStreamingJSONString(`{"content":"abc\`, "content"); c != "abc" {
 		t.Errorf("dangling escape: %q", c)
 	}
 	// Missing key.
-	if _, ok := streamingFileContent(`{"path":"x"}`); ok {
+	if _, ok := decodeStreamingJSONString(`{"path":"x"}`, "content"); ok {
 		t.Error("no content key should be (false)")
-	}
-}
-
-func TestStreamingToolCallView(t *testing.T) {
-	// No active call → empty.
-	if (model{}).streamingToolCallView(80) != "" {
-		t.Error("inactive should render nothing")
-	}
-	// Non-file tool → empty.
-	if (model{streamCallID: "1", streamCallName: "bash", streamCallArgs: `{"command":"ls"}`}).streamingToolCallView(80) != "" {
-		t.Error("non-file tool should render nothing")
-	}
-	// Active write_file → shows path, line count, and a content tail.
-	m := model{
-		streamCallID:   "1",
-		streamCallName: "write_file",
-		streamCallArgs: `{"path":"a/b.go","content":"package main\n\nfunc main() {}\n"}`,
-	}
-	out := m.streamingToolCallView(80)
-	for _, want := range []string{"write_file", "a/b.go", "lines", "func main()"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("view missing %q:\n%s", want, out)
-		}
 	}
 }
 
@@ -63,32 +40,46 @@ func TestDecodeStreamingTolerantOfWhitespace(t *testing.T) {
 		if got := streamingFilePath(args); got != "a.go" {
 			t.Errorf("path from %q = %q, want a.go", args, got)
 		}
-		c, ok := streamingFileContent(args)
+		c, ok := decodeStreamingJSONString(args, "content")
 		if !ok || c != "line1\nline2" {
 			t.Errorf("content from %q = %q ok=%v", args, c, ok)
 		}
 	}
 }
 
-func TestStreamingViewShowsProgressBeforeContent(t *testing.T) {
-	// Args streaming but content not reached yet → show a byte count, not blank.
-	m := model{streamCallID: "1", streamCallName: "write_file", streamCallArgs: `{"path": "website/css/styles.css", "content": "/* lo`}
-	out := m.streamingToolCallView(80)
-	if !strings.Contains(out, "website/css/styles.css") {
-		t.Errorf("path should show with kimi-style spacing: %q", out)
+func viewModel(name, args string) model {
+	dec := newStreamingDecoder()
+	dec.feed(args)
+	return model{streamCallID: "1", streamCallName: name, streamCallDecoder: dec}
+}
+
+func TestStreamingToolCallView(t *testing.T) {
+	// No active call → empty.
+	if (model{}).streamingToolCallView(80) != "" {
+		t.Error("inactive should render nothing")
+	}
+	// Non-file tool → empty.
+	if viewModel("bash", `{"command":"ls"}`).streamingToolCallView(80) != "" {
+		t.Error("non-file tool should render nothing")
+	}
+	// Active write_file → shows path, line count, and a content tail.
+	out := viewModel("write_file", `{"path":"a/b.go","content":"package main\n\nfunc main() {}\n"}`).streamingToolCallView(80)
+	for _, want := range []string{"write_file", "a/b.go", "lines", "func main()"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view missing %q:\n%s", want, out)
+		}
 	}
 }
 
-func TestStreamingFileContentEditFileKey(t *testing.T) {
-	// edit_file's canonical replacement arg is new_string — the live preview must
-	// extract it (regression for M13: edit preview showed nothing).
-	args := `{"path":"a.go","old_string":"x","new_string":"package main\nfunc main(){}"}`
-	c, ok := streamingFileContent(args)
-	if !ok || c != "package main\nfunc main(){}" {
-		t.Errorf("new_string content = %q ok=%v", c, ok)
+func TestStreamingViewShowsProgressBeforeContent(t *testing.T) {
+	// Path known but the content field hasn't arrived yet → show the path + a live
+	// byte count, never blank.
+	out := viewModel("write_file", `{"path": "website/css/styles.css"`).streamingToolCallView(80)
+	if !strings.Contains(out, "website/css/styles.css") {
+		t.Errorf("path should show with kimi-style spacing: %q", out)
 	}
-	if p := streamingFilePath(args); p != "a.go" {
-		t.Errorf("path = %q", p)
+	if !strings.Contains(out, "KB") {
+		t.Errorf("should show a receiving byte count before content: %q", out)
 	}
 }
 

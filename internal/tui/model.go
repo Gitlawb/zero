@@ -207,9 +207,10 @@ type model struct {
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
 	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
-	streamCallID   string
-	streamCallName string
-	streamCallArgs string
+	// streamCallDecoder decodes the streamed args incrementally (O(1) per delta).
+	streamCallID      string
+	streamCallName    string
+	streamCallDecoder *streamingDecoder
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
@@ -1129,13 +1130,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A new tool call opened — reset the live "writing" block to it.
 		m.streamCallID = msg.id
 		m.streamCallName = msg.name
-		m.streamCallArgs = ""
+		m.streamCallDecoder = newStreamingDecoder()
 		return m, nil
 	case toolCallStreamDeltaMsg:
-		if msg.runID != m.activeRunID || msg.id != m.streamCallID {
+		if msg.runID != m.activeRunID || msg.id != m.streamCallID || m.streamCallDecoder == nil {
 			return m, nil
 		}
-		m.streamCallArgs += msg.fragment
+		m.streamCallDecoder.feed(msg.fragment)
 		return m, nil
 	case agentTextMsg:
 		if msg.runID != m.activeRunID {
@@ -3624,7 +3625,7 @@ func (m model) sendToolCallStreamDelta(runID int, id, fragment string) {
 func (m *model) clearStreamingToolCall() {
 	m.streamCallID = ""
 	m.streamCallName = ""
-	m.streamCallArgs = ""
+	m.streamCallDecoder = nil
 }
 
 func (m model) sendAgentReasoning(runID int, delta string) {
