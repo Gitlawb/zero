@@ -18,6 +18,8 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
+const anthropicVersion = "2023-06-01"
+
 type Model struct {
 	ID               string
 	Description      string
@@ -40,7 +42,7 @@ type Options struct {
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
 	catalogModels, catalogErr := fetchCatalogModels(ctx, provider, options)
-	canProbeProvider := openAICompatibleDiscoveryAllowed(profile) && (!provider.RequiresAuth || discoveryHasCredential(profile))
+	canProbeProvider := modelDiscoveryAllowed(profile) && (!provider.RequiresAuth || discoveryHasCredential(profile))
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
@@ -73,23 +75,22 @@ func discoveryHasCredential(profile config.ProviderProfile) bool {
 }
 
 func Discover(ctx context.Context, profile config.ProviderProfile, options Options) ([]Model, error) {
-	if !openAICompatibleDiscoveryAllowed(profile) {
-		return nil, fmt.Errorf("provider %s does not expose OpenAI-compatible model discovery", displayProviderName(profile))
+	switch discoveryProviderKind(profile) {
+	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
+		return discoverOpenAIModels(ctx, profile, options)
+	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
+		return discoverAnthropicModels(ctx, profile, options)
+	default:
+		return nil, fmt.Errorf("provider %s does not expose model discovery", displayProviderName(profile))
 	}
+}
+
+func discoverOpenAIModels(ctx context.Context, profile config.ProviderProfile, options Options) ([]Model, error) {
 	endpoint, err := modelsEndpoint(profile.BaseURL)
 	if err != nil {
 		return nil, err
 	}
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	// Authenticate via either an APIKey (Authorization: Bearer ...) or a raw
-	// auth-header value / custom headers, matching how the live providers build
-	// their requests (internal/providers/providerio). Honoring AuthHeaderValue
-	// keeps discovery consistent with the credential-present logic elsewhere.
-	providerio.ApplyAuthHeaders(request, providerio.AuthHeaders{
+	return fetchProviderModels(ctx, endpoint, profile, options, providerio.AuthHeaders{
 		APIKey:            profile.APIKey,
 		DefaultAuthHeader: "Authorization",
 		DefaultAuthScheme: "Bearer",
@@ -97,8 +98,40 @@ func Discover(ctx context.Context, profile config.ProviderProfile, options Optio
 		AuthScheme:        profile.AuthScheme,
 		AuthHeaderValue:   profile.AuthHeaderValue,
 		CustomHeaders:     profile.CustomHeaders,
+	}, nil)
+}
+
+func discoverAnthropicModels(ctx context.Context, profile config.ProviderProfile, options Options) ([]Model, error) {
+	endpoint, err := anthropicModelsEndpoint(profile.BaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return fetchProviderModels(ctx, endpoint, profile, options, providerio.AuthHeaders{
+		APIKey:            profile.APIKey,
+		DefaultAuthHeader: "x-api-key",
+		AuthHeader:        profile.AuthHeader,
+		AuthScheme:        profile.AuthScheme,
+		AuthHeaderValue:   profile.AuthHeaderValue,
+		CustomHeaders:     profile.CustomHeaders,
+	}, func(request *http.Request) {
+		request.Header.Set("anthropic-version", anthropicVersion)
 	})
+}
+
+func fetchProviderModels(ctx context.Context, endpoint string, profile config.ProviderProfile, options Options, auth providerio.AuthHeaders, configure func(*http.Request)) ([]Model, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Authenticate via either an APIKey or a raw auth-header value / custom
+	// headers, matching how the live providers build their requests
+	// (internal/providers/providerio). Honoring AuthHeaderValue keeps discovery
+	// consistent with the credential-present logic elsewhere.
+	providerio.ApplyAuthHeaders(request, auth)
 	request.Header.Set("Accept", "application/json")
+	if configure != nil {
+		configure(request)
+	}
 
 	client := options.HTTPClient
 	if client == nil {
@@ -125,12 +158,21 @@ func Discover(ctx context.Context, profile config.ProviderProfile, options Optio
 	return models, nil
 }
 
-func openAICompatibleDiscoveryAllowed(profile config.ProviderProfile) bool {
+func modelDiscoveryAllowed(profile config.ProviderProfile) bool {
+	switch discoveryProviderKind(profile) {
+	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible, config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
+		return true
+	default:
+		return false
+	}
+}
+
+func discoveryProviderKind(profile config.ProviderProfile) config.ProviderKind {
 	kind := config.ProviderKind(strings.TrimSpace(strings.ToLower(string(profile.ProviderKind))))
 	if kind == "" {
 		kind = config.ProviderKind(strings.TrimSpace(strings.ToLower(profile.Provider)))
 	}
-	return kind == config.ProviderKindOpenAI || kind == config.ProviderKindOpenAICompatible
+	return kind
 }
 
 func modelsEndpoint(baseURL string) (string, error) {
@@ -148,9 +190,31 @@ func modelsEndpoint(baseURL string) (string, error) {
 	return parsed.String(), nil
 }
 
+func anthropicModelsEndpoint(baseURL string) (string, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return "", fmt.Errorf("provider base URL is required for model discovery")
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid provider base URL %q", baseURL)
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(strings.ToLower(path), "/v1") {
+		parsed.Path = path + "/models"
+	} else {
+		parsed.Path = path + "/v1/models"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
 type modelsResponse struct {
 	Data []struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
+		Name        string `json:"name"`
 	} `json:"data"`
 }
 
@@ -167,7 +231,11 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 			continue
 		}
 		seen[id] = true
-		models = append(models, Model{ID: id})
+		description := strings.TrimSpace(item.DisplayName)
+		if description == "" {
+			description = strings.TrimSpace(item.Name)
+		}
+		models = append(models, Model{ID: id, Description: description})
 	}
 	sort.SliceStable(models, func(i, j int) bool {
 		return models[i].ID < models[j].ID

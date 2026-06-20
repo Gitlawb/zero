@@ -92,6 +92,54 @@ func TestModelPickerRefreshesLiveModelsForActiveProvider(t *testing.T) {
 	}
 }
 
+func TestModelPickerTreatsCustomOpenAIEndpointAsCustomProvider(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "openai",
+		ModelName:    "custom-coder",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://proxy.example.test/v1",
+			APIKey:       "proxy-key",
+			Model:        "custom-coder",
+		},
+		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+			captured = profile
+			return []providermodeldiscovery.Model{
+				{ID: "custom-coder-plus", Description: "Custom Coder Plus"},
+			}, nil
+		},
+	})
+	m.input.SetValue("/model")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.picker == nil {
+		t.Fatal("expected model picker to open")
+	}
+	if cmd == nil {
+		t.Fatal("opening /model for a custom endpoint should start model discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
+
+	if captured.CatalogID != "custom-openai-compatible" || captured.ProviderKind != config.ProviderKindOpenAICompatible {
+		t.Fatalf("discovery profile = %#v, want custom OpenAI-compatible identity", captured)
+	}
+	groups := pickerGroups(next.picker.items)
+	if !contains(groups, "Custom OpenAI-compatible catalog") {
+		t.Fatalf("picker groups = %#v, want custom catalog group", groups)
+	}
+	got := pickerValues(next.picker.items)
+	if !contains(got, "custom-coder-plus") {
+		t.Fatalf("picker values = %#v, want discovered custom model", got)
+	}
+	if contains(got, "gpt-4.1") {
+		t.Fatalf("custom endpoint picker should not fall back to official OpenAI models: %#v", got)
+	}
+}
+
 func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ProviderName: "ollama-cloud",
@@ -445,6 +493,43 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "model: openai/gpt-4.1") {
 		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	}
+}
+
+func TestModelCommandAcceptsManualModelForCustomProvider(t *testing.T) {
+	var captured config.ProviderProfile
+	m := newModel(context.Background(), Options{
+		ProviderName: "custom-openai-compatible",
+		ModelName:    "custom-model",
+		Provider:     &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:         "custom-openai-compatible",
+			CatalogID:    "custom-openai-compatible",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://proxy.example.test/v1",
+			APIKey:       "proxy-key",
+			Model:        "custom-model",
+		},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			captured = profile
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model qwen-custom-latest")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /model to be handled without starting a run")
+	}
+	if captured.Model != "qwen-custom-latest" {
+		t.Fatalf("captured model = %q, want manual custom model", captured.Model)
+	}
+	if next.modelName != "qwen-custom-latest" {
+		t.Fatalf("active model = %q, want manual custom model", next.modelName)
+	}
+	if transcriptContains(next.transcript, "unknown Zero model") {
+		t.Fatalf("manual custom model should not be rejected, got %#v", next.transcript)
 	}
 }
 

@@ -349,6 +349,9 @@ func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
 	if descriptor, ok := providerDescriptorByBaseURL(m.providerProfile.BaseURL); ok {
 		return descriptor, true
 	}
+	if descriptor, ok := customProviderDescriptorForProfile(m.providerProfile); ok {
+		return descriptor, true
+	}
 	for _, candidate := range []string{
 		m.providerProfile.Name,
 		m.providerName,
@@ -360,6 +363,46 @@ func (m model) activeProviderDescriptor() (providercatalog.Descriptor, bool) {
 		}
 	}
 	return providercatalog.Descriptor{}, false
+}
+
+func customProviderDescriptorForProfile(profile config.ProviderProfile) (providercatalog.Descriptor, bool) {
+	if descriptor, ok := providercatalog.Get(profile.CatalogID); ok && genericProviderCatalogID(descriptor.ID) {
+		return descriptor, true
+	}
+
+	baseURL := strings.TrimSpace(profile.BaseURL)
+	if baseURL == "" {
+		return providercatalog.Descriptor{}, false
+	}
+	switch profileProviderKind(profile) {
+	case config.ProviderKindOpenAICompatible:
+		if !sameNormalizedProviderBaseURL(baseURL, config.OpenAIBaseURL) {
+			return providercatalog.Get("custom-openai-compatible")
+		}
+	case config.ProviderKindAnthropicCompat:
+		if !sameNormalizedProviderBaseURL(baseURL, config.AnthropicBaseURL) {
+			return providercatalog.Get("custom-anthropic-compatible")
+		}
+	case config.ProviderKindOpenAI:
+		if !sameNormalizedProviderBaseURL(baseURL, config.OpenAIBaseURL) {
+			return providercatalog.Get("custom-openai-compatible")
+		}
+	case config.ProviderKindAnthropic:
+		if !sameNormalizedProviderBaseURL(baseURL, config.AnthropicBaseURL) {
+			return providercatalog.Get("custom-anthropic-compatible")
+		}
+	}
+	return providercatalog.Descriptor{}, false
+}
+
+func profileProviderKind(profile config.ProviderProfile) config.ProviderKind {
+	if kind := strings.TrimSpace(string(profile.ProviderKind)); kind != "" {
+		return config.ProviderKind(strings.ToLower(kind))
+	}
+	if provider := strings.TrimSpace(profile.Provider); provider != "" {
+		return config.ProviderKind(strings.ToLower(provider))
+	}
+	return ""
 }
 
 func providerDescriptorByBaseURL(baseURL string) (providercatalog.Descriptor, bool) {
@@ -380,6 +423,10 @@ func providerDescriptorByBaseURL(baseURL string) (providercatalog.Descriptor, bo
 
 func normalizeProviderBaseURL(baseURL string) string {
 	return strings.TrimRight(strings.ToLower(strings.TrimSpace(baseURL)), "/")
+}
+
+func sameNormalizedProviderBaseURL(left string, right string) bool {
+	return normalizeProviderBaseURL(left) == normalizeProviderBaseURL(right)
 }
 
 func genericProviderCatalogID(id string) bool {

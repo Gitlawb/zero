@@ -123,12 +123,56 @@ func TestDiscoverOpenAICompatibleModelsHandlesBaseURLWithoutVersion(t *testing.T
 
 func TestDiscoverOpenAICompatibleModelsRejectsUnsupportedProviders(t *testing.T) {
 	_, err := Discover(context.Background(), config.ProviderProfile{
-		Name:         "anthropic",
-		ProviderKind: config.ProviderKindAnthropic,
-		BaseURL:      "https://api.anthropic.com",
+		Name:         "google",
+		ProviderKind: config.ProviderKindGoogle,
+		BaseURL:      "https://generativelanguage.googleapis.com",
 	}, Options{})
-	if err == nil || !strings.Contains(err.Error(), "does not expose OpenAI-compatible model discovery") {
+	if err == nil || !strings.Contains(err.Error(), "does not expose model discovery") {
 		t.Fatalf("Discover error = %v, want unsupported provider message", err)
+	}
+}
+
+func TestDiscoverAnthropicCompatibleModelsFetchesModelsEndpoint(t *testing.T) {
+	const apiKey = "sk-ant-secret"
+	var gotPath string
+	var gotAPIKey string
+	var gotVersion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "claude-custom-b", "display_name": "Claude Custom B"},
+				{"id": "claude-custom-a", "display_name": "Claude Custom A"},
+				{"id": "claude-custom-a", "display_name": "Claude Custom A"},
+				{}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	models, err := Discover(context.Background(), config.ProviderProfile{
+		Name:         "custom",
+		ProviderKind: config.ProviderKindAnthropicCompat,
+		BaseURL:      server.URL + "/anthropic",
+		APIKey:       apiKey,
+	}, Options{HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("Discover returned error: %v", err)
+	}
+	if gotPath != "/anthropic/v1/models" {
+		t.Fatalf("requested path = %q, want /anthropic/v1/models", gotPath)
+	}
+	if gotAPIKey != apiKey {
+		t.Fatalf("x-api-key = %q, want API key", gotAPIKey)
+	}
+	if gotVersion == "" {
+		t.Fatal("anthropic-version header is required")
+	}
+	if got, want := modelIDs(models), []string{"claude-custom-a", "claude-custom-b"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %#v, want %#v", got, want)
 	}
 }
 

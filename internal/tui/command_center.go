@@ -522,6 +522,9 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 				return modelSwitchTarget{modelID: model.ID}, true
 			}
 		}
+		if genericProviderCatalogID(provider.ID) && strings.TrimSpace(args) != "" {
+			return modelSwitchTarget{modelID: strings.TrimSpace(args)}, true
+		}
 	}
 	return modelSwitchTarget{}, false
 }
