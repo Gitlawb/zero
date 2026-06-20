@@ -86,9 +86,10 @@ var (
 	// Redact the ENTIRE credential after the scheme (to end of line), not just the
 	// first token: parameterized schemes (Digest, OAuth, AWS4-HMAC-SHA256) spread
 	// the secret across comma-separated params (…, response=…, Signature=…), so a
-	// single-token capture would leave the actual secret visible. The scheme name
-	// is kept; only the value is replaced.
-	headerPattern = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\s*:\s*(bearer|basic|token|apikey|api-key|digest|negotiate|oauth|aws4-hmac-sha256)\s+([^\r\n]+)`)
+	// single-token capture would leave the actual secret visible. A known scheme is
+	// kept for readability; the scheme is OPTIONAL so an opaque or custom-scheme
+	// credential (no recognized scheme) still has its whole value redacted (M12).
+	headerPattern = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization)\s*:\s*(?:(bearer|basic|token|apikey|api-key|digest|negotiate|oauth|aws4-hmac-sha256)\s+)?([^\r\n]+)`)
 	secretHeader  = regexp.MustCompile(`(?i)\b(x-api-key|api-key|cookie|set-cookie)\s*:\s*([^\r\n]+)`)
 	queryPattern  = regexp.MustCompile(`([?&])([^=&#\s]+)=([^&#\s]+)`)
 )
@@ -182,7 +183,15 @@ func RedactString(value string, options Options) string {
 		}
 		return parts[1] + parts[2] + replacement
 	})
-	redacted = headerPattern.ReplaceAllString(redacted, "$1: $2 "+replacement)
+	redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+		groups := headerPattern.FindStringSubmatch(match)
+		// groups[2] is the known scheme (kept for readability) or "" for an opaque /
+		// custom-scheme credential — in which case the whole value is redacted (M12).
+		if groups[2] != "" {
+			return groups[1] + ": " + groups[2] + " " + replacement
+		}
+		return groups[1] + ": " + replacement
+	})
 	redacted = secretHeader.ReplaceAllString(redacted, "$1: "+replacement)
 	redacted = redactURLPasswords(redacted, replacement)
 	redacted = queryPattern.ReplaceAllStringFunc(redacted, func(match string) string {

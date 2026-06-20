@@ -44,9 +44,14 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
 		if liveErr == nil {
-			return mergeLiveModels(provider, liveModels, catalogModels), nil
-		}
-		if len(catalogModels) == 0 {
+			if merged := mergeLiveModels(provider, liveModels, catalogModels); len(merged) > 0 {
+				return merged, nil
+			}
+			// Live probe returned 200 but its model ids didn't match the catalog, so
+			// the merge is empty. Fall through to the curated catalog below instead of
+			// returning an empty list that collapses the picker to the bare built-in
+			// set (and shows a misleading "no model ids" error) (M11).
+		} else if len(catalogModels) == 0 {
 			return nil, liveErr
 		}
 	}
