@@ -52,7 +52,9 @@ func shellOnlyCommandText(name string) string {
 }
 
 func helpText() string {
-	return formatGroupedCommandHelp()
+	// Render /help as a styled command card (accent group headers, two-tone
+	// command rows) rather than a flat grey system note.
+	return commandCardTranscriptPrefix + formatGroupedCommandHelp()
 }
 
 // rowContext carries the cross-row knowledge renderRow needs: which tool
@@ -586,34 +588,91 @@ func renderCommandCardRow(text string, width int) string {
 
 	title := strings.TrimSpace(raw[0])
 	lines := make([]string, 0, len(raw)-1)
-	for index, line := range raw[1:] {
+	for _, line := range raw[1:] {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case trimmed == "":
 			lines = append(lines, "")
-		case index == 0:
-			lines = append(lines, zeroTheme.ink.Bold(true).Render(line))
-		case isCommandCardHeading(trimmed):
-			lines = append(lines, zeroTheme.accent.Bold(true).Render(line))
-		case strings.HasPrefix(trimmed, "actions:"):
-			lines = append(lines, zeroTheme.accent.Render("actions:")+zeroTheme.ink.Render(strings.TrimPrefix(trimmed, "actions:")))
-		case strings.HasPrefix(trimmed, "- "):
-			lines = append(lines, zeroTheme.ink.Render(line))
+		case isCommandCardStatusLine(trimmed):
+			// "status: info" and the like are structural noise — the card border
+			// and title already convey state; only surface a non-ok status.
+			if styled := styledCommandCardStatus(trimmed); styled != "" {
+				lines = append(lines, styled)
+			}
+		case isCommandCardActionsLine(trimmed):
+			lines = append(lines, zeroTheme.accent.Render("actions: ")+zeroTheme.ink.Render(strings.TrimSpace(strings.TrimPrefix(trimmed, "actions:"))))
+		case isCommandCardHintLine(trimmed):
+			lines = append(lines, zeroTheme.faint.Render(line))
+		case isIndentedCommandCardRow(line):
+			// A content row (indented): a "/cmd … - description" gets two-tone
+			// styling (bright name, muted description); a "key  value" field or a
+			// "- bullet" keeps the value readable rather than dim grey.
+			lines = append(lines, styleCommandCardContentRow(line))
 		default:
-			lines = append(lines, zeroTheme.muted.Render(line))
+			// A non-indented, non-empty line is a group header (Model, Session…).
+			lines = append(lines, zeroTheme.accent.Bold(true).Render(line))
 		}
 	}
 	return styledBlockFillTitle(width, title, lines, zeroTheme.accent, lipgloss.NewStyle())
 }
 
-func isCommandCardHeading(value string) bool {
-	if value == "" {
-		return false
+// isIndentedCommandCardRow reports whether a line is an indented content row
+// (a command, field, or bullet) rather than a group header.
+func isIndentedCommandCardRow(line string) bool {
+	return strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t")
+}
+
+// styleCommandCardContentRow two-tones an indented content row. A command row
+// ("  /name [args] - description") renders the "/name [args]" half in bright ink
+// and the description in muted; a plain field/bullet row keeps the leading
+// marker bright and the rest readable. Indentation is preserved.
+func styleCommandCardContentRow(line string) string {
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	body := strings.TrimLeft(line, " \t")
+
+	// "/cmd … - description": split on the FIRST " - " so the command (and its
+	// arg/alias syntax) stays bright and the prose dims.
+	if strings.HasPrefix(body, "/") {
+		if name, desc, ok := strings.Cut(body, " - "); ok {
+			return indent + zeroTheme.ink.Bold(true).Render(name) + zeroTheme.muted.Render(" — "+desc)
+		}
+		return indent + zeroTheme.ink.Bold(true).Render(body)
 	}
-	if strings.HasPrefix(value, "- ") || strings.HasPrefix(value, "actions:") {
-		return false
+	// "- bullet" list item: keep it readable (not dim grey).
+	if strings.HasPrefix(body, "- ") {
+		return indent + zeroTheme.ink.Render(body)
 	}
-	return !strings.Contains(value, " | ") && !strings.Contains(value, "  ")
+	// "key   value" field row: the value carries the information, so keep the
+	// whole row in readable ink rather than the old faint grey.
+	return indent + zeroTheme.ink.Render(body)
+}
+
+// isCommandCardStatusLine reports whether trimmed is a "status: <state>" line.
+func isCommandCardStatusLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "status: ")
+}
+
+// styledCommandCardStatus returns a styled status line for a non-ok/non-info
+// state (warning/blocked surface in their tint), or "" to drop a neutral
+// "status: ok"/"status: info" entirely.
+func styledCommandCardStatus(trimmed string) string {
+	state := strings.TrimSpace(strings.TrimPrefix(trimmed, "status:"))
+	switch state {
+	case "warning":
+		return zeroTheme.amber.Render(trimmed)
+	case "blocked":
+		return zeroTheme.red.Render(trimmed)
+	default: // ok, info — no signal worth the line
+		return ""
+	}
+}
+
+func isCommandCardActionsLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "actions:")
+}
+
+func isCommandCardHintLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "hint:")
 }
 
 func renderMCPManagerCard(text string, width int) string {

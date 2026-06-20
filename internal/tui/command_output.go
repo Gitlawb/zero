@@ -210,7 +210,12 @@ func compactCommandOutputText(text string) string {
 }
 
 func renderCommandOutput(output commandOutput) string {
-	return formatCommandOutput(output)
+	// Route every command-info screen (/tools, /permissions, /context, /config,
+	// /sessions, doctor, …) through the styled command-card renderer so it gets
+	// real visual hierarchy (accent group headers, two-tone command rows) instead
+	// of the flat dim-grey system note. The structured text is unchanged — the
+	// prefix just selects the card renderer in renderRowModeUncached.
+	return commandCardTranscriptPrefix + formatCommandOutput(output)
 }
 
 func commandBullet(value string) string {
