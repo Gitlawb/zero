@@ -1621,6 +1621,42 @@ func bashCardBody(command string, detail string, width int, opts cardRenderOptio
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
 }
 
+func execCommandCardBody(command string, detail string, width int, opts cardRenderOptions) cardBody {
+	innerWidth := width - 4
+	lines := []string{}
+	if command = strings.TrimSpace(command); command != "" {
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.bashPrompt).Render("❯ ")+zeroTheme.onPanel(zeroTheme.ink).Render(truncateRunes(command, maxInt(8, innerWidth-2))))
+		lines = append(lines, zeroTheme.onPanel(zeroTheme.line).Render(strings.Repeat("─", maxInt(1, innerWidth))))
+	}
+
+	footer := ""
+	section := ""
+	for _, line := range strings.Split(detail, "\n") {
+		switch {
+		case line == "output:":
+			section = "output"
+		case strings.HasPrefix(line, "exit_code: "):
+			code := strings.TrimPrefix(line, "exit_code: ")
+			if code == "0" {
+				footer = zeroTheme.green.Render("exit 0")
+			} else {
+				footer = zeroTheme.red.Render("exit " + code)
+			}
+		case strings.HasPrefix(line, "session_id: "):
+			footer = zeroTheme.faint.Render("session " + strings.TrimSpace(strings.TrimPrefix(line, "session_id: ")))
+		case strings.HasPrefix(line, "Use write_stdin "):
+			continue
+		default:
+			style := zeroTheme.muted
+			if section == "" && strings.HasPrefix(line, "Command is still running.") {
+				style = zeroTheme.faint
+			}
+			lines = append(lines, zeroTheme.panel.Render("  ")+zeroTheme.onPanel(style).Render(line))
+		}
+	}
+	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
+}
+
 // renderSessionsCards draws the /resume list as stacked cards: id (accent) +
 // age (faint) on the top row, title (ink), then the meta line (faint with
 // faintest dots). Records arrive as sessionsCardFieldSep-joined fields; a

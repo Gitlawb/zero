@@ -43,6 +43,12 @@ func newDefaultToolBodyRegistry() *toolBodyRegistry {
 	registry.register("bash", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
 		return bashCardBody(req.hint, req.detail, req.width, req.opts)
 	})})
+	registry.register("exec_command", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
+		return execCommandCardBody(req.hint, req.detail, req.width, req.opts)
+	})})
+	registry.register("write_stdin", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
+		return execCommandCardBody("", req.detail, req.width, req.opts)
+	})})
 	registry.register("grep", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
 		return grepCardBody(req.detail, req.width, req.opts)
 	})})

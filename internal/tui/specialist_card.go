@@ -395,14 +395,44 @@ func toolCallSummary(event streamjson.Event) string {
 		if pattern, ok := args["pattern"].(string); ok {
 			return truncateRunes(pattern, 40)
 		}
-	case "bash":
+	case "bash", "exec_command":
 		if cmd, ok := args["command"].(string); ok {
 			return truncateRunes(cmd, 40)
+		}
+		if cmd, ok := args["cmd"].(string); ok {
+			return truncateRunes(cmd, 40)
+		}
+	case "write_stdin":
+		sessionID := toolCallIntArg(args, "session_id")
+		chars, _ := args["chars"].(string)
+		switch {
+		case chars == "":
+			return fmt.Sprintf("poll session %d", sessionID)
+		case chars == "\x03":
+			return fmt.Sprintf("interrupt session %d", sessionID)
+		default:
+			return fmt.Sprintf("send input to session %d", sessionID)
 		}
 	case "update_plan":
 		return "plan"
 	}
 	return ""
+}
+
+func toolCallIntArg(args map[string]any, key string) int {
+	switch value := args[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case string:
+		parsed, _ := strconv.Atoi(value)
+		return parsed
+	default:
+		return 0
+	}
 }
 
 // truncateRunes is provided by view.go; specialist_card.go relies on it for
