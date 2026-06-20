@@ -154,6 +154,14 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			if (shownAny || (m.flushedAny && havePreviousKind)) && previousKind == rowUser && row.kind == rowReasoning {
 				items = append(items, transcriptBlankBodyItem())
 			}
+			// Breathing room between back-to-back tool cards in the same turn: a
+			// tool result collapses its call into one card, so consecutive cards
+			// would otherwise stack with no gap (the dense "wall" look). One blank
+			// line between them matches the reference agents. Turn-starters are
+			// separated above, so this only fires tool-card -> tool-card.
+			if shownAny && havePreviousKind && isToolCardKind(previousKind) && isToolCardKind(row.kind) {
+				items = append(items, transcriptBlankBodyItem())
+			}
 			// Inject the plan panel inline before the specialist cards, so it
 			// appears in the chat flow (not pinned at the top).
 			if row.kind == rowSpecialist && !planPanelEmitted {

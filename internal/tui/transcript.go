@@ -280,6 +280,41 @@ func permissionTranscriptRow(event agent.PermissionEvent) transcriptRow {
 	}
 }
 
+// permissionEventIsNoteworthy reports whether a permission event carries
+// user-facing information worth a visible transcript row. A silently
+// auto-approved call (auto mode, or a previously-granted scope that just
+// matched) is NOT noteworthy: the tool card already shows the action, target,
+// and result, so a separate "always · <tool> · target:<path>" row is pure
+// noise — the reference agents only surface approval when the user is actually
+// prompted or makes an explicit durable choice. The underlying audit event is
+// still recorded regardless (see the OnPermission handler and resume rebuild);
+// this only gates the rendered row, so the session log / `zero sessions` stay
+// complete.
+//
+// Used in BOTH the live path (model.go OnPermission) and the resume rebuild
+// (session.go) so a resumed session shows exactly the rows the live view did.
+func permissionEventIsNoteworthy(event agent.PermissionEvent) bool {
+	switch event.Action {
+	case agent.PermissionActionPrompt, agent.PermissionActionDeny, agent.PermissionActionCancel:
+		// A real prompt was shown, or the call was blocked/cancelled — always show.
+		return true
+	}
+	// A non-empty DecisionAction means the user actually decided (allow once,
+	// allow for session, always, prefix, …): the agent only sets it when a
+	// decision was made, leaving it empty for a silent auto-approve. So any real
+	// decision is worth one visible row, even a plain "allow once".
+	if strings.TrimSpace(string(event.DecisionAction)) != "" {
+		return true
+	}
+	// A safety-relevant block stays visible even if somehow allowed.
+	if event.Block != nil {
+		return true
+	}
+	// Everything else (plain auto-approve, or a pre-granted scope auto-matching)
+	// is silent — the tool card speaks for it.
+	return false
+}
+
 func permissionEventFromRequest(request agent.PermissionRequest) agent.PermissionEvent {
 	return agent.PermissionEvent{
 		ToolCallID:     request.ToolCallID,

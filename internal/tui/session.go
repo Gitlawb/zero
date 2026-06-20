@@ -415,7 +415,12 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				arg:    argHintSecondary(payloadString(payload, "arguments")),
 			})
 		case sessions.EventPermission, sessions.EventPermissionRequest, sessions.EventPermissionDecision:
-			rows = append(rows, permissionTranscriptRow(permissionEventFromPayload(payload)))
+			// Mirror the live path: a silently auto-approved call recorded its
+			// audit event but rendered no row, so don't resurrect one on resume.
+			event := permissionEventFromPayload(payload)
+			if permissionEventIsNoteworthy(event) {
+				rows = append(rows, permissionTranscriptRow(event))
+			}
 		case sessions.EventToolResult:
 			name := payloadString(payload, "name")
 			if name == "" {

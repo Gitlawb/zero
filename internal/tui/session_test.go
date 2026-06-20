@@ -582,12 +582,13 @@ func TestResumeCommandHydratesSessionTranscript(t *testing.T) {
 	}
 	appendTestEvent(t, store, session.SessionID, sessions.EventMessage, map[string]any{"role": "user", "content": "previous request"})
 	appendTestEvent(t, store, session.SessionID, sessions.EventToolCall, map[string]any{"id": "call_1", "name": "grep", "arguments": `{"pattern":"Zero"}`})
-	appendTestEvent(t, store, session.SessionID, sessions.EventPermission, map[string]any{
+	appendTestEvent(t, store, session.SessionID, sessions.EventPermissionDecision, map[string]any{
 		"toolCallId":     "call_1",
 		"name":           "grep",
 		"action":         "allow",
+		"decisionAction": "allow",
 		"permission":     "allow",
-		"permissionMode": "auto",
+		"permissionMode": "ask",
 		"sideEffect":     "read",
 		"scope":          "src",
 		"risk":           map[string]any{"level": "low"},

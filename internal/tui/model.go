@@ -2490,6 +2490,14 @@ func startsTurn(kind rowKind) bool {
 	}
 }
 
+// isToolCardKind reports whether a row renders as a tool card (a running call or
+// its collapsed result). Used to add one blank line between consecutive tool
+// cards in a turn. Specialist cards are excluded — they own their own grouping
+// (summary line + injected spacing) and must not be double-spaced.
+func isToolCardKind(kind rowKind) bool {
+	return kind == rowToolCall || kind == rowToolResult
+}
+
 func (m model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.pendingPermission == nil {
 		return m, nil
@@ -3496,10 +3504,16 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 
 		onPermission := options.OnPermission
 		options.OnPermission = func(event agent.PermissionEvent) {
-			row := permissionTranscriptRow(event)
-			row.runID = runID
-			rows = append(rows, row)
-			m.sendAgentRow(runID, row)
+			// The audit event is recorded for every call so the session log stays
+			// complete; the visible row is only emitted when the event carries
+			// user-facing information (a real prompt, a denial, an explicit durable
+			// grant), not for silent auto-approvals.
+			if permissionEventIsNoteworthy(event) {
+				row := permissionTranscriptRow(event)
+				row.runID = runID
+				rows = append(rows, row)
+				m.sendAgentRow(runID, row)
+			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    tuiPermissionEventType(event),
 				Payload: event,

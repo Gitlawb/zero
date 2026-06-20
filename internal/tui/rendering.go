@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -292,6 +293,50 @@ func looksLikePath(value string) bool {
 		return false
 	}
 	return strings.Contains(value, "/") || filepath.Ext(value) != ""
+}
+
+// userHomeDir is overridable in tests; os.UserHomeDir in production.
+var userHomeDir = os.UserHomeDir
+
+// displayPath shortens an absolute path for the transcript so a tool card shows
+// `examples/calc/calc.go` instead of `D:\…\examples\calc\calc.go`. Built-in
+// tools already emit workspace-relative paths; this mainly tames MCP tools and
+// any tool that surfaces an absolute path. Display-only: never mutate the path
+// sent to a tool or stored in the session. The ladder mirrors the reference
+// agents — relative under the workspace, `~`-relative under home, else the
+// trailing segments with a `…/` prefix:
+//
+//	under cwd      → examples/calc/calc.go
+//	under $HOME    → ~/projects/zero/main.go
+//	elsewhere      → …/other/calc.go   (last displayPathTailSegments segments)
+//	already short  → returned unchanged (relative input, no separators, etc.)
+//
+// Output always uses forward slashes so it reads the same on every platform.
+const displayPathTailSegments = 3
+
+func displayPath(cwd string, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" || !filepath.IsAbs(p) {
+		// Relative inputs (the built-in-tool common case) are already short and
+		// workspace-anchored; just normalize separators.
+		return filepath.ToSlash(p)
+	}
+	if cwd = strings.TrimSpace(cwd); cwd != "" {
+		if rel, err := filepath.Rel(cwd, p); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+			return filepath.ToSlash(rel)
+		}
+	}
+	if home, err := userHomeDir(); err == nil && home != "" {
+		if rel, err := filepath.Rel(home, p); err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+			return "~/" + filepath.ToSlash(rel)
+		}
+	}
+	slashed := filepath.ToSlash(p)
+	segments := strings.Split(strings.Trim(slashed, "/"), "/")
+	if len(segments) <= displayPathTailSegments {
+		return slashed
+	}
+	return "…/" + strings.Join(segments[len(segments)-displayPathTailSegments:], "/")
 }
 
 // sayMeasure is the narrow prose wrap width for compact secondary text.
@@ -1100,6 +1145,15 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		borderStyle = zeroTheme.cardErr
 	}
 	key := rcKey(row.runID, row.id)
+	// A successful call whose only output is a one-line confirmation ("Created
+	// examples/calc.go (45 bytes).", "Successfully created directory …") restates
+	// what the head already shows (action + target + ✓), so drop the body and let
+	// the card collapse to a single line — matching the reference agents' density.
+	// Only for clean OK results: errors and anything multi-line keep their body.
+	if !failed && opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && looksLikeRedundantConfirmation(row.detail) {
+		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
+		return toolCard(head, glyph, nil, "", borderStyle, width)
+	}
 	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
 	// transcript stays scannable; the model still received the full output. Click
 	// the card to expand (▸ → ▾) while it is live; collapsed rows flush to
@@ -1120,6 +1174,25 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		footer = "▾ collapse"
 	}
 	return toolCard(head, glyph, body.lines, footer, borderStyle, width)
+}
+
+// confirmationVerbPattern matches a single-line success confirmation that only
+// restates the action + target: a leading verb ("Created", "Overwrote",
+// "Successfully created directory", "Wrote", "Deleted", …) optionally followed
+// by a path/detail. Kept deliberately narrow — anything it doesn't recognize
+// keeps its body, so the worst case is the status quo, never lost output.
+var confirmationVerbPattern = regexp.MustCompile(`(?i)^(successfully\s+\w+|created|overwrote|wrote|updated|edited|deleted|removed|renamed|moved|copied|appended)\b`)
+
+// looksLikeRedundantConfirmation reports whether a tool's output is a single
+// short line that merely confirms a mutation (so the card body would just echo
+// the head). Multi-line output, or anything not starting with a known
+// confirmation verb, is NOT redundant and keeps its body.
+func looksLikeRedundantConfirmation(detail string) bool {
+	trimmed := strings.TrimSpace(detail)
+	if trimmed == "" || strings.Contains(trimmed, "\n") {
+		return false
+	}
+	return confirmationVerbPattern.MatchString(trimmed)
 }
 
 // toolCardAlwaysExpands reports tools whose body is a code diff that must stay
@@ -1187,7 +1260,13 @@ func toolDisplayName(name string) string {
 func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
 	head := zeroTheme.toolName.Render(toolDisplayName(name))
 	if target = strings.TrimSpace(target); target != "" {
-		styled := zeroTheme.toolTarget.Render(middleTruncate(target, maxInt(16, width/2)))
+		// Show a shortened, workspace-relative path, but keep the hyperlink
+		// pointing at the original absolute path so the file still opens.
+		shown := target
+		if looksLikePath(target) {
+			shown = displayPath(opts.cwd, target)
+		}
+		styled := zeroTheme.toolTarget.Render(middleTruncate(shown, maxInt(16, width/2)))
 		if looksLikePath(target) {
 			styled = hyperlink(fileURL(opts.cwd, target), styled)
 		}
