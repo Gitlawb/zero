@@ -223,8 +223,16 @@ func (m *model) consumePendingDocuments() string {
 	return b.String()
 }
 
+// appendImageNotice appends an image-related notice to the transcript. Image
+// errors (vision gate refusal, oversize, unsupported type) render with a red
+// error border + red text so they stand out from ordinary grey system notes.
 func (m model) appendImageNotice(text string) model {
-	return m.appendSystemNotice(text)
+	row := transcriptRow{
+		kind: rowError,
+		text: text,
+	}
+	m.transcript = appendTranscriptRow(m.transcript, row)
+	return m
 }
 
 // removeLastAttachment drops the rightmost pending attachment chip and reports
