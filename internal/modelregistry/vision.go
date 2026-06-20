@@ -28,9 +28,8 @@ func SupportsVision(registry Registry, modelID string) bool {
 
 // visionCapableByName reports whether modelID names a known multimodal family.
 // It is conservative: it matches the established vision families and leaves
-// everything else (including text-only models like gpt-oss, kimi, and coder
-// models) refused, so a false "supported" is unlikely. Used only as a fallback
-// for models absent from the curated catalog.
+// everything else refused, so a false "supported" is unlikely. Used only as a
+// fallback for models absent from the curated catalog.
 func visionCapableByName(modelID string) bool {
 	id := strings.ToLower(strings.TrimSpace(modelID))
 	if slash := strings.LastIndexByte(id, '/'); slash >= 0 {
@@ -53,6 +52,13 @@ func visionCapableByName(modelID string) bool {
 	case strings.Contains(id, "grok-4"),
 		strings.Contains(id, "grok") && mentionsVision(id):
 		return true // Grok 4 (and grok vision variants) are multimodal
+	case strings.Contains(id, "kimi-k2"):
+		return true // Kimi-K2 and later are multimodal (kimi-for-coding is NOT)
+	case strings.Contains(id, "qwen2-vl"), strings.Contains(id, "qwen2.5-vl"),
+		strings.Contains(id, "qwen-vl"), strings.Contains(id, "qwenvl"):
+		return true // Qwen VL series are multimodal
+	case strings.Contains(id, "minimax-m3"):
+		return false // MiniMax M3 is text-only (the user confirmed this)
 	case strings.Contains(id, "llava"), strings.Contains(id, "pixtral"),
 		strings.Contains(id, "internvl"), strings.Contains(id, "minicpm-v"),
 		strings.Contains(id, "moondream"), strings.Contains(id, "bakllava"),
