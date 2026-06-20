@@ -102,9 +102,9 @@ func ChatGPTLogin(ctx context.Context, opts ChatGPTOptions) (oauth.Token, error)
 	// ChatGPT's authorize endpoint requires these extra params (the Codex CLI
 	// sends them too) — without them it rejects with authorize_hydra_invalid_request.
 	chatgptExtraParams := map[string]string{
-		"id_token_add_organizations":   "true",
-		"codex_cli_simplified_flow":    "true",
-		"originator":                   "codex_cli_rs",
+		"id_token_add_organizations": "true",
+		"codex_cli_simplified_flow":  "true",
+		"originator":                 "codex_cli_rs",
 	}
 	authURL, err := oauth.BuildAuthorizationURL(cfg, pkce, state, redirectURI, chatgptExtraParams)
 	if err != nil {
