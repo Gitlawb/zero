@@ -41,6 +41,14 @@ func (m model) backgroundTerminalSummary() string {
 	return fmt.Sprintf("%d background terminal%s running · /ps to view · /stop to close", count, plural)
 }
 
+func (m model) stopAllBackgroundTerminalSessions() []int {
+	controller, ok := m.execSessionController()
+	if !ok {
+		return nil
+	}
+	return controller.StopAllExecSessions()
+}
+
 func (m model) backgroundTerminalsText() string {
 	sessions := m.backgroundTerminalSessions()
 	card := commandCard{
@@ -79,7 +87,7 @@ func (m model) stopBackgroundTerminalsText(input string) string {
 	}
 	input = strings.TrimSpace(input)
 	if input == "" {
-		stopped := controller.StopAllExecSessions()
+		stopped := m.stopAllBackgroundTerminalSessions()
 		return renderStopBackgroundTerminalsCard(stopped, "")
 	}
 	id, err := strconv.Atoi(input)

@@ -126,3 +126,15 @@ func TestStopBackgroundTerminalsTextRejectsInvalidSessionID(t *testing.T) {
 		t.Fatalf("expected usage, got:\n%s", text)
 	}
 }
+
+func TestQuitStopsBackgroundTerminals(t *testing.T) {
+	tool := &fakeExecSessionTool{
+		sessions: []tools.ExecSessionSnapshot{{ID: 1000, StartedAt: time.Unix(100, 0), Status: "running"}},
+	}
+	m := modelWithFakeExecSessions(tool, time.Unix(200, 0))
+
+	_, _ = m.quit()
+	if !tool.stopAll {
+		t.Fatal("quit should stop all background terminal sessions")
+	}
+}

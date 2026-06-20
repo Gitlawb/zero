@@ -666,6 +666,7 @@ func (m model) noBlockingModal() bool {
 
 func (m model) quit() (tea.Model, tea.Cmd) {
 	m.stopPRWatcher()
+	m.stopAllBackgroundTerminalSessions()
 	return m, tea.Quit
 }
 
