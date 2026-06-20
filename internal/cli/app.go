@@ -235,9 +235,20 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if err != nil {
 			return writeAppError(stderr, err.Error(), 1)
 		}
+		// A misplaced --add-dir anywhere in the remainder is the more specific error,
+		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
 			if arg == "--add-dir" || strings.HasPrefix(arg, "--add-dir=") {
 				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --skip-permissions-unsafe)", 1)
+			}
+		}
+		// This path launches the interactive TUI, which takes no positional prompt or
+		// subcommand. Reject any remaining trailing arg loudly instead of silently
+		// dropping it, so `zero --skip-permissions-unsafe "fix bug"` doesn't appear to
+		// hang in the TUI with the prompt discarded. (AUDIT-L3)
+		for _, arg := range rest {
+			if strings.TrimSpace(arg) != "" {
+				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
 		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...))

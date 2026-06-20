@@ -562,6 +562,29 @@ func TestRunSkipPermissionsUnsafeLaunchesTUIInUnsafeMode(t *testing.T) {
 	}
 }
 
+func TestRunSkipPermissionsUnsafeRejectsTrailingPrompt(t *testing.T) {
+	// AUDIT-L3: a trailing prompt must be rejected loudly, not silently dropped
+	// while the interactive TUI launches.
+	var stdout, stderr bytes.Buffer
+	launched := false
+	exitCode := runWithDeps([]string{"--skip-permissions-unsafe", "fix the bug"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(context.Context, tui.Options) int { launched = true; return 0 },
+	})
+	if exitCode == 0 {
+		t.Fatal("a trailing prompt after --skip-permissions-unsafe must be rejected, not silently dropped")
+	}
+	if launched {
+		t.Fatal("the TUI must not launch when trailing args are rejected")
+	}
+	if !strings.Contains(stderr.String(), "takes no prompt") {
+		t.Fatalf("error should explain the no-prompt contract, got %q", stderr.String())
+	}
+}
+
 func TestRunAddDirWiresExtraWriteRootIntoTUISandboxScope(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
