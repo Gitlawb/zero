@@ -17,12 +17,12 @@ func TestVisionCapableByName(t *testing.T) {
 		"my-custom-vision-less-model", "no-vision-model", "grok-vision-less",
 	}
 	for _, m := range vision {
-		if !visionCapableByName(m) {
+		if !VisionCapableByName(m) {
 			t.Errorf("expected %q to be recognized as vision-capable", m)
 		}
 	}
 	for _, m := range textOnly {
-		if visionCapableByName(m) {
+		if VisionCapableByName(m) {
 			t.Errorf("expected %q to NOT be vision-capable", m)
 		}
 	}

@@ -86,27 +86,52 @@ func stripMatchingQuotes(s string) (string, bool) {
 	return s, false
 }
 
-// modelSupportsVisionTUI reports whether the active model can accept image input.
-// An unknown / custom id (not in the catalog) returns false: we cannot confirm
-// vision support, so the TUI refuses to attach rather than silently sending
-// images a model may reject. Mirrors the CLI/headless vision gate (component E).
-func modelSupportsVisionTUI(modelName string) bool {
-	trimmed := strings.TrimSpace(modelName)
+// modelSupportsVisionTUI reports whether the active model can accept image
+// input. It checks three sources in order:
+//  1. The curated model registry (catalog authority + name heuristic)
+//  2. The discovered model list from models.dev (if the live model picker
+//     fetched it) — this carries InputModalities from models.dev, which
+//     includes "image" for vision-capable models
+//  3. Falls back to the name heuristic for unknown models
+func (m model) modelSupportsVisionTUI() bool {
+	trimmed := strings.TrimSpace(m.modelName)
 	if trimmed == "" {
 		return false
 	}
+	// Check the curated registry first.
 	registry, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return false
+	if err == nil {
+		if modelregistry.SupportsVision(registry, trimmed) {
+			return true
+		}
+		// Catalog knows this model and it lacks vision — trust that.
+		if _, known := registry.Get(trimmed); known {
+			return false
+		}
 	}
-	return modelregistry.SupportsVision(registry, trimmed)
+	// Check the discovered model list (from models.dev) for InputModalities
+	// containing "image". This covers custom/ollama/cloud models not in the
+	// curated catalog — models.dev knows their capabilities.
+	for _, dm := range m.modelPickerLiveModels {
+		if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+			for _, modality := range dm.InputModalities {
+				if strings.EqualFold(strings.TrimSpace(modality), "image") {
+					return true
+				}
+			}
+			return false // found the model in discovered list, no image modality
+		}
+	}
+	// Fall back to the name heuristic for models not in the catalog or
+	// discovered list.
+	return modelregistry.VisionCapableByName(trimmed)
 }
 
 // attachClipboardImage attaches an image read from the OS clipboard (a
 // screenshot paste). Runs through the same vision gate + size cap as
 // /image <path>, but the bytes come from the clipboard instead of a file.
 func (m model) attachClipboardImage(data []byte, mediaType string) model {
-	if !modelSupportsVisionTUI(m.modelName) {
+	if !m.modelSupportsVisionTUI() {
 		name := m.modelName
 		if name == "" {
 			name = "the active model"
@@ -150,7 +175,7 @@ func (m model) handleImageCommand(arg string) model {
 		return m.handleDocumentAttach(trimmed)
 	}
 
-	if !modelSupportsVisionTUI(m.modelName) {
+	if !m.modelSupportsVisionTUI() {
 		name := m.modelName
 		if name == "" {
 			name = "the active model"
@@ -185,7 +210,7 @@ type pendingDocument struct {
 // nothing.
 func (m model) handleDocumentAttach(path string) model {
 	doc, err := imageinput.LoadDocument(path, m.cwd, imageinput.DocumentOptions{
-		Vision: modelSupportsVisionTUI(m.modelName),
+		Vision: m.modelSupportsVisionTUI(),
 	})
 	if err != nil {
 		return m.appendImageNotice(err.Error())

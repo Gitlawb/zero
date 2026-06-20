@@ -23,14 +23,14 @@ func SupportsVision(registry Registry, modelID string) bool {
 	if _, known := registry.Get(modelID); known {
 		return false
 	}
-	return visionCapableByName(modelID)
+	return VisionCapableByName(modelID)
 }
 
-// visionCapableByName reports whether modelID names a known multimodal family.
+// VisionCapableByName reports whether modelID names a known multimodal family.
 // It is conservative: it matches the established vision families and leaves
 // everything else refused, so a false "supported" is unlikely. Used only as a
 // fallback for models absent from the curated catalog.
-func visionCapableByName(modelID string) bool {
+func VisionCapableByName(modelID string) bool {
 	id := strings.ToLower(strings.TrimSpace(modelID))
 	if slash := strings.LastIndexByte(id, '/'); slash >= 0 {
 		id = id[slash+1:] // drop a "provider/" prefix

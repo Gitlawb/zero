@@ -3034,7 +3034,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	// exec's drop+warn wording) rather than sending them to a model that
 	// rejects them. Pending state is cleared either way below.
 	turnImages := m.pendingImages
-	if len(turnImages) > 0 && !modelSupportsVisionTUI(m.modelName) {
+	if len(turnImages) > 0 && !m.modelSupportsVisionTUI() {
 		name := m.modelName
 		if name == "" {
 			name = "the active model"

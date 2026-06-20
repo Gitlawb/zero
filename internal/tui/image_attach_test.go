@@ -26,7 +26,8 @@ func TestModelSupportsVisionTUI(t *testing.T) {
 		{modelName: "", want: false},
 	}
 	for _, tc := range cases {
-		got := modelSupportsVisionTUI(tc.modelName)
+		m := newModel(t.Context(), Options{ModelName: tc.modelName})
+		got := m.modelSupportsVisionTUI()
 		if got != tc.want {
 			t.Fatalf("modelSupportsVisionTUI(%q) = %v, want %v", tc.modelName, got, tc.want)
 		}
