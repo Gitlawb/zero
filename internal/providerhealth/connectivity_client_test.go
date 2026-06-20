@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 func TestDialValidatedAddrsFallsBackPastDeadAddress(t *testing.T) {
@@ -95,7 +97,7 @@ func TestSafeDialContextRejectsLiteralLinkLocalAddress(t *testing.T) {
 }
 
 func TestConnectivityClientRefusesRedirectToBlockedHost(t *testing.T) {
-	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("169.254.169.254")})
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("169.254.169.254")}, nil)
 	if client.CheckRedirect == nil {
 		t.Fatal("default connectivity client has no CheckRedirect guard")
 	}
@@ -110,7 +112,7 @@ func TestConnectivityClientRefusesRedirectToBlockedHost(t *testing.T) {
 }
 
 func TestConnectivityClientRefusesTooManyRedirects(t *testing.T) {
-	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")})
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")}, nil)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.example.com/v1/models", nil)
 	if err != nil {
@@ -119,5 +121,40 @@ func TestConnectivityClientRefusesTooManyRedirects(t *testing.T) {
 	via := make([]*http.Request, maxConnectivityRedirects)
 	if err := client.CheckRedirect(req, via); err == nil {
 		t.Fatalf("CheckRedirect allowed more than %d redirects", maxConnectivityRedirects)
+	}
+}
+
+func TestConnectivityClientStripsCredentialsOnCrossHostRedirect(t *testing.T) {
+	// A 3xx to a different host must not carry the provider credential. Go's stdlib
+	// strips Authorization/Cookie but NOT x-api-key/x-goog-api-key/custom headers,
+	// so the CheckRedirect guard must delete them on a host change (AUDIT-M10).
+	sensitive := sensitiveAuthHeaderNames(config.ProviderProfile{
+		AuthHeader:    "x-custom-token",
+		CustomHeaders: map[string]string{"x-tenant-secret": "s3cr3t"},
+	}, config.ProviderKindAnthropic)
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")}, sensitive)
+
+	orig, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.anthropic.com/v1/models", nil)
+	redirect, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://evil.example.net/v1/models", nil)
+	for _, h := range []string{"x-api-key", "x-custom-token", "x-tenant-secret", "Authorization"} {
+		redirect.Header.Set(h, "leak-me")
+	}
+	if err := client.CheckRedirect(redirect, []*http.Request{orig}); err != nil {
+		t.Fatalf("cross-host redirect to a public host should be followed (with creds stripped), got %v", err)
+	}
+	for _, h := range []string{"x-api-key", "x-custom-token", "x-tenant-secret", "Authorization"} {
+		if v := redirect.Header.Get(h); v != "" {
+			t.Errorf("credential header %q leaked across host redirect: %q", h, v)
+		}
+	}
+
+	// Same-host redirect (only the path changes) must keep the credential.
+	same, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.anthropic.com/v1/other", nil)
+	same.Header.Set("x-api-key", "keep-me")
+	if err := client.CheckRedirect(same, []*http.Request{orig}); err != nil {
+		t.Fatalf("same-host redirect rejected: %v", err)
+	}
+	if same.Header.Get("x-api-key") != "keep-me" {
+		t.Error("same-host redirect must not strip the credential")
 	}
 }

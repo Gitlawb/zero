@@ -280,7 +280,7 @@ func connectivityCheck(ctx context.Context, profile config.ProviderProfile, kind
 	}
 	client := options.HTTPClient
 	if client == nil {
-		client = newConnectivityClient(timeout, options.Resolver)
+		client = newConnectivityClient(timeout, options.Resolver, sensitiveAuthHeaderNames(profile, kind))
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -413,7 +413,7 @@ const maxConnectivityRedirects = 5
 //     time and then dials the validated IP literal, closing the TOCTOU window
 //     between the pre-flight validateEndpoint check and the actual connection
 //     (DNS rebinding).
-func newConnectivityClient(timeout time.Duration, resolver Resolver) *http.Client {
+func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHeaders []string) *http.Client {
 	if resolver == nil {
 		resolver = defaultResolver{}
 	}
@@ -431,9 +431,53 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver) *http.Clien
 			if len(via) >= maxConnectivityRedirects {
 				return fmt.Errorf("provider connectivity exceeded %d redirects", maxConnectivityRedirects)
 			}
+			// A redirect that leaves the original host must not carry the provider
+			// credential with it. Go's stdlib only auto-strips Authorization/Cookie/
+			// WWW-Authenticate on a host change — NOT x-api-key, x-goog-api-key, or
+			// arbitrary custom auth headers — so a 3xx to an attacker-controlled host
+			// would otherwise receive the API key verbatim (credential exfil). Strip
+			// every auth-bearing header on any host:port change (fail-safe). (AUDIT-M10)
+			if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+				for _, h := range sensitiveHeaders {
+					req.Header.Del(h)
+				}
+			}
 			return validateEndpoint(req.Context(), req.URL.String(), resolver)
 		},
 	}
+}
+
+// sensitiveAuthHeaderNames returns every request header applyAuth may set as a
+// credential for this profile/kind: the kind's default auth header, the profile's
+// custom auth header, and all CustomHeaders keys, plus the well-known auth headers
+// as defense in depth. Used to scrub credentials before following a cross-host
+// redirect on the health probe.
+func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.ProviderKind) []string {
+	names := map[string]struct{}{
+		"Authorization": {}, "Proxy-Authorization": {}, "Cookie": {},
+		"x-api-key": {}, "x-goog-api-key": {}, "api-key": {},
+	}
+	switch kind {
+	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
+		names["x-api-key"] = struct{}{}
+	case config.ProviderKindGoogle:
+		names["x-goog-api-key"] = struct{}{}
+	default:
+		names["Authorization"] = struct{}{}
+	}
+	if h := strings.TrimSpace(profile.AuthHeader); h != "" {
+		names[h] = struct{}{}
+	}
+	for k := range profile.CustomHeaders {
+		if k = strings.TrimSpace(k); k != "" {
+			names[k] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(names))
+	for k := range names {
+		out = append(out, k)
+	}
+	return out
 }
 
 // safeDialContext returns a dial function that resolves the target host, refuses
