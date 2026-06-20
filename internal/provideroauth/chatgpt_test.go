@@ -303,6 +303,46 @@ func TestChatGPTLoginUsesPreset(t *testing.T) {
 	}
 }
 
+func TestChatGPTAuthorizeURLIncludesConnectorScopes(t *testing.T) {
+	// Regression: the chatgpt preset must request the api.connectors scopes, or
+	// the authorize endpoint rejects the flow with authorize_hydra_invalid_request.
+	// Assert the generated authorize URL carries both connector scopes (plus the
+	// base OIDC set) by inspecting the URL the browser is handed.
+	idTok := makeIDToken(t, map[string]any{"chatgpt_account_id": "acc"})
+	ts := newChatGPTTestServer(t, idTok)
+	defer ts.Close()
+
+	env := chatgptTestEnv()
+	env["ZERO_OAUTH_CHATGPT_AUTHORIZE_URL"] = ts.AuthorizeURL()
+	env["ZERO_OAUTH_CHATGPT_TOKEN_URL"] = ts.TokenURL()
+
+	var gotScope string
+	inspect := func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		gotScope = u.Query().Get("scope")
+		// Drive the rest of the flow so ChatGPTLogin completes cleanly.
+		return browserSimulator(t, "TEST-CODE")(authURL)
+	}
+
+	if _, err := ChatGPTLogin(context.Background(), ChatGPTOptions{
+		Env:         env,
+		HTTPClient:  &http.Client{Timeout: 10 * time.Second},
+		Out:         io.Discard,
+		OpenBrowser: inspect,
+	}); err != nil {
+		t.Fatalf("ChatGPTLogin: %v", err)
+	}
+
+	for _, want := range []string{"openid", "offline_access", "api.connectors.read", "api.connectors.invoke"} {
+		if !strings.Contains(gotScope, want) {
+			t.Fatalf("authorize URL scope %q missing %q", gotScope, want)
+		}
+	}
+}
+
 func TestChatGPTLoginWithoutPresetEnvReturnsError(t *testing.T) {
 	// With no env at all, the chatgpt preset stays inert (the same posture
 	// every other preset uses); ResolveConfig returns an error and the login

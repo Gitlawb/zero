@@ -69,7 +69,7 @@ var builtinOAuthPresets = map[string]providerPreset{
 		AuthorizationEndpoint: "https://auth.openai.com/oauth/authorize",
 		TokenEndpoint:         "https://auth.openai.com/oauth/token",
 		IssuerURL:             "https://auth.openai.com",
-		Scopes:                []string{"openid", "profile", "email", "offline_access"},
+		Scopes:                []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"},
 		Flow:                  FlowLoopback,
 	},
 }
