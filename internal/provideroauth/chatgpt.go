@@ -15,10 +15,22 @@ import (
 	"github.com/Gitlawb/zero/internal/oauth"
 )
 
-// chatgptAccountClaim is the OIDC ID-token claim the ChatGPT backend requires as
-// the `chatgpt-account-id` request header on every Codex call. OpenAI's
-// authorization server populates it on the public Codex CLI client.
+// chatgptAccountClaim is the ID-token claim the ChatGPT backend requires as the
+// `chatgpt-account-id` request header on every Codex call. OpenAI namespaces it
+// under the chatgptAuthClaimNamespace object (NOT at the top level) — see
+// extractChatGPTAccountID.
 const chatgptAccountClaim = "chatgpt_account_id"
+
+// chatgptAuthClaimNamespace is the custom-claim namespace OpenAI's id_token uses
+// for ChatGPT auth claims. The account id lives at
+// id_token[chatgptAuthClaimNamespace][chatgptAccountClaim], matching the Codex
+// CLI's own parser (it reads exclusively from this nested object).
+const chatgptAuthClaimNamespace = "https://api.openai.com/auth"
+
+// chatgptCallbackPort is the fixed loopback port ChatGPT's public Codex CLI
+// client registration requires in its redirect_uri. Unlike the OS-assigned
+// port other OAuth flows use, this must be exactly 1455.
+const chatgptCallbackPort = 1455
 
 // ChatGPTOptions configures the ChatGPT (Codex) login flow.
 type ChatGPTOptions struct {
@@ -92,14 +104,24 @@ func ChatGPTLogin(ctx context.Context, opts ChatGPTOptions) (oauth.Token, error)
 	if err != nil {
 		return oauth.Token{}, fmt.Errorf("provideroauth: generate CSRF state: %w", err)
 	}
-	listener, err := oauth.NewLoopbackListener(state)
+	listener, err := oauth.NewLoopbackListenerOnPort(state, chatgptCallbackPort)
 	if err != nil {
-		return oauth.Token{}, fmt.Errorf("provideroauth: start loopback listener: %w", err)
+		return oauth.Token{}, fmt.Errorf("provideroauth: start loopback listener on port %d (close any other Zero or Codex login already running and retry): %w", chatgptCallbackPort, err)
 	}
 	defer listener.Close()
 
-	redirectURI := listener.RedirectURI()
-	authURL, err := oauth.BuildAuthorizationURL(cfg, pkce, state, redirectURI, nil)
+	// ChatGPT's client registration requires the redirect_uri host to be
+	// "localhost" (not 127.0.0.1) at the fixed callback path. The listener still
+	// binds 127.0.0.1 and accepts /auth/callback.
+	redirectURI := listener.RedirectURIWithHost("localhost", "/auth/callback")
+	// ChatGPT's authorize endpoint requires these extra params (the Codex CLI
+	// sends them too) — without them it rejects with authorize_hydra_invalid_request.
+	chatgptExtraParams := map[string]string{
+		"id_token_add_organizations": "true",
+		"codex_cli_simplified_flow":  "true",
+		"originator":                 "codex_cli_rs",
+	}
+	authURL, err := oauth.BuildAuthorizationURL(cfg, pkce, state, redirectURI, chatgptExtraParams)
 	if err != nil {
 		return oauth.Token{}, fmt.Errorf("provideroauth: build authorize URL: %w", err)
 	}
@@ -159,10 +181,14 @@ func (o ChatGPTOptions) OutOrStderr(out io.Writer) io.Writer {
 	return io.Discard
 }
 
-// extractChatGPTAccountID pulls the `chatgpt_account_id` claim out of the
-// ID token in token (assumed to be the access-token response's `id_token`
-// field, which the standard loopback flow's `oauth.ExchangeCode` populates
-// when the token endpoint returns one).
+// extractChatGPTAccountID pulls the `chatgpt_account_id` claim out of the ID
+// token. OpenAI nests it under the "https://api.openai.com/auth" claim object
+// (id_token[ns][chatgpt_account_id]), NOT at the top level — reading the top
+// level returns empty against a real token, which silently drops the required
+// chatgpt-account-id header and 401s every Codex call. We read the nested path
+// first (matching the Codex CLI's parser) and fall back to a top-level claim
+// only for forward-compat. The token is the access-token response's `id_token`
+// field, which oauth.ExchangeCode populates when the endpoint returns one.
 //
 // The ID token is a JWS — three base64url segments separated by dots. We do
 // NOT verify the signature: the bearer is already authenticated by TLS to
@@ -193,9 +219,18 @@ func extractChatGPTAccountID(token oauth.Token) (string, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return "", fmt.Errorf("parse JWS claims: %w", err)
 	}
-	value, ok := claims[chatgptAccountClaim].(string)
-	if !ok {
-		return "", nil
+	// OpenAI namespaces the account id under the "https://api.openai.com/auth"
+	// claim object — id_token[ns][chatgpt_account_id] — NOT at the top level.
+	// Read the nested path first (this is where every real token puts it, and
+	// what the Codex CLI reads); fall back to a bare top-level claim only for
+	// forward-compat if OpenAI ever flattens it.
+	if ns, ok := claims[chatgptAuthClaimNamespace].(map[string]any); ok {
+		if value, ok := ns[chatgptAccountClaim].(string); ok {
+			return strings.TrimSpace(value), nil
+		}
 	}
-	return strings.TrimSpace(value), nil
+	if value, ok := claims[chatgptAccountClaim].(string); ok {
+		return strings.TrimSpace(value), nil
+	}
+	return "", nil
 }

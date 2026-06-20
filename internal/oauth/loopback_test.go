@@ -38,6 +38,44 @@ func TestNewLoopbackListenerRejectsEmptyState(t *testing.T) {
 	}
 }
 
+func TestRedirectURIWithHostUsesGivenHostAndPath(t *testing.T) {
+	l, err := NewLoopbackListener("the-state")
+	if err != nil {
+		t.Fatalf("NewLoopbackListener: %v", err)
+	}
+	defer l.Close()
+	got := l.RedirectURIWithHost("localhost", "/auth/callback")
+	if !strings.HasPrefix(got, "http://localhost:") {
+		t.Fatalf("redirect URI host = %q, want localhost", got)
+	}
+	if !strings.HasSuffix(got, "/auth/callback") {
+		t.Fatalf("redirect URI path = %q, want /auth/callback suffix", got)
+	}
+}
+
+func TestLoopbackCapturesCodeOnAuthCallbackPath(t *testing.T) {
+	// The ChatGPT flow uses /auth/callback, not /callback; the listener must
+	// capture the code on that path too.
+	l, err := NewLoopbackListener("the-state")
+	if err != nil {
+		t.Fatalf("NewLoopbackListener: %v", err)
+	}
+	defer l.Close()
+	uri := l.RedirectURIWithHost("127.0.0.1", "/auth/callback")
+	go func() {
+		_, _ = http.Get(uri + "?code=auth-code&state=the-state")
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	code, err := l.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if code != "auth-code" {
+		t.Fatalf("code = %q, want auth-code", code)
+	}
+}
+
 func TestLoopbackRejectsStateMismatch(t *testing.T) {
 	l, err := NewLoopbackListener("expected-state")
 	if err != nil {

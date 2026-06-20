@@ -31,13 +31,17 @@ type callbackResult struct {
 // begins serving. state is the CSRF value the callback must echo back. Call
 // RedirectURI to build the redirect_uri, then Wait for the code. Always Close.
 func NewLoopbackListener(state string) (*LoopbackListener, error) {
-	// Refuse an empty state: the callback check compares the query's state to this
-	// value, so an empty state would match a callback carrying no state at all,
-	// defeating CSRF protection (fail closed).
+	return NewLoopbackListenerOnPort(state, 0)
+}
+
+// NewLoopbackListenerOnPort is like NewLoopbackListener but binds a specific
+// port (0 = OS-assigned). Used by ChatGPT OAuth which requires a fixed
+// redirect_uri of http://localhost:1455/auth/callback.
+func NewLoopbackListenerOnPort(state string, port int) (*LoopbackListener, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.New("oauth: loopback listener requires a non-empty CSRF state")
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("oauth: start loopback redirect listener: %w", err)
 	}
@@ -56,8 +60,18 @@ func (l *LoopbackListener) RedirectURI() string {
 	return fmt.Sprintf("http://%s/callback", l.listener.Addr().String())
 }
 
+// RedirectURIWithHost returns a redirect URI using the given host (e.g.
+// "localhost") and path (e.g. "/auth/callback"). The listener still binds
+// 127.0.0.1, but the OAuth client may require "localhost" in the redirect_uri
+// (OpenAI's ChatGPT client registration does). The listener accepts both
+// /callback and the given path.
+func (l *LoopbackListener) RedirectURIWithHost(host, path string) string {
+	_, port, _ := net.SplitHostPort(l.listener.Addr().String())
+	return fmt.Sprintf("http://%s:%s%s", host, port, path)
+}
+
 func (l *LoopbackListener) handle(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/callback" {
+	if r.URL.Path != "/callback" && r.URL.Path != "/auth/callback" {
 		http.NotFound(w, r)
 		return
 	}

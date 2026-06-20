@@ -33,11 +33,16 @@ func makeIDToken(t *testing.T, claims map[string]any) string {
 }
 
 func TestExtractChatGPTAccountIDHappyPath(t *testing.T) {
+	// Real auth.openai.com id_tokens nest the account id under the
+	// "https://api.openai.com/auth" claim object (NOT at the top level), so the
+	// fixture must too — a top-level fixture would mask the very bug this guards.
 	token := oauth.Token{
 		IDToken: makeIDToken(t, map[string]any{
-			"sub":                "user-1",
-			"email":              "me@example.com",
-			"chatgpt_account_id": "acc-12345",
+			"sub":   "user-1",
+			"email": "me@example.com",
+			"https://api.openai.com/auth": map[string]any{
+				"chatgpt_account_id": "acc-12345",
+			},
 		}),
 	}
 	got, err := extractChatGPTAccountID(token)
@@ -46,6 +51,44 @@ func TestExtractChatGPTAccountIDHappyPath(t *testing.T) {
 	}
 	if got != "acc-12345" {
 		t.Fatalf("account_id = %q, want acc-12345", got)
+	}
+}
+
+func TestExtractChatGPTAccountIDIgnoresTopLevelOnlyClaim(t *testing.T) {
+	// Regression for the P0: a real token never puts chatgpt_account_id at the
+	// top level — the Codex CLI reads only the nested namespace, so a top-level
+	// claim is not a real account id. We prefer the nested path; a bare top-level
+	// claim is honored only as a forward-compat fallback when the namespace is
+	// absent, but it must NOT shadow the nested value.
+	token := oauth.Token{
+		IDToken: makeIDToken(t, map[string]any{
+			"chatgpt_account_id": "top-level-decoy",
+			"https://api.openai.com/auth": map[string]any{
+				"chatgpt_account_id": "nested-real",
+			},
+		}),
+	}
+	got, err := extractChatGPTAccountID(token)
+	if err != nil {
+		t.Fatalf("extractChatGPTAccountID: %v", err)
+	}
+	if got != "nested-real" {
+		t.Fatalf("account_id = %q, want nested-real (nested path must win over a top-level decoy)", got)
+	}
+}
+
+func TestExtractChatGPTAccountIDTopLevelFallback(t *testing.T) {
+	// Forward-compat: if OpenAI ever flattens the claim (no namespace object),
+	// honor a bare top-level claim rather than dropping the header.
+	token := oauth.Token{
+		IDToken: makeIDToken(t, map[string]any{"chatgpt_account_id": "flat-acc"}),
+	}
+	got, err := extractChatGPTAccountID(token)
+	if err != nil {
+		t.Fatalf("extractChatGPTAccountID: %v", err)
+	}
+	if got != "flat-acc" {
+		t.Fatalf("account_id = %q, want flat-acc (top-level fallback)", got)
 	}
 }
 
@@ -249,8 +292,11 @@ func browserSimulator(t *testing.T, code string) func(string) error {
 
 func TestChatGPTLoginUsesPreset(t *testing.T) {
 	idTok := makeIDToken(t, map[string]any{
-		"chatgpt_account_id": "acc-real",
-		"email":              "user@example.com",
+		"email": "user@example.com",
+		// Nested under the OpenAI auth namespace, as a real id_token is.
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": "acc-real",
+		},
 	})
 	ts := newChatGPTTestServer(t, idTok)
 	defer ts.Close()
@@ -300,6 +346,46 @@ func TestChatGPTLoginUsesPreset(t *testing.T) {
 	// Sanity-check the printed URL contains the test server's authorize path.
 	if !strings.Contains(out.String(), "/oauth/authorize") {
 		t.Fatalf("Out should print the authorize URL, got %q", out.String())
+	}
+}
+
+func TestChatGPTAuthorizeURLIncludesConnectorScopes(t *testing.T) {
+	// Regression: the chatgpt preset must request the api.connectors scopes, or
+	// the authorize endpoint rejects the flow with authorize_hydra_invalid_request.
+	// Assert the generated authorize URL carries both connector scopes (plus the
+	// base OIDC set) by inspecting the URL the browser is handed.
+	idTok := makeIDToken(t, map[string]any{"chatgpt_account_id": "acc"})
+	ts := newChatGPTTestServer(t, idTok)
+	defer ts.Close()
+
+	env := chatgptTestEnv()
+	env["ZERO_OAUTH_CHATGPT_AUTHORIZE_URL"] = ts.AuthorizeURL()
+	env["ZERO_OAUTH_CHATGPT_TOKEN_URL"] = ts.TokenURL()
+
+	var gotScope string
+	inspect := func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		gotScope = u.Query().Get("scope")
+		// Drive the rest of the flow so ChatGPTLogin completes cleanly.
+		return browserSimulator(t, "TEST-CODE")(authURL)
+	}
+
+	if _, err := ChatGPTLogin(context.Background(), ChatGPTOptions{
+		Env:         env,
+		HTTPClient:  &http.Client{Timeout: 10 * time.Second},
+		Out:         io.Discard,
+		OpenBrowser: inspect,
+	}); err != nil {
+		t.Fatalf("ChatGPTLogin: %v", err)
+	}
+
+	for _, want := range []string{"openid", "offline_access", "api.connectors.read", "api.connectors.invoke"} {
+		if !strings.Contains(gotScope, want) {
+			t.Fatalf("authorize URL scope %q missing %q", gotScope, want)
+		}
 	}
 }
 

@@ -160,10 +160,28 @@ func TestResolveConfigChatGPTPreset(t *testing.T) {
 	if flow != FlowLoopback {
 		t.Fatalf("flow = %q, want loopback (Codex requires a browser)", flow)
 	}
-	wantScopes := map[string]bool{"openid": true, "profile": true, "email": true, "offline_access": true}
+	// The preset must request the base OIDC scopes AND the api.connectors scopes
+	// the ChatGPT authorize endpoint requires (without them it rejects the flow
+	// with authorize_hydra_invalid_request).
+	allowedScopes := map[string]bool{
+		"openid": true, "profile": true, "email": true, "offline_access": true,
+		"api.connectors.read": true, "api.connectors.invoke": true,
+	}
 	for _, s := range cfg.Scopes {
-		if !wantScopes[s] {
+		if !allowedScopes[s] {
 			t.Fatalf("unexpected scope %q in %v", s, cfg.Scopes)
+		}
+	}
+	for _, required := range []string{"api.connectors.read", "api.connectors.invoke"} {
+		found := false
+		for _, s := range cfg.Scopes {
+			if s == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing required scope %q in %v", required, cfg.Scopes)
 		}
 	}
 	// No device endpoint — the ChatGPT flow is loopback-only.
