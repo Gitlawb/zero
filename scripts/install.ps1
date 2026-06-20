@@ -43,6 +43,25 @@ function Get-ZeroArch {
   }
 }
 
+function Find-ZeroExtractedFile {
+  param(
+    [string]$Root,
+    [string]$FileName
+  )
+
+  $candidate = Join-Path $Root $FileName
+  if (Test-Path $candidate -PathType Leaf) {
+    return $candidate
+  }
+
+  $matches = @(Get-ChildItem -Path $Root -Filter $FileName -File -Recurse)
+  if ($matches.Count -eq 1) {
+    return $matches[0].FullName
+  }
+
+  throw "Release archive did not contain exactly one $FileName"
+}
+
 if ($Version -eq "latest") {
   $tag = Get-ZeroLatestTag -Repository $Repository -GitHubApi $GitHubApi
 } elseif ($Version.StartsWith("v")) {
@@ -78,24 +97,19 @@ try {
   }
 
   Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
-  $binaryPath = Join-Path $extractDir "zero.exe"
-
-  if (-not (Test-Path $binaryPath)) {
-    $binaryMatches = @(Get-ChildItem -Path $extractDir -Filter "zero.exe" -File -Recurse)
-
-    if ($binaryMatches.Count -eq 1) {
-      $binaryPath = $binaryMatches[0].FullName
-    }
-  }
-
-  if (-not (Test-Path $binaryPath)) {
-    throw "Release archive did not contain exactly one zero.exe"
-  }
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-  $targetPath = Join-Path $InstallDir "zero.exe"
-  Copy-Item -Path $binaryPath -Destination $targetPath -Force
+  $requiredFiles = @(
+    "zero.exe",
+    "zero-windows-command-runner.exe",
+    "zero-windows-sandbox-setup.exe"
+  )
+  foreach ($fileName in $requiredFiles) {
+    $sourcePath = Find-ZeroExtractedFile -Root $extractDir -FileName $fileName
+    Copy-Item -Path $sourcePath -Destination (Join-Path $InstallDir $fileName) -Force
+  }
 
+  $targetPath = Join-Path $InstallDir "zero.exe"
   Write-Host "Installed $targetPath"
 
   $pathEntries = $env:PATH -split [System.IO.Path]::PathSeparator

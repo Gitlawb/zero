@@ -44,8 +44,10 @@ func TestPowerShellInstallerScriptMatchesWindowsReleaseContracts(t *testing.T) {
 		`$checksumName = "$archiveName.sha256"`,
 		`Get-FileHash -Path $archivePath -Algorithm SHA256`,
 		`Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force`,
-		`Get-ChildItem -Path $extractDir -Filter "zero.exe" -File -Recurse`,
-		`Copy-Item -Path $binaryPath -Destination $targetPath -Force`,
+		`Find-ZeroExtractedFile -Root $extractDir -FileName $fileName`,
+		`"zero-windows-command-runner.exe"`,
+		`"zero-windows-sandbox-setup.exe"`,
+		`Copy-Item -Path $sourcePath -Destination (Join-Path $InstallDir $fileName) -Force`,
 	})
 }
 
