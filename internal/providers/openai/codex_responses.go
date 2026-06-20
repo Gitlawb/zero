@@ -115,8 +115,10 @@ type responsesEvent struct {
 	// delta payloads (response.output_text.delta / function_call_arguments.delta)
 	Delta string `json:"delta,omitempty"`
 	// item payloads (response.output_item.added / done)
-	ItemID      string       `json:"item_id,omitempty"`
-	OutputIndex int          `json:"output_index,omitempty"`
+	ItemID string `json:"item_id,omitempty"`
+	// OutputIndex is a *int so a real 0 (the first output) is distinguishable from
+	// "absent" — a plain int defaulting to 0 dropped a no-item_id call's args (M1).
+	OutputIndex *int         `json:"output_index,omitempty"`
 	Item        *itemPayload `json:"item,omitempty"`
 	// completed / failed / incomplete
 	Response *responsePayload `json:"response,omitempty"`
@@ -639,6 +641,18 @@ func (p *CodexProvider) handleTerminalResponse(
 	events chan<- zeroruntime.StreamEvent,
 ) bool {
 	if event.Response == nil {
+		// A terminal event with no Response payload must still emit a terminal
+		// stream event, or the collector returns a clean-looking empty completion
+		// that masks a real failure (M2). A response.failed without a payload is an
+		// error; a response.completed without one is just an empty (but clean) turn.
+		if event.Type == responsesEventFailed {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+				Type:  zeroruntime.StreamEventError,
+				Error: "codex: response.failed with no error detail",
+			})
+		} else {
+			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone})
+		}
 		state.done = true
 		return false
 	}
@@ -686,11 +700,11 @@ func (p *CodexProvider) toolCallKey(event *responsesEvent) string {
 	if event.Item != nil && event.Item.CallID != "" {
 		return event.Item.CallID
 	}
-	if event.OutputIndex > 0 {
-		// OutputIndex is 0-based; offset by one to keep "0" reserved for
-		// "no index known" so it cannot collide with a real zero-indexed
-		// call.
-		return fmt.Sprintf("output-%d", event.OutputIndex+1)
+	if event.OutputIndex != nil {
+		// output_index is present (a *int distinguishes a real 0 — the first output
+		// in the response — from "absent"), so key on it even when 0 instead of
+		// dropping the call's args when no item_id is present (M1).
+		return fmt.Sprintf("output-%d", *event.OutputIndex)
 	}
 	return ""
 }

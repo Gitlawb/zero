@@ -531,11 +531,17 @@ type streamState struct {
 // normalized terminal reasons. A normal stop ("STOP"/"") returns "".
 func mapFinishReason(reason string) string {
 	switch reason {
+	case "", "STOP", "FINISH_REASON_UNSPECIFIED":
+		return "" // normal completion
 	case "MAX_TOKENS":
 		return zeroruntime.FinishReasonLength
-	case "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII":
+	case "SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION", "IMAGE_SAFETY":
 		return zeroruntime.FinishReasonContentFilter
 	default:
-		return ""
+		// MALFORMED_FUNCTION_CALL, OTHER, LANGUAGE, UNEXPECTED_TOOL_CALL, and any
+		// future non-STOP reason: surface the raw reason so a truncated/aborted turn
+		// isn't mistaken for a clean completion (M3). TruncationNotice renders it as
+		// "Response ended early (<reason>)".
+		return reason
 	}
 }

@@ -595,10 +595,17 @@ type thinkingBuf struct {
 // normalized terminal reasons. A normal stop ("end_turn"/"tool_use"/"stop_sequence"/"")
 // returns "".
 func mapStopReason(reason string) string {
-	if reason == "max_tokens" {
+	switch reason {
+	case "max_tokens":
 		return zeroruntime.FinishReasonLength
+	case "refusal":
+		// The model declined to respond — surface it as content-filtered so the
+		// empty/partial turn isn't mistaken for a normal completion (M4).
+		return zeroruntime.FinishReasonContentFilter
+	default:
+		// end_turn / tool_use / stop_sequence / pause_turn (and "") are normal.
+		return ""
 	}
-	return ""
 }
 
 func newStreamState() *streamState {
