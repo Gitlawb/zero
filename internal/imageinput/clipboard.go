@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -63,18 +64,27 @@ func readClipboardImageWindows() ([]byte, error) {
 	if strings.TrimSpace(string(out)) != "True" {
 		return nil, nil
 	}
-	// Read the image as PNG bytes.
-	script := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img -ne $null) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); $ms.ToArray() }`
+	// Save the clipboard image as PNG to a temp file, then read the bytes.
+	// PowerShell stdout can't reliably emit raw binary — $ms.ToArray() prints
+	// a .NET byte array as space-separated text, not raw bytes. A temp file
+	// is the correct binary-safe path.
+	tmpFile, err := os.CreateTemp("", "zero-clipboard-*.png")
+	if err != nil {
+		return nil, nil
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+	script := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img -ne $null) { $img.Save('` + tmpPath + `', [System.Drawing.Imaging.ImageFormat]::Png) }`
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", script)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
 		return nil, nil
 	}
-	if stdout.Len() == 0 {
+	data, err := os.ReadFile(tmpPath)
+	if err != nil || len(data) == 0 {
 		return nil, nil
 	}
-	return stdout.Bytes(), nil
+	return data, nil
 }
 
 // readClipboardImageDarwin uses osascript to check for and read a clipboard
