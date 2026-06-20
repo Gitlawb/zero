@@ -4,6 +4,7 @@ package tools
 
 import (
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -13,10 +14,17 @@ import (
 // tests can shorten it.
 var bashWaitDelay = 2 * time.Second
 
-// hardenProcessLifetime sets WaitDelay so a leaked child cannot block Wait
-// indefinitely. Windows lacks POSIX process groups; tree-killing the shell's
-// descendants (taskkill /T) is not wired for the synchronous bash path, so the
-// default Cancel (Process.Kill on the shell) plus WaitDelay is used.
+// hardenProcessLifetime makes a Windows shell command killable as a process
+// tree. cmd.exe starts helper commands as child processes, so killing only the
+// shell can leave a long-running child alive and holding cwd/temp handles after
+// Zero exits.
 func hardenProcessLifetime(command *exec.Cmd) {
 	command.WaitDelay = bashWaitDelay
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return nil
+		}
+		_ = exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(command.Process.Pid)).Run()
+		return nil
+	}
 }
