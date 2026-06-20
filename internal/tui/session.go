@@ -351,6 +351,19 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 	// disambiguation the live runner applies — without it, dedup would drop
 	// every tool card after the first occurrence of an id.
 	callSeq := map[string]int{}
+	// Pre-pass: collect the tool-call ids of Task delegations that actually started
+	// a specialist (each renders as a card below). Only those Task tool-call/result
+	// rows are redundant and skipped; a Task that failed before a specialist started
+	// has no card, so its rows are kept — otherwise the failed delegation vanishes
+	// on resume (M10).
+	specialistToolCalls := map[string]bool{}
+	for _, event := range events {
+		if event.Type == sessions.EventSpecialistStart {
+			if id := payloadString(sessionPayload(event), "toolCallId"); id != "" {
+				specialistToolCalls[id] = true
+			}
+		}
+	}
 	for _, event := range events {
 		payload := sessionPayload(event)
 		switch event.Type {
@@ -385,12 +398,13 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if name == "" {
 				name = "unknown"
 			}
-			if name == "Task" {
-				// The specialist card (EventSpecialistStart) renders this delegation;
-				// skip the redundant "tool call: Task" row on resume too.
+			id := payloadString(payload, "id")
+			if name == "Task" && specialistToolCalls[id] {
+				// A specialist card renders this delegation; skip the redundant
+				// "tool call: Task" row. A Task with no specialist (it failed before
+				// one started) keeps its row so the failure stays visible (M10).
 				continue
 			}
-			id := payloadString(payload, "id")
 			callSeq[id]++
 			rows = append(rows, transcriptRow{
 				kind:   rowToolCall,
@@ -407,9 +421,11 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if name == "" {
 				name = "unknown"
 			}
-			if name == "Task" {
-				// Mirrors the live path: the specialist card carries the Task result,
-				// so skip the redundant "tool result: Task" row on resume.
+			id := firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id"))
+			if name == "Task" && specialistToolCalls[id] {
+				// The specialist card carries this Task's result; skip the redundant
+				// "tool result: Task" row. A Task with no specialist keeps its result
+				// row so a failed delegation's error stays visible (M10).
 				continue
 			}
 			status := tools.Status(payloadString(payload, "status"))
@@ -417,7 +433,6 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
-			id := firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id"))
 			rows = append(rows, transcriptRow{
 				kind:   rowToolResult,
 				id:     effectiveToolRowID(id, callSeq[id]),
