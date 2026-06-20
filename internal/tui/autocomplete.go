@@ -185,9 +185,31 @@ func isPathQueryBoundary(r rune) bool {
 }
 
 func (m model) matchCommandSuggestions(token string) []commandSuggestion {
-	return matchCommandSuggestionsWithFilter(token, func(command commandDefinition) bool {
+	out := matchCommandSuggestionsWithFilter(token, func(command commandDefinition) bool {
 		return command.kind != commandSandboxSetup || m.sandboxSetupCommand != nil
 	})
+	return append(out, m.matchUserCommandSuggestions(token)...)
+}
+
+// matchUserCommandSuggestions returns file-sourced /commands whose name has the
+// typed prefix, so user-defined commands appear in the autocomplete menu
+// alongside builtins. Builtins win on a name collision (they are listed first
+// and a builtin name shadows a same-named user command at dispatch time).
+func (m model) matchUserCommandSuggestions(token string) []commandSuggestion {
+	prefix := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, "/")))
+	if prefix == "" {
+		return nil
+	}
+	var out []commandSuggestion
+	for _, cmd := range m.userCommands {
+		if strings.HasPrefix(cmd.Name, prefix) {
+			out = append(out, commandSuggestion{Name: "/" + cmd.Name, Desc: cmd.Description})
+			if len(out) >= maxCommandSuggestions {
+				break
+			}
+		}
+	}
+	return out
 }
 
 // matchCommandSuggestions returns commands whose canonical name or any alias has

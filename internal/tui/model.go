@@ -29,6 +29,7 @@ import (
 	"github.com/Gitlawb/zero/internal/streamjson"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/usage"
+	"github.com/Gitlawb/zero/internal/usercommands"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -39,6 +40,7 @@ const chatWheelScrollLines = 5
 type model struct {
 	ctx                    context.Context
 	cwd                    string
+	userCommands           []usercommands.Command // file-sourced /commands (.zero/commands)
 	userConfigPath         string
 	doctorUserConfigPath   string
 	projectConfigPath      string
@@ -467,6 +469,9 @@ func newModel(ctx context.Context, options Options) model {
 		}
 	}
 
+	userConfigDir, _ := os.UserConfigDir()
+	loadedUserCommands := usercommands.Load(usercommands.DefaultPaths(cwd, userConfigDir))
+
 	registry := options.Registry
 	if registry == nil {
 		registry = options.AgentOptions.Registry
@@ -523,6 +528,7 @@ func newModel(ctx context.Context, options Options) model {
 	m := model{
 		ctx:                    ctx,
 		cwd:                    cwd,
+		userCommands:           loadedUserCommands,
 		composerCursorVisible:  true,
 		userConfigPath:         options.UserConfigPath,
 		doctorUserConfigPath:   doctorUserConfigPath,
@@ -2955,6 +2961,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m = m.handleAddDirCommand(command.text)
 		return m, nil
 	case commandUnknown:
+		// A "/name" not in the builtin registry may be a user-defined command
+		// from .zero/commands/<name>.md — expand its template and run it as a
+		// normal prompt before reporting "unknown".
+		if next, cmd, handled := m.handleUserCommand(command.text); handled {
+			return next, cmd
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendError,
 			text: "unknown command: " + command.text,
