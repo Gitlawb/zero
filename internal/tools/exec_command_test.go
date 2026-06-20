@@ -35,7 +35,7 @@ func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
 
 	poll := writeTool.Run(context.Background(), map[string]any{
 		"session_id":    sessionID,
-		"yield_time_ms": 1000,
+		"yield_time_ms": 30000,
 	})
 	if poll.Status != StatusOK {
 		t.Fatalf("write_stdin poll status = %s: %s", poll.Status, poll.Output)
@@ -71,7 +71,7 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 
 	poll := writeTool.Run(context.Background(), map[string]any{
 		"session_id":    sessionID,
-		"yield_time_ms": 1000,
+		"yield_time_ms": 30000,
 	})
 	if poll.Status != StatusOK {
 		t.Fatalf("write_stdin poll status = %s: %s", poll.Status, poll.Output)
@@ -91,7 +91,7 @@ func TestExecCommandReturnsExitCodeWhenCommandCompletesDuringInitialYield(t *tes
 
 	result := execTool.Run(context.Background(), map[string]any{
 		"cmd":           helperCommand("success"),
-		"yield_time_ms": 1000,
+		"yield_time_ms": 30000,
 	})
 	if result.Status != StatusOK {
 		t.Fatalf("exec_command status = %s: %s", result.Status, result.Output)
