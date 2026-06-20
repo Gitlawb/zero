@@ -219,11 +219,25 @@ func (s *Server) writeStatusFile() error {
 // remote bridge calls it AFTER authenticating a TLS connection, so a remote
 // session is handled identically to a local one (same SessionManager/Pool, same
 // sandbox/risk model) — remote never bypasses the local controls. It closes conn.
-func (s *Server) ServeConn(conn net.Conn) { s.handleConn(conn) }
+func (s *Server) ServeConn(conn net.Conn) {
+	// Track the conn so Shutdown can close it: the remote bridge enters here (not via
+	// the local accept loop), so without this a remote connection stalled in the
+	// pre-stream handshake read would survive Shutdown's conns-close sweep. (AUDIT-M8)
+	s.trackConn(conn)
+	defer s.untrackConn(conn)
+	s.handleConn(conn)
+}
 
 // handleConn performs the handshake then dispatches a single control command.
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+
+	// Bound the handshake (hello + first command). The remote bridge clears the conn
+	// deadline before handing off and the local socket sets none, so an idle/hostile
+	// peer that connects but never completes the exchange would otherwise pin a
+	// handler goroutine (and, on the bridge, a connection slot) forever. Cleared once
+	// the command is read, before the (long-lived) streaming phase. (AUDIT-M7, AUDIT-I1)
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	hello, err := ReadControl(conn)
 	if err != nil {
@@ -246,6 +260,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	// Handshake complete — the dispatched command may stream indefinitely, so drop
+	// the deadline before handing off.
+	_ = conn.SetDeadline(time.Time{})
 	switch cmd.Type {
 	case CtrlRun:
 		s.handleRun(conn, cmd)
