@@ -12,8 +12,8 @@ import (
 
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	toolset := CoreReadOnlyTools(t.TempDir())
-	if len(toolset) != 8 {
-		t.Fatalf("expected 8 core read-only tools, got %d", len(toolset))
+	if len(toolset) != 9 {
+		t.Fatalf("expected 9 core read-only tools, got %d", len(toolset))
 	}
 
 	seen := map[string]bool{}

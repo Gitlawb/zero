@@ -211,6 +211,10 @@ func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {
 		NewScopedListDirectoryTool(workspaceRoot, scope),
 		NewScopedGlobTool(workspaceRoot, scope),
 		NewScopedGrepTool(workspaceRoot, scope),
+		// lsp_navigate is semantic code navigation (definition/references/impl/
+		// workspace_symbol) via the language server; read-only and degrades to a
+		// clear "unavailable" when no server is installed for the file type.
+		NewLSPNavigateTool(workspaceRoot),
 		// skill reads reusable instruction files from the skills dir (it resolves
 		// skills.DefaultDir itself); read-only, so it is safe in the core/MCP set.
 		NewSkillTool(""),
