@@ -603,7 +603,12 @@ func mapStopReason(reason string) string {
 		// empty/partial turn isn't mistaken for a normal completion (M4).
 		return zeroruntime.FinishReasonContentFilter
 	default:
-		// end_turn / tool_use / stop_sequence / pause_turn (and "") are normal.
+		// end_turn / tool_use / stop_sequence (and "") are normal completions.
+		// pause_turn is also normal here: it is Anthropic's long-running-turn pause
+		// (used with server-side tools), where the turn is NOT truncated or refused —
+		// the client is expected to resume it by sending the response back. Treating
+		// it as a non-normal early stop would fire a spurious truncation notice, so it
+		// maps to "" like the other clean stops.
 		return ""
 	}
 }
