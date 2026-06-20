@@ -128,6 +128,39 @@ func TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage(t *testing.T) {
 	}
 }
 
+func TestBuildLinuxSandboxBwrapArgsKeepsHostNetworkWhenAllowed(t *testing.T) {
+	helperPath := filepath.Join(t.TempDir(), LinuxSandboxHelperName)
+	if err := os.WriteFile(helperPath, []byte("helper"), 0o755); err != nil {
+		t.Fatalf("WriteFile helper: %v", err)
+	}
+	profile := DefaultPermissionProfile("/workspace")
+	profile.Network = NetworkPolicy{Mode: NetworkAllow}
+	args, err := BuildLinuxSandboxCommandArgs(LinuxSandboxCommandArgsOptions{
+		SandboxPolicyCWD:  "/workspace",
+		PermissionProfile: profile,
+		BlockUnixSockets:  true,
+		Command:           []string{"python3", "-m", "http.server", "8000"},
+	})
+	if err != nil {
+		t.Fatalf("BuildLinuxSandboxCommandArgs: %v", err)
+	}
+	config, err := ParseLinuxSandboxHelperArgs(args)
+	if err != nil {
+		t.Fatalf("ParseLinuxSandboxHelperArgs: %v", err)
+	}
+	bwrapArgs, err := BuildLinuxSandboxBwrapArgs(LinuxSandboxBwrapOptions{
+		Config:     config,
+		HelperPath: helperPath,
+	})
+	if err != nil {
+		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
+	}
+	if indexString(bwrapArgs, "--unshare-net") >= 0 {
+		t.Fatalf("network-allowed bwrap args must not isolate loopback: %#v", bwrapArgs)
+	}
+	assertArgsContainSequence(t, bwrapArgs, "--setenv", "ZERO_SANDBOX_NETWORK", string(NetworkAllow))
+}
+
 func indexString(values []string, want string) int {
 	for index, value := range values {
 		if value == want {
