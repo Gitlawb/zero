@@ -605,3 +605,45 @@ The 35 surviving findings cluster into four underlying causes:
 - **Not deep-read (out of stated focus):** `internal/tools/web_fetch.go` & `web_search.go` (network tools), Anthropic provider internals, the plugin/skill **install/checksum/lockfile** paths, and TUI overlays (`mouse.go`, picker/wizard/onboarding, `command_center.go` specifics). Build/vet cover them; behavior was not audited.
 - **Daemon prior-audit reconciliation is necessarily empty:** the `D1–D11` labels referenced in current daemon code comments come from a review not present in the three on-disk `docs/audit/*.md`, so "fixed since" for the daemon is against code comments, not those docs. The daemon findings here (M7/M8/L7/I1) are re-derived against current code.
 - **Reproductions:** M4, M5, M6, M11 were empirically reproduced with throwaway tests against the current tree (then removed). M10, M12, M14, M9, H1 are verified by code reading + caller/grep tracing, not a live exploit. Severity calibration for M10 is *medium* (requires a malicious/compromised/typo'd `baseURL` that 3xx-redirects to an attacker host) rather than high; if a deployment commonly points providers at untrusted gateways, treat it as high.
+
+---
+
+## 8. Remediation status — `fix/audit-2026-06-20`
+
+Implemented in staged commits on branch `fix/audit-2026-06-20` (one finding/tight-cluster per commit; each gated build/vet/gofmt + `-race` on the affected package; full `-race` suite green on the final tree). Each finding was re-confirmed against current code before fixing.
+
+### Fixed (14 findings + 1 test-robustness)
+
+| ID | Sev | Status | Note |
+|---|---|---|---|
+| M10 | medium | ✅ Fixed | strip auth headers (x-api-key/x-goog-api-key/custom) on cross-host redirect in the health probe |
+| M12 | medium | ✅ Fixed | fsync events.jsonl append so the log is as durable as its metadata |
+| M4 | medium | ✅ Fixed | feed `sched.Next` a minute-aligned instant so the DST fall-back collapse guard engages |
+| M5 | medium | ✅ Fixed | pause an unadvanceable job inside the claim so two schedulers can't both fire it |
+| M7 | medium | ✅ Fixed | bound the daemon control handshake with a read deadline (idle remote peer can't pin a slot) |
+| M8 | medium | ✅ Fixed | `ServeConn` tracks the conn so `Shutdown` can close a stalled remote handshake |
+| M13 | medium | ✅ Fixed | atomic rename-with-verify mailbox stale-lock break (no self-compare; no split-brain) |
+| M1 | medium | ✅ Fixed | anchor the streamjson `api_key` redaction so prose isn't mangled |
+| I1 | info | ✅ Fixed | local control socket handshake now deadline-bounded (same fix as M7) |
+| L15 | low | ✅ Fixed | snapshot exec-session `lastUsedAt` under its lock — fixes a real `-race` data race |
+| L13 | low | ✅ Fixed | `defer job.cancel()` releases the scheduler's per-job context on MaxRuns completion |
+| L1 | low | ✅ Fixed | route the post-compaction / max-turns connects through `streamWithReconnect` |
+| L3 | low | ✅ Fixed | `--skip-permissions-unsafe` rejects trailing positional args instead of dropping them |
+| L11 | low | ✅ Fixed | error on a present-but-wrong-shape chatgpt account-id claim so the login warning fires |
+| (report §2) | — | ✅ Fixed | de-flaked the 3 exec-session timing tests so `go test ./... -race` is green |
+
+### Deferred (larger/riskier than a clean stage — rationale)
+
+| ID | Sev | Why deferred |
+|---|---|---|
+| H1 | high | Wiring `sessionStart/End` + `specialistStart/Stop` correctly is a cross-surface design change: the dispatcher lives only in `agent.Options` (fires per-tool), so session boundaries differ across exec/TUI/daemon and the specialist events need the parent dispatcher threaded through the child boundary. The audit's alternative (delete the events) would disable a documented feature (against the guardrails). Needs a focused design pass, not a surgical edit. |
+| M9 | medium | MCP SSE reconnect is risky concurrency (re-open + re-`initialize`d session state) and not deterministically unit-testable; warrants its own change with a fault-injection harness. |
+| M11 | medium | Making the sandbox AST authoritative is security-sensitive — a wrong call under-blocks a genuinely destructive command. Needs an extensive "still blocks real destructive commands" matrix before flipping the precedence; the guardrails forbid weakening confinement to land a fix. |
+| M14 | medium | PTY drain-on-exit is platform-specific concurrency (Linux PTY copy goroutine ↔ `markDone` sync); needs a `copied` channel + bounded join, carefully tested per platform. |
+| M2 | medium | Merging provider-command MCP into `ResolveMCP` is a real wiring decision (which resolve path the runtime should read); deferred to avoid guessing the intended single source of truth. |
+| M3, M6 | medium | Project-command provenance marker (UX) and cron `--run-now` one-shot marker (schema field) are design choices better made deliberately. |
+| M15 | medium | Streaming-block memoization is perf-only (no correctness risk) and fiddly in the TUI render hot path. |
+| L2, L4, L5, L6, L7, L8, L9, L10, L12, L14, L16, L17, I2 | low/info | Lower-value hygiene / cross-cutting (dead-code removal decisions, cross-platform lock identity, RFC3339Nano format change, TUI width math, minor concurrency hardening). Batchable in a follow-up. |
+
+### Skipped (not a real defect)
+- The two findings the audit itself dropped in §4.4 (compactor frozen-budget; `maxTurns<=0`) were already withdrawn and not implemented.
