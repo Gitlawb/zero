@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible problem in Zero
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Clear, reproducible reports are the most useful way to help the
+        project. Please do **not** report security vulnerabilities here — see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version / branch / commit
+      description: Output of `zero version`, or the branch/commit you built from.
+      placeholder: "zero dev (commit abc1234) / main"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS and environment
+      description: Operating system, terminal, and any relevant environment details.
+      placeholder: "macOS 14 / iTerm2 / Go 1.25.1"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal reproduction case when possible.
+      placeholder: |
+        1. Run `zero ...`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs, screenshots, or error messages
+      description: Redact any secrets (API keys, tokens) before pasting.
+    validations:
+      required: false

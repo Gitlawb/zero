@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a new capability or change
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not begin implementation until the issue has been reviewed and marked with the
+        `issue-approved` label (see CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The problem you are trying to solve.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Requested behavior
+      description: The behavior or functionality you are requesting.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it belongs in Zero
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds considered
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Examples, screenshots, or prior discussion
+    validations:
+      required: false
