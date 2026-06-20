@@ -244,6 +244,41 @@ func TestMailboxLockReleaseIsOwnershipAware(t *testing.T) {
 	os.Remove(lockPath)
 }
 
+func TestAcquireLockReclaimsStaleLock(t *testing.T) {
+	// A crashed holder's stale lock (old mtime) must be reclaimed via the atomic
+	// rename-with-verify path, leaving no sidelined .stale.* file (AUDIT-M13).
+	lockPath := filepath.Join(t.TempDir(), "x.lock")
+	if err := os.WriteFile(lockPath, []byte("dead-holder"), 0o600); err != nil {
+		t.Fatalf("seed stale lock: %v", err)
+	}
+	old := time.Now().Add(-2 * lockStaleAfter)
+	if err := os.Chtimes(lockPath, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	release, err := acquireLock(lockPath, time.Second)
+	if err != nil {
+		t.Fatalf("acquireLock should reclaim a genuinely stale lock, got %v", err)
+	}
+	release()
+	if matches, _ := filepath.Glob(lockPath + ".stale.*"); len(matches) != 0 {
+		t.Fatalf("reclaim left sidelined files: %v", matches)
+	}
+}
+
+func TestAcquireLockDoesNotBreakFreshLock(t *testing.T) {
+	// A fresh, held lock (recent mtime) must never be broken — the stale-break must
+	// not steal a live lock (AUDIT-M13).
+	lockPath := filepath.Join(t.TempDir(), "x.lock")
+	release, err := acquireLock(lockPath, time.Second)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer release()
+	if _, err := acquireLock(lockPath, 50*time.Millisecond); err == nil {
+		t.Fatal("acquireLock broke a fresh, held lock (split-brain risk)")
+	}
+}
+
 func TestMailboxConcurrentSends(t *testing.T) {
 	mb := newTestMailbox(t)
 	// High fan-out exercises heavy contention (a lock regression — e.g. a Windows

@@ -365,13 +365,22 @@ func acquireLock(lockPath string, timeout time.Duration) (func(), error) {
 		if !isLockContended(err) {
 			return nil, fmt.Errorf("swarm: acquire lock: %w", err)
 		}
-		// Lock held: break it if stale, otherwise wait. The break is conditional
-		// on the file's content being unchanged since we observed it, so we do not
-		// delete a lock another writer rotated in between.
+		// Lock held: break it if stale, otherwise wait. Reclaim ATOMICALLY via
+		// rename-with-verify. The previous content==content check read the same file
+		// twice microseconds apart, so it was always "unchanged" and gave no
+		// protection — two waiters could both Remove the lock while a third recreated
+		// it via O_EXCL, leaving two live holders. Renaming the file aside means only
+		// one racer wins the rename of a given inode; the moved file's mtime is then
+		// re-checked stale before deletion, and if a holder rotated a fresh lock in
+		// the gap it is renamed back rather than stolen. (AUDIT-M13)
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > lockStaleAfter {
-			stale, _ := os.ReadFile(lockPath)
-			if data, rerr := os.ReadFile(lockPath); rerr == nil && string(data) == string(stale) {
-				os.Remove(lockPath)
+			reclaimed := lockPath + ".stale." + token
+			if os.Rename(lockPath, reclaimed) == nil {
+				if rinfo, rerr := os.Stat(reclaimed); rerr == nil && time.Since(rinfo.ModTime()) > lockStaleAfter {
+					os.Remove(reclaimed) // genuinely stale — drop it
+				} else {
+					_ = os.Rename(reclaimed, lockPath) // young again — restore, don't steal
+				}
 			}
 			continue
 		}
