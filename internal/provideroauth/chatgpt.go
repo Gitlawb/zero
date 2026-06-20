@@ -98,7 +98,7 @@ func ChatGPTLogin(ctx context.Context, opts ChatGPTOptions) (oauth.Token, error)
 	}
 	defer listener.Close()
 
-	redirectURI := listener.RedirectURI()
+	redirectURI := listener.RedirectURIWithHost("localhost", "/auth/callback")
 	// ChatGPT's authorize endpoint requires these extra params (the Codex CLI
 	// sends them too) — without them it rejects with authorize_hydra_invalid_request.
 	chatgptExtraParams := map[string]string{

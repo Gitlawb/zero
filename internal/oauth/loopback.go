@@ -56,8 +56,24 @@ func (l *LoopbackListener) RedirectURI() string {
 	return fmt.Sprintf("http://%s/callback", l.listener.Addr().String())
 }
 
+// RedirectURIWithHost returns a redirect URI using the given host (e.g.
+// "localhost") and path (e.g. "/auth/callback"). The listener still binds
+// 127.0.0.1, but the OAuth client may require "localhost" in the redirect_uri
+// (OpenAI's ChatGPT client registration does). The listener accepts both
+// /callback and the given path.
+func (l *LoopbackListener) RedirectURIWithHost(host, path string) string {
+	_, port, _ := net.SplitHostPort(l.listener.Addr().String())
+	return fmt.Sprintf("http://%s:%s%s", host, port, path)
+}
+
+// Port returns the OS-assigned TCP port the listener is bound on.
+func (l *LoopbackListener) Port() string {
+	_, port, _ := net.SplitHostPort(l.listener.Addr().String())
+	return port
+}
+
 func (l *LoopbackListener) handle(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/callback" {
+	if r.URL.Path != "/callback" && r.URL.Path != "/auth/callback" {
 		http.NotFound(w, r)
 		return
 	}
