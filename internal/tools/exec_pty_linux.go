@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,10 +32,26 @@ func startPTYProcess(command *exec.Cmd, output *execOutputBuffer) (io.WriteClose
 		return nil, nil, err
 	}
 	_ = slave.Close()
+	copied := make(chan struct{})
 	go func() {
+		defer close(copied)
 		_, _ = io.Copy(output, master)
 	}()
-	return master, func() { _ = master.Close() }, nil
+	return master, func() {
+		// cleanup runs in the Wait goroutine AFTER command.Wait() returns, so the
+		// child has exited and its slave fds are closed — the master then EOFs once
+		// io.Copy drains the remaining PTY output into the buffer. Wait for that copy
+		// to finish BEFORE closing the master and letting the caller mark the session
+		// done + remove it; otherwise a command's final output chunk (e.g. a test
+		// runner's last PASS/FAIL line) can be lost on exit. Closing the master first
+		// would truncate the unread tail, so the join precedes the Close. Bounded so a
+		// stuck copy can't hang teardown. (AUDIT-M14)
+		select {
+		case <-copied:
+		case <-time.After(bashWaitDelay):
+		}
+		_ = master.Close()
+	}, nil
 }
 
 func openPTY() (*os.File, *os.File, error) {
