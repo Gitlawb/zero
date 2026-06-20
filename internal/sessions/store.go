@@ -611,6 +611,15 @@ func (store *Store) appendEventLocked(sessionID string, input AppendEventInput) 
 		_ = file.Close()
 		return Event{}, fmt.Errorf("append zero session event: %w", err)
 	}
+	// fsync the event before reporting success: the derived metadata.json IS
+	// fsync'd (writeMetadata), so without this a crash after the metadata flush
+	// but before the events.jsonl page reaches disk leaves EventCount ahead of the
+	// durable log — silently losing the just-appended event (incl. the checkpoint
+	// that /rewind targets). Make the log at least as durable as its metadata. (AUDIT-M12)
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return Event{}, fmt.Errorf("sync zero session event: %w", err)
+	}
 	if err := file.Close(); err != nil {
 		return Event{}, fmt.Errorf("close zero session event file: %w", err)
 	}
