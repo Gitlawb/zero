@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -127,8 +128,35 @@ func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
 	}
 }
 
+// resilientTempDir is like t.TempDir() but tolerates the Windows handle-release
+// lag: a SIGKILL'd child process that had the dir as its cwd may not have
+// released it the instant it is reaped, so the immediate RemoveAll t.TempDir()
+// does on cleanup can fail with "being used by another process". Retry the
+// removal briefly before giving up.
+func resilientTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "zero-exec-interrupt-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				// Best-effort: a leaked temp dir is not worth failing the test.
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
-	root := t.TempDir()
+	root := resilientTempDir(t)
 	manager := newExecSessionManager()
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
@@ -143,6 +171,24 @@ func TestWriteStdinInterruptTerminatesSession(t *testing.T) {
 	sessionID, err := strconv.Atoi(start.Meta["session_id"])
 	if err != nil {
 		t.Fatalf("session_id is not numeric: %v", err)
+	}
+
+	// Send the interrupt, then wait deterministically for the process to be
+	// reaped (session.done closes) before asserting. The previous version relied
+	// on the write_stdin yield window (1000ms) being long enough for the async
+	// SIGKILL + reap to land, which flaked on slow CI (notably Windows smoke).
+	// Waiting on done removes the timing dependence: a generous safety timeout
+	// fails loudly if the kill genuinely hangs, but the common case returns the
+	// instant the process exits.
+	session, ok := manager.get(sessionID)
+	if !ok {
+		t.Fatalf("session %d not found after start", sessionID)
+	}
+	session.terminate()
+	select {
+	case <-session.done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("interrupted session %d was not reaped within 30s", sessionID)
 	}
 
 	interrupted := writeTool.Run(context.Background(), map[string]any{
