@@ -385,6 +385,11 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if name == "" {
 				name = "unknown"
 			}
+			if name == "Task" {
+				// The specialist card (EventSpecialistStart) renders this delegation;
+				// skip the redundant "tool call: Task" row on resume too.
+				continue
+			}
 			id := payloadString(payload, "id")
 			callSeq[id]++
 			rows = append(rows, transcriptRow{
@@ -401,6 +406,11 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			name := payloadString(payload, "name")
 			if name == "" {
 				name = "unknown"
+			}
+			if name == "Task" {
+				// Mirrors the live path: the specialist card carries the Task result,
+				// so skip the redundant "tool result: Task" row on resume.
+				continue
 			}
 			status := tools.Status(payloadString(payload, "status"))
 			if status == "" {

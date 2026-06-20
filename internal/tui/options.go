@@ -49,7 +49,10 @@ type Options struct {
 	PermissionMode  agent.PermissionMode
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string
-	UserAgent       string
+	// Theme is the operator's palette preference: "auto" (default), "dark", or
+	// "light". From the --theme flag if wired; falls back to ZERO_THEME then auto.
+	Theme     string
+	UserAgent string
 
 	// Notify configures completion / awaiting-input notifications.
 	Notify config.NotifyConfig

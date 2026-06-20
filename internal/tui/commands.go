@@ -258,9 +258,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/theme",
-		usage:       "/theme",
+		usage:       "/theme [auto|dark|light]",
 		group:       commandGroupSession,
-		description: "Show theme state.",
+		description: "Switch or show the color theme (auto-detects terminal background).",
 		kind:        commandTheme,
 	},
 	{

@@ -306,10 +306,20 @@ func sayMeasure(width int) int {
 	return measure
 }
 
-// assistantMeasure is the main answer wrap width. Assistant responses use the
-// available chat width so they visually balance full-width submitted prompts.
+// assistantMeasureCap bounds assistant PROSE to a readable line length on wide
+// terminals — long measures hurt readability past the ~90-100 col sweet spot.
+// Looser than sayMeasure's 74 (this is the main answer); tables and code blocks
+// still use the full chat width (the separate tableMeasure arg).
+const assistantMeasureCap = 96
+
+// assistantMeasure is the main answer prose wrap width: the chat width, capped at
+// assistantMeasureCap, with a 16-col floor. Left-aligned (the cap just shortens
+// lines; it does not center).
 func assistantMeasure(width int) int {
 	measure := width
+	if measure > assistantMeasureCap {
+		measure = assistantMeasureCap
+	}
 	if measure < 16 {
 		measure = 16
 	}
@@ -339,6 +349,18 @@ func wrapPlainText(text string, measure int) []string {
 			indent = strings.Repeat(" ", measure/2)
 		}
 		available := measure - len(indent)
+		// Preformatted: a body with an internal run of >=2 spaces is aligned
+		// content (columns, a table, indented code) where word-wrapping via
+		// strings.Fields would collapse the runs and destroy the alignment. Split it
+		// verbatim by display width instead, preserving every space. A line that
+		// already fits returns unchanged. Leading indent (handled above) and
+		// explicit newlines (the outer split) are unaffected.
+		if strings.Contains(body, "  ") {
+			for _, segment := range splitPreservingWidth(body, available) {
+				out = append(out, indent+segment)
+			}
+			continue
+		}
 		line := ""
 		for _, word := range strings.Fields(body) {
 			for lipgloss.Width(word) > available {
@@ -385,6 +407,28 @@ func splitAtWidth(text string, measure int) (string, string) {
 		used += glyphWidth
 	}
 	return text, ""
+}
+
+// splitPreservingWidth breaks text into segments that each fit the measure in
+// display width, preserving ALL characters (whitespace included) — the verbatim
+// counterpart to the word-wrapper, used for aligned/columnar lines so their
+// column spacing survives. A line that already fits returns a single segment.
+func splitPreservingWidth(text string, measure int) []string {
+	if measure < 1 {
+		measure = 1
+	}
+	var segments []string
+	for lipgloss.Width(text) > measure {
+		head, tail := splitAtWidth(text, measure)
+		if head == "" {
+			// splitAtWidth always advances by >=1 rune for measure>=1; the guard
+			// just keeps a degenerate input from spinning.
+			break
+		}
+		segments = append(segments, head)
+		text = tail
+	}
+	return append(segments, text)
 }
 
 func renderUserRow(row transcriptRow, width int) string {
@@ -1000,7 +1044,7 @@ func renderFocusedAskUserPrompt(prompt pendingAskUserPrompt, input string, width
 	}
 	// Echo the in-progress answer inside the card so the user sees what they
 	// are typing where they are answering, cursor included.
-	answer := zeroTheme.userPrompt.Background(lipgloss.Color(colorPanel)).Render("❯ ") +
+	answer := zeroTheme.onPanel(zeroTheme.userPrompt).Render("❯ ") +
 		fill(zeroTheme.ink).Render(input) + fill(zeroTheme.accent).Render("▌")
 	lines = append(lines, answer)
 	lines = append(lines, fill(zeroTheme.faint).Render("type an answer, Enter to submit · Esc to skip"))

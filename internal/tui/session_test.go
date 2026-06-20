@@ -247,10 +247,18 @@ func TestPromptSubmitPersistsPermissionSessionEvents(t *testing.T) {
 		finalCh <- execCmd(cmd)
 	}()
 
-	for received := 0; received < 4; received++ {
+	for received := 0; received < 4; {
 		runtimeMsg := receiveRuntimeMessage(t, runtimeMessageCh)
 		updated, _ = next.Update(runtimeMsg)
 		next = updated.(model)
+		// Live tool-call streaming-preview messages (the file being written) are
+		// not one of the 4 semantic steps this test drives — process them so the
+		// model state advances, but don't count them toward the budget.
+		switch runtimeMsg.(type) {
+		case toolCallStreamStartMsg, toolCallStreamDeltaMsg:
+			continue
+		}
+		received++
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
 			updated, _ = next.Update(testKeyText("d"))
 			next = updated.(model)

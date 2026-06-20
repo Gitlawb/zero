@@ -2,11 +2,46 @@ package tui
 
 import (
 	"image/color"
+	"os"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 )
+
+// defaultFadeDisabled resolves streamingFadeDisabled from the live process
+// environment and the env-detected color profile, at model construction.
+func defaultFadeDisabled() bool {
+	return streamingFadeDisabled(os.Getenv, colorprofile.Env(os.Environ()))
+}
+
+// streamingFadeDisabled reports whether the streaming-text fade should be OFF.
+// The fade re-renders every ~150ms while text streams; that stutters over remote
+// links and terminal multiplexers, and the age→color ramp reads poorly with few
+// colors. Disabled when: ZERO_NO_FADE is set, the session is over SSH
+// (SSH_CONNECTION), TERM is a screen/tmux multiplexer, or the color profile is
+// no-TTY / ASCII / 16-color. When disabled, streaming text renders statically at
+// the base ink color (styleStreamingLine's pre-fade path), which always sits at
+// full readable contrast against the active theme.
+func streamingFadeDisabled(env func(string) string, profile colorprofile.Profile) bool {
+	if v := strings.TrimSpace(env("ZERO_NO_FADE")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
+		return true
+	}
+	if strings.TrimSpace(env("SSH_CONNECTION")) != "" || strings.TrimSpace(env("SSH_TTY")) != "" {
+		return true
+	}
+	term := strings.ToLower(strings.TrimSpace(env("TERM")))
+	if strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux") {
+		return true
+	}
+	switch profile {
+	case colorprofile.NoTTY, colorprofile.ASCII, colorprofile.ANSI:
+		return true
+	}
+	return false
+}
 
 // Streaming-text age-based fade.
 //
@@ -56,13 +91,20 @@ type streamingFadeTickMsg time.Time
 // struct-field access and a single Render call, not a hex parse.
 var streamingFadePalette [streamingFadeSteps]lipgloss.Style
 
-// init builds the palette once at package load. Cheap; called before any
-// model is constructed.
+// init builds the palette once at package load (after zeroTheme's var init), so
+// the fade tracks the active theme's accent→ink. Cheap; before any model exists.
 func init() {
+	rebuildStreamingFadePalette()
+}
+
+// rebuildStreamingFadePalette regenerates the fade ramp from the active theme.
+// Called at init and again by applyTheme when /theme or startup detection swaps
+// the palette, so the streaming fade matches dark vs light.
+func rebuildStreamingFadePalette() {
 	streamingFadePalette = buildStreamingFadePalette(
 		streamingFadeSteps,
-		lipgloss.Color(colorAccent),
-		lipgloss.Color(colorInk),
+		zeroTheme.accentColor,
+		zeroTheme.inkColor,
 	)
 }
 

@@ -27,7 +27,7 @@ func rgbaOf(t *testing.T, s lipgloss.Style) color.RGBA {
 func TestStreamingFadePaletteMonotonic(t *testing.T) {
 	// Build a fresh palette against the package's theme tokens so this
 	// test is independent of any test-time mutation of the global.
-	palette := buildStreamingFadePalette(streamingFadeSteps, lipgloss.Color(colorAccent), lipgloss.Color(colorInk))
+	palette := buildStreamingFadePalette(streamingFadeSteps, lipgloss.Color(darkPalette.accent), lipgloss.Color(darkPalette.ink))
 	// We convert the Blend1D output to color.RGBA inside the builder
 	// so per-bucket comparisons are byte-stable. The endpoint byte
 	// values are the contract — the hex strings are not.
@@ -70,7 +70,7 @@ func TestStreamingFadePaletteIntermediates(t *testing.T) {
 	// don't pin the exact channel path (Blend1D uses CIELAB, which is
 	// not a straight per-channel interpolation), but we do confirm the
 	// ramp makes monotonic progress.
-	palette := buildStreamingFadePalette(streamingFadeSteps, lipgloss.Color(colorAccent), lipgloss.Color(colorInk))
+	palette := buildStreamingFadePalette(streamingFadeSteps, lipgloss.Color(darkPalette.accent), lipgloss.Color(darkPalette.ink))
 	prev := rgbaOf(t, palette[0])
 	for i := 1; i < streamingFadeSteps; i++ {
 		cur := rgbaOf(t, palette[i])
@@ -88,7 +88,7 @@ func TestStreamingFadePaletteIntermediates(t *testing.T) {
 }
 
 func TestStreamingFadePaletteLength(t *testing.T) {
-	palette := buildStreamingFadePalette(streamingFadeSteps, lipgloss.Color(colorAccent), lipgloss.Color(colorInk))
+	palette := buildStreamingFadePalette(streamingFadeSteps, lipgloss.Color(darkPalette.accent), lipgloss.Color(darkPalette.ink))
 	if len(palette) != streamingFadeSteps {
 		t.Fatalf("palette length = %d, want %d", len(palette), streamingFadeSteps)
 	}
@@ -134,7 +134,7 @@ func TestAgeDimLineFreshReturnsAccent(t *testing.T) {
 	// foreground of the styled output via the palette's known color,
 	// since lipgloss strips ANSI in non-tty tests.
 	now := time.Unix(0, 0)
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk))
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
 	out := ageDimLine("hello", now, now, base)
 	if !strings.Contains(out, "hello") {
 		t.Errorf("fresh ageDimLine output %q does not contain the input", out)
@@ -155,7 +155,7 @@ func TestAgeDimLineMidRangeReturnsIntermediate(t *testing.T) {
 	// zeroTheme.ink). The output must be non-empty and contain the
 	// input.
 	now := time.Unix(0, 0)
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk))
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
 	bornAt := now.Add(-600 * time.Millisecond)
 	out := ageDimLine("hello", bornAt, now, base)
 	if !strings.Contains(out, "hello") {
@@ -165,7 +165,7 @@ func TestAgeDimLineMidRangeReturnsIntermediate(t *testing.T) {
 
 func TestAgeDimLineSettledReturnsBase(t *testing.T) {
 	// At age >= dimDuration the base style is used directly.
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk))
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
 	now := time.Unix(0, 0)
 	bornAt := now.Add(-streamingFadeDuration - time.Millisecond)
 	out := ageDimLine("hello", bornAt, now, base)
@@ -180,7 +180,7 @@ func TestAgeDimLineZeroBornAtReturnsBase(t *testing.T) {
 	// without populating m.lineAges, so bornAt is the zero time. The
 	// renderer must fall back to the base color (not panic, not produce
 	// neon text).
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk))
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
 	now := time.Unix(0, 0)
 	out := ageDimLine("hello", time.Time{}, now, base)
 	want := base.Render("hello")
@@ -195,7 +195,7 @@ func TestAgeDimLineBuckets(t *testing.T) {
 	// bucket covers 100ms. We don't assert on the rendered colors
 	// (lipgloss's per-color bytes are an implementation detail); we
 	// just check the bucket math and that nothing panics.
-	base := lipgloss.NewStyle().Foreground(lipgloss.Color(colorInk))
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color(darkPalette.ink))
 	now := time.Unix(0, 0)
 	bornAt := now
 	lastBucket := -1

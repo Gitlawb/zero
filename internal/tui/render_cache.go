@@ -50,6 +50,16 @@ func newStaticRenderCache(maxEntries int, maxCharacters int) *staticRenderCache 
 	}
 }
 
+// clear drops every cached render. Called when the active theme changes so stale
+// entries painted in the old palette are never reused.
+func (c *staticRenderCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = map[string]*list.Element{}
+	c.lru.Init()
+	c.retained = 0
+}
+
 func (c *staticRenderCache) render(key string, stable bool, render func() string) string {
 	if render == nil {
 		return ""

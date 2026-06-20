@@ -182,9 +182,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		}
 
 		collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
-			OnText:      options.OnText,
-			OnReasoning: options.OnReasoning,
-			OnUsage:     options.OnUsage,
+			OnText:          options.OnText,
+			OnReasoning:     options.OnReasoning,
+			OnUsage:         options.OnUsage,
+			OnToolCallStart: options.OnToolCallStart,
+			OnToolCallDelta: options.OnToolCallDelta,
 		})
 		if collected.Error != "" {
 			// REACTIVE compaction: the streamed error may also be a context
@@ -487,9 +489,11 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 		return "", messages, ""
 	}
 	collected := zeroruntime.CollectStreamWithOptions(ctx, stream, zeroruntime.CollectOptions{
-		OnText:      options.OnText,
-		OnReasoning: options.OnReasoning,
-		OnUsage:     options.OnUsage,
+		OnText:          options.OnText,
+		OnReasoning:     options.OnReasoning,
+		OnUsage:         options.OnUsage,
+		OnToolCallStart: options.OnToolCallStart,
+		OnToolCallDelta: options.OnToolCallDelta,
 	})
 	if ctx.Err() != nil || collected.Error != "" || strings.TrimSpace(collected.Text) == "" {
 		return "", messages, ""

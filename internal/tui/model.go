@@ -93,6 +93,8 @@ type model struct {
 	selfCorrectTests      bool
 	reasoningEffort       modelregistry.ReasoningEffort
 	responseStyle         string
+	themeMode             themeMode // palette preference: auto (default), dark, light
+	hasDarkBg             bool      // last terminal background-detection result (auto mode)
 	userAgent             string
 	compactRequests       int
 	compactInFlight       bool
@@ -201,6 +203,13 @@ type model struct {
 	lineAges           []time.Time
 	lastStreamActivity time.Time
 	fadeActive         bool
+	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color)
+	// In-progress tool call whose arguments are streaming (a file being written),
+	// shown live by streamingToolCallView so a long write/edit isn't a frozen
+	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
+	streamCallID   string
+	streamCallName string
+	streamCallArgs string
 
 	// Slash-command autocomplete (purely additive UI state). suggestions is the
 	// live match list for the current "/token"; suggestionIdx is the highlighted
@@ -264,6 +273,21 @@ type model struct {
 type agentTextMsg struct {
 	runID int
 	delta string
+}
+
+// toolCallStreamStartMsg / toolCallStreamDeltaMsg carry a tool call's live
+// argument stream from the agent goroutine to the update loop, so a file being
+// written renders as it streams (see streamingToolCallView).
+type toolCallStreamStartMsg struct {
+	runID int
+	id    string
+	name  string
+}
+
+type toolCallStreamDeltaMsg struct {
+	runID    int
+	id       string
+	fragment string
 }
 
 type agentReasoningMsg struct {
@@ -524,6 +548,8 @@ func newModel(ctx context.Context, options Options) model {
 		permissionMode:         permissionMode,
 		reasoningEffort:        options.ReasoningEffort,
 		responseStyle:          defaultedResponseStyle(options.ResponseStyle),
+		themeMode:              resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME")),
+		hasDarkBg:              true,
 		userAgent:              options.UserAgent,
 		usageTracker:           usageTracker,
 		transcript:             initialTranscript(),
@@ -539,6 +565,12 @@ func newModel(ctx context.Context, options Options) model {
 		setup:                  newSetupState(options.Setup),
 		setupSave:              options.Setup.Save,
 	}
+	// Apply an explicit theme immediately; auto stays on the dark default until
+	// Init's terminal background probe resolves it (see Init / BackgroundColorMsg).
+	if m.themeMode != themeAuto {
+		applyTheme(m.themeMode, true)
+	}
+	m.fadeDisabled = defaultFadeDisabled()
 	m.refreshMCPViewState()
 	return m
 }
@@ -591,6 +623,11 @@ func composerBlinkCmd() tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd()}
+	// In auto mode, ask the terminal for its background color; the reply arrives
+	// as tea.BackgroundColorMsg and selects light vs dark (see updateModel).
+	if m.themeMode == themeAuto {
+		cmds = append(cmds, tea.RequestBackgroundColor)
+	}
 	if m.prService != nil && m.runtimeMessageSink != nil {
 		service := m.prService
 		sink := m.runtimeMessageSink
@@ -671,6 +708,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case composerBlinkMsg:
 		m.composerCursorVisible = !m.composerCursorVisible
 		return m, composerBlinkCmd()
+	case tea.BackgroundColorMsg:
+		// Terminal background-color reply (from Init's RequestBackgroundColor). In
+		// auto mode it selects light vs dark; applyTheme repaints (clears the render
+		// cache). An explicit dark/light theme ignores it but still records the bg.
+		m.hasDarkBg = msg.IsDark()
+		if m.themeMode == themeAuto {
+			applyTheme(themeAuto, m.hasDarkBg)
+		}
+		return m, nil
 	case tea.MouseMsg:
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
@@ -1076,10 +1122,28 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notifier.SetFocused(false)
 		}
 		return m, nil
+	case toolCallStreamStartMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		// A new tool call opened — reset the live "writing" block to it.
+		m.streamCallID = msg.id
+		m.streamCallName = msg.name
+		m.streamCallArgs = ""
+		return m, nil
+	case toolCallStreamDeltaMsg:
+		if msg.runID != m.activeRunID || msg.id != m.streamCallID {
+			return m, nil
+		}
+		m.streamCallArgs += msg.fragment
+		return m, nil
 	case agentTextMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		// Streaming text means any in-progress tool call has finished — clear the
+		// live "writing" block so it doesn't linger over new prose.
+		m.clearStreamingToolCall()
 		m.streamingText += msg.delta
 		// recordStreamingDelta appends a time.Time to lineAges for every
 		// newline in the delta and bumps lastStreamActivity. It also
@@ -1090,10 +1154,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// case schedules the next one). Schedule the FIRST tick only on
 		// the inactive→active transition; subsequent deltas just refresh
 		// state and rely on the existing tick chain.
-		startTick := !m.fadeActive
-		m.fadeActive = true
-		if startTick {
-			return m, streamingFadeTick()
+		// When the fade is disabled (ZERO_NO_FADE / SSH / tmux / low-color),
+		// fadeActive stays false so styleStreamingLine renders streaming text
+		// statically at base ink, and no self-perpetuating tick is scheduled.
+		if !m.fadeDisabled {
+			startTick := !m.fadeActive
+			m.fadeActive = true
+			if startTick {
+				return m, streamingFadeTick()
+			}
 		}
 		return m, nil
 	case agentReasoningMsg:
@@ -1242,6 +1311,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		m.pending = false
 		// Fully reset the fade state at stream end. The next render
 		// emits the final row in solid ink (no settling animation), and
@@ -1407,6 +1477,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
 			}
 			m.streamingText = ""
+			// The tool call has finalized into its card — drop the live "writing"
+			// preview so it doesn't linger or duplicate beneath the card.
+			m.clearStreamingToolCall()
 		}
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		return m, nil
@@ -1921,6 +1994,9 @@ func (m model) interimBlock(width int) string {
 		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0))
 	}
 	if strings.TrimSpace(text) == "" {
+		if writing := m.streamingToolCallView(width); writing != "" {
+			blocks = append(blocks, writing)
+		}
 		blocks = append(blocks, m.workingStatusLine())
 		// During a long think the reasoning block is collapsed to just its header;
 		// show a live tail of the streaming reasoning beneath the working line so
@@ -1943,6 +2019,11 @@ func (m model) interimBlock(width int) string {
 	}
 	lines = appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
+	// Live preview of a file currently being written, so a long write_file/edit
+	// shows the code streaming in rather than looking frozen.
+	if writing := m.streamingToolCallView(width); writing != "" {
+		blocks = append(blocks, writing)
+	}
 	// Always show the live working line (spinner + verb + elapsed) BELOW the
 	// streamed text so an upstream stall keeps animating, never a frozen screen.
 	blocks = append(blocks, m.workingStatusLine())
@@ -2785,10 +2866,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandTheme:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{
-			kind: actionAppendSystem,
-			text: shellOnlyCommandText(command.name),
-		})
+		text := ""
+		m, text = m.handleThemeCommand(command.text)
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandInputStyle:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
@@ -2989,6 +3069,7 @@ func (m *model) cancelRun() {
 	if m.runCancel != nil {
 		m.runCancel()
 	}
+	m.clearStreamingToolCall() // a cancelled file-write must not linger into the next run
 	// Remember the in-flight run — and the session it was recording into — so
 	// its final agentResponseMsg is still drained for session-event persistence
 	// after activeRunID is cleared. Otherwise the checkpoint blobs it captured
@@ -3155,6 +3236,14 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				onText(delta)
 			}
 		}
+		// Stream a tool call's arguments live so a long write_file/edit shows the
+		// code being written instead of a frozen spinner (see streamingToolCallView).
+		options.OnToolCallStart = func(id, name string) {
+			m.sendToolCallStreamStart(runID, id, name)
+		}
+		options.OnToolCallDelta = func(id, fragment string) {
+			m.sendToolCallStreamDelta(runID, id, fragment)
+		}
 		onPermissionRequest := options.OnPermissionRequest
 		options.OnPermissionRequest = func(ctx context.Context, request agent.PermissionRequest) (agent.PermissionDecision, error) {
 			if onPermissionRequest != nil {
@@ -3261,8 +3350,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				arg:    argHintSecondary(call.Arguments),
 				runID:  runID,
 			}
-			rows = append(rows, row)
-			m.sendAgentRow(runID, row)
+			// A Task delegation is shown by the specialist card below, so skip its
+			// redundant "tool call: Task" transcript row — the card supersedes it.
+			if call.Name != "Task" {
+				rows = append(rows, row)
+				m.sendAgentRow(runID, row)
+			}
 			// Track specialist delegation: when the Task tool is called, register
 			// the specialist start so the specialist card + task table can show
 			// live status. The child session ID is not known yet (it's created
@@ -3340,8 +3433,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				detail: result.Output,
 				runID:  runID,
 			}
-			rows = append(rows, row)
-			m.sendAgentRow(runID, row)
+			// A Task result is shown by the specialist card (its completion state),
+			// so skip its redundant "tool result: Task" transcript row.
+			if result.Name != "Task" {
+				rows = append(rows, row)
+				m.sendAgentRow(runID, row)
+			}
 			// Sync the sticky plan panel when update_plan runs.
 			if result.Name == "update_plan" && m.registry != nil {
 				if planTool, ok := m.registry.Get("update_plan"); ok {
@@ -3504,6 +3601,30 @@ func (m model) sendAgentText(runID int, delta string) {
 		return
 	}
 	m.runtimeMessageSink(agentTextMsg{runID: runID, delta: delta})
+}
+
+func (m model) sendToolCallStreamStart(runID int, id, name string) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(toolCallStreamStartMsg{runID: runID, id: id, name: name})
+}
+
+func (m model) sendToolCallStreamDelta(runID int, id, fragment string) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(toolCallStreamDeltaMsg{runID: runID, id: id, fragment: fragment})
+}
+
+// clearStreamingToolCall drops the in-progress live "writing" block (id + name +
+// accumulated args). Called whenever the streamed tool call is no longer the
+// active live preview: it finalizes into a card, text resumes, the run ends, or
+// the run is cancelled. Releasing the args buffer also caps memory after a write.
+func (m *model) clearStreamingToolCall() {
+	m.streamCallID = ""
+	m.streamCallName = ""
+	m.streamCallArgs = ""
 }
 
 func (m model) sendAgentReasoning(runID int, delta string) {

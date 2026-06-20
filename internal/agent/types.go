@@ -213,12 +213,19 @@ type Options struct {
 	// Hooks, when set, runs configured beforeTool (blocking) and afterTool
 	// (advisory) commands around each tool call. nil disables hooks entirely; a
 	// dispatcher built from an empty config is also a safe no-op.
-	Hooks               *hooks.Dispatcher
-	EnabledTools        []string
-	DisabledTools       []string
-	OnText              func(string)
-	OnReasoning         func(string)
-	OnToolCall          func(ToolCall)
+	Hooks         *hooks.Dispatcher
+	EnabledTools  []string
+	DisabledTools []string
+	OnText        func(string)
+	OnReasoning   func(string)
+	OnToolCall    func(ToolCall)
+	// OnToolCallStart / OnToolCallDelta stream a tool call's arguments LIVE as the
+	// model generates them — OnToolCallStart on open (id, tool name), then
+	// OnToolCallDelta for each argument fragment. A surface can render the
+	// in-progress call (e.g. a file being written) instead of waiting for
+	// OnToolCall, which only fires once the whole call has accumulated. nil no-ops.
+	OnToolCallStart     func(id, name string)
+	OnToolCallDelta     func(id, fragment string)
 	OnPermissionRequest func(context.Context, PermissionRequest) (PermissionDecision, error)
 	OnPermission        func(PermissionEvent)
 	OnAskUser           func(context.Context, AskUserRequest) (AskUserResponse, error)

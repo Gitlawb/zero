@@ -35,6 +35,12 @@ type CollectOptions struct {
 	OnText      func(string)
 	OnReasoning func(string)
 	OnUsage     func(Usage)
+	// OnToolCallStart fires when a tool call opens (id + tool name), and
+	// OnToolCallDelta fires for each streamed argument fragment. Together they let
+	// a surface render a tool call's arguments LIVE (e.g. a file being written)
+	// instead of waiting for the whole call to accumulate. nil is a no-op.
+	OnToolCallStart func(id, name string)
+	OnToolCallDelta func(id, fragment string)
 }
 
 // SeedMessages creates the initial system and user turns for a request. It is a
@@ -125,8 +131,14 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 				}
 			case StreamEventToolCallStart:
 				collector.start(event.ToolCallID, event.ToolName, event.ToolCallSignature)
+				if options.OnToolCallStart != nil {
+					options.OnToolCallStart(event.ToolCallID, event.ToolName)
+				}
 			case StreamEventToolCallDelta:
 				collector.delta(event.ToolCallID, event.ArgumentsFragment)
+				if options.OnToolCallDelta != nil {
+					options.OnToolCallDelta(event.ToolCallID, event.ArgumentsFragment)
+				}
 			case StreamEventToolCallEnd:
 				collector.end(event.ToolCallID)
 			case StreamEventToolCallDropped:
