@@ -245,6 +245,11 @@ func (s *Scheduler) Close() {
 func (s *Scheduler) run(job *scheduledJob) {
 	defer s.wg.Done()
 	defer s.forget(job.id)
+	// Release the job's context on every exit path — notably the MaxRuns-completion
+	// return below, which otherwise leaked the derived context (and its propagation
+	// goroutine) until the whole scheduler was cancelled. Idempotent with Cancel/Close.
+	// (AUDIT-L13)
+	defer job.cancel()
 
 	delay := job.schedule.FirstDelay
 	if delay <= 0 {
