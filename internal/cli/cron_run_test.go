@@ -80,6 +80,59 @@ func TestCronRunOnceSkipsOverdueWithoutCatchUp(t *testing.T) {
 	}
 }
 
+func TestClaimFireRefusesSecondClaimOnUnadvanceableJob(t *testing.T) {
+	// AUDIT-M5: two concurrent schedulers must not BOTH claim the same fire of a
+	// job whose schedule cannot advance. The first claim pauses it inside the lock;
+	// the second sees a non-active job and is refused.
+	now := time.Date(2026, 6, 9, 9, 0, 0, 0, time.UTC)
+	store := cron.NewStore(cron.StoreOptions{RootDir: t.TempDir(), Now: func() time.Time { return now }})
+	job, err := store.Add(cron.Job{Expr: "0 0 30 2 *", Prompt: "x", Status: cron.StatusActive, NextRunAt: now.Add(-time.Minute)})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	c1, err1 := claimFire(store, now, job.ID)
+	c2, err2 := claimFire(store, now, job.ID)
+	if err1 != nil || err2 != nil {
+		t.Fatalf("claimFire errs: %v %v", err1, err2)
+	}
+	if !c1 {
+		t.Fatal("first claim should win")
+	}
+	if c2 {
+		t.Fatal("second claim must be refused for an unadvanceable job (double-grant)")
+	}
+	d, _ := store.Get(job.ID)
+	if d.Status != cron.StatusPaused {
+		t.Fatalf("unadvanceable job must be paused by the winning claim, got %q", d.Status)
+	}
+}
+
+func TestCronFireDoesNotDoubleFireOnDSTFallBack(t *testing.T) {
+	// AUDIT-M4: a daily job in the repeated wall-clock hour must advance past the
+	// fall-back repeat, not back to the same-day occurrence one absolute hour later.
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	store := cron.NewStore(cron.StoreOptions{RootDir: t.TempDir()})
+	firstRun := time.Date(2026, 11, 1, 1, 30, 0, 0, loc) // 01:30 EDT, before fall-back
+	job, err := store.Add(cron.Job{Expr: "30 1 * * *", Prompt: "x", Status: cron.StatusActive, NextRunAt: firstRun})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// Fire at 01:30:15 EDT with a sub-minute instant, exactly like the real scheduler.
+	firedNow := time.Date(2026, 11, 1, 1, 30, 15, 0, loc)
+	fx := &fakeExec{}
+	var out, errb bytes.Buffer
+	cronRun(store, func() time.Time { return firedNow }, []string{"--once"}, &out, &errb, fx.run)
+	d, _ := store.Get(job.ID)
+	// The fall-back repeat (01:30 EST) is ~1 absolute hour after firedNow; the next
+	// real daily slot is ~23h later. A gap > 90m proves we skipped the repeat.
+	if gap := d.NextRunAt.Sub(firedNow); gap <= 90*time.Minute {
+		t.Fatalf("DST fall-back double-fire: NextRunAt advanced only %s (to the repeated hour), want the next day", gap)
+	}
+}
+
 func TestCronRunPausesUnadvanceableJob(t *testing.T) {
 	now := time.Date(2026, 6, 9, 9, 0, 0, 0, time.UTC)
 	store := cron.NewStore(cron.StoreOptions{RootDir: t.TempDir(), Now: func() time.Time { return now }})

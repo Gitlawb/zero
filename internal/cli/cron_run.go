@@ -187,12 +187,14 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 		if rec.Error == "" {
 			rec.Error = "invalid schedule; job paused: " + perr.Error()
 		}
-	} else if nxt := sched.Next(fired); nxt.IsZero() {
+	} else if nxt := sched.Next(fired.Truncate(time.Minute)); nxt.IsZero() {
 		job.Status = cron.StatusPaused
 		if rec.Error == "" {
 			rec.Error = "schedule no longer fires; job paused"
 		}
 	} else {
+		// Minute-aligned input keeps this advance identical to claimFire's and lets
+		// the DST fall-back collapse guard engage (AUDIT-M4).
 		job.NextRunAt = nxt
 	}
 	// Re-read and persist the advanced state ATOMICALLY under the per-job lock. The
@@ -253,11 +255,23 @@ func claimFire(store *cron.Store, fired time.Time, id string) (bool, error) {
 			claimed = false // another scheduler already advanced this slot
 			return current, nil
 		}
+		// Advance to the next slot to claim the fire. Compute it from the minute-
+		// aligned fire instant so the schedule's DST fall-back collapse guard (which
+		// only engages for a minute-aligned `after`) actually fires, instead of
+		// double-firing the repeated wall-clock hour (AUDIT-M4).
 		if sched, perr := cron.Parse(current.Expr); perr == nil {
-			if nxt := sched.Next(fired); !nxt.IsZero() {
+			if nxt := sched.Next(fired.Truncate(time.Minute)); !nxt.IsZero() {
 				current.NextRunAt = nxt // advance to claim; concurrent schedulers now skip
+				return current, nil
 			}
 		}
+		// Unparseable or unadvanceable schedule (an impossible spec whose Next is
+		// zero): pause the job inside this same locked claim so a concurrent scheduler
+		// sees a non-active job and does NOT also fire it. The winner still fires once
+		// and fireJob's post-exec keeps it paused. Without this, both callers leave
+		// NextRunAt unchanged, both see the job due, and both fire the same slot
+		// (AUDIT-M5).
+		current.Status = cron.StatusPaused
 		return current, nil
 	})
 	return claimed, err
