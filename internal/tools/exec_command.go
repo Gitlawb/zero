@@ -115,22 +115,38 @@ func (manager *execSessionManager) sessionToPruneLocked() *execSession {
 	if len(manager.sessions) == 0 {
 		return nil
 	}
-	sessions := make([]*execSession, 0, len(manager.sessions))
-	for _, session := range manager.sessions {
-		sessions = append(sessions, session)
+	// Snapshot each session's lastUsedAt UNDER session.mu before sorting: touch()
+	// writes lastUsedAt under session.mu, so reading it here (under manager.mu only)
+	// was a data race on a multi-word time.Time. Lock order stays manager.mu →
+	// session.mu (no path takes them the other way). (AUDIT-L15)
+	type sessionAge struct {
+		session *execSession
+		last    time.Time
 	}
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].lastUsedAt.Before(sessions[j].lastUsedAt)
+	ages := make([]sessionAge, 0, len(manager.sessions))
+	for _, session := range manager.sessions {
+		ages = append(ages, sessionAge{session: session, last: session.lastUsed()})
+	}
+	sort.Slice(ages, func(i, j int) bool {
+		return ages[i].last.Before(ages[j].last)
 	})
-	for _, session := range sessions {
-		if session.doneClosed() {
-			return session
+	for _, a := range ages {
+		if a.session.doneClosed() {
+			return a.session
 		}
 	}
-	if len(sessions) <= 8 {
+	if len(ages) <= 8 {
 		return nil
 	}
-	return sessions[0]
+	return ages[0].session
+}
+
+// lastUsed returns the session's last-used time under its own lock, so the prune
+// comparator never races touch()'s write to lastUsedAt.
+func (session *execSession) lastUsed() time.Time {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.lastUsedAt
 }
 
 func (manager *execSessionManager) list() []ExecSessionSnapshot {

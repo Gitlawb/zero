@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -588,4 +589,40 @@ func TestTruncateExecOutputPreservesUTF8(t *testing.T) {
 	if !utf8.ValidString(truncated) {
 		t.Fatalf("truncated output is not valid UTF-8: %q", truncated)
 	}
+}
+
+func TestExecSessionPruneDoesNotRaceTouch(t *testing.T) {
+	// AUDIT-L15: the prune comparator read execSession.lastUsedAt under manager.mu
+	// while touch() writes it under session.mu — a data race on a time.Time. Drive
+	// both concurrently under -race; with the snapshot-under-session.mu fix it is
+	// clean, without it the race detector flags lastUsedAt.
+	mgr := newExecSessionManager()
+	for i := 0; i < 12; i++ {
+		s := &execSession{id: 1000 + i, lastUsedAt: time.Now(), done: make(chan struct{})}
+		mgr.sessions[s.id] = s
+	}
+	target := mgr.sessions[1000]
+
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				target.touch()
+			}
+		}
+	}()
+
+	for i := 0; i < 2000; i++ {
+		mgr.mu.Lock()
+		_ = mgr.sessionToPruneLocked()
+		mgr.mu.Unlock()
+	}
+	close(stop)
+	writer.Wait()
 }
