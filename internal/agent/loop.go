@@ -202,7 +202,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 						Content: reminder,
 					})
 				}
-				stream, err = provider.StreamCompletion(ctx, request)
+				// Pre-content connect after a context-limit compaction: route through the
+				// reconnect helper so a transient upstream hiccup here doesn't fail the
+				// whole run and re-burn every token (AUDIT-L1).
+				stream, err = streamWithReconnect(ctx, provider, request, reconnectNoticeFor(options))
 			}
 			if err != nil {
 				result.Messages = copyMessages(messages)
@@ -250,7 +253,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 						Content: reminder,
 					})
 				}
-				retryStream, retryStreamErr := provider.StreamCompletion(ctx, retryRequest)
+				// Pre-content reconnect of a mid-stream disconnect: route the connect
+				// through the reconnect helper too (AUDIT-L1).
+				retryStream, retryStreamErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 				if retryStreamErr != nil {
 					result.Messages = copyMessages(messages)
 					return result, retryStreamErr
@@ -515,10 +520,13 @@ func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, messages [
 		Role:    zeroruntime.MessageRoleUser,
 		Content: maxTurnsFinalAnswerPrompt,
 	})
-	stream, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{
+	// The max-turns final-answer call is a pre-content connect, often after a long
+	// autonomous/cron run — route it through the reconnect helper so a single
+	// transient hiccup doesn't drop the final summary (AUDIT-L1).
+	stream, err := streamWithReconnect(ctx, provider, zeroruntime.CompletionRequest{
 		Messages:        copyMessages(finalMessages),
 		ReasoningEffort: options.ReasoningEffort,
-	})
+	}, reconnectNoticeFor(options))
 	if err != nil {
 		return "", messages, ""
 	}
