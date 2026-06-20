@@ -256,7 +256,10 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writePromptRequired(stderr)
 		}
 		// Forward leading --add-dir occurrences so exec's own parser collects them.
-		execArgs := append(addDirFlagArgs(addDirs), "--prompt", args[1])
+		// Use the inline --prompt=<value> form so a prompt whose first character is a
+		// dash (e.g. `zero -p "-foo"`) is taken verbatim instead of being mistaken for
+		// a flag and rejected with "--prompt requires a value" (matches the cron path).
+		execArgs := append(addDirFlagArgs(addDirs), "--prompt="+args[1])
 		execArgs = append(execArgs, args[2:]...)
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":

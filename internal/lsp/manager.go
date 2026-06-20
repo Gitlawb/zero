@@ -114,12 +114,26 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	sessions := m.sessions
 	m.sessions = map[string]*session{}
 	m.mu.Unlock()
-	var errs []error
+	// Shut servers down concurrently: each Shutdown can block up to shutdownGrace,
+	// so a serial loop over N servers would take N×grace. One goroutine each, joined,
+	// bounds the whole shutdown to a single grace window (L19).
+	var (
+		wg     sync.WaitGroup
+		errsMu sync.Mutex
+		errs   []error
+	)
 	for _, sess := range sessions {
-		if err := sess.server.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
+		wg.Add(1)
+		go func(sess *session) {
+			defer wg.Done()
+			if err := sess.server.Shutdown(ctx); err != nil {
+				errsMu.Lock()
+				errs = append(errs, err)
+				errsMu.Unlock()
+			}
+		}(sess)
 	}
+	wg.Wait()
 	return errors.Join(errs...)
 }
 

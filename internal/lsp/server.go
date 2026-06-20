@@ -76,6 +76,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
+	case <-ctx.Done():
+		// Caller's deadline/cancellation fired: kill now instead of waiting out the
+		// full grace window. Without this, Shutdown could block up to shutdownGrace
+		// per server regardless of the context (L19).
+		_ = s.cmd.Process.Kill()
+		<-done
 	case <-time.After(shutdownGrace):
 		_ = s.cmd.Process.Kill()
 		<-done

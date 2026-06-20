@@ -86,12 +86,38 @@ func TestPlanPanelClear(t *testing.T) {
 	}
 }
 
+func TestUpdateFromItemsDuplicateContentKeepsDistinctTimestamps(t *testing.T) {
+	t1 := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	var s planPanelState
+	// Two prior steps with IDENTICAL content but distinct start times.
+	s.steps = []planStep{
+		{content: "step", status: "completed", startedAt: t1, completedAt: t1.Add(time.Second)},
+		{content: "step", status: "in_progress", startedAt: t2},
+	}
+	s.updateFromItems([]tools.PlanItem{
+		{Content: "step", Status: "completed"},
+		{Content: "step", Status: "in_progress"},
+	}, t2.Add(time.Hour))
+	if len(s.steps) != 2 {
+		t.Fatalf("steps = %d, want 2", len(s.steps))
+	}
+	// Each step must inherit a DISTINCT prior entry positionally, not both collapse
+	// onto the first content match (L22).
+	if s.steps[0].startedAt != t1 {
+		t.Errorf("step[0] startedAt = %v, want %v", s.steps[0].startedAt, t1)
+	}
+	if s.steps[1].startedAt != t2 {
+		t.Errorf("step[1] startedAt = %v, want %v (duplicate-content tie-break)", s.steps[1].startedAt, t2)
+	}
+}
+
 func TestPlanPanelHeight(t *testing.T) {
 	var s planPanelState
 	now := time.Now()
 
 	// Empty plan: height 0
-	if h := s.height(80); h != 0 {
+	if h := s.height(80, now); h != 0 {
 		t.Errorf("empty plan height = %d, want 0", h)
 	}
 
@@ -101,7 +127,7 @@ func TestPlanPanelHeight(t *testing.T) {
 		{Content: "B", Status: "in_progress"},
 		{Content: "C", Status: "pending"},
 	}, now)
-	if h := s.height(80); h != 5 {
+	if h := s.height(80, now); h != 5 {
 		t.Errorf("running plan height = %d, want 5", h)
 	}
 
@@ -111,13 +137,13 @@ func TestPlanPanelHeight(t *testing.T) {
 		{Content: "B", Status: "completed"},
 		{Content: "C", Status: "completed"},
 	}, now)
-	if h := s.height(80); h != 2 {
+	if h := s.height(80, now); h != 2 {
 		t.Errorf("completed collapsed plan height = %d, want 2", h)
 	}
 
 	// Expanded: 2 + 3 = 5
 	s.expanded = true
-	if h := s.height(80); h != 5 {
+	if h := s.height(80, now); h != 5 {
 		t.Errorf("expanded plan height = %d, want 5", h)
 	}
 }

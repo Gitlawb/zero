@@ -24,6 +24,31 @@ func TestRefreshSchedulerNoRefreshTokenIsNoop(t *testing.T) {
 	s.Stop()
 }
 
+func TestRefreshSchedulerRestartsAfterStop(t *testing.T) {
+	m := managerFor(t, map[string]string{"ZERO_OAUTH_DEMO_CLIENT_ID": "c"}, nil)
+	if err := m.store.Save(ProviderKey("demo"), Token{AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+	s := NewRefreshScheduler()
+	s.Start(context.Background(), m, ProviderKey("demo"))
+	s.Stop()
+	s.mu.Lock()
+	started := s.started
+	s.mu.Unlock()
+	if started {
+		t.Fatal("Stop must reset started so the scheduler is not permanently inert (L14)")
+	}
+	// A second Start must take effect (previously a no-op forever after the first Stop).
+	s.Start(context.Background(), m, ProviderKey("demo"))
+	s.mu.Lock()
+	restarted := s.started
+	s.mu.Unlock()
+	if !restarted {
+		t.Fatal("scheduler must be startable again after Stop")
+	}
+	s.Stop()
+}
+
 func TestRefreshSchedulerRefreshesBeforeExpiry(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

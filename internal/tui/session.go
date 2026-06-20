@@ -398,7 +398,12 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			if name == "" {
 				name = "unknown"
 			}
-			id := payloadString(payload, "id")
+			// Extract the id exactly as the tool-result branch and the specialist
+			// pre-pass do (toolCallId first, then id) so call and result rows key
+			// callSeq/effectiveToolRowID on the same string and the specialist-skip
+			// lookup matches — otherwise a payload that carries toolCallId (not id)
+			// desyncs call→result dedup and the M10 skip (L20).
+			id := firstNonEmptyString(payloadString(payload, "toolCallId"), payloadString(payload, "id"))
 			if name == "Task" && specialistToolCalls[id] {
 				// A specialist card renders this delegation; skip the redundant
 				// "tool call: Task" row. A Task with no specialist (it failed before

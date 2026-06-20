@@ -1486,6 +1486,20 @@ func TestResolveRejectsNegativeDeferThreshold(t *testing.T) {
 	}
 }
 
+func TestMergeProfilePreservesParseThinkTags(t *testing.T) {
+	yes := true
+	// next supplies the setting; a nil base must inherit it (it was being dropped).
+	merged := mergeProfile(ProviderProfile{Name: "p"}, ProviderProfile{ParseThinkTags: &yes})
+	if merged.ParseThinkTags == nil || !*merged.ParseThinkTags {
+		t.Fatalf("mergeProfile dropped ParseThinkTags from next: %v", merged.ParseThinkTags)
+	}
+	// A nil next must not clobber an explicit base value.
+	keep := mergeProfile(ProviderProfile{ParseThinkTags: &yes}, ProviderProfile{})
+	if keep.ParseThinkTags == nil || !*keep.ParseThinkTags {
+		t.Fatalf("mergeProfile clobbered base ParseThinkTags with a nil next: %v", keep.ParseThinkTags)
+	}
+}
+
 func TestMergeConfigUnionsSandboxAdditionalWriteRoots(t *testing.T) {
 	dst := FileConfig{}
 	dst.Sandbox.AdditionalWriteRoots = []string{"/global/one"}

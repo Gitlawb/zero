@@ -204,9 +204,16 @@ func patchHeaderPaths(patch string) []string {
 			oldRemaining, newRemaining = parseHunkCounts(line)
 			inHunk = oldRemaining > 0 || newRemaining > 0
 		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				paths = append(paths, stripPatchPrefix(fields[1]))
+			// Take everything after the fixed 4-char prefix instead of splitting on
+			// spaces, so a path that contains spaces survives. Drop a trailing
+			// tab-delimited timestamp (unified-diff convention) and unquote a
+			// C-quoted git path (git quotes names with spaces/specials) (L18).
+			rest := line[len("--- "):] // "--- " and "+++ " are both 4 bytes
+			if tab := strings.IndexByte(rest, '\t'); tab >= 0 {
+				rest = rest[:tab]
+			}
+			if p := strings.TrimSpace(unquoteGitPath(rest)); p != "" && p != "/dev/null" {
+				paths = append(paths, stripPatchPrefix(p))
 			}
 		}
 	}
@@ -252,6 +259,19 @@ func hunkCount(spec string) int {
 		return 0
 	}
 	return 1
+}
+
+// unquoteGitPath undoes git's C-style quoting of a diff path. Git wraps a path in
+// double quotes and backslash-escapes special bytes (spaces, tabs, high bytes as
+// octal) when it contains anything unusual; an unquoted path is returned as-is.
+func unquoteGitPath(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		if unquoted, err := strconv.Unquote(s); err == nil {
+			return unquoted
+		}
+	}
+	return s
 }
 
 func stripPatchPrefix(path string) string {

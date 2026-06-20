@@ -415,6 +415,11 @@ func mergeProfile(base ProviderProfile, next ProviderProfile) ProviderProfile {
 	if next.Description != "" {
 		base.Description = next.Description
 	}
+	// A nil *bool means "unset"; only an explicit value overrides. Without this the
+	// parseThinkTags setting was silently dropped on every profile merge (L17).
+	if next.ParseThinkTags != nil {
+		base.ParseThinkTags = next.ParseThinkTags
+	}
 	return base
 }
 

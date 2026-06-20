@@ -210,3 +210,18 @@ func TestRefreshPreservesRefreshTokenWhenOmitted(t *testing.T) {
 		t.Fatalf("refresh should preserve old refresh token: %+v", tok)
 	}
 }
+
+func TestRefreshPreservesTokenTypeWhenOmitted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"new-at","expires_in":3600}`)) // no token_type in response
+	}))
+	defer server.Close()
+	cfg := Config{ClientID: "c", TokenEndpoint: server.URL}
+	tok, err := Refresh(context.Background(), server.Client(), cfg, Token{RefreshToken: "keep-me", TokenType: "Bearer"}, nil)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if tok.TokenType != "Bearer" {
+		t.Fatalf("refresh should carry the existing token_type forward, got %q", tok.TokenType)
+	}
+}

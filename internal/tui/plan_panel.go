@@ -59,6 +59,10 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 	}
 
 	prev := s.steps
+	// Consume each prior step at most once so two steps with identical content don't
+	// both inherit the SAME prior entry's timestamps; positional order then breaks
+	// the tie, giving duplicate-text steps their own start/complete times (L22).
+	prevUsed := make([]bool, len(prev))
 	next := make([]planStep, 0, len(items))
 	for _, item := range items {
 		step := planStep{
@@ -66,11 +70,12 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 			status:  item.Status,
 			notes:   item.Notes,
 		}
-		// Carry over timestamps from a prior step with the same content.
-		for _, p := range prev {
-			if p.content == step.content {
-				step.startedAt = p.startedAt
-				step.completedAt = p.completedAt
+		// Carry over timestamps from the first unconsumed prior step with the same content.
+		for pi := range prev {
+			if !prevUsed[pi] && prev[pi].content == step.content {
+				step.startedAt = prev[pi].startedAt
+				step.completedAt = prev[pi].completedAt
+				prevUsed[pi] = true
 				break
 			}
 		}
@@ -143,8 +148,8 @@ func (s planPanelState) visible(now time.Time) bool {
 // the given width (0 when the panel is not visible). The step list is shown
 // when the panel is expanded or still running; a collapsed, finished plan is
 // just the header and progress bar.
-func (s planPanelState) height(width int) int {
-	if !s.visible(time.Now()) {
+func (s planPanelState) height(width int, now time.Time) int {
+	if !s.visible(now) {
 		return 0
 	}
 	if s.expanded || !s.isComplete() {

@@ -115,6 +115,10 @@ func (s *RefreshScheduler) Stop() {
 	cancel := s.cancel
 	done := s.done
 	s.cancel = nil
+	// Reset started/done so a Stop'd scheduler can be Start'd again; otherwise the
+	// started guard leaves it permanently inert after the first Stop (L14).
+	s.started = false
+	s.done = nil
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()

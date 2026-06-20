@@ -1485,6 +1485,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		// Each progress message is one specialist tool call (OnToolProgress fires only
+		// for EventToolCall); bump the card's tool-call counter so it stops showing a
+		// permanent "0 tool calls" (M18). The tracker is still keyed by the tool-call
+		// id at this point (reconciled to the session id only on completion).
+		m.specialists.incrementToolCount(msg.toolCallID)
 		m.specialists.setCurrentTool(msg.toolCallID, msg.toolName, msg.detail)
 		return m, nil
 	case agentRowMsg:
@@ -2941,6 +2946,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if m.themeMode == themeAuto {
+			// Re-probe the terminal background so /theme auto re-detects light/dark
+			// instead of reusing a stale reading from startup; the BackgroundColorMsg
+			// handler re-applies the auto palette with the fresh result (M17).
+			return m, tea.RequestBackgroundColor
+		}
 		return m, nil
 	case commandInputStyle:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{

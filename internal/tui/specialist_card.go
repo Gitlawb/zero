@@ -310,7 +310,12 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	if info.status == specialistError {
 		statusLabel = fmt.Sprintf("error (exit code %d)", info.exitCode)
 	}
-	bodyText := fmt.Sprintf("  %s · %d %s · %s tokens", statusLabel, info.toolCount, toolLabel, formatTokenCount(info.tokenCount))
+	// The token total is only populated when usage was bridged from the child; omit
+	// the segment when it is zero rather than advertise a misleading "0 tokens" (M18).
+	bodyText := fmt.Sprintf("  %s · %d %s", statusLabel, info.toolCount, toolLabel)
+	if info.tokenCount > 0 {
+		bodyText += fmt.Sprintf(" · %s tokens", formatTokenCount(info.tokenCount))
+	}
 	var body string
 	if info.status == specialistError {
 		body = zeroTheme.red.Render(bodyText)

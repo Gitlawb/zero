@@ -210,6 +210,45 @@ func TestRenderSpecialistCard(t *testing.T) {
 	}
 }
 
+func TestRenderSpecialistCardOmitsZeroTokens(t *testing.T) {
+	// Until usage is bridged from the child, tokenCount stays 0; the card must show
+	// the (now-wired) tool-call count without advertising a misleading "0 tokens" (M18).
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.width = 80
+	now := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return now.Add(5 * time.Second) }
+
+	info := specialistInfo{
+		name:           "worker",
+		description:    "do work",
+		childSessionID: "s1",
+		status:         specialistRunning,
+		startedAt:      now,
+		toolCount:      2,
+		tokenCount:     0,
+	}
+	plain := ansiPattern.ReplaceAllString(m.renderSpecialistCard(info, 80), "")
+	if !strings.Contains(plain, "2 tool calls") {
+		t.Errorf("card should show the wired tool-call count, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "tokens") {
+		t.Errorf("card must omit the token segment when tokenCount is 0, got:\n%s", plain)
+	}
+}
+
+func TestSpecialistTrackerIncrementToolCountByCallID(t *testing.T) {
+	// The progress handler increments by the tool-call id while the entry is still
+	// keyed by it (before completion reconciles it to the session id) (M18).
+	var tracker specialistTracker
+	tracker.start("worker", "desc", "call-1", time.Now())
+	tracker.incrementToolCount("call-1")
+	tracker.incrementToolCount("call-1")
+	info, ok := tracker.getBySessionID("call-1")
+	if !ok || info.toolCount != 2 {
+		t.Fatalf("toolCount via call id = %d (found=%v), want 2", info.toolCount, ok)
+	}
+}
+
 func TestParseTaskCallArgs(t *testing.T) {
 	name, desc := parseTaskCallArgs(`{"name":"worker","description":"fix tests"}`)
 	if name != "worker" {
