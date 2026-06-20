@@ -122,32 +122,55 @@ if data:
 
 // readClipboardImageLinux tries wl-paste (Wayland) then xclip (X11) to read
 // clipboard image bytes. Returns (nil, nil) when no image or no tool available.
+//
+// The MIME type comes from the clipboard (wl-paste --list-types / xclip
+// TARGETS), so it is NEVER interpolated into a shell — every command runs via
+// exec.Command(prog, args...) with the type passed as a discrete argument.
+// (A hostile clipboard offerer could otherwise register a target like
+// "image/png; rm -rf ~" that passes the "image/" prefix check.)
 func readClipboardImageLinux() ([]byte, error) {
 	// Try Wayland first.
-	types, err := exec.Command("sh", "-c", "wl-paste --list-types 2>/dev/null").Output()
-	if err == nil && len(types) > 0 {
-		for _, t := range strings.Split(string(types), "\n") {
-			t = strings.TrimSpace(t)
-			if strings.HasPrefix(t, "image/") {
-				data, err := exec.Command("sh", "-c", "wl-paste --type "+t+" 2>/dev/null").Output()
-				if err == nil && len(data) > 0 {
-					return data, nil
-				}
+	if types, err := runClipboardStdout("wl-paste", "--list-types"); err == nil {
+		for _, t := range imageMIMETypes(types) {
+			if data, err := runClipboardStdout("wl-paste", "--type", t); err == nil && len(data) > 0 {
+				return data, nil
 			}
 		}
 	}
 	// Fall back to X11 xclip.
-	types, err = exec.Command("sh", "-c", "xclip -selection clipboard -t TARGETS -o 2>/dev/null").Output()
-	if err == nil && len(types) > 0 {
-		for _, t := range strings.Split(string(types), "\n") {
-			t = strings.TrimSpace(t)
-			if strings.HasPrefix(t, "image/") {
-				data, err := exec.Command("sh", "-c", "xclip -selection clipboard -t "+t+" -o 2>/dev/null").Output()
-				if err == nil && len(data) > 0 {
-					return data, nil
-				}
+	if types, err := runClipboardStdout("xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"); err == nil {
+		for _, t := range imageMIMETypes(types) {
+			if data, err := runClipboardStdout("xclip", "-selection", "clipboard", "-t", t, "-o"); err == nil && len(data) > 0 {
+				return data, nil
 			}
 		}
 	}
 	return nil, nil
+}
+
+// runClipboardStdout runs a clipboard helper and returns only its stdout.
+// Stderr is discarded (the helpers are noisy when the clipboard is empty or the
+// tool is missing); a missing tool surfaces as the command error, treated as
+// "no image" by the callers.
+func runClipboardStdout(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
+// imageMIMETypes extracts the "image/*" lines from a newline-separated type
+// list, each safe to pass as a discrete argument (no shell).
+func imageMIMETypes(list []byte) []string {
+	var out []string
+	for _, line := range strings.Split(string(list), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "image/") {
+			out = append(out, line)
+		}
+	}
+	return out
 }

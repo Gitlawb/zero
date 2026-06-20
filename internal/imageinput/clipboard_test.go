@@ -1,8 +1,28 @@
 package imageinput
 
 import (
+	"reflect"
 	"testing"
 )
+
+func TestImageMIMETypesFiltersAndPreservesRaw(t *testing.T) {
+	// Only image/* lines are kept, trimmed. Crucially, a hostile/odd type is
+	// returned VERBATIM (not sanitized) — safety comes from never passing it
+	// through a shell, so the filter must not silently mangle a real type.
+	list := []byte("text/plain\nimage/png\n  image/jpeg  \nTARGETS\n" +
+		"image/png; rm -rf ~\n")
+	got := imageMIMETypes(list)
+	want := []string{"image/png", "image/jpeg", "image/png; rm -rf ~"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("imageMIMETypes = %#v, want %#v", got, want)
+	}
+}
+
+func TestImageMIMETypesEmpty(t *testing.T) {
+	if got := imageMIMETypes([]byte("text/plain\nTARGETS\n")); got != nil {
+		t.Fatalf("expected no image types, got %#v", got)
+	}
+}
 
 func TestReadClipboardImage(t *testing.T) {
 	// ReadClipboardImage either returns nil (no image) or valid image bytes.
