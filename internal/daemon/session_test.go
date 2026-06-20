@@ -25,6 +25,46 @@ func drain(t *testing.T, buffered []string, live <-chan string) []string {
 	}
 }
 
+func TestSessionSlowSubscriberGetsGapNotice(t *testing.T) {
+	// A subscriber that stops reading must not silently lose lines: once its channel
+	// fills, Line counts the drops and flushes a single gap notice the moment the
+	// channel drains, so the consumer learns its stream is incomplete (D8).
+	sess := newSession("s", "", 0)
+	_, live, cancel := sess.Subscribe()
+	defer cancel()
+
+	capacity := cap(live)
+	// Fill the channel, then push extra lines that must be dropped (not block).
+	for i := 0; i < capacity+4; i++ {
+		sess.Line("x")
+	}
+	// Drain everything currently buffered.
+	drained := 0
+	for {
+		select {
+		case <-live:
+			drained++
+			continue
+		default:
+		}
+		break
+	}
+	if drained != capacity {
+		t.Fatalf("drained %d lines, want %d (the channel capacity)", drained, capacity)
+	}
+
+	// The next line triggers the gap notice (4 lines were dropped) ahead of itself.
+	sess.Line("resume")
+	first := <-live
+	if first != gapNotice(4) {
+		t.Fatalf("first post-lag line = %q, want gap notice %q", first, gapNotice(4))
+	}
+	second := <-live
+	if second != "resume" {
+		t.Fatalf("line after gap notice = %q, want %q", second, "resume")
+	}
+}
+
 func TestSessionStartRoutesAndStreams(t *testing.T) {
 	launcher, _ := seqLauncher(&fakeWorker{pid: 1, out: []string{"e1", "e2", "e3"}, exitCode: 0})
 	pool, _ := NewPool(PoolOptions{Size: 2, Launcher: launcher})

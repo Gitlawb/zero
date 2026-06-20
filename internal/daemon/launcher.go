@@ -49,7 +49,7 @@ func scrubWorkerEnv(env []string) []string {
 type execWorker struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
-	lines  *scannerLines
+	lines  Lines
 	pid    int
 }
 
@@ -77,19 +77,28 @@ func (w *execWorker) Kill() error {
 	return background.TerminateProcess(w.cmd.Process.Pid)
 }
 
-// scannerLines adapts a bufio.Scanner to the Lines interface.
-type scannerLines struct {
-	sc *bufio.Scanner
+// readerLines adapts a bufio.Reader to the Lines interface. Unlike a capped
+// bufio.Scanner it imposes NO per-line size limit, so a legitimately large
+// stream-json line from our own trusted worker (a big final answer or tool
+// result) is never dropped. io.EOF ends the stream; a trailing line without a
+// newline is still yielded.
+type readerLines struct {
+	r *bufio.Reader
 }
 
-func (s *scannerLines) Next() (string, bool, error) {
-	if s.sc.Scan() {
-		return s.sc.Text(), true, nil
-	}
-	if err := s.sc.Err(); err != nil {
+func (rl *readerLines) Next() (string, bool, error) {
+	line, err := rl.r.ReadString('\n')
+	line = strings.TrimRight(line, "\r\n")
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			if line != "" {
+				return line, true, nil // final line with no trailing newline
+			}
+			return "", false, nil
+		}
 		return "", false, err
 	}
-	return "", false, nil
+	return line, true, nil
 }
 
 // ExecLauncherConfig configures the production worker launcher.
@@ -143,6 +152,16 @@ func NewExecLauncher(cfg ExecLauncherConfig) (Launcher, error) {
 		cmd.Env = env
 		cmd.Stdin = nil // the prompt is passed via flags; no streamed stdin input
 		background.ConfigureChildProcessGroup(cmd)
+		// CommandContext's default cancel sends os.Process.Kill to the LEADER only,
+		// orphaning the process group we just configured (a stuck worker's children
+		// would survive ctx cancellation). Terminate the whole group instead — the
+		// same cross-platform group terminate Kill() uses (D11).
+		cmd.Cancel = func() error {
+			if cmd.Process == nil {
+				return nil
+			}
+			return background.TerminateProcess(cmd.Process.Pid)
+		}
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -152,14 +171,14 @@ func NewExecLauncher(cfg ExecLauncherConfig) (Launcher, error) {
 			return nil, fmt.Errorf("daemon: start worker: %w", err)
 		}
 
-		scanner := bufio.NewScanner(stdout)
-		// Allow long stream-json lines up to the control-frame cap.
-		scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameSize)
 		return &execWorker{
 			cmd:    cmd,
 			stdout: stdout,
-			lines:  &scannerLines{sc: scanner},
-			pid:    cmd.Process.Pid,
+			// A bufio.Reader (not a capped Scanner) so a legitimately large stream-json
+			// line from our own trusted worker is never dropped — the 1 MiB cap is only
+			// correct for untrusted network frames (protocol.go), not this pipe (D1).
+			lines: &readerLines{r: bufio.NewReaderSize(stdout, 64*1024)},
+			pid:   cmd.Process.Pid,
 		}, nil
 	}, nil
 }

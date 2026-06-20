@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // Single-instance lock. Mirrors reference-daemon-code-agent-js/supervisor.js's
@@ -58,12 +59,40 @@ func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
 		if perr == nil && pid > 0 && isAlive(pid) {
 			return nil, fmt.Errorf("%w (pid %d)", ErrAlreadyRunning, pid)
 		}
-		// Stale lock (dead PID or unreadable) — remove and retry once.
-		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			return nil, rmErr
-		}
+		// Stale lock (dead PID or unreadable) — reclaim it atomically, then retry the
+		// O_EXCL create. A blind Remove here races: two daemons starting at once could
+		// both read the stale PID, both Remove, and then one Removes the OTHER's
+		// freshly-created lock — leaving both "holding" the single-instance lock.
+		// reclaimStaleLock renames the file aside so only one racer wins the rename,
+		// and restores it if a live holder reacquired in the gap (D6).
+		reclaimStaleLock(path, isAlive)
 	}
 	return nil, ErrAlreadyRunning
+}
+
+// daemonLockSeq makes each reclaim attempt's sidelined filename unique per process.
+var daemonLockSeq atomic.Uint64
+
+// reclaimStaleLock atomically reclaims a single-instance lock whose recorded PID is
+// dead. A blind Remove lets two racers both delete-and-recreate the lock and wind up
+// BOTH holding it; instead this renames the lock file aside (only one racer can win
+// the rename of a given inode), re-reads the moved file's PID, and removes it only if
+// that PID is still dead. If a new holder reacquired the lock in the gap between the
+// stale check and the rename, the moved file carries that LIVE pid, so it is renamed
+// back rather than stolen. Returns true only when a genuinely stale lock was removed.
+func reclaimStaleLock(path string, isAlive func(pid int) bool) bool {
+	reclaimed := fmt.Sprintf("%s.stale.%d-%d", path, os.Getpid(), daemonLockSeq.Add(1))
+	if err := os.Rename(path, reclaimed); err != nil {
+		return false // another racer already moved/removed it, or it vanished
+	}
+	if pid, err := readPidFile(reclaimed); err == nil && pid > 0 && isAlive(pid) {
+		// A holder reacquired the lock in the gap — its live PID is now in the moved
+		// file. Restore it instead of stealing a live lock; let the caller refuse.
+		_ = os.Rename(reclaimed, path)
+		return false
+	}
+	_ = os.Remove(reclaimed)
+	return true
 }
 
 // release removes the lock file. Safe to call once.

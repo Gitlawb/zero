@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -51,9 +52,27 @@ type Session struct {
 	finished    bool
 	err         error
 	exitCode    int
-	subscribers map[int]chan string
+	subscribers map[int]*subscriber
 	nextSub     int
 	done        chan struct{}
+}
+
+// subscriber is one live attach: a bounded channel plus a count of live lines
+// dropped because that channel was full. The drop count is flushed to the consumer
+// as a gap notice (see Line) the moment the channel drains, so a lagging client
+// learns its stream is incomplete instead of silently losing output (D8).
+type subscriber struct {
+	ch      chan string
+	dropped int
+}
+
+// gapNotice is a stream-json event line emitted to a subscriber that fell behind,
+// reporting how many live lines it missed. It uses a daemon-namespaced type so a
+// stream-json consumer that switches on "type" ignores it rather than mistaking it
+// for a terminal event; the full output remains available via a fresh attach
+// (which replays the buffer).
+func gapNotice(dropped int) string {
+	return fmt.Sprintf(`{"type":"daemon_gap","dropped":%d}`, dropped)
 }
 
 func newSession(id, cwd string, maxBuffer int) *Session {
@@ -65,7 +84,7 @@ func newSession(id, cwd string, maxBuffer int) *Session {
 		cwd:         cwd,
 		state:       SessionQueued,
 		maxBuffer:   maxBuffer,
-		subscribers: map[int]chan string{},
+		subscribers: map[int]*subscriber{},
 		done:        make(chan struct{}),
 	}
 }
@@ -102,23 +121,38 @@ func (s *Session) Started() {
 // Line records and broadcasts one stream-json output line.
 func (s *Session) Line(line string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lines++
 	s.buffer = append(s.buffer, line)
 	if len(s.buffer) > s.maxBuffer {
 		// Drop the oldest line; the ring keeps only the most recent maxBuffer.
 		s.buffer = s.buffer[len(s.buffer)-s.maxBuffer:]
 	}
-	subs := make([]chan string, 0, len(s.subscribers))
-	for _, ch := range s.subscribers {
-		subs = append(subs, ch)
-	}
-	s.mu.Unlock()
-	for _, ch := range subs {
+	// Hold s.mu across the (non-blocking) sends. The sends never block — every case
+	// has a default — so the lock is held only briefly, and holding it stops
+	// cancel()/finish() from closing a subscriber channel mid-send, which would
+	// panic with "send on closed channel". It also makes each subscriber's dropped
+	// counter mutated under the lock.
+	for _, sub := range s.subscribers {
 		// Non-blocking: a slow/stalled subscriber must not stall the worker pump.
-		// Dropped live lines remain available via the buffer for a fresh attach.
+		if sub.dropped > 0 {
+			// The consumer fell behind earlier. Before delivering more output, flush a
+			// gap notice so it learns its stream is incomplete (D8). If the channel is
+			// still full, keep counting and skip this line too.
+			select {
+			case sub.ch <- gapNotice(sub.dropped):
+				sub.dropped = 0
+			default:
+				sub.dropped++
+				continue
+			}
+		}
 		select {
-		case ch <- line:
+		case sub.ch <- line:
 		default:
+			// Channel full: count the drop; the gap notice above will report it once
+			// the consumer catches up. Full output stays available via a fresh attach.
+			sub.dropped++
 		}
 	}
 }
@@ -134,10 +168,10 @@ func (s *Session) finish(exitCode int, err error) {
 		s.state = SessionDone
 	}
 	subs := s.subscribers
-	s.subscribers = map[int]chan string{}
+	s.subscribers = map[int]*subscriber{}
 	s.mu.Unlock()
-	for _, ch := range subs {
-		close(ch)
+	for _, sub := range subs {
+		close(sub.ch)
 	}
 	close(s.done)
 }
@@ -156,17 +190,17 @@ func (s *Session) Subscribe() (buffered []string, live <-chan string, cancel fun
 	}
 	id := s.nextSub
 	s.nextSub++
-	ch := make(chan string, 256)
-	s.subscribers[id] = ch
+	sub := &subscriber{ch: make(chan string, 256)}
+	s.subscribers[id] = sub
 	cancel = func() {
 		s.mu.Lock()
 		if c, ok := s.subscribers[id]; ok {
 			delete(s.subscribers, id)
-			close(c)
+			close(c.ch)
 		}
 		s.mu.Unlock()
 	}
-	return buffered, ch, cancel
+	return buffered, sub.ch, cancel
 }
 
 func (s *Session) status() SessionStatus {

@@ -66,6 +66,44 @@ func TestLockReleaseRemovesFile(t *testing.T) {
 	}
 }
 
+func TestReclaimStaleLockRemovesDeadHolder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
+		t.Fatalf("write stale lock: %v", err)
+	}
+	if !reclaimStaleLock(path, func(int) bool { return false }) {
+		t.Fatal("reclaimStaleLock must report a genuinely stale (dead-PID) lock reclaimed")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a reclaimed stale lock must be removed, stat = %v", err)
+	}
+}
+
+func TestReclaimStaleLockRestoresLiveHolder(t *testing.T) {
+	// If a holder reacquires the lock in the gap between the stale check and the
+	// rename, the moved file carries a LIVE pid; reclaim must restore it untouched
+	// rather than steal it — otherwise two daemons both "hold" the lock (D6).
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	if reclaimStaleLock(path, func(int) bool { return true }) {
+		t.Fatal("reclaimStaleLock must NOT report a live-PID lock reclaimed")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("live lock must be restored in place, read = %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "4242" {
+		t.Fatalf("restored lock content = %q, want %q (unchanged)", strings.TrimSpace(string(data)), "4242")
+	}
+	// No sidelined ".stale" leftovers.
+	matches, _ := filepath.Glob(path + ".stale.*")
+	if len(matches) != 0 {
+		t.Fatalf("reclaim left sidelined files: %v", matches)
+	}
+}
+
 func TestProcessAliveSelfAndDead(t *testing.T) {
 	if !osProcessAlive(os.Getpid()) {
 		t.Fatal("osProcessAlive(self) = false, want true")

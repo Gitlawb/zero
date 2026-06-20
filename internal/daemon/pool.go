@@ -94,7 +94,7 @@ type Pool struct {
 
 	mu       sync.Mutex
 	draining bool
-	active   map[int]WorkerHandle // pid -> handle, for drain/kill + status
+	active   map[int]WorkerHandle // worker id -> handle, for drain/kill + status
 	nextID   int
 
 	drainOnce sync.Once
@@ -243,14 +243,16 @@ func (p *Pool) runOnce(ctx context.Context, id int, spec WorkerSpec, sink Sink) 
 	if err != nil {
 		return 0, err
 	}
-	p.track(handle)
-	defer p.untrack(handle)
+	p.track(id, handle)
+	defer p.untrack(id)
 
 	// Pump stdout lines until the stream ends.
 	lines := handle.Stdout()
+	var readErr error
 	for {
 		line, ok, lerr := lines.Next()
 		if lerr != nil {
+			readErr = lerr
 			break
 		}
 		if !ok {
@@ -259,6 +261,15 @@ func (p *Pool) runOnce(ctx context.Context, id int, spec WorkerSpec, sink Sink) 
 		if sink != nil {
 			sink.Line(line)
 		}
+	}
+	if readErr != nil {
+		// A stdout read error means the worker's output was NOT fully consumed, so the
+		// request must surface as a failure (Run then retries / records it) rather than
+		// a bogus clean success that silently drops output (D1). Kill first so the
+		// worker can't block writing to the now-unread pipe and hang Wait (D2).
+		_ = handle.Kill()
+		_, _ = handle.Wait()
+		return -1, fmt.Errorf("daemon: worker %d stdout read failed: %w", id, readErr)
 	}
 	return handle.Wait()
 }
@@ -270,15 +281,18 @@ func (p *Pool) newStat() *workerStat {
 	return &workerStat{id: p.nextID}
 }
 
-func (p *Pool) track(h WorkerHandle) {
+// track/untrack key the active set by the pool's monotonic worker id, not the OS
+// pid: the OS can reuse a pid the instant a worker exits, so a pid key could collide
+// a finished worker with a freshly-launched one and drop the wrong handle (D10).
+func (p *Pool) track(id int, h WorkerHandle) {
 	p.mu.Lock()
-	p.active[h.Pid()] = h
+	p.active[id] = h
 	p.mu.Unlock()
 }
 
-func (p *Pool) untrack(h WorkerHandle) {
+func (p *Pool) untrack(id int) {
 	p.mu.Lock()
-	delete(p.active, h.Pid())
+	delete(p.active, id)
 	p.mu.Unlock()
 }
 
@@ -348,8 +362,8 @@ func (p *Pool) WorkerStats() []WorkerStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]WorkerStatus, 0, len(p.active))
-	for pid := range p.active {
-		out = append(out, WorkerStatus{PID: pid, State: "busy"})
+	for _, h := range p.active {
+		out = append(out, WorkerStatus{PID: h.Pid(), State: "busy"})
 	}
 	return out
 }

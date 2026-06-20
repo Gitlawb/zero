@@ -39,7 +39,17 @@ func NewClientConn(conn net.Conn) (*Client, error) {
 	return c, nil
 }
 
+// handshakeTimeout bounds the hello/hello-ok exchange so a hung or hostile peer
+// can't wedge Dial/NewClientConn forever. It covers only the handshake; the
+// deadline is cleared before the (long-lived, unbounded) streaming phase. It is a
+// var so tests can shorten it.
+var handshakeTimeout = 10 * time.Second
+
 func (c *Client) handshake() error {
+	// Bound only the handshake. A peer that accepts the connection but never
+	// completes the version exchange would otherwise block ReadControl forever (D9).
+	_ = c.conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }() // clear before streaming
 	if err := WriteControl(c.conn, Ctrl{Type: CtrlHello, Version: ProtoVersion}); err != nil {
 		return err
 	}

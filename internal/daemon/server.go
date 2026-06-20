@@ -19,7 +19,9 @@ type Server struct {
 	opts      ServerOptions
 	startedAt time.Time
 
+	mu       sync.Mutex // guards listener + conns
 	listener net.Listener
+	conns    map[net.Conn]struct{} // open connections, closed on Shutdown so blocked reads return
 	lock     *fileLock
 
 	ctx    context.Context
@@ -61,6 +63,7 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		ctx:    ctx,
 		cancel: cancel,
 		done:   make(chan struct{}),
+		conns:  map[net.Conn]struct{}{},
 	}, nil
 }
 
@@ -95,7 +98,19 @@ func (s *Server) Serve() error {
 	if err != nil {
 		return fmt.Errorf("daemon: bind control socket: %w", err)
 	}
+	s.mu.Lock()
 	s.listener = listener
+	s.mu.Unlock()
+	// If Shutdown already fired during the bind window, close now and bail so a
+	// shutdown requested at startup is never lost (the accept loop would otherwise
+	// block forever waiting for a connection that never comes) (D4).
+	select {
+	case <-s.done:
+		_ = listener.Close()
+		s.wg.Wait()
+		return nil
+	default:
+	}
 	if err := hardenSocketFile(s.opts.Paths.Socket); err != nil {
 		return fmt.Errorf("daemon: harden control socket: %w", err)
 	}
@@ -118,12 +133,36 @@ func (s *Server) Serve() error {
 				return fmt.Errorf("daemon: accept: %w", err)
 			}
 		}
+		s.trackConn(conn)
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.untrackConn(conn)
 			s.handleConn(conn)
 		}()
 	}
+}
+
+// trackConn registers an accepted connection so Shutdown can close it. If a
+// shutdown is already in progress it closes the connection immediately rather
+// than serving it.
+func (s *Server) trackConn(c net.Conn) {
+	s.mu.Lock()
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		_ = c.Close()
+		return
+	default:
+	}
+	s.conns[c] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *Server) untrackConn(c net.Conn) {
+	s.mu.Lock()
+	delete(s.conns, c)
+	s.mu.Unlock()
 }
 
 // Shutdown stops accepting connections, cancels in-flight runs, drains the pool,
@@ -132,9 +171,17 @@ func (s *Server) Shutdown() {
 	s.shutdownOnce.Do(func() {
 		close(s.done)
 		s.cancel() // stop in-flight pool runs
+		s.mu.Lock()
 		if s.listener != nil {
 			_ = s.listener.Close()
 		}
+		// Close every open connection so a handler blocked on an idle/hostile
+		// client's read returns at once and wg.Wait() can finish — otherwise a single
+		// stalled connection wedges shutdown (and SIGTERM cleanup) forever (D3).
+		for c := range s.conns {
+			_ = c.Close()
+		}
+		s.mu.Unlock()
 		s.opts.Pool.Drain()
 	})
 }
@@ -255,6 +302,14 @@ func (s *Server) handleAttach(conn net.Conn, cmd Ctrl) {
 // (client disconnected) ends the stream without affecting the session.
 func (s *Server) streamToClient(conn net.Conn, sess *Session, buffered []string, live <-chan string) {
 	for _, line := range buffered {
+		// Honor shutdown during history replay too: a large buffer would otherwise
+		// keep writing after Shutdown, delaying drain (D5).
+		select {
+		case <-s.done:
+			_ = WriteControl(conn, Ctrl{Type: CtrlEnd, Message: "daemon shutting down"})
+			return
+		default:
+		}
 		if err := WriteControl(conn, Ctrl{Type: CtrlData, Line: line}); err != nil {
 			return
 		}

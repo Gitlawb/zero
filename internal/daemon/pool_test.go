@@ -14,10 +14,16 @@ import (
 type fakeLines struct {
 	lines []string
 	i     int
+	err   error // when set, returned once after the lines are exhausted (read-error tests)
 }
 
 func (f *fakeLines) Next() (string, bool, error) {
 	if f.i >= len(f.lines) {
+		if f.err != nil {
+			e := f.err
+			f.err = nil
+			return "", false, e
+		}
 		return "", false, nil
 	}
 	l := f.lines[f.i]
@@ -28,12 +34,13 @@ func (f *fakeLines) Next() (string, bool, error) {
 type fakeWorker struct {
 	pid      int
 	out      []string
+	outErr   error // a stdout read error surfaced after the lines (read-error tests)
 	exitCode int
 	killed   int32
 	waitCh   chan struct{} // when non-nil, Wait blocks until closed (drain tests)
 }
 
-func (w *fakeWorker) Stdout() Lines { return &fakeLines{lines: w.out} }
+func (w *fakeWorker) Stdout() Lines { return &fakeLines{lines: w.out, err: w.outErr} }
 func (w *fakeWorker) Wait() (int, error) {
 	if w.waitCh != nil {
 		<-w.waitCh
@@ -245,4 +252,22 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition not met within timeout")
+}
+
+func TestPoolRunSurfacesStdoutReadError(t *testing.T) {
+	// A worker stdout read error must surface as a failure (not be swallowed and
+	// reported as clean success), and the worker is killed so it can't block on an
+	// unread pipe (D1/D2).
+	w := &fakeWorker{pid: 1, out: []string{"partial"}, outErr: errors.New("read failed")}
+	launcher, _ := seqLauncher(w)
+	pool, err := NewPool(PoolOptions{Size: 1, Launcher: launcher, MaxAttempts: 1, Backoff: func(int) time.Duration { return 0 }})
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	if _, runErr := pool.Run(context.Background(), WorkerSpec{Session: "s"}, &collectSink{}); runErr == nil {
+		t.Fatal("a worker stdout read error must surface, not report clean success")
+	}
+	if atomic.LoadInt32(&w.killed) != 1 {
+		t.Error("the worker should be killed on a read error to avoid a pipe-block hang")
+	}
 }
