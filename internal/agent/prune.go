@@ -1,0 +1,123 @@
+package agent
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
+)
+
+// Stale tool-output pruning reclaims context at ZERO token/latency cost before
+// the loop falls back to the paid LLM summarizer. A long, dump-heavy session
+// accumulates large read_file/grep/glob/bash tool results that the model has
+// long since acted on; their bodies are dead weight. Pruning replaces those
+// older bodies with a compact placeholder (keeping the tool message + its
+// ToolCallID so provider replay stays valid and the model knows what was
+// there), preserving recent turns exactly — no paraphrase loss.
+const (
+	// pruneProtectRecentTokens is the trailing window of tool output kept
+	// verbatim — the model is most likely still using it.
+	pruneProtectRecentTokens = 40000
+	// pruneMinReclaimTokens gates the whole pass: only prune when the reclaimable
+	// (older, large) tool output exceeds this, so a short session is untouched.
+	pruneMinReclaimTokens = 20000
+	// pruneMinBodyTokens skips small tool results — replacing a tiny body saves
+	// nothing and just loses information.
+	pruneMinBodyTokens = 200
+)
+
+// prunedPlaceholder is the body a pruned tool result is replaced with. It names
+// the tool and the original size so the model can re-fetch if it needs to.
+func prunedPlaceholder(toolName string, originalTokens int) string {
+	if toolName == "" {
+		toolName = "tool"
+	}
+	return fmt.Sprintf("[pruned %s output (~%d tokens) to reclaim context — re-run the tool if you need it again]", toolName, originalTokens)
+}
+
+// pruneStaleToolOutput walks messages newest-first, protects the last
+// preserveLast messages and a trailing pruneProtectRecentTokens of tool output,
+// then replaces the body of older large tool results with a placeholder. It
+// returns the (possibly) rewritten slice and the number of tokens reclaimed.
+// When nothing meets the bar it returns the input unchanged with reclaimed=0.
+//
+// It never drops a message, never touches non-tool messages, and never prunes
+// an already-pruned body — so it is idempotent and safe to run every turn.
+func pruneStaleToolOutput(messages []zeroruntime.Message, preserveLast int) ([]zeroruntime.Message, int) {
+	if len(messages) == 0 {
+		return messages, 0
+	}
+	if preserveLast < 0 {
+		preserveLast = 0
+	}
+
+	// Index → original token cost of each prunable tool body, scanning newest
+	// first and skipping the protected suffix.
+	type candidate struct {
+		index  int
+		tokens int
+	}
+	var candidates []candidate
+	recentToolTokens := 0
+	reclaimable := 0
+	protectUntil := len(messages) - preserveLast // indices >= this are protected
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role != zeroruntime.MessageRoleTool {
+			continue
+		}
+		bodyTokens := ApproxTextTokens(msg.Content)
+		if i >= protectUntil {
+			recentToolTokens += bodyTokens
+			continue
+		}
+		// Still within the trailing-output protection window?
+		if recentToolTokens < pruneProtectRecentTokens {
+			recentToolTokens += bodyTokens
+			continue
+		}
+		if bodyTokens < pruneMinBodyTokens || isPrunedPlaceholder(msg.Content) {
+			continue
+		}
+		candidates = append(candidates, candidate{index: i, tokens: bodyTokens})
+		reclaimable += bodyTokens
+	}
+
+	if reclaimable < pruneMinReclaimTokens || len(candidates) == 0 {
+		return messages, 0
+	}
+
+	// Copy-on-write so we never mutate the caller's slice in place.
+	out := make([]zeroruntime.Message, len(messages))
+	copy(out, messages)
+	reclaimed := 0
+	for _, c := range candidates {
+		toolName := toolNameForResult(out, c.index)
+		newBody := prunedPlaceholder(toolName, c.tokens)
+		reclaimed += c.tokens - ApproxTextTokens(newBody)
+		out[c.index].Content = newBody
+	}
+	return out, reclaimed
+}
+
+// toolNameForResult finds the tool name for the tool-result message at index by
+// matching its ToolCallID against the assistant tool_call that produced it.
+func toolNameForResult(messages []zeroruntime.Message, index int) string {
+	id := messages[index].ToolCallID
+	if id == "" {
+		return ""
+	}
+	for j := index - 1; j >= 0; j-- {
+		for _, call := range messages[j].ToolCalls {
+			if call.ID == id {
+				return call.Name
+			}
+		}
+	}
+	return ""
+}
+
+func isPrunedPlaceholder(content string) bool {
+	return strings.HasPrefix(strings.TrimSpace(content), "[pruned ")
+}

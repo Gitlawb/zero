@@ -340,6 +340,19 @@ func (state *compactionState) maybeCompact(
 		return messages
 	}
 
+	// CHEAP FIRST STAGE: reclaim context at zero token/latency cost by pruning
+	// the bodies of old, large tool results (the model has already acted on
+	// them). If that brings us back under threshold, skip the paid summarizer
+	// entirely and preserve recent turns verbatim.
+	if pruned, reclaimed := pruneStaleToolOutput(messages, state.preserveLast); reclaimed > 0 {
+		messages = pruned
+		size = estimateTokens(messages) + toolTokens
+		if size <= state.threshold {
+			state.lowWaterMark = size
+			return messages
+		}
+	}
+
 	compacted, err := Compact(messages, CompactionOptions{
 		PreserveLast: state.preserveLast,
 		Summarize:    summarizeClosure(ctx, provider, state.onUsage),
