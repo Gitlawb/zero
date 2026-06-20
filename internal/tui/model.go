@@ -758,7 +758,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return transcriptCopyStatusExpiredMsg{seq: seq}
 			})
 		}
+		if msg.content == "" {
+			// Empty text clipboard — may be a screenshot. Probe for image.
+			return m, readClipboardImageCmd()
+		}
 		return m.routePaste(msg.content)
+	case clipboardImageMsg:
+		if msg.err != nil {
+			return m.appendImageNotice("Clipboard image read failed: " + msg.err.Error()), nil
+		}
+		if msg.data == nil {
+			return m, nil // no image — silent no-op
+		}
+		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
 		return m.routePaste(msg.Content)
 	case tea.KeyPressMsg:

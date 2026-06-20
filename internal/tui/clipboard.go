@@ -3,6 +3,7 @@ package tui
 import (
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/atotto/clipboard"
 )
 
@@ -11,6 +12,31 @@ import (
 type clipboardReadMsg struct {
 	content string
 	err     error
+}
+
+// clipboardImageMsg carries image bytes read from the OS clipboard (a
+// screenshot). Sent when the text clipboard is empty — the user pasted an
+// image, not text. data is nil when no image was found.
+type clipboardImageMsg struct {
+	data      []byte
+	mediaType string
+	err       error
+}
+
+// readClipboardImageCmd reads the OS clipboard for image content off the
+// Update goroutine. Returns a clipboardImageMsg with the bytes, or nil (no
+// command) if there is no image — the caller treats nil as a silent no-op.
+func readClipboardImageCmd() tea.Cmd {
+	return func() tea.Msg {
+		data, mediaType, err := imageinput.ReadClipboardImage()
+		if err != nil {
+			return clipboardImageMsg{err: err}
+		}
+		if data == nil {
+			return nil // no image — silent no-op
+		}
+		return clipboardImageMsg{data: data, mediaType: mediaType}
+	}
 }
 
 // pasteFromClipboardCmd reads the OS clipboard off the Update goroutine (it
@@ -31,7 +57,9 @@ func pasteFromClipboardCmd() tea.Cmd {
 // the paste; empty content is a no-op.
 func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	if content == "" {
-		return m, nil
+		// Empty text clipboard — the user may have pasted a screenshot.
+		// Probe the OS clipboard for image content asynchronously.
+		return m, readClipboardImageCmd()
 	}
 	// Setup and the ask_user questionnaire share the main text input.
 	if m.setup.visible {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 // droppableImageExts are the image extensions a dragged-and-dropped file may
@@ -99,6 +100,28 @@ func modelSupportsVisionTUI(modelName string) bool {
 		return false
 	}
 	return modelregistry.SupportsVision(registry, trimmed)
+}
+
+// attachClipboardImage attaches an image read from the OS clipboard (a
+// screenshot paste). Runs through the same vision gate + size cap as
+// /image <path>, but the bytes come from the clipboard instead of a file.
+func (m model) attachClipboardImage(data []byte, mediaType string) model {
+	if !modelSupportsVisionTUI(m.modelName) {
+		name := m.modelName
+		if name == "" {
+			name = "the active model"
+		}
+		return m.appendImageNotice("Model " + name + " does not support image input; clipboard image refused.")
+	}
+	if len(data) > imageinput.MaxImageBytes {
+		return m.appendImageNotice("Clipboard image is larger than the 10 MiB limit.")
+	}
+	m.pendingImages = append(m.pendingImages, zeroruntime.ImageBlock{
+		MediaType: mediaType,
+		Data:      data,
+	})
+	m.pendingImageLabels = append(m.pendingImageLabels, "clipboard")
+	return m
 }
 
 // handleImageCommand processes "/image <path>" and "/image clear". A bare
