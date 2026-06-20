@@ -110,13 +110,9 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 	if note != "" {
 		handoffTask += "\n\nHandoff note: " + note
 	}
-	if _, err := s.coord.Register(newID, newID, team, handoffTask); err != nil {
-		return "", err
-	}
-	cwd := s.cwdFor(taskID)
-	s.rememberCwd(newID, cwd)
-	// Deliver the handoff note to the new member's inbox. A mailbox failure must
-	// not silently strand the handoff, so it is surfaced to the caller.
+	// Deliver the handoff note to the new member's inbox BEFORE registering the new
+	// task, so a mailbox failure can't leave a phantom pending task in the
+	// coordinator (it returns the error having registered nothing) (M5).
 	if note != "" {
 		if mbErr := s.mailbox.Send(team, newID, Message{
 			From: task.AgentID, Subject: "handoff", Body: note, Type: "handoff", Time: nowRFC3339(),
@@ -124,6 +120,11 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 			return "", fmt.Errorf("swarm: deliver handoff note: %w", mbErr)
 		}
 	}
+	if _, err := s.coord.Register(newID, newID, team, handoffTask); err != nil {
+		return "", err
+	}
+	cwd := s.cwdFor(taskID)
+	s.rememberCwd(newID, cwd)
 	// Retire the original task (it has been re-delegated).
 	_ = s.coord.SetStatus(taskID, StatusHandedOff)
 	spec := s.buildSpec(pol, newID, newID, team, def, handoffTask, cwd)

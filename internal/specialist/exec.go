@@ -720,6 +720,9 @@ func cleanupPromptFile(promptFile string) {
 func runChildProcess(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
 	var stderr bytes.Buffer
 	command := osexec.CommandContext(ctx, binaryPath, args...)
+	// Put the child in its own process group and group-kill on cancel/timeout, so a
+	// build/server/bash the sub-agent forked dies with it instead of orphaning (M6).
+	hardenSpecialistChild(command)
 	command.Stderr = &stderr
 	stdout, err := command.StdoutPipe()
 	if err != nil {

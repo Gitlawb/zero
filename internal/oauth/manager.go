@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,11 @@ type Manager struct {
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error
+	// refreshLocks serializes concurrent refreshes per key so parallel callers
+	// don't each spend the single-use refresh token; the loser reuses the rotated
+	// token. refreshMu guards the map (M7).
+	refreshMu    sync.Mutex
+	refreshLocks map[string]*sync.Mutex
 }
 
 // ManagerOptions configures a Manager.
@@ -308,6 +314,15 @@ func (m *Manager) Handle401(ctx context.Context, key string) (string, error) {
 }
 
 func (m *Manager) refreshAndSave(ctx context.Context, key string, cfg Config, current Token) (string, error) {
+	lock := m.keyLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	// Re-load inside the critical section: if a concurrent caller already refreshed
+	// (the access token changed), reuse it rather than spending the single-use
+	// refresh token a second time — the provider would reject the second use (M7).
+	if reloaded, err := m.loadToken(key); err == nil && reloaded.AccessToken != current.AccessToken {
+		return reloaded.AccessToken, nil
+	}
 	refreshed, err := Refresh(ctx, m.client, cfg, current, m.now)
 	if err != nil {
 		return "", err
@@ -316,6 +331,22 @@ func (m *Manager) refreshAndSave(ctx context.Context, key string, cfg Config, cu
 		return "", err
 	}
 	return refreshed.AccessToken, nil
+}
+
+// keyLock returns the per-key refresh mutex, creating it on first use, so all
+// refreshes for one key are serialized.
+func (m *Manager) keyLock(key string) *sync.Mutex {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if m.refreshLocks == nil {
+		m.refreshLocks = map[string]*sync.Mutex{}
+	}
+	lock, ok := m.refreshLocks[key]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.refreshLocks[key] = lock
+	}
+	return lock
 }
 
 // loadToken loads a stored token for key without resolving any provider config,

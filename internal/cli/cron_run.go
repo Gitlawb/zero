@@ -134,6 +134,24 @@ func reconcileOverdue(store *cron.Store, now func() time.Time, ids []string, std
 // previous fire has already returned before the next tick — no overlap.
 func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Writer, stderr io.Writer, exec execRunner) {
 	fired := now()
+	// Atomically claim this fire before running it so concurrent schedulers (or
+	// --once overlapping the forever loop) can't both execute the same due job: the
+	// winner advances NextRunAt under the per-job lock, and a loser sees the
+	// advanced time and skips. The post-exec advance recomputes the same
+	// NextRunAt (sched.Next(fired) is deterministic), so the claim serializes the
+	// fire decision without changing any persisted schedule state (M9).
+	claimed, claimErr := claimFire(store, fired, job.ID)
+	if claimErr != nil {
+		if errors.Is(claimErr, cron.ErrJobNotFound) {
+			return // removed before we could claim
+		}
+		fmt.Fprintf(stderr, "warning: could not claim job %s: %v\n", job.ID, claimErr)
+		return
+	}
+	if !claimed {
+		return // another scheduler already claimed this slot, or the job was paused
+	}
+
 	args := []string{"exec", "--output-format", "stream-json", "--session-title", "cron:" + job.ID}
 	if job.Cwd != "" {
 		args = append(args, "--cwd", job.Cwd)
@@ -213,6 +231,36 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 		persisted = job
 	}
 	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(persisted.NextRunAt))
+}
+
+// claimFire atomically claims a due job's fire under the per-job lock and reports
+// whether THIS caller should run it. It returns false only when the job was paused
+// externally or another scheduler already advanced NextRunAt past `fired` (so a
+// valid recurring job never double-fires). A valid due job has its NextRunAt
+// advanced here to claim the slot; an invalid or exhausted schedule is left for the
+// caller to fire-once and pause (preserving existing single-scheduler behavior).
+func claimFire(store *cron.Store, fired time.Time, id string) (bool, error) {
+	claimed := true
+	_, err := store.Mutate(id, func(current cron.Job, readErr error) (cron.Job, error) {
+		if readErr != nil {
+			return current, readErr
+		}
+		if current.Status != cron.StatusActive {
+			claimed = false // paused/other — not ours to fire
+			return current, nil
+		}
+		if current.NextRunAt.After(fired) {
+			claimed = false // another scheduler already advanced this slot
+			return current, nil
+		}
+		if sched, perr := cron.Parse(current.Expr); perr == nil {
+			if nxt := sched.Next(fired); !nxt.IsZero() {
+				current.NextRunAt = nxt // advance to claim; concurrent schedulers now skip
+			}
+		}
+		return current, nil
+	})
+	return claimed, err
 }
 
 func cronTruncate(s string, max int) string {

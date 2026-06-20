@@ -239,7 +239,13 @@ func (store *TokenStore) migrateLegacy(legacyPath string) error {
 			return err
 		}
 	}
-	return os.Rename(legacyPath, legacyPath+".migrated")
+	// A concurrent migrator may have already renamed the legacy file; treat a
+	// "source is gone" rename as success so the server isn't wrongly dropped on
+	// startup just because it lost the cleanup race (the tokens migrated fine) (M8).
+	if err := os.Rename(legacyPath, legacyPath+".migrated"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // mcpKey builds and validates the unified store key for an MCP server token.
