@@ -165,7 +165,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			options.OnContext(MeasureContext(messages, request.Tools, options.ContextWindow))
 		}
 
-		stream, err := provider.StreamCompletion(ctx, request)
+		// A transient upstream disconnect on the initial connect is retried with
+		// backoff (before any content is forwarded, so no OnText is duplicated);
+		// a context-limit / image-rejection / cancellation is NOT retried here —
+		// those fall through to their own handlers below.
+		stream, err := streamWithReconnect(ctx, provider, request, reconnectNoticeFor(options))
 		if err != nil {
 			if isImageRejectionError(err) {
 				result.Messages = copyMessages(messages)
