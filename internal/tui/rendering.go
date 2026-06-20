@@ -1087,7 +1087,7 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
 	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[rcKey(row.runID, row.id)], width, opts)
-	return toolCard(head, nil, "", zeroTheme.cardRun, width)
+	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
 }
 
 func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
@@ -1111,7 +1111,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	}
 	if collapsedFooter != "" && !row.expanded {
 		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
-		return toolCard(head, nil, collapsedFooter, borderStyle, width)
+		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
 	}
 	body := toolCardBody(name, rc.hints[key], row.detail, width, opts)
 	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width, opts)
@@ -1119,7 +1119,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	if collapsedFooter != "" && row.expanded && footer == "" {
 		footer = "▾ collapse"
 	}
-	return toolCard(head, body.lines, footer, borderStyle, width)
+	return toolCard(head, glyph, body.lines, footer, borderStyle, width)
 }
 
 // toolCardAlwaysExpands reports tools whose body is a code diff that must stay
@@ -1179,9 +1179,11 @@ func toolDisplayName(name string) string {
 	return strings.ReplaceAll(rest, "_", " ")
 }
 
-// toolCardHead composes the border-embedded head: tool name, middle-truncated
-// target (hyperlinked when it names a file), the faintest arg column, optional
-// extra tag, the auto marker, and the status glyph.
+// toolCardHead composes the card head: tool name, middle-truncated target
+// (hyperlinked when it names a file), the faintest arg column, optional extra
+// tag, and the auto marker. The status glyph is NOT included here — toolCard
+// right-aligns it on the rule line so it sits at the card's right edge instead
+// of trailing the head text.
 func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
 	head := zeroTheme.toolName.Render(toolDisplayName(name))
 	if target = strings.TrimSpace(target); target != "" {
@@ -1201,54 +1203,69 @@ func toolCardHead(name string, target string, arg string, headTag string, glyph 
 	if auto {
 		head += "  " + zeroTheme.autoTag.Render("[auto]")
 	}
-	return head + "  " + glyph
+	return head
 }
 
-// toolCard draws the rounded card: head embedded in the top border, optional
-// footer embedded in the bottom border, body lines between on the panel
-// surface. Every emitted line is exactly `width` cells. On tiny terminals the
-// side borders go away (top/bottom rules stay) so content keeps the columns.
-func toolCard(head string, body []string, footer string, borderStyle lipgloss.Style, width int) string {
+// toolCard draws a left-rule card: a status-tinted "│ " rail down the left
+// edge, the head (with the status glyph right-aligned to the card edge) on the
+// first line, body lines below, and an optional footer line — no top, right, or
+// bottom borders. This matches the lighter inline style of specialist cards
+// (renderLeftRuleCard) and the reference TUIs (opencode, codex), instead of the
+// older full rounded box. Every emitted line is exactly `width` cells, and the
+// inner content budget stays width-4, so the diff/read/bash body renderers
+// (which assume width-4) need no change. On the tiny tier the rail goes away
+// (bare lines) so content keeps every column — and so a tiny card carries no
+// leading "│", matching TestTinyToolCardDropsSideBorders.
+func toolCard(head string, glyph string, body []string, footer string, borderStyle lipgloss.Style, width int) string {
 	tiny := widthTier(width) == tierTiny
 	if width < 24 {
 		width = 24
 	}
-	innerWidth := width - 4
+	rail := borderStyle.Render("│ ")
+	railWidth := 2
+	innerWidth := width - 4 // "│ " (2) + content + 2 trailing cells where the old right border sat
 	if tiny {
+		rail = ""
+		railWidth = 0
 		innerWidth = width
 	}
 
-	head = fitStyledLine(head, width-6)
-	dashes := maxInt(1, width-4-lipgloss.Width(head))
-	top := borderStyle.Render("╭ ") + head + " " + borderStyle.Render(strings.Repeat("─", dashes)+"╮")
-	if tiny {
-		top = head + " " + borderStyle.Render(strings.Repeat("─", maxInt(1, width-1-lipgloss.Width(head))))
+	// Head line: rail + head, with the status glyph right-aligned to the card
+	// edge. The glyph (and the space before it) is reserved out of the head's
+	// width budget so a long head truncates before it collides with the glyph.
+	glyphWidth := lipgloss.Width(glyph)
+	glyphGap := 0
+	if glyphWidth > 0 {
+		glyphGap = 1
 	}
+	headBudget := maxInt(1, width-railWidth-glyphWidth-glyphGap)
+	head = fitStyledLine(head, headBudget)
+	headPad := maxInt(0, width-railWidth-lipgloss.Width(head)-glyphWidth)
+	headLine := rail + head + strings.Repeat(" ", headPad) + glyph
 
 	lines := make([]string, 0, len(body)+2)
-	lines = append(lines, top)
+	lines = append(lines, headLine)
 	for _, line := range body {
 		fitted := fitStyledLine(line, innerWidth)
 		if tiny {
 			lines = append(lines, fitted)
 			continue
 		}
-		pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted))))
-		lines = append(lines, borderStyle.Render("│ ")+fitted+pad+borderStyle.Render(" │"))
+		// Fill to the full card width (not just innerWidth) so the panel band
+		// reads as one solid block now that there is no right border; the extra
+		// two cells are bare panel background.
+		pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, width-railWidth-lipgloss.Width(fitted))))
+		lines = append(lines, rail+fitted+pad)
 	}
 
-	switch {
-	case tiny && strings.TrimSpace(footer) == "":
-		lines = append(lines, borderStyle.Render(strings.Repeat("─", width)))
-	case tiny:
-		footer = fitStyledLine(footer, width-4)
-		lines = append(lines, footer+" "+borderStyle.Render(strings.Repeat("─", maxInt(1, width-1-lipgloss.Width(footer)))))
-	case strings.TrimSpace(footer) == "":
-		lines = append(lines, borderStyle.Render("╰"+strings.Repeat("─", width-2)+"╯"))
-	default:
-		footer = fitStyledLine(footer, width-6)
-		dashes = maxInt(1, width-4-lipgloss.Width(footer))
-		lines = append(lines, borderStyle.Render("╰ ")+footer+" "+borderStyle.Render(strings.Repeat("─", dashes)+"╯"))
+	if strings.TrimSpace(footer) != "" {
+		fittedFooter := fitStyledLine(footer, width-railWidth)
+		if tiny {
+			lines = append(lines, fittedFooter)
+		} else {
+			pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, width-railWidth-lipgloss.Width(fittedFooter))))
+			lines = append(lines, rail+fittedFooter+pad)
+		}
 	}
 	return strings.Join(lines, "\n")
 }

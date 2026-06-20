@@ -728,8 +728,13 @@ func TestRunningToolCardShowsHeadAndSpinnerSlot(t *testing.T) {
 	if !strings.Contains(got, "grep") || !strings.Contains(got, "internal/cli") {
 		t.Fatalf("running card = %q, want tool name and target in head", got)
 	}
-	if !strings.Contains(got, "╭") || !strings.Contains(got, "╰") {
-		t.Fatalf("running card = %q, want a bordered card", got)
+	// Tool cards render as a left-rule card (status-tinted "│ " rail, no box),
+	// matching specialist cards and the reference TUIs.
+	if !strings.HasPrefix(got, "│ ") {
+		t.Fatalf("running card = %q, want a left-rule card", got)
+	}
+	if strings.ContainsAny(got, "╭╮╰╯") {
+		t.Fatalf("running card = %q, must not carry box-border corners", got)
 	}
 }
 
@@ -1162,6 +1167,33 @@ func TestToolCardLinesAllSameWidth(t *testing.T) {
 		if got := len([]rune(line)); got != 60 {
 			t.Fatalf("card line width %d, want 60: %q", got, line)
 		}
+	}
+}
+
+func TestToolResultCardRendersAsLeftRule(t *testing.T) {
+	m := limeTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "c",
+		tool:   "read_file",
+		status: tools.StatusOK,
+		detail: "File: README.md\n\n1: # Zero\n2: line two",
+	}
+	card := plainRender(t, m.renderRow(row, 80, buildRowContext(nil)))
+	lines := strings.Split(card, "\n")
+	// Every line carries the left rail; none carries a box corner or a right
+	// border — the unified left-rule card shape (matches specialist cards).
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "│ ") {
+			t.Fatalf("line %d = %q, want left-rule prefix", i, line)
+		}
+		if strings.ContainsAny(line, "╭╮╰╯") || strings.HasSuffix(line, "│") {
+			t.Fatalf("line %d = %q, must not carry box borders", i, line)
+		}
+	}
+	// The status glyph sits on the head line (first line), right-aligned.
+	if !strings.Contains(lines[0], "✓") {
+		t.Fatalf("head line = %q, want the status glyph on the rule line", lines[0])
 	}
 }
 
