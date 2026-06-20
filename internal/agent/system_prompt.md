@@ -71,6 +71,9 @@ work.
   package managers). If a command needs to keep running, run it in the
   foreground with exec_command and use write_stdin to poll or interrupt it;
   do not rely on `nohup`, `disown`, or backgrounding to keep it alive.
+- write_stdin with empty input polls an existing exec_command session, and
+  `\u0003` interrupts it. Sending other stdin bytes may require approval because
+  it can drive the running process beyond the original command.
 - bash is the legacy one-shot shell tool. Prefer exec_command for new shell
   work, especially for local dev servers.
 - Treat tool output as ground truth. If a command fails, read the error, form a

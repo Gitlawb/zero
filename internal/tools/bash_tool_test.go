@@ -42,6 +42,9 @@ func runBashToolHelper(command string) {
 	case "sleep":
 		time.Sleep(250 * time.Millisecond)
 		fmt.Println("woke up")
+	case "long-sleep":
+		time.Sleep(5 * time.Second)
+		fmt.Println("long sleep finished")
 	default:
 		fmt.Fprintln(os.Stderr, "unknown helper command")
 		os.Exit(2)
@@ -64,11 +67,11 @@ func TestCoreToolsExposeShellTools(t *testing.T) {
 			t.Fatalf("%s side effect = %s, want shell", name, tool.Safety().SideEffect)
 		}
 		wantPermission := PermissionPrompt
-		if name == "write_stdin" {
-			wantPermission = PermissionAllow
-		}
 		if tool.Safety().Permission != wantPermission {
 			t.Fatalf("%s permission = %s, want %s", name, tool.Safety().Permission, wantPermission)
+		}
+		if name == "write_stdin" && !tool.Safety().AdvertiseInAuto {
+			t.Fatalf("write_stdin should stay visible in auto mode for polling and interrupts")
 		}
 	}
 }

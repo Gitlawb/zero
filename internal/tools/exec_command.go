@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
@@ -23,20 +24,25 @@ const (
 	maxPollYieldTimeMS        = 300000
 	defaultMaxOutputTokens    = 10000
 	maxExecOutputTokenRequest = 200000
+	completedSessionRetention = 30 * time.Second
 )
 
 type execSessionManager struct {
-	mu       sync.Mutex
-	nextID   int
-	sessions map[int]*execSession
+	mu                 sync.Mutex
+	nextID             int
+	sessions           map[int]*execSession
+	completedRetention time.Duration
 }
 
 func newExecSessionManager() *execSessionManager {
 	return &execSessionManager{
-		nextID:   1000,
-		sessions: make(map[int]*execSession),
+		nextID:             1000,
+		sessions:           make(map[int]*execSession),
+		completedRetention: completedSessionRetention,
 	}
 }
+
+var defaultExecSessionManager = newExecSessionManager()
 
 func (manager *execSessionManager) allocateID() int {
 	manager.mu.Lock()
@@ -63,6 +69,24 @@ func (manager *execSessionManager) remove(id int) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	delete(manager.sessions, id)
+}
+
+func (manager *execSessionManager) removeCompletedLater(session *execSession) {
+	retention := manager.completedRetention
+	go func() {
+		<-session.done
+		if retention > 0 {
+			timer := time.NewTimer(retention)
+			<-timer.C
+		}
+		manager.remove(session.id)
+	}()
+}
+
+func (manager *execSessionManager) len() int {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	return len(manager.sessions)
 }
 
 type execSession struct {
@@ -161,7 +185,7 @@ func NewExecCommandTool(workspaceRoot string, manager *execSessionManager) Tool 
 
 func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *execSessionManager) Tool {
 	if manager == nil {
-		manager = newExecSessionManager()
+		manager = defaultExecSessionManager
 	}
 	shellGuidance := shellGuidanceForGOOS(runtimeGOOS())
 	return execCommandTool{
@@ -230,6 +254,10 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		return errorResult("Error starting exec_command: " + err.Error())
 	}
 	output := session.collect(ctx, time.Duration(yieldTimeMS)*time.Millisecond)
+	if ctx != nil && ctx.Err() != nil && !session.doneClosed() {
+		session.terminate()
+		output += session.collect(context.Background(), time.Second)
+	}
 	exitCode, exited := session.exitStatus()
 	if exited {
 		tool.manager.remove(session.id)
@@ -285,6 +313,7 @@ func (tool execCommandTool) startSession(commandText string, absoluteCwd string,
 		done:        make(chan struct{}),
 	}
 	tool.manager.store(session)
+	tool.manager.removeCompletedLater(session)
 	go func() {
 		err := command.Wait()
 		if blocks := monitor.Stop(); len(blocks) > 0 {
@@ -355,17 +384,17 @@ type writeStdinTool struct {
 
 func NewWriteStdinTool(manager *execSessionManager) Tool {
 	if manager == nil {
-		manager = newExecSessionManager()
+		manager = defaultExecSessionManager
 	}
 	return writeStdinTool{
 		baseTool: baseTool{
 			name:        WriteStdinToolName,
-			description: "Writes characters to an existing exec_command session and returns recent output. Use an empty chars value to poll.",
+			description: "Writes characters to an existing exec_command session and returns recent output. Empty polls and Ctrl-C interrupts are allowed; other stdin bytes may require approval.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"session_id":        {Type: "integer", Description: "Identifier returned by exec_command while the process is still running."},
-					"chars":             {Type: "string", Description: "Bytes to write to stdin. Defaults to empty, which polls without writing.", Default: ""},
+					"chars":             {Type: "string", Description: "Bytes to write to stdin. Defaults to empty, which polls without writing. Use \\u0003 to interrupt the session.", Default: ""},
 					"yield_time_ms":     {Type: "integer", Description: "Wait before yielding output. Empty polls default to 5000ms and can wait up to 300000ms.", Default: defaultPollYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxPollYieldTimeMS)},
 					"max_output_tokens": {Type: "integer", Description: "Output token budget. Defaults to 10000; larger requests may be capped.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
 				},
@@ -373,13 +402,29 @@ func NewWriteStdinTool(manager *execSessionManager) Tool {
 				AdditionalProperties: false,
 			},
 			safety: Safety{
-				SideEffect: SideEffectShell,
-				Permission: PermissionAllow,
-				Reason:     "write_stdin only interacts with an exec_command session that was already started through the shell permission flow.",
+				SideEffect:      SideEffectShell,
+				Permission:      PermissionPrompt,
+				Reason:          "Sending stdin can drive an existing shell process beyond the original command; empty polling and Ctrl-C interrupts are allowed automatically.",
+				AdvertiseInAuto: true,
 			},
 		},
 		manager: manager,
 	}
+}
+
+func (tool writeStdinTool) PermissionForArgs(args map[string]any) Permission {
+	raw, ok := args["chars"]
+	if !ok || raw == nil {
+		return PermissionAllow
+	}
+	chars, ok := raw.(string)
+	if !ok {
+		return PermissionPrompt
+	}
+	if chars == "" || chars == "\x03" {
+		return PermissionAllow
+	}
+	return PermissionPrompt
 }
 
 func (tool writeStdinTool) Run(ctx context.Context, args map[string]any) Result {
@@ -504,7 +549,34 @@ func truncateExecOutput(output string, maxOutputTokens int) (string, bool) {
 	}
 	head := maxBytes / 2
 	tail := maxBytes - head
-	return output[:head] + "\n[zero] output truncated\n" + output[len(output)-tail:], true
+	return utf8Prefix(output, head) + "\n[zero] output truncated\n" + utf8Suffix(output, tail), true
+}
+
+func utf8Prefix(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	for maxBytes > 0 && !utf8.RuneStart(value[maxBytes]) {
+		maxBytes--
+	}
+	return value[:maxBytes]
+}
+
+func utf8Suffix(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	start := len(value) - maxBytes
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return value[start:]
 }
 
 func execDisplaySummary(commandText string, sessionID int, exited bool, exitCode int) string {
