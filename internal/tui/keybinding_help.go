@@ -1,0 +1,147 @@
+// keybinding_help.go renders the `?` keyboard-shortcut overlay. Zero has a
+// rich set of chord bindings (Ctrl+T effort, Ctrl+P plan, drill-in subchat,
+// Shift+Tab permission mode, …) that are otherwise invisible — only learnable
+// by reading the source. A single-key `?` overlay (opened on an empty composer)
+// lists them grouped, so the keymap is discoverable the way the reference TUIs
+// do it. The list is declarative and hand-curated to match the real handlers in
+// model.go's Update switch; keep them in sync when a binding changes.
+package tui
+
+import "strings"
+
+// keybinding is one row in the help overlay: the key chord and what it does.
+type keybinding struct {
+	keys string
+	desc string
+}
+
+// keybindingGroup is a titled cluster of related bindings.
+type keybindingGroup struct {
+	title    string
+	bindings []keybinding
+}
+
+// keybindingGroups is the full, grouped shortcut list shown by the `?` overlay.
+// Sourced from the real key cases in model.go (Update) — not invented. When a
+// binding is added/changed there, update it here too (a test guards that the
+// data is non-empty and well-formed, but it can't verify the bindings exist).
+var keybindingGroups = []keybindingGroup{
+	{
+		title: "Chat",
+		bindings: []keybinding{
+			{"Enter", "send the message"},
+			{"Alt+Enter", "insert a newline (multi-line compose)"},
+			{"Esc", "cancel the run / dismiss a popup / clear the input"},
+			{"Ctrl+C", "cancel the run, then quit"},
+			{"?", "show this help (on an empty input)"},
+		},
+	},
+	{
+		title: "Model & run controls",
+		bindings: []keybinding{
+			{"Ctrl+T", "cycle reasoning effort (auto → low → medium → high)"},
+			{"Shift+Tab", "cycle permission mode (auto ↔ ask)"},
+			{"Ctrl+P", "expand / collapse the plan panel"},
+		},
+	},
+	{
+		title: "Navigation & scrollback",
+		bindings: []keybinding{
+			{"PgUp / PgDn", "scroll the transcript by a page"},
+			{"↑ / ↓", "scroll, or move within a popup / multi-line input"},
+			{"Ctrl+O", "toggle the detailed (full-screen) transcript"},
+			{"Ctrl+E", "release the mouse to drag-select & copy text"},
+			{"Tab", "accept the autocomplete / picker selection"},
+		},
+	},
+	{
+		title: "Specialists & pickers",
+		bindings: []keybinding{
+			{"Click a specialist card", "drill into its sub-session"},
+			{"↑ / Esc (in a sub-session)", "return to the main chat"},
+			{"Ctrl+F (in /model)", "toggle the highlighted model as a favorite"},
+			{"Click a tool card", "expand / collapse its output"},
+			{"Right-click", "paste the clipboard"},
+		},
+	},
+}
+
+// keybindingHelpFooter is the dismiss hint shown at the bottom of the overlay.
+const keybindingHelpFooter = "? or Esc to close · /help for slash commands"
+
+// renderKeybindingHelpLines builds the overlay body lines (group titles +
+// aligned key/description rows + footer), wrapped to the inner width. Exposed
+// separately from the framed renderer so tests can assert on content without
+// the border chrome.
+func (m model) renderKeybindingHelpLines(innerWidth int) []string {
+	keyColumn := keybindingKeyColumnWidth()
+	lines := make([]string, 0, 64)
+	for index, group := range keybindingGroups {
+		if index > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, zeroTheme.accent.Render(group.title))
+		for _, binding := range group.bindings {
+			lines = append(lines, formatKeybindingLine(binding, keyColumn, innerWidth))
+		}
+	}
+	lines = append(lines, "")
+	lines = append(lines, zeroTheme.faint.Render(keybindingHelpFooter))
+	return lines
+}
+
+// keybindingKeyColumnWidth returns the width of the key column: the widest key
+// chord across all groups, so the descriptions align in a clean second column.
+func keybindingKeyColumnWidth() int {
+	widest := 0
+	for _, group := range keybindingGroups {
+		for _, binding := range group.bindings {
+			if n := len([]rune(binding.keys)); n > widest {
+				widest = n
+			}
+		}
+	}
+	return widest
+}
+
+// formatKeybindingLine renders one "  <keys>   <desc>" row: the key chord in
+// the accent color, padded to keyColumn, then the muted description truncated
+// to fit innerWidth.
+func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) string {
+	keys := binding.keys
+	pad := keyColumn - len([]rune(keys))
+	if pad < 0 {
+		pad = 0
+	}
+	keyCell := zeroTheme.ink.Render(keys) + strings.Repeat(" ", pad)
+	// Indent(2) + keyCell + gap(2) consumed before the description.
+	descBudget := innerWidth - 2 - keyColumn - 2
+	if descBudget < 4 {
+		descBudget = 4
+	}
+	desc := zeroTheme.muted.Render(truncateRunes(binding.desc, descBudget))
+	return "  " + keyCell + "  " + desc
+}
+
+// renderKeybindingHelpOverlay renders the framed, centered `?` help overlay for
+// the given terminal dimensions.
+func (m model) renderKeybindingHelpOverlay(width int, height int) string {
+	overlayWidth := keybindingHelpOverlayWidth(width)
+	lines := m.renderKeybindingHelpLines(overlayWidth - 4)
+	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, zeroTheme.panel)
+	return centerRenderedBlock(block, width)
+}
+
+// keybindingHelpOverlayWidth picks the overlay width: wide enough that the
+// descriptions don't truncate next to the key column, capped, and never wider
+// than the terminal.
+func keybindingHelpOverlayWidth(terminalWidth int) int {
+	width := 76
+	if terminalWidth-4 < width {
+		width = terminalWidth - 4
+	}
+	if width < 24 {
+		width = 24
+	}
+	return width
+}

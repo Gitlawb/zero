@@ -1,0 +1,107 @@
+package tui
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+)
+
+func TestQuestionMarkOpensHelpOnEmptyComposer(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	updated, _ := m.Update(testKeyText("?"))
+	next := updated.(model)
+	if !next.helpOverlay {
+		t.Fatal("? on an empty composer should open the help overlay")
+	}
+	// The ? must NOT have been typed into the composer.
+	if next.composerValue() != "" {
+		t.Fatalf("composer should stay empty when ? opens help, got %q", next.composerValue())
+	}
+}
+
+func TestQuestionMarkTypesIntoNonEmptyComposer(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m = typeRunes(t, m, "what")
+	updated, _ := m.Update(testKeyText("?"))
+	next := updated.(model)
+	if next.helpOverlay {
+		t.Fatal("? after text should type a literal '?', not open help")
+	}
+	if got := next.composerValue(); got != "what?" {
+		t.Fatalf("composer = %q, want %q", got, "what?")
+	}
+}
+
+func TestHelpOverlayClosesOnQuestionMarkAndEsc(t *testing.T) {
+	for _, closer := range []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"question-mark", testKeyText("?")},
+		{"esc", testKey(tea.KeyEsc)},
+		{"q", testKeyText("q")},
+		{"enter", testKey(tea.KeyEnter)},
+	} {
+		m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+		m.helpOverlay = true
+		updated, _ := m.Update(closer.key)
+		next := updated.(model)
+		if next.helpOverlay {
+			t.Fatalf("%s should close the help overlay", closer.name)
+		}
+	}
+}
+
+func TestHelpOverlaySwallowsOtherKeys(t *testing.T) {
+	// While the overlay is open, an ordinary key must not type into the composer.
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m.helpOverlay = true
+	updated, _ := m.Update(testKeyText("x"))
+	next := updated.(model)
+	if !next.helpOverlay {
+		t.Fatal("an ordinary key should not close the overlay")
+	}
+	if next.composerValue() != "" {
+		t.Fatalf("keys must be swallowed while the overlay is open, composer = %q", next.composerValue())
+	}
+}
+
+func TestHelpOverlayViewRendersGroupsAndKeys(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	m.width = 90
+	m.height = 40
+	m.helpOverlay = true
+	view := plainRender(t, m.View())
+	for _, want := range []string{
+		"Keyboard Shortcuts",
+		"Ctrl+T", "cycle reasoning effort",
+		"Shift+Tab", "Ctrl+P", "Ctrl+O",
+		"drill into its sub-session",
+		keybindingHelpFooter,
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("help overlay view missing %q, got:\n%s", want, view)
+		}
+	}
+}
+
+func TestKeybindingGroupsAreWellFormed(t *testing.T) {
+	if len(keybindingGroups) == 0 {
+		t.Fatal("keybindingGroups must not be empty")
+	}
+	for _, group := range keybindingGroups {
+		if strings.TrimSpace(group.title) == "" {
+			t.Fatal("every keybinding group needs a title")
+		}
+		if len(group.bindings) == 0 {
+			t.Fatalf("group %q has no bindings", group.title)
+		}
+		for _, binding := range group.bindings {
+			if strings.TrimSpace(binding.keys) == "" || strings.TrimSpace(binding.desc) == "" {
+				t.Fatalf("group %q has a binding with an empty key or description: %+v", group.title, binding)
+			}
+		}
+	}
+}

@@ -70,6 +70,8 @@ func emptyStateLines(width int) []string {
 	}
 	lines = append(lines, "")
 	lines = append(lines, centerLine(zeroTheme.muted.Render(emptyStateTagline), width))
+	lines = append(lines, "")
+	lines = append(lines, centerLine(zeroTheme.faint.Render("Press ? for keyboard shortcuts · / for commands"), width))
 	// centerLine pads but never truncates; below ~62 cols the tagline would
 	// exceed the frame without this fit.
 	for index := range lines {

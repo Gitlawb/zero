@@ -105,6 +105,7 @@ type model struct {
 	unpricedTokens        int
 	transcript            []transcriptRow
 	transcriptDetailed    bool
+	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
 	transcriptBodyHeights *transcriptBodyHeightCache
 	input                 textinput.Model
 	composer              composerState
@@ -766,6 +767,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.transcriptSelection = transcriptSelectionState{}
 		m.clearMouseSelection()
+		// The `?` help overlay is modal: `?`, Esc, q, or Enter close it; every
+		// other key is swallowed so nothing types into the hidden composer.
+		if m.helpOverlay {
+			if keyText(msg) == "?" || keyText(msg) == "q" || keyIs(msg, tea.KeyEsc) || keyIs(msg, tea.KeyEnter) || keyCtrl(msg, 'c') {
+				m.helpOverlay = false
+			}
+			return m, nil
+		}
 		switch {
 		case keyCtrl(msg, 'c'):
 			// cancelRun records the in-flight run into flushRunIDs and writes the
@@ -945,6 +954,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m.toggleModelFavorite(), nil
+			}
+		case keyText(msg) == "?" && !keyAlt(msg) && !keyHasMod(msg, tea.ModCtrl):
+			// `?` opens the keyboard-shortcut overlay, but ONLY on an empty
+			// composer with nothing modal up — otherwise it must type a literal
+			// "?" into the prompt. Falls through to the rune-insert path below
+			// when the composer is non-empty or a popup is active.
+			if m.composerValue() == "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active && !m.suggestionsActive() {
+				m.helpOverlay = true
+				return m, nil
 			}
 		case keyBackspace(msg):
 			if m.picker != nil {
@@ -1535,6 +1553,8 @@ func (m model) View() tea.View {
 	var content string
 	if m.setup.visible {
 		content = m.setupView(chatWidth(m.width))
+	} else if m.helpOverlay {
+		content = m.renderKeybindingHelpOverlay(chatWidth(m.width), m.height)
 	} else if m.transcriptDetailed {
 		content = m.detailedTranscriptView()
 	} else {
