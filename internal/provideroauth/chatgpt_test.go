@@ -32,6 +32,22 @@ func makeIDToken(t *testing.T, claims map[string]any) string {
 	return header + "." + body + ".AAAA"
 }
 
+func TestExtractChatGPTAccountIDErrorsOnWrongShapeNamespace(t *testing.T) {
+	// AUDIT-L11: when OpenAI's auth namespace is present but the account id is the
+	// wrong shape (or missing), surface an error so the login warning fires and the
+	// user re-auths — instead of silently omitting the header and hitting opaque 401s.
+	for _, claims := range []map[string]any{
+		{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": 12345}},   // non-string
+		{"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": ""}},      // empty
+		{"https://api.openai.com/auth": map[string]any{"organization_id": "org-only"}}, // missing key
+	} {
+		token := oauth.Token{IDToken: makeIDToken(t, claims)}
+		if _, err := extractChatGPTAccountID(token); err == nil {
+			t.Fatalf("expected an error for a present-but-wrong-shape namespace claim: %v", claims)
+		}
+	}
+}
+
 func TestExtractChatGPTAccountIDHappyPath(t *testing.T) {
 	// Real auth.openai.com id_tokens nest the account id under the
 	// "https://api.openai.com/auth" claim object (NOT at the top level), so the

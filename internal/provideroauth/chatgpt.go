@@ -225,9 +225,15 @@ func extractChatGPTAccountID(token oauth.Token) (string, error) {
 	// what the Codex CLI reads); fall back to a bare top-level claim only for
 	// forward-compat if OpenAI ever flattens it.
 	if ns, ok := claims[chatgptAuthClaimNamespace].(map[string]any); ok {
-		if value, ok := ns[chatgptAccountClaim].(string); ok {
+		if value, ok := ns[chatgptAccountClaim].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value), nil
 		}
+		// The namespace is present (the scopes request it) but the account id is
+		// missing/empty/not-a-string — the claim shape changed. Surface an error so
+		// the caller warns and the user re-auths, instead of silently omitting the
+		// chatgpt-account-id header and hitting opaque Cloudflare 401s on every Codex
+		// call that look identical to an expired token. (AUDIT-L11)
+		return "", fmt.Errorf("chatgpt-account-id claim missing or not a non-empty string under %q", chatgptAuthClaimNamespace)
 	}
 	if value, ok := claims[chatgptAccountClaim].(string); ok {
 		return strings.TrimSpace(value), nil
