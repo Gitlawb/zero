@@ -71,14 +71,38 @@ func (store *AuditStore) lockAudit() (func(), error) {
 		if !errors.Is(err, os.ErrExist) && !errors.Is(err, os.ErrPermission) {
 			return nil, fmt.Errorf("hooks: acquire audit lock: %w", err)
 		}
-		// Reclaim a stale lock left by a crashed holder.
+		// Reclaim a stale lock left by a crashed holder — atomically (H3). A blind
+		// Remove lets two racers both reclaim + recreate and so both hold the lock;
+		// reclaimStaleLock renames the file aside (only one rename wins) and restores
+		// it if it turns out fresh, so a live lock is never deleted out from under it.
 		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > auditLockStaleAfter {
-			_ = os.Remove(lockPath)
-			continue
+			if reclaimStaleLock(lockPath, token, auditLockStaleAfter) {
+				continue
+			}
+			// Lost the reclaim race (or it was actually fresh) — fall through to the
+			// bounded wait rather than hot-spinning on a reclaim that never wins.
 		}
 		if !time.Now().Before(deadline) {
 			return nil, fmt.Errorf("hooks: timed out acquiring audit lock")
 		}
 		time.Sleep(auditLockRetryDelay)
 	}
+}
+
+// reclaimStaleLock atomically reclaims a stale lock file: it renames the lock to a
+// per-acquirer unique name (only one racer can rename a given file), then verifies
+// the moved file is still stale; if a holder reacquired it in the gap it is
+// restored rather than stolen. Returns true only when a genuinely stale lock was
+// removed. Mirrors internal/cron/lock.go and internal/oauth/lock.go.
+func reclaimStaleLock(lockPath, token string, staleAfter time.Duration) bool {
+	reclaimed := fmt.Sprintf("%s.stale.%s", lockPath, token)
+	if err := os.Rename(lockPath, reclaimed); err != nil {
+		return false
+	}
+	if info, err := os.Stat(reclaimed); err == nil && time.Since(info.ModTime()) <= staleAfter {
+		_ = os.Rename(reclaimed, lockPath)
+		return false
+	}
+	_ = os.Remove(reclaimed)
+	return true
 }

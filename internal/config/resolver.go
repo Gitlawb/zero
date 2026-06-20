@@ -472,6 +472,18 @@ func applyProviderEnv(cfg *FileConfig, providerKind ProviderKind, env envProfile
 	if providerKind == ProviderKindOpenAI && baseURL != "" && !isOfficialOpenAIBaseURL(baseURL) {
 		profile.ProviderKind = ProviderKindOpenAICompatible
 	}
+	// When the env supplies only credentials (no baseURL) for a provider name that
+	// already exists, don't force the standard transport kind — a same-named
+	// openai-compatible/anthropic-compatible proxy or gateway must keep its kind.
+	// An empty kind makes mergeProfile preserve the existing provider's kind (H2).
+	if baseURL == "" {
+		for _, existing := range cfg.Providers {
+			if strings.TrimSpace(existing.Name) == profile.Name {
+				profile.ProviderKind = ""
+				break
+			}
+		}
+	}
 	mergeProvider(cfg, profile)
 }
 

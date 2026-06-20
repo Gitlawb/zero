@@ -216,6 +216,19 @@ func (c *Client) readError() error {
 	return errors.New("lsp client closed")
 }
 
+// IsClosed reports whether the client's connection has been torn down — the
+// server exited, a read error occurred, or Close was called (all close c.closed).
+// A closed client can never serve another request, so the manager evicts and
+// restarts its session rather than returning a permanently-dead one.
+func (c *Client) IsClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Client) write(payload any) error {
 	// Reject writes once the client is closed so Notify (and Call's request write)
 	// can't keep pushing frames onto a dead connection.

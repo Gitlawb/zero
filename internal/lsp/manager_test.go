@@ -251,3 +251,44 @@ func TestManagerCheckDegradesWhenServerBinaryMissing(t *testing.T) {
 		t.Fatalf("missing server binary should degrade to (nil,nil), got (%#v, %v)", diags, err)
 	}
 }
+
+func TestSessionForEvictsDeadSession(t *testing.T) {
+	var starts int
+	inner := stubStarter(nil, true) // neverPublish; this test only exercises session lifecycle
+	m := fastManager(func(ctx context.Context, cmd []string, root string) (lspServer, error) {
+		starts++
+		return inner(ctx, cmd, root)
+	})
+
+	sess1, err := m.sessionFor(context.Background(), []string{"gopls"})
+	if err != nil {
+		t.Fatalf("sessionFor: %v", err)
+	}
+	if starts != 1 {
+		t.Fatalf("starts = %d, want 1", starts)
+	}
+
+	// A live session is reused — no new server started.
+	if sess2, _ := m.sessionFor(context.Background(), []string{"gopls"}); sess2 != sess1 || starts != 1 {
+		t.Fatalf("live session should be reused: same=%v starts=%d", sess2 == sess1, starts)
+	}
+
+	// Simulate the language server crashing: its client closes.
+	_ = sess1.client.Close()
+	if !sess1.client.IsClosed() {
+		t.Fatal("client should report closed after Close")
+	}
+
+	// sessionFor must now evict the dead session and start a fresh server (H4) —
+	// otherwise every later diagnostic would fail forever against the dead one.
+	sess3, err := m.sessionFor(context.Background(), []string{"gopls"})
+	if err != nil {
+		t.Fatalf("sessionFor after crash: %v", err)
+	}
+	if starts != 2 {
+		t.Fatalf("a dead session must trigger a restart: starts=%d, want 2", starts)
+	}
+	if sess3 == sess1 {
+		t.Fatal("should return a fresh session, not the dead one")
+	}
+}

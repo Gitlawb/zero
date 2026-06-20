@@ -305,9 +305,15 @@ func (t *Team) removeMember(id string) {
 func (t *Team) liveAgents() map[string]struct{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	live := make(map[string]struct{}, len(t.members))
+	live := make(map[string]struct{}, len(t.members)+len(t.queue))
 	for _, m := range t.members {
 		live[m.ID] = struct{}{}
+	}
+	// Queued specs are over the concurrency cap but still owned and about to launch
+	// as slots free; count them live so orphan adoption never re-dispatches (and
+	// thus double-executes) a task whose member is merely waiting for a slot.
+	for _, spec := range t.queue {
+		live[spec.ID] = struct{}{}
 	}
 	return live
 }

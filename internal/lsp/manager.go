@@ -130,10 +130,19 @@ func (m *Manager) sessionFor(ctx context.Context, command []string) (*session, e
 	key := command[0]
 	m.mu.Lock()
 	if sess, ok := m.sessions[key]; ok {
+		if !sess.client.IsClosed() {
+			m.mu.Unlock()
+			return sess, nil
+		}
+		// The cached session's client has died (server crashed/exited/malformed
+		// frame). Evict it so a fresh server is started below — otherwise every
+		// later diagnostic fails forever against a permanently-dead session (H4).
+		delete(m.sessions, key)
 		m.mu.Unlock()
-		return sess, nil
+		_ = sess.server.Shutdown(context.Background()) // best-effort reap of the dead server
+	} else {
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 
 	server, err := m.starter(ctx, command, m.workspaceRoot)
 	if err != nil {
@@ -142,12 +151,12 @@ func (m *Manager) sessionFor(ctx context.Context, command []string) (*session, e
 	sess := newSession(server)
 
 	m.mu.Lock()
-	if existing, ok := m.sessions[key]; ok {
+	if existing, ok := m.sessions[key]; ok && !existing.client.IsClosed() {
 		m.mu.Unlock()
 		_ = server.Shutdown(context.Background()) // lost the start race; discard ours
 		return existing, nil
 	}
-	m.sessions[key] = sess
+	m.sessions[key] = sess // install ours (replacing an absent or already-dead entry)
 	m.mu.Unlock()
 	return sess, nil
 }

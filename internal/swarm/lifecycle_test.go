@@ -306,6 +306,27 @@ func TestAdoptOrphans(t *testing.T) {
 	}
 }
 
+func TestLiveAgentsIncludesQueuedSpecs(t *testing.T) {
+	// H1 regression: a spec queued over the concurrency cap is owned and about to
+	// launch, so it must count as a live agent. Otherwise AdoptOrphans sees its
+	// task as orphaned and re-dispatches it — double-executing the same task.
+	team := &Team{Name: "t", members: map[string]*Member{}, maxSize: 1}
+	if !team.admit(MemberSpec{ID: "a1", TaskID: "t1"}) {
+		t.Fatal("first spec should take the only slot and launch immediately")
+	}
+	team.addMember(&Member{ID: "a1"})
+	if team.admit(MemberSpec{ID: "a2", TaskID: "t2"}) {
+		t.Fatal("second spec is over the cap and should queue, not launch")
+	}
+	live := team.liveAgents()
+	if _, ok := live["a1"]; !ok {
+		t.Error("running member a1 missing from liveAgents")
+	}
+	if _, ok := live["a2"]; !ok {
+		t.Error("queued spec a2 missing from liveAgents — would be double-dispatched by AdoptOrphans")
+	}
+}
+
 func TestCollectScopesToTeam(t *testing.T) {
 	l := newLauncher(okFor)
 	sw := newSwarmFor(t, l)
