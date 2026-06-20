@@ -8,6 +8,38 @@ import (
 	"testing"
 )
 
+func TestLSPNavigateConfinesPathToWorkspace(t *testing.T) {
+	// Regression: lsp_navigate must enforce the same workspace confinement its
+	// sibling read-only tools do — an absolute or `..`-escaping path must be
+	// rejected before any read or LSP open, so it can't exfiltrate files off disk
+	// (reachable via indirect prompt injection).
+	root := t.TempDir()
+	tool := NewLSPNavigateTool(root) // workspace-only scope (nil)
+	escapes := []string{
+		"/etc/passwd",
+		"../../../../etc/passwd",
+		"../../../../../../etc/ssh/id_rsa",
+	}
+	for _, p := range escapes {
+		for _, op := range []string{"definition", "workspace_symbol"} {
+			args := map[string]any{"op": op, "path": p}
+			if op == "definition" {
+				args["line"], args["character"] = 1, 1
+			} else {
+				args["query"] = "x"
+			}
+			got := tool.Run(context.Background(), args)
+			if got.Status != StatusError {
+				t.Fatalf("path %q op %s: expected StatusError (confinement), got %s: %s", p, op, got.Status, got.Output)
+			}
+			// The error must not leak the resolved absolute path.
+			if strings.Contains(got.Output, "/etc/") && strings.Contains(got.Output, root) {
+				t.Fatalf("path %q: error should not echo an absolute out-of-workspace path: %q", p, got.Output)
+			}
+		}
+	}
+}
+
 func TestLSPNavigateRejectsBadArgs(t *testing.T) {
 	tool := NewLSPNavigateTool(t.TempDir())
 	cases := []map[string]any{

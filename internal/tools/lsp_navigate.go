@@ -19,12 +19,21 @@ import (
 type lspNavigateTool struct {
 	baseTool
 	workspaceRoot string
+	scope         PathScope
 	manager       *lsp.Manager
 }
 
-// NewLSPNavigateTool builds the tool with its own lazily-started LSP manager
-// (servers spin up on first use and are reused across calls within a session).
+// NewLSPNavigateTool builds the tool with workspace-only path confinement.
 func NewLSPNavigateTool(workspaceRoot string) Tool {
+	return NewScopedLSPNavigateTool(workspaceRoot, nil)
+}
+
+// NewScopedLSPNavigateTool builds the tool with its own lazily-started LSP
+// manager (servers spin up on first use and are reused across calls within a
+// session). The model-supplied path is resolved through the same scoped
+// confinement the sibling read-only tools use, so a `..` or absolute path
+// cannot read or open a file outside the workspace (or an extra granted root).
+func NewScopedLSPNavigateTool(workspaceRoot string, scope PathScope) Tool {
 	root := normalizeWorkspaceRoot(workspaceRoot)
 	return lspNavigateTool{
 		baseTool: baseTool{
@@ -52,6 +61,7 @@ func NewLSPNavigateTool(workspaceRoot string) Tool {
 			safety: readOnlySafety("Queries the language server for code navigation; reads files, modifies nothing."),
 		},
 		workspaceRoot: root,
+		scope:         scope,
 		manager:       lsp.NewManager(root),
 	}
 }
@@ -63,17 +73,28 @@ func (tool lspNavigateTool) Run(ctx context.Context, args map[string]any) Result
 	}
 	op := lsp.NavOp(strings.ToLower(strings.TrimSpace(opRaw)))
 
-	path, err := aliasedStringArg(args, []string{"path", "file", "file_path"}, "", true, false)
+	requestedPath, err := aliasedStringArg(args, []string{"path", "file", "file_path"}, "", true, false)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for lsp_navigate: " + err.Error())
 	}
 
-	text, readErr := tool.readFile(path)
-	if readErr != nil && op != lsp.NavWorkspaceSymbol {
-		return errorResult("Error: lsp_navigate could not read " + path + ": " + readErr.Error())
+	// Confine the model-supplied path to the workspace (or an extra granted root)
+	// BEFORE reading it or handing it to the language server — a `..` or absolute
+	// path must not read/open a file outside the boundary the sibling read-only
+	// tools enforce. Errors echo only the relative path, never an absolute one.
+	absPath, relPath, scopeErr := resolveScopedReadPath(tool.workspaceRoot, tool.scope, requestedPath)
+	if scopeErr != nil {
+		return errorResult("Error: lsp_navigate " + scopeErr.Error())
 	}
 
-	req := lsp.NavRequest{Op: op, Path: path, Text: text}
+	text, readErr := readWorkspaceFile(absPath)
+	if readErr != nil && op != lsp.NavWorkspaceSymbol {
+		return errorResult("Error: lsp_navigate could not read " + relPath + ": " + readErr.Error())
+	}
+
+	// Hand the LSP manager the resolved absolute path so it opens only the
+	// confined file (not the raw, possibly-escaping, model input).
+	req := lsp.NavRequest{Op: op, Path: absPath, Text: text}
 	switch op {
 	case lsp.NavWorkspaceSymbol:
 		query, qErr := stringArg(args, "query", "", true)
@@ -99,18 +120,16 @@ func (tool lspNavigateTool) Run(ctx context.Context, args map[string]any) Result
 		return errorResult("Error: lsp_navigate failed: " + navErr.Error())
 	}
 	if !ok {
-		return okResult(fmt.Sprintf("No language server available for %s — lsp_navigate is unavailable for this file type. Fall back to grep/read_file.", filepath.Base(path)))
+		return okResult(fmt.Sprintf("No language server available for %s — lsp_navigate is unavailable for this file type. Fall back to grep/read_file.", filepath.Base(relPath)))
 	}
 
 	return okResult(tool.formatResult(op, locations, symbols))
 }
 
-func (tool lspNavigateTool) readFile(path string) (string, error) {
-	abs := path
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(tool.workspaceRoot, path)
-	}
-	data, err := os.ReadFile(abs)
+// readWorkspaceFile reads an already-confined absolute path (resolved by
+// resolveScopedReadPath). Returns "" + error when the file can't be read.
+func readWorkspaceFile(absPath string) (string, error) {
+	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return "", err
 	}
