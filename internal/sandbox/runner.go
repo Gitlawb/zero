@@ -370,9 +370,18 @@ func existingBubblewrapMounts() []string {
 }
 
 func sandboxEnvironment(policy Policy, backend BackendName, home string) []string {
+	pathValue := firstEnv("PATH", defaultPath())
+	if runtime.GOOS == "darwin" {
+		// The sandbox runs commands with a scrubbed, minimal PATH that omits the
+		// Homebrew / usr-local bin dirs, so a bare `python3`/`node` resolves to a
+		// system stub (the macOS /usr/bin/python3 placeholder) or is not found at
+		// all. Make the user-tool dirs reachable to match the read/map-executable
+		// allowances added for those trees.
+		pathValue = ensureMacToolPaths(pathValue)
+	}
 	env := []string{
 		"HOME=" + home,
-		"PATH=" + firstEnv("PATH", defaultPath()),
+		"PATH=" + pathValue,
 		"TERM=" + firstEnv("TERM", "dumb"),
 		EnvSandboxBackend + "=" + string(backend),
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
@@ -403,6 +412,42 @@ func defaultPath() string {
 		return os.Getenv("PATH")
 	}
 	return "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
+// macToolPaths are the user-package bin dirs that hold node/python/etc. on macOS
+// (Homebrew on Apple Silicon under /opt/homebrew, and /usr/local for Intel/older
+// installs). They are NOT in the scrubbed default PATH, so the sandbox would
+// otherwise miss user-installed interpreters.
+var macToolPaths = []string{
+	"/opt/homebrew/bin",
+	"/opt/homebrew/sbin",
+	"/usr/local/bin",
+	"/usr/local/sbin",
+}
+
+// ensureMacToolPaths prepends any missing macToolPaths to a PATH value so a
+// sandboxed command can find Homebrew/usr-local tools. Existing entries are kept
+// in place (no duplicates, original order preserved after the prepended dirs).
+func ensureMacToolPaths(path string) string {
+	present := make(map[string]bool)
+	for _, entry := range strings.Split(path, ":") {
+		if entry != "" {
+			present[entry] = true
+		}
+	}
+	missing := make([]string, 0, len(macToolPaths))
+	for _, dir := range macToolPaths {
+		if !present[dir] {
+			missing = append(missing, dir)
+		}
+	}
+	if len(missing) == 0 {
+		return path
+	}
+	if path == "" {
+		return strings.Join(missing, ":")
+	}
+	return strings.Join(missing, ":") + ":" + path
 }
 
 // sandboxWritableDevices are the standard character devices that virtually every
@@ -717,8 +762,12 @@ func macosPlatformReadRoots() []string {
 		"/usr/lib",
 		"/usr/libexec",
 		"/usr/share",
-		"/usr/local/lib",
-		"/opt/homebrew/lib",
+		// User-installed package trees (Homebrew on Apple Silicon, /usr/local on
+		// Intel / older installs). Broadened from the bare lib dirs to the whole
+		// tree so the interpreters in .../bin and their Cellar/opt dylibs are
+		// readable; writes stay confined to the workspace.
+		"/usr/local",
+		"/opt/homebrew",
 		"/etc",
 		"/private/etc",
 		"/var/db",
@@ -746,7 +795,12 @@ func seatbeltPlatformRuntimeRules() string {
 		`  (subpath "/System/iOSSupport/System/Library/Frameworks")`,
 		`  (subpath "/System/iOSSupport/System/Library/PrivateFrameworks")`,
 		`  (subpath "/System/iOSSupport/System/Library/SubFrameworks")`,
-		`  (subpath "/usr/lib"))`,
+		`  (subpath "/usr/lib")`,
+		// User-installed tools load their own dylibs (e.g. node -> libnode/libuv,
+		// python3 -> its framework) from these trees; without map-executable here
+		// a Homebrew/usr-local binary fails to start even when it is on PATH.
+		`  (subpath "/usr/local")`,
+		`  (subpath "/opt/homebrew"))`,
 		`(allow system-mac-syscall (mac-policy-name "vnguard"))`,
 		`(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))`,
 		`(allow file-read-metadata file-test-existence`,
@@ -755,6 +809,14 @@ func seatbeltPlatformRuntimeRules() string {
 		`  (literal "/var")`,
 		`  (literal "/private/etc/localtime"))`,
 		`(allow file-read-metadata file-test-existence (path-ancestors "/System/Volumes/Data/private"))`,
+		// realpath()/getcwd() lstat every ancestor of a path, so resolving a tool
+		// under /opt/homebrew or /usr/local also stats the parent dirs (e.g. /opt,
+		// /usr). The subpath read rules above cover the trees themselves but not
+		// those ancestors, so without this a Homebrew python3 fails at startup with
+		// "realpath: /opt/homebrew/bin/: Operation not permitted" even though it is
+		// on PATH and readable. node only exec()s (kernel traversal) so it is not
+		// affected — which is exactly how this asymmetry was diagnosed.
+		`(allow file-read-metadata file-test-existence (path-ancestors "/opt/homebrew") (path-ancestors "/usr/local"))`,
 		`(allow file-read* file-test-existence (literal "/"))`,
 		`(allow system-fsctl (fsctl-command FSIOC_CAS_BSDFLAGS))`,
 		`(allow file-read* file-test-existence`,
