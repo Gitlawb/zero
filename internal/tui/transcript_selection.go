@@ -497,6 +497,9 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 }
 
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
+	if row.final {
+		return m.renderSelectableAssistantGlamourRow(rowIndex, row, width, startBodyY)
+	}
 	tableMeasure := width
 	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
@@ -513,19 +516,43 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 	if !m.transcriptSelection.active {
 		return m.renderRow(row, width, rowContext{}), selectable
 	}
-	lines := make([]string, 0, len(wrapped)+1)
-	textStyle := zeroTheme.sayText
-	if row.final {
-		textStyle = zeroTheme.ink
-	}
+	lines := make([]string, 0, len(wrapped))
 	for index, line := range wrapped {
 		meta := selectable[index]
-		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
-		lines = append(lines, rendered)
+		lines = append(lines, m.renderTranscriptSelectableMarkdownText(meta, line, zeroTheme.sayText))
 	}
-	if row.final {
-		lines = append(lines, doneLine(row, false))
+	return strings.Join(lines, "\n"), selectable
+}
+
+// renderSelectableAssistantGlamourRow renders a FINAL assistant row through
+// glamour for both display and selectable metadata, keeping colored display line N
+// aligned with its plain selectable twin. During an active selection, a line under
+// the cursor falls back to plain text + selection highlight (so the copy buffer is
+// clean); every other line keeps its glamour coloring.
+func (m model) renderSelectableAssistantGlamourRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
+	display, plain := assistantGlamourLines(row.text, width)
+	selectable := make([]transcriptSelectableLine, 0, len(plain))
+	for index, text := range plain {
+		selectable = append(selectable, transcriptSelectableLine{
+			bodyY:     startBodyY + index,
+			rowIndex:  rowIndex,
+			textStart: 0,
+			text:      text,
+		})
 	}
+	if !m.transcriptSelection.active {
+		return m.renderRow(row, width, rowContext{}), selectable
+	}
+	lines := make([]string, 0, len(display)+1)
+	for index := range display {
+		meta := selectable[index]
+		if _, _, ok := m.selectedColumnsForTranscriptLine(meta); ok {
+			lines = append(lines, m.renderTranscriptSelectableText(meta, zeroTheme.ink))
+		} else {
+			lines = append(lines, display[index])
+		}
+	}
+	lines = append(lines, doneLine(row, false))
 	return strings.Join(lines, "\n"), selectable
 }
 

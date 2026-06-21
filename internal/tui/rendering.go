@@ -504,21 +504,22 @@ func renderUserPromptPaddingLine(width int) string {
 	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render(strings.Repeat(" ", maxInt(0, width-1)))
 }
 
-// renderAssistantRow draws final answers as plain response text plus completion
-// metadata; a non-final assistant row (e.g. a rehydrated inline notice) renders
-// as interim-style prose.
+// renderAssistantRow draws a final answer as themed glamour markdown plus a
+// completion line; a non-final assistant row (e.g. a rehydrated inline notice)
+// renders with the lightweight, partial-safe renderer in interim "say" tone.
 func renderAssistantRow(row transcriptRow, width int) string {
-	tableMeasure := width
-	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
 	if !row.final {
+		lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), width)
 		for index := range lines {
 			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.sayText)
 		}
 		return strings.Join(lines, "\n")
 	}
-	for index := range lines {
-		lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
-	}
+	// Final answers render as Lime Refined glamour markdown (headings, lists,
+	// inline code, syntax-highlighted fenced blocks) plus the completion line.
+	display, _ := assistantGlamourLines(row.text, width)
+	lines := make([]string, 0, len(display)+1)
+	lines = append(lines, display...)
 	lines = append(lines, doneLine(row, false))
 	return strings.Join(lines, "\n")
 }

@@ -55,14 +55,17 @@ func applyTheme(mode themeMode, hasDarkBackground bool) themeMode {
 	}
 	switch resolved {
 	case themeLight:
+		zeroPalette = lightPalette
 		zeroTheme = buildTheme(lightPalette)
 	default:
+		zeroPalette = darkPalette
 		zeroTheme = buildTheme(darkPalette)
 	}
 	rebuildStreamingFadePalette()
 	if defaultRenderCache != nil {
 		defaultRenderCache.clear() // old-palette entries must not be reused
 	}
+	clearGlamourCaches() // rebuild the glamour renderer + line cache for the new palette
 	return resolved
 }
 

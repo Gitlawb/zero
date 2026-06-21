@@ -284,6 +284,12 @@ func buildTheme(p palette) tuiTheme {
 // subsequent render.
 var zeroTheme = buildTheme(darkPalette)
 
+// zeroPalette is the raw token table behind the active zeroTheme. buildTheme drops
+// the source hex once resolved, so the glamour assistant renderer (assistant_glamour.go)
+// keeps the palette here to theme its StyleConfig. Reassigned alongside zeroTheme in
+// applyTheme; reads happen on the update goroutine only, like zeroTheme.
+var zeroPalette = darkPalette
+
 // onPanel returns a copy of style that paints on the panel surface. lipgloss
 // resets the background between adjacent Render calls, so every segment of a
 // panel row (including padding) must carry the background itself — renderers wrap
