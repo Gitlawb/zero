@@ -37,11 +37,6 @@ func thinkingBudgetForEffort(effort string) int {
 	}
 }
 
-// defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
-// without closing the connection, so a stalled-but-open upstream cannot hang the
-// agent forever.
-const defaultStreamIdleTimeout = 90 * time.Second
-
 // Options configures a Gemini streamGenerateContent provider.
 type Options struct {
 	APIKey          string
@@ -55,7 +50,8 @@ type Options struct {
 	HTTPClient      *http.Client
 	UserAgent       string
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
-	// Zero uses defaultStreamIdleTimeout.
+	// When unset, Zero uses providerio.ResolveStreamIdleTimeout — the
+	// ZERO_STREAM_IDLE_TIMEOUT override or providerio.DefaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
 }
 
@@ -88,10 +84,6 @@ func New(options Options) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	idleTimeout := options.StreamIdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultStreamIdleTimeout
-	}
 	return &Provider{
 		apiKey:            options.APIKey,
 		baseURL:           baseURL,
@@ -103,7 +95,7 @@ func New(options Options) (*Provider, error) {
 		customHeaders:     providerio.CopyHeaders(options.CustomHeaders),
 		httpClient:        providerio.HTTPClient(options.HTTPClient),
 		userAgent:         options.UserAgent,
-		streamIdleTimeout: idleTimeout,
+		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
 	}, nil
 }
 

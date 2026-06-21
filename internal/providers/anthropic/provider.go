@@ -68,11 +68,6 @@ func resolveThinking(effort string, maxTokens int) (budget int, effectiveMax int
 	return budget, effectiveMax, true
 }
 
-// defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
-// without closing the connection, so a stalled-but-open upstream cannot hang the
-// agent forever.
-const defaultStreamIdleTimeout = 90 * time.Second
-
 // Options configures an Anthropic Messages API provider.
 type Options struct {
 	APIKey          string
@@ -92,7 +87,8 @@ type Options struct {
 	// the API key. See providerio.SendWithAuthRetry.
 	OAuthResolver providerio.TokenResolver
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
-	// Zero uses defaultStreamIdleTimeout.
+	// When unset, Zero uses providerio.ResolveStreamIdleTimeout — the
+	// ZERO_STREAM_IDLE_TIMEOUT override or providerio.DefaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
 }
 
@@ -132,10 +128,6 @@ func New(options Options) (*Provider, error) {
 	if version == "" {
 		version = defaultVersion
 	}
-	idleTimeout := options.StreamIdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultStreamIdleTimeout
-	}
 	return &Provider{
 		apiKey:            options.APIKey,
 		baseURL:           baseURL,
@@ -150,7 +142,7 @@ func New(options Options) (*Provider, error) {
 		oauthResolver:     options.OAuthResolver,
 		httpClient:        providerio.HTTPClient(options.HTTPClient),
 		userAgent:         options.UserAgent,
-		streamIdleTimeout: idleTimeout,
+		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
 	}, nil
 }
 

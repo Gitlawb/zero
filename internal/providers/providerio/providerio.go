@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,47 @@ const maxSSELineBytes = 16 * 1024 * 1024
 // ErrStreamIdle reports that a streaming upstream stopped sending data without
 // closing the connection. Callers surface it as an idle-timeout error.
 var ErrStreamIdle = errors.New("idle timeout (upstream stopped sending data)")
+
+// DefaultStreamIdleTimeout is the single source of truth for how long every
+// provider waits on a silent stream before aborting it. The watchdog only fires
+// on genuine silence — SSE keep-alive comments reset it (see
+// ScanSSEDataWithContext) — so this needs to be generous enough for slow cloud
+// and reasoning backends that pause for minutes without heartbeating, while
+// still bounding a truly hung connection. 90s was too aggressive and killed
+// healthy long generations; 5 minutes is the floor a real stall must cross.
+// Override globally with ZERO_STREAM_IDLE_TIMEOUT.
+const DefaultStreamIdleTimeout = 5 * time.Minute
+
+// streamIdleTimeoutEnv is the global override for the stream idle timeout. It
+// accepts a Go duration ("5m", "300s", "90s") or a bare number of seconds
+// ("300"). A value of "0", "off", "none", or "disabled" turns the watchdog off
+// entirely (streams may then hang until the HTTP/transport layer gives up).
+const streamIdleTimeoutEnv = "ZERO_STREAM_IDLE_TIMEOUT"
+
+// ResolveStreamIdleTimeout selects the effective stream idle timeout. Precedence:
+// an explicit positive option (e.g. set by a test) wins; otherwise the
+// ZERO_STREAM_IDLE_TIMEOUT env override if set and valid; otherwise
+// DefaultStreamIdleTimeout. A returned value <= 0 disables the idle watchdog.
+func ResolveStreamIdleTimeout(option time.Duration) time.Duration {
+	if option > 0 {
+		return option
+	}
+	if raw := strings.TrimSpace(os.Getenv(streamIdleTimeoutEnv)); raw != "" {
+		switch strings.ToLower(raw) {
+		case "0", "off", "none", "disabled":
+			return 0
+		}
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+		if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+		// Unparseable / non-positive: fall through to the default rather than
+		// silently disabling the watchdog on a typo.
+	}
+	return DefaultStreamIdleTimeout
+}
 
 // NormalizeBaseURL trims trailing slashes and validates an HTTP API base URL.
 func NormalizeBaseURL(baseURL string, defaultBaseURL string, label string) (string, error) {
