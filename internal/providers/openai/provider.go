@@ -18,11 +18,6 @@ import (
 
 const defaultBaseURL = "https://api.openai.com/v1"
 
-// defaultStreamIdleTimeout aborts a streaming read when the upstream goes silent
-// without closing the connection. Hosted gateways (e.g. Ollama Cloud) sometimes
-// stall mid-stream after a tool-call delta; without this the agent blocks forever.
-const defaultStreamIdleTimeout = 90 * time.Second
-
 // Options configures an OpenAI-compatible chat completions provider.
 type Options struct {
 	APIKey  string
@@ -48,7 +43,8 @@ type Options struct {
 	// own default applies). Resolved from the model registry by the factory.
 	MaxTokens int
 	// StreamIdleTimeout aborts the stream if no data arrives for this long.
-	// Zero uses defaultStreamIdleTimeout.
+	// When unset, Zero uses providerio.ResolveStreamIdleTimeout — the
+	// ZERO_STREAM_IDLE_TIMEOUT override or providerio.DefaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
 	// ParseThinkTags converts streamed <think>...</think> content into reasoning
 	// events for OpenAI-compatible models known to emit that legacy format.
@@ -111,11 +107,6 @@ func New(options Options) (*Provider, error) {
 		httpClient = http.DefaultClient
 	}
 
-	idleTimeout := options.StreamIdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultStreamIdleTimeout
-	}
-
 	maxTokens := options.MaxTokens
 	if maxTokens < 0 {
 		maxTokens = 0
@@ -134,7 +125,7 @@ func New(options Options) (*Provider, error) {
 		maxTokens:         maxTokens,
 		httpClient:        httpClient,
 		userAgent:         options.UserAgent,
-		streamIdleTimeout: idleTimeout,
+		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
 		parseThinkTags:    options.ParseThinkTags,
 		setRequestExtra:   options.SetRequestExtra,
 	}, nil

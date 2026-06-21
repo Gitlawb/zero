@@ -185,6 +185,8 @@ Bring your own key — or no key at all for local runtimes.
 
 The model registry tracks each model's capabilities, context window, and cost — and the live model picker discovers what your provider actually serves.
 
+**Slow or stalling streams.** Every provider aborts a stream that goes completely silent (no data and no keep-alive) for `ZERO_STREAM_IDLE_TIMEOUT` (default **5 minutes**) so a hung connection can't block the agent forever. SSE keep-alives reset the timer, so a heartbeating-but-slow backend is never killed. If a slow cloud or reasoning model still trips it, raise the limit — `ZERO_STREAM_IDLE_TIMEOUT=10m` (accepts a Go duration or bare seconds; `0`/`off` disables the watchdog).
+
 ## Tools
 
 | Tool | Purpose | Side effect |
