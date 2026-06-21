@@ -687,6 +687,13 @@ func (m model) quit() (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
+	if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
+		m.clearComposer()
+		m.clearSuggestions()
+		m.exitConfirmActive = false
+		m.exitConfirmSeq++
+		return m, nil
+	}
 	if m.exitConfirmActive {
 		m.exitConfirmActive = false
 		m.exitConfirmSeq++

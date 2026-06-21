@@ -1610,6 +1610,41 @@ func TestCtrlCRequiresSecondPressToExit(t *testing.T) {
 	}
 }
 
+func TestCtrlCClearsComposerBeforeExitConfirmation(t *testing.T) {
+	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
+	m.input.SetValue("draft prompt")
+	m.recomputeSuggestions()
+
+	updated, cmd := m.Update(testKeyCtrl('c'))
+	next := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("Ctrl+C with a draft should clear the composer without scheduling exit confirmation")
+	}
+	if next.composerValue() != "" {
+		t.Fatalf("composer value = %q, want empty after Ctrl+C", next.composerValue())
+	}
+	if next.exitConfirmActive {
+		t.Fatal("Ctrl+C with a draft should not arm exit confirmation")
+	}
+	if next.exiting {
+		t.Fatal("Ctrl+C with a draft should not mark model exiting")
+	}
+	status := plainRender(t, next.statusLine(80))
+	if strings.Contains(status, ctrlCExitConfirmText) || !strings.Contains(status, "tokenrouter") {
+		t.Fatalf("status line = %q, want provider restored with no exit confirmation", status)
+	}
+
+	updated, cmd = next.Update(testKeyCtrl('c'))
+	next = updated.(model)
+	if !next.exitConfirmActive {
+		t.Fatal("Ctrl+C on an empty composer should arm exit confirmation")
+	}
+	if cmd == nil {
+		t.Fatal("Ctrl+C on an empty composer should schedule confirmation expiry")
+	}
+}
+
 func TestCtrlCExitConfirmationExpires(t *testing.T) {
 	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
 
