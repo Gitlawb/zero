@@ -25,7 +25,17 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 		return 1
 	}
-	token, err := createWindowsRestrictedTokenForCapabilitySIDs(capabilitySIDs)
+	offlineSID, err := WindowsOfflineMarkerSID(config.SandboxHome)
+	if err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		return 1
+	}
+	// Compose the restricting-SID set: both modes keep the write-capability SIDs
+	// (workspace write-jail); deny additionally carries the offline-marker SID
+	// that the persistent WFP block filter matches — so a deny command has no
+	// network while an approved allow command reaches it, both write-jailed.
+	tokenSIDs := windowsRuntimeTokenSIDs(capabilitySIDs, offlineSID, config.PermissionProfile.Network.Mode)
+	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 		return 1

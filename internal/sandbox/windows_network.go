@@ -43,63 +43,45 @@ func ValidateWindowsNetworkPolicy(network NetworkPolicy) error {
 	}
 }
 
-func BuildWindowsNetworkPlan(config WindowsSandboxCommandConfig) (WindowsNetworkPlan, error) {
-	network := config.PermissionProfile.Network
-	switch network.Mode {
-	case NetworkAllow:
-		return WindowsNetworkPlan{
-			Mode:        NetworkAllow,
-			ProviderKey: windowsWFPProviderKey,
-			SubLayerKey: windowsWFPSubLayerKey,
-		}, nil
-	case NetworkDeny:
-		identitySIDs, err := WindowsNetworkIdentitySIDsForConfig(config)
-		if err != nil {
-			return WindowsNetworkPlan{}, err
-		}
-		if len(identitySIDs) == 0 {
-			return WindowsNetworkPlan{}, errors.New("windows network enforcement requires at least one sandbox identity SID")
-		}
-		return WindowsNetworkPlan{
-			Mode:         NetworkDeny,
-			ProviderKey:  windowsWFPProviderKey,
-			SubLayerKey:  windowsWFPSubLayerKey,
-			IdentitySIDs: identitySIDs,
-			Filters:      windowsDenyWFPFilterSpecs(),
-		}, nil
-	case "":
-		return WindowsNetworkPlan{}, fmt.Errorf("%w: missing network mode", ErrWindowsNetworkEnforcementUnavailable)
-	default:
-		return WindowsNetworkPlan{}, fmt.Errorf("unsupported Windows sandbox network mode %q", network.Mode)
-	}
-}
-
-func WindowsNetworkIdentitySIDsForConfig(config WindowsSandboxCommandConfig) ([]string, error) {
-	identitySIDs, err := WindowsCapabilitySIDsForConfig(config)
+// BuildWindowsNetworkInfraPlan returns the mode-INDEPENDENT network
+// infrastructure that `zero sandbox setup` installs: the persistent outbound
+// block filters scoped to the sandbox home's offline-marker SID. It is identical
+// for allow and deny command configs — the per-command mode is enforced at
+// runtime by whether the restricted token carries the offline-marker SID, not by
+// which filters exist. This is what the setup marker fingerprints, so one setup
+// validly serves both modes.
+func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNetworkPlan, error) {
+	offlineSID, err := WindowsOfflineMarkerSID(config.SandboxHome)
 	if err != nil {
-		return nil, fmt.Errorf("resolve Windows network identity SIDs: %w", err)
+		return WindowsNetworkPlan{}, err
 	}
-	return canonicalWindowsNetworkSIDs(identitySIDs), nil
+	return WindowsNetworkPlan{
+		Mode:         NetworkDeny,
+		ProviderKey:  windowsWFPProviderKey,
+		SubLayerKey:  windowsWFPSubLayerKey,
+		IdentitySIDs: []string{offlineSID},
+		Filters:      windowsDenyWFPFilterSpecs(),
+	}, nil
 }
 
-func WindowsNetworkPlanHash(plan WindowsNetworkPlan) (string, error) {
-	plan.IdentitySIDs = canonicalWindowsNetworkSIDs(plan.IdentitySIDs)
-	plan.Filters = canonicalWindowsWFPFilterSpecs(plan.Filters)
-	bytes, err := json.Marshal(plan)
-	if err != nil {
-		return "", fmt.Errorf("marshal windows network plan hash input: %w", err)
-	}
-	sum := sha256.Sum256(bytes)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func WindowsNetworkPolicyHash(network NetworkPolicy) (string, error) {
+// WindowsNetworkInfraHash fingerprints the provisioned (mode-independent) network
+// infrastructure so the setup marker validates against the same setup for BOTH
+// command modes. It never folds in the per-command network mode.
+func WindowsNetworkInfraHash(plan WindowsNetworkPlan) (string, error) {
 	canonical := struct {
-		Mode NetworkMode `json:"mode"`
-	}{Mode: network.Mode}
+		ProviderKey  string                 `json:"providerKey"`
+		SubLayerKey  string                 `json:"subLayerKey"`
+		IdentitySIDs []string               `json:"identitySids"`
+		Filters      []WindowsWFPFilterSpec `json:"filters"`
+	}{
+		ProviderKey:  plan.ProviderKey,
+		SubLayerKey:  plan.SubLayerKey,
+		IdentitySIDs: canonicalWindowsNetworkSIDs(plan.IdentitySIDs),
+		Filters:      canonicalWindowsWFPFilterSpecs(plan.Filters),
+	}
 	bytes, err := json.Marshal(canonical)
 	if err != nil {
-		return "", fmt.Errorf("marshal windows network policy hash input: %w", err)
+		return "", fmt.Errorf("marshal windows network infra hash input: %w", err)
 	}
 	sum := sha256.Sum256(bytes)
 	return hex.EncodeToString(sum[:]), nil

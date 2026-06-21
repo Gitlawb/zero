@@ -13,7 +13,7 @@ import (
 
 const WindowsSandboxCommandRunnerName = "zero-windows-command-runner.exe"
 
-const windowsCapabilitySIDSchemaVersion = 1
+const windowsCapabilitySIDSchemaVersion = 2
 
 // Hidden subcommands the main zero binary answers to when it acts as its own
 // Windows sandbox helper (self-dispatch). The "__" prefix can never collide with
@@ -393,6 +393,12 @@ type WindowsCapabilitySIDs struct {
 	ReadOnly           string            `json:"readOnly"`
 	WorkspaceByRoot    map[string]string `json:"workspaceByRoot,omitempty"`
 	WritableRootByPath map[string]string `json:"writableRootByPath,omitempty"`
+	// Offline is a synthetic SID that carries NO filesystem ACL. The persistent
+	// WFP outbound-block filter is scoped to it, so a command's network is gated
+	// purely by whether its restricted token carries this SID: offline (deny)
+	// commands include it and are blocked; online (approved) commands omit it and
+	// reach the network — both still write-jailed by the capability SIDs.
+	Offline string `json:"offline,omitempty"`
 }
 
 func ResolveWindowsSandboxHome(env map[string]string) (string, error) {
@@ -426,6 +432,16 @@ func LoadOrCreateWindowsCapabilitySIDs(sandboxHome string) (WindowsCapabilitySID
 		}
 		normalizeWindowsCapabilitySIDs(&caps)
 		if caps.ReadOnly != "" {
+			// Back-compat: an older (schema 1) file has no offline-marker SID.
+			// Mint one and persist so the setup helper and the runner agree on a
+			// single value for the WFP filter scope across processes.
+			if caps.Offline == "" {
+				caps.Offline = randomWindowsCapabilitySID()
+				caps.SchemaVersion = windowsCapabilitySIDSchemaVersion
+				if err := saveWindowsCapabilitySIDs(path, caps); err != nil {
+					return WindowsCapabilitySIDs{}, err
+				}
+			}
 			return caps, nil
 		}
 	} else if !os.IsNotExist(err) {
@@ -434,6 +450,7 @@ func LoadOrCreateWindowsCapabilitySIDs(sandboxHome string) (WindowsCapabilitySID
 	caps := WindowsCapabilitySIDs{
 		SchemaVersion:      windowsCapabilitySIDSchemaVersion,
 		ReadOnly:           randomWindowsCapabilitySID(),
+		Offline:            randomWindowsCapabilitySID(),
 		WorkspaceByRoot:    map[string]string{},
 		WritableRootByPath: map[string]string{},
 	}
@@ -441,6 +458,34 @@ func LoadOrCreateWindowsCapabilitySIDs(sandboxHome string) (WindowsCapabilitySID
 		return WindowsCapabilitySIDs{}, err
 	}
 	return caps, nil
+}
+
+// WindowsOfflineMarkerSID returns the sandbox home's offline-marker SID (minting
+// and persisting it on first use). The persistent WFP block filter is scoped to
+// this SID; a deny-mode command's token carries it, an allow-mode command's does
+// not.
+func WindowsOfflineMarkerSID(sandboxHome string) (string, error) {
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(sandboxHome)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(caps.Offline) == "" {
+		return "", errors.New("windows sandbox offline-marker SID is missing")
+	}
+	return caps.Offline, nil
+}
+
+// windowsRuntimeTokenSIDs composes the restricting-SID set for the sandbox's
+// restricted token. Both modes carry the write-capability SIDs (so the workspace
+// write-jail holds in either case); DENY additionally carries the offline-marker
+// SID that the persistent WFP block filter matches, so an offline command has no
+// network while an approved online command does.
+func windowsRuntimeTokenSIDs(capabilitySIDs []string, offlineSID string, mode NetworkMode) []string {
+	out := append([]string(nil), capabilitySIDs...)
+	if mode == NetworkDeny && strings.TrimSpace(offlineSID) != "" {
+		out = append(out, offlineSID)
+	}
+	return out
 }
 
 func WindowsWorkspaceCapabilitySID(sandboxHome string, root string) (string, error) {

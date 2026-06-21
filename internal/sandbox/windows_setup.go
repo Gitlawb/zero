@@ -15,7 +15,7 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 3
+const windowsSandboxSetupMarkerSchemaVersion = 4
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string
@@ -32,12 +32,17 @@ type WindowsSandboxSetupConfig struct {
 }
 
 type WindowsSandboxSetupMarker struct {
-	SchemaVersion     int    `json:"schemaVersion"`
-	ACLPlanHash       string `json:"aclPlanHash"`
-	ACLPlanEntries    int    `json:"aclPlanEntries"`
-	NetworkPolicyHash string `json:"networkPolicyHash"`
-	NetworkPlanHash   string `json:"networkPlanHash"`
-	NetworkFilters    int    `json:"networkFilters"`
+	SchemaVersion  int    `json:"schemaVersion"`
+	ACLPlanHash    string `json:"aclPlanHash"`
+	ACLPlanEntries int    `json:"aclPlanEntries"`
+	// NetworkInfraHash fingerprints the mode-INDEPENDENT network infrastructure
+	// setup provisioned (block filters scoped to the offline-marker SID), so one
+	// marker validly serves both an allow command and a deny command. It replaces
+	// the old per-command NetworkPolicyHash/NetworkPlanHash, which locked the
+	// marker to a single mode and bricked approved network commands.
+	NetworkInfraHash string `json:"networkInfraHash"`
+	OfflineFilterSID string `json:"offlineFilterSid"`
+	NetworkFilters   int    `json:"networkFilters"`
 }
 
 // WindowsSandboxSetupPathForRunner derives the setup helper's path from a
@@ -182,25 +187,28 @@ func BuildWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) (WindowsSa
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
-	networkHash, err := WindowsNetworkPolicyHash(config.PermissionProfile.Network)
+	// Fingerprint the mode-INDEPENDENT network infrastructure (block filters
+	// scoped to the offline-marker SID), NOT the per-command network mode, so the
+	// marker validates for both allow and deny commands against this one setup.
+	infraPlan, err := BuildWindowsNetworkInfraPlan(config.commandConfig())
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
-	networkPlan, err := BuildWindowsNetworkPlan(config.commandConfig())
+	infraHash, err := WindowsNetworkInfraHash(infraPlan)
 	if err != nil {
 		return WindowsSandboxSetupMarker{}, err
 	}
-	networkPlanHash, err := WindowsNetworkPlanHash(networkPlan)
-	if err != nil {
-		return WindowsSandboxSetupMarker{}, err
+	offlineSID := ""
+	if len(infraPlan.IdentitySIDs) > 0 {
+		offlineSID = infraPlan.IdentitySIDs[0]
 	}
 	return WindowsSandboxSetupMarker{
-		SchemaVersion:     windowsSandboxSetupMarkerSchemaVersion,
-		ACLPlanHash:       hash,
-		ACLPlanEntries:    len(plan.Entries),
-		NetworkPolicyHash: networkHash,
-		NetworkPlanHash:   networkPlanHash,
-		NetworkFilters:    len(networkPlan.Filters),
+		SchemaVersion:    windowsSandboxSetupMarkerSchemaVersion,
+		ACLPlanHash:      hash,
+		ACLPlanEntries:   len(plan.Entries),
+		NetworkInfraHash: infraHash,
+		OfflineFilterSID: offlineSID,
+		NetworkFilters:   len(infraPlan.Filters),
 	}, nil
 }
 
@@ -261,10 +269,16 @@ func ValidateWindowsSandboxSetupMarker(config WindowsSandboxSetupConfig) error {
 	if actual.ACLPlanHash != expected.ACLPlanHash || actual.ACLPlanEntries != expected.ACLPlanEntries {
 		return errors.New("windows sandbox setup is out of date: permission roots or deny lists changed")
 	}
-	if actual.NetworkPolicyHash != expected.NetworkPolicyHash {
-		return errors.New("windows sandbox setup is out of date: network policy changed")
+	// Mode-agnostic: validate the provisioned infrastructure, never the
+	// per-command network mode — so an approved (allow) network command and an
+	// ordinary (deny) command both validate against this one setup.
+	if actual.NetworkInfraHash != expected.NetworkInfraHash {
+		return errors.New("windows sandbox setup is out of date: network infrastructure changed")
 	}
-	if actual.NetworkPlanHash != expected.NetworkPlanHash || actual.NetworkFilters != expected.NetworkFilters {
+	if actual.OfflineFilterSID != expected.OfflineFilterSID {
+		return errors.New("windows sandbox setup is out of date: offline network identity changed")
+	}
+	if actual.NetworkFilters != expected.NetworkFilters {
 		return errors.New("windows sandbox setup is out of date: network enforcement plan changed")
 	}
 	return nil

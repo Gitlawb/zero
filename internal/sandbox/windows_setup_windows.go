@@ -22,7 +22,10 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
 	}
-	networkPlan, err := BuildWindowsNetworkPlan(config.commandConfig())
+	// Always provision the mode-INDEPENDENT infrastructure: the outbound block
+	// filters scoped to the offline-marker SID. Runtime gates network per command
+	// by whether the token carries that SID, so one setup serves both modes.
+	networkPlan, err := BuildWindowsNetworkInfraPlan(config.commandConfig())
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 1
