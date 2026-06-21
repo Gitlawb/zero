@@ -29,7 +29,9 @@ func NewUpdatePlanTool() *updatePlanTool {
 			description: "Create or update the in-memory plan for the current task. " +
 				"Pass the full ordered list of steps each call; it replaces the previous plan. " +
 				"Each item needs a `content` string; `status` defaults to \"pending\" and `id` is " +
-				"auto-numbered, so you only need to supply `content` (and `status` as the task progresses).",
+				"auto-numbered, so you only need to supply `content` (and `status` as the task progresses). " +
+				"Non-canonical status values are coerced to the nearest of pending/in_progress/completed/failed, " +
+				"and at most one item stays in_progress (earlier ones are marked completed).",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -70,6 +72,7 @@ func (tool *updatePlanTool) Run(_ context.Context, args map[string]any) Result {
 	if err != nil {
 		return errorResult("Error: Invalid arguments for update_plan: " + err.Error())
 	}
+	plan = enforceSingleInProgress(plan)
 	tool.mu.Lock()
 	tool.currentPlan = plan
 	tool.mu.Unlock()
@@ -114,17 +117,15 @@ func parsePlanItems(value any) ([]PlanItem, error) {
 		if id == "" {
 			id = fmt.Sprintf("%d", index+1)
 		}
-		// status is optional and defaults to pending.
+		// status is optional and defaults to pending. Non-canonical values from
+		// weaker models (e.g. "done", "in-progress", "nope") are COERCED to the
+		// nearest canonical status rather than rejected: a rejected call leaves the
+		// stored plan unchanged, which freezes the plan panel on its previous state.
 		status, err := stringArgWithEmpty(object, "status", "pending", false, true)
 		if err != nil {
 			return nil, fmt.Errorf("plan item %d %s", index+1, err.Error())
 		}
-		if status == "" {
-			status = "pending"
-		}
-		if !isPlanStatus(status) {
-			return nil, fmt.Errorf("plan item %d status must be pending, in_progress, completed, or failed", index+1)
-		}
+		status = normalizePlanStatus(status)
 		notes, err := stringArgWithEmpty(object, "notes", "", false, true)
 		if err != nil {
 			return nil, fmt.Errorf("plan item %d %s", index+1, err.Error())
@@ -140,8 +141,44 @@ func parsePlanItems(value any) ([]PlanItem, error) {
 	return plan, nil
 }
 
-func isPlanStatus(status string) bool {
-	return status == "pending" || status == "in_progress" || status == "completed" || status == "failed"
+// normalizePlanStatus coerces a free-form status into one of the four canonical
+// values. Unknown/empty input maps to "pending" so a weak model's stray status
+// never fails the whole update_plan call (which would freeze the plan panel).
+func normalizePlanStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "done", "finished", "resolved", "✓", "x", "[x]":
+		return "completed"
+	case "in_progress", "in-progress", "inprogress", "in progress", "active",
+		"doing", "started", "current", "wip", "ongoing", "running":
+		return "in_progress"
+	case "failed", "fail", "error", "errored", "blocked", "cancelled", "canceled", "abandoned", "skipped":
+		return "failed"
+	default: // pending, todo, not_started, queued, "", or anything unrecognized
+		return "pending"
+	}
+}
+
+// enforceSingleInProgress keeps at most one in_progress item: if several are
+// marked, only the LAST stays in_progress and the earlier ones are downgraded to
+// completed. Mirrors how a single active step should drive the plan panel.
+func enforceSingleInProgress(plan []PlanItem) []PlanItem {
+	last := -1
+	count := 0
+	for i, item := range plan {
+		if item.Status == "in_progress" {
+			count++
+			last = i
+		}
+	}
+	if count <= 1 {
+		return plan
+	}
+	for i := range plan {
+		if i != last && plan[i].Status == "in_progress" {
+			plan[i].Status = "completed"
+		}
+	}
+	return plan
 }
 
 func formatPlan(plan []PlanItem) string {

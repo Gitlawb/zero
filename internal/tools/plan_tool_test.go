@@ -43,18 +43,80 @@ func TestUpdatePlanToolStoresAndFormatsPlan(t *testing.T) {
 	}
 }
 
-func TestUpdatePlanToolRejectsInvalidStatus(t *testing.T) {
-	result := NewUpdatePlanTool().Run(context.Background(), map[string]any{
+func TestUpdatePlanToolCoercesStatuses(t *testing.T) {
+	// A weaker model may emit non-canonical statuses ("nope", "done", "in-progress").
+	// These must be coerced (unknown -> pending, synonyms -> canonical) rather than
+	// failing the whole update_plan call — a rejected call leaves the stored plan
+	// unchanged, which freezes the plan panel on its previous state.
+	tool := NewUpdatePlanTool()
+	result := tool.Run(context.Background(), map[string]any{
 		"plan": []any{
 			map[string]any{"id": "1", "content": "Bad step", "status": "nope"},
+			map[string]any{"id": "2", "content": "Done step", "status": "done"},
+			map[string]any{"id": "3", "content": "Active step", "status": "in-progress"},
 		},
 	})
 
-	if result.Status != StatusError {
-		t.Fatalf("expected error status, got %s", result.Status)
+	if result.Status == StatusError {
+		t.Fatalf("unknown/synonym statuses must not error, got: %q", result.Output)
 	}
-	if !strings.Contains(result.Output, "status must be pending, in_progress, completed, or failed") {
-		t.Fatalf("unexpected output: %q", result.Output)
+	plan := tool.CurrentPlan()
+	if len(plan) != 3 {
+		t.Fatalf("expected 3 steps, got %d", len(plan))
+	}
+	if plan[0].Status != "pending" {
+		t.Errorf("unknown status should coerce to pending, got %q", plan[0].Status)
+	}
+	if plan[1].Status != "completed" {
+		t.Errorf("'done' should coerce to completed, got %q", plan[1].Status)
+	}
+	if plan[2].Status != "in_progress" {
+		t.Errorf("'in-progress' should coerce to in_progress, got %q", plan[2].Status)
+	}
+}
+
+func TestEnforceSingleInProgress(t *testing.T) {
+	// More than one in_progress is downgraded so only the LAST stays.
+	plan := []PlanItem{
+		{Content: "a", Status: "in_progress"},
+		{Content: "b", Status: "completed"},
+		{Content: "c", Status: "in_progress"},
+		{Content: "d", Status: "pending"},
+	}
+	out := enforceSingleInProgress(plan)
+	if out[0].Status != "completed" {
+		t.Errorf("earlier in_progress should downgrade to completed, got %q", out[0].Status)
+	}
+	if out[2].Status != "in_progress" {
+		t.Errorf("last in_progress should remain, got %q", out[2].Status)
+	}
+	count := 0
+	for _, it := range out {
+		if it.Status == "in_progress" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("want exactly 1 in_progress, got %d", count)
+	}
+
+	single := []PlanItem{{Status: "completed"}, {Status: "in_progress"}, {Status: "pending"}}
+	if got := enforceSingleInProgress(single); got[1].Status != "in_progress" {
+		t.Fatalf("single in_progress must be preserved, got %q", got[1].Status)
+	}
+}
+
+func TestUpdatePlanRunEnforcesSingleInProgress(t *testing.T) {
+	tool := NewUpdatePlanTool()
+	tool.Run(context.Background(), map[string]any{
+		"plan": []any{
+			map[string]any{"content": "a", "status": "in_progress"},
+			map[string]any{"content": "b", "status": "in_progress"},
+		},
+	})
+	plan := tool.CurrentPlan()
+	if plan[0].Status != "completed" || plan[1].Status != "in_progress" {
+		t.Fatalf("Run should enforce one in_progress, got %q,%q", plan[0].Status, plan[1].Status)
 	}
 }
 

@@ -283,6 +283,14 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		}
 		return 0
 	case "-v", "--version", "version":
+		for _, a := range args[1:] {
+			if a == "-h" || a == "--help" {
+				if _, err := fmt.Fprintln(stdout, "Usage: zero version\n\nPrint the Zero CLI version. Takes no flags."); err != nil {
+					return 1
+				}
+				return 0
+			}
+		}
 		if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
 			return 1
 		}
