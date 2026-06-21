@@ -1349,3 +1349,54 @@ func assertAgentOptions(t *testing.T, options tui.Options, maxTurns int, permiss
 		t.Fatalf("PermissionMode = %q, want %q", options.PermissionMode, permissionMode)
 	}
 }
+
+func TestRunThemeFlagPopulatesTUIOptions(t *testing.T) {
+	// The --theme flag must reach tui.Options.Theme (resolveThemeMode prefers it
+	// over ZERO_THEME). Previously Options.Theme was read but never set by the CLI.
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--theme", "light"}, "light"},
+		{[]string{"--theme=dark"}, "dark"},
+		{[]string{"--theme", "auto"}, "auto"},
+	} {
+		var stdout, stderr bytes.Buffer
+		var got tui.Options
+		launched := false
+		exit := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+			getwd: func() (string, error) { return t.TempDir(), nil },
+			resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+				return config.ResolvedConfig{MaxTurns: 3}, nil
+			},
+			runTUI: func(_ context.Context, o tui.Options) int { launched = true; got = o; return 0 },
+		})
+		if exit != 0 || !launched {
+			t.Fatalf("%v: exit=%d launched=%v stderr=%s", tc.args, exit, launched, stderr.String())
+		}
+		if got.Theme != tc.want {
+			t.Fatalf("%v: Options.Theme = %q, want %q", tc.args, got.Theme, tc.want)
+		}
+	}
+}
+
+func TestRunThemeFlagRejectsBadValue(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	launched := false
+	exit := runWithDeps([]string{"--theme", "solarized"}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) { return t.TempDir(), nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.ResolvedConfig{MaxTurns: 3}, nil
+		},
+		runTUI: func(context.Context, tui.Options) int { launched = true; return 0 },
+	})
+	if exit == 0 {
+		t.Fatal("an invalid --theme value must be rejected, not silently ignored")
+	}
+	if launched {
+		t.Fatal("the TUI must not launch on a bad --theme value")
+	}
+	if !strings.Contains(stderr.String(), "--theme must be auto, dark, or light") {
+		t.Fatalf("expected a clear --theme error, got %q", stderr.String())
+	}
+}

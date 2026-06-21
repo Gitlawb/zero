@@ -50,7 +50,7 @@ type Options struct {
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string
 	// Theme is the operator's palette preference: "auto" (default), "dark", or
-	// "light". From the --theme flag if wired; falls back to ZERO_THEME then auto.
+	// "light". Set from the --theme flag; falls back to ZERO_THEME then auto.
 	Theme     string
 	UserAgent string
 

@@ -199,9 +199,21 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
+	// --theme {auto|dark|light} selects the TUI palette non-interactively (populates
+	// tui.Options.Theme, which resolveThemeMode prefers over ZERO_THEME). Re-split
+	// --add-dir afterward so it may appear on either side of --theme.
+	theme, args, err := splitLeadingThemeFlag(args)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	moreDirs, args, err := splitLeadingAddDirFlags(args)
+	if err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
+	addDirs = append(addDirs, moreDirs...)
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
 	}
 
 	// --add-dir grants an extra write root, and only the interactive TUI and
@@ -235,6 +247,17 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if err != nil {
 			return writeAppError(stderr, err.Error(), 1)
 		}
+		// --theme may appear here too; extract it before the stray-arg checks so it is
+		// not rejected as an unexpected positional, then re-split --add-dir after it.
+		skipTheme, rest, err := splitLeadingThemeFlag(rest)
+		if err != nil {
+			return writeAppError(stderr, err.Error(), 1)
+		}
+		evenMoreDirs, rest, err := splitLeadingAddDirFlags(rest)
+		if err != nil {
+			return writeAppError(stderr, err.Error(), 1)
+		}
+		moreDirs = append(moreDirs, evenMoreDirs...)
 		// A misplaced --add-dir anywhere in the remainder is the more specific error,
 		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
@@ -251,7 +274,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...))
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -445,11 +468,11 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string) int {
-	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, false)
+func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
+	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false)
 }
 
-func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, forceSetup bool) int {
+func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), 1)
@@ -581,6 +604,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	lastKnownMCPConfig := mcpConfig
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
+		Theme:                theme,
 		UserConfigPath:       userConfigPath,
 		DoctorUserConfigPath: doctorUserConfigPath,
 		ProjectConfigPath:    projectConfigPath,
@@ -897,6 +921,36 @@ func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
 		}
 	}
 	return addDirs, args, nil
+}
+
+// splitLeadingThemeFlag strips a leading --theme {auto|dark|light} (space or =form)
+// from the root argument list and validates it. The last occurrence wins. A value
+// outside the allowed set is a loud error rather than a silent fallback.
+func splitLeadingThemeFlag(args []string) (string, []string, error) {
+	theme := ""
+	for len(args) > 0 {
+		var value string
+		switch {
+		case args[0] == "--theme":
+			if len(args) < 2 {
+				return "", nil, errors.New("--theme requires a value (auto, dark, or light)")
+			}
+			value = strings.TrimSpace(args[1])
+			args = args[2:]
+		case strings.HasPrefix(args[0], "--theme="):
+			value = strings.TrimSpace(strings.TrimPrefix(args[0], "--theme="))
+			args = args[1:]
+		default:
+			return theme, args, nil
+		}
+		switch strings.ToLower(value) {
+		case "auto", "dark", "light":
+			theme = strings.ToLower(value)
+		default:
+			return "", nil, fmt.Errorf("--theme must be auto, dark, or light (got %q)", value)
+		}
+	}
+	return theme, args, nil
 }
 
 func writePromptRequired(stderr io.Writer) int {

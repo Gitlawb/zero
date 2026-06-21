@@ -41,7 +41,7 @@ func runSetup(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 		return exitSuccess
 	}
 	if strings.TrimSpace(options.catalogID) == "" {
-		return runInteractiveTUIWithSetup(stderr, deps, "", nil, true)
+		return runInteractiveTUIWithSetup(stderr, deps, "", nil, "", true)
 	}
 
 	result, err := saveSetupProvider(deps, tui.SetupSelection{
