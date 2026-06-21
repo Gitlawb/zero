@@ -1,5 +1,10 @@
 # Zero Install Scripts
 
+> **Status: pre-release.** No GitHub release has been published yet, so the install scripts below
+> (which download release assets from `Gitlawb/zero`'s Releases) will fail with a 404 until the first
+> release exists. Until then, build from source: `go run ./cmd/zero` or `go build -o zero ./cmd/zero`
+> (requires Go 1.25+). The instructions below describe how the scripts work once releases are published.
+
 Zero release archives are published as:
 
 - `zero-v<version>-linux-<arch>.tar.gz`

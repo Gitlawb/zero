@@ -15,6 +15,8 @@ jobs:
   package:
     name: Package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # create/upload the GitHub Release on a tag push
     strategy:
       fail-fast: false
       matrix:
@@ -55,3 +57,18 @@ jobs:
           name: zero-${{ runner.os }}-${{ runner.arch }}
           path: dist/release/*
           if-no-files-found: error
+
+      # On a `v*` tag push, publish the packaged archive + .sha256 as GitHub Release
+      # assets so the documented `scripts/install.sh` / `install.ps1` path (which reads
+      # /releases/latest) works. Uses the preinstalled `gh` (no new action dependency);
+      # each matrix OS creates the release if absent (best-effort) then uploads its own
+      # assets with --clobber. NOTE: maintainers must push the tag — this never tags.
+      - name: Publish to GitHub Release
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes 2>/dev/null || true
+          gh release upload "$tag" dist/release/* --repo "$GITHUB_REPOSITORY" --clobber

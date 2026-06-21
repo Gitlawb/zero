@@ -13,7 +13,7 @@
 
 **Any model. Any provider. Your rules.**
 
-![go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
+![go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
 ![providers](https://img.shields.io/badge/providers-25%2B-34E2EA)
 ![tests](https://img.shields.io/badge/test%20files-200%2B-43D17A)
 ![status](https://img.shields.io/badge/status-active%20development-E8B84B)
@@ -49,13 +49,14 @@ zero exec -o stream-json < turns.jsonl        # programmatic, for scripts & CI
 ## Quick start
 
 ```bash
-# run from source (requires Go 1.24+)
+# run from source (requires Go 1.25+)
 go run ./cmd/zero
-
-# or install a release binary
-scripts/install.sh                                          # Linux / macOS
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1  # Windows
 ```
+
+> **Pre-built binaries are coming soon.** Once the first GitHub release is published, you'll be able
+> to install with `scripts/install.sh` (Linux/macOS) or `scripts/install.ps1` (Windows); those
+> scripts download release assets that don't exist yet. Until then, build from source with
+> `go run ./cmd/zero` (or `go build -o zero ./cmd/zero`).
 
 First launch opens a **guided setup wizard** — pick a provider, paste a key, choose a model, done. Or do it non-interactively:
 
