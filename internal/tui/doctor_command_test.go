@@ -202,6 +202,10 @@ func TestDoctorConnectivityCommandAnimatesAndReplacesStatusRow(t *testing.T) {
 			}
 		},
 	})
+	// This test exercises the tick-driven status animation, which is gated off
+	// under reduced motion. CI runs with no TTY (reducedMotion auto-on), so force
+	// it off to test the animation mechanism deterministically.
+	m.reducedMotion = false
 	m.input.SetValue("/doctor --connectivity")
 
 	updated, cmd := m.Update(testKey(tea.KeyEnter))

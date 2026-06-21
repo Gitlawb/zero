@@ -299,6 +299,9 @@ func TestCompactSpinnerTickRefreshesProgressFrame(t *testing.T) {
 		}),
 	})
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: strings.Repeat("context ", 90)})
+	// The compact ring animates on tick, which reduced motion freezes; CI is
+	// no-TTY (reducedMotion auto-on), so force it off to test the animation.
+	m.reducedMotion = false
 	m.input.SetValue("/compact")
 
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
