@@ -469,12 +469,14 @@ func splitPreservingWidth(text string, measure int) []string {
 func renderUserRow(row transcriptRow, width int) string {
 	contentWidth := userPromptContentWidth(width)
 	wrapped := wrapPlainText(row.text, maxInt(1, contentWidth))
-	lines := make([]string, 0, len(wrapped)+2)
-	lines = append(lines, renderUserPromptPaddingLine(width))
+	lines := make([]string, 0, len(wrapped)+1)
+	// A single plain blank line delimits the turn — no full-width painted band.
+	// The ▌ accent gutter alone marks it as the user's, matching the clean
+	// reference agents instead of a heavy chat bubble.
+	lines = append(lines, "")
 	for _, line := range wrapped {
-		lines = append(lines, renderUserPromptStyledLine(zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true)).Render(line), contentWidth))
+		lines = append(lines, renderUserPromptStyledLine(zeroTheme.ink.Bold(true).Render(line), contentWidth))
 	}
-	lines = append(lines, renderUserPromptPaddingLine(width))
 	return strings.Join(lines, "\n")
 }
 
@@ -493,15 +495,7 @@ func renderUserPromptStyledLine(styledText string, contentWidth int) string {
 		return zeroTheme.userPrompt.Render("▌")
 	}
 	fitted := fitStyledLine(styledText, contentWidth)
-	pad := zeroTheme.userPromptPanel.Render(strings.Repeat(" ", maxInt(0, contentWidth-lipgloss.Width(fitted))))
-	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render("  ") + fitted + pad
-}
-
-func renderUserPromptPaddingLine(width int) string {
-	if width <= 0 {
-		return ""
-	}
-	return zeroTheme.userPrompt.Render("▌") + zeroTheme.userPromptPanel.Render(strings.Repeat(" ", maxInt(0, width-1)))
+	return zeroTheme.userPrompt.Render("▌") + "  " + fitted
 }
 
 // renderAssistantRow draws final answers as plain response text plus completion
@@ -520,7 +514,9 @@ func renderAssistantRow(row transcriptRow, width int) string {
 	for index := range lines {
 		lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
 	}
-	lines = append(lines, doneLine(row, false))
+	if row.turnElapsed >= longTurnBookend {
+		lines = append(lines, doneLine(row))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -581,32 +577,16 @@ func formatElapsedSeconds(elapsed time.Duration) string {
 	return fmt.Sprintf("%.1fs", elapsed.Seconds())
 }
 
-// doneLine renders the turn terminator and faint counters. Normal completions
-// stay text-only; errors keep a red marker so failures remain easy to scan.
-func doneLine(row transcriptRow, failed bool) string {
-	label := "completed"
-	if failed {
-		label = "error"
-	}
-	segments := []string{zeroTheme.faint.Render(label)}
-	if !failed && row.turnElapsed > 0 {
-		segments[0] = zeroTheme.faint.Render(fmt.Sprintf("completed in %s", formatElapsedSeconds(row.turnElapsed)))
-	}
-	if row.turnTools > 0 {
-		noun := "tools"
-		if row.turnTools == 1 {
-			noun = "tool"
-		}
-		segments = append(segments, zeroTheme.faint.Render(fmt.Sprintf("%d %s", row.turnTools, noun)))
-	}
-	if failed && row.turnElapsed > 0 {
-		segments = append(segments, zeroTheme.faint.Render(formatElapsedSeconds(row.turnElapsed)))
-	}
-	line := strings.Join(segments, zeroTheme.faintest.Render(" · "))
-	if failed {
-		return zeroTheme.red.Render("●") + " " + line
-	}
-	return line
+// longTurnBookend is the floor a turn must cross to earn a "worked for …"
+// terminator. Short turns get none — the next user prompt is the separator,
+// matching the clean reference agents — so trivial replies stay uncluttered.
+const longTurnBookend = 60 * time.Second
+
+// doneLine is the faint bookend for a long successful turn ("worked for 1m 5s").
+// It carries no tool count (the tool cards above already show that) and never
+// marks errors (the bordered error note already signals failure).
+func doneLine(row transcriptRow) string {
+	return zeroTheme.faint.Render("worked for " + formatElapsedSeconds(row.turnElapsed))
 }
 
 // renderSystemNote draws a system notice as a bordered note: faint text on
@@ -865,9 +845,6 @@ func isDoctorResultHeading(value string) bool {
 
 func renderErrorRow(row transcriptRow, width int) string {
 	note := noteBox(row.text, width, zeroTheme.cardErr, zeroTheme.red)
-	if row.final {
-		note += "\n" + doneLine(row, true)
-	}
 	return note
 }
 
@@ -1334,9 +1311,7 @@ func toolCardHead(name string, target string, arg string, headTag string, nameSt
 	if headTag != "" {
 		head += "  " + zeroTheme.faint.Render(headTag)
 	}
-	if auto {
-		head += "  " + zeroTheme.autoTag.Render("[auto]")
-	}
+	_ = auto // the permission mode is shown in the composer divider; a per-card [auto] badge is redundant noise
 	return head
 }
 

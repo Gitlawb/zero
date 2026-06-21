@@ -126,15 +126,7 @@ type model struct {
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
 	spinner spinner.Model
-	// workingVerb holds the rotating "gitlawbmaxxing / openfablemaxxing / …"
-	// label the assistant interim block displays while pending. The verb
-	// advances at WorkingWordsStepEvery-tick intervals (≈1Hz at the 80ms
-	// spinner cadence) so the glyph can spin fast and the word still be
-	// readable; workingVerbTicks is the gate counter. See the spinner
-	// TickMsg branch and launchPrompt for the advance/reset.
-	workingVerb      *workingWords
-	workingVerbTicks int
-	pending          bool
+	pending bool
 	// turnStartedAt is when the in-flight run began; the working status line
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
@@ -567,7 +559,6 @@ func newModel(ctx context.Context, options Options) model {
 		prState:                prService.GetState(),
 		input:                  input,
 		spinner:                runSpinner,
-		workingVerb:            newWorkingWords(),
 		now:                    time.Now,
 		notifier:               notifier,
 		altScreen:              options.AltScreen,
@@ -1219,16 +1210,6 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		// Advance the working verb every WorkingWordsStepEvery spinner
-		// ticks (~1Hz at 80ms cadence). The glyph spins fast; the word
-		// turns over slowly enough to read. Nil-safe — the type's
-		// methods handle a nil receiver, and the counter still
-		// increments harmlessly.
-		m.workingVerbTicks++
-		if m.workingVerbTicks >= WorkingWordsStepEvery {
-			m.workingVerbTicks = 0
-			m.workingVerb.Tick()
-		}
 		if m.compactInFlight {
 			if !m.reducedMotion {
 				m.compactFrame++ // frozen frame under reduced motion -> static ring
@@ -2126,7 +2107,7 @@ func (m model) spinnerGlyph() string {
 }
 
 func (m model) workingStatusLine() string {
-	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
+	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + zeroTheme.muted.Render("Working")
 	if !m.turnStartedAt.IsZero() {
 		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
 	}
@@ -3113,13 +3094,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
-	// Rewind the verb rotation so the user sees "gitlawbmaxxing" first when
-	// the new run starts (instead of mid-rotation from a prior turn). Also
-	// reset the step counter so the cadence doesn't carry over a partial
-	// countdown from the previous run.
 	m.turnStartedAt = m.now()
-	m.workingVerbTicks = 0
-	m.workingVerb.Reset()
 	return m
 }
 

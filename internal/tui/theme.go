@@ -273,11 +273,6 @@ func (t tuiTheme) onPanel(style lipgloss.Style) lipgloss.Style {
 	return style.Background(t.bgPanel)
 }
 
-// onUserPrompt paints on the submitted user-prompt surface.
-func (t tuiTheme) onUserPrompt(style lipgloss.Style) lipgloss.Style {
-	return style.Background(t.bgPrompt)
-}
-
 // onSel paints on the selected-row tint.
 func (t tuiTheme) onSel(style lipgloss.Style) lipgloss.Style {
 	return style.Background(t.bgSel)

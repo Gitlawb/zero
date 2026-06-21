@@ -52,7 +52,7 @@ func TestTranscriptSeparatesUserPromptFromContinuation(t *testing.T) {
 	body, _ := m.transcriptBody(96, "")
 	got := plainRender(t, body)
 	lines := strings.Split(got, "\n")
-	if len(lines) < 5 || !strings.HasPrefix(lines[1], "▌  hey") || lines[3] != "" || !strings.HasPrefix(lines[4], "▸ Thought") {
+	if len(lines) < 4 || !strings.HasPrefix(lines[1], "▌  hey") || lines[2] != "" || !strings.HasPrefix(lines[3], "▸ Thought") {
 		t.Fatalf("transcript body should keep a small gap before thought, got:\n%s", got)
 	}
 }
@@ -199,8 +199,8 @@ func TestInterimBlockShowsStreamingTextWithCursor(t *testing.T) {
 
 	// Before the first delta the block falls back to the liveness spinner.
 	m.streamingText = ""
-	if got := plainRender(t, m.interimBlock(96)); !strings.Contains(got, "gitlawbmaxxing") {
-		t.Fatalf("empty interim block = %q, want first brand verb", got)
+	if got := plainRender(t, m.interimBlock(96)); !strings.Contains(got, "Working") {
+		t.Fatalf("empty interim block = %q, want the liveness label", got)
 	}
 }
 
@@ -460,8 +460,8 @@ func TestFinalAnswerRendersPlainTextAndCompletionLine(t *testing.T) {
 	if !strings.Contains(got, "Done — the CLI now prints its version.") {
 		t.Fatalf("final row = %q, want final answer text", got)
 	}
-	if !strings.Contains(got, "completed in 8.4s · 2 tools") {
-		t.Fatalf("final row = %q, want completion line with counters", got)
+	if strings.Contains(got, "completed in") || strings.Contains(got, "worked for") {
+		t.Fatalf("short final row = %q, must not carry a completion bookend", got)
 	}
 }
 
@@ -558,8 +558,8 @@ func TestFinalAnswerRendersMarkdownTableForTerminal(t *testing.T) {
 	if !strings.Contains(got, " │ ") || !strings.Contains(got, "─┼─") {
 		t.Fatalf("markdown table should render terminal table separators, got:\n%s", got)
 	}
-	if !strings.Contains(got, "completed") {
-		t.Fatalf("markdown final row = %q, want completed line terminator", got)
+	if strings.Contains(got, "worked for") {
+		t.Fatalf("short markdown final row = %q, must not carry a terminator", got)
 	}
 	for index, line := range strings.Split(rendered, "\n") {
 		if gotWidth := lipgloss.Width(line); gotWidth > 72 {
@@ -681,13 +681,16 @@ func TestFinalAnswerRendersCrowdedMarkdownTablesAsTables(t *testing.T) {
 	}
 }
 
-func TestDoneLineOmitsMissingSegments(t *testing.T) {
-	got := plainRender(t, doneLine(transcriptRow{final: true}, false))
-	if got != "completed" {
-		t.Fatalf("done line without counters = %q, want plain completed", got)
+// Short turns get no terminator (the next user prompt is the separator); only a
+// long turn earns a faint "worked for …" bookend.
+func TestDoneLineOnlyOnLongTurns(t *testing.T) {
+	short := plainRender(t, renderAssistantRow(transcriptRow{final: true, text: "hi", turnElapsed: 2 * time.Second}, 80))
+	if strings.Contains(short, "worked for") {
+		t.Fatalf("short turn should have no bookend, got: %q", short)
 	}
-	if got := plainRender(t, doneLine(transcriptRow{final: true, turnTools: 1}, false)); !strings.Contains(got, "1 tool") || strings.Contains(got, "1 tools") {
-		t.Fatalf("done line = %q, want singular tool noun", got)
+	long := plainRender(t, renderAssistantRow(transcriptRow{final: true, text: "hi", turnElapsed: 90 * time.Second}, 80))
+	if !strings.Contains(long, "worked for") {
+		t.Fatalf("long turn should show a 'worked for' bookend, got: %q", long)
 	}
 }
 
@@ -707,8 +710,8 @@ func TestErrorRowRendersTintedNoteAndErrorDoneLine(t *testing.T) {
 	if !strings.Contains(got, "╭") || !strings.Contains(got, "provider exploded") {
 		t.Fatalf("error row = %q, want bordered note", got)
 	}
-	if !strings.Contains(got, "● error · 1 tool") {
-		t.Fatalf("error row = %q, want error done line", got)
+	if strings.Contains(got, "● error") {
+		t.Fatalf("error row = %q, must not carry a second done-line (the bordered note already signals failure)", got)
 	}
 }
 
@@ -922,8 +925,8 @@ func TestToolCardMarksAutoApprovedCalls(t *testing.T) {
 	}
 	rc := buildRowContext(rows)
 	got := plainRender(t, m.renderRow(rows[2], 80, rc))
-	if !strings.Contains(got, "[auto]") {
-		t.Fatalf("grant-approved card = %q, want [auto] tag", got)
+	if strings.Contains(got, "[auto]") {
+		t.Fatalf("auto-approved card = %q, must not carry the removed [auto] tag", got)
 	}
 
 	// A prompted-then-allowed call was a manual decision: no auto tag.

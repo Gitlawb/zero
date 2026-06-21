@@ -185,10 +185,12 @@ func (m model) renderPlanPanel(width int) string {
 		elapsed = now.Sub(state.startedAt)
 	}
 
+	// The header already carries done/total and the per-step ✓/•/✗ icons convey
+	// progress; a separate filled █/░ bar restates it and reads heavier than the
+	// reference agents, so it's dropped.
 	header := renderPlanHeader(state, m.spinnerGlyph(), done, total, elapsed)
-	bar := renderPlanProgressBar(done, total, width)
 
-	lines := []string{header, bar}
+	lines := []string{header}
 
 	showSteps := state.expanded || !state.isComplete()
 	if showSteps {
@@ -279,29 +281,6 @@ func renderPlanHeader(state planPanelState, spinnerView string, done, total int,
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN COMPLETE · %d/%d · %s", done, total, formatElapsedSeconds(elapsed)))
 	}
 	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, first, done, total, formatElapsedSeconds(elapsed)))
-}
-
-// renderPlanProgressBar renders a text progress bar like "[██████░░░░░░░░] 2/5"
-// with the filled portion in green and the empty portion in faint gray.
-func renderPlanProgressBar(done, total, width int) string {
-	if total <= 0 {
-		return ""
-	}
-	// Reserve room for the brackets and the " N/N" suffix.
-	barWidth := 20
-	if room := width - 6; room < barWidth {
-		barWidth = room
-	}
-	if barWidth < 4 {
-		barWidth = 4
-	}
-	filled := done * barWidth / total
-	if filled > barWidth {
-		filled = barWidth
-	}
-	filledStr := zeroTheme.green.Render(strings.Repeat("█", filled))
-	emptyStr := zeroTheme.faint.Render(strings.Repeat("░", barWidth-filled))
-	return fmt.Sprintf("[%s%s] %d/%d", filledStr, emptyStr, done, total)
 }
 
 // renderPlanStepLine renders one step row: an indent, a status icon, the

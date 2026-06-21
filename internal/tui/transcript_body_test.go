@@ -31,8 +31,8 @@ func TestTranscriptBodyItemsShiftSelectableLinesByItemStart(t *testing.T) {
 		t.Fatalf("spans = %#v, want one transcript row item", layout.spans)
 	}
 	rowSpan := layout.spans[0]
-	if rowSpan.height != 3 {
-		t.Fatalf("user row height = %d, want padding/text/padding", rowSpan.height)
+	if rowSpan.height != 2 {
+		t.Fatalf("user row height = %d, want blank-delimiter + text", rowSpan.height)
 	}
 	if len(layout.selectable) != 1 {
 		t.Fatalf("selectable lines = %#v, want one user text line", layout.selectable)

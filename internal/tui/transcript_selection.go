@@ -487,12 +487,11 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 	if !m.transcriptSelection.active {
 		return m.renderRow(row, width, rowContext{}), selectable
 	}
-	lines := make([]string, 0, len(wrapped)+2)
-	lines = append(lines, renderUserPromptPaddingLine(width))
+	lines := make([]string, 0, len(wrapped)+1)
+	lines = append(lines, "")
 	for _, meta := range selectable {
-		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.onUserPrompt(zeroTheme.ink.Bold(true))), contentWidth))
+		lines = append(lines, renderUserPromptStyledLine(m.renderTranscriptSelectableText(meta, zeroTheme.ink.Bold(true)), contentWidth))
 	}
-	lines = append(lines, renderUserPromptPaddingLine(width))
 	return strings.Join(lines, "\n"), selectable
 }
 
@@ -524,8 +523,8 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
 		lines = append(lines, rendered)
 	}
-	if row.final {
-		lines = append(lines, doneLine(row, false))
+	if row.final && row.turnElapsed >= longTurnBookend {
+		lines = append(lines, doneLine(row))
 	}
 	return strings.Join(lines, "\n"), selectable
 }

@@ -220,9 +220,9 @@ func runningPlanModel(t *testing.T, steps int) model {
 
 func TestPinnedPlanFullWhenItFits(t *testing.T) {
 	m := runningPlanModel(t, 3)
-	// 3 steps => header + bar + 3 lines = 5; budget 10 fits.
+	// 3 steps => header + 3 step lines = 4; budget 10 fits.
 	got := m.renderPinnedPlanPanel(80, 10)
-	if strings.Count(got, "\n")+1 < 5 {
+	if strings.Count(got, "\n")+1 < 4 {
 		t.Fatalf("expected full multi-line panel within budget, got:\n%s", got)
 	}
 	if !strings.Contains(got, "Step number 1") || !strings.Contains(got, "Step number 3") {
