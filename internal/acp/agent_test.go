@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -10,7 +11,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -33,10 +34,6 @@ func (f fakeProvider) StreamCompletion(_ context.Context, _ zeroruntime.Completi
 func testDeps(t *testing.T) Deps {
 	t.Helper()
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
-	models, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		t.Fatalf("model registry: %v", err)
-	}
 	return Deps{
 		ResolveConfig: func(_ string, o config.Overrides) (config.ResolvedConfig, error) {
 			model := "fake-model"
@@ -52,14 +49,14 @@ func testDeps(t *testing.T) Deps {
 			return fakeProvider{text: "Hello from ZERO"}, nil
 		},
 		RunAgent: agent.Run,
-		BuildRegistry: func(string) *tools.Registry {
+		BuildWorkspace: func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
 			r := tools.NewRegistry()
 			r.Register(tools.NewUpdatePlanTool())
-			return r
+			return r, nil, nil
 		},
-		Store:     store,
-		Models:    models,
-		AgentInfo: Implementation{Name: "zero", Version: "test"},
+		ResolveWorkspaceRoot: func(cwd string) (string, error) { return cwd, nil },
+		Store:                store,
+		AgentInfo:            Implementation{Name: "zero", Version: "test"},
 	}
 }
 
@@ -178,12 +175,70 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
-	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err != nil {
-		t.Fatalf("set_mode: %v", err)
+	// auto/ask are accepted.
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeAsk)}, &SetSessionModeResult{}); err != nil {
+		t.Fatalf("set_mode ask: %v", err)
+	}
+	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
+		t.Fatal("expected Unsafe mode to be rejected over ACP")
 	}
 	// An unknown mode must be rejected.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: "bogus"}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected error for unknown mode")
+	}
+}
+
+// TestACPRunTurnWiresSandboxAndScopedRegistry proves the sandbox engine and the
+// scoped registry from BuildWorkspace actually reach agent.Options — i.e. ACP
+// shell tools run confined, not unconfined on the host.
+func TestACPRunTurnWiresSandboxAndScopedRegistry(t *testing.T) {
+	deps := testDeps(t)
+	reg := tools.NewRegistry()
+	reg.Register(tools.NewUpdatePlanTool())
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir()})
+	deps.BuildWorkspace = func(string, config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+		return reg, engine, nil
+	}
+	var captured agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		captured = opts
+		return agent.Result{FinalAnswer: "ok"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{SessionID: newRes.SessionID, Prompt: []ContentBlock{TextBlock("hi")}}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if captured.Sandbox != engine {
+		t.Fatal("sandbox engine was not wired into agent.Options (shell tools would run unconfined)")
+	}
+	if captured.Registry != reg {
+		t.Fatal("scoped registry was not wired into agent.Options")
+	}
+}
+
+// TestACPRejectsInvalidCwd confirms session/new fails when the workspace root
+// resolver rejects the client cwd (e.g. filesystem root).
+func TestACPRejectsInvalidCwd(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveWorkspaceRoot = func(string) (string, error) {
+		return "", fmt.Errorf("cwd must not be the filesystem root")
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: "/", McpServers: []McpServer{}}, &NewSessionResult{}); err == nil {
+		t.Fatal("expected session/new to reject an invalid cwd")
 	}
 }
 

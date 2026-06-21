@@ -61,15 +61,9 @@ type PromptCapabilities struct {
 	EmbeddedContext bool `json:"embeddedContext"`
 }
 
-type SessionCapabilities struct {
-	Resume bool `json:"resume"`
-	Load   bool `json:"load,omitempty"`
-}
-
 type AgentCapabilities struct {
-	LoadSession         bool                `json:"loadSession"`
-	PromptCapabilities  PromptCapabilities  `json:"promptCapabilities"`
-	SessionCapabilities SessionCapabilities `json:"sessionCapabilities,omitempty"`
+	LoadSession        bool               `json:"loadSession"`
+	PromptCapabilities PromptCapabilities `json:"promptCapabilities"`
 }
 
 type AuthMethod struct {

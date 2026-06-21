@@ -10,7 +10,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -25,10 +25,15 @@ type Deps struct {
 	ResolveConfig func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error)
 	NewProvider   func(profile config.ProviderProfile) (zeroruntime.Provider, error)
 	RunAgent      func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error)
-	BuildRegistry func(workspaceRoot string) *tools.Registry
-	Store         *sessions.Store
-	Models        modelregistry.Registry
-	AgentInfo     Implementation
+	// BuildWorkspace builds the SCOPED tool registry and the sandbox engine for a
+	// validated workspace root, so ACP shell tools (bash/exec_command) are confined
+	// exactly like the exec surface — never run unconfined on the host.
+	BuildWorkspace func(workspaceRoot string, resolved config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error)
+	// ResolveWorkspaceRoot validates + normalizes a client-supplied cwd (must be an
+	// existing directory; never the bare root). It is the file-tool confinement root.
+	ResolveWorkspaceRoot func(cwd string) (string, error)
+	Store                *sessions.Store
+	AgentInfo            Implementation
 }
 
 // Agent is the ACP agent server bound to one JSON-RPC connection (one editor).
@@ -50,6 +55,11 @@ type turnRecord struct {
 type acpSession struct {
 	id  string
 	cwd string
+
+	// turnMu serializes prompt turns for one session: concurrent session/prompt
+	// calls run one at a time so they can't interleave history or clobber the
+	// single cancel slot.
+	turnMu sync.Mutex
 
 	mu      sync.Mutex
 	mode    agent.PermissionMode
@@ -95,9 +105,11 @@ func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any
 	return InitializeResult{
 		ProtocolVersion: negotiated,
 		AgentCapabilities: AgentCapabilities{
-			LoadSession:         true,
-			PromptCapabilities:  PromptCapabilities{Image: true},
-			SessionCapabilities: SessionCapabilities{Resume: true, Load: true},
+			// Only advertise what ZERO actually implements: session/load (loadSession)
+			// and image prompts. session/resume + the session-capability sub-object
+			// are intentionally omitted since there is no resume handler yet.
+			LoadSession:        true,
+			PromptCapabilities: PromptCapabilities{Image: true},
 		},
 		AgentInfo: &info,
 		// ZERO owns credentials (BYOK) and does not delegate auth to the editor.
@@ -112,18 +124,18 @@ func (a *Agent) handleSessionNew(_ context.Context, params json.RawMessage) (any
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/new params")
 	}
-	if strings.TrimSpace(p.Cwd) == "" {
-		return nil, RPCError(codeInvalidParams, "cwd is required")
+	root, err := a.deps.ResolveWorkspaceRoot(p.Cwd)
+	if err != nil {
+		return nil, RPCError(codeInvalidParams, err.Error())
 	}
-	meta, err := a.deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: p.Cwd})
+	meta, err := a.deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: root})
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess := a.register(meta.SessionID, p.Cwd)
+	sess := a.registerSession(meta.SessionID, root, nil)
 	return NewSessionResult{
-		SessionID:     sess.id,
-		Modes:         a.modeState(sess),
-		ConfigOptions: a.modelConfigOptions(sess),
+		SessionID: sess.id,
+		Modes:     a.modeState(sess),
 	}, nil
 }
 
@@ -136,15 +148,21 @@ func (a *Agent) handleSessionLoad(_ context.Context, params json.RawMessage) (an
 	if err != nil || meta == nil {
 		return nil, RPCError(codeInvalidParams, "session not found: "+p.SessionID)
 	}
-	cwd := p.Cwd
-	if strings.TrimSpace(cwd) == "" {
-		cwd = meta.Cwd
+	cwdInput := p.Cwd
+	if strings.TrimSpace(cwdInput) == "" {
+		cwdInput = meta.Cwd
 	}
-	sess := a.register(meta.SessionID, cwd)
-	sess.history = a.loadHistory(meta.SessionID)
+	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
+	if err != nil {
+		return nil, RPCError(codeInvalidParams, err.Error())
+	}
+	// Load history BEFORE publishing the session so no concurrent prompt observes
+	// a half-initialized session (registerSession sets history under the lock and
+	// reuses an already-live session rather than orphaning its in-flight turn).
+	history := a.loadHistory(meta.SessionID)
+	sess := a.registerSession(meta.SessionID, root, history)
 	return LoadSessionResult{
-		Modes:         a.modeState(sess),
-		ConfigOptions: a.modelConfigOptions(sess),
+		Modes: a.modeState(sess),
 	}, nil
 }
 
@@ -159,6 +177,12 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
 	}
+
+	// Serialize turns for this session so two prompts can't interleave history or
+	// fight over the single cancel slot. session/cancel still works concurrently
+	// (it doesn't take turnMu).
+	sess.turnMu.Lock()
+	defer sess.turnMu.Unlock()
 
 	userText := promptText(p.Prompt)
 	images := promptImages(p.Prompt)
@@ -190,7 +214,12 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	if err != nil {
 		return "", RPCError(codeInternalError, "provider: "+err.Error())
 	}
-	registry := a.deps.BuildRegistry(sess.cwd)
+	// Build the SCOPED registry + sandbox engine for this session's workspace so
+	// shell/file tools are confined to the workspace exactly like the exec surface.
+	registry, sandboxEngine, err := a.deps.BuildWorkspace(sess.cwd, resolved)
+	if err != nil {
+		return "", RPCError(codeInternalError, "workspace: "+err.Error())
+	}
 	note := &notifier{conn: a.conn, sessionID: sess.id}
 
 	opts := agent.Options{
@@ -199,6 +228,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		ProviderName:   resolved.Provider.Name,
 		Model:          resolved.Provider.Model,
 		Registry:       registry,
+		Sandbox:        sandboxEngine,
 		PermissionMode: sess.currentMode(),
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
@@ -287,10 +317,15 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
-	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModeUnsafe:
+	case agent.PermissionModeAuto, agent.PermissionModeAsk:
 		sess.setMode(mode)
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
+	case agent.PermissionModeUnsafe:
+		// Unsafe = run every tool with no prompt. The TUI gates this behind an
+		// explicit --skip-permissions-unsafe operator flag; an editor client must
+		// not be able to grant itself unconfined, no-prompt access over the wire.
+		return nil, RPCError(codeInvalidParams, "mode not permitted over ACP: "+p.ModeID)
 	default:
 		return nil, RPCError(codeInvalidParams, "unknown mode: "+p.ModeID)
 	}
@@ -309,7 +344,7 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 		return nil, RPCError(codeInvalidParams, "unknown config option: "+p.ConfigID)
 	}
 	sess.setModel(p.Value)
-	return SetSessionConfigOptionResult{ConfigOptions: a.modelConfigOptions(sess)}, nil
+	return SetSessionConfigOptionResult{}, nil
 }
 
 func (a *Agent) handleZeroSetModel(_ context.Context, params json.RawMessage) (any, error) {
@@ -338,44 +373,15 @@ func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
 // ---- advertising helpers ----
 
 func (a *Agent) modeState(s *acpSession) *SessionModeState {
+	// Only auto/ask are offered over ACP; Unsafe is gated to the operator (see
+	// handleSetMode) so a client can't grant itself no-prompt host access.
 	return &SessionModeState{
 		CurrentModeID: string(s.currentMode()),
 		AvailableModes: []SessionMode{
 			{ID: string(agent.PermissionModeAuto), Name: "Auto", Description: "Run safe tools automatically; ask before risky ones."},
 			{ID: string(agent.PermissionModeAsk), Name: "Ask", Description: "Ask before every tool that changes state."},
-			{ID: string(agent.PermissionModeUnsafe), Name: "Full access", Description: "Run all tools without asking."},
 		},
 	}
-}
-
-func (a *Agent) modelConfigOptions(s *acpSession) []SessionConfigOption {
-	current := s.currentModel()
-	if current == "" {
-		if resolved, err := a.deps.ResolveConfig(s.cwd, config.Overrides{}); err == nil {
-			current = resolved.Provider.Model
-		}
-	}
-	var values []SessionConfigOptionValue
-	for _, m := range a.deps.Models.List(modelregistry.ListOptions{}) {
-		values = append(values, SessionConfigOptionValue{ID: m.ID, Name: modelDisplayName(m)})
-	}
-	if len(values) == 0 {
-		return nil
-	}
-	return []SessionConfigOption{{
-		ID:          configIDModel,
-		Name:        "Model",
-		Description: "Model ZERO uses for this session.",
-		Value:       current,
-		Values:      values,
-	}}
-}
-
-func modelDisplayName(m modelregistry.ModelEntry) string {
-	if strings.TrimSpace(m.DisplayName) != "" {
-		return m.DisplayName
-	}
-	return m.ID
 }
 
 // ---- persistence + continuity ----
@@ -481,11 +487,19 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 
 // ---- session registry + accessors ----
 
-func (a *Agent) register(id, cwd string) *acpSession {
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto}
+// registerSession publishes a session under the agent's lock. If one is already
+// registered for id (e.g. a re-load of an in-flight session) the existing live
+// session is returned unchanged rather than orphaning its turn or resetting its
+// mode/model. history is set BEFORE publishing so no concurrent prompt can read a
+// half-initialized session.
+func (a *Agent) registerSession(id, cwd string, history []turnRecord) *acpSession {
 	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing := a.sessions[id]; existing != nil {
+		return existing
+	}
+	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, history: history}
 	a.sessions[id] = sess
-	a.mu.Unlock()
 	return sess
 }
 

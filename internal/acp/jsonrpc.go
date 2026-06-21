@@ -10,6 +10,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,8 +80,8 @@ type NotifyFunc func(ctx context.Context, params json.RawMessage)
 // requests/notifications — needed because ACP is bidirectional (the agent calls
 // the client for session/request_permission, fs/*, terminal/*).
 type Conn struct {
-	dec *json.Decoder
-	w   io.Writer
+	reader *bufio.Reader
+	w      io.Writer
 
 	writeMu sync.Mutex // serializes all writes to w
 
@@ -98,7 +99,7 @@ type Conn struct {
 // NewConn builds a peer reading ndjson from r and writing ndjson to w.
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	return &Conn{
-		dec:       json.NewDecoder(bufio.NewReader(r)),
+		reader:    bufio.NewReader(r),
 		w:         w,
 		handlers:  make(map[string]HandlerFunc),
 		notifiers: make(map[string]NotifyFunc),
@@ -128,36 +129,58 @@ func (c *Conn) Serve(ctx context.Context) error {
 	}()
 
 	for {
-		var msg rpcMessage
-		if err := c.dec.Decode(&msg); err != nil {
+		// One ndjson value per line. Framing per line (rather than streaming the
+		// decoder) keeps a single malformed line from making the whole connection
+		// unrecoverable — we report -32700 and continue.
+		line, err := c.reader.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			c.handleLine(ctx, line)
+		}
+		if err != nil {
 			c.failAllPending(err)
 			if errors.Is(err, io.EOF) || ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
-		switch {
-		case msg.isResponse():
-			c.deliver(msg)
-		case msg.isRequest():
+	}
+}
+
+// handleLine decodes and dispatches one ndjson frame. A parse failure replies
+// with -32700 (id null) and keeps the connection alive.
+func (c *Conn) handleLine(ctx context.Context, line []byte) {
+	var msg rpcMessage
+	if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil {
+		c.writeError(json.RawMessage("null"), &rpcError{Code: codeParseError, Message: "parse error"})
+		return
+	}
+	if msg.JSONRPC != "" && msg.JSONRPC != "2.0" {
+		if len(msg.ID) > 0 {
+			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "unsupported jsonrpc version"})
+		}
+		return
+	}
+	switch {
+	case msg.isResponse():
+		c.deliver(msg)
+	case msg.isRequest():
+		c.wg.Add(1)
+		go func(m rpcMessage) {
+			defer c.wg.Done()
+			c.dispatchRequest(ctx, m)
+		}(msg)
+	case msg.isNotify():
+		if fn := c.notifiers[msg.Method]; fn != nil {
 			c.wg.Add(1)
 			go func(m rpcMessage) {
 				defer c.wg.Done()
-				c.dispatchRequest(ctx, m)
+				fn(ctx, m.Params)
 			}(msg)
-		case msg.isNotify():
-			if fn := c.notifiers[msg.Method]; fn != nil {
-				c.wg.Add(1)
-				go func(m rpcMessage) {
-					defer c.wg.Done()
-					fn(ctx, m.Params)
-				}(msg)
-			}
-		default:
-			// Malformed frame; reply only if we can identify a request id.
-			if len(msg.ID) > 0 {
-				c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
-			}
+		}
+	default:
+		// Malformed frame; reply only if we can identify a request id.
+		if len(msg.ID) > 0 {
+			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
 		}
 	}
 }
@@ -241,9 +264,17 @@ func (c *Conn) deliver(msg rpcMessage) {
 	}
 	c.mu.Lock()
 	ch := c.pending[id]
+	delete(c.pending, id)
 	c.mu.Unlock()
-	if ch != nil {
-		ch <- msg
+	if ch == nil {
+		return
+	}
+	// Non-blocking: the pending channel is cap-1 and may have been abandoned (e.g.
+	// a Call cancelled by session/cancel). A duplicate or late response frame must
+	// never block the read-loop goroutine.
+	select {
+	case ch <- msg:
+	default:
 	}
 }
 

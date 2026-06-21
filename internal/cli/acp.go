@@ -3,10 +3,13 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/Gitlawb/zero/internal/acp"
 	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -37,20 +40,27 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		}
 	}
 
-	models, err := modelregistry.DefaultRegistry()
-	if err != nil {
-		return writeAppError(stderr, "acp: model registry: "+err.Error(), exitCrash)
-	}
-
 	conn := acp.NewConn(deps.stdin, stdout)
 	acp.NewAgent(conn, acp.Deps{
 		ResolveConfig: deps.resolveConfig,
 		NewProvider:   deps.newProvider,
 		RunAgent:      agent.Run,
-		BuildRegistry: func(workspaceRoot string) *tools.Registry { return newCoreRegistry(workspaceRoot) },
-		Store:         deps.newSessionStore(),
-		Models:        models,
-		AgentInfo:     acp.Implementation{Name: "zero", Version: version},
+		// Build the SCOPED registry + sandbox engine per workspace, exactly like the
+		// exec surface, so ACP shell/file tools are confined — never run unconfined.
+		BuildWorkspace: func(workspaceRoot string, resolved config.ResolvedConfig) (*tools.Registry, *sandbox.Engine, error) {
+			scope, err := sandbox.NewScope(workspaceRoot, resolved.Sandbox.AdditionalWriteRoots)
+			if err != nil {
+				return nil, nil, err
+			}
+			engine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, scope)
+			if err != nil {
+				return nil, nil, err
+			}
+			return newCoreRegistryScoped(workspaceRoot, scope), engine, nil
+		},
+		ResolveWorkspaceRoot: acpWorkspaceRootResolver(deps),
+		Store:                deps.newSessionStore(),
+		AgentInfo:            acp.Implementation{Name: "zero", Version: version},
 	})
 
 	ctx, stop := signalContext()
@@ -59,4 +69,24 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 		return writeAppError(stderr, "acp: "+err.Error(), exitCrash)
 	}
 	return exitSuccess
+}
+
+// acpWorkspaceRootResolver validates a client-supplied cwd into a confinement
+// root. It reuses exec's resolveWorkspaceRoot (abs+clean, must be an existing
+// dir) and additionally rejects the filesystem root and the home directory — an
+// editor must not be able to point ZERO's file/shell tools at the whole disk.
+func acpWorkspaceRootResolver(deps appDeps) func(string) (string, error) {
+	return func(cwd string) (string, error) {
+		root, err := resolveWorkspaceRoot(cwd, deps)
+		if err != nil {
+			return "", err
+		}
+		if root == filepath.Dir(root) {
+			return "", fmt.Errorf("cwd must not be the filesystem root: %s", root)
+		}
+		if home, herr := os.UserHomeDir(); herr == nil && home != "" && filepath.Clean(home) == root {
+			return "", fmt.Errorf("cwd must not be the home directory: %s", root)
+		}
+		return root, nil
+	}
 }

@@ -72,10 +72,13 @@ func decisionFromOutcome(outcome RequestPermissionOutcome, offered []agent.Permi
 		return agent.PermissionDecision{Action: agent.PermissionDecisionCancel, Reason: "client cancelled"}
 	case OutcomeSelected:
 		action := agent.PermissionDecisionAction(outcome.OptionID)
-		if actionOffered(action, offered) || isKnownDecision(action) {
+		// Bind to what was actually offered for THIS call: a client must not be able
+		// to return a broader grant (always_allow / allow_for_session) that wasn't
+		// presented. Anything not offered fails closed to deny.
+		if actionOffered(action, offered) {
 			return agent.PermissionDecision{Action: action}
 		}
-		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "unknown permission option"}
+		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "permission option was not offered"}
 	default:
 		return agent.PermissionDecision{Action: agent.PermissionDecisionDeny, Reason: "no permission outcome"}
 	}
@@ -88,22 +91,6 @@ func actionOffered(action agent.PermissionDecisionAction, offered []agent.Permis
 		}
 	}
 	return false
-}
-
-func isKnownDecision(action agent.PermissionDecisionAction) bool {
-	switch action {
-	case agent.PermissionDecisionAllow,
-		agent.PermissionDecisionAllowStrict,
-		agent.PermissionDecisionAllowForSession,
-		agent.PermissionDecisionAllowPrefix,
-		agent.PermissionDecisionAlwaysAllowPrefix,
-		agent.PermissionDecisionAlwaysAllow,
-		agent.PermissionDecisionDeny,
-		agent.PermissionDecisionCancel:
-		return true
-	default:
-		return false
-	}
 }
 
 // permissionToolCall builds the ToolCall descriptor embedded in a

@@ -136,6 +136,60 @@ func TestConnBidirectionalDuringHandler(t *testing.T) {
 	}
 }
 
+// TestConnSurvivesMalformedLine proves a single bad ndjson line yields a -32700
+// and does NOT tear down the connection — a following valid request still works.
+func TestConnSurvivesMalformedLine(t *testing.T) {
+	clientR, serverW := io.Pipe() // server -> client
+	serverR, clientW := io.Pipe() // client -> server
+	server := NewConn(serverR, serverW)
+	server.Handle("ping", func(_ context.Context, _ json.RawMessage) (any, error) { return "pong", nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		_ = serverW.Close()
+		_ = clientW.Close()
+	}()
+	go func() { _ = server.Serve(ctx) }()
+
+	go func() {
+		_, _ = clientW.Write([]byte("this is not json\n"))
+		_, _ = clientW.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"ping"}` + "\n"))
+	}()
+
+	dec := json.NewDecoder(clientR)
+	var sawParseError, sawPong bool
+	for i := 0; i < 2; i++ {
+		var msg struct {
+			Result any `json:"result"`
+			Error  *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		done := make(chan error, 1)
+		go func() { done <- dec.Decode(&msg) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("decode response %d: %v", i, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for a response")
+		}
+		if msg.Error != nil && msg.Error.Code == codeParseError {
+			sawParseError = true
+		}
+		if r, ok := msg.Result.(string); ok && r == "pong" {
+			sawPong = true
+		}
+	}
+	if !sawParseError {
+		t.Error("expected a -32700 parse error for the malformed line")
+	}
+	if !sawPong {
+		t.Error("expected the valid request to still be answered (connection survived the bad line)")
+	}
+}
+
 func asRPCError(err error, target **rpcError) bool {
 	re, ok := err.(*rpcError)
 	if ok {
