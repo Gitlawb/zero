@@ -951,6 +951,22 @@ func TestParseImageCommand(t *testing.T) {
 	}
 }
 
+func TestInputStyleCommandRemoved(t *testing.T) {
+	// AUDIT-H3: /input-style was an inert stub (registered + in /help + autocompleted,
+	// but only printed "no backend setting yet"). It must no longer be a known command.
+	if got := parseCommand("/input-style"); got.kind != commandUnknown {
+		t.Fatalf("/input-style should be unknown after removal, got kind=%v", got.kind)
+	}
+	for _, c := range commandDefinitions {
+		if c.name == "/input-style" {
+			t.Fatal("/input-style must be gone from the command registry")
+		}
+	}
+	if strings.Contains(formatGroupedCommandHelp(), "/input-style") {
+		t.Fatal("/help must not advertise /input-style")
+	}
+}
+
 func TestParseBackgroundTerminalCommands(t *testing.T) {
 	cases := []struct {
 		input string

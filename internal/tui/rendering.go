@@ -40,18 +40,6 @@ func pickerBusyText(name string) string {
 	})
 }
 
-func shellOnlyCommandText(name string) string {
-	return renderCommandOutput(commandOutput{
-		Title:  strings.TrimPrefix(name, "/"),
-		Status: commandStatusWarning,
-		Sections: []commandSection{{
-			Title: "State",
-			Lines: []string{"This control is available in the TUI but does not have a backend setting yet."},
-		}},
-		Hints: []string{"use /help to inspect active commands"},
-	})
-}
-
 func helpText() string {
 	// Render /help as a styled command card (accent group headers, two-tone
 	// command rows) rather than a flat grey system note.

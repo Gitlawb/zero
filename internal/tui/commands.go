@@ -36,7 +36,6 @@ const (
 	commandEffort
 	commandStyle
 	commandTheme
-	commandInputStyle
 	commandTranscript
 	commandBash
 	commandImage
@@ -286,13 +285,6 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Switch or show the color theme (auto-detects terminal background).",
 		kind:        commandTheme,
-	},
-	{
-		name:        "/input-style",
-		usage:       "/input-style",
-		group:       commandGroupSession,
-		description: "Show input style state.",
-		kind:        commandInputStyle,
 	},
 	{
 		name:        "/exit",

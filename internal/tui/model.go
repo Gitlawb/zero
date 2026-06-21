@@ -2961,12 +2961,6 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 			return m, tea.RequestBackgroundColor
 		}
 		return m, nil
-	case commandInputStyle:
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{
-			kind: actionAppendSystem,
-			text: shellOnlyCommandText(command.name),
-		})
-		return m, nil
 	case commandImage:
 		m = m.handleImageCommand(command.text)
 		return m, nil
