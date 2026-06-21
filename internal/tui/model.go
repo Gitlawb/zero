@@ -1230,11 +1230,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.workingVerb.Tick()
 		}
 		if m.compactInFlight {
-			m.compactFrame++
+			if !m.reducedMotion {
+				m.compactFrame++ // frozen frame under reduced motion -> static ring
+			}
 			m = m.setCompactStatusRow(m.compactText(true))
 		}
 		if m.doctorInFlight {
-			m.doctorFrame++
+			if !m.reducedMotion {
+				m.doctorFrame++
+			}
 			m = m.setDoctorStatusRow(m.doctorConnectivityRunningText())
 		}
 		return m, cmd
@@ -2078,7 +2082,10 @@ func (m model) interimBlock(width int) string {
 		}
 		return strings.Join(blocks, "\n")
 	}
-	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width)
+	// Live streaming block: render plain (no chroma) so the per-frame render loop
+	// never re-tokenises the growing code block. Highlighting happens once the row
+	// commits (renderAssistantRow, cached).
+	lines := renderAssistantMarkdownText(text, assistantMeasure(width), width, false)
 	for index, line := range lines {
 		// styleStreamingLine applies the fade palette when fadeActive is
 		// true and lineAges is populated; otherwise it falls through to

@@ -2,11 +2,40 @@ package tui
 
 import (
 	"strings"
+	"sync"
 
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 )
+
+var (
+	lexerCacheMu sync.RWMutex
+	lexerCache   = map[string]chroma.Lexer{}
+)
+
+// cachedLexer resolves a language name to a chroma lexer once, memoizing the
+// result — including a nil "no lexer" result — so chroma's per-language registry
+// Match scan (which its own docs call slow) runs at most once per language. An
+// empty language short-circuits before any lookup, which is the common case for
+// a bare ``` fence on every streaming frame.
+func cachedLexer(lang string) chroma.Lexer {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if lang == "" {
+		return nil
+	}
+	lexerCacheMu.RLock()
+	lexer, ok := lexerCache[lang]
+	lexerCacheMu.RUnlock()
+	if ok {
+		return lexer
+	}
+	lexer = lexers.Get(lang)
+	lexerCacheMu.Lock()
+	lexerCache[lang] = lexer
+	lexerCacheMu.Unlock()
+	return lexer
+}
 
 // tokenStyle maps a chroma token type onto Zero's existing, contrast-audited
 // palette rather than a chroma color scheme — so highlighted code stays on-brand
@@ -40,7 +69,7 @@ func highlightCode(code []string, lang string, measure int) ([]string, bool) {
 	if measure < 4 {
 		return nil, false
 	}
-	lexer := lexers.Get(strings.ToLower(strings.TrimSpace(lang)))
+	lexer := cachedLexer(lang)
 	if lexer == nil {
 		return nil, false
 	}

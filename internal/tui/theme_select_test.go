@@ -49,6 +49,31 @@ func wcagRatio(t *testing.T, fg, bg string) float64 {
 	return (l1 + 0.05) / (l2 + 0.05)
 }
 
+// The word-level diff's brighter changed-span band must keep its text AA-readable
+// and stay clearly distinct from the base add/del band, on both themes.
+func TestDiffWordSpanContrast(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		pal  palette
+	}{
+		{"dark", darkPalette},
+		{"light", lightPalette},
+	} {
+		if r := wcagRatio(t, c.pal.addInk, c.pal.addBgWord); r < 4.5 {
+			t.Errorf("%s: addInk on addBgWord %.2f < 4.5 (AA)", c.name, r)
+		}
+		if r := wcagRatio(t, c.pal.delInk, c.pal.delBgWord); r < 4.5 {
+			t.Errorf("%s: delInk on delBgWord %.2f < 4.5 (AA)", c.name, r)
+		}
+		if sep := wcagRatio(t, c.pal.addBgWord, c.pal.addBg); sep < 1.2 {
+			t.Errorf("%s: addBgWord vs addBg separation %.2f < 1.2 (span not distinct)", c.name, sep)
+		}
+		if sep := wcagRatio(t, c.pal.delBgWord, c.pal.delBg); sep < 1.2 {
+			t.Errorf("%s: delBgWord vs delBg separation %.2f < 1.2 (span not distinct)", c.name, sep)
+		}
+	}
+}
+
 // resolveThemeMode precedence: explicit flag > ZERO_THEME env > auto.
 func TestResolveThemeModePrecedence(t *testing.T) {
 	cases := []struct {

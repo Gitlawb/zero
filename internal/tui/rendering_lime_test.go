@@ -291,7 +291,7 @@ func TestMarkdownTableHeaderRendersBold(t *testing.T) {
 		"| Feature | System A | System B |",
 		"|---|---|---|",
 		"| Mode | Alpha | Beta |",
-	}, "\n"), 72, 72)
+	}, "\n"), 72, 72, true)
 	got := strings.Join(lines, "\n")
 	for _, want := range []string{
 		markdownBoldStart + "Feature" + markdownBoldEnd,
@@ -309,7 +309,7 @@ func TestMarkdownTableRendersOuterBorder(t *testing.T) {
 		"| Feature | System A |",
 		"|---|---|",
 		"| Mode | Alpha |",
-	}, "\n"), 80, 80)
+	}, "\n"), 80, 80, true)
 	got := strings.Join(lines, "\n")
 	for _, want := range []string{"╭", "┬", "╮", "├", "┼", "┤", "╰", "┴", "╯"} {
 		if !strings.Contains(got, want) {
@@ -324,7 +324,7 @@ func TestMarkdownTableAddsBodyRulesForWrappedRows(t *testing.T) {
 		"|---|---|---|",
 		"| Long Description | This cell contains enough neutral words to wrap across multiple lines. | This other cell also wraps across multiple lines for layout testing. |",
 		"| Short Row | Alpha | Beta |",
-	}, "\n"), 72, 72)
+	}, "\n"), 72, 72, true)
 	got := strings.Join(lines, "\n")
 	ruleCount := countMarkdownRuleLines(got)
 	if ruleCount < 2 {
@@ -338,7 +338,7 @@ func TestMarkdownTableKeepsCompactRowsClean(t *testing.T) {
 		"|---|---|---|",
 		"| Count | one | two |",
 		"| Mode | Alpha | Beta |",
-	}, "\n"), 96, 96)
+	}, "\n"), 96, 96, true)
 	got := strings.Join(lines, "\n")
 	ruleCount := countMarkdownRuleLines(got)
 	if ruleCount != 1 {
@@ -354,7 +354,7 @@ func TestMarkdownTableAddsBodyRulesForManyRows(t *testing.T) {
 		"| Mode | Alpha | Beta |",
 		"| Scope | local | remote |",
 		"| State | ready | done |",
-	}, "\n"), 160, 160)
+	}, "\n"), 160, 160, true)
 	got := strings.Join(lines, "\n")
 	ruleCount := countMarkdownRuleLines(got)
 	if ruleCount < 2 {
@@ -367,7 +367,7 @@ func TestMarkdownTableConvertsHtmlBreaks(t *testing.T) {
 		"| Field | Value |",
 		"|---|---|",
 		"| Price | first<br>second<BR />third<br/>fourth |",
-	}, "\n"), 96, 96)
+	}, "\n"), 96, 96, true)
 	got := strings.Join(lines, "\n")
 	for _, unwanted := range []string{"<br>", "<BR />", "<br/>"} {
 		if strings.Contains(got, unwanted) {

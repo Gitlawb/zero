@@ -33,7 +33,7 @@ const (
 	markdownTableAlignRight
 )
 
-func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int) []string {
+func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int, allowHighlight bool) []string {
 	if proseMeasure < 16 {
 		proseMeasure = 16
 	}
@@ -57,7 +57,11 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 		}
 
 		if fence, ok := markdownFenceMarker(trimmed); ok {
-			lang := strings.TrimSpace(strings.TrimPrefix(trimmed, fence))
+			info := strings.TrimSpace(strings.TrimPrefix(trimmed, fence))
+			lang := ""
+			if fields := strings.Fields(info); len(fields) > 0 {
+				lang = fields[0] // first token only: "```go title=x" -> "go"
+			}
 			code := []string{}
 			index++
 			for index < len(raw) {
@@ -68,11 +72,16 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 				code = append(code, strings.ReplaceAll(raw[index], "\t", "    "))
 				index++
 			}
-			if highlighted, ok := highlightCode(code, lang, tableMeasure); ok {
-				lines = append(lines, highlighted...)
-			} else {
-				lines = append(lines, renderMarkdownCodeBlock(code, tableMeasure)...)
+			// Highlighting tokenises the whole block, so it is confined to
+			// committed/cached rows (allowHighlight); the live streaming block
+			// renders plain so the per-frame render loop never re-lexes.
+			if allowHighlight {
+				if highlighted, ok := highlightCode(code, lang, tableMeasure); ok {
+					lines = append(lines, highlighted...)
+					continue
+				}
 			}
+			lines = append(lines, renderMarkdownCodeBlock(code, tableMeasure)...)
 			continue
 		}
 
@@ -118,7 +127,7 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 }
 
 func renderAssistantMarkdownPlainText(text string, proseMeasure int, tableMeasure int) []string {
-	lines := renderAssistantMarkdownText(text, proseMeasure, tableMeasure)
+	lines := renderAssistantMarkdownText(text, proseMeasure, tableMeasure, false)
 	for index := range lines {
 		lines[index] = stripMarkdownRenderControls(lines[index])
 	}

@@ -1,6 +1,21 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// The live streaming render path (allowHighlight=false) must render code
+// verbatim/plain — never tokenised — so the per-frame loop can't re-lex a
+// growing block. Profile-independent: the plain path applies no styling, so the
+// code appears as a contiguous substring (a highlighted block would not).
+func TestStreamingCodeRendersPlain(t *testing.T) {
+	md := "```go\nfunc main() {}\n```"
+	out := strings.Join(renderAssistantMarkdownText(md, 80, 80, false), "\n")
+	if !strings.Contains(out, "func main() {}") {
+		t.Fatalf("interim render must keep code verbatim (no chroma), got:\n%s", out)
+	}
+}
 
 // highlightCode must fall back (ok=false) on a missing/unknown language so the
 // caller renders the block plain — never worse than today — and must preserve

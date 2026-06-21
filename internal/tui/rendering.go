@@ -509,7 +509,8 @@ func renderUserPromptPaddingLine(width int) string {
 // as interim-style prose.
 func renderAssistantRow(row transcriptRow, width int) string {
 	tableMeasure := width
-	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure)
+	// Committed row: highlighting runs here (once, behind the render cache).
+	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure, true)
 	if !row.final {
 		for index := range lines {
 			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.sayText)
@@ -545,7 +546,8 @@ func renderReasoningBlock(text string, expanded bool, width int, running bool, e
 
 func renderReasoningBodyLines(text string, width int) []string {
 	measure := maxInt(16, sayMeasure(width)-2)
-	return renderAssistantMarkdownText(strings.TrimSpace(text), measure, measure)
+	// Reasoning bodies can stream and rarely carry code: keep them plain.
+	return renderAssistantMarkdownText(strings.TrimSpace(text), measure, measure, false)
 }
 
 func reasoningHeaderLine(text string, expanded bool, running bool, elapsed time.Duration) string {
