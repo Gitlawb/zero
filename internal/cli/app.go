@@ -384,6 +384,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runRepoInfo(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
+	case "acp":
+		return runACP(args[1:], stdout, stderr, deps)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -884,6 +886,7 @@ Commands:
   cron       Schedule agent jobs (foreground, file-backed)
   repo-info  Characterize the current repository (local git only)
   serve      Run Zero protocol servers
+  acp        Serve the Agent Client Protocol over stdio (editor backend)
   help       Show this help
   version    Print version
 
