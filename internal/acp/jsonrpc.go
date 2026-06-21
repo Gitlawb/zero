@@ -91,6 +91,8 @@ type Conn struct {
 	nextID  int64
 	pending map[int64]chan rpcMessage
 	closed  bool
+
+	wg sync.WaitGroup // tracks in-flight inbound handlers
 }
 
 // NewConn builds a peer reading ndjson from r and writing ndjson to w.
@@ -116,7 +118,14 @@ func (c *Conn) HandleNotify(method string, fn NotifyFunc) { c.notifiers[method] 
 // blocks the loop from delivering session/cancel or a permission response.
 func (c *Conn) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
+	// ctx) and then wait for them to finish writing their responses. Without this,
+	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
+	// would race the dispatch goroutine and drop the response.
+	defer func() {
+		cancel()
+		c.wg.Wait()
+	}()
 
 	for {
 		var msg rpcMessage
@@ -131,10 +140,18 @@ func (c *Conn) Serve(ctx context.Context) error {
 		case msg.isResponse():
 			c.deliver(msg)
 		case msg.isRequest():
-			go c.dispatchRequest(ctx, msg)
+			c.wg.Add(1)
+			go func(m rpcMessage) {
+				defer c.wg.Done()
+				c.dispatchRequest(ctx, m)
+			}(msg)
 		case msg.isNotify():
 			if fn := c.notifiers[msg.Method]; fn != nil {
-				go fn(ctx, msg.Params)
+				c.wg.Add(1)
+				go func(m rpcMessage) {
+					defer c.wg.Done()
+					fn(ctx, m.Params)
+				}(msg)
 			}
 		default:
 			// Malformed frame; reply only if we can identify a request id.
