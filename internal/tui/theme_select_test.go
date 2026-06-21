@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +20,33 @@ func relLum(t *testing.T, hex string) float64 {
 	g := float64((v>>8)&0xff) / 255
 	b := float64(v&0xff) / 255
 	return 0.2126*r + 0.7152*g + 0.0722*b
+}
+
+// wcagRatio is the true WCAG 2.x contrast ratio (sRGB-linearized luminance), unlike
+// relLum which is a cheap perceptual ordering. Used to assert AA (>=4.5) for the
+// text-bearing theme tokens.
+func wcagRatio(t *testing.T, fg, bg string) float64 {
+	t.Helper()
+	rel := func(hex string) float64 {
+		h := strings.TrimPrefix(hex, "#")
+		v, err := strconv.ParseUint(h, 16, 32)
+		if err != nil || len(h) != 6 {
+			t.Fatalf("bad hex %q", hex)
+		}
+		lin := func(c float64) float64 {
+			c /= 255
+			if c <= 0.03928 {
+				return c / 12.92
+			}
+			return math.Pow((c+0.055)/1.055, 2.4)
+		}
+		return 0.2126*lin(float64((v>>16)&0xff)) + 0.7152*lin(float64((v>>8)&0xff)) + 0.0722*lin(float64(v&0xff))
+	}
+	l1, l2 := rel(fg), rel(bg)
+	if l1 < l2 {
+		l1, l2 = l2, l1
+	}
+	return (l1 + 0.05) / (l2 + 0.05)
 }
 
 // resolveThemeMode precedence: explicit flag > ZERO_THEME env > auto.
@@ -80,8 +108,26 @@ func TestLightPaletteContrastAndHierarchy(t *testing.T) {
 	if panelL-inkL < 0.5 {
 		t.Errorf("light ink/panel contrast too low: panel=%.2f ink=%.2f", panelL, inkL)
 	}
-	if panelL-relLum(t, lightPalette.accent) < 0.25 {
-		t.Errorf("light accent not contrasted enough against panel")
+	// AUDIT-H5/H6/M: text-bearing tokens (incl. faint/faintest, which carry line
+	// numbers, diff @@/+++/---, help text, placeholders, and the accent prompt glyph)
+	// must meet WCAG AA (>=4.5) against the worst-case background (the panel) — a real
+	// contrast ratio, not just a luminance ordering.
+	for _, tok := range []struct {
+		name   string
+		fg, bg string
+	}{
+		{"dark muted", darkPalette.muted, darkPalette.panel},
+		{"dark faint", darkPalette.faint, darkPalette.panel},
+		{"dark faintest", darkPalette.faintest, darkPalette.panel},
+		{"dark accent", darkPalette.accent, darkPalette.panel},
+		{"light muted", lightPalette.muted, lightPalette.panel},
+		{"light faint", lightPalette.faint, lightPalette.panel},
+		{"light faintest", lightPalette.faintest, lightPalette.panel},
+		{"light accent", lightPalette.accent, lightPalette.panel},
+	} {
+		if r := wcagRatio(t, tok.fg, tok.bg); r < 4.5 {
+			t.Errorf("%s contrast %.2f < 4.5 (WCAG AA): %s on %s", tok.name, r, tok.fg, tok.bg)
+		}
 	}
 	// Dark-on-light: ink darkest, then progressively lighter toward the surface.
 	chain := []float64{

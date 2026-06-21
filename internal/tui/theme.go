@@ -132,8 +132,8 @@ var darkPalette = palette{
 	line2:    "#414147",
 	ink:      "#ececee",
 	muted:    "#8b8b93",
-	faint:    "#5b5b63",
-	faintest: "#3a3a40",
+	faint:    "#838389",
+	faintest: "#7c7c82",
 	accent:   "#caff3f",
 	green:    "#5dd1a4",
 	red:      "#ff7a7a",
@@ -164,9 +164,9 @@ var lightPalette = palette{
 	line2:    "#b0b0b8", // emphasized borders
 	ink:      "#1b1b1d", // primary text (near-black)
 	muted:    "#54545b", // secondary text
-	faint:    "#78787f", // hints, metadata
-	faintest: "#9b9ba3", // line numbers, separators
-	accent:   "#4d7a08", // brand lime, darkened for contrast on light
+	faint:    "#5b5b62", // hints, metadata
+	faintest: "#646469", // line numbers, separators
+	accent:   "#477006", // brand lime, darkened to AA contrast on light
 	green:    "#1c7a4a", // success / diff add
 	red:      "#c0322c", // errors / diff del
 	amber:    "#8f6200", // permission / warnings
