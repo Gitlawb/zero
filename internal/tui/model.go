@@ -691,13 +691,11 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	if !m.pending && m.composerValue() != "" && m.noBlockingModal() && !m.transcriptDetailed && !m.subchat.active {
 		m.clearComposer()
 		m.clearSuggestions()
-		m.exitConfirmActive = false
-		m.exitConfirmSeq++
+		m = m.disarmExitConfirmation()
 		return m, nil
 	}
 	if m.exitConfirmActive {
-		m.exitConfirmActive = false
-		m.exitConfirmSeq++
+		m = m.disarmExitConfirmation()
 		m.cancelRun()
 		m.exiting = true
 		// A cancelled run may still need to flush checkpoint/session events; quit
@@ -714,6 +712,14 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 	return m, tea.Tick(ctrlCExitConfirmDuration, func(time.Time) tea.Msg {
 		return exitConfirmExpiredMsg{seq: seq}
 	})
+}
+
+func (m model) disarmExitConfirmation() model {
+	if m.exitConfirmActive {
+		m.exitConfirmActive = false
+		m.exitConfirmSeq++
+	}
+	return m
 }
 
 // Update routes every message through updateModel, then advances the flush
@@ -832,6 +838,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.transcriptSelection = transcriptSelectionState{}
 		m.composerSelection = composerSelectionState{}
 		m.clearMouseSelection()
+		if !keyCtrl(msg, 'c') {
+			m = m.disarmExitConfirmation()
+		}
 		// The `?` help overlay is modal: `?`, Esc, q, or Enter close it; every
 		// other key is swallowed so nothing types into the hidden composer.
 		if m.helpOverlay {

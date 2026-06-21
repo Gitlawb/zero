@@ -257,7 +257,7 @@ func (m model) handleComposerSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd, b
 }
 
 func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
-	if !m.altScreen || m.height <= 0 {
+	if !m.altScreen || m.height <= 0 || m.composerMouseSelectionBlocked() {
 		return 0, false
 	}
 	width := chatWidth(m.width)
@@ -277,6 +277,11 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 		return 0, false
 	}
 	return m.composerPositionAtVisualCell(localX-2, contentY, maxInt(1, width-4))
+}
+
+func (m model) composerMouseSelectionBlocked() bool {
+	return m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+		m.mcpManager != nil || m.picker != nil || m.suggestionsActive()
 }
 
 func (m model) composerPositionAtVisualCell(x int, y int, width int) (int, bool) {

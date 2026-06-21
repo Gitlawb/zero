@@ -1610,6 +1610,41 @@ func TestCtrlCRequiresSecondPressToExit(t *testing.T) {
 	}
 }
 
+func TestCtrlCExitConfirmationDisarmsOnInterveningKey(t *testing.T) {
+	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
+
+	updated, _ := m.Update(testKeyCtrl('c'))
+	next := updated.(model)
+	if !next.exitConfirmActive {
+		t.Fatal("first Ctrl+C should arm exit confirmation")
+	}
+	seq := next.exitConfirmSeq
+
+	updated, cmd := next.Update(testKey(tea.KeyLeft))
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("intervening navigation key should not return a command")
+	}
+	if next.exitConfirmActive {
+		t.Fatal("intervening non-Ctrl+C key should disarm exit confirmation")
+	}
+	if next.exitConfirmSeq == seq {
+		t.Fatal("disarming should advance the sequence so stale expiry ticks are ignored")
+	}
+
+	updated, cmd = next.Update(testKeyCtrl('c'))
+	next = updated.(model)
+	if next.exiting {
+		t.Fatal("Ctrl+C after an intervening key should re-arm, not exit")
+	}
+	if !next.exitConfirmActive {
+		t.Fatal("Ctrl+C after an intervening key should arm a fresh confirmation")
+	}
+	if cmd == nil {
+		t.Fatal("fresh Ctrl+C confirmation should schedule expiry")
+	}
+}
+
 func TestCtrlCClearsComposerBeforeExitConfirmation(t *testing.T) {
 	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
 	m.input.SetValue("draft prompt")

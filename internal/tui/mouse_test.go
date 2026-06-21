@@ -277,6 +277,43 @@ func TestComposerMouseDragSelectsCopiesAndClears(t *testing.T) {
 	}
 }
 
+func TestComposerMouseSelectionBlockedWhileSuggestionsOpen(t *testing.T) {
+	m := mouseTestModel()
+	m = typeRunes(t, m, "/sp")
+	if !m.suggestionsActive() {
+		t.Fatalf("expected suggestions to be open, got %#v", m.suggestions)
+	}
+	initial := m.currentComposerState()
+	startX, y := composerMousePoint(t, m, 0)
+	endX, _ := composerMousePoint(t, m, 2)
+
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, startX, y))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("composer click behind suggestions should not return a command")
+	}
+	if next.composerSelection.active {
+		t.Fatal("composer selection should not start while suggestions are open")
+	}
+	if got := next.currentComposerState().cursor; got != initial.cursor {
+		t.Fatalf("composer cursor changed behind suggestions: got %d want %d", got, initial.cursor)
+	}
+
+	updated, cmd = next.Update(testMouseMotion(tea.MouseLeft, endX, y))
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("composer drag behind suggestions should not return a command")
+	}
+	updated, cmd = next.Update(testMouseRelease(tea.MouseNone, endX, y))
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("composer release behind suggestions should not copy")
+	}
+	if next.composerSelection.active {
+		t.Fatal("composer selection should remain inactive while suggestions are open")
+	}
+}
+
 func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
