@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
@@ -386,6 +387,47 @@ func TestTranscriptSelectionClearsAfterCopy(t *testing.T) {
 	}
 }
 
+func TestTranscriptSelectionIncludesToolResultBody(t *testing.T) {
+	m := mouseTestModel()
+	m.mouseCapture = true
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowToolCall, id: "call_1", tool: "bash", detail: "go build ./..."})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+		kind:   rowToolResult,
+		id:     "call_1",
+		tool:   "bash",
+		status: tools.StatusError,
+		detail: "stdout:\nok build\nstderr:\nwarning: slow\nexit_code: 1",
+	})
+
+	line := transcriptSelectableLineContaining(t, m, "warning: slow")
+	m.transcriptSelection = transcriptSelectionState{
+		active: true,
+		anchor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart},
+		cursor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart + lipgloss.Width(line.text)},
+	}
+
+	if got := m.selectedTranscriptText(); strings.TrimSpace(got) != "warning: slow" {
+		t.Fatalf("selectedTranscriptText() = %q, want warning: slow", got)
+	}
+}
+
+func TestTranscriptSelectionIncludesErrorRows(t *testing.T) {
+	m := mouseTestModel()
+	m.mouseCapture = true
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "provider stream error: connection reset"})
+
+	line := transcriptSelectableLineContaining(t, m, "provider stream error")
+	m.transcriptSelection = transcriptSelectionState{
+		active: true,
+		anchor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart},
+		cursor: transcriptSelectionPoint{bodyY: line.bodyY, x: line.textStart + lipgloss.Width(line.text)},
+	}
+
+	if got := m.selectedTranscriptText(); got != "provider stream error: connection reset" {
+		t.Fatalf("selectedTranscriptText() = %q, want provider stream error: connection reset", got)
+	}
+}
+
 func TestMouseClickTogglesReasoningRow(t *testing.T) {
 	m := mouseTestModel()
 	m.mouseCapture = true
@@ -620,6 +662,19 @@ func firstTranscriptTextMousePoint(t *testing.T, m model) (int, int) {
 	}
 	t.Fatalf("no selectable transcript text line found: %#v", selectable)
 	return 0, 0
+}
+
+func transcriptSelectableLineContaining(t *testing.T, m model, text string) transcriptSelectableLine {
+	t.Helper()
+	width := chatWidth(m.width)
+	layout := m.transcriptBodyLayout(width, "")
+	for _, line := range layout.selectable {
+		if strings.Contains(line.text, text) {
+			return line
+		}
+	}
+	t.Fatalf("no selectable transcript line containing %q found: %#v", text, layout.selectable)
+	return transcriptSelectableLine{}
 }
 
 func composerMousePoint(t *testing.T, m model, column int) (int, int) {

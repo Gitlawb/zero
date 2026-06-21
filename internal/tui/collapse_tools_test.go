@@ -72,7 +72,10 @@ func TestToolResultRowExposesClickToggle(t *testing.T) {
 	m := transcriptViewTestModel()
 	row := transcriptRow{kind: rowToolResult, id: "t", tool: "custom_tool", status: tools.StatusOK, detail: numberedLines(cardBodyMaxLines + 5)}
 	_, selectable := m.renderSelectableToolResultRow(0, row, m.width, buildRowContext(nil), 0)
-	if len(selectable) != 1 || !selectable[0].toggle {
+	if len(selectable) < 1 || !selectable[0].toggle {
 		t.Fatalf("tool result head must be a clickable toggle line, got %#v", selectable)
+	}
+	if len(selectable) < 2 || selectable[1].text == "" {
+		t.Fatalf("tool result visible body/footer must stay selectable, got %#v", selectable)
 	}
 }

@@ -431,6 +431,8 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 		return m.renderSelectableAssistantRow(rowIndex, row, width, startBodyY)
 	case rowReasoning:
 		return m.renderSelectableReasoningRow(rowIndex, row, width, startBodyY)
+	case rowSystem, rowError, rowToolCall, rowPermission, rowAskUser:
+		return m.renderSelectableRenderedRow(rowIndex, row, width, rc, startBodyY)
 	case rowToolResult:
 		return m.renderSelectableToolResultRow(rowIndex, row, width, rc, startBodyY)
 	case rowSpecialist:
@@ -441,13 +443,142 @@ func (m model) renderTranscriptRow(rowIndex int, row transcriptRow, width int, r
 }
 
 // renderSelectableToolResultRow renders the tool result card and marks its head
-// (first line) as a clickable collapse/expand toggle while the row is live.
+// (first line) as a clickable collapse/expand toggle. Body/footer text remains
+// selectable so copying a visible transcript range includes command output.
 func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
 	rendered := m.renderRow(row, width, rc)
 	if rendered == "" {
 		return "", nil
 	}
-	return rendered, []transcriptSelectableLine{{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}}
+	selectable := []transcriptSelectableLine{{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}}
+	selectable = append(selectable, selectableLinesFromRendered(rowIndex, rendered, startBodyY, 1)...)
+	if !m.transcriptSelection.active {
+		return rendered, selectable
+	}
+	return m.renderRenderedSelection(rendered, selectable, startBodyY), selectable
+}
+
+func (m model) renderSelectableRenderedRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
+	rendered := m.renderRow(row, width, rc)
+	if rendered == "" {
+		return "", nil
+	}
+	selectable := selectableLinesFromRendered(rowIndex, rendered, startBodyY, 0)
+	if !m.transcriptSelection.active {
+		return rendered, selectable
+	}
+	return m.renderRenderedSelection(rendered, selectable, startBodyY), selectable
+}
+
+func selectableLinesFromRendered(rowIndex int, rendered string, startBodyY int, skipLeading int) []transcriptSelectableLine {
+	lines := viewLines(rendered)
+	boxed := renderedLinesHaveBoxBorder(lines)
+	selectable := make([]transcriptSelectableLine, 0, len(lines))
+	for index, line := range lines {
+		if index < skipLeading {
+			continue
+		}
+		meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY+index, line, boxed)
+		if ok {
+			selectable = append(selectable, meta)
+		}
+	}
+	return selectable
+}
+
+func selectableLineFromRenderedLine(rowIndex int, bodyY int, rendered string, boxed bool) (transcriptSelectableLine, bool) {
+	text := ansi.Strip(rendered)
+	if isTranscriptStructuralLine(text) {
+		return transcriptSelectableLine{}, false
+	}
+
+	textStart := 0
+	if strings.HasPrefix(text, "│ ") {
+		textStart = lipgloss.Width("│ ")
+		text = strings.TrimPrefix(text, "│ ")
+		if boxed && strings.HasSuffix(text, " │") {
+			text = strings.TrimSuffix(text, " │")
+		}
+	}
+	text = strings.TrimRight(text, " ")
+	if strings.TrimSpace(text) == "" {
+		return transcriptSelectableLine{}, false
+	}
+	return transcriptSelectableLine{
+		bodyY:     bodyY,
+		rowIndex:  rowIndex,
+		textStart: textStart,
+		text:      text,
+	}, true
+}
+
+func renderedLinesHaveBoxBorder(lines []string) bool {
+	hasTop := false
+	hasBottom := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(ansi.Strip(line))
+		if strings.HasPrefix(trimmed, "╭") && strings.HasSuffix(trimmed, "╮") {
+			hasTop = true
+		}
+		if strings.HasPrefix(trimmed, "╰") && strings.HasSuffix(trimmed, "╯") {
+			hasBottom = true
+		}
+	}
+	return hasTop && hasBottom
+}
+
+func isTranscriptStructuralLine(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+	for _, r := range trimmed {
+		switch r {
+		case '╭', '╮', '╰', '╯', '┌', '┐', '└', '┘', '─', '━':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (m model) renderRenderedSelection(rendered string, selectable []transcriptSelectableLine, startBodyY int) string {
+	if len(selectable) == 0 {
+		return rendered
+	}
+	byY := make(map[int]transcriptSelectableLine, len(selectable))
+	for _, line := range selectable {
+		if line.text == "" || line.toggle || line.permOption || line.specialistCard {
+			continue
+		}
+		byY[line.bodyY] = line
+	}
+	lines := viewLines(rendered)
+	for index, line := range lines {
+		meta, ok := byY[startBodyY+index]
+		if !ok {
+			continue
+		}
+		lines[index] = m.renderTranscriptSelectableStyledLine(meta, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) renderTranscriptSelectableStyledLine(line transcriptSelectableLine, styledLine string) string {
+	start, end, ok := m.selectedColumnsForTranscriptLine(line)
+	if !ok {
+		return styledLine
+	}
+	absoluteStart := line.textStart + start
+	absoluteEnd := line.textStart + end
+	lineWidth := ansi.StringWidth(styledLine)
+	absoluteStart = clampInt(absoluteStart, 0, lineWidth)
+	absoluteEnd = clampInt(absoluteEnd, absoluteStart, lineWidth)
+	prefix := ansi.Cut(styledLine, 0, absoluteStart)
+	selected := ansi.Strip(ansi.Cut(styledLine, absoluteStart, absoluteEnd))
+	suffix := ansi.Cut(styledLine, absoluteEnd, lineWidth)
+	return prefix + zeroTheme.selection.Render(selected) + suffix
 }
 
 // renderSelectableSpecialistRow renders a specialist card and marks every line
