@@ -78,6 +78,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	if next, cmd, ok := m.handleComposerSelectionMouse(msg); ok {
+		return next, cmd
+	}
 	if next, cmd, ok := m.handleTranscriptSelectionMouse(msg); ok {
 		return next, cmd
 	}

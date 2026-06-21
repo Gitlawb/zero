@@ -116,6 +116,7 @@ type model struct {
 	composerActive        bool
 	composerCursorVisible bool
 	composerPastePreviews []composerPastePreview
+	composerSelection     composerSelectionState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan        planPanelState
@@ -829,6 +830,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleSetupKey(msg)
 		}
 		m.transcriptSelection = transcriptSelectionState{}
+		m.composerSelection = composerSelectionState{}
 		m.clearMouseSelection()
 		// The `?` help overlay is modal: `?`, Esc, q, or Enter close it; every
 		// other key is swallowed so nothing types into the hidden composer.
@@ -2252,7 +2254,15 @@ func (m model) composerLine(width int) string {
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
 	displayState := composerDisplayStateForPastePreviews(state, previews)
-	return renderComposerInput(input, displayState, width, m.composerCursorVisible)
+	displaySelection := composerSelectionState{}
+	if start, end, ok := m.composerSelection.rangeFor(state); ok {
+		displaySelection = composerSelectionState{
+			active: true,
+			anchor: composerDisplayCursorForPastePreviews(start, previews),
+			cursor: composerDisplayCursorForPastePreviews(end, previews),
+		}
+	}
+	return renderComposerInput(input, displayState, width, m.composerCursorVisible, displaySelection)
 }
 
 type composerVisualLine struct {
@@ -2261,7 +2271,7 @@ type composerVisualLine struct {
 	end   int
 }
 
-func renderComposerInput(input textinput.Model, state composerState, width int, cursorVisible bool) string {
+func renderComposerInput(input textinput.Model, state composerState, width int, cursorVisible bool, selection composerSelectionState) string {
 	state = normalizeComposerState(state)
 	if width <= 0 {
 		return ""
@@ -2277,23 +2287,28 @@ func renderComposerInput(input textinput.Model, state composerState, width int, 
 		return fitStyledLine(composerVisualLinePrefix(input, true)+cursor+zeroTheme.faint.Render(input.Placeholder), width)
 	}
 
-	segments := composerWrappedVisualLines(input, state, width)
-	cursorLine := composerCursorVisualLine(segments, state.cursor)
-	if len(segments) > composerMaxVisibleLines {
-		start := clamp(cursorLine-composerMaxVisibleLines+1, 0, len(segments)-composerMaxVisibleLines)
-		end := start + composerMaxVisibleLines
-		cursorLine -= start
-		segments = segments[start:end]
-		if len(segments) > 0 {
-			segments[0].first = true
-		}
-	}
-
+	segments, cursorLine := composerVisibleVisualLines(input, state, width)
 	lines := make([]string, 0, len(segments))
 	for index, segment := range segments {
-		lines = append(lines, fitStyledLine(renderComposerVisualLine(input, state, segment, index == cursorLine, cursorVisible), width))
+		lines = append(lines, fitStyledLine(renderComposerVisualLine(input, state, segment, index == cursorLine, cursorVisible, selection), width))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func composerVisibleVisualLines(input textinput.Model, state composerState, width int) ([]composerVisualLine, int) {
+	segments := composerWrappedVisualLines(input, state, width)
+	cursorLine := composerCursorVisualLine(segments, state.cursor)
+	if len(segments) <= composerMaxVisibleLines {
+		return segments, cursorLine
+	}
+	start := clamp(cursorLine-composerMaxVisibleLines+1, 0, len(segments)-composerMaxVisibleLines)
+	end := start + composerMaxVisibleLines
+	cursorLine -= start
+	segments = segments[start:end]
+	if len(segments) > 0 {
+		segments[0].first = true
+	}
+	return segments, cursorLine
 }
 
 func composerWrappedVisualLines(input textinput.Model, state composerState, width int) []composerVisualLine {
@@ -2357,33 +2372,33 @@ func composerCursorVisualLine(segments []composerVisualLine, cursor int) int {
 	return len(segments) - 1
 }
 
-func renderComposerVisualLine(input textinput.Model, state composerState, segment composerVisualLine, hasCursor bool, cursorVisible bool) string {
+func renderComposerVisualLine(input textinput.Model, state composerState, segment composerVisualLine, hasCursor bool, cursorVisible bool, selection composerSelectionState) string {
 	runes := []rune(state.text)
 	prefix := composerVisualLinePrefix(input, segment.first)
 	textStyle := zeroTheme.ink.Inline(true)
-	if !hasCursor {
-		return prefix + textStyle.Render(string(runes[segment.start:segment.end]))
+	selectionStart, selectionEnd, hasSelection := selection.rangeFor(state)
+	cursorIndex := -1
+	if hasCursor && !hasSelection {
+		cursorIndex = clamp(state.cursor, segment.start, segment.end)
 	}
 
-	offset := clamp(state.cursor-segment.start, 0, segment.end-segment.start)
-	cursorIndex := segment.start + offset
-	before := string(runes[segment.start:cursorIndex])
-	if cursorIndex < segment.end {
-		cursorChar := string(runes[cursorIndex])
-		after := string(runes[cursorIndex+1 : segment.end])
-		// Blinked off: draw the character normally (no caret highlight).
-		cell := textStyle.Render(cursorChar)
-		if cursorVisible {
-			cell = composerCursor(cursorChar)
+	var line strings.Builder
+	line.WriteString(prefix)
+	for index := segment.start; index < segment.end; index++ {
+		cell := string(runes[index])
+		switch {
+		case index == cursorIndex && cursorVisible:
+			line.WriteString(composerCursor(cell))
+		case hasSelection && index >= selectionStart && index < selectionEnd:
+			line.WriteString(zeroTheme.selection.Render(cell))
+		default:
+			line.WriteString(textStyle.Render(cell))
 		}
-		return prefix + textStyle.Render(before) + cell + textStyle.Render(after)
 	}
-	// Cursor at end of line: a caret block when on, nothing when blinked off.
-	end := ""
-	if cursorVisible {
-		end = composerCursor(" ")
+	if cursorIndex == segment.end && cursorVisible {
+		line.WriteString(composerCursor(" "))
 	}
-	return prefix + textStyle.Render(before) + end
+	return line.String()
 }
 
 func composerVisualLinePrefix(input textinput.Model, first bool) string {

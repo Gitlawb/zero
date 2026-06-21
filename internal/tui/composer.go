@@ -16,6 +16,12 @@ type composerState struct {
 	cursor int
 }
 
+type composerSelectionState struct {
+	active bool
+	anchor int
+	cursor int
+}
+
 type composerPastePreview struct {
 	active bool
 	start  int
@@ -151,6 +157,7 @@ func (m *model) clearComposer() {
 	m.composer = composerState{}
 	m.composerActive = false
 	m.composerPastePreviews = nil
+	m.composerSelection = composerSelectionState{}
 	m.input.SetValue("")
 }
 
@@ -158,6 +165,7 @@ func (m *model) resetComposerFromInput() {
 	m.composer = composerState{}
 	m.composerActive = false
 	m.composerPastePreviews = nil
+	m.composerSelection = composerSelectionState{}
 }
 
 func (m *model) syncInputFromComposer() {
@@ -173,6 +181,121 @@ func composerDisplayCursor(state composerState) int {
 		count++
 	}
 	return count
+}
+
+func (selection composerSelectionState) rangeFor(state composerState) (int, int, bool) {
+	if !selection.active {
+		return 0, 0, false
+	}
+	state = normalizeComposerState(state)
+	start := clamp(selection.anchor, 0, len([]rune(state.text)))
+	end := clamp(selection.cursor, 0, len([]rune(state.text)))
+	if start > end {
+		start, end = end, start
+	}
+	return start, end, start != end
+}
+
+func (m model) selectedComposerText() string {
+	state := m.currentComposerState()
+	start, end, ok := m.composerSelection.rangeFor(state)
+	if !ok {
+		return ""
+	}
+	return string([]rune(state.text)[start:end])
+}
+
+func (m model) handleComposerSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
+	switch {
+	case mouseLeftPress(msg):
+		pos, ok := m.composerPositionAtMouse(msg)
+		if !ok {
+			if m.composerSelection.active {
+				m.composerSelection = composerSelectionState{}
+				return m, nil, true
+			}
+			return m, nil, false
+		}
+		state := m.currentComposerState()
+		state.cursor = pos
+		m.setComposerState(state)
+		m.copyStatus = ""
+		m.composerSelection = composerSelectionState{active: true, anchor: pos, cursor: pos}
+		return m, nil, true
+	case mouseMotion(msg):
+		if !m.composerSelection.active {
+			return m, nil, false
+		}
+		if pos, ok := m.composerPositionAtMouse(msg); ok {
+			state := m.currentComposerState()
+			state.cursor = pos
+			m.setComposerState(state)
+			m.composerSelection.active = true
+			m.composerSelection.cursor = pos
+		}
+		return m, nil, true
+	case mouseRelease(msg):
+		if !m.composerSelection.active {
+			return m, nil, false
+		}
+		if pos, ok := m.composerPositionAtMouse(msg); ok {
+			state := m.currentComposerState()
+			state.cursor = pos
+			m.setComposerState(state)
+			m.composerSelection.active = true
+			m.composerSelection.cursor = pos
+		}
+		text := m.selectedComposerText()
+		m.composerSelection = composerSelectionState{}
+		if strings.TrimSpace(text) == "" {
+			return m, nil, true
+		}
+		return m, copyTranscriptSelectionCmd(text), true
+	default:
+		return m, nil, false
+	}
+}
+
+func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
+	if !m.altScreen || m.height <= 0 {
+		return 0, false
+	}
+	width := chatWidth(m.width)
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	localX, localY, ok := frame.composerRect.local(mouseX(msg), mouseY(msg))
+	if !ok {
+		return 0, false
+	}
+	if width < 8 {
+		return m.composerPositionAtVisualCell(localX, localY, width)
+	}
+	contentY := localY - 1
+	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
+		contentY--
+	}
+	if contentY < 0 {
+		return 0, false
+	}
+	return m.composerPositionAtVisualCell(localX-2, contentY, maxInt(1, width-4))
+}
+
+func (m model) composerPositionAtVisualCell(x int, y int, width int) (int, bool) {
+	input := m.input
+	state := m.currentComposerState()
+	previews := validComposerPastePreviews(state, m.composerPastePreviews)
+	displayState := composerDisplayStateForPastePreviews(state, previews)
+	segments, _ := composerVisibleVisualLines(input, displayState, width)
+	if len(segments) == 0 {
+		return 0, y == 0
+	}
+	if y < 0 || y >= len(segments) {
+		return 0, false
+	}
+	segment := segments[y]
+	prefixWidth := lipgloss.Width(composerVisualLinePrefix(input, segment.first))
+	column := maxInt(0, x-prefixWidth)
+	displayCursor := composerCursorForVisualColumn(displayState, segment, column)
+	return clamp(composerOriginalCursorForPastePreviews(displayCursor, previews), 0, len([]rune(state.text))), true
 }
 
 func (m model) applyComposerKey(msg tea.KeyMsg) (model, bool) {

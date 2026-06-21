@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
@@ -226,6 +227,52 @@ func TestMouseCaptureOnEmptyChatSplash(t *testing.T) {
 	m.transcript = appendRow(m.transcript, rowUser, "hello")
 	if !m.wantsMouseCapture() {
 		t.Fatal("chat with transcript rows should keep mouse capture for Zero-owned selection")
+	}
+}
+
+func TestComposerMouseClickMovesCursor(t *testing.T) {
+	m := mouseTestModel()
+	m.input.SetValue("hello world")
+	m.input.CursorEnd()
+	x, y := composerMousePoint(t, m, 5)
+
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, x, y))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("composer click should not return a command")
+	}
+	if got := next.currentComposerState().cursor; got != 5 {
+		t.Fatalf("composer cursor = %d, want 5", got)
+	}
+	if text := next.selectedComposerText(); text != "" {
+		t.Fatalf("composer click should not select text, got %q", text)
+	}
+}
+
+func TestComposerMouseDragSelectsCopiesAndClears(t *testing.T) {
+	m := mouseTestModel()
+	m.input.SetValue("hello world")
+	startX, y := composerMousePoint(t, m, 0)
+	endX, _ := composerMousePoint(t, m, 5)
+
+	updated, _ := m.Update(testMouseClick(tea.MouseLeft, startX, y))
+	next := updated.(model)
+	updated, _ = next.Update(testMouseMotion(tea.MouseLeft, endX, y))
+	next = updated.(model)
+	if got := next.selectedComposerText(); got != "hello" {
+		t.Fatalf("selectedComposerText() = %q, want hello", got)
+	}
+
+	updated, cmd := next.Update(testMouseRelease(tea.MouseNone, endX, y))
+	next = updated.(model)
+	if cmd == nil {
+		t.Fatal("composer drag release should return copy command")
+	}
+	if next.composerSelection.active {
+		t.Fatal("composer selection should clear automatically after release")
+	}
+	if got := next.currentComposerState().cursor; got != 5 {
+		t.Fatalf("composer cursor after release = %d, want 5", got)
 	}
 }
 
@@ -573,6 +620,22 @@ func firstTranscriptTextMousePoint(t *testing.T, m model) (int, int) {
 	}
 	t.Fatalf("no selectable transcript text line found: %#v", selectable)
 	return 0, 0
+}
+
+func composerMousePoint(t *testing.T, m model, column int) (int, int) {
+	t.Helper()
+	width := chatWidth(m.width)
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	if frame.composerRect.height <= 0 {
+		t.Fatalf("expected visible composer rect, frame=%#v", frame)
+	}
+	contentY := 1
+	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
+		contentY++
+	}
+	x := frame.composerRect.x + 2 + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
+	y := frame.composerRect.y + contentY
+	return x, y
 }
 
 func mouseTestModel() model {
