@@ -129,6 +129,11 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 }
 
 func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
+	// This exercises the native wrapped path, which requires the workspace to be
+	// sandbox-initialized; stub the marker present (otherwise it degrades).
+	restore := windowsSandboxInitialized
+	t.Cleanup(func() { windowsSandboxInitialized = restore })
+	windowsSandboxInitialized = func() bool { return true }
 	backend := Backend{Name: BackendWindowsRestrictedToken, Available: true, Executable: `C:\zero\zero-windows-command-runner.exe`, Platform: "windows"}
 	policy := DefaultPolicy()
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})

@@ -1,9 +1,36 @@
 package sandbox
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"runtime"
 )
+
+// errWindowsSandboxNotInitialized is returned only to a caller that explicitly
+// REQUIRED the sandbox (--sandbox require) on Windows before `zero sandbox setup`
+// has run. The default (auto) preference degrades instead — see BuildExecutionRequest.
+var errWindowsSandboxNotInitialized = errors.New(
+	"the Windows sandbox is not initialized — run `zero sandbox setup` from an elevated (Administrator) terminal, " +
+		"or drop `--sandbox require` to run with workspace path-confinement and per-command approval")
+
+// windowsSetupDowngradeReason is surfaced when Windows falls back to the
+// in-process policy gate because the OS sandbox has not been set up.
+const windowsSetupDowngradeReason = "Windows OS sandbox inactive — commands run with workspace path-confinement and " +
+	"per-command approval only. Run `zero sandbox setup` from an elevated (Administrator) terminal for full filesystem and network isolation."
+
+// windowsSandboxInitialized reports whether the per-host Windows sandbox setup
+// marker exists. A missing marker is the common fresh-install state, so the
+// caller degrades rather than bricking the command. Indirected through a var so
+// tests can drive both the initialized and not-initialized paths.
+var windowsSandboxInitialized = func() bool {
+	home, err := ResolveWindowsSandboxHome(nil)
+	if err != nil || home == "" {
+		return false
+	}
+	_, statErr := os.Stat(WindowsSandboxSetupMarkerPath(home))
+	return statErr == nil
+}
 
 type SandboxPreference string
 
@@ -131,10 +158,27 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	if request.ValidateExecution && requiresPlatformSandbox && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
+	// Windows: the OS sandbox needs a one-time elevated `zero sandbox setup` (it
+	// applies WFP network filters + workspace ACLs and writes a marker). Without
+	// it the command runner hard-fails — so on the default preference, DEGRADE to
+	// the in-process policy gate + per-command approval (matching Linux/macOS when
+	// their sandbox is unavailable) instead of bricking every command. A strict
+	// caller (--sandbox require) still gets a clear error pointing at setup.
+	windowsNeedsSetup := false
+	if manager.goos == "windows" && requiresPlatformSandbox && enforcementLevel == EnforcementNative && !windowsSandboxInitialized() {
+		if preference == SandboxPreferenceRequire {
+			return SandboxExecutionRequest{}, errWindowsSandboxNotInitialized
+		}
+		enforcementLevel = EnforcementDegraded
+		windowsNeedsSetup = true
+	}
 	targetBackend := manager.targetBackend(preference, policy, requiresPlatformSandbox)
 	downgradeReason := ""
 	if requiresPlatformSandbox && enforcementLevel == EnforcementDegraded {
 		downgradeReason = backend.DowngradeReason(policy)
+		if windowsNeedsSetup {
+			downgradeReason = windowsSetupDowngradeReason
+		}
 	}
 	wrapped := backend.CommandWrapping && backend.Available && enforcementLevel == EnforcementNative
 	markers := backend.SandboxEnvMarkers(policy)
