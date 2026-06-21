@@ -19,12 +19,20 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 		t.Fatalf("ReadFile package.json: %v", err)
 	}
 	var pkg struct {
-		Module  string            `json:"module"`
-		Bin     map[string]string `json:"bin"`
-		Scripts map[string]string `json:"scripts"`
+		Name       string            `json:"name"`
+		Module     string            `json:"module"`
+		Bin        map[string]string `json:"bin"`
+		Scripts    map[string]string `json:"scripts"`
+		License    string            `json:"license"`
+		Files      []string          `json:"files"`
+		Repository json.RawMessage   `json:"repository"`
+		Engines    map[string]string `json:"engines"`
 	}
 	if err := json.Unmarshal(bytes, &pkg); err != nil {
 		t.Fatalf("Unmarshal package.json: %v", err)
+	}
+	if pkg.Name != "@gitlawb/zero" {
+		t.Fatalf("name = %q, want @gitlawb/zero", pkg.Name)
 	}
 	if pkg.Bin["zero"] != "bin/zero.js" {
 		t.Fatalf("bin.zero = %q, want bin/zero.js", pkg.Bin["zero"])
@@ -32,9 +40,149 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	if pkg.Module != "bin/zero.js" {
 		t.Fatalf("module = %q, want bin/zero.js", pkg.Module)
 	}
-	if len(pkg.Scripts) != 0 {
-		t.Fatalf("package.json scripts = %#v, want no repository build scripts in npm package metadata", pkg.Scripts)
+	// Only a postinstall hook (which downloads the prebuilt binary) is allowed.
+	// Repository build scripts (build/prepare/prepack/…) must not ship in the
+	// published package — the tarball has no Go source to build from.
+	if pkg.Scripts["postinstall"] != "node scripts/postinstall.mjs" {
+		t.Fatalf("scripts.postinstall = %q, want node scripts/postinstall.mjs", pkg.Scripts["postinstall"])
 	}
+	for name := range pkg.Scripts {
+		if name != "postinstall" {
+			t.Fatalf("package.json scripts contains %q; only a postinstall hook is allowed (no repository build scripts)", name)
+		}
+	}
+	if pkg.License == "" {
+		t.Fatalf("package.json license is empty; set it (ties to the pending LICENSE file) so npm publish is not unlicensed")
+	}
+	if len(pkg.Repository) == 0 {
+		t.Fatalf("package.json repository is missing; npm needs it for provenance")
+	}
+	if pkg.Engines["node"] == "" {
+		t.Fatalf("package.json engines.node is empty; the wrapper and installer require a modern Node")
+	}
+	wantFiles := map[string]bool{"bin/zero.js": false, "scripts/postinstall.mjs": false}
+	for _, f := range pkg.Files {
+		if _, ok := wantFiles[f]; ok {
+			wantFiles[f] = true
+		}
+	}
+	for f, present := range wantFiles {
+		if !present {
+			t.Fatalf("package.json files is missing %q; it would not be published in the tarball", f)
+		}
+	}
+}
+
+func TestPostinstallComputesAssetPlan(t *testing.T) {
+	version := packageVersion(t)
+	cases := []struct {
+		platform, arch        string
+		wantAsset, wantBinary string
+	}{
+		{"linux", "x64", "zero-v" + version + "-linux-x64.tar.gz", "zero"},
+		{"darwin", "arm64", "zero-v" + version + "-macos-arm64.tar.gz", "zero"},
+		{"win32", "x64", "zero-v" + version + "-windows-x64.zip", "zero.exe"},
+	}
+	for _, tc := range cases {
+		stdout, stderr, err := runPostinstall(t,
+			"ZERO_INSTALL_DRY_RUN=1",
+			"ZERO_INSTALL_PLATFORM="+tc.platform,
+			"ZERO_INSTALL_ARCH="+tc.arch,
+		)
+		if err != nil {
+			t.Fatalf("%s/%s: dry-run err=%v stderr=%s", tc.platform, tc.arch, err, stderr)
+		}
+		var plan struct {
+			AssetName  string `json:"assetName"`
+			AssetURL   string `json:"assetUrl"`
+			BinaryName string `json:"binaryName"`
+			Tag        string `json:"tag"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+			t.Fatalf("%s/%s: parse plan %q: %v", tc.platform, tc.arch, stdout, err)
+		}
+		if plan.AssetName != tc.wantAsset {
+			t.Fatalf("%s/%s: assetName=%q want %q", tc.platform, tc.arch, plan.AssetName, tc.wantAsset)
+		}
+		if plan.BinaryName != tc.wantBinary {
+			t.Fatalf("%s/%s: binaryName=%q want %q", tc.platform, tc.arch, plan.BinaryName, tc.wantBinary)
+		}
+		wantURL := "https://github.com/Gitlawb/zero/releases/download/v" + version + "/" + tc.wantAsset
+		if plan.AssetURL != wantURL {
+			t.Fatalf("%s/%s: assetUrl=%q want %q", tc.platform, tc.arch, plan.AssetURL, wantURL)
+		}
+		if plan.Tag != "v"+version {
+			t.Fatalf("%s/%s: tag=%q want v%s", tc.platform, tc.arch, plan.Tag, version)
+		}
+	}
+}
+
+func TestPostinstallSkipsUnsupportedPlatform(t *testing.T) {
+	stdout, stderr, err := runPostinstall(t,
+		"ZERO_INSTALL_DRY_RUN=1",
+		"ZERO_INSTALL_PLATFORM=plan9",
+		"ZERO_INSTALL_ARCH=x64",
+	)
+	if err != nil {
+		t.Fatalf("unsupported platform should exit 0, got err=%v stderr=%s", err, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("unsupported platform should not print a plan, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "no prebuilt binary") {
+		t.Fatalf("stderr=%q, want it to mention no prebuilt binary", stderr)
+	}
+}
+
+func TestPostinstallHonorsSkipEnv(t *testing.T) {
+	stdout, stderr, err := runPostinstall(t, "ZERO_SKIP_DOWNLOAD=1")
+	if err != nil {
+		t.Fatalf("ZERO_SKIP_DOWNLOAD should exit 0, got err=%v stderr=%s", err, stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("skip should print nothing to stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "skipping native binary download") {
+		t.Fatalf("stderr=%q, want skip message", stderr)
+	}
+}
+
+func runPostinstall(t *testing.T, env ...string) (string, string, error) {
+	t.Helper()
+	node := requireNode(t)
+	root := repoRoot(t)
+	script := filepath.Join(root, "scripts", "postinstall.mjs")
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := exec.CommandContext(ctx, node, script)
+	command.Env = append(append(os.Environ(), "NODE_OPTIONS="), env...)
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	runErr := command.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("postinstall timed out: %v; stderr: %s", ctx.Err(), stderr.String())
+	}
+	return stdout.String(), stderr.String(), runErr
+}
+
+func packageVersion(t *testing.T) string {
+	t.Helper()
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	if err != nil {
+		t.Fatalf("ReadFile package.json: %v", err)
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		t.Fatalf("Unmarshal package.json: %v", err)
+	}
+	if pkg.Version == "" {
+		t.Fatal("package.json version is empty")
+	}
+	return pkg.Version
 }
 
 func TestNodeWrapperIsExecutableAndDoesNotImportBun(t *testing.T) {

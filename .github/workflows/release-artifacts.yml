@@ -45,6 +45,21 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # zero-release names assets zero-v<package.json version>-… while the release
+      # is published under the pushed git tag. If they disagree, install.sh/install.ps1
+      # and the npm postinstall all build a download URL that 404s. Fail fast so a
+      # forgotten version bump can never publish mis-versioned, un-installable assets.
+      - name: Check tag matches package.json version
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "v$pkg_version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version v$pkg_version — bump package.json before tagging so the release assets and the npm package agree." >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches package.json version v$pkg_version."
+
       - name: Package release artifact
         run: go run ./cmd/zero-release package
 
