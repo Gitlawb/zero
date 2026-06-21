@@ -1306,7 +1306,11 @@ func toolDisplayName(name string) string {
 // right-aligns it on the rule line so it sits at the card's right edge instead
 // of trailing the head text.
 func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
-	head := zeroTheme.toolName.Render(toolDisplayName(name))
+	// Every piece — including the separators — carries the card-header background so
+	// the head reads as one solid Lime Refined header band (lipgloss resets bg
+	// between Render calls). The tool name is the brand accent (lime).
+	gap := func(n int) string { return zeroTheme.cardHeader.Render(strings.Repeat(" ", n)) }
+	head := zeroTheme.onCardHeader(zeroTheme.toolName).Render(toolDisplayName(name))
 	if target = strings.TrimSpace(target); target != "" {
 		// Show a shortened, workspace-relative path, but keep the hyperlink
 		// pointing at the original absolute path so the file still opens.
@@ -1314,21 +1318,21 @@ func toolCardHead(name string, target string, arg string, headTag string, glyph 
 		if looksLikePath(target) {
 			shown = displayPath(opts.cwd, target)
 		}
-		styled := zeroTheme.toolTarget.Render(middleTruncate(shown, maxInt(16, width/2)))
+		styled := zeroTheme.onCardHeader(zeroTheme.toolTarget).Render(middleTruncate(shown, maxInt(16, width/2)))
 		if looksLikePath(target) {
 			styled = hyperlink(fileURL(opts.cwd, target), styled)
 		}
-		head += " " + styled
+		head += gap(1) + styled
 	}
 	// The arg column is the first thing the width tiers drop (below 100 cols).
 	if arg = strings.TrimSpace(arg); arg != "" && widthTier(width) == tierFull {
-		head += "  " + zeroTheme.toolArg.Render(truncateRunes(arg, maxInt(12, width/3)))
+		head += gap(2) + zeroTheme.onCardHeader(zeroTheme.toolArg).Render(truncateRunes(arg, maxInt(12, width/3)))
 	}
 	if headTag != "" {
-		head += "  " + zeroTheme.faint.Render(headTag)
+		head += gap(2) + zeroTheme.onCardHeader(zeroTheme.faint).Render(headTag)
 	}
 	if auto {
-		head += "  " + zeroTheme.autoTag.Render("[auto]")
+		head += gap(2) + zeroTheme.onCardHeader(zeroTheme.autoTag).Render("[auto]")
 	}
 	return head
 }
@@ -1368,7 +1372,9 @@ func toolCard(head string, glyph string, body []string, footer string, borderSty
 	headBudget := maxInt(1, width-railWidth-glyphWidth-glyphGap)
 	head = fitStyledLine(head, headBudget)
 	headPad := maxInt(0, width-railWidth-lipgloss.Width(head)-glyphWidth)
-	headLine := rail + head + strings.Repeat(" ", headPad) + glyph
+	// Extend the header band across the padding so it reads as one solid raised
+	// row; the status glyph floats at the right edge on the canvas.
+	headLine := rail + head + zeroTheme.cardHeader.Render(strings.Repeat(" ", headPad)) + glyph
 
 	lines := make([]string, 0, len(body)+2)
 	lines = append(lines, headLine)

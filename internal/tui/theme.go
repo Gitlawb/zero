@@ -235,7 +235,7 @@ func buildTheme(p palette) tuiTheme {
 		userPrompt: fg(p.accent).Bold(true),
 		userText:   fg(p.user),
 		sayText:    fg(p.muted),
-		toolName:   fg(p.ink).Bold(true),
+		toolName:   fg(p.accent).Bold(true),
 		toolTarget: fg(p.muted),
 		toolArg:    fg(p.faintest),
 		autoTag:    fg(p.amber),
@@ -311,4 +311,11 @@ func (t tuiTheme) onSel(style lipgloss.Style) lipgloss.Style {
 // onPerm paints on the permission-card tint.
 func (t tuiTheme) onPerm(style lipgloss.Style) lipgloss.Style {
 	return style.Background(t.bgPerm)
+}
+
+// onCardHeader paints on the tool-card header band (raised above the panel body).
+// Every segment of the head row carries it, since lipgloss resets the background
+// between adjacent Render calls.
+func (t tuiTheme) onCardHeader(style lipgloss.Style) lipgloss.Style {
+	return style.Background(t.bgCardHeader)
 }
