@@ -207,7 +207,19 @@ func (engine *Engine) shellSandboxActive(policy Policy) bool {
 		return false
 	}
 	backend := engine.backend
-	return backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation
+	if !(backend.Available && backend.Executable != "" && backend.CommandWrapping && backend.NativeIsolation) {
+		return false
+	}
+	// On Windows the command is only actually wrapped once `zero sandbox setup`
+	// has written the marker; until then execution DEGRADES to unwrapped (see
+	// manager.BuildExecutionRequest). The engine must mirror that — otherwise it
+	// would auto-allow a shell command as "sandboxed" while it really runs
+	// unsandboxed, breaking the invariant above and the per-command approval
+	// floor. When not initialized, fall through so the command prompts.
+	if backend.Platform == "windows" && !windowsSandboxInitialized() {
+		return false
+	}
+	return true
 }
 
 // Precheck reports the sandbox blocks that would block a tool request BEFORE
