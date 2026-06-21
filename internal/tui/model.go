@@ -816,6 +816,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.quit()
 		case keyCtrl(msg, 'o'):
+			// Model picker (BYOK): lists the real configured/catalog models; selecting
+			// one calls the real model-switch path so the next turn uses it.
+			return m.openModelPicker()
+		case keyCtrl(msg, 'r'):
+			// Detailed transcript view (relocated from ctrl+o, which now opens the
+			// model picker). Also reachable via the /transcript command.
 			return m.toggleDetailedTranscript(), nil
 		case keyCtrl(msg, 'k') && strings.TrimSpace(m.composerValue()) == "":
 			// Command palette: ctrl+k on an empty prompt opens the full slash-command

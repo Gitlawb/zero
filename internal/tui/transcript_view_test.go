@@ -26,21 +26,21 @@ func TestTranscriptCommandTogglesDetailedView(t *testing.T) {
 	assertNotContains(t, plainRender(t, next.View()), "Transcript")
 }
 
-func TestCtrlOTogglesDetailedTranscriptView(t *testing.T) {
+func TestCtrlRTogglesDetailedTranscriptView(t *testing.T) {
 	m := transcriptViewTestModel()
 
-	updated, _ := m.Update(testKeyCtrl('o'))
+	updated, _ := m.Update(testKeyCtrl('r'))
 	next := updated.(model)
 	assertContains(t, plainRender(t, next.View()), "Transcript")
 
-	updated, _ = next.Update(testKeyCtrl('o'))
+	updated, _ = next.Update(testKeyCtrl('r'))
 	next = updated.(model)
 	assertNotContains(t, plainRender(t, next.View()), "Transcript")
 }
 
 func TestEscExitsDetailedTranscriptView(t *testing.T) {
 	m := transcriptViewTestModel()
-	updated, _ := m.Update(testKeyCtrl('o'))
+	updated, _ := m.Update(testKeyCtrl('r'))
 	next := updated.(model)
 	assertContains(t, plainRender(t, next.View()), "Transcript")
 
@@ -62,8 +62,8 @@ func TestDetailedTranscriptIncludesToolOutputBeyondLiveCap(t *testing.T) {
 	assertNotContains(t, compact, "line-020")
 	assertContains(t, compact, "click to expand")
 
-	// The detailed transcript view (Ctrl+O) still shows the full, uncapped output.
-	updated, _ := m.Update(testKeyCtrl('o'))
+	// The detailed transcript view (Ctrl+R) still shows the full, uncapped output.
+	updated, _ := m.Update(testKeyCtrl('r'))
 	next := updated.(model)
 	view := plainRender(t, next.View())
 	assertContains(t, view, "line-404")
@@ -82,7 +82,7 @@ func TestDetailedTranscriptViewNeverExceedsTerminalWidth(t *testing.T) {
 		)
 		m.flushed = len(m.transcript)
 
-		updated, _ := m.Update(testKeyCtrl('o'))
+		updated, _ := m.Update(testKeyCtrl('r'))
 		next := updated.(model)
 		view := viewString(next.View())
 		assertContains(t, plainRender(t, view), "Transcript")
@@ -96,7 +96,7 @@ func TestDetailedTranscriptViewNeverExceedsTerminalWidth(t *testing.T) {
 
 func TestDetailedTranscriptSwallowsNormalChatSubmit(t *testing.T) {
 	m := transcriptViewTestModel()
-	updated, _ := m.Update(testKeyCtrl('o'))
+	updated, _ := m.Update(testKeyCtrl('r'))
 	next := updated.(model)
 	next.input.SetValue("this should not launch")
 
