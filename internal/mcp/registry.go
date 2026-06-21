@@ -321,11 +321,48 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 	if output == "" {
 		output = "(empty MCP tool result)"
 	}
-	return tools.Result{
+	res := tools.Result{
 		Status: status,
 		Output: output,
 		Meta:   tool.meta(),
 	}
+	// If this MCP tool wrote a file, surface the written content as a UI preview
+	// (Zero never saw the bytes, so it's an all-added preview). The model-facing
+	// Output stays the server's own text.
+	if status == tools.StatusOK {
+		if path, content, ok := mcpFileWriteArgs(tool.remote.Name, args); ok {
+			if body := tools.WrittenContentPreview(path, content); body != "" {
+				res.Display = tools.Display{Kind: "diff", Body: body}
+			}
+		}
+	}
+	return res
+}
+
+// mcpFileWriteArgs detects an MCP file-writing tool call and pulls its target
+// path and content from the arguments. It matches names containing "write_file"
+// / "create_file" (the common MCP filesystem servers) that also carry both a
+// content and a path argument, so directory-creation and non-file tools skip.
+func mcpFileWriteArgs(name string, args map[string]any) (path, content string, ok bool) {
+	lower := strings.ToLower(name)
+	if !strings.Contains(lower, "write_file") && !strings.Contains(lower, "create_file") && !strings.Contains(lower, "writefile") {
+		return "", "", false
+	}
+	content = firstStringArg(args, "content", "contents", "text", "data", "file_content", "body")
+	path = firstStringArg(args, "path", "file_path", "filename", "file", "target", "filepath")
+	if content == "" || path == "" {
+		return "", "", false
+	}
+	return path, content, true
+}
+
+func firstStringArg(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := args[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (tool registryTool) meta() map[string]string {

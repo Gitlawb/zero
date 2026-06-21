@@ -29,6 +29,14 @@ func unifiedDiff(relativePath, oldContent, newContent string) string {
 	return capPreview(diff)
 }
 
+// WrittenContentPreview returns an all-added diff of content, for the TUI to
+// preview a freshly written file when no prior content is available — e.g. an
+// external MCP file-write tool, where Zero never saw the old bytes. Returns ""
+// for empty content.
+func WrittenContentPreview(relativePath, content string) string {
+	return unifiedDiff(relativePath, "", content)
+}
+
 // capPreview trims a render body to maxPreviewLines, appending a hidden-count
 // trailer when it overflows so the UI never renders an enormous payload.
 func capPreview(body string) string {
