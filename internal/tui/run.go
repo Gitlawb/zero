@@ -6,6 +6,7 @@ import (
 	"os"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -28,6 +29,13 @@ func Run(ctx context.Context, options Options) int {
 		tea.WithOutput(os.Stdout),
 		tea.WithFilter(mouseEventFilter()),
 	}
+	// Honor the no-color.org spec ourselves: NO_COLOR set to ANY non-empty value
+	// disables color. bubbletea/colorprofile only respects strconv.ParseBool-style
+	// values, so NO_COLOR=yes / NO_COLOR=foo would otherwise leave the UI in full
+	// color. Force the Ascii (no-color, bold-still-allowed) profile. (AUDIT-M3)
+	if noColorRequested(os.Getenv) {
+		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
+	}
 	initialModel := newModel(ctx, options)
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
@@ -45,4 +53,11 @@ func Run(ctx context.Context, options Options) int {
 
 func useAltScreen(_ Options) bool {
 	return true
+}
+
+// noColorRequested reports whether the no-color.org spec is in effect: NO_COLOR set
+// to any non-empty value. Checked here rather than via the colorprofile dependency,
+// whose strconv.ParseBool gate ignores common values like NO_COLOR=yes. (AUDIT-M3)
+func noColorRequested(getenv func(string) string) bool {
+	return getenv("NO_COLOR") != ""
 }
