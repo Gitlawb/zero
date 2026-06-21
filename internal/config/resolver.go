@@ -676,7 +676,14 @@ func normalizeProvidersWithOptions(providers []ProviderProfile, activeName strin
 	for _, provider := range providers {
 		next, err := normalizeProvider(provider, env, options)
 		if err != nil {
-			return nil, ProviderProfile{}, err
+			// One unresolvable provider (e.g. a profile referencing a provider preset
+			// this build doesn't ship) must NOT brick the whole app — drop it and keep
+			// the rest. Only the ACTIVE provider failing is fatal, since the run can't
+			// proceed without it.
+			if strings.TrimSpace(provider.Name) == activeName {
+				return nil, ProviderProfile{}, err
+			}
+			continue
 		}
 		normalized = append(normalized, next)
 		if next.Name == activeName {
