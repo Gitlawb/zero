@@ -1720,6 +1720,9 @@ func (m model) footerView(width int) string {
 	if hint := m.composerDescriptionHint(width); hint != "" {
 		footer.WriteString("\n")
 		footer.WriteString(hint)
+	} else if help := m.helpBar(width); help != "" {
+		footer.WriteString("\n")
+		footer.WriteString(help)
 	}
 	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
 		footer.WriteString("\n")

@@ -39,6 +39,7 @@ var keybindingGroups = []keybindingGroup{
 	{
 		title: "Model & run controls",
 		bindings: []keybinding{
+			{"Ctrl+O", "open the model picker (BYOK)"},
 			{"Ctrl+T", "cycle reasoning effort (auto → low → medium → high)"},
 			{"Shift+Tab", "cycle permission mode (auto ↔ ask)"},
 			{"Ctrl+P", "expand / collapse the plan panel"},
@@ -49,7 +50,9 @@ var keybindingGroups = []keybindingGroup{
 		bindings: []keybinding{
 			{"PgUp / PgDn", "scroll the transcript by a page"},
 			{"↑ / ↓", "scroll, or move within a popup / multi-line input"},
-			{"Ctrl+O", "toggle the detailed (full-screen) transcript"},
+			{"Ctrl+K", "command palette (on an empty input)"},
+			{"Ctrl+G", "toggle the sidebar (sessions + changed files)"},
+			{"Ctrl+R", "toggle the detailed (full-screen) transcript"},
 			{"Ctrl+E", "release the mouse to drag-select & copy text"},
 			{"Tab", "accept the autocomplete / picker selection"},
 		},
@@ -68,6 +71,29 @@ var keybindingGroups = []keybindingGroup{
 
 // keybindingHelpFooter is the dismiss hint shown at the bottom of the overlay.
 const keybindingHelpFooter = "? or Esc to close · /help for slash commands"
+
+// helpBar is the persistent one-line key legend shown under the composer (the
+// reference TUI's bottom bar). It is a compact subset of keybindingGroups using
+// the real, current chords; the full grouped list lives behind `?`. Keys use the
+// faint token and descriptions the AA-compliant faintest token, and the line
+// truncates to width on a narrow terminal.
+func (m model) helpBar(width int) string {
+	if width < 8 {
+		return ""
+	}
+	hint := func(key, desc string) string {
+		return zeroTheme.faint.Render(key) + " " + zeroTheme.faintest.Render(desc)
+	}
+	parts := []string{
+		hint("^k", "commands"),
+		hint("^o", "model"),
+		hint("^g", "sidebar"),
+		hint("⏎", "send"),
+		hint("^c", "quit"),
+		hint("?", "help"),
+	}
+	return fitStyledLine(strings.Join(parts, "   "), width)
+}
 
 // renderKeybindingHelpLines builds the overlay body lines (group titles +
 // aligned key/description rows + footer), wrapped to the inner width. Exposed
