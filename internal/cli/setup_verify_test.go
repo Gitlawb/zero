@@ -33,6 +33,7 @@ func TestFormatSetupCompleteIncludesTryThisExample(t *testing.T) {
 }
 
 func TestRunSetupVerifyReportsClassifiedProbeFailure(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test") // a key is present, so --verify reaches the probe (not the no-key short-circuit)
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	probed := false
@@ -68,6 +69,7 @@ func TestRunSetupVerifyReportsClassifiedProbeFailure(t *testing.T) {
 }
 
 func TestRunSetupVerifySucceedsAndConfirmsWorking(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-test") // a key is present, so --verify reaches the probe (not the no-key short-circuit)
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	deps := appDeps{

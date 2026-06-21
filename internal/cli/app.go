@@ -955,6 +955,20 @@ func splitLeadingThemeFlag(args []string) (string, []string, error) {
 	return theme, args, nil
 }
 
+// profileHasCredential reports whether the profile can authenticate: a direct API
+// key, an auth-header value, or an APIKeyEnv whose environment variable is set. The
+// setup result is not env-resolved, so checking APIKey alone would wrongly flag every
+// env-var-based provider as keyless.
+func profileHasCredential(profile config.ProviderProfile) bool {
+	if strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
+		return true
+	}
+	if env := strings.TrimSpace(profile.APIKeyEnv); env != "" {
+		return strings.TrimSpace(os.Getenv(env)) != ""
+	}
+	return false
+}
+
 // baseURLIsLoopback reports whether a provider base_url points at a loopback host
 // (a keyless local provider like Ollama/LM Studio), which needs no API key.
 func baseURLIsLoopback(baseURL string) bool {

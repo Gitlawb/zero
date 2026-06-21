@@ -368,7 +368,10 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 			if !strings.HasPrefix(events[0].Error, tc.wantPrefix) {
 				t.Fatalf("error = %q, want prefix %q", events[0].Error, tc.wantPrefix)
 			}
-			if strings.Contains(events[0].Error, "sk-secret") || strings.Contains(events[0].Error, "Bearer ") {
+			// The real security property: the secret token must never appear. Redact now
+			// preserves the word "Bearer" and scrubs only the token-shaped value after it,
+			// so we assert the token is gone rather than that "Bearer" was rewritten. (AUDIT-H7)
+			if strings.Contains(events[0].Error, "sk-secret") {
 				t.Fatalf("error leaked token: %q", events[0].Error)
 			}
 		})
