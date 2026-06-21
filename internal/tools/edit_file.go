@@ -113,6 +113,6 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff"}
+	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Body: unifiedDiff(relativePath, content, updated)}
 	return result
 }

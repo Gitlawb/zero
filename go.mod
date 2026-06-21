@@ -12,6 +12,7 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/hexops/gotextdiff v1.0.3
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/sys v0.46.0
 	mvdan.cc/sh/v3 v3.13.1

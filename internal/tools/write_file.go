@@ -91,6 +91,13 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 		}
 	}
 
+	// Capture the pre-write content so an overwrite can render a real diff.
+	oldContent := ""
+	if existed {
+		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
+			oldContent = string(prev)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
@@ -110,9 +117,16 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 		verb = "Overwrote"
 	}
 	summary := fmt.Sprintf("%s %s (%d bytes).", verb, relativePath, len([]byte(content)))
+	// A new file renders as an all-added diff; an overwrite renders the real diff.
+	// Either way it flows through the TUI's existing diff card. oldContent is ""
+	// for a new file, so unifiedDiff yields all-added lines.
+	display := Display{Summary: summary, Kind: "file"}
+	if diff := unifiedDiff(relativePath, oldContent, content); diff != "" {
+		display = Display{Summary: summary, Kind: "diff", Body: diff}
+	}
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	result.Display = Display{Summary: summary, Kind: "file"}
+	result.Display = display
 	return result
 }
 

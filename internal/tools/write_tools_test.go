@@ -482,8 +482,15 @@ func TestWriteFileReportsChangedFileAndDisplay(t *testing.T) {
 	if len(res.ChangedFiles) != 1 || res.ChangedFiles[0] != "notes.txt" {
 		t.Fatalf("ChangedFiles = %v, want [notes.txt]", res.ChangedFiles)
 	}
-	if res.Display.Kind != "file" {
-		t.Errorf("Display.Kind = %q, want file", res.Display.Kind)
+	// A non-empty new file carries an all-added diff for the TUI to preview.
+	if res.Display.Kind != "diff" {
+		t.Errorf("Display.Kind = %q, want diff", res.Display.Kind)
+	}
+	if !strings.Contains(res.Display.Body, "+hello") {
+		t.Errorf("Display.Body should preview the new content as an added line, got %q", res.Display.Body)
+	}
+	if strings.Contains(res.Output, "+hello") {
+		t.Errorf("model-facing Output must stay the concise summary, not the diff body: %q", res.Output)
 	}
 	if res.Display.Summary == "" {
 		t.Error("expected a non-empty Display.Summary")

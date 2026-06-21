@@ -3510,13 +3510,20 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					specReview = &info
 				}
 			}
+			// Display.Body is a UI-only render payload (a diff for file writes/edits)
+			// that the tool attaches so the card can show a code preview without
+			// echoing the file into the model's context. Prefer it over Output.
+			detail := result.Output
+			if result.Display.Body != "" {
+				detail = result.Display.Body
+			}
 			row := transcriptRow{
 				kind:   rowToolResult,
 				id:     effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
 				text:   toolResultRowText(result),
 				tool:   result.Name,
 				status: result.Status,
-				detail: result.Output,
+				detail: detail,
 				runID:  runID,
 			}
 			// A Task result is shown by the specialist card (its completion state),

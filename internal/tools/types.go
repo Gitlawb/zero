@@ -86,7 +86,12 @@ type Result struct {
 // Display carries a short, structured summary of a tool result for the TUI/stream.
 type Display struct {
 	Summary string
-	Kind    string // e.g. file, diff, search, shell
+	Kind    string // e.g. file, diff, search, shell, preview
+	// Body is a UI-only render payload (a unified diff for Kind=="diff", or file
+	// content for Kind=="preview"). It is NOT sent to the model — it exists so the
+	// TUI can show a code preview/diff without bloating the model's context with
+	// the full file. Empty when the tool has no richer view than its Output.
+	Body string
 }
 
 type Tool interface {
