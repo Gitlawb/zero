@@ -39,10 +39,10 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// via Windows Schannel (e.g. a Schannel-backed curl.exe) fails inside this
 	// restricted token with SEC_E_NO_CREDENTIALS — Schannel can't acquire its
 	// per-user TLS credential under a WRITE_RESTRICTED/LUA token. This is a
-	// fundamental restricted-token ↔ Schannel incompatibility (the reason
-	// Chromium does TLS in its broker, not the sandboxed process) and is unsolved
-	// even in the reference sandboxes (cf. openai/codex#17459). Workarounds: the
-	// degraded path (no restricted token) or the in-process web_fetch tool.
+	// fundamental restricted-token vs Schannel incompatibility (the standard
+	// mitigation is to run TLS in a broker process, not the sandboxed one) and
+	// has no clean in-token fix. Workarounds: the degraded path (no restricted
+	// token) or the in-process web_fetch tool.
 	tokenSIDs := windowsRuntimeTokenSIDs(capabilitySIDs, offlineSID, config.PermissionProfile.Network.Mode)
 	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs)
 	if err != nil {
