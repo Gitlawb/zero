@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -147,13 +150,42 @@ func providerConfigCheck(profile config.ProviderProfile) Check {
 	if strings.TrimSpace(profile.APIKey) != "" || strings.TrimSpace(profile.AuthHeaderValue) != "" {
 		credential = "set"
 	}
-	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), map[string]any{
+	details := map[string]any{
 		"name":                 profile.Name,
 		"provider":             profile.ProviderKind,
 		"baseURL":              profile.BaseURL,
 		"model":                profile.Model,
 		"credentialConfigured": credential,
-	})
+	}
+	// A remote provider with no credential cannot make a request, so doctor must NOT
+	// report it as healthy — otherwise "Overall: pass" gives a false all-clear for the
+	// one tool meant to verify keys. Keyless local providers (loopback base_url, e.g.
+	// Ollama/LM Studio) legitimately need no key, so they stay a pass. (AUDIT-H9)
+	if credential == "not set" && !localProviderBaseURL(profile.BaseURL) {
+		return check("provider.config", "Provider config", StatusFail,
+			fmt.Sprintf("No API key configured for %s. Run `zero auth` or `zero setup`, or set the provider's API key environment variable.", providerName(profile)),
+			details)
+	}
+	return check("provider.config", "Provider config", StatusPass, fmt.Sprintf("Provider config loaded for %s.", providerName(profile)), details)
+}
+
+// localProviderBaseURL reports whether the configured base_url is a loopback host
+// (a keyless local provider like Ollama/LM Studio), which needs no API key.
+func localProviderBaseURL(baseURL string) bool {
+	u := strings.TrimSpace(baseURL)
+	if u == "" {
+		return false
+	}
+	if parsed, err := url.Parse(u); err == nil && parsed.Host != "" {
+		host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			return true
+		}
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return addr.IsLoopback()
+		}
+	}
+	return false
 }
 
 func providerModelCheck(profile config.ProviderProfile) Check {
@@ -274,9 +306,42 @@ func formatDetails(details map[string]any) string {
 	parts := make([]string, 0, len(details))
 	for _, key := range keys {
 		value := details[key]
-		parts = append(parts, fmt.Sprintf("%s: %v", redaction.RedactString(key, redaction.Options{}), redaction.RedactValue(value, redaction.Options{})))
+		parts = append(parts, fmt.Sprintf("%s: %s", redaction.RedactString(key, redaction.Options{}), formatDetailValue(redaction.RedactValue(value, redaction.Options{}))))
 	}
 	return strings.Join(parts, " | ")
+}
+
+// formatDetailValue renders a detail value for human reading. A nested map (e.g. the
+// lsp.servers missing-tools list or config.validation results) was previously printed
+// with %v, leaking Go's `map[k:v ...]` syntax into user output; render maps as sorted
+// "k: v" entries and slices as a comma list instead. (AUDIT-H8)
+func formatDetailValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Map:
+		entries := make([]string, 0, rv.Len())
+		for _, k := range rv.MapKeys() {
+			entries = append(entries, fmt.Sprintf("%v: %v", k.Interface(), rv.MapIndex(k).Interface()))
+		}
+		sort.Strings(entries)
+		return strings.Join(entries, "; ")
+	case reflect.Slice, reflect.Array:
+		if rv.Type().Elem().Kind() == reflect.Uint8 { // []byte
+			return fmt.Sprintf("%v", value)
+		}
+		parts := make([]string, 0, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			parts = append(parts, fmt.Sprintf("%v", rv.Index(i).Interface()))
+		}
+		return strings.Join(parts, ", ")
+	case reflect.String:
+		return rv.String()
+	default:
+		return fmt.Sprintf("%v", value)
+	}
 }
 
 func configValidationCheck(userPath string, projectPath string) Check {

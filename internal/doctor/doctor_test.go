@@ -95,6 +95,7 @@ func TestProviderModelUnknownOpenAICompatibleModelWarnsPassThrough(t *testing.T)
 			ProviderKind: config.ProviderKindOpenAICompatible,
 			BaseURL:      "https://openrouter.ai/api/v1",
 			Model:        "vendor/new-dynamic-model",
+			APIKey:       "sk-test", // isolate the model pass-through behavior from the credential check
 		},
 	})
 
@@ -392,5 +393,55 @@ func TestProviderConfigCheckCredentialPresence(t *testing.T) {
 				t.Fatalf("credentialConfigured = %v, want %q (matches ProviderSnapshot.APIKeySet trimming)", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatDetailValueRendersMapForHumans(t *testing.T) {
+	// AUDIT-H8: nested-map details (lsp.servers missing tools, config.validation) must
+	// not leak Go's map[...] syntax.
+	got := formatDetailValue(map[string]any{
+		"gopls":   "install with `go install ...`",
+		"pyright": "install with `npm i -g pyright`",
+	})
+	if strings.Contains(got, "map[") {
+		t.Fatalf("formatDetailValue leaked Go map syntax: %q", got)
+	}
+	if !strings.Contains(got, "gopls: install") || !strings.Contains(got, "pyright: install") {
+		t.Fatalf("formatDetailValue should render sorted k: v entries, got %q", got)
+	}
+}
+
+func TestDoctorFailsRemoteProviderWithoutCredential(t *testing.T) {
+	// AUDIT-H9: a remote provider with no key must NOT yield "Overall: pass".
+	report := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "openai",
+			ProviderKind: config.ProviderKindOpenAI,
+			BaseURL:      "https://api.openai.com/v1",
+			Model:        "gpt-4.1",
+		},
+	})
+	if report.OK {
+		t.Fatal("doctor must not report Overall: pass for a remote provider with no credential")
+	}
+	if c := report.Check("provider.config"); c == nil || c.Status != StatusFail {
+		t.Fatalf("provider.config should fail without a credential, got %#v", c)
+	}
+
+	// A keyless LOCAL provider (loopback base_url) is legitimately fine.
+	local := Run(Options{
+		Now:     fixedDoctorClock("2026-06-04T15:45:00Z"),
+		Runtime: "go",
+		Provider: config.ProviderProfile{
+			Name:         "ollama",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "http://localhost:11434/v1",
+			Model:        "llama3",
+		},
+	})
+	if c := local.Check("provider.config"); c == nil || c.Status != StatusPass {
+		t.Fatalf("keyless local provider should pass provider.config, got %#v", c)
 	}
 }
