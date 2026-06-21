@@ -294,7 +294,7 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	var header string
 	switch info.status {
 	case specialistRunning:
-		icon := m.spinner.View()
+		icon := m.spinnerGlyph()
 		header = zeroTheme.accent.Render(fmt.Sprintf("%s%s · %s · %s", icon, info.name, description, elapsedStr))
 	case specialistCompleted:
 		header = zeroTheme.green.Render(fmt.Sprintf("✓ %s · %s · %s", info.name, description, elapsedStr))

@@ -185,7 +185,7 @@ func (m model) renderPlanPanel(width int) string {
 		elapsed = now.Sub(state.startedAt)
 	}
 
-	header := renderPlanHeader(state, m.spinner.View(), done, total, elapsed)
+	header := renderPlanHeader(state, m.spinnerGlyph(), done, total, elapsed)
 	bar := renderPlanProgressBar(done, total, width)
 
 	lines := []string{header, bar}
@@ -258,7 +258,7 @@ func (m model) renderPlanSummaryLine(width int) string {
 	if state.isComplete() {
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN · %d/%d complete", done, total))
 	}
-	label := fmt.Sprintf("%s PLAN · %d/%d · ", m.spinner.View(), done, total)
+	label := fmt.Sprintf("%s PLAN · %d/%d · ", m.spinnerGlyph(), done, total)
 	room := width - len([]rune(label)) - 1
 	if room < 4 {
 		room = 4

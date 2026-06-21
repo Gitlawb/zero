@@ -57,6 +57,7 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 		}
 
 		if fence, ok := markdownFenceMarker(trimmed); ok {
+			lang := strings.TrimSpace(strings.TrimPrefix(trimmed, fence))
 			code := []string{}
 			index++
 			for index < len(raw) {
@@ -67,7 +68,11 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 				code = append(code, strings.ReplaceAll(raw[index], "\t", "    "))
 				index++
 			}
-			lines = append(lines, renderMarkdownCodeBlock(code, tableMeasure)...)
+			if highlighted, ok := highlightCode(code, lang, tableMeasure); ok {
+				lines = append(lines, highlighted...)
+			} else {
+				lines = append(lines, renderMarkdownCodeBlock(code, tableMeasure)...)
+			}
 			continue
 		}
 

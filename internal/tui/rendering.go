@@ -1166,7 +1166,7 @@ type cardBody struct {
 func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	glyph := zeroTheme.faintest.Render("…")
 	if m.pending && row.runID != 0 && row.runID == m.activeRunID {
-		glyph = zeroTheme.accent.Render(m.spinner.View())
+		glyph = zeroTheme.accent.Render(m.spinnerGlyph())
 	}
 	// The call row carries its own argHints; rc.hints/args only matter for
 	// result rows, whose detail is the tool output.
@@ -1479,7 +1479,8 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	textBudget := maxInt(8, innerWidth-3-gutterWidth)
 	oldLine, newLine := 0, 0
 	inHunk := false
-	for _, line := range rawLines {
+	for i := 0; i < len(rawLines); i++ {
+		line := rawLines[i]
 		switch {
 		case strings.HasPrefix(line, "+++ "), strings.HasPrefix(line, "--- "):
 			// Path already in the body head row.
@@ -1500,6 +1501,20 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 			lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget, gutter))
 			newLine++
 		case strings.HasPrefix(line, "-"):
+			// Isolated 1:1 replacement (one "-" immediately followed by one "+"):
+			// highlight only the changed span on each side so a one-token edit reads
+			// instantly. Block changes and near-rewrites fall back to whole-line tint.
+			if isIsolatedReplacement(rawLines, i) {
+				delText := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
+				addText := truncateRunes(strings.TrimPrefix(rawLines[i+1], "+"), textBudget)
+				if delRow, addRow, ok := renderWordDiffPair(oldLine, newLine, delText, addText, textBudget, gutter); ok {
+					lines = append(lines, delRow, addRow)
+					oldLine++
+					newLine++
+					i++ // consume the paired "+"
+					continue
+				}
+			}
 			text := truncateRunes(strings.TrimPrefix(line, "-"), textBudget)
 			lines = append(lines, diffBodyLine(oldLine, "−", text, false, textBudget, gutter))
 			oldLine++
@@ -1537,6 +1552,93 @@ func diffBodyLine(number int, sign string, text string, added bool, textBudget i
 		return numCol + zeroTheme.addSign.Render(" "+sign+" ") + zeroTheme.addLine.Render(text)
 	}
 	return numCol + zeroTheme.delSign.Render(" "+sign+" ") + zeroTheme.delLine.Render(text)
+}
+
+func isDiffAddContent(s string) bool {
+	return strings.HasPrefix(s, "+") && !strings.HasPrefix(s, "+++")
+}
+func isDiffDelContent(s string) bool {
+	return strings.HasPrefix(s, "-") && !strings.HasPrefix(s, "---")
+}
+
+// isIsolatedReplacement reports whether rawLines[i] (already a deleted content
+// line) is a single delete immediately followed by a single add — a 1:1 swap
+// where an intra-line word diff is meaningful. It rejects multi-line delete or
+// add blocks (where pairing would be wrong).
+func isIsolatedReplacement(rawLines []string, i int) bool {
+	if i+1 >= len(rawLines) || !isDiffAddContent(rawLines[i+1]) {
+		return false
+	}
+	if i > 0 && isDiffDelContent(rawLines[i-1]) {
+		return false // part of a multi-line delete block
+	}
+	if i+2 < len(rawLines) && isDiffAddContent(rawLines[i+2]) {
+		return false // part of a multi-line add block
+	}
+	return true
+}
+
+// changedSpan returns the rune index p where a and b first diverge, plus the
+// exclusive ends in a and b after the common suffix. The changed middle is
+// a[p:aEnd] / b[p:bEnd]; equal strings yield p==aEnd==bEnd.
+func changedSpan(a, b []rune) (p, aEnd, bEnd int) {
+	n := minInt(len(a), len(b))
+	for p < n && a[p] == b[p] {
+		p++
+	}
+	s := 0
+	for s < n-p && a[len(a)-1-s] == b[len(b)-1-s] {
+		s++
+	}
+	return p, len(a) - s, len(b) - s
+}
+
+// renderWordDiffPair renders a deleted/added pair with only the changed span
+// highlighted. ok is false (caller falls back to whole-line tinting) when the
+// change covers more than 60% of the longer line — a near-rewrite, where
+// per-word highlighting is just noise.
+func renderWordDiffPair(oldLine, newLine int, delText, addText string, textBudget int, gutter bool) (string, string, bool) {
+	del := []rune(delText)
+	add := []rune(addText)
+	p, delEnd, addEnd := changedSpan(del, add)
+	longer := maxInt(len(del), len(add))
+	changed := maxInt(delEnd-p, addEnd-p)
+	if longer == 0 || changed <= 0 || float64(changed)/float64(longer) > 0.6 {
+		return "", "", false
+	}
+	delRow := diffBodyLineSpanned(oldLine, "−", del, false, p, delEnd, textBudget, gutter)
+	addRow := diffBodyLineSpanned(newLine, "+", add, true, p, addEnd, textBudget, gutter)
+	return delRow, addRow, true
+}
+
+// diffBodyLineSpanned is diffBodyLine with the [spanStart,spanEnd) rune range of
+// text painted on the brighter changed-span bg.
+func diffBodyLineSpanned(number int, sign string, text []rune, added bool, spanStart, spanEnd, textBudget int, gutter bool) string {
+	if spanStart < 0 {
+		spanStart = 0
+	}
+	if spanEnd > len(text) {
+		spanEnd = len(text)
+	}
+	if spanEnd < spanStart {
+		spanEnd = spanStart
+	}
+	lineStyle, wordStyle, signStyle, numStyle := zeroTheme.delLine, zeroTheme.delLineWord, zeroTheme.delSign, zeroTheme.delLineNum
+	if added {
+		lineStyle, wordStyle, signStyle, numStyle = zeroTheme.addLine, zeroTheme.addLineWord, zeroTheme.addSign, zeroTheme.addLineNum
+	}
+	pre := string(text[:spanStart])
+	mid := string(text[spanStart:spanEnd])
+	post := string(text[spanEnd:])
+	if pad := textBudget - lipgloss.Width(string(text)); pad > 0 {
+		post += strings.Repeat(" ", pad)
+	}
+	body := lineStyle.Render(pre) + wordStyle.Render(mid) + lineStyle.Render(post)
+	numCol := ""
+	if gutter {
+		numCol = numStyle.Render(fmt.Sprintf("%4d", number))
+	}
+	return numCol + signStyle.Render(" "+sign+" ") + body
 }
 
 // readNumberedLinePattern matches read_file's body rows, which the tool emits

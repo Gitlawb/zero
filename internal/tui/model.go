@@ -206,7 +206,8 @@ type model struct {
 	lineAges           []time.Time
 	lastStreamActivity time.Time
 	fadeActive         bool
-	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color)
+	fadeDisabled       bool // streaming fade off (ZERO_NO_FADE / SSH / tmux / low-color / reduced motion)
+	reducedMotion      bool // ZERO_REDUCED_MOTION / no-TTY: static spinner glyph, no fade
 	// In-progress tool call whose arguments are streaming (a file being written),
 	// shown live by streamingToolCallView so a long write/edit isn't a frozen
 	// spinner. Cleared when the call completes (next text/turn) — see updateModel.
@@ -578,7 +579,8 @@ func newModel(ctx context.Context, options Options) model {
 	if m.themeMode != themeAuto {
 		applyTheme(m.themeMode, true)
 	}
-	m.fadeDisabled = defaultFadeDisabled()
+	m.reducedMotion = defaultReducedMotion()
+	m.fadeDisabled = defaultFadeDisabled() || m.reducedMotion
 	m.refreshMCPViewState()
 	return m
 }
@@ -2105,8 +2107,19 @@ func (m model) interimBlock(width int) string {
 // looks like a frozen terminal — the spinner tick (~80ms, time-based) drives the
 // re-render, so the elapsed clock keeps advancing for ANY provider/model even
 // when no stream data arrives.
+// spinnerGlyph is the liveness glyph every renderer should use instead of
+// m.spinner.View() directly: the animated frame normally, or a steady dot under
+// reduced motion. The caller applies its own color; liveness is preserved by the
+// advancing elapsed timer, so the static glyph never reads as frozen.
+func (m model) spinnerGlyph() string {
+	if m.reducedMotion {
+		return "•"
+	}
+	return m.spinner.View()
+}
+
 func (m model) workingStatusLine() string {
-	line := zeroTheme.accent.Render(m.spinner.View()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
+	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + zeroTheme.muted.Render(m.workingVerb.Current())
 	if !m.turnStartedAt.IsZero() {
 		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
 	}

@@ -181,7 +181,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 						specialists = append(specialists, *r.specialistInfo)
 					}
 				}
-				summary := renderSpecialistSummary(specialists, m.spinner.View())
+				summary := renderSpecialistSummary(specialists, m.spinnerGlyph())
 				if summary != "" {
 					items = append(items, transcriptBlockBodyItem(transcriptBodyItemRow, -1, summary))
 					items = append(items, transcriptBlankBodyItem())
