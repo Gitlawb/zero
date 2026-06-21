@@ -34,6 +34,15 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// (workspace write-jail); deny additionally carries the offline-marker SID
 	// that the persistent WFP block filter matches — so a deny command has no
 	// network while an approved allow command reaches it, both write-jailed.
+	//
+	// KNOWN LIMITATION: an approved online command reaches the network, but HTTPS
+	// via Windows Schannel (e.g. a Schannel-backed curl.exe) fails inside this
+	// restricted token with SEC_E_NO_CREDENTIALS — Schannel can't acquire its
+	// per-user TLS credential under a WRITE_RESTRICTED/LUA token. This is a
+	// fundamental restricted-token ↔ Schannel incompatibility (the reason
+	// Chromium does TLS in its broker, not the sandboxed process) and is unsolved
+	// even in the reference sandboxes (cf. openai/codex#17459). Workarounds: the
+	// degraded path (no restricted token) or the in-process web_fetch tool.
 	tokenSIDs := windowsRuntimeTokenSIDs(capabilitySIDs, offlineSID, config.PermissionProfile.Network.Mode)
 	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs)
 	if err != nil {
