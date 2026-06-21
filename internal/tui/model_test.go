@@ -786,6 +786,7 @@ func TestDoctorCommandUsesCurrentProviderProfile(t *testing.T) {
 			ProviderKind: config.ProviderKindOpenAI,
 			BaseURL:      config.OpenAIBaseURL,
 			Model:        "gpt-4.1",
+			APIKey:       "sk-test", // credentialed so provider.config passes (isolates this render test from the no-key check)
 		},
 	})
 	m.input.SetValue("/doctor")

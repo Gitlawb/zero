@@ -323,6 +323,7 @@ func TestDoctorFixRunsConnectivityWhenProviderConfigured(t *testing.T) {
 		ProviderKind: config.ProviderKindOpenAICompatible,
 		BaseURL:      "https://api.example.com/v1",
 		Model:        "custom-model",
+		APIKey:       "sk-test", // credentialed so provider.config passes and /doctor fix reaches connectivity
 	}
 	called := false
 	m := newModel(context.Background(), Options{
