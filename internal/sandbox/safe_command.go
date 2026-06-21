@@ -85,13 +85,23 @@ var interactivePrograms = map[string]interactiveProgram{
 var nonInteractiveREPLFlags = map[string][]string{
 	"python":  {"-c", "-m"},
 	"python3": {"-c", "-m"},
-	"node":    {"-e", "--eval", "-p", "--print"},
+	"node":    {"-e", "--eval", "-p", "--print", "-v", "--check", "-h"},
 	"ruby":    {"-e"},
 	"php":     {"-r", "-f"},
 	"psql":    {"-c", "--command", "-f", "--file", "-l", "--list"},
 	"mysql":   {"-e", "--execute"},
 	"mongo":   {"--eval", "-f", "--file"},
 	"mongosh": {"--eval", "-f", "--file"},
+}
+
+// infoExitFlags make ANY repl/interactive program print a message and exit
+// instead of opening a prompt. `--version` and `--help` are unambiguous across
+// these programs (unlike, say, `-v`, which is "version" for node but "verbose"
+// for mysql), so they universally suppress the interactive guard — without them
+// a harmless `node --version` / `python3 --version` was wrongly blocked.
+var infoExitFlags = map[string]bool{
+	"--version": true,
+	"--help":    true,
 }
 
 // interactiveSegments are multi-word interactive invocations. The detector
@@ -387,6 +397,15 @@ func hasNonInteractiveFlag(program string, fields []string) bool {
 		return false
 	}
 	for _, arg := range fields[start+1:] {
+		// Universal print-and-exit flags (`--version`/`--help`) make the program
+		// print and quit rather than open a prompt, for every repl program.
+		base := arg
+		if i := strings.IndexByte(base, '='); i >= 0 {
+			base = base[:i]
+		}
+		if infoExitFlags[base] {
+			return true
+		}
 		for _, flag := range flags {
 			if arg == flag || strings.HasPrefix(arg, flag+"=") {
 				return true

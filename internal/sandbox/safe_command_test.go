@@ -17,6 +17,9 @@ func TestDetectInteractiveCommandBlocksEditors(t *testing.T) {
 		{name: "less pager", command: "less /var/log/syslog", wantCmd: "less", wantSuggHint: "cat"},
 		{name: "python repl", command: "python", wantCmd: "python", wantSuggHint: "-c"},
 		{name: "node repl", command: "node", wantCmd: "node", wantSuggHint: "-e"},
+		// -v is "verbose" for mysql (NOT "version"), so it must still open the
+		// prompt — the info-exit allowance is for unambiguous --version/--help only.
+		{name: "mysql verbose not version", command: "mysql -v", wantCmd: "mysql", wantSuggHint: "-e"},
 		{name: "ssh interactive", command: "ssh host.example.com", wantCmd: "ssh"},
 		{name: "top", command: "top", wantCmd: "top"},
 		{name: "git rebase interactive", command: "git rebase -i HEAD~3", wantCmd: "git rebase -i"},
@@ -51,6 +54,13 @@ func TestDetectInteractiveCommandAllowsNonInteractive(t *testing.T) {
 		"python3 script.py",
 		"node -e 'console.log(1)'",
 		"node build.js",
+		"node --version",
+		"node -v",
+		"node --check app.js",
+		"node --help",
+		"node --version && npm --version",
+		"python3 --version",
+		"php --version",
 		"cat file.txt",
 		"git rebase --continue",
 		"git status",
