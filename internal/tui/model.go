@@ -817,6 +817,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.quit()
 		case keyCtrl(msg, 'o'):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'k') && strings.TrimSpace(m.composerValue()) == "":
+			// Command palette: ctrl+k on an empty prompt opens the full slash-command
+			// registry. With text present this case falls through, so ctrl+k keeps its
+			// composer kill-to-end-of-line behavior.
+			return m.openCommandPalette(), nil
 		case keyCtrl(msg, 'g'):
 			return m.toggleSidebar(), nil
 		case keyCtrl(msg, 'e'):

@@ -688,3 +688,21 @@ func (m model) dismissSuggestions() model {
 	m.filePaletteOpen = false
 	return m
 }
+
+// openCommandPalette opens the slash-command palette over the FULL command
+// registry, exactly as if the user had typed "/". It is the ctrl+k entry point
+// (in addition to the leading-"/" trigger): it seeds the composer with "/" and
+// recomputes, so the existing palette rendering, filtering, navigation, and
+// Enter-dispatch all apply unchanged — Enter executes a self-contained command or
+// inserts an argument-taking one, identically to typing the slash command. A no-op
+// while a blocking modal owns the screen.
+func (m model) openCommandPalette() model {
+	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil ||
+		m.providerWizard != nil || m.mcpManager != nil || m.mcpAddWizard != nil || m.picker != nil || m.subchat.active {
+		return m
+	}
+	m.setComposerState(composerState{text: "/", cursor: 1})
+	m.suggestionIdx = 0
+	m.recomputeSuggestions()
+	return m
+}
