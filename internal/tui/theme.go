@@ -21,6 +21,8 @@ type tuiTheme struct {
 	faint      lipgloss.Style // hints, metadata
 	faintest   lipgloss.Style // line numbers, separators, tool args
 	accent     lipgloss.Style // brand lime: prompts, spinner, focus
+	white      lipgloss.Style // brand wordmark "ZER", status emphasis (white bold)
+	dimmer     lipgloss.Style // dimmest decorative text (help hints)
 	green      lipgloss.Style // success, diff add sign, ✓
 	red        lipgloss.Style // errors, diff del sign, ✗, deny
 	amber      lipgloss.Style // permission surfaces, warnings, auto badge
@@ -36,6 +38,7 @@ type tuiTheme struct {
 
 	// Stream roles.
 	userPrompt lipgloss.Style // ❯ user gutter, accent bold
+	userText   lipgloss.Style // user-turn prose, cool blue
 	sayText    lipgloss.Style // assistant interim prose, muted
 
 	// Tool cards.
@@ -47,6 +50,7 @@ type tuiTheme struct {
 	cardErr    lipgloss.Style // card border after an error (red-mixed)
 	bashPrompt lipgloss.Style // ❯ command gutter inside bash cards, accent bold
 	grepLoc    lipgloss.Style // file:line locations in grep bodies, blue
+	cardHeader lipgloss.Style // tool-card header surface (raised above the body)
 
 	// Diff bodies. The sign/count styles are bare foregrounds; the line styles
 	// carry the tinted backgrounds standing in for the prototype's 9% overlays.
@@ -82,12 +86,14 @@ type tuiTheme struct {
 	// fade interpolates accent→ink; panel-backed prompts paint on bgPanel), kept
 	// on the theme so a theme switch reaches them too. The bg* colors back the
 	// on* surface helpers below.
-	accentColor color.Color
-	inkColor    color.Color
-	bgPanel     color.Color
-	bgPrompt    color.Color
-	bgSel       color.Color
-	bgPerm      color.Color
+	accentColor  color.Color
+	inkColor     color.Color
+	bgCanvas     color.Color // Lime Refined base canvas (overlay/sidebar fills)
+	bgPanel      color.Color
+	bgCardHeader color.Color // tool-card header surface
+	bgPrompt     color.Color
+	bgSel        color.Color
+	bgPerm       color.Color
 }
 
 // palette is the raw color-token table for one theme. buildTheme turns it into a
@@ -95,62 +101,74 @@ type tuiTheme struct {
 // live. All dark tints stay darker than ink so every pairing survives 256-color
 // downsampling; the light set is dark-on-light with the same intent inverted.
 type palette struct {
-	panel    string // card backgrounds (the terminal canvas itself is never painted full-bleed)
-	promptBg string // submitted user prompt background
-	line     string // default borders, rules
-	line2    string // emphasized borders
-	ink      string // primary text
-	muted    string // secondary text
-	faint    string // hints, metadata
-	faintest string // line numbers, separators, tool args
-	accent   string // brand lime
-	green    string // success, diff add
-	red      string // errors, diff del
-	amber    string // permission, warnings
-	blue     string // grep locations, local-model dot
-	gitAdd   string // footer PR diff additions
-	gitDel   string // footer PR diff deletions
-	addBg    string // diff added-line bg
-	delBg    string // diff deleted-line bg
-	permBg   string // permission card bg
-	selBg    string // selected row bg
-	addInk   string // added-line text
-	delInk   string // deleted-line text
-	onAccent string // text on accent or amber fills
-	cardRun  string // running card border (accent mixed into line)
-	cardErr  string // errored card border (red mixed into line)
-	cardPerm string // permission card border (amber mixed into line)
+	bg         string // Lime Refined base canvas — backs overlays/sidebar fills (the chat surface itself is never painted full-bleed)
+	panel      string // card/body surface fill
+	cardHeader string // tool-card header surface (raised above the body)
+	promptBg   string // submitted user prompt background
+	line       string // default borders, rules
+	line2      string // emphasized borders
+	ink        string // primary text
+	muted      string // secondary text
+	faint      string // hints, metadata (AA-lifted: carries content)
+	faintest   string // line numbers, separators, tool args (AA-lifted: carries content)
+	dimmer     string // dimmest decorative text (help hints) — non-content, AA-exempt
+	accent     string // brand lime
+	white      string // brand wordmark "ZER", status emphasis
+	green      string // success, diff add
+	red        string // errors, diff del
+	amber      string // permission, warnings
+	blue       string // grep locations, local-model dot
+	user       string // user-turn prose (cool blue)
+	gitAdd     string // footer PR diff additions
+	gitDel     string // footer PR diff deletions
+	addBg      string // diff added-line bg
+	delBg      string // diff deleted-line bg
+	permBg     string // permission card bg
+	selBg      string // selected row bg
+	addInk     string // added-line text
+	delInk     string // deleted-line text
+	onAccent   string // text on accent or amber fills
+	cardRun    string // running card border (accent mixed into line)
+	cardErr    string // errored card border (red mixed into line)
+	cardPerm   string // permission card border (amber mixed into line)
 }
 
-// darkPalette is the original Lime palette: a near-black chat surface with one
-// lime accent. bg (#070708) is the terminal's own canvas — deliberately never
-// painted — so no token references it.
+// darkPalette is the Lime Refined dark theme: a deep cool-charcoal chat surface
+// with one lime accent (the terminal translation of the Lime Refined design). The
+// chat canvas itself is still never painted full-bleed; bg (#0d0f13) backs only the
+// overlays/sidebar fills that need a base. faint/faintest are AA-lifted (>=4.5 on
+// panel) because they carry content — see TestLightPaletteContrastAndHierarchy.
 var darkPalette = palette{
-	panel:    "#0e0e10",
-	promptBg: "#262626",
-	line:     "#242429",
-	line2:    "#414147",
-	ink:      "#ececee",
-	muted:    "#8b8b93",
-	faint:    "#838389",
-	faintest: "#7c7c82",
-	accent:   "#caff3f",
-	green:    "#5dd1a4",
-	red:      "#ff7a7a",
-	amber:    "#ffc25c",
-	blue:     "#7db4ff",
-	gitAdd:   "#7db87a",
-	gitDel:   "#b87a7a",
-	addBg:    "#15201d",
-	delBg:    "#241819",
-	permBg:   "#1c1915",
-	selBg:    "#1d2114",
-	addInk:   "#bdeed7",
-	delInk:   "#f2c4c4",
-	onAccent: "#000000",
-	cardRun:  "#5a6b2e",
-	cardErr:  "#6b3434",
-	cardPerm: "#6b5a2e",
+	bg:         "#0d0f13",
+	panel:      "#14171d",
+	cardHeader: "#161a21",
+	promptBg:   "#1b1f27",
+	line:       "#232830",
+	line2:      "#2b313b",
+	ink:        "#d4d8e0",
+	muted:      "#8b93a1",
+	faint:      "#868d9b",
+	faintest:   "#7e8694",
+	dimmer:     "#6b7280",
+	accent:     "#caff3f",
+	white:      "#f0f3f7",
+	green:      "#3fb950",
+	red:        "#ff9b95",
+	amber:      "#ffc25c",
+	blue:       "#7db4ff",
+	user:       "#9db4ff",
+	gitAdd:     "#7db87a",
+	gitDel:     "#b87a7a",
+	addBg:      "#102a19",
+	delBg:      "#2a1618",
+	permBg:     "#1c1915",
+	selBg:      "#1a2310",
+	addInk:     "#7ee787",
+	delInk:     "#ff9b95",
+	onAccent:   "#000000",
+	cardRun:    "#5a6b2e",
+	cardErr:    "#6b3434",
+	cardPerm:   "#6b5a2e",
 }
 
 // lightPalette is dark-on-light: light-gray surfaces with near-black ink. The
@@ -158,31 +176,36 @@ var darkPalette = palette{
 // same text hierarchy reads on white; the lime accent is darkened to keep contrast
 // against a light background, and the diff/permission tints become light surfaces.
 var lightPalette = palette{
-	panel:    "#ececed", // card backgrounds (slightly off-white)
-	promptBg: "#dcdce0", // submitted prompt background
-	line:     "#cfcfd5", // default borders
-	line2:    "#b0b0b8", // emphasized borders
-	ink:      "#1b1b1d", // primary text (near-black)
-	muted:    "#54545b", // secondary text
-	faint:    "#5b5b62", // hints, metadata
-	faintest: "#646469", // line numbers, separators
-	accent:   "#477006", // brand lime, darkened to AA contrast on light
-	green:    "#1c7a4a", // success / diff add
-	red:      "#c0322c", // errors / diff del
-	amber:    "#8f6200", // permission / warnings
-	blue:     "#1d5fd6", // grep locations
-	gitAdd:   "#2f7a3a", // footer PR diff additions
-	gitDel:   "#a83a3a", // footer PR diff deletions
-	addBg:    "#e2f3e6", // diff added-line bg (light green)
-	delBg:    "#fbe6e6", // diff deleted-line bg (light red)
-	permBg:   "#fbf0d8", // permission card bg (light amber)
-	selBg:    "#e7f2cd", // selected row bg (light accent)
-	addInk:   "#1d5b37", // added-line text
-	delInk:   "#8e2d2d", // deleted-line text
-	onAccent: "#ffffff", // text on the (dark) accent/amber fills
-	cardRun:  "#94ad60", // running card border
-	cardErr:  "#cf9a9a", // errored card border
-	cardPerm: "#c9ad7d", // permission card border
+	bg:         "#f6f6f4", // light canvas (overlay/sidebar fills)
+	panel:      "#ececed", // card backgrounds (slightly off-white)
+	cardHeader: "#e2e2e6", // tool-card header surface (raised on light)
+	promptBg:   "#dcdce0", // submitted prompt background
+	line:       "#cfcfd5", // default borders
+	line2:      "#b0b0b8", // emphasized borders
+	ink:        "#1b1b1d", // primary text (near-black)
+	muted:      "#54545b", // secondary text
+	faint:      "#5b5b62", // hints, metadata
+	faintest:   "#646469", // line numbers, separators
+	dimmer:     "#6f6f76", // dimmest decorative text
+	accent:     "#477006", // brand lime, darkened to AA contrast on light
+	white:      "#1b1b1d", // wordmark/emphasis becomes near-black ink on light
+	green:      "#1c7a4a", // success / diff add
+	red:        "#c0322c", // errors / diff del
+	amber:      "#8f6200", // permission / warnings
+	blue:       "#1d5fd6", // grep locations
+	user:       "#2f53c8", // user-turn prose (AA blue on light)
+	gitAdd:     "#2f7a3a", // footer PR diff additions
+	gitDel:     "#a83a3a", // footer PR diff deletions
+	addBg:      "#e2f3e6", // diff added-line bg (light green)
+	delBg:      "#fbe6e6", // diff deleted-line bg (light red)
+	permBg:     "#fbf0d8", // permission card bg (light amber)
+	selBg:      "#e7f2cd", // selected row bg (light accent)
+	addInk:     "#1d5b37", // added-line text
+	delInk:     "#8e2d2d", // deleted-line text
+	onAccent:   "#ffffff", // text on the (dark) accent/amber fills
+	cardRun:    "#94ad60", // running card border
+	cardErr:    "#cf9a9a", // errored card border
+	cardPerm:   "#c9ad7d", // permission card border
 }
 
 // buildTheme resolves a palette into the styles every renderer uses.
@@ -195,6 +218,8 @@ func buildTheme(p palette) tuiTheme {
 		faint:      fg(p.faint),
 		faintest:   fg(p.faintest),
 		accent:     fg(p.accent).Bold(true),
+		white:      fg(p.white).Bold(true),
+		dimmer:     fg(p.dimmer),
 		green:      fg(p.green),
 		red:        fg(p.red),
 		amber:      fg(p.amber),
@@ -208,6 +233,7 @@ func buildTheme(p palette) tuiTheme {
 		badge: lipgloss.NewStyle().Background(col(p.accent)).Foreground(col(p.onAccent)).Bold(true),
 
 		userPrompt: fg(p.accent).Bold(true),
+		userText:   fg(p.user),
 		sayText:    fg(p.muted),
 		toolName:   fg(p.ink).Bold(true),
 		toolTarget: fg(p.muted),
@@ -217,6 +243,7 @@ func buildTheme(p palette) tuiTheme {
 		cardErr:    fg(p.cardErr),
 		bashPrompt: fg(p.accent).Bold(true),
 		grepLoc:    fg(p.blue),
+		cardHeader: lipgloss.NewStyle().Background(col(p.cardHeader)),
 
 		diffAdd:    fg(p.green),
 		diffDel:    fg(p.red),
@@ -240,12 +267,14 @@ func buildTheme(p palette) tuiTheme {
 		modeAsk:    fg(p.amber).Bold(true),
 		modeUnsafe: fg(p.red).Bold(true),
 
-		accentColor: col(p.accent),
-		inkColor:    col(p.ink),
-		bgPanel:     col(p.panel),
-		bgPrompt:    col(p.promptBg),
-		bgSel:       col(p.selBg),
-		bgPerm:      col(p.permBg),
+		accentColor:  col(p.accent),
+		inkColor:     col(p.ink),
+		bgCanvas:     col(p.bg),
+		bgPanel:      col(p.panel),
+		bgCardHeader: col(p.cardHeader),
+		bgPrompt:     col(p.promptBg),
+		bgSel:        col(p.selBg),
+		bgPerm:       col(p.permBg),
 	}
 }
 
