@@ -87,7 +87,7 @@ Type to chat, **Enter** to send. `/` opens command suggestions, **Shift+Tab** cy
 | `/permissions` `/tools` | inspect what the agent can touch |
 | `/add-dir` | grant an extra write directory for the session, or list current write roots |
 | `/theme` `/style` | make it yours |
-| `/doctor` `/usage` `/config` | health, cost, and config without leaving the chat |
+| `/doctor` `/config` | health and config without leaving the chat |
 
 Turn-completion notifications (terminal bell / OSC-9) ping you when the agent finishes or needs input — go make coffee.
 
