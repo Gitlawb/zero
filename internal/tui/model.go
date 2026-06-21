@@ -699,6 +699,8 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
 		m.exitConfirmSeq++
 		m.cancelRun()
 		m.exiting = true
+		// A cancelled run may still need to flush checkpoint/session events; quit
+		// only after agentResponseMsg drains flushRunIDs so /rewind stays valid.
 		if len(m.flushRunIDs) > 0 {
 			return m, nil
 		}
