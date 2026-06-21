@@ -101,7 +101,25 @@ func (m model) titleBar(width int) string {
 		}
 	}
 
-	line := startupHeaderLine(width, candidates)
+	// Prefix the ZERO wordmark (white "ZER" + lime "O") as a DROPPABLE decoration:
+	// for each info tier, offer "wordmark + tier" ONLY when it fits untruncated
+	// (joinHeaderLine needs a >=2 gap), with the bare tier right behind as the
+	// fallback. So a tight width keeps the branch/cwd and simply drops the brand,
+	// rather than the brand bumping content down a tier.
+	mark := wordmark()
+	ordered := make([]headerCandidate, 0, len(candidates)*2)
+	for _, c := range candidates {
+		markLeft := mark
+		if lipgloss.Width(c.left) > 0 {
+			markLeft = mark + "  " + c.left
+		}
+		if lipgloss.Width(markLeft)+lipgloss.Width(c.right) <= width-2 {
+			ordered = append(ordered, headerCandidate{left: markLeft, right: c.right})
+		}
+		ordered = append(ordered, c)
+	}
+
+	line := startupHeaderLine(width, ordered)
 	rule := zeroTheme.line.Render(strings.Repeat("─", width))
 	return line + "\n" + rule
 }

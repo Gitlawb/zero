@@ -95,8 +95,10 @@ type model struct {
 	selfCorrectTests      bool
 	reasoningEffort       modelregistry.ReasoningEffort
 	responseStyle         string
-	themeMode             themeMode // palette preference: auto (default), dark, light
-	hasDarkBg             bool      // last terminal background-detection result (auto mode)
+	themeMode             themeMode           // palette preference: auto (default), dark, light
+	hasDarkBg             bool                // last terminal background-detection result (auto mode)
+	sidebarVisible        bool                // collapsible left rail (ctrl+g), alt-screen only
+	sidebarSessions       []sessions.Metadata // resumable sessions snapshot, loaded on toggle
 	userAgent             string
 	compactRequests       int
 	compactInFlight       bool
@@ -815,6 +817,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.quit()
 		case keyCtrl(msg, 'o'):
 			return m.toggleDetailedTranscript(), nil
+		case keyCtrl(msg, 'g'):
+			return m.toggleSidebar(), nil
 		case keyCtrl(msg, 'e'):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection).
@@ -1866,6 +1870,7 @@ func (m model) renderScrollableTranscriptWindow(frame transcriptFrameLayout, bod
 	for len(bodyWindow) < window.height {
 		bodyWindow = append(bodyWindow, "")
 	}
+	bodyWindow = m.applySidebar(bodyWindow, width)
 	bodyWindow = overlayViewportLines(bodyWindow, overlay, width)
 
 	lines := make([]string, 0, len(frame.headerLines)+len(bodyWindow)+len(frame.footerLines))

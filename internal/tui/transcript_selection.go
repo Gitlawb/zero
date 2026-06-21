@@ -681,6 +681,11 @@ func (m model) transcriptLineAtMouse(msg tea.MouseMsg) (transcriptSelectableLine
 	if !m.altScreen || m.height <= 0 || m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
 		return transcriptSelectableLine{}, false
 	}
+	// Clicks over the docked sidebar rail must not select the transcript text it
+	// covers.
+	if m.sidebarVisible && sidebarFits(chatWidth(m.width)) && mouseX(msg) < sidebarWidth {
+		return transcriptSelectableLine{}, false
+	}
 	width := chatWidth(m.width)
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	items := m.transcriptBodyItems(width, "")
