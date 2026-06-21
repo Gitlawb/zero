@@ -49,6 +49,26 @@ func wcagRatio(t *testing.T, fg, bg string) float64 {
 	return (l1 + 0.05) / (l2 + 0.05)
 }
 
+// The highlighted picker/autocomplete row must both stand out from the panel
+// AND keep its label readable. Guards the regression this fixes: the light
+// selBg (#e7f2cd) sat at 1.01 vs the panel (#ececed) — effectively invisible.
+func TestSelectedRowBandIsVisibleAndReadable(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		pal  palette
+	}{
+		{"dark", darkPalette},
+		{"light", lightPalette},
+	} {
+		if r := wcagRatio(t, c.pal.ink, c.pal.selBg); r < 4.5 {
+			t.Errorf("%s: ink on selBg contrast %.2f < 4.5 — selected-row label unreadable", c.name, r)
+		}
+		if sep := wcagRatio(t, c.pal.selBg, c.pal.panel); sep < 1.10 {
+			t.Errorf("%s: selBg vs panel separation %.2f < 1.10 — selected row does not stand out", c.name, sep)
+		}
+	}
+}
+
 // resolveThemeMode precedence: explicit flag > ZERO_THEME env > auto.
 func TestResolveThemeModePrecedence(t *testing.T) {
 	cases := []struct {

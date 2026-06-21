@@ -1178,7 +1178,9 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	if arg == "" {
 		arg = rc.args[rcKey(row.runID, row.id)]
 	}
-	head := toolCardHead(toolRowName(row), hint, arg, "", glyph, rc.auto[rcKey(row.runID, row.id)], width, opts)
+	// Running cards keep the normal name color; the accent spinner glyph at the
+	// front already marks them live (and orphaned dead cards must not look active).
+	head := toolCardHead(toolRowName(row), hint, arg, "", zeroTheme.ink, rc.auto[rcKey(row.runID, row.id)], width, opts)
 	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
 }
 
@@ -1186,9 +1188,11 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	name := toolRowName(row)
 	failed := row.status == tools.StatusError
 	glyph := zeroTheme.green.Render("✓")
+	nameStyle := zeroTheme.green
 	borderStyle := zeroTheme.line
 	if failed {
 		glyph = zeroTheme.red.Render("✗")
+		nameStyle = zeroTheme.red
 		borderStyle = zeroTheme.cardErr
 	}
 	key := rcKey(row.runID, row.id)
@@ -1198,7 +1202,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	// the card collapse to a single line — matching the reference agents' density.
 	// Only for clean OK results: errors and anything multi-line keep their body.
 	if !failed && opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && looksLikeRedundantConfirmation(row.detail) {
-		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
+		head := toolCardHead(name, rc.hints[key], rc.args[key], "", nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, "", borderStyle, width)
 	}
 	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
@@ -1211,11 +1215,11 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		collapsedFooter = collapsedToolFooter(row.detail)
 	}
 	if collapsedFooter != "" && !row.expanded {
-		head := toolCardHead(name, rc.hints[key], rc.args[key], "", glyph, rc.auto[key], width, opts)
+		head := toolCardHead(name, rc.hints[key], rc.args[key], "", nameStyle, rc.auto[key], width, opts)
 		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
 	}
 	body := toolCardBody(name, rc.hints[key], row.detail, width, opts)
-	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, glyph, rc.auto[key], width, opts)
+	head := toolCardHead(name, rc.hints[key], rc.args[key], body.headTag, nameStyle, rc.auto[key], width, opts)
 	footer := body.footer
 	if collapsedFooter != "" && row.expanded && footer == "" {
 		footer = "▾ collapse"
@@ -1304,8 +1308,10 @@ func toolDisplayName(name string) string {
 // tag, and the auto marker. The status glyph is NOT included here — toolCard
 // right-aligns it on the rule line so it sits at the card's right edge instead
 // of trailing the head text.
-func toolCardHead(name string, target string, arg string, headTag string, glyph string, auto bool, width int, opts cardRenderOptions) string {
-	head := zeroTheme.toolName.Render(toolDisplayName(name))
+func toolCardHead(name string, target string, arg string, headTag string, nameStyle lipgloss.Style, auto bool, width int, opts cardRenderOptions) string {
+	// Color the tool name by state (accent running / green done / red failed) so
+	// the head row reads at a glance, reinforcing the leading status glyph.
+	head := nameStyle.Bold(true).Render(toolDisplayName(name))
 	if target = strings.TrimSpace(target); target != "" {
 		// Show a shortened, workspace-relative path, but keep the hyperlink
 		// pointing at the original absolute path so the file still opens.
@@ -1356,18 +1362,22 @@ func toolCard(head string, glyph string, body []string, footer string, borderSty
 		innerWidth = width
 	}
 
-	// Head line: rail + head, with the status glyph right-aligned to the card
-	// edge. The glyph (and the space before it) is reserved out of the head's
-	// width budget so a long head truncates before it collides with the glyph.
+	// Head line: rail + LEADING status glyph + head. Leading the row with the
+	// glyph (✓ done / ✗ failed / spinner running) puts state in the first cell the
+	// eye lands on, instead of right-aligning it to the far card edge. The glyph
+	// (and the space after it) is reserved out of the head's width budget so a long
+	// head truncates cleanly; the row is right-padded to the full card width.
 	glyphWidth := lipgloss.Width(glyph)
-	glyphGap := 0
+	leading := ""
+	leadingWidth := 0
 	if glyphWidth > 0 {
-		glyphGap = 1
+		leading = glyph + " "
+		leadingWidth = glyphWidth + 1
 	}
-	headBudget := maxInt(1, width-railWidth-glyphWidth-glyphGap)
+	headBudget := maxInt(1, width-railWidth-leadingWidth)
 	head = fitStyledLine(head, headBudget)
-	headPad := maxInt(0, width-railWidth-lipgloss.Width(head)-glyphWidth)
-	headLine := rail + head + strings.Repeat(" ", headPad) + glyph
+	headPad := maxInt(0, width-railWidth-leadingWidth-lipgloss.Width(head))
+	headLine := rail + leading + head + strings.Repeat(" ", headPad)
 
 	lines := make([]string, 0, len(body)+2)
 	lines = append(lines, headLine)
