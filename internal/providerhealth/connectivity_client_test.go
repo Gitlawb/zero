@@ -67,7 +67,7 @@ type stubConn struct{ net.Conn }
 func (stubConn) Close() error { return nil }
 
 func TestSafeDialContextRejectsResolvedPrivateAddress(t *testing.T) {
-	dial := safeDialContext(staticResolver{addr: netip.MustParseAddr("10.0.0.5")})
+	dial := safeDialContext(staticResolver{addr: netip.MustParseAddr("10.0.0.5")}, false)
 
 	conn, err := dial(context.Background(), "tcp", "api.example.com:443")
 	if conn != nil {
@@ -83,7 +83,7 @@ func TestSafeDialContextRejectsResolvedPrivateAddress(t *testing.T) {
 func TestSafeDialContextRejectsLiteralLinkLocalAddress(t *testing.T) {
 	// The cloud metadata address must be refused even when supplied as a literal,
 	// without consulting the resolver and without opening a socket.
-	dial := safeDialContext(staticResolver{err: errors.New("resolver must not be called")})
+	dial := safeDialContext(staticResolver{err: errors.New("resolver must not be called")}, false)
 
 	conn, err := dial(context.Background(), "tcp", "169.254.169.254:80")
 	if conn != nil {
@@ -97,7 +97,7 @@ func TestSafeDialContextRejectsLiteralLinkLocalAddress(t *testing.T) {
 }
 
 func TestConnectivityClientRefusesRedirectToBlockedHost(t *testing.T) {
-	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("169.254.169.254")}, nil)
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("169.254.169.254")}, nil, false)
 	if client.CheckRedirect == nil {
 		t.Fatal("default connectivity client has no CheckRedirect guard")
 	}
@@ -112,7 +112,7 @@ func TestConnectivityClientRefusesRedirectToBlockedHost(t *testing.T) {
 }
 
 func TestConnectivityClientRefusesTooManyRedirects(t *testing.T) {
-	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")}, nil)
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")}, nil, false)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.example.com/v1/models", nil)
 	if err != nil {
@@ -132,7 +132,7 @@ func TestConnectivityClientStripsCredentialsOnCrossHostRedirect(t *testing.T) {
 		AuthHeader:    "x-custom-token",
 		CustomHeaders: map[string]string{"x-tenant-secret": "s3cr3t"},
 	}, config.ProviderKindAnthropic)
-	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")}, sensitive)
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("93.184.216.34")}, sensitive, false)
 
 	orig, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.anthropic.com/v1/models", nil)
 	redirect, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://evil.example.net/v1/models", nil)
@@ -156,5 +156,48 @@ func TestConnectivityClientStripsCredentialsOnCrossHostRedirect(t *testing.T) {
 	}
 	if same.Header.Get("x-api-key") != "keep-me" {
 		t.Error("same-host redirect must not strip the credential")
+	}
+}
+
+func TestValidateEndpointAllowsLoopbackOnlyForLocalProvider(t *testing.T) {
+	ctx := context.Background()
+	r := staticResolver{addr: netip.MustParseAddr("127.0.0.1")}
+
+	// AUDIT-H1: a user-configured local provider base_url (loopback) must pass when
+	// allowLoopback=true, so `zero setup ollama --verify` / doctor / providers check work.
+	for _, ep := range []string{"http://localhost:11434/api/tags", "http://127.0.0.1:11434/v1/models", "http://[::1]:1234/v1/models"} {
+		if err := validateEndpoint(ctx, ep, r, true); err != nil {
+			t.Errorf("local provider endpoint %q should be allowed with allowLoopback=true, got %v", ep, err)
+		}
+		if !endpointIsLoopback(ep) {
+			t.Errorf("endpointIsLoopback(%q) = false, want true", ep)
+		}
+	}
+
+	// Loopback stays BLOCKED without the flag (e.g. a redirect target).
+	if err := validateEndpoint(ctx, "http://localhost:11434/api/tags", r, false); err == nil {
+		t.Error("loopback must remain blocked when allowLoopback=false (redirects / non-local)")
+	}
+
+	// allowLoopback relaxes loopback ONLY — other special ranges (cloud metadata,
+	// link-local, private) stay blocked even for a local provider config.
+	for _, ep := range []string{"http://169.254.169.254/latest/meta-data", "http://10.0.0.5:8080/v1"} {
+		if err := validateEndpoint(ctx, ep, staticResolver{addr: netip.MustParseAddr("169.254.169.254")}, true); err == nil {
+			t.Errorf("non-loopback special address %q must stay blocked even with allowLoopback=true", ep)
+		}
+		if endpointIsLoopback(ep) {
+			t.Errorf("endpointIsLoopback(%q) = true, want false", ep)
+		}
+	}
+}
+
+func TestConnectivityClientLoopbackRedirectStillBlocked(t *testing.T) {
+	// AUDIT-H1: even a local-provider probe (allowLoopback=true) must NOT follow a
+	// redirect to loopback — that would be SSRF via a 3xx, not the user's base_url.
+	client := newConnectivityClient(5*time.Second, staticResolver{addr: netip.MustParseAddr("127.0.0.1")}, nil, true)
+	orig, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://localhost:11434/api/tags", nil)
+	redirect, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:9999/secret", nil)
+	if err := client.CheckRedirect(redirect, []*http.Request{orig}); err == nil {
+		t.Fatal("a redirect to loopback must be rejected even when the probe allows a loopback base_url")
 	}
 }

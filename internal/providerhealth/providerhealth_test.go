@@ -205,11 +205,14 @@ func TestProbeConnectivityClassifiesTimeout(t *testing.T) {
 	}
 }
 
-func TestProbeConnectivityBlocksLocalhostBeforeNetwork(t *testing.T) {
+func TestProbeConnectivityAllowsLocalhostForLocalProvider(t *testing.T) {
+	// AUDIT-H1: a user-configured local provider (loopback base_url) must be reachable
+	// — the probe no longer blocks it pre-network, so `zero setup <local> --verify` /
+	// doctor / providers check can confirm a running Ollama/LM Studio.
 	called := false
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		called = true
-		return nil, errors.New("network should not be reached")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header)}, nil
 	})}
 
 	result := Probe(context.Background(), Options{
@@ -224,12 +227,12 @@ func TestProbeConnectivityBlocksLocalhostBeforeNetwork(t *testing.T) {
 		HTTPClient:   client,
 	})
 
-	check := result.Check("provider.connectivity")
-	if check == nil || check.Status != StatusFail || check.Category != CategoryNetwork {
-		t.Fatalf("connectivity check = %#v, want blocked network failure", check)
+	if !called {
+		t.Fatal("HTTP client should be reached for a user-configured localhost provider (loopback no longer pre-blocked)")
 	}
-	if called {
-		t.Fatal("HTTP client was called for a blocked localhost URL")
+	check := result.Check("provider.connectivity")
+	if check == nil || check.Status != StatusPass {
+		t.Fatalf("connectivity check = %#v, want pass for a reachable local provider", check)
 	}
 }
 
