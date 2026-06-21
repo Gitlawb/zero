@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -217,18 +218,43 @@ func ScanSSEDataWithContext(
 
 // ClassifiedError normalizes provider HTTP/stream errors and redacts secrets.
 func ClassifiedError(statusCode int, message string, secrets ...string) string {
-	prefix := "provider error: "
 	switch statusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		prefix = "auth error: "
+		// Lead with an actionable instruction rather than the raw upstream auth blurb
+		// (which often points the user at the wrong provider's dashboard URL). Keep a
+		// redacted, one-line upstream detail for context — never the raw body. (AUDIT-H7)
+		curated := "auth error: your API key is missing or invalid — run `zero auth`, or set the provider's API key, then retry."
+		if detail := strings.TrimSpace(Redact(message, secrets...)); detail != "" {
+			return curated + " (provider said: " + detail + ")"
+		}
+		return curated
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable, 529:
-		prefix = "rate limit error: "
+		return Redact("rate limit error: "+message, secrets...)
 	default:
+		prefix := "provider error: "
 		if statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
 			prefix = "provider request error: "
 		}
+		return Redact(prefix+message, secrets...)
 	}
-	return Redact(prefix+message, secrets...)
+}
+
+// tokenShape matches a long credential-like token (API key / JWT) so the Bearer
+// heuristic in Redact only scrubs an actual token, not ordinary words.
+var tokenShape = regexp.MustCompile(`^[A-Za-z0-9._\-]{16,}$`)
+
+// looksLikeToken reports whether w is credential-shaped: long, token-charset, and
+// either very long or containing a digit (so "Bearer authentication" / "Bearer
+// token" in upstream help text is not mangled, while real keys/JWTs are redacted).
+func looksLikeToken(w string) bool {
+	w = strings.Trim(w, ".,;:\"'`)(")
+	if !tokenShape.MatchString(w) {
+		return false
+	}
+	if len(w) >= 24 {
+		return true
+	}
+	return strings.ContainsAny(w, "0123456789")
 }
 
 // Redact removes known API-key and bearer-token forms from provider messages.
@@ -240,8 +266,10 @@ func Redact(message string, secrets ...string) string {
 	}
 	words := strings.Fields(message)
 	for index := 0; index < len(words)-1; index++ {
-		if strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") {
-			words[index] = "authorization"
+		// Only redact the word after "Bearer" when it is actually token-shaped, so the
+		// provider's own help text ("use Bearer authentication", "Bearer token") is no
+		// longer corrupted into "authorization [REDACTED]". (AUDIT-H7)
+		if strings.EqualFold(strings.TrimRight(words[index], ":"), "Bearer") && looksLikeToken(words[index+1]) {
 			words[index+1] = "[REDACTED]"
 		}
 	}
