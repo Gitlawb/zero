@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -951,6 +953,27 @@ func splitLeadingThemeFlag(args []string) (string, []string, error) {
 		}
 	}
 	return theme, args, nil
+}
+
+// baseURLIsLoopback reports whether a provider base_url points at a loopback host
+// (a keyless local provider like Ollama/LM Studio), which needs no API key.
+func baseURLIsLoopback(baseURL string) bool {
+	u := strings.TrimSpace(baseURL)
+	if u == "" {
+		return false
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.IsLoopback()
+	}
+	return false
 }
 
 func writePromptRequired(stderr io.Writer) int {

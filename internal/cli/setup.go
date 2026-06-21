@@ -111,6 +111,18 @@ func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVer
 	if deps.probeProviderHealth == nil {
 		return setupVerification{Ran: false, Summary: "probe unavailable; skipped"}, nil
 	}
+	// Distinguish "no key configured" from "key rejected": probing a remote provider
+	// with no credential yields a generic "the provider rejected the API key", which
+	// misleads a user who simply hasn't exported a key yet. Keyless local providers
+	// (loopback base_url) legitimately need no key, so they still probe. (AUDIT-M1)
+	if strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.AuthHeaderValue) == "" && !baseURLIsLoopback(profile.BaseURL) {
+		name := strings.TrimSpace(profile.Name)
+		if name == "" {
+			name = "this provider"
+		}
+		return setupVerification{Ran: true, OK: false, Summary: "no api key"},
+			fmt.Errorf("no API key found for %s — set its API key (export the provider's API key env var, or pass --api-key-env) or run `zero auth`, then re-run setup", name)
+	}
 	ctx, stop := signalContext()
 	defer stop()
 	result := deps.probeProviderHealth(ctx, providerhealth.Options{

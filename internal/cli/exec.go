@@ -258,7 +258,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
 	if !config.HasProviderProfile(resolved.Provider) {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Set OPENAI_MODEL/OPENAI_API_KEY or add .zero/config.json.")
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Run `zero setup` (guided), `zero auth` (OAuth providers), set a provider API key env var (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY), or add .zero/config.json.")
 	}
 	// Activate deferred MCP-tool loading for this run only when the VISIBLE
 	// deferred-eligible count meets the resolved threshold; below threshold this

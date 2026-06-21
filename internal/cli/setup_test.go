@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providerhealth"
 	"github.com/Gitlawb/zero/internal/tui"
 )
 
@@ -217,5 +220,39 @@ func TestSaveSetupProviderCLIOptionsOverrideCustomEndpointSelection(t *testing.T
 	profile := cfg.Providers[0]
 	if profile.Name != "cli-name" || profile.BaseURL != "https://cli.example/v1" || profile.Model != "selection-model" {
 		t.Fatalf("stored provider = %#v, want CLI name/baseURL and selection model", profile)
+	}
+}
+
+func TestVerifySetupProviderDistinguishesMissingFromRejectedKey(t *testing.T) {
+	// AUDIT-M1: verifying a remote provider with no key must say "no API key found",
+	// not probe and report "the provider rejected the API key". The probe must not run.
+	probed := false
+	deps := appDeps{probeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+		probed = true
+		return providerhealth.Result{}
+	}}
+	_, err := verifySetupProvider(deps, config.ProviderProfile{
+		Name:         "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      "https://api.openai.com/v1",
+		Model:        "gpt-4.1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no API key found") {
+		t.Fatalf("missing key should report 'no API key found', got %v", err)
+	}
+	if probed {
+		t.Fatal("must not probe the endpoint when no key is configured")
+	}
+
+	// A keyless LOCAL provider still probes (no key needed).
+	probed = false
+	_, _ = verifySetupProvider(deps, config.ProviderProfile{
+		Name:         "ollama",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      "http://localhost:11434/v1",
+		Model:        "llama3",
+	})
+	if !probed {
+		t.Fatal("a keyless local provider should still be probed")
 	}
 }

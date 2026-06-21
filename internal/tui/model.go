@@ -3016,7 +3016,7 @@ func (m model) launchPrompt(prompt string) (model, tea.Cmd) {
 	if m.provider == nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{
 			kind: actionAppendAssistant,
-			text: "No provider configured.",
+			text: "No provider configured. Run `zero setup` (guided) or `zero auth` (OAuth) from a shell, or set a provider API key env var, then relaunch.",
 		})
 		return m, nil
 	}
