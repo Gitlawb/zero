@@ -48,6 +48,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### A. First-run & onboarding
 
 #### C1 · Both README binary-install paths point at a repo that 404s — `scripts/install.sh` and `install.ps1` dead-end for every new user
+
+**Status (2026-06-21):** Fixed (in-repo) — `622e4b4`. README/INSTALL demote the binary path to "coming soon" and lead with `go run`; release-artifacts.yml now publishes a GitHub Release on a `v*` tag. Publishing the release + making the repo public are MANUAL maintainer steps (repo owner/name already matched go.mod).
 - **Severity:** critical · also: G-oss-readiness
 - **Where:** `README.md:55-57, docs/INSTALL.md:52, scripts/install.sh:4 (ZERO_REPO default Gitlawb/zero)`
 - **Evidence:** curl -s -o /dev/null -w '%{http_code}' https://api.github.com/repos/Gitlawb/zero -> 404. /releases, /releases/latest, /tags all return {"message":"Not Found","status":"404"}. install.sh:106 resolves api_url="${ZERO_GITHUB_API%/}/repos/${ZERO_REPO}/releases/latest" then install.sh:111 `[ -n "$tag" ] || fail "could not read tag_name from $api_url"`. With curl --fail (install.sh:80) the API call itself errors out first. README presents this as the 'or install a release binary' path alongside go run.
@@ -55,6 +57,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Publish at least one GitHub release with the documented archive+.sha256 assets under the correct public repo, and fix the ZERO_REPO default / README links to that repo's real owner/name. Until releases exist, demote the binary-install path in README/INSTALL to 'coming soon' and lead with `go run ./cmd/zero`.
 
 #### C2 · No LICENSE file; README says license 'being finalized' — OSS-release blocker (confirming established fact, still true @ f7ee189)
+
+**Status (2026-06-21):** Skipped — license choice deferred by the maintainer ("leave the license portion now"). LICENSE / README §License / package.json license remain a MANUAL step.
 - **Severity:** critical · also: G-oss-readiness
 - **Where:** `README.md:330-332; repo root (no LICENSE* file)`
 - **Evidence:** `ls LICENSE*` -> no matches. README.md:332: 'License is being finalized; a `LICENSE` file will be added before the public release.'
@@ -62,6 +66,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add a LICENSE file (e.g. Apache-2.0/MIT) and update README §License to name it.
 
 #### H1 · Local-model verification/health commands fail with a misleading 'localhost hosts are blocked' error — breaks the README's headlined keyless path
+
+**Status (2026-06-21):** Fixed — `24c8de3`. Loopback allowed only for a user-configured local base_url; redirects + other private ranges stay blocked.
 - **Severity:** high
 - **Where:** `internal/providerhealth/providerhealth.go:374-377 (also :81,:94 loopback prefixes); surfaced by `zero setup <local> --verify`, `zero providers check <local> --connectivity`, `zero doctor``
 - **Evidence:** `zero setup ollama --verify` -> `[zero] setup verification failed: Could not reach the provider endpoint. Check the base URL ... and that the server is running. (provider connectivity URL is unsafe: localhost hosts are blocked)`. `zero providers check ollama --connectivity` -> status: fail / `provider.connectivity: provider connectivity URL is unsafe: localhost hosts are blocked` / exit 3. validateEndpoint() hard-rejects normalized=='localhost' and 127.0.0.0/8 + ::1. Guard is confined to providerhealth probe path (grep shows blockedAddrReason/endpointSafetyError only in providerhealth + unrelated web_fetch.go) so actual `zero exec` chat again
@@ -69,6 +75,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Allow loopback/localhost in the provider connectivity probe for explicitly user-configured local providers (the SSRF guard is meant for fetched/remote URLs, not the user's own configured base_url). At minimum, special-case local provider kinds to skip the loopback block, and drop the contradictory 'server is running' wrapper when the real cause is the loopback policy.
 
 #### H2 · go.mod requires `go 1.25.0` (+ toolchain go1.26.4) but README badge and Quick start say Go 1.24 — a Go 1.24 user cannot build from source
+
+**Status (2026-06-21):** Fixed — `622e4b4`. README badge + quick start now say Go 1.25+.
 - **Severity:** high · also: G-oss-readiness
 - **Where:** `go.mod:3 (`go 1.25.0`), go.mod:4 (`toolchain go1.26.4`); README.md:16 badge 'Go-1.24', README.md:52 'requires Go 1.24+'`
 - **Evidence:** go.mod: `go 1.25.0` / `toolchain go1.26.4`. README.md:16 `![go](https://img.shields.io/badge/Go-1.24-...)`, README.md:52 `# run from source (requires Go 1.24+)`. A Go 1.24.x toolchain refuses a module declaring `go 1.25.0` unless auto-toolchain download is enabled (GOTOOLCHAIN=auto + network); offline/pinned 1.24 users get a 'go.mod requires go >= 1.25.0' build error.
@@ -76,6 +84,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Make the docs match go.mod: change the badge and Quick-start note to 'requires Go 1.25+'. (Or, if 1.24 support is intended, lower the go.mod directive to 1.24 and verify it compiles.)
 
 #### M1 · `zero setup <provider> --verify` with NO key set reports 'The provider rejected the API key' — but no key was ever sent
+
+**Status (2026-06-21):** Fixed — `42b7123`. `--verify` distinguishes "no API key found" from "rejected".
 - **Severity:** medium
 - **Where:** `internal/cli/setup.go:59-77 (verify branch); verified via runtime`
 - **Evidence:** With OPENAI_API_KEY unset: `zero setup openai --verify` -> '... setup verification failed: The provider rejected the API key. Double-check the key value (and that it is for this provider), then re-run setup. (Provider openai requires API credentials.)' — identical message to the WRONG-key case (OPENAI_API_KEY=sk-wrongkey123).
@@ -83,6 +93,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Distinguish the missing-credentials case from the rejected-credentials case: when no key/env is present, say 'No API key found — export OPENAI_API_KEY (or pass --api-key-env) then re-run', and reserve 'rejected the key' for actual 401s.
 
 #### I1 · The guided setup wizard copy itself is well-written and self-explanatory (source-level; live frames unverified)
+
+**Status (2026-06-21):** Info — no action (positive finding).
 - **Severity:** info
 - **Where:** `internal/tui/onboarding.go:1191-1650`
 - **Evidence:** Strings include 'Welcome to Zero' / 'A terminal agent for changing real code.' (1202-1204), a Safety panel 'Zero asks before running shell commands or changing files. Unsafe mode stays off unless you explicitly enable it. Default: ask before risky work.' (1191-1196), clear step headers ('Choose a provider', 'Choose a model', 'Paste your <name> API key' with 'Saved keys stay in your user config' / 'Blank uses <ENV> from your shell'), model-ID examples (1311), and a consistent footer ('↑/↓ choose  Enter continue  q quit'). Non-interactive `zero setup <p>` output is also good: prints config path + concrete 'next:' steps + a runnable 'try this:' 
@@ -93,6 +105,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### B. Interaction flows & UX
 
 #### H3 · /input-style is a fully inert command — registered, in /help, autocompletes, but does nothing
+
+**Status (2026-06-21):** Fixed — `1b2e453`. Command + kind + handler + dead helper removed.
 - **Severity:** high
 - **Where:** `internal/tui/commands.go:288-296 (registry) + internal/tui/model.go:2964-2969 (handler) + internal/tui/rendering.go:43-53 (output)`
 - **Evidence:** Handler: `case commandInputStyle: ... text: shellOnlyCommandText(command.name)`. shellOnlyCommandText renders a warning card whose only body line is "This control is available in the TUI but does not have a backend setting yet." Captured from a test I ran: `command-card input-style / status: warning / State / This control is available in the TUI but does not have a backend setting yet. / hint: use /help to inspect active commands`. grep confirms NO other input-style logic exists: `grep -rn 'input-style|inputStyle|InputStyle' internal --include='*.go' | grep -v _test` returns only the registry entry + this handler. Yet it is listed in /help (S
@@ -100,6 +114,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Remove the /input-style entry from commandDefinitions (commands.go) and drop the commandInputStyle kind + its case in model.go, so /help and autocomplete stop advertising it. Re-add it only when a backend setting exists.
 
 #### H4 · README's TUI slash-command table advertises /usage, which is not a slash command (resolves to 'unknown command')
+
+**Status (2026-06-21):** Fixed — `e68d6cb`. `/usage` removed from the README slash table.
 - **Severity:** high
 - **Where:** `README.md:89 (`| \`/doctor\` \`/usage\` \`/config\` | health, cost, and config without leaving the chat |`) under the "## The TUI" slash-command table`
 - **Evidence:** The registry has no /usage (full name+alias dump from commands.go contains /doctor, /config, but no /usage). I ran a test: `parseCommand("/usage").kind == commandUnknown` (PASS), and `formatGroupedCommandHelp()` does NOT contain /usage (`HELP has ... /usage=false`). `zero --help` shows `usage  Summarize token usage and estimated cost` exists ONLY as a CLI subcommand. So a user who types `/usage` in-chat (per the README) hits the commandUnknown path (model.go:2976) -> "unknown command: /usage" (unless they happen to have authored .zero/commands/usage.md, which a new user has not). The table's caption literally promises "...cost...without leavi
@@ -107,6 +123,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Either add a /usage slash command (kind+handler showing the same token/cost summary as the `zero usage` subcommand) or remove `/usage` from the README:89 table and document `zero usage` as a CLI command instead.
 
 #### L1 · Ctrl+E in the composer is hijacked by mouse-release toggle, breaking the emacs end-of-line binding (while Ctrl+A=home still works)
+
+**Status (2026-06-21):** Deferred — low (Ctrl+E composer binding).
 - **Severity:** low
 - **Where:** `internal/tui/model.go:818-825 (top-level Ctrl+E intercept) vs internal/tui/composer.go:223-225 (composer Ctrl+E = end-of-line)`
 - **Evidence:** The top-level key switch handles `case keyCtrl(msg, 'e'):` and unconditionally toggles m.mouseReleased then `return`s, before the composer dispatch (model.go:1140 `applyComposerKey`) is ever reached. composer.go:223 declares `case keyIs(msg, tea.KeyEnd) || keyCtrl(msg, 'e'): state.cursor = composerLineEnd(state)` — that Ctrl+E arm is therefore unreachable from the composer. By contrast Ctrl+A/K/U/W are NOT intercepted at top level (`grep -n "keyCtrl(msg, 'a'|'e'|'k'|'u'|'w')" model.go` returns ONLY line 818 = Ctrl+E), so they reach the composer normally. The `?`-help overlay (keybinding_help.go:53) documents Ctrl+E only as 'release the mouse 
@@ -114,6 +132,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Either remove the dead Ctrl+E arm from composer.go:223 (leaving only tea.KeyEnd), or gate the top-level Ctrl+E mouse-toggle so it only fires on an empty/inactive composer (like the `?` overlay does at model.go:982) and let Ctrl+E reach the composer when editing text; then update keybinding_help.go accordingly.
 
 #### I2 · Two permission decisions share hotkey 'y' but are mutually exclusive by tool type (no actual collision)
+
+**Status (2026-06-21):** Info — no action (no real collision).
 - **Severity:** info
 - **Where:** `internal/tui/permission_prompt.go:45-48 + internal/agent/loop.go:1737-1742,1798-1805`
 - **Evidence:** permissionOptions maps both AlwaysAllowPrefix and AlwaysAllow to hotkey "y". The dedup in permissionOptions is keyed by decision action, not hotkey, so if both appeared in one prompt both 'y' rows would render. However availablePermissionDecisions only appends AlwaysAllowPrefix for shell tools with a command prefix (loop.go:1738), and AlwaysAllow only when permissionSupportsPersistentDecision(toolName) is true — which returns false for `bash/exec_command/write_stdin/apply_patch` (loop.go:1800). So a shell prompt gets AlwaysAllowPrefix=y and a non-shell prompt gets AlwaysAllow=y; they never co-occur.
@@ -124,6 +144,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### C. TUI rendering & visual correctness
 
 #### M5 · middleTruncate (diff card file paths) overflows the budget on wide-rune paths
+
+**Status (2026-06-21):** Deferred — explicitly out of scope for this PR (wide-rune truncation budget; outer width clip already prevents frame breakage per I4).
 - **Severity:** medium
 - **Where:** `internal/tui/startup.go:138 middleTruncate (used for the diff card path head at internal/tui/rendering.go:1471 with budget innerWidth/2)`
 - **Evidence:** middleTruncate is also rune-count based (`if len(runes) <= limit`, then string(runes[:front])+"…"+string(runes[len-back:])). Ran the real fn: `middleTruncate(strings.Repeat("路",40), 20)` returns 39 cells for a 20-cell budget (test log: `middleTruncate(20) -> cells=39 (want <=20)`).
@@ -131,6 +153,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Make middleTruncate measure with lipgloss.Width and cut front/back halves with splitAtWidth on the reversed/forward string, or fall back to the width-aware truncateRunes once that is fixed.
 
 #### I4 · Wide-rune handling is correct in prose/markdown/table/user-prompt wrap and at the outer card fit — overflow does NOT break the card frame
+
+**Status (2026-06-21):** Info — no action (verified good).
 - **Severity:** info
 - **Where:** `internal/tui/rendering.go:381 wrapPlainText / :442 splitAtWidth / :463 splitPreservingWidth; internal/tui/startup.go:213 fitStyledLine / :223 truncateStyledLine`
 - **Evidence:** These all measure via lipgloss.Width / per-glyph glyphWidth (e.g. truncateStyledLine line 260 accumulates glyphWidth and also tracks OSC-8 link state so truncation can't leak a hyperlink). toolCard re-fits every body line to innerWidth (rendering.go:1387) so even the buggy truncateRunes output cannot push the card past the terminal width — verified: a 100-col CJK diff card produced all lines at exactly 100 cells. Assistant prose is also capped at 96 cols (assistantMeasureCap, rendering.go:360) for readability on wide terminals. WindowSizeMsg (model.go:1249) resizes composer and resets fade state cleanly.
@@ -141,6 +165,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### C/E. Color, theme & accessibility
 
 #### H5 · faintest fails WCAG even the 3.0 UI floor in BOTH themes; it carries functional content (line numbers, diff @@/+++/--- headers, tool args, separators)
+
+**Status (2026-06-21):** Fixed — `cc3b5e3`. faintest raised to WCAG AA (>=4.5) in both themes.
 - **Severity:** high
 - **Where:** `internal/tui/theme.go:135 (dark faintest #3a3a40), :168 (light faintest #9b9ba3); consumed as zeroTheme.faintest / diffMeta / addLineNum / delLineNum / toolArg`
 - **Evidence:** Computed WCAG ratios: light faintest #9b9ba3 on panel #ececed = 2.34; dark faintest #3a3a40 on panel #0e0e10 = 1.71, and on the unpainted canvas #070708 = 1.78. AA-normal needs 4.5, the relaxed UI/large floor is 3.0 — these are below even 3.0. faintest renders diffMeta (theme.go:223: '@@ hunks, +++/--- headers') and the diff gutter line numbers (theme.go:226-227), which are functional, not decorative.
@@ -148,6 +174,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Darken light faintest toward ~#6e6e76 (>=3.0 on #ececed) and lighten dark faintest toward ~#5a5a62 (>=3.0 on #0e0e10/#070708); then add a test asserting actual WCAG ratio >= 3.0 for every token used to carry text, not just a luminance delta.
 
 #### H6 · faint is sub-AA in both themes yet carries instructional/navigation text (help footer, MCP wizard hints, composer placeholder, working timer)
+
+**Status (2026-06-21):** Fixed — `cc3b5e3`. faint raised to WCAG AA in both themes.
 - **Severity:** high
 - **Where:** `internal/tui/theme.go:134 (dark faint #5b5b63), :167 (light faint #78787f); used at keybinding_help.go:89, mcp_add_wizard_view.go:26-160, mcp_manager.go:362/443, model.go:2111/2151/2231`
 - **Evidence:** WCAG: dark faint #5b5b63 on panel = 2.87 (below the 3.0 UI floor); light faint #78787f on panel = 3.71 (below AA-normal 4.5). It renders real instructions: keybinding_help.go:70 'keybindingHelpFooter = "? or Esc to close · /help for slash commands"' shown via zeroTheme.faint (the user's only on-screen cue for how to exit the help overlay), mcp_manager.go:362 the nav legend 'type search up/down navigate Enter action Esc close', and the composer placeholder (model.go:2231).
@@ -155,6 +183,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Raise faint to clear 4.5 (light) / >=3.0 (dark) on its panel, e.g. dark #6f6f78, light #5f5f66. Reserve sub-AA grays strictly for non-text decoration (rules/borders), which already have separate tokens (line/line2).
 
 #### M2 · Light-theme accent (4.34) is below AA for normal text, despite a test that claims to verify light accent contrast
+
+**Status (2026-06-21):** Fixed — `cc3b5e3`. Light accent #4d7a08->#477006 (AA); theme test now asserts a true WCAG ratio.
 - **Severity:** medium
 - **Where:** `internal/tui/theme.go:169 (light accent #4d7a08); test internal/tui/theme_select_test.go:83`
 - **Evidence:** WCAG: light accent #4d7a08 on panel #ececed = 4.34 (AA-normal needs 4.5). accent renders the user gutter '❯' (theme.go:38/210), bash prompt (theme.go:48/218), spinner, and focus. The test at theme_select_test.go:83 only asserts 'panelL - relLum(accent) < 0.25' (a luminance delta, not a contrast ratio), so 4.34 passes. Dark accent #caff3f is fine (16.4).
@@ -162,6 +192,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Darken light accent slightly (e.g. #436a07 → ~4.7) to clear AA-normal, and change the test to assert a real WCAG ratio (>=4.5 for text-bearing accent) instead of a luminance delta.
 
 #### M3 · NO_COLOR honored only for strconv.ParseBool-style values; NO_COLOR=yes / NO_COLOR=anything leaves the UI in full color, violating the no-color.org spec
+
+**Status (2026-06-21):** Fixed — `7fc296b`. NO_COLOR with any non-empty value forces the Ascii profile.
 - **Severity:** medium
 - **Where:** `dependency github.com/charmbracelet/colorprofile@v0.4.3 env.go:115-117 (envNoColor uses strconv.ParseBool); zero never sets WithColorProfile (internal/tui/run.go:25-35), so it inherits this`
 - **Evidence:** Drove /tmp/zero under a pty across NO_COLOR variants and diffed emitted SGR: 'NO_COLOR=1' -> colorSGR=false (306 bytes, monochrome), 'NO_COLOR=true' -> false, but 'NO_COLOR=yes' -> colorSGR=true (676 bytes, full color) and 'NO_COLOR=foo' -> colorSGR=true. Source: colorprofile env.go:116 'noColor, _ := strconv.ParseBool(env.get("NO_COLOR"))'. The no-color.org spec says NO_COLOR present with ANY non-empty value must disable color. (NO_COLOR=1 correctly produced a readable bold-only frame — color degrades cleanly when the value is recognized.)
@@ -169,6 +201,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Don't rely on the dependency's ParseBool: detect NO_COLOR yourself (present and non-empty => force colorprofile.Ascii via tea.WithColorProfile) in run.go, matching no-color.org. At minimum document that only NO_COLOR=1/true work today.
 
 #### M4 · Documented-in-code --theme flag does not exist; Options.Theme is read but never populated, so the only non-interactive theme control is the undocumented ZERO_THEME env var
+
+**Status (2026-06-21):** Fixed — `3b73074`. Real `--theme {auto|dark|light}` flag wired to Options.Theme; stale comment corrected.
 - **Severity:** medium
 - **Where:** `internal/tui/theme.go:12 and theme_select.go:18 (both claim a '--theme flag'); internal/tui/options.go:52-54 (Theme field); internal/tui/model.go:559 (reads it)`
 - **Evidence:** Binary: 'zero --theme light -p hi' -> 'unknown command "--theme"'. 'zero --help' global Flags list has no theme flag. grep for assignments to Options.Theme / '.Theme =' across cmd/ and internal/ returns ZERO hits — the field is only ever READ (model.go:559 resolveThemeMode(options.Theme, ...)). Yet theme_select.go:18 comments 'the --theme flag, threaded via Options.Theme' and theme.go:12 says startup selection happens via '--theme'.
@@ -176,6 +210,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Either wire a real --theme {auto|dark|light} flag that sets Options.Theme, or delete the --theme references from theme.go:12 and theme_select.go:18 and document ZERO_THEME + /theme as the supported controls.
 
 #### L2 · Accessibility/customization controls (NO_COLOR, ZERO_THEME, ZERO_NO_FADE, motion opt-out) are completely undocumented
+
+**Status (2026-06-21):** Fixed — `3cd0a50`. README "Accessibility & appearance" section documents NO_COLOR/ZERO_THEME/--theme//theme/ZERO_NO_FADE.
 - **Severity:** low
 - **Where:** `README.md / docs/ (grep for NO_COLOR|ZERO_THEME|ZERO_NO_FADE|--theme|reduce.motion returns nothing); controls exist at streaming_fade.go:28-44 and theme_select.go:19`
 - **Evidence:** grep -rni 'NO_COLOR|ZERO_THEME|ZERO_NO_FADE|--theme|reduce.motion' README.md docs/ => no matches. The controls themselves are real and tested: streaming_fade.go:28-44 honors ZERO_NO_FADE and auto-disables fade over SSH/tmux/16-color/no-TTY; /theme and ZERO_THEME switch palettes.
@@ -183,6 +219,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add a short 'Accessibility / Appearance' section to the README listing NO_COLOR (note the value caveat), ZERO_THEME=auto|dark|light, /theme, and ZERO_NO_FADE (reduce-motion opt-out).
 
 #### I3 · Meaning does not depend on color alone, and there IS a reduce-motion opt-out — both verified
+
+**Status (2026-06-21):** Info — no action (verified good).
 - **Severity:** info
 - **Where:** `internal/tui/rendering.go:1512/1516 (diff signs), :1200-1203 (permission ✓/✗), view.go:277-285 (mode labels), :996 (PERMISSION text badge); streaming_fade.go:28-44 (ZERO_NO_FADE)`
 - **Evidence:** Diffs emit explicit sign columns: rendering.go:1512 diffBodyLine(...,"+",...) for adds and :1516 "−" for dels, so add/del survive color-stripping. Permission outcome uses glyphs ✓ (rendering.go:1200) / ✗ (:1203), the card is gated by a text 'PERMISSION' badge (:996), and permission MODE shows a text label 'auto-approve'/'ask'/'unsafe' (view.go:277-285) not color-only. Streaming fade has a reduce-motion path: ZERO_NO_FADE plus auto-disable on SSH/tmux/ANSI/no-TTY (streaming_fade.go:29-43); the spinner has no separate opt-out but is a single glyph, not a fade. NO_COLOR=1 pty frame rendered fully readable in bold-only.
@@ -193,6 +231,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### D. Consistency & polish
 
 #### H7 · Bad/missing API key produces a mangled, self-contradicting error paragraph (Redact corrupts the provider's own help text)
+
+**Status (2026-06-21):** Fixed — `8b9b479`. 401/403 lead with an actionable curated message; Redact only scrubs token-shaped Bearer words.
 - **Severity:** high
 - **Where:** `internal/providers/providerio/providerio.go:234-249 (Redact); surfaced via exec/-p with no/invalid key`
 - **Evidence:** Live: `/tmp/zero -p "hi" --model not-a-real-model` -> `[zero] auth error: You didn't provide an API key. You need to provide your API key in an Authorization header using authorization [REDACTED] (i.e. Authorization: authorization [REDACTED] or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from https://platform.openai.com/account/api-keys.` The raw 401 prose contains the literal word 'Bearer' twice as INSTRUCTION text; Redact() (line 242-247: `if EqualFold(TrimRight(words[index],":"),"Bearer")` -> rewrite this+next word) treats 
@@ -200,6 +240,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Don't pass raw upstream auth-error bodies through verbatim. For 401/403 emit a curated message: `auth error: your <provider> API key is missing or invalid. Run \`zero auth\` or set <ENV>=...`. Keep the raw body only behind a --verbose/debug flag. Also tighten Redact so the 'Bearer' heuristic only fires on token-shaped following words (e.g. matches sk-/long base64), not arbitrary prose.
 
 #### H8 · doctor leaks raw Go map[...] syntax for ANY nested-map detail — confirmed on lsp.servers AND config.validation (shared formatDetails bug)
+
+**Status (2026-06-21):** Fixed — `bb4b348`. formatDetailValue renders nested maps as "k: v"; no more raw map[...].
 - **Severity:** high
 - **Where:** `internal/doctor/doctor.go:277 (formatDetails uses %v on the value)`
 - **Evidence:** lsp.servers: `missing: map[gopls:install with \`go install golang.org/x/tools/gopls@latest\` ... pyright-langserver:install with \`npm install -g pyright\` ...] | present: map[rust-analyzer:on PATH]`. config.validation (with a malformed config.json): `/tmp/zbad/.zero/config.json: map[col:4 error:invalid config JSON: invalid character 't' looking for beginning of object key string line:1]` — the actual error sentence is buried inside a Go map dump. Root cause line 277: `fmt.Sprintf("%s: %v", ..., redaction.RedactValue(value, ...))` where value is a map[string]any.
@@ -207,6 +249,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** In formatDetails, special-case map[string]any values: render them as indented `key: value` sub-lines (or `k=v, k=v`) instead of `%v`. For config.validation specifically, hoist line/col/error into a one-line human string (`line 1, col 4: invalid character 't' ...`).
 
 #### M6 · Inconsistent validation of enum-like flags: --mode rejects bad values with a great message, --reasoning-effort silently ignores garbage
+
+**Status (2026-06-21):** Deferred — medium not in this PR's scope (crit/high + OSS files + contrast). Tracked for a follow-up (validate --reasoning-effort like --mode).
 - **Severity:** medium
 - **Where:** `internal/cli/exec.go:902 (mode) vs exec.go:965-998 (reasoning effort)`
 - **Evidence:** `zero -p hi --mode bogus` -> `[zero] unknown mode "bogus". Valid modes: smart, deep, fast, large, precise.` (exit 2 — exemplary microcopy). But `zero -p hi --reasoning-effort wat` -> `gpt-4.1 does not support reasoning effort; ignoring --reasoning-effort wat` then proceeds; `wat` is never validated as a value (the message only fires because gpt-4.1 lacks the capability — on a model that DOES support effort, an invalid value like `wat` would pass through unchecked).
@@ -214,6 +258,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Validate --reasoning-effort against the allowed enum the same way --mode does, with a `Valid efforts: low, medium, high.` message; only fall back to the capability-skip notice when the value itself is valid.
 
 #### L3 · Brand capitalization inconsistent across one CLI surface (ZERO / Zero / zero) and `zero version` prints no real version
+
+**Status (2026-06-21):** Deferred — low (brand capitalization + real version string).
 - **Severity:** low
 - **Where:** ``zero --help` header vs body; `zero version``
 - **Evidence:** `zero --help` first line: `ZERO terminal coding agent`; the 10 command descriptions all say `Zero` (e.g. 'List Zero model registry entries'); `zero version` -> `zero dev`. So one help screen shows three casings, and the release binary reports its version as the literal word `dev`.
@@ -221,6 +267,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Pick one brand casing (recommend 'Zero') and use it everywhere including the --help header. Stamp a real version (git describe / tag) into the build via ldflags so `zero version` is meaningful.
 
 #### I5 · Empty states and existing polish tests are genuinely clean
+
+**Status (2026-06-21):** Info — no action (verified good).
 - **Severity:** info
 - **Where:** `providers/sessions/skills/plugins/usage commands; internal/tui/*_test.go`
 - **Evidence:** Empty-state copy is clear and path-aware: `No Zero skills found in /tmp/.../skills.`, `No local Zero plugins loaded.`, `No Zero sessions found.`, and `usage` renders a tidy zero table with `n/a (net LOC <= 0)` guards. `providers` even flags `api key: not set`. Visual tests TestLightPaletteContrastAndHierarchy / TestWidthTierSegments / TestViewNeverExceedsTerminalWidth / TestWrapPlainTextPreservesAlignedWhitespace / TestThemeAutoReProbesBackground / TestHelpRoutesThroughStyledCard / TestStyleCommandCardContentRowTwoTonesCommands all PASS.
@@ -231,6 +279,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### F. Product completeness & robustness
 
 #### H9 · `zero doctor` reports "Overall: pass" with NO provider credential — the one tool meant to verify keys gives a false all-clear
+
+**Status (2026-06-21):** Fixed — `bb4b348`. provider.config fails (not pass) for a remote provider with no credential; keyless local stays pass.
 - **Severity:** high
 - **Where:** `internal/doctor/doctor.go:136-156 (providerConfigCheck) + :83-84 (report.OK only flips on StatusFail) + :188 (connectivity is warn/skipped). Reproduced via `zero doctor`.`
 - **Evidence:** With unset OPENAI_API_KEY and empty config: `Overall: pass` ... `[pass] provider.config - Provider config loaded for openai.\n  ... credentialConfigured: not set ... model: gpt-4.1` ... `[warn] provider.connectivity - Connectivity probe skipped. Run zero doctor --connectivity`. In code, providerConfigCheck returns StatusPass whenever the profile is non-empty (the built-in openai/gpt-4.1 default is non-empty), regardless of `credential := "not set"`; report.OK is false ONLY if some check is StatusFail (line 83-84).
@@ -238,6 +288,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** In providerConfigCheck, when credential=="not set" AND the provider kind requires a key (i.e. not a local/keyless runtime like ollama/lmstudio), return StatusWarn (or StatusFail) with help text pointing to `zero setup` / `zero auth`. That makes Overall reflect "not actually usable yet" and gives the user the next action.
 
 #### H10 · No-provider / missing-key error never names zero's own onboarding (`zero setup`/`zero auth`) — it dumps a raw OpenAI HTTP message telling the user to visit platform.openai.com
+
+**Status (2026-06-21):** Fixed — `42b7123`. exec + TUI no-provider errors point at `zero setup` / `zero auth`.
 - **Severity:** high · also: A-onboarding, D-polish
 - **Where:** `internal/providers/providerio/providerio.go:218-232 (ClassifiedError) + internal/config/resolver.go:740 (silent default to openai/gpt-4.1). Reproduced via `zero exec "hello"` with no config.`
 - **Evidence:** `zero exec "hello"` (no key) → stderr: `[zero] auth error: You didn't provide an API key. You need to provide your API key in an Authorization header ... You can obtain an API key from https://platform.openai.com/account/api-keys.` (exit 3). The README's literal first example is `zero exec "fix the failing test in ./pkg"`. grep for `zero setup|zero auth|no provider configured` across internal/cli, internal/agent, internal/providers error paths returns nothing in this path — the only zero-added text is the `auth error: ` prefix.
@@ -245,6 +297,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** When the resolved profile has no credential (credential not set) and the request fails auth, prepend a zero-owned line before the upstream text, e.g.: `No provider credential found. Run \`zero setup\` (interactive) or set OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY. Local models need no key — see \`zero providers list\`.` Detect the no-credential case at the agent/exec boundary rather than relying on the upstream 401 b
 
 #### M7 · Provider errors (auth / rate limit) are classified but give the user no recovery action
+
+**Status (2026-06-21):** Largely addressed by H7 (`8b9b479`) — auth errors now name a recovery action (`zero auth`). Remaining per-class recovery hints DEFERRED.
 - **Severity:** medium
 - **Where:** `internal/providers/providerio/providerio.go:218-231 (ClassifiedError); rendered raw in TUI via internal/tui/model.go:1403-1409 (rowError text = msg.err.Error()) and to exec stderr.`
 - **Evidence:** ClassifiedError only adds a category prefix: `auth error: `, `rate limit error: `, `provider error: `. The TUI error row is `transcriptRow{kind: rowError, text: msg.err.Error(), final: true}` — the verbatim classified string, no appended next-step. Confirmed live: rate-limit/auth bodies are the raw upstream message with only the prefix.
@@ -252,6 +306,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Append a short, category-specific recovery hint when rendering rowError / exec error: auth → `Run \`zero auth\` or check your API key, or /provider to switch.`; rate limit → `Zero already retried with backoff; wait or use /model to switch provider.` Keep it one line; the classifier already knows the category.
 
 #### M8 · TUI has no slash command to discover or manage subagents/cron/skills/plugins — features the README markets prominently
+
+**Status (2026-06-21):** Deferred — larger feature (discovery slash commands for subagents/cron/skills/plugins); out of this PR's scope.
 - **Severity:** medium
 - **Where:** `internal/tui/commands.go (full registry: /spec and /mcp exist; no /specialist, /cron, /skills, /plugins, /subagent). CLI subcommands exist (zero specialist|cron|skills|plugins per `zero --help`).`
 - **Evidence:** grep over commands.go for `spec|specialist|cron|mcp|skill|plugin|subagent` matches only `/mcp` (:174) and `/spec` (:197). README §Why Zero headlines "Subagents", "Spec mode", "Scheduled agents", and "Extensible — skills, plugins, hooks"; the TUI command table only lists /spec /plan. The ? overlay (keybinding_help.go:58-61) references specialist *cards* but only as a reactive drill-in, not a way to list/create them.
@@ -259,6 +315,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add thin TUI slash commands that shell into the existing CLI surfaces (or at least informational `/specialist`, `/cron`, `/skills`, `/plugins` that print status + the CLI command to manage them), and list them in `/help`. Even read-only listing closes the discoverability gap.
 
 #### I6 · Strong robustness wins worth preserving: network-down framing, mid-stream reconnect, output truncation, and width-safe rendering
+
+**Status (2026-06-21):** Info — no action (verified good).
 - **Severity:** info
 - **Where:** `internal/providers (upstream-unreachable message), internal/agent/reconnect.go, internal/tools/exec_command.go:802-812, internal/tui/rendering.go:1161-1233; tests in internal/tui.`
 - **Evidence:** Unreachable base URL → `[zero] upstream unreachable: the model server could not connect to 127.0.0.1:9 (connection refused). The request never reached the model — this is a network failure ... Verify the host is reachable (DNS/proxy/VPN/firewall) ...` (exit 3). reconnect.go retries connect-time disconnects (eof/reset/timeout/502/503) twice with backoff and surfaces `[connection lost — reconnecting N/2…]`. exec output truncates head+tail with `\n[zero] output truncated\n`. Tool cards cap at 16 live / 400 flushed lines and collapse noisy output. Visual tests PASS: TestViewNeverExceedsTerminalWidth, TestTinyTierSingleSegmentAndRailLessCards, Tes
@@ -269,6 +327,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 ### G. Open-source readiness
 
 #### H11 · No SECURITY.md and no private vulnerability-reporting path
+
+**Status (2026-06-21):** Fixed — `634f23f`. SECURITY.md with a private GitHub-advisory reporting path.
 - **Severity:** high
 - **Where:** `/tmp/zero-ux/ (no SECURITY.md at root or .github); CONTRIBUTING.md (no disclosure section)`
 - **Evidence:** find for security.md => none. grep -niE 'vulnerab|disclos|CVE|report.*privately' across CONTRIBUTING.md/README.md/INSTALL.md => only an unrelated 'security issue' mention in CONTRIBUTING:92 and a firecrawl privacy note. For a coding agent that executes shell, edits files, and handles API keys/secrets, there is no documented way to report a vuln.
@@ -276,6 +336,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add SECURITY.md (root or .github/) with a private reporting address or GitHub Security Advisories link and a supported-versions/response-time note.
 
 #### M9 · No issue templates and no PR template (.github/) despite CONTRIBUTING mandating their use
+
+**Status (2026-06-21):** Fixed — `634f23f`. .github issue (bug/feature/config) + PR templates added.
 - **Severity:** medium
 - **Where:** `/tmp/zero-ux/.github/ (only workflows/); CONTRIBUTING.md:49 ('Open an issue using the appropriate issue template')`
 - **Evidence:** find .github -type f => only the 4 workflow YAMLs. No .github/ISSUE_TEMPLATE/, no PULL_REQUEST_TEMPLATE. Yet CONTRIBUTING.md:49 says 'Open an issue using the appropriate issue template' and the whole policy hinges on an `issue-approved` label workflow.
@@ -283,6 +345,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add .github/ISSUE_TEMPLATE/bug_report.yml + feature_request.yml (matching the fields CONTRIBUTING already enumerates at lines 122-145) and a PULL_REQUEST_TEMPLATE.md that prompts for the `Fixes #123` issue link.
 
 #### M10 · No CODE_OF_CONDUCT.md
+
+**Status (2026-06-21):** Fixed — `634f23f`. CODE_OF_CONDUCT.md (Contributor Covenant 2.1) added.
 - **Severity:** medium
 - **Where:** `/tmp/zero-ux/ (none at root or .github)`
 - **Evidence:** find for code_of_conduct* => none.
@@ -290,6 +354,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add CODE_OF_CONDUCT.md (e.g. Contributor Covenant) with a contact for enforcement.
 
 #### M11 · No CHANGELOG and source builds report version 'dev' — `zero update` has nothing to compare against
+
+**Status (2026-06-21):** Partially fixed — `634f23f` adds CHANGELOG.md; build-time version stamping (still `dev`) is DEFERRED.
 - **Severity:** medium
 - **Where:** `/tmp/zero-ux/ (no CHANGELOG); internal/update/update.go:138-141; `/tmp/zero --version` => 'zero dev'`
 - **Evidence:** `/tmp/zero --version` => `zero dev`. update.go:138-141: 'Source/dev builds carry a non-semver version ("dev"); ... currentVersion = "0.0.0"'. No CHANGELOG file anywhere. README.md:147 advertises `zero update` and INSTALL.md:91-98 documents `zero update --check`.
@@ -297,6 +363,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add a CHANGELOG.md (Keep-a-Changelog style) and document the release/versioning process; consider stamping the real version via -ldflags in the release builder so installed binaries report a semver.
 
 #### L4 · README has no screenshot/GIF for a TUI-first product
+
+**Status (2026-06-21):** Deferred — MANUAL maintainer step (add a screenshot/GIF; not auto-generated).
 - **Severity:** low
 - **Where:** `/tmp/zero-ux/README.md:1-21 (only ASCII logo + shields.io badges)`
 - **Evidence:** grep -niE '!\[|\.png|\.gif|demo|screenshot|asciinema' README.md => only the 4 shields.io badge images; no product screenshot or terminal recording. README.md:38 promises 'A TUI that feels premium'.
@@ -304,6 +372,8 @@ Beyond that, the recurring themes are **docs/claims drifting from the code** (a 
 - **Fix:** Add a screenshot or asciinema/GIF of the TUI (setup wizard + a chat turn) near the top of the README.
 
 #### L5 · npm package name is the un-scoped generic 'zero' — almost certainly unpublishable as-is
+
+**Status (2026-06-21):** Deferred — low (npm package name).
 - **Severity:** low
 - **Where:** `/tmp/zero-ux/package.json:2`
 - **Evidence:** package.json: `"name": "zero"`. README.md:279 calls the npm wrapper a real install path ('the npm wrapper just delegates to it'). bin/zero.js exists as the wrapper.
