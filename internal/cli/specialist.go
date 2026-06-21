@@ -325,6 +325,11 @@ func runSpecialistEdit(paths specialist.Paths, name string, options specialistOp
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			for _, b := range specialist.Builtins() {
+				if b.Metadata.Name == name {
+					return writeExecUsageError(stderr, fmt.Sprintf("cannot edit builtin specialist %q: builtins are read-only. Create a user or project specialist of the same name to override it.", name))
+				}
+			}
 			return writeExecUsageError(stderr, "specialist not found: "+name)
 		}
 		return writeAppError(stderr, err.Error(), exitCrash)

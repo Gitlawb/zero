@@ -38,11 +38,11 @@ func runCronWith(store *cron.Store, now func() time.Time, args []string, stdout 
 	case "list", "ls":
 		return cronList(store, now, stdout, stderr)
 	case "rm", "remove":
-		return cronSimple(store, rest, stderr, func(id string) error { return store.Remove(id) }, "removed")
+		return cronSimple(store, rest, stdout, stderr, func(id string) error { return store.Remove(id) }, "Removed")
 	case "pause":
-		return cronSetStatus(store, rest, stderr, cron.StatusPaused)
+		return cronSetStatus(store, rest, stdout, stderr, cron.StatusPaused, "Paused")
 	case "resume":
-		return cronResume(store, now, rest, stderr)
+		return cronResume(store, now, rest, stdout, stderr)
 	case "run":
 		return cronRun(store, now, rest, stdout, stderr, Run)
 	default:
@@ -195,7 +195,7 @@ func cronList(store *cron.Store, now func() time.Time, stdout io.Writer, stderr 
 	return exitSuccess
 }
 
-func cronSimple(store *cron.Store, args []string, stderr io.Writer, fn func(string) error, verb string) int {
+func cronSimple(store *cron.Store, args []string, stdout io.Writer, stderr io.Writer, fn func(string) error, verb string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "An id is required.")
 		return exitUsage
@@ -204,10 +204,11 @@ func cronSimple(store *cron.Store, args []string, stderr io.Writer, fn func(stri
 		fmt.Fprintln(stderr, err.Error())
 		return exitUsage
 	}
+	fmt.Fprintf(stdout, "%s cron job %s.\n", verb, args[0])
 	return exitSuccess
 }
 
-func cronSetStatus(store *cron.Store, args []string, stderr io.Writer, status string) int {
+func cronSetStatus(store *cron.Store, args []string, stdout io.Writer, stderr io.Writer, status string, verb string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "An id is required.")
 		return exitUsage
@@ -222,11 +223,12 @@ func cronSetStatus(store *cron.Store, args []string, stderr io.Writer, status st
 		fmt.Fprintln(stderr, err.Error())
 		return exitCrash
 	}
+	fmt.Fprintf(stdout, "%s cron job %s.\n", verb, job.ID)
 	return exitSuccess
 }
 
 // cronResume sets a job active and recomputes NextRunAt.
-func cronResume(store *cron.Store, now func() time.Time, args []string, stderr io.Writer) int {
+func cronResume(store *cron.Store, now func() time.Time, args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "An id is required.")
 		return exitUsage
@@ -254,6 +256,7 @@ func cronResume(store *cron.Store, now func() time.Time, args []string, stderr i
 		fmt.Fprintln(stderr, err.Error())
 		return exitCrash
 	}
+	fmt.Fprintf(stdout, "Resumed cron job %s (next run %s).\n", job.ID, next.Format(time.RFC3339))
 	return exitSuccess
 }
 

@@ -150,7 +150,7 @@ var darkPalette = palette{
 	addBgWord: "#26503d", // changed span within an added line — brighter green (sep 1.83 vs addBg, addInk 7.1:1)
 	delBgWord: "#502d30", // changed span within a deleted line — brighter red (sep 1.44 vs delBg, delInk 7.7:1)
 	permBg:    "#1c1915",
-	selBg:     "#1d2114",
+	selBg:     "#32401b", // selected row bg — brightened from #1d2114 so the highlighted row separates from the panel (sep 1.18→1.73) while ink label contrast stays ~9.4:1
 	addInk:    "#bdeed7",
 	delInk:    "#f2c4c4",
 	onAccent:  "#000000",
@@ -184,7 +184,7 @@ var lightPalette = palette{
 	addBgWord: "#97d3ab", // changed span within an added line — deeper green (sep 1.49 vs addBg, addInk 4.7:1)
 	delBgWord: "#f1b3b3", // changed span within a deleted line — deeper red (sep 1.48 vs delBg, delInk 4.6:1)
 	permBg:    "#fbf0d8", // permission card bg (light amber)
-	selBg:     "#e7f2cd", // selected row bg (light accent)
+	selBg:     "#cfe78f", // selected row bg (light accent) — deepened from #e7f2cd so it separates from the near-white panel (sep 1.01→1.15); ink label stays >12:1, faint ~5:1
 	addInk:    "#1d5b37", // added-line text
 	delInk:    "#8e2d2d", // deleted-line text
 	onAccent:  "#ffffff", // text on the (dark) accent/amber fills

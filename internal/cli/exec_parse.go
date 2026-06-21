@@ -233,7 +233,7 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.outputFormat = format
-		case arg == "--prompt":
+		case arg == "-p" || arg == "--prompt":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
 				return options, false, err
@@ -242,6 +242,8 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 			index = next
 		case strings.HasPrefix(arg, "--prompt="):
 			options.promptParts = append(options.promptParts, strings.TrimSpace(strings.TrimPrefix(arg, "--prompt=")))
+		case strings.HasPrefix(arg, "-p="):
+			options.promptParts = append(options.promptParts, strings.TrimSpace(strings.TrimPrefix(arg, "-p=")))
 		case arg == "--resume":
 			if index+1 < len(args) && !strings.HasPrefix(args[index+1], "-") && strings.TrimSpace(args[index+1]) != "" {
 				options.resume = strings.TrimSpace(args[index+1])

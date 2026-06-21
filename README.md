@@ -53,9 +53,17 @@ zero exec -o stream-json < turns.jsonl        # programmatic, for scripts & CI
 go run ./cmd/zero
 ```
 
-> **Pre-built binaries are coming soon.** Once the first GitHub release is published, you'll be able
-> to install with `scripts/install.sh` (Linux/macOS) or `scripts/install.ps1` (Windows); those
-> scripts download release assets that don't exist yet. Until then, build from source with
+Or, once the first release is published, install the prebuilt binary via npm — the wrapper
+downloads the right binary for your platform:
+
+```bash
+npm install -g @gitlawb/zero
+zero
+```
+
+> **Pre-built binaries are coming soon.** The npm package and the `scripts/install.sh`
+> (Linux/macOS) / `scripts/install.ps1` (Windows) installers all download GitHub Release
+> assets, which require the first release to be published. Until then, build from source with
 > `go run ./cmd/zero` (or `go build -o zero ./cmd/zero`).
 
 First launch opens a **guided setup wizard** — pick a provider, paste a key, choose a model, done. Or do it non-interactively:
@@ -176,6 +184,8 @@ Bring your own key — or no key at all for local runtimes.
 | **Anything else** | any OpenAI-compatible or Anthropic-compatible endpoint |
 
 The model registry tracks each model's capabilities, context window, and cost — and the live model picker discovers what your provider actually serves.
+
+**Slow or stalling streams.** Every provider aborts a stream that goes completely silent (no data and no keep-alive) for `ZERO_STREAM_IDLE_TIMEOUT` (default **5 minutes**) so a hung connection can't block the agent forever. SSE keep-alives reset the timer, so a heartbeating-but-slow backend is never killed. If a slow cloud or reasoning model still trips it, raise the limit — `ZERO_STREAM_IDLE_TIMEOUT=10m` (accepts a Go duration or bare seconds; `0`/`off` disables the watchdog).
 
 ## Tools
 

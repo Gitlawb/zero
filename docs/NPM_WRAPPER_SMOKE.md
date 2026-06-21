@@ -23,7 +23,13 @@ go run ./cmd/zero-release smoke
 
 ## Checklist
 
-- `package.json` has the expected package name, version, and `bin.zero` entry.
+- `package.json` has the expected package name (`@gitlawb/zero`), version,
+  `bin.zero` entry, and exactly one `scripts` entry — the `postinstall` hook.
+- `scripts/postinstall.mjs` resolves the correct release asset name/URL per
+  platform (`ZERO_INSTALL_DRY_RUN=1` prints the plan), verifies the downloaded
+  archive's SHA-256, and extracts only the known binary basenames into place.
+  `ZERO_SKIP_DOWNLOAD=1` opts out cleanly (exit 0) and an unsupported
+  platform/arch is a non-fatal skip.
 - The wrapper binary resolves through the package `bin` entry and
   `node_modules/.bin` in a package-install smoke test.
 - The built binary exits 0 for `zero --version` or `zero --help`.

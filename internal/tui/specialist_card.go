@@ -322,6 +322,10 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	} else {
 		body = zeroTheme.muted.Render(bodyText)
 	}
+	// Surface the otherwise-invisible drill-in affordance: a left-click or Enter on
+	// the card opens its subchat (transcript_selection.go). A faint hint makes that
+	// discoverable instead of hidden; it truncates first on narrow cards.
+	body += zeroTheme.faint.Render("   · enter to open")
 
 	lines := []string{header, body}
 

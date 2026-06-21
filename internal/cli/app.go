@@ -298,6 +298,14 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		}
 		return 0
 	case "-v", "--version", "version":
+		for _, a := range args[1:] {
+			if a == "-h" || a == "--help" {
+				if _, err := fmt.Fprintln(stdout, "Usage: zero version\n\nPrint the Zero CLI version. Takes no flags."); err != nil {
+					return 1
+				}
+				return 0
+			}
+		}
 		if _, err := fmt.Fprintf(stdout, "zero %s\n", version); err != nil {
 			return 1
 		}
@@ -376,6 +384,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runRepoInfo(args[1:], stdout, stderr, deps)
 	case "serve":
 		return runServe(args[1:], stdout, stderr, deps)
+	case "acp":
+		return runACP(args[1:], stdout, stderr, deps)
 	default:
 		if _, err := fmt.Fprintf(stderr, "unknown command %q\n", args[0]); err != nil {
 			return 1
@@ -876,6 +886,7 @@ Commands:
   cron       Schedule agent jobs (foreground, file-backed)
   repo-info  Characterize the current repository (local git only)
   serve      Run Zero protocol servers
+  acp        Serve the Agent Client Protocol over stdio (editor backend)
   help       Show this help
   version    Print version
 

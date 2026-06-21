@@ -1,9 +1,38 @@
 {
-  "name": "zero",
+  "name": "@gitlawb/zero",
   "version": "0.1.0",
-  "module": "bin/zero.js",
+  "description": "Zero — a fast, multi-provider terminal coding agent.",
   "type": "module",
+  "module": "bin/zero.js",
   "bin": {
     "zero": "bin/zero.js"
-  }
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "files": [
+    "bin/zero.js",
+    "scripts/postinstall.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitlawb/zero.git"
+  },
+  "homepage": "https://github.com/Gitlawb/zero#readme",
+  "bugs": {
+    "url": "https://github.com/Gitlawb/zero/issues"
+  },
+  "license": "SEE LICENSE IN LICENSE"
 }
