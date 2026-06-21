@@ -199,12 +199,18 @@ func (m model) statusLine(width int) string {
 	providerName := displayValue(strings.TrimSpace(m.providerDisplayName()), "no provider")
 
 	if tier == tierTiny {
+		if m.exitConfirmActive {
+			warning := prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
+			return fitStyledLine(warning, width)
+		}
 		provider := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
 		return fitStyledLine(provider, width)
 	}
 
 	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
-	if summary := m.backgroundTerminalSummary(); summary != "" {
+	if m.exitConfirmActive {
+		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
+	} else if summary := m.backgroundTerminalSummary(); summary != "" {
 		left += separator + zeroTheme.muted.Render(summary)
 	}
 

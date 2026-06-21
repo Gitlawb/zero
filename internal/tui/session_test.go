@@ -875,7 +875,7 @@ func TestCancelledRunFlushesCheckpointSessionEvents(t *testing.T) {
 	assertPayloadField(t, cancelErr, "message", "Run cancelled.")
 }
 
-func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
+func TestCtrlCCancelsAndFlushesCheckpointSessionEvents(t *testing.T) {
 	store := testSessionStore(t)
 	root := t.TempDir()
 	writeTestFile(t, root, "notes.txt", "before")
@@ -910,17 +910,16 @@ func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
 		next = updated.(model)
 		if _, ok := runtimeMsg.(permissionRequestMsg); ok {
 			// Ctrl+C while the permission prompt is pending: this must cancel the
-			// in-flight run (unblocking the goroutine via ctx) AND mark the model
-			// exiting — but it must NOT quit before the in-flight run's final
-			// message has been drained, or the captured checkpoint is orphaned.
-			var exitCmd tea.Cmd
-			updated, exitCmd = next.Update(testKeyCtrl('c'))
+			// in-flight run (unblocking the goroutine via ctx), arm the second-press
+			// exit confirmation, and still avoid quitting before the in-flight run's
+			// final message has been drained, or the captured checkpoint is orphaned.
+			updated, _ = next.Update(testKeyCtrl('c'))
 			next = updated.(model)
-			if !next.exiting {
-				t.Fatal("expected Ctrl+C to mark model exiting")
+			if next.exiting {
+				t.Fatal("first Ctrl+C should not mark model exiting")
 			}
-			if exitCmd != nil {
-				t.Fatal("expected Ctrl+C to defer quit while an in-flight run still needs flushing")
+			if !next.exitConfirmActive {
+				t.Fatal("first Ctrl+C should arm exit confirmation")
 			}
 			cancelled = true
 		}
@@ -932,17 +931,26 @@ func TestCtrlCFlushesCheckpointSessionEvents(t *testing.T) {
 		t.Fatal("expected cancelled run to be flagged for session-event flush")
 	}
 
+	updated, quitCmd := next.Update(testKeyCtrl('c'))
+	next = updated.(model)
+	if !next.exiting {
+		t.Fatal("second Ctrl+C should mark model exiting")
+	}
+	if quitCmd != nil {
+		t.Fatal("second Ctrl+C should wait for the cancelled run's flush before quitting")
+	}
+
 	// The cancelled goroutine still returns its accumulated session events. Deliver
 	// that final message; the checkpoint must be persisted even though activeRunID
-	// is already zeroed, and the deferred quit must fire now.
+	// is already zeroed, and the second Ctrl+C's deferred quit must fire now.
 	finalMsg := receiveFinalMessage(t, finalCh)
-	updated, quitCmd := next.Update(finalMsg)
+	updated, quitCmd = next.Update(finalMsg)
 	next = updated.(model)
 	if len(next.flushRunIDs) != 0 {
 		t.Fatalf("expected flush set to clear after draining cancelled run, got %v", next.flushRunIDs)
 	}
 	if quitCmd == nil {
-		t.Fatal("expected deferred quit to fire once the in-flight run is flushed on Ctrl+C")
+		t.Fatal("expected deferred quit to fire once the in-flight run is flushed on second Ctrl+C")
 	}
 
 	events := readOnlySessionEvents(t, store)

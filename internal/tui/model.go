@@ -36,6 +36,8 @@ import (
 const tuiToolOutputLimit = 240
 const defaultResponseStyle = "balanced"
 const chatWheelScrollLines = 5
+const ctrlCExitConfirmDuration = 3 * time.Second
+const ctrlCExitConfirmText = "Press Ctrl+C again to exit"
 
 type model struct {
 	ctx                    context.Context
@@ -242,6 +244,8 @@ type model struct {
 	transcriptSelection transcriptSelectionState
 	copyStatus          string
 	copyStatusSeq       int
+	exitConfirmActive   bool
+	exitConfirmSeq      int
 
 	// picker, when non-nil, is an open interactive selector overlay (/model,
 	// /effort, /mode with no argument). It captures ↑/↓/Enter/Esc and applies
@@ -278,6 +282,10 @@ type model struct {
 type agentTextMsg struct {
 	runID int
 	delta string
+}
+
+type exitConfirmExpiredMsg struct {
+	seq int
 }
 
 // toolCallStreamStartMsg / toolCallStreamDeltaMsg carry a tool call's live
@@ -678,6 +686,26 @@ func (m model) quit() (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
+func (m model) handleCtrlC() (tea.Model, tea.Cmd) {
+	if m.exitConfirmActive {
+		m.exitConfirmActive = false
+		m.exitConfirmSeq++
+		m.cancelRun()
+		m.exiting = true
+		if len(m.flushRunIDs) > 0 {
+			return m, nil
+		}
+		return m.quit()
+	}
+	m.cancelRun()
+	m.exitConfirmActive = true
+	m.exitConfirmSeq++
+	seq := m.exitConfirmSeq
+	return m, tea.Tick(ctrlCExitConfirmDuration, func(time.Time) tea.Msg {
+		return exitConfirmExpiredMsg{seq: seq}
+	})
+}
+
 // Update routes every message through updateModel, then advances the flush
 // frontier for inline rendering. Alt-screen runs keep rows in the managed view
 // instead of printing into terminal scrollback (see flush.go).
@@ -751,6 +779,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyStatus = ""
 		}
 		return m, nil
+	case exitConfirmExpiredMsg:
+		if msg.seq == m.exitConfirmSeq {
+			m.exitConfirmActive = false
+		}
+		return m, nil
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
 	case providerWizardDeviceCodeMsg:
@@ -798,23 +831,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch {
 		case keyCtrl(msg, 'c'):
-			// cancelRun records the in-flight run into flushRunIDs and writes the
-			// "Run cancelled." marker, exactly like the Esc path. While ANY cancelled
-			// run is still flushing we must NOT quit yet: each cancelled goroutine
-			// returns its accumulated session events (including the
-			// EventSessionCheckpoint blobs it already wrote to disk before each
-			// mutating tool) in a final agentResponseMsg, and quitting now would drop
-			// that message, orphaning the checkpoints and breaking /rewind. This
-			// covers both a run cancelled BY this Ctrl+C and one cancelled by an
-			// earlier Esc whose flush hasn't landed (m.pending is already false then,
-			// but flushRunIDs is not empty). The agentResponseMsg handler fires
-			// tea.Quit once flushRunIDs drains.
-			m.cancelRun()
-			m.exiting = true
-			if len(m.flushRunIDs) > 0 {
-				return m, nil
-			}
-			return m.quit()
+			return m.handleCtrlC()
 		case keyCtrl(msg, 'o'):
 			return m.toggleDetailedTranscript(), nil
 		case keyCtrl(msg, 'e'):

@@ -1577,17 +1577,60 @@ func TestShiftTabDoesNotCycleWhileModalsActive(t *testing.T) {
 	})
 }
 
-func TestCtrlCExits(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+func TestCtrlCRequiresSecondPressToExit(t *testing.T) {
+	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
 
 	updated, cmd := m.Update(testKeyCtrl('c'))
 	next := updated.(model)
 
-	if !next.exiting {
-		t.Fatal("expected Ctrl+C to mark model exiting")
+	if next.exiting {
+		t.Fatal("first Ctrl+C should not mark model exiting")
+	}
+	if !next.exitConfirmActive {
+		t.Fatal("first Ctrl+C should arm exit confirmation")
 	}
 	if cmd == nil {
-		t.Fatal("expected Ctrl+C to return quit command")
+		t.Fatal("first Ctrl+C should schedule confirmation expiry")
+	}
+	status := plainRender(t, next.statusLine(80))
+	if !strings.Contains(status, ctrlCExitConfirmText) {
+		t.Fatalf("status line = %q, want exit confirmation", status)
+	}
+	if strings.Contains(status, "tokenrouter") {
+		t.Fatalf("status line = %q, should replace provider while exit confirmation is active", status)
+	}
+
+	updated, cmd = next.Update(testKeyCtrl('c'))
+	next = updated.(model)
+	if !next.exiting {
+		t.Fatal("second Ctrl+C should mark model exiting")
+	}
+	if cmd == nil {
+		t.Fatal("second Ctrl+C should return quit command")
+	}
+}
+
+func TestCtrlCExitConfirmationExpires(t *testing.T) {
+	m := newModel(context.Background(), Options{ProviderName: "tokenrouter"})
+
+	updated, _ := m.Update(testKeyCtrl('c'))
+	next := updated.(model)
+	seq := next.exitConfirmSeq
+
+	updated, _ = next.Update(exitConfirmExpiredMsg{seq: seq - 1})
+	next = updated.(model)
+	if !next.exitConfirmActive {
+		t.Fatal("stale expiry should not clear active exit confirmation")
+	}
+
+	updated, _ = next.Update(exitConfirmExpiredMsg{seq: seq})
+	next = updated.(model)
+	if next.exitConfirmActive {
+		t.Fatal("matching expiry should clear exit confirmation")
+	}
+	status := plainRender(t, next.statusLine(80))
+	if strings.Contains(status, ctrlCExitConfirmText) || !strings.Contains(status, "tokenrouter") {
+		t.Fatalf("status line after expiry = %q, want provider restored", status)
 	}
 }
 
