@@ -91,6 +91,20 @@ Type to chat, **Enter** to send. `/` opens command suggestions, **Shift+Tab** cy
 
 Turn-completion notifications (terminal bell / OSC-9) ping you when the agent finishes or needs input — go make coffee.
 
+## Accessibility & appearance
+
+Zero ships sensible defaults and a few environment/command controls. Meaning never depends on color
+alone — diffs carry `+`/`−` signs, permission outcomes use `✓`/`✗` glyphs plus a text `PERMISSION`
+badge, and permission modes show text labels — so the UI stays readable when color is stripped.
+
+| Control | What it does |
+|---|---|
+| `NO_COLOR` (any non-empty value) | Disables color, per [no-color.org](https://no-color.org). Zero honors **any** non-empty value (`NO_COLOR=1`, `yes`, `true`, …); bold/underline still render. |
+| `ZERO_THEME=auto\|dark\|light` | Selects the palette at startup. `auto` (default) detects the terminal background. |
+| `--theme auto\|dark\|light` | Same as `ZERO_THEME`, as a launch flag (takes precedence over the env var). |
+| `/theme [auto\|dark\|light]` | Switches the palette live inside the TUI. |
+| `ZERO_NO_FADE=1` | Reduce-motion opt-out: disables the streaming-text fade animation. Fade also auto-disables over SSH/tmux and on low-color/no-TTY terminals. |
+
 ## Headless `exec`
 
 ```bash
