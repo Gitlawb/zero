@@ -46,6 +46,16 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 	}
 
 	lines := []string{}
+	// blankBefore inserts one separator blank line before a block (heading or
+	// paragraph) for vertical breathing room, but never doubles an existing blank
+	// and never leads with one (lines is empty at the top; trimMarkdownDisplay-
+	// BlankEdges strips any leading blank anyway). Lists, code, and tables are left
+	// tight — they don't call it.
+	blankBefore := func() {
+		if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+			lines = append(lines, "")
+		}
+	}
 	for index := 0; index < len(raw); {
 		line := raw[index]
 		trimmed := strings.TrimSpace(line)
@@ -98,6 +108,7 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 		}
 
 		if heading := markdownHeadingText(trimmed); heading != "" {
+			blankBefore()
 			lines = append(lines, wrapMarkdownInline(heading, proseMeasure)...)
 			index++
 			continue
@@ -109,6 +120,7 @@ func renderAssistantMarkdownText(text string, proseMeasure int, tableMeasure int
 			continue
 		}
 
+		blankBefore()
 		paragraph := []string{strings.TrimSpace(line)}
 		index++
 		for index < len(raw) {

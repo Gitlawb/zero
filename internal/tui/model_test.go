@@ -1710,6 +1710,84 @@ func TestCtrlCExitConfirmationExpires(t *testing.T) {
 	}
 }
 
+func TestTranscriptReadingColumnHelpers(t *testing.T) {
+	if g := transcriptGutter(160); g != 4 {
+		t.Fatalf("wide gutter = %d, want 4", g)
+	}
+	if cw := transcriptContentWidth(160); cw != transcriptContentCap {
+		t.Fatalf("wide contentWidth = %d, want cap %d", cw, transcriptContentCap)
+	}
+	if g := transcriptGutter(70); g != 0 {
+		t.Fatalf("narrow gutter = %d, want 0", g)
+	}
+	if cw := transcriptContentWidth(70); cw != 70 {
+		t.Fatalf("narrow contentWidth = %d, want full 70", cw)
+	}
+}
+
+func TestTranscriptBodyRowsUseReadingColumnAndAlignSelection(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 160, 30
+	m.altScreen = true
+	m.transcript = append(m.transcript, transcriptRow{
+		kind: rowAssistant, text: strings.Repeat("word ", 60), final: true,
+	})
+
+	width := m.chatColumnWidth()
+	gutter := transcriptGutter(width)
+	if gutter <= 0 {
+		t.Fatalf("expected a gutter at width %d", width)
+	}
+
+	items := m.transcriptBodyItems(width, "")
+	var row *transcriptBodyItem
+	for i := range items {
+		if items[i].kind == transcriptBodyItemRow && items[i].rowIndex >= 0 {
+			row = &items[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("no assistant row item found")
+	}
+	rendered := row.render(0)
+
+	wroteIndented := false
+	for _, line := range rendered.lines {
+		if w := lipgloss.Width(line); w > transcriptContentCap+gutter {
+			t.Fatalf("body line width %d exceeds reading column %d: %q", w, transcriptContentCap+gutter, line)
+		}
+		if strings.TrimSpace(line) != "" {
+			if !strings.HasPrefix(line, strings.Repeat(" ", gutter)) {
+				t.Fatalf("non-blank body line is not gutter-indented: %q", line)
+			}
+			wroteIndented = true
+		}
+	}
+	if !wroteIndented {
+		t.Fatal("expected at least one indented content line")
+	}
+	// Selection alignment: text-carrying selectable lines start at/after the gutter
+	// so click-to-select and the highlight track the indented glyphs.
+	for _, sl := range rendered.selectable {
+		if sl.text != "" && sl.textStart < gutter {
+			t.Fatalf("selectable textStart %d < gutter %d — selection would misalign", sl.textStart, gutter)
+		}
+	}
+}
+
+func TestMarkdownAddsBlankBeforeHeadingAndParagraph(t *testing.T) {
+	lines := renderAssistantMarkdownText("First paragraph.\n## Heading\nSecond body.", 80, 80, false)
+	headingIdx := -1
+	for i, l := range lines {
+		if strings.Contains(l, "Heading") {
+			headingIdx = i
+		}
+	}
+	if headingIdx <= 0 || strings.TrimSpace(lines[headingIdx-1]) != "" {
+		t.Fatalf("expected a blank line before the heading, got %#v", lines)
+	}
+}
+
 func TestComposerIdleHintAndJumpCue(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
 	m.altScreen = true

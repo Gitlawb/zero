@@ -93,6 +93,35 @@ func (m model) chatColumnWidth() int {
 	return chatWidth(m.width)
 }
 
+// transcriptContentCap is the readable measure the chat BODY wraps to, so text
+// on a wide terminal doesn't run edge-to-edge. The frame/composer/sidebar keep
+// the full chatColumnWidth; only transcript rows use the reading column.
+const transcriptContentCap = 90
+
+// transcriptGutter is the fixed left margin applied to transcript body rows so
+// the reading column floats off the left edge. Zero on terminals too narrow to
+// afford it (the body then uses the full column, just capped).
+func transcriptGutter(columnWidth int) int {
+	if columnWidth <= transcriptContentCap+8 {
+		return 0
+	}
+	return 4
+}
+
+// transcriptContentWidth is the wrap width for transcript body rows: the column
+// width minus the gutter, capped at transcriptContentCap. Degrades to the full
+// column on tiny terminals so prose never collapses to the wrap floor.
+func transcriptContentWidth(columnWidth int) int {
+	cw := columnWidth - transcriptGutter(columnWidth)
+	if cw > transcriptContentCap {
+		cw = transcriptContentCap
+	}
+	if cw < 24 {
+		return columnWidth
+	}
+	return cw
+}
+
 // sidebarWidthForLayout returns the active sidebar column width, or 0 when the
 // two-column layout is not active.
 func (m model) sidebarWidthForLayout() int {

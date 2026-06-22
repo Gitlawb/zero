@@ -118,8 +118,41 @@ func (l transcriptBodyLayout) visibleLines(window transcriptViewportWindow) []st
 	return append([]string(nil), l.lines[start:end]...)
 }
 
+// padTranscriptBodyLines left-indents transcript body rows by gutter cells (the
+// reading-column margin). Horizontal only — it never changes the line count, so
+// the width-keyed height cache stays valid. Two-column mode right-pads the chat
+// block to the column width in joinColumns; single-column leaves the right blank.
+func padTranscriptBodyLines(lines []string, gutter int) []string {
+	if gutter <= 0 {
+		return lines
+	}
+	pad := strings.Repeat(" ", gutter)
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
+	return lines
+}
+
+// shiftSelectableX bumps each selectable line's textStart by the gutter so
+// click-to-select and the highlight stay aligned with the indented glyphs (the
+// text now begins gutter cells further right on screen).
+func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcriptSelectableLine {
+	if gutter <= 0 {
+		return lines
+	}
+	for i := range lines {
+		lines[i].textStart += gutter
+	}
+	return lines
+}
+
 func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
 	items := []transcriptBodyItem{}
+	// Transcript ROWS render in a reading column: wrapped to contentWidth and
+	// indented by gutter, so wide terminals don't run text edge-to-edge. Block
+	// items (title bar, empty state, prompts) keep the full column width below.
+	contentWidth := transcriptContentWidth(width)
+	gutter := transcriptGutter(width)
 
 	// The inline title bar prints once into scrollback on the first WindowSizeMsg;
 	// until then it renders managed so the surface never appears headless.
@@ -188,15 +221,20 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				}
 			}
 			rowIndex, transcriptRow := index, row
-			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKey(transcriptRow, width, rc)
+			// Key the height cache on contentWidth (the wrap width drives line count);
+			// the gutter is a horizontal-only post-pad and never changes height.
+			heightCacheKey, heightCacheStable := m.transcriptRowBodyHeightCacheKey(transcriptRow, contentWidth, rc)
 			items = append(items, transcriptBodyItem{
 				kind:              transcriptBodyItemRow,
 				rowIndex:          rowIndex,
 				heightCacheKey:    heightCacheKey,
 				heightCacheStable: heightCacheStable,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, width, rc, startBodyY)
-					return transcriptBodyRenderedItem{lines: viewLines(rendered), selectable: selectable}
+					rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
+					return transcriptBodyRenderedItem{
+						lines:      padTranscriptBodyLines(viewLines(rendered), gutter),
+						selectable: shiftSelectableX(selectable, gutter),
+					}
 				},
 			})
 			shownAny = true
@@ -241,9 +279,11 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				kind:     transcriptBodyItemPendingInterim,
 				rowIndex: -1,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
+					// Streaming text shares the reading column so it doesn't snap
+					// width when the turn finalizes into a row.
 					return transcriptBodyRenderedItem{
-						lines:      viewLines(m.interimBlock(width)),
-						selectable: m.renderSelectableStreamingReasoning(width, startBodyY),
+						lines:      padTranscriptBodyLines(viewLines(m.interimBlock(contentWidth)), gutter),
+						selectable: shiftSelectableX(m.renderSelectableStreamingReasoning(contentWidth, startBodyY), gutter),
 					}
 				},
 			})
@@ -291,6 +331,8 @@ func (m model) transcriptBodyItemsFromRows(rows []transcriptRow, width int) []tr
 		items = append(items, transcriptBlockBodyItem(transcriptBodyItemEmpty, -1, "No events in this subagent session."))
 		return items
 	}
+	contentWidth := transcriptContentWidth(width)
+	gutter := transcriptGutter(width)
 	rc := buildRowContext(rows)
 	shownAny := false
 	var previousKind rowKind
@@ -309,10 +351,13 @@ func (m model) transcriptBodyItemsFromRows(rows []transcriptRow, width int) []tr
 		items = append(items, transcriptBodyItem{
 			kind:           transcriptBodyItemRow,
 			rowIndex:       rowIndex,
-			heightCacheKey: "subchat:" + strconv.Itoa(index),
+			heightCacheKey: "subchat:" + strconv.Itoa(index) + ":" + strconv.Itoa(contentWidth),
 			render: func(startBodyY int) transcriptBodyRenderedItem {
-				rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, width, rc, startBodyY)
-				return transcriptBodyRenderedItem{lines: viewLines(rendered), selectable: selectable}
+				rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
+				return transcriptBodyRenderedItem{
+					lines:      padTranscriptBodyLines(viewLines(rendered), gutter),
+					selectable: shiftSelectableX(selectable, gutter),
+				}
 			},
 		})
 		shownAny = true
