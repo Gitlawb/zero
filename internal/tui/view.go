@@ -862,7 +862,7 @@ func modelPickerItemDetail(item pickerItem) string {
 // argHint extracts the most representative argument from a tool call's raw JSON
 // arguments for the single-line tool row (the path, pattern, or command acted on).
 func argHint(raw string) string {
-	return firstArgValue(raw, []string{"path", "file", "file_path", "filepath", "pattern", "query", "command", "cmd", "url"})
+	return firstArgValue(raw, []string{"path", "file", "file_path", "filepath", "pattern", "query", "command", "cmd", "url", "task"})
 }
 
 // argHintSecondary extracts the card head's faintest arg column: the

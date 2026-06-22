@@ -21,7 +21,7 @@ const (
 	CollectToolName = "swarm_collect"
 )
 
-// RegisterTools registers the six swarm tools backed by one shared Swarm. The
+// RegisterTools registers the seven swarm tools backed by one shared Swarm. The
 // caller owns the Swarm's lifetime (call Swarm.Close on shutdown).
 func RegisterTools(registry *tools.Registry, sw *Swarm) {
 	registry.Register(&spawnTool{sw: sw})
@@ -37,11 +37,44 @@ func RegisterTools(registry *tools.Registry, sw *Swarm) {
 // advanced, rarely-first-move orchestration feature and the base system prompt
 // does not name them, so they are hidden behind tool_search (loaded on demand)
 // instead of shipping their full schemas in the eager per-request tool prefix.
-// Embedding it in each swarm tool struct is enough — partitionTools keys off the
-// shared tools.IsDeferred check, exactly as it does for MCP tools.
+// Embedding it keys each tool into partitionTools' deferral, exactly like MCP.
+//
+// The COORDINATION tools (swarm_send/swarm_status/swarm_inbox/swarm_collect)
+// override Deferred() to un-defer (expose eagerly) once a swarm is active (see
+// hasActiveSwarm): a weaker model coordinating a live swarm that can't see those
+// tools tends to misroute the calls to the specialist tool ("specialist
+// swarm_send not found") in a retry loop. The ENTRY-POINT tools (swarm_spawn/
+// swarm_schedule) and swarm_handoff keep the default true — they stay
+// discoverable via tool_search from a cold start.
+//
+// Un-deferring a coordination tool must NOT lower the global deferral count and
+// risk dropping it below DeferThreshold (which would deactivate deferral and
+// force-expose every other deferred tool, e.g. MCP). DeferralEligible() keeps
+// every swarm tool counting toward the threshold even while exposed eagerly, so
+// partitionTools' active-gate is unaffected by the un-defer in ANY config —
+// raised threshold or filtered tools included (see tools.IsDeferralEligible).
 type deferredSwarmTool struct{}
 
 func (deferredSwarmTool) Deferred() bool { return true }
+
+// DeferralEligible keeps a swarm tool counting toward the DeferThreshold even
+// when a coordination tool un-defers (Deferred()==false). This decouples
+// "counts toward the threshold" from "currently hidden", so un-deferring the
+// coordination tools can never deactivate deferral for other tools.
+func (deferredSwarmTool) DeferralEligible() bool { return true }
+
+// hasActiveSwarm reports whether the swarm currently tracks any task — i.e. a
+// swarm exists worth coordinating (members running, queued, on standby, or done
+// awaiting collection). It is the gate the coordination tools' Deferred() reads,
+// so they surface eagerly for the swarm's whole life rather than flapping as
+// members move to standby/done. Thread-safe (Summarize RLocks the coordinator)
+// and nil-safe: a zero-value or unwired Swarm reports inactive (stays deferred).
+func (s *Swarm) hasActiveSwarm() bool {
+	if s == nil || s.coord == nil {
+		return false
+	}
+	return s.coord.Summarize().Total > 0
+}
 
 // policyFrom derives the member-inheritance policy from the live tool options so
 // each spawned member runs on the orchestrator's current model + permission mode.
@@ -133,6 +166,9 @@ type sendTool struct {
 	deferredSwarmTool
 }
 
+// Deferred un-defers swarm_send once a swarm is active (see deferredSwarmTool).
+func (t *sendTool) Deferred() bool { return !t.sw.hasActiveSwarm() }
+
 func (t *sendTool) Name() string { return SendToolName }
 func (t *sendTool) Description() string {
 	return "Send a message to another swarm member's inbox on a team."
@@ -190,6 +226,9 @@ type inboxTool struct {
 	sw *Swarm
 	deferredSwarmTool
 }
+
+// Deferred un-defers swarm_inbox once a swarm is active (see deferredSwarmTool).
+func (t *inboxTool) Deferred() bool { return !t.sw.hasActiveSwarm() }
 
 func (t *inboxTool) Name() string { return InboxToolName }
 func (t *inboxTool) Description() string {
@@ -252,6 +291,9 @@ type statusTool struct {
 	sw *Swarm
 	deferredSwarmTool
 }
+
+// Deferred un-defers swarm_status once a swarm is active (see deferredSwarmTool).
+func (t *statusTool) Deferred() bool { return !t.sw.hasActiveSwarm() }
 
 func (t *statusTool) Name() string { return StatusToolName }
 func (t *statusTool) Description() string {
@@ -354,6 +396,9 @@ type collectTool struct {
 	sw *Swarm
 	deferredSwarmTool
 }
+
+// Deferred un-defers swarm_collect once a swarm is active (see deferredSwarmTool).
+func (t *collectTool) Deferred() bool { return !t.sw.hasActiveSwarm() }
 
 func (t *collectTool) Name() string { return CollectToolName }
 func (t *collectTool) Description() string {

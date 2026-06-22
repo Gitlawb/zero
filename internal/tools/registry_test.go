@@ -426,3 +426,46 @@ func TestIsDeferredReportsOptionalInterface(t *testing.T) {
 		t.Fatal("IsDeferred(plain) = true, want false for a tool that does not implement deferredTool")
 	}
 }
+
+// fakeUndeferredEligibleTool is exposed eagerly (Deferred()==false) yet still
+// counts toward the threshold (DeferralEligible()==true) — like a swarm
+// coordination tool while a swarm is active.
+type fakeUndeferredEligibleTool struct {
+	baseTool
+}
+
+func (tool fakeUndeferredEligibleTool) Run(context.Context, map[string]any) Result {
+	return okResult("ok")
+}
+
+func (tool fakeUndeferredEligibleTool) Deferred() bool         { return false }
+func (tool fakeUndeferredEligibleTool) DeferralEligible() bool { return true }
+
+func TestIsDeferralEligibleDecouplesFromDeferred(t *testing.T) {
+	// A currently-deferred tool is eligible via the IsDeferred fallback.
+	deferred := fakeDeferredTool{baseTool: baseTool{name: "deferred"}, deferred: true}
+	if !IsDeferralEligible(deferred) {
+		t.Fatal("IsDeferralEligible(deferred) = false, want true (deferred tools always count)")
+	}
+
+	// Exposed eagerly but opted into DeferralEligible: still counts toward the gate.
+	undeferred := fakeUndeferredEligibleTool{baseTool: baseTool{name: "undeferred_eligible"}}
+	if IsDeferred(undeferred) {
+		t.Fatal("IsDeferred(undeferred) = true, want false")
+	}
+	if !IsDeferralEligible(undeferred) {
+		t.Fatal("IsDeferralEligible(undeferred) = false, want true (opts in via DeferralEligible)")
+	}
+
+	// A plain eager tool counts toward neither.
+	plain := fakePlainTool{baseTool: baseTool{name: "plain"}}
+	if IsDeferralEligible(plain) {
+		t.Fatal("IsDeferralEligible(plain) = true, want false")
+	}
+
+	// Deferred()==false and no DeferralEligible interface: not eligible.
+	optedOut := fakeDeferredTool{baseTool: baseTool{name: "opted_out"}, deferred: false}
+	if IsDeferralEligible(optedOut) {
+		t.Fatal("IsDeferralEligible(optedOut) = true, want false")
+	}
+}

@@ -1845,7 +1845,12 @@ func partitionTools(registry *tools.Registry, permissionMode PermissionMode, opt
 			continue
 		}
 		visible = append(visible, tool)
-		if tools.IsDeferred(tool) {
+		// Count by deferral-ELIGIBILITY, not current deferred state: a tool that
+		// un-defers at runtime (e.g. swarm coordination tools once a swarm is
+		// active) still counts, so it can't drop `eligible` below the threshold
+		// and force-expose every other deferred tool. Whether a tool is actually
+		// hidden is decided by IsDeferred in the exposure loop below.
+		if tools.IsDeferralEligible(tool) {
 			eligible++
 		}
 	}

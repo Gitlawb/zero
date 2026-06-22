@@ -69,6 +69,30 @@ func IsDeferred(t Tool) bool {
 	return ok && d.Deferred()
 }
 
+// deferralEligibleTool lets a tool keep counting toward the deferral threshold
+// even when it is dynamically exposed eagerly (Deferred()==false). A tool whose
+// Deferred() flips false at runtime — e.g. the swarm coordination tools once a
+// swarm is active — would otherwise lower the global eligible count and risk
+// dropping it below DeferThreshold, which would deactivate deferral for ALL
+// tools (force-exposing every MCP schema). Implementing this keeps the count
+// stable so un-deferring one tool can never force-expose others.
+type deferralEligibleTool interface {
+	DeferralEligible() bool
+}
+
+// IsDeferralEligible reports whether a tool counts toward the DeferThreshold.
+// A currently-deferred tool always counts. A tool may ALSO opt in via
+// DeferralEligible() to keep counting while exposed eagerly (see above). This is
+// the count partitionTools uses for the active-gate; whether a tool is actually
+// hidden is still decided by IsDeferred.
+func IsDeferralEligible(t Tool) bool {
+	if IsDeferred(t) {
+		return true
+	}
+	d, ok := t.(deferralEligibleTool)
+	return ok && d.DeferralEligible()
+}
+
 func (registry *Registry) Register(tool Tool) {
 	registry.tools[tool.Name()] = tool
 }

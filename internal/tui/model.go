@@ -134,7 +134,12 @@ type model struct {
 	// (ripple.go). Reusing the spinner's existing tick keeps a single ~80ms timer
 	// driving both the braille glyph and the colour wave — no second ticker.
 	spinnerPhase int
-	pending      bool
+	// spinnerTicking tracks whether the spinner's self-scheduling tick loop is
+	// currently alive, so a kick (ensureSpinnerTick) never double-issues the tick
+	// when the loop is already running. Set true whenever a Tick cmd is returned
+	// from the TickMsg handler / beginRun, cleared when the handler stops the loop.
+	spinnerTicking bool
+	pending        bool
 	// turnStartedAt is when the in-flight run began; the working status line
 	// renders the live elapsed time from it so a long or stalled turn never looks
 	// like a frozen terminal (for ANY provider, not just slow ones). Zero = idle.
@@ -1250,10 +1255,21 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case spinner.TickMsg:
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
-		// so no timer fires between runs.
+		// so no timer fires between runs. The one exception is an active sidebar
+		// holding agents: their cool ripple animation needs the phase to keep
+		// advancing even when no run is pending, so the tick loop stays alive while
+		// sidebarHasAgents() holds (and stops the moment the agents/sidebar clear).
 		if !m.pending && !m.compactInFlight && !m.doctorInFlight {
+			if m.sidebarHasAgents() && !m.reducedMotion {
+				m.spinner, _ = m.spinner.Update(msg)
+				m.spinnerPhase++
+				m.spinnerTicking = true
+				return m, m.spinner.Tick
+			}
+			m.spinnerTicking = false
 			return m, nil
 		}
+		m.spinnerTicking = true
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		// Advance the shared ripple phase in lock-step with the spinner glyph;
@@ -1302,7 +1318,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.headerPrinted = true
 			m.flushQueue = append(m.flushQueue, m.titleBar(chatWidth(msg.Width)))
 		}
-		return m, nil
+		// A resumed/idle session may already hold sidebar agents now that geometry
+		// (and thus sidebarActive) is known; kick the ripple tick loop if so. No-op
+		// when the loop is already running or there is nothing to animate.
+		return m, m.ensureSpinnerTick()
 	case permissionRequestMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -3209,7 +3228,22 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.specialists.clear()
 	m.plan.clear()
 	m.turnStartedAt = m.now()
+	m.spinnerTicking = true
 	return m
+}
+
+// ensureSpinnerTick returns the spinner.Tick cmd to (re)start the self-scheduling
+// tick loop when an active sidebar holds agents to animate but the loop is not
+// already running (e.g. a resumed session whose swarm members exist before any
+// run started this process). It returns nil — issuing no second timer — when the
+// loop is already alive, when reduced motion is set, or when there is nothing to
+// animate, so an idle plain session schedules no timer.
+func (m *model) ensureSpinnerTick() tea.Cmd {
+	if m.spinnerTicking || m.reducedMotion || !m.sidebarHasAgents() {
+		return nil
+	}
+	m.spinnerTicking = true
+	return m.spinner.Tick
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {

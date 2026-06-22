@@ -11,6 +11,8 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
+	"regexp"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -83,34 +85,166 @@ func (m model) sidebarWidthForLayout() int {
 	return sidebarWidth(m.width)
 }
 
-// sidebarAgentHeader renders the AGENTS section header with a running/total
-// count of the subagents spawned this turn.
-func (m model) sidebarAgentHeader(width int) string {
-	agents := m.specialists.all()
-	if len(agents) == 0 {
-		return sidebarHeader("AGENTS", width)
-	}
-	running := 0
-	for _, a := range agents {
-		if a.status == specialistRunning {
-			running++
+// sidebarSpecialists returns the specialist delegations worth surfacing in the
+// AGENTS panel, EXCLUDING failed tool-misroutes: when a model calls a swarm (or
+// any other) tool name as if it were a specialist, the lookup fails with
+// "specialist <name> not found". That was never a real sub-agent, so it would
+// otherwise pile up bogus "× swarm_send" rows. Real specialists (e.g. "worker")
+// and genuine run failures still show.
+func (m model) sidebarSpecialists() []specialistInfo {
+	all := m.specialists.all()
+	out := all[:0:0]
+	for _, a := range all {
+		if a.status == specialistError && strings.Contains(strings.ToLower(a.errorMsg), "not found") {
+			continue
 		}
+		out = append(out, a)
 	}
-	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d/%d", running, len(agents)), width)
+	return out
 }
 
-// sidebarAgentLines renders one line per spawned subagent — a status glyph
-// (• running, ✓ done, ✗ error) and its name — plus a "↳ <tool> <detail>"
-// working line for each running agent so the live subagent activity is visible.
-// Returns nil when none are spawned (the caller then shows a placeholder).
+// sidebarHasAgents reports whether the two-column sidebar is active AND has at
+// least one agent line to animate (a specialist delegation or a swarm member).
+// The spinner tick keeps firing while this holds so the cool swarm ripple on
+// member names stays alive even when no run is in flight; gating it on the
+// sidebar+agent presence means a plain idle session schedules no timer.
+func (m model) sidebarHasAgents() bool {
+	if !m.sidebarActive() {
+		return false
+	}
+	return len(m.sidebarSpecialists())+len(m.swarmSpawnedAgents()) > 0
+}
+
+// sidebarAgentHeader renders the AGENTS section header with the total count of
+// active agents — specialist delegations plus swarm/team members.
+func (m model) sidebarAgentHeader(width int) string {
+	n := len(m.sidebarSpecialists()) + len(m.swarmSpawnedAgents())
+	if n == 0 {
+		return sidebarHeader("AGENTS", width)
+	}
+	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d", n), width)
+}
+
+// swarmSpawnRe extracts a member id from a swarm_spawn tool result, whose text
+// is "Spawned <type> as task <id> on team <team>." (internal/swarm/tools.go).
+var swarmSpawnRe = regexp.MustCompile(`as task (\S+) on team`)
+
+// swarmAgent is one spawned swarm/team member surfaced in the sidebar: the
+// stable id recovered from the spawn result, plus a human display name derived
+// from the spawn call's task briefing (falling back to the id).
+type swarmAgent struct {
+	id   string // e.g. "subagent-1" — the dedup key and fallback name
+	name string // the task briefing (argHint of the call row), or id when empty
+}
+
+// swarmSpawnedAgents derives the swarm/team members from the transcript's
+// swarm_spawn rows — the swarm roster lives in the CLI runtime, not the TUI
+// model, so members are recovered from the tool stream. Each member pairs a
+// swarm_spawn CALL row (whose detail = the task briefing, via argHint) with the
+// next swarm_spawn RESULT row (whose text yields the id, via swarmSpawnRe), so
+// the sidebar can name the agent by what it was asked to do rather than an
+// opaque "subagent-N". Only spawns that produced a result row (success) are
+// returned, and the list is deduped by id.
+func (m model) swarmSpawnedAgents() []swarmAgent {
+	// If a swarm_collect has run on any team, the swarm is considered closed
+	// and we no longer surface its members in the AGENTS sidebar.
+	for _, row := range m.transcript {
+		if row.tool == "swarm_collect" && row.kind == rowToolResult {
+			return nil
+		}
+	}
+
+	seen := map[string]bool{}
+	var agents []swarmAgent
+	// pendingTask holds the task from the most recent unmatched swarm_spawn call
+	// row, to be paired with the next swarm_spawn result row.
+	pendingTask := ""
+	havePending := false
+	for _, row := range m.transcript {
+		if row.tool != "swarm_spawn" {
+			continue
+		}
+		switch row.kind {
+		case rowToolCall:
+			pendingTask = strings.TrimSpace(row.detail)
+			havePending = true
+		case rowToolResult:
+			match := swarmSpawnRe.FindStringSubmatch(row.detail)
+			if match == nil {
+				continue
+			}
+			id := match[1]
+			task := ""
+			if havePending {
+				task = pendingTask
+			}
+			pendingTask = ""
+			havePending = false
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			name := shortTaskName(task)
+			if name == "" {
+				name = id
+			}
+			agents = append(agents, swarmAgent{id: id, name: name})
+		}
+	}
+	// Drop members the latest swarm_status reports as finished (done/failed) so
+	// they disappear from the sidebar once their work completes. Members not yet
+	// in a status report (just spawned) stay visible.
+	if status := m.swarmMemberStatus(); len(status) > 0 {
+		live := agents[:0:0]
+		for _, a := range agents {
+			switch status[a.id] {
+			case "done", "failed", "completed", "cancelled":
+				// finished — hide it
+			default:
+				live = append(live, a)
+			}
+		}
+		agents = live
+	}
+	return agents
+}
+
+// swarmStatusRe matches one member line of a swarm_status result, e.g.
+// "– teammate-1 [done] (cyan) <task>" → captures the id and the status word.
+var swarmStatusRe = regexp.MustCompile(`(?m)^\s*[-–—]?\s*(\S+)\s+\[([a-zA-Z]+)\]`)
+
+// swarmMemberStatus parses the LATEST swarm_status result in the transcript into
+// id → status (lowercased). Empty when no swarm_status has run yet.
+func (m model) swarmMemberStatus() map[string]string {
+	status := map[string]string{}
+	for _, row := range m.transcript {
+		if row.tool != "swarm_status" || row.kind != rowToolResult {
+			continue
+		}
+		latest := map[string]string{}
+		for _, mt := range swarmStatusRe.FindAllStringSubmatch(row.detail, -1) {
+			latest[mt[1]] = strings.ToLower(mt[2])
+		}
+		if len(latest) > 0 {
+			status = latest
+		}
+	}
+	return status
+}
+
+// sidebarAgentLines renders one line per active agent. Specialist delegations
+// show a live status glyph (• running, ✓ done, ✗ error) plus a "↳ <tool>" working
+// line; swarm/team members (from swarm_spawn) show a ready dot and their id.
+// Returns nil when there are none (the caller shows a placeholder).
 func (m model) sidebarAgentLines(width int) []string {
-	agents := m.specialists.all()
-	if len(agents) == 0 {
+	specialists := m.sidebarSpecialists()
+	swarm := m.swarmSpawnedAgents()
+	if len(specialists) == 0 && len(swarm) == 0 {
 		return nil
 	}
 	room := maxInt(4, width-3)
 	var lines []string
-	for _, a := range agents {
+	for _, a := range specialists {
 		var icon string
 		switch a.status {
 		case specialistRunning:
@@ -145,7 +279,98 @@ func (m model) sidebarAgentLines(width int) []string {
 			lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
 		}
 	}
+	// Swarm/team members: the whole task-name carries a mild, slow cool pulse
+	// (NOT a per-letter ripple) so a live member reads as alive without noise.
+	style := m.swarmNameStyle()
+	for _, a := range swarm {
+		lines = append(lines, " "+zeroTheme.accent.Render("•")+" "+style.Render(truncateStep(a.name, room)))
+	}
 	return lines
+}
+
+// swarmNameStyle returns a gentle, whole-line cool tint for a live swarm member
+// name: mostly a calm blue, easing through a dimmer shade on a slow cycle — a
+// mild breathe, not a flashing per-letter ripple. Static blue under reduced
+// motion (or when the animation clock isn't advancing).
+func (m model) swarmNameStyle() lipgloss.Style {
+	if m.reducedMotion {
+		return zeroTheme.blue
+	}
+	styles := swarmPulseStyles()
+	if len(styles) == 0 {
+		return zeroTheme.blue
+	}
+	// Slow ping-pong through the subtle ramp for a smooth, slight breathe: the
+	// index eases up then back down so the colour never jumps (no flicker).
+	n := len(styles)
+	period := 2 * (n - 1)
+	if period <= 0 {
+		return styles[0]
+	}
+	p := (m.spinnerPhase / 5) % period
+	idx := p
+	if idx >= n {
+		idx = period - p
+	}
+	return styles[idx]
+}
+
+// swarmPulseStyles is a short, SUBTLE ramp from the cool blue toward a slightly
+// dimmer shade — only the bright portion of a blue→muted blend, so the dim end
+// stays bluish (a slight shift, not a blue→grey swing). Smooth gradient = no
+// flicker. Returns nil when the theme has no parseable colours (static fallback).
+func swarmPulseStyles() []lipgloss.Style {
+	fg := zeroTheme.blue.GetForeground()
+	dim := zeroTheme.muted.GetForeground()
+	if fg == nil || dim == nil {
+		return nil
+	}
+	blend := lipgloss.Blend1D(12, fg, dim)
+	if len(blend) > 5 {
+		blend = blend[:5] // brightest portion: blue → slightly dimmed blue
+	}
+	out := make([]lipgloss.Style, len(blend))
+	for i, c := range blend {
+		r, g, b, a := c.RGBA()
+		out[i] = lipgloss.NewStyle().Foreground(color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)})
+	}
+	return out
+}
+
+// shortTaskName condenses a task briefing into a 1-2 word agent name: the first
+// significant word (usually the verb) plus the next non-filler word, so a member
+// reads as e.g. "Explore repository" instead of the full one-line briefing.
+func shortTaskName(task string) string {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return ""
+	}
+	picked := make([]string, 0, 2)
+	for _, w := range strings.Fields(task) {
+		clean := strings.Trim(w, ".,:;!?\"'`()[]{}")
+		if clean == "" {
+			continue
+		}
+		if len(picked) > 0 && nameFillerWords[strings.ToLower(clean)] {
+			continue
+		}
+		picked = append(picked, clean)
+		if len(picked) == 2 {
+			break
+		}
+	}
+	if len(picked) == 0 {
+		return task
+	}
+	return strings.Join(picked, " ")
+}
+
+// nameFillerWords are skipped (after the first word) when condensing a task into
+// a short agent name, so "Review the current branch" → "Review current".
+var nameFillerWords = map[string]bool{
+	"the": true, "a": true, "an": true, "to": true, "of": true, "for": true,
+	"and": true, "or": true, "on": true, "in": true, "with": true, "any": true,
+	"all": true, "its": true, "this": true, "that": true, "into": true, "from": true,
 }
 
 // renderContextSidebar builds the sidebar block: exactly height lines, each

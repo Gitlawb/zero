@@ -659,7 +659,11 @@ func newExecSelfCorrector(enabled bool, workspaceRoot string, autonomy string) (
 func deferredEligibleCount(registry *tools.Registry, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) int {
 	count := 0
 	for _, tool := range registry.All() {
-		if !tools.IsDeferred(tool) {
+		// Count by deferral-eligibility (not current deferred state) to match
+		// partitionTools' active-gate: a tool that un-defers at runtime still
+		// participates in the threshold. At registration time the swarm is empty
+		// so this equals IsDeferred, but it keeps the two count sites consistent.
+		if !tools.IsDeferralEligible(tool) {
 			continue
 		}
 		if !agent.ToolVisible(tool, permissionMode, enabledTools, disabledTools) {
