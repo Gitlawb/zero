@@ -28,6 +28,11 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
+			provider: "chatgpt",
+			want:     []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"},
+			notWant:  []string{"gpt-5", "gpt-4.1", "openai/gpt-4.1"},
+		},
+		{
 			provider: "mistral",
 			want:     []string{"mistral-large-latest", "codestral-latest"},
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},

@@ -56,6 +56,12 @@ var curatedModels = map[string][]Model{
 		{ID: "minimax/minimax-m2.1", Description: "agentic coding model"},
 		{ID: "deepseek/deepseek-chat", Description: "coding model"},
 	},
+	"chatgpt": {
+		{ID: "gpt-5.5", Description: "recommended Codex model"},
+		{ID: "gpt-5.4", Description: "strong Codex model"},
+		{ID: "gpt-5.4-mini", Description: "fast Codex model"},
+		{ID: "gpt-5.3-codex-spark", Description: "research preview fast Codex model"},
+	},
 	"deepseek": {
 		{ID: "deepseek-chat", Description: "catalog default"},
 		{ID: "deepseek-reasoner", Description: "reasoning model"},

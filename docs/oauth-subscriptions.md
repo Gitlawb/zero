@@ -170,7 +170,7 @@ preset (no API key — the proxy authenticates):
       "name": "chatgpt",
       "catalogID": "chatgpt-proxy",     // OpenAI-compatible, local, no key
       "baseURL": "http://localhost:10531/v1", // override for your proxy's port
-      "model": "gpt-5"                   // whatever model your proxy serves
+      "model": "gpt-5.5"                 // whatever model your proxy serves
     }
   ]
 }

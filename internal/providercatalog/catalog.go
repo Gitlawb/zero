@@ -104,7 +104,7 @@ var descriptors = []Descriptor{
 	// way in; RequiresAuth is forced true so catalog consumers know the provider
 	// needs an interactive login before a request will succeed.
 	func() Descriptor {
-		d := openAICompat("chatgpt", "ChatGPT", "https://chatgpt.com/backend-api/codex", "gpt-5", nil)
+		d := openAICompat("chatgpt", "ChatGPT", "https://chatgpt.com/backend-api/codex", "gpt-5.5", nil)
 		d.RequiresAuth = true
 		return oauthProvider(d, false, false)
 	}(),

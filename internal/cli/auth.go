@@ -137,7 +137,7 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	if _, err := fmt.Fprint(stdout, statuses); err != nil {
 		return exitCrash
 	}
-	if _, err := fmt.Fprint(stdout, "\nUse it with zero, e.g.:\n  zero --provider chatgpt --model gpt-5\n"); err != nil {
+	if _, err := fmt.Fprint(stdout, "\nUse it with zero, e.g.:\n  zero --provider chatgpt --model gpt-5.5\n"); err != nil {
 		return exitCrash
 	}
 	return exitSuccess

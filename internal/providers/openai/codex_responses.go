@@ -72,8 +72,10 @@ const (
 // responsesRequest is the wire shape POSTed to {baseURL}/responses.
 type responsesRequest struct {
 	Model           string          `json:"model"`
+	Instructions    string          `json:"instructions"`
 	Input           []inputItem     `json:"input"`
 	Stream          bool            `json:"stream"`
+	Store           bool            `json:"store"`
 	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
 	Tools           []responsesTool `json:"tools,omitempty"`
 }
@@ -203,18 +205,13 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 		Stream:          true,
 		MaxOutputTokens: p.inner.maxTokens,
 	}
+	instructions := []string{}
 	for _, msg := range request.Messages {
 		switch msg.Role {
 		case zeroruntime.MessageRoleSystem:
-			// System → first-class user message in Responses API. Keeping it as
-			// an input message (rather than a separate `instructions` field)
-			// matches the chat-completions semantics the runtime was already
-			// producing — every system turn reaches the model in order.
-			req.Input = append(req.Input, inputItem{
-				Type:    "message",
-				Role:    "system",
-				Content: []contentItem{{Type: "input_text", Text: msg.Content}},
-			})
+			if content := strings.TrimSpace(msg.Content); content != "" {
+				instructions = append(instructions, content)
+			}
 		case zeroruntime.MessageRoleUser:
 			req.Input = append(req.Input, p.userInputItem(msg))
 		case zeroruntime.MessageRoleAssistant:
@@ -236,6 +233,7 @@ func (p *CodexProvider) buildResponsesRequest(request zeroruntime.CompletionRequ
 			return nil, fmt.Errorf("codex provider: unsupported message role %q", msg.Role)
 		}
 	}
+	req.Instructions = strings.Join(instructions, "\n\n")
 	for _, tool := range request.Tools {
 		req.Tools = append(req.Tools, responsesTool{
 			Type:        "function",

@@ -214,6 +214,29 @@ func TestProviderWizardSupportsOAuth(t *testing.T) {
 	}
 }
 
+func TestProviderWizardChatGPTOAuthModelsUseCodexSet(t *testing.T) {
+	chatgpt, ok := providercatalog.Get("chatgpt")
+	if !ok {
+		t.Fatal("chatgpt provider missing from catalog")
+	}
+	models := providerWizardModelOptions(chatgpt)
+	got := map[string]bool{}
+	for _, model := range models {
+		got[model.ID] = true
+	}
+	for _, want := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"} {
+		if !got[want] {
+			t.Fatalf("ChatGPT OAuth models missing %q; got %#v", want, providerWizardModelIDs(models))
+		}
+	}
+	if got["gpt-5"] {
+		t.Fatalf("ChatGPT OAuth models should not include stale gpt-5 fallback; got %#v", providerWizardModelIDs(models))
+	}
+	if models[0].ID != "gpt-5.5" {
+		t.Fatalf("default ChatGPT OAuth model = %q, want gpt-5.5", models[0].ID)
+	}
+}
+
 func TestProviderWizardCtrlOStartsOAuthForOpenRouter(t *testing.T) {
 	m := wizardModelAt(t, "openrouter", providerWizardStepCredential)
 	next, cmd := m.handleProviderWizardKey(testKeyCtrl('o'))

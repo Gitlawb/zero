@@ -385,9 +385,10 @@ func TestCodexProviderOmitsAccountIDWhenResolverSaysNo(t *testing.T) {
 
 func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
 	// The Codex provider speaks the Responses API, not the chat-completions
-	// API. The request body must carry `input` items (not `messages`), a
-	// `stream: true` flag, and `tools` (when the caller supplies any) — a
-	// chat-completions body would be rejected by the live Codex backend.
+	// API. The request body must carry top-level `instructions`, `input` items
+	// (not `messages`), a `stream: true` flag, and `tools` (when the caller
+	// supplies any) — a chat-completions body would be rejected by the live
+	// Codex backend.
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -423,23 +424,25 @@ func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
 	if rec.body["stream"] != true {
 		t.Fatalf("body.stream = %#v, want true", rec.body["stream"])
 	}
+	if store, ok := rec.body["store"].(bool); !ok || store {
+		t.Fatalf("body.store = %#v, want explicit false", rec.body["store"])
+	}
 	if _, ok := rec.body["messages"]; ok {
 		t.Fatalf("body must not carry chat-completions `messages` (got %#v); the Codex backend serves the Responses API", rec.body["messages"])
 	}
+	if rec.body["instructions"] != "sys" {
+		t.Fatalf("body.instructions = %#v, want system prompt", rec.body["instructions"])
+	}
 	input, ok := rec.body["input"].([]any)
 	if !ok {
-		t.Fatalf("body.input = %#v, want []any with two message items", rec.body["input"])
+		t.Fatalf("body.input = %#v, want []any with user message item", rec.body["input"])
 	}
-	if len(input) != 2 {
-		t.Fatalf("body.input has %d items, want 2 (system + user)", len(input))
+	if len(input) != 1 {
+		t.Fatalf("body.input has %d items, want 1 (user)", len(input))
 	}
-	system, _ := input[0].(map[string]any)
-	if system["type"] != "message" || system["role"] != "system" {
-		t.Fatalf("body.input[0] = %#v, want type=message role=system", system)
-	}
-	user, _ := input[1].(map[string]any)
+	user, _ := input[0].(map[string]any)
 	if user["type"] != "message" || user["role"] != "user" {
-		t.Fatalf("body.input[1] = %#v, want type=message role=user", user)
+		t.Fatalf("body.input[0] = %#v, want type=message role=user", user)
 	}
 	tools, ok := rec.body["tools"].([]any)
 	if !ok || len(tools) != 1 {
