@@ -529,7 +529,28 @@ func jsonValuesEqual(t *testing.T, wantBytes []byte, gotBytes []byte) bool {
 	if err := json.Unmarshal(gotBytes, &gotValue); err != nil {
 		t.Fatalf("decode got JSON: %v\n%s", err, string(gotBytes))
 	}
+	normalizePortableJSONRootString(&wantValue)
+	normalizePortableJSONRootString(&gotValue)
 	return reflect.DeepEqual(wantValue, gotValue)
+}
+
+func normalizePortableJSONRootString(value *any) {
+	switch current := (*value).(type) {
+	case string:
+		if current == `\` {
+			*value = "/"
+		}
+	case []any:
+		for index := range current {
+			normalizePortableJSONRootString(&current[index])
+		}
+	case map[string]any:
+		for key := range current {
+			entry := current[key]
+			normalizePortableJSONRootString(&entry)
+			current[key] = entry
+		}
+	}
 }
 
 func replacePathToken(value string, path string, token string) string {

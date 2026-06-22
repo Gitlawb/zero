@@ -1,6 +1,9 @@
 package sandbox
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsAlreadySandboxed(t *testing.T) {
 	// A lone ZERO_SANDBOXED=1 (no corroborating backend marker) must NOT count as
@@ -61,7 +64,6 @@ func TestSandboxEnvironmentPreservesCallerEnv(t *testing.T) {
 	)
 
 	for _, want := range []string{
-		"PATH=/custom/bin",
 		"TERM=xterm-256color",
 		"HOME=/home/user",
 		EnvSandboxed + "=1",
@@ -72,9 +74,22 @@ func TestSandboxEnvironmentPreservesCallerEnv(t *testing.T) {
 			t.Fatalf("sandbox env = %#v, missing %q", env, want)
 		}
 	}
+	path := envListValue(env, "PATH", "")
+	if !pathListContains(path, "/custom/bin") {
+		t.Fatalf("sandbox PATH = %q, want it to preserve caller path segment /custom/bin", path)
+	}
 	if stringSliceContains(env, EnvSandboxed+"=0") || stringSliceContains(env, EnvSandboxBackend+"=other") {
 		t.Fatalf("sandbox env did not replace stale sandbox markers: %#v", env)
 	}
+}
+
+func pathListContains(path string, want string) bool {
+	for _, entry := range strings.Split(path, ":") {
+		if entry == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildCommandPlanWrapsWhenNotAlreadySandboxed(t *testing.T) {
