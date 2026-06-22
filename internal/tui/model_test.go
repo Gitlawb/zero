@@ -1849,7 +1849,9 @@ func TestMarkdownAddsBlankBeforeHeadingAndParagraph(t *testing.T) {
 	lines := renderAssistantMarkdownText("First paragraph.\n## Heading\nSecond body.", 80, 80, false)
 	headingIdx := -1
 	for i, l := range lines {
-		if strings.Contains(l, "Heading") {
+		// Headings render accent+bold+underline (per-grapheme ANSI), so strip styling
+		// before matching the text.
+		if strings.Contains(plainRender(t, l), "Heading") {
 			headingIdx = i
 		}
 	}
