@@ -262,6 +262,28 @@ func TestSeatbeltProfileGrantsAncestorMetadataForTraversal(t *testing.T) {
 	}
 }
 
+func TestSeatbeltAncestorRuleSkipsFilesystemRoot(t *testing.T) {
+	// A "/" read root has no ancestors; (path-ancestors "/") is invalid SBPL and
+	// makes sandbox-exec abort (exit 65), so the rule must skip it entirely.
+	if rule := seatbeltAncestorMetadataRule([]string{"/"}); rule != "" {
+		t.Fatalf(`expected no ancestor rule for "/", got: %q`, rule)
+	}
+	// Mixed roots: a real root still gets its grant; "/" is dropped.
+	rule := seatbeltAncestorMetadataRule([]string{"/", "/Users/me/app"})
+	if strings.Contains(rule, `(path-ancestors "/")`) {
+		t.Fatalf(`rule must not contain (path-ancestors "/"): %q`, rule)
+	}
+	if !strings.Contains(rule, `(path-ancestors "/Users/me/app")`) {
+		t.Fatalf("expected ancestor grant for the real root: %q", rule)
+	}
+	// The compat builder hard-codes ReadRoots=["/"] and flips to restricted under
+	// EnforceWorkspace — the generated profile must not contain the malformed rule.
+	compat := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
+	if strings.Contains(compat, `(path-ancestors "/")`) {
+		t.Fatalf("compat profile must not contain (path-ancestors \"/\"):\n%s", compat)
+	}
+}
+
 func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

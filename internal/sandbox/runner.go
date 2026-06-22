@@ -620,9 +620,17 @@ func seatbeltReadRule(fs FileSystemPolicy) string {
 func seatbeltAncestorMetadataRule(roots []string) string {
 	filters := make([]string, 0, len(roots))
 	for _, root := range roots {
-		if root = strings.TrimSpace(root); root != "" {
-			filters = append(filters, `(path-ancestors "`+sandboxProfileString(root)+`")`)
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
 		}
+		// A filesystem/volume root (e.g. "/") has no ancestors, and (path-ancestors
+		// "/") is INVALID SBPL — sandbox-exec aborts and the command can't launch at
+		// all. Skip it; the root itself is already covered by its subpath read grant.
+		if clean := filepath.Clean(root); filepath.Dir(clean) == clean {
+			continue
+		}
+		filters = append(filters, `(path-ancestors "`+sandboxProfileString(root)+`")`)
 	}
 	if len(filters) == 0 {
 		return ""
