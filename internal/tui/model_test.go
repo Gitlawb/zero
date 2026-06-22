@@ -1754,6 +1754,32 @@ func TestSpecialistCardLinesAreSelectableForCopy(t *testing.T) {
 	}
 }
 
+func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width, m.height = 120, 40
+	m.altScreen = true
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowUser, text: "do it"},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "list_directory", status: tools.StatusOK, detail: "a\nb"},
+		transcriptRow{kind: rowReasoning, text: "Considering the next step in detail before acting"},
+		transcriptRow{kind: rowToolResult, id: "t2", tool: "read_file", status: tools.StatusOK, detail: "x\ny"},
+	)
+	items := m.transcriptBodyItems(m.chatColumnWidth(), "")
+	reasoningIdx := -1
+	for i := range items {
+		if items[i].rowIndex >= 0 && items[i].rowIndex < len(m.transcript) &&
+			m.transcript[items[i].rowIndex].kind == rowReasoning {
+			reasoningIdx = i
+		}
+	}
+	if reasoningIdx <= 0 {
+		t.Fatal("reasoning item not found in the body")
+	}
+	if items[reasoningIdx-1].kind != transcriptBodyItemSeparator {
+		t.Fatalf("expected a blank separator before the reasoning group, got kind %v", items[reasoningIdx-1].kind)
+	}
+}
+
 func TestTranscriptReadingColumnHelpers(t *testing.T) {
 	if g := transcriptGutter(160); g != 4 {
 		t.Fatalf("wide gutter = %d, want 4", g)

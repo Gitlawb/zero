@@ -194,6 +194,13 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 			if shownAny && havePreviousKind && isToolCardKind(previousKind) && isToolCardKind(row.kind) {
 				items = append(items, transcriptBlankBodyItem())
 			}
+			// A "Thought for X" reasoning header opens the next think→act group, so
+			// give it a blank above when it follows a tool card. Reasoning interleaves
+			// the tool cards (tool → thought → tool …), which breaks the
+			// tool-card→tool-card rule above; without this the groups pack into a wall.
+			if shownAny && havePreviousKind && row.kind == rowReasoning && isToolCardKind(previousKind) {
+				items = append(items, transcriptBlankBodyItem())
+			}
 			// The plan panel is no longer injected inline here — it is pinned
 			// above the composer (see footerView) so a streaming turn can't push
 			// it off-screen.
