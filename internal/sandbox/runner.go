@@ -805,6 +805,12 @@ func macosPlatformReadRoots() []string {
 		// readable; writes stay confined to the workspace.
 		"/usr/local",
 		"/opt/homebrew",
+		// Xcode Command Line Tools toolchain. /usr/bin/git (and clang, make, etc.)
+		// are thin stubs that resolve the real binary under the active developer
+		// dir — usually /Library/Developer/CommandLineTools. Without read+exec here
+		// the stub can't reach the real tool and fails with the misleading
+		// "xcode-select: No developer tools were found" error.
+		"/Library/Developer",
 		"/etc",
 		"/private/etc",
 		"/var/db",

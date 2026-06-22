@@ -284,6 +284,21 @@ func TestSeatbeltAncestorRuleSkipsFilesystemRoot(t *testing.T) {
 	}
 }
 
+func TestSeatbeltProfileGrantsCLTToolchain(t *testing.T) {
+	// /usr/bin/git, clang, make, etc. are stubs that resolve the real binary under
+	// the active developer dir (/Library/Developer/CommandLineTools). The platform
+	// read roots must include it or the stub fails with "xcode-select: No developer
+	// tools were found".
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{Kind: FileSystemRestricted, ReadRoots: []string{"/ws"}, IncludePlatformRoots: true},
+		Network:    NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	if !strings.Contains(sbpl, `(subpath "/Library/Developer")`) {
+		t.Fatalf("profile must grant read on the CLT toolchain (/Library/Developer):\n%s", sbpl)
+	}
+}
+
 func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
