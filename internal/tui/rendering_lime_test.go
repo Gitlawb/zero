@@ -715,12 +715,16 @@ func TestErrorRowRendersTintedNoteAndErrorDoneLine(t *testing.T) {
 	}
 }
 
-func TestSystemNoteRendersBordered(t *testing.T) {
+func TestSystemNoteRendersPlainLine(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{kind: rowSystem, text: "Mode set to ask."}
 	got := plainRender(t, m.renderRow(row, 60, buildRowContext(nil)))
-	if !strings.Contains(got, "╭") || !strings.Contains(got, "Mode set to ask.") {
-		t.Fatalf("system row = %q, want bordered note with content unchanged", got)
+	// System notices are plain marked lines now, not boxes.
+	if strings.ContainsAny(got, "╭╮╰╯│") {
+		t.Fatalf("system row = %q, want a plain line (no box border)", got)
+	}
+	if !strings.Contains(got, "Mode set to ask.") {
+		t.Fatalf("system row = %q, want the notice text unchanged", got)
 	}
 }
 

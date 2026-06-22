@@ -1710,17 +1710,23 @@ func TestCtrlCExitConfirmationExpires(t *testing.T) {
 	}
 }
 
-func TestRunCancelledRendersPlainColoredLineNotBox(t *testing.T) {
-	got := plainRender(t, renderSystemNote("Run cancelled.", 80))
-	if strings.ContainsAny(got, "│╭╮╰╯") {
-		t.Fatalf("cancellation should be a plain line, not a box: %q", got)
+func TestSystemNotesRenderPlainLinesNotBoxes(t *testing.T) {
+	cancel := plainRender(t, renderSystemNote("Run cancelled.", 80))
+	if strings.ContainsAny(cancel, "│╭╮╰╯") {
+		t.Fatalf("cancellation should be a plain line, not a box: %q", cancel)
 	}
-	if !strings.Contains(got, "Run cancelled.") {
-		t.Fatalf("cancellation text missing: %q", got)
+	if !strings.Contains(cancel, "Run cancelled.") {
+		t.Fatalf("cancellation text missing: %q", cancel)
 	}
-	// A regular system notice keeps the bordered box.
-	if boxed := plainRender(t, renderSystemNote("Mode set to ask.", 80)); !strings.Contains(boxed, "│") {
-		t.Fatalf("regular notice should stay boxed: %q", boxed)
+	// Every other system notice is ALSO a boxless plain line now.
+	for _, note := range []string{"Mouse interaction re-enabled.", "Mode set to ask."} {
+		got := plainRender(t, renderSystemNote(note, 80))
+		if strings.ContainsAny(got, "│╭╮╰╯") {
+			t.Fatalf("system notice should be a plain line, not a box: %q", got)
+		}
+		if !strings.Contains(got, note) {
+			t.Fatalf("notice text missing: %q", got)
+		}
 	}
 }
 
