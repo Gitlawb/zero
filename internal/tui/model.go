@@ -2288,6 +2288,17 @@ func (m model) spinnerGlyph() string {
 	return m.spinner.View()
 }
 
+// workingActivity labels what the agent is doing right now for the working
+// status line: "writing" while the final answer streams, otherwise "thinking"
+// (reasoning, waiting on the model, or a tool in flight). Cheap and robust — no
+// transcript scan — so it can't misreport on a long, output-less step.
+func (m model) workingActivity() string {
+	if strings.TrimSpace(m.streamingText) != "" {
+		return "writing"
+	}
+	return "thinking"
+}
+
 func (m model) workingStatusLine() string {
 	// Cosine ripple FX: "Working" breathes through a cold-to-warm theme ramp, the
 	// wave moving one character per spinner tick (shared m.spinnerPhase clock). A
@@ -2295,6 +2306,10 @@ func (m model) workingStatusLine() string {
 	// Under reduced motion the phase is frozen, so this renders a static gradient.
 	working := rippleText("Working", ripplePalette(), m.spinnerPhase, 6)
 	line := zeroTheme.accent.Render(m.spinnerGlyph()) + " " + working
+	// Phase label so a long, output-less step reads as live progress rather than a
+	// frozen screen: "writing" while the answer streams, "thinking" otherwise
+	// (reasoning, waiting on the model, or running a tool).
+	line += zeroTheme.faint.Render("  ·  " + m.workingActivity())
 	if !m.turnStartedAt.IsZero() {
 		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
 	}
