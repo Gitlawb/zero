@@ -198,6 +198,37 @@ func TestPlanPanelRenderRunning(t *testing.T) {
 	}
 }
 
+// TestPlanNowFreezeAndResume covers the idle-freeze fix: while the agent is idle
+// (activeRunID == 0) and a freeze time is stamped, the plan clock is frozen so an
+// in_progress step left mid-plan stops ticking; during a run it tracks live time.
+func TestPlanNowFreezeAndResume(t *testing.T) {
+	frozen := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	live := frozen.Add(2 * time.Minute)
+	m := model{now: func() time.Time { return live }, plan: planPanelState{frozenAt: frozen}}
+
+	m.activeRunID = 0 // idle -> frozen clock
+	if got := m.planNow(); !got.Equal(frozen) {
+		t.Fatalf("idle planNow = %v, want frozen %v", got, frozen)
+	}
+	m.activeRunID = 3 // running -> live clock
+	if got := m.planNow(); !got.Equal(live) {
+		t.Fatalf("running planNow = %v, want live %v", got, live)
+	}
+	m.activeRunID = 0
+	m.plan.frozenAt = time.Time{} // idle but never stamped -> live fallback
+	if got := m.planNow(); !got.Equal(live) {
+		t.Fatalf("unstamped idle planNow = %v, want live fallback %v", got, live)
+	}
+}
+
+func TestPlanPanelClearResetsFrozenAt(t *testing.T) {
+	s := planPanelState{frozenAt: time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)}
+	s.clear()
+	if !s.frozenAt.IsZero() {
+		t.Fatal("clear() must reset frozenAt so the next run starts with a live clock")
+	}
+}
+
 // runningPlanModel builds a model with an n-step running plan for the pinned
 // panel tests.
 func runningPlanModel(t *testing.T, steps int) model {
@@ -253,7 +284,7 @@ func TestPinnedPlanHiddenWhenEmpty(t *testing.T) {
 func TestFooterIncludesPinnedPlanAboveComposer(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.height = 40
-	footer := plainRender(t, m.footerView(chatWidth(m.width)))
+	footer := plainRender(t, m.footerView(m.chatColumnWidth()))
 	planIdx := strings.Index(footer, "PLAN")
 	composerIdx := strings.Index(footer, "describe a task")
 	if planIdx < 0 {

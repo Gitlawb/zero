@@ -192,7 +192,7 @@ func (m model) mouseOverComposer(msg tea.MouseMsg) bool {
 	if !m.altScreen || m.height <= 0 {
 		return false
 	}
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	return frame.composerRect.contains(mouseX(msg), mouseY(msg))
 }

@@ -4,7 +4,7 @@ import "testing"
 
 func TestTranscriptBodyItemsRepresentEmptyState(t *testing.T) {
 	m := mouseTestModel()
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 
 	items := m.transcriptBodyItems(width, "")
 	layout := layoutTranscriptBodyItems(items)
@@ -23,7 +23,7 @@ func TestTranscriptBodyItemsRepresentEmptyState(t *testing.T) {
 func TestTranscriptBodyItemsShiftSelectableLinesByItemStart(t *testing.T) {
 	m := mouseTestModel()
 	m.transcript = appendRow(m.transcript, rowUser, "hello")
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 
 	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, ""))
 
@@ -49,7 +49,7 @@ func TestTranscriptBodyItemsKeepPendingInterimSelectableLocal(t *testing.T) {
 	m := mouseTestModel()
 	m.pending = true
 	m.streamingReasoning = "private thought"
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 
 	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, ""))
 
@@ -178,7 +178,7 @@ func TestScrollableTranscriptItemsViewMatchesFullLayout(t *testing.T) {
 	m.transcript = appendRow(m.transcript, rowUser, "please inspect this request")
 	m.transcript = appendRow(m.transcript, rowAssistant, "first response line\nsecond response line\nthird response line")
 	m.transcript = appendRow(m.transcript, rowUser, "follow up")
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	header := m.pinnedTitleBar(width)
 	footer := m.footerView(width)
 	items := m.transcriptBodyItems(width, "")

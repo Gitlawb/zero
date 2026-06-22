@@ -40,7 +40,7 @@ func specialistClickTestModel(t *testing.T, childSessionID string) model {
 // specialistCardClickPoint resolves the screen coordinates (x, y) of the first
 // selectable specialist card line in the model's transcript layout.
 func specialistCardClickPoint(m model, x int) (int, int, bool) {
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	layout := m.transcriptBodyLayout(width, "")
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	for _, line := range layout.selectable {

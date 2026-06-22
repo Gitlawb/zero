@@ -34,6 +34,11 @@ type planPanelState struct {
 	expanded    bool
 	completedAt time.Time // set once all steps reach a terminal status
 	startedAt   time.Time // set on the first non-empty update
+	// frozenAt freezes the live plan clock while the agent is idle (between
+	// turns / waiting on the user). Stamped when a run ends; cleared by clear()
+	// at the next run's start. While set and idle, an in_progress step's elapsed
+	// time stops ticking up instead of counting forever against a yielded turn.
+	frozenAt time.Time
 }
 
 // completedHideAfter is how long a finished plan stays pinned before the
@@ -111,6 +116,7 @@ func (s *planPanelState) clear() {
 	s.expanded = false
 	s.completedAt = time.Time{}
 	s.startedAt = time.Time{}
+	s.frozenAt = time.Time{}
 }
 
 // isEmpty reports whether the panel has no steps to show.
@@ -158,6 +164,18 @@ func (s planPanelState) height(width int, now time.Time) int {
 	return 2
 }
 
+// planNow returns the clock used for live plan durations. While the agent is
+// idle (no run in flight, activeRunID == 0) it freezes at the moment the last
+// run ended, so an in_progress step left mid-plan when the agent yields (e.g.
+// after ask_user) stops ticking up instead of counting forever against a turn
+// that is no longer running. During a run it tracks the live clock as before.
+func (m model) planNow() time.Time {
+	if m.activeRunID == 0 && !m.plan.frozenAt.IsZero() {
+		return m.plan.frozenAt
+	}
+	return m.now()
+}
+
 // renderPlanPanel renders the full sticky plan panel. It returns an empty
 // string when the plan is empty or when a finished plan has been collapsed
 // past completedHideAfter without being expanded.
@@ -167,7 +185,7 @@ func (m model) renderPlanPanel(width int) string {
 	}
 
 	state := m.plan
-	now := m.now()
+	now := m.planNow()
 	if !state.visible(now) {
 		return ""
 	}
@@ -214,6 +232,14 @@ func (m model) renderPlanPanel(width int) string {
 // full list via m.plan.expanded, but the height budget always wins to keep the
 // composer on screen.
 func (m model) renderPinnedPlanPanel(width int, maxHeight int) string {
+	// When the two-column layout is active the plan lives in the context
+	// sidebar (FILES / PLAN / tokens), so suppress the pinned panel above the
+	// composer to avoid showing it twice. Both the real model (sidebarActive)
+	// and the narrow chat-column copy (hidePinnedPlan) suppress it, so the
+	// view and the mouse-geometry frame stay aligned.
+	if m.hidePinnedPlan || m.sidebarActive() {
+		return ""
+	}
 	if !m.plan.visible(m.now()) {
 		return ""
 	}

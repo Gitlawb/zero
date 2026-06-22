@@ -14,7 +14,7 @@ func TestTranscriptFrameLayoutPinsMainRegions(t *testing.T) {
 	m.providerName = "openai"
 	m.modelName = "gpt-4.1"
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 
 	if frame.headerRect != (tuiRect{width: width, height: len(frame.headerLines)}) {
@@ -46,7 +46,7 @@ func TestTranscriptFrameLayoutClipsFooterInTinyTerminal(t *testing.T) {
 	m.copyStatus = "Copied!"
 	m.input.SetValue("Create a book library dashboard page with cards, filters, charts, and responsive behavior.")
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 
 	if frame.bodyRect.height != 1 {
@@ -80,7 +80,7 @@ func TestTranscriptFrameLayoutHandlesDegenerateDimensions(t *testing.T) {
 			m.width = size.width
 			m.height = size.height
 
-			width := chatWidth(m.width)
+			width := m.chatColumnWidth()
 			frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 			if width <= 0 {
 				t.Fatalf("chatWidth(%d) = %d, want positive fallback", size.width, width)
@@ -101,7 +101,7 @@ func TestFrameComposerRegionDrivesMouseHit(t *testing.T) {
 	m.height = 20
 	m.input.SetValue("Create a book library dashboard page with cards, filters, charts, and responsive behavior.")
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	if frame.composerRect.height <= 0 {
 		t.Fatalf("expected visible composer rect, frame=%#v", frame)
@@ -119,7 +119,7 @@ func TestOverlayMouseRectCentersInsideTranscriptBody(t *testing.T) {
 	m.width = 100
 	m.height = 30
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	rect := m.overlayMouseRect(5, width)
 
@@ -137,7 +137,7 @@ func TestOverlayMouseHitClampsToVisibleBody(t *testing.T) {
 	m.width = 80
 	m.height = 8
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	overlay := strings.Join([]string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"}, "\n")
 	rect := m.overlayMouseRect(len(viewLines(overlay)), width)
@@ -159,7 +159,7 @@ func TestTranscriptLineAtMouseUsesFrameBodyRegion(t *testing.T) {
 	m.height = 12
 	m.transcript = appendRow(m.transcript, rowUser, "target text")
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	body, selectable := m.transcriptBody(width, "")
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	start, _, _ := transcriptViewportStartForFrame(body, frame, m.chatScrollOffset)

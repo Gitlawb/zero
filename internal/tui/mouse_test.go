@@ -19,7 +19,7 @@ func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
 		t.Fatalf("expected command suggestions, got %#v", m.suggestions)
 	}
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	top := m.overlayMouseTop(len(viewLines(m.suggestionOverlay(width))), width)
 	click := testMouseClick(tea.MouseLeft, width/2, top+3)
 	updated, cmd := m.Update(click)
@@ -60,7 +60,7 @@ func TestMouseClickSelectsThenAppliesPickerRow(t *testing.T) {
 	m.picker.allItems = append([]pickerItem{}, m.picker.items...)
 	m.mouseCapture = true
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	top := m.overlayMouseTop(len(viewLines(m.pickerOverlay(width))), width)
 	click := testMouseClick(tea.MouseLeft, width/2, top+3)
 	updated, cmd := m.Update(click)
@@ -95,7 +95,7 @@ func TestMouseClickSelectsProviderWizardRow(t *testing.T) {
 	}
 	m.mouseCapture = true
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	top := m.overlayMouseTop(len(viewLines(m.providerWizardOverlay(width))), width)
 	click := testMouseClick(tea.MouseLeft, width/2, top+5)
 	updated, cmd := m.Update(click)
@@ -139,7 +139,7 @@ func TestMouseClickSelectsThenContinuesSetupProviderRow(t *testing.T) {
 	m.mouseCapture = true
 	m.setup.stage = setupStageProvider
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	height := normalizedStartupHeight(m.height)
 	rowWidth := setupProviderBlockWidth(width, m.setup.providers)
 	top := setupContentTop(height, len(m.setupProviderLines(width, height)), m.setup.err != "")
@@ -174,7 +174,7 @@ func TestMouseClickSelectsThenContinuesSetupModelRow(t *testing.T) {
 	}
 	m.setup.modelForID = m.setupProviderDescriptor().ID
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	height := normalizedStartupHeight(m.height)
 	rowWidth := setupModelBlockWidth(width, m.setup.models)
 	top := setupContentTop(height, len(m.setupModelLines(width, height)), m.setup.err != "")
@@ -470,7 +470,7 @@ func TestMouseClickTogglesReasoningRow(t *testing.T) {
 	m.mouseCapture = true
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowReasoning, text: "private thought"})
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	body, selectable := m.transcriptBody(width, "")
 	start, _, top := m.transcriptViewportStart(body, width)
 	var target transcriptSelectableLine
@@ -504,7 +504,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 	m.activeRunID = 1
 	m.streamingReasoning = "private **thought**"
 
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	body, selectable := m.transcriptBody(width, "")
 	start, _, top := m.transcriptViewportStart(body, width)
 	var target transcriptSelectableLine
@@ -565,7 +565,7 @@ func TestMCPManagerMouseSelectsFirstItemRow(t *testing.T) {
 	m.width = 120
 	m.height = 36
 	m = m.openMCPManager()
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	overlay := m.mcpManagerOverlay(width)
 	lines := viewLines(overlay)
 	left, _, _ := normalizeOverlayBlock(lines, width)
@@ -586,7 +586,7 @@ func TestMCPAddWizardMouseSelectsAndActivatesType(t *testing.T) {
 	m.height = 36
 	m.mcpAddWizard = newMCPAddWizard("http")
 	m.mcpAddWizard.step = mcpAddWizardStepType
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	overlay := m.mcpAddWizardOverlay(width)
 	lines := viewLines(overlay)
 	left, _, _ := normalizeOverlayBlock(lines, width)
@@ -689,7 +689,7 @@ func firstTranscriptTextMouseY(t *testing.T, m model) int {
 
 func firstTranscriptTextMousePoint(t *testing.T, m model) (int, int) {
 	t.Helper()
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	body, selectable := m.transcriptBody(width, "")
 	start, _, top := m.transcriptViewportStart(body, width)
 	for _, line := range selectable {
@@ -703,7 +703,7 @@ func firstTranscriptTextMousePoint(t *testing.T, m model) (int, int) {
 
 func transcriptSelectableLineContaining(t *testing.T, m model, text string) transcriptSelectableLine {
 	t.Helper()
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	layout := m.transcriptBodyLayout(width, "")
 	for _, line := range layout.selectable {
 		if strings.Contains(line.text, text) {
@@ -716,7 +716,7 @@ func transcriptSelectableLineContaining(t *testing.T, m model, text string) tran
 
 func composerMousePoint(t *testing.T, m model, column int) (int, int) {
 	t.Helper()
-	width := chatWidth(m.width)
+	width := m.chatColumnWidth()
 	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
 	if frame.composerRect.height <= 0 {
 		t.Fatalf("expected visible composer rect, frame=%#v", frame)
