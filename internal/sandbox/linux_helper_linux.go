@@ -10,6 +10,11 @@ import (
 	"syscall"
 )
 
+var (
+	applyUnixSocketBlockFilter  = ApplyUnixSocketBlock
+	applyLinuxNetworkDenyFilter = ApplyLinuxNetworkDeny
+)
+
 func RunLinuxSandboxHelper(args []string, stderr io.Writer) int {
 	config, err := ParseLinuxSandboxHelperArgs(args)
 	if err != nil {
@@ -64,8 +69,14 @@ func runLinuxSandboxInnerStage(config LinuxSandboxHelperConfig, stderr io.Writer
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": inner seccomp stage is incompatible with Landlock mode")
 		return 2
 	}
+	if shouldUnshareLinuxNetwork(config.PermissionProfile.Network) {
+		if err := applyLinuxNetworkDenyFilter(); err != nil {
+			fmt.Fprintln(stderr, LinuxSandboxHelperName+": apply network deny: "+err.Error())
+			return 125
+		}
+	}
 	if config.BlockUnixSockets {
-		if err := ApplyUnixSocketBlock(); err != nil {
+		if err := applyUnixSocketBlockFilter(); err != nil {
 			fmt.Fprintln(stderr, LinuxSandboxHelperName+": warning: "+err.Error()+"; running without the Unix-socket filter")
 		}
 	}
@@ -91,7 +102,7 @@ func runLinuxSandboxLandlockStage(config LinuxSandboxHelperConfig, stderr io.Wri
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": "+err.Error())
 		return 127
 	}
-	if err := syscall.Exec(binary, config.Command, linuxHelperSandboxEnvironment(config.PermissionProfile, config.CommandCWD)); err != nil {
+	if err := syscall.Exec(binary, config.Command, linuxHelperSandboxEnvironment(config.PermissionProfile, os.Environ())); err != nil {
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": exec command: "+err.Error())
 		return 126
 	}

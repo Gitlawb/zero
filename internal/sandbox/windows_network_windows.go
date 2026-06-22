@@ -18,6 +18,8 @@ const (
 	windowsFWPActrlMatchFilter      = 0x00000001
 	windowsFWPEmpty                 = 0
 	windowsFWPSecurityDescriptor    = 14
+	windowsFWPUInt8                 = 1
+	windowsFWPUInt16                = 2
 	windowsFWPMatchEqual            = 0
 	windowsFWPMProviderPersistent   = 0x00000001
 	windowsFWPMSubLayerPersistent   = 0x00000001
@@ -42,9 +44,13 @@ var (
 )
 
 var (
-	windowsWFPLayerALEAuthConnectV4 = windows.GUID{Data1: 0xc38d57d1, Data2: 0x05a7, Data3: 0x4c33, Data4: [8]byte{0x90, 0x4f, 0x7f, 0xbc, 0xee, 0xe6, 0x0e, 0x82}}
-	windowsWFPLayerALEAuthConnectV6 = windows.GUID{Data1: 0x4a72393b, Data2: 0x319f, Data3: 0x44bc, Data4: [8]byte{0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4}}
-	windowsWFPConditionALEUserID    = windows.GUID{Data1: 0xaf043a0a, Data2: 0xb34d, Data3: 0x4f86, Data4: [8]byte{0x97, 0x9c, 0xc9, 0x03, 0x71, 0xaf, 0x6e, 0x66}}
+	windowsWFPLayerALEAuthConnectV4        = windows.GUID{Data1: 0xc38d57d1, Data2: 0x05a7, Data3: 0x4c33, Data4: [8]byte{0x90, 0x4f, 0x7f, 0xbc, 0xee, 0xe6, 0x0e, 0x82}}
+	windowsWFPLayerALEAuthConnectV6        = windows.GUID{Data1: 0x4a72393b, Data2: 0x319f, Data3: 0x44bc, Data4: [8]byte{0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4}}
+	windowsWFPLayerALEResourceAssignmentV4 = windows.GUID{Data1: 0x1247d66d, Data2: 0x0b60, Data3: 0x4a15, Data4: [8]byte{0x8d, 0x44, 0x71, 0x55, 0xd0, 0xf5, 0x3a, 0x0c}}
+	windowsWFPLayerALEResourceAssignmentV6 = windows.GUID{Data1: 0x55a650e1, Data2: 0x5f0a, Data3: 0x4eca, Data4: [8]byte{0xa6, 0x53, 0x88, 0xf5, 0x3b, 0x26, 0xaa, 0x8c}}
+	windowsWFPConditionALEUserID           = windows.GUID{Data1: 0xaf043a0a, Data2: 0xb34d, Data3: 0x4f86, Data4: [8]byte{0x97, 0x9c, 0xc9, 0x03, 0x71, 0xaf, 0x6e, 0x66}}
+	windowsWFPConditionIPProtocol          = windows.GUID{Data1: 0x3971ef2b, Data2: 0x623e, Data3: 0x4f9a, Data4: [8]byte{0x8c, 0xb1, 0x6e, 0x79, 0xb8, 0x06, 0xb9, 0xa7}}
+	windowsWFPConditionIPRemotePort        = windows.GUID{Data1: 0xc35a604d, Data2: 0xd22b, Data3: 0x4e1a, Data4: [8]byte{0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4b}}
 )
 
 type windowsWFPDisplayData0 struct {
@@ -164,7 +170,7 @@ func applyWindowsNetworkPlan(plan WindowsNetworkPlan) error {
 	if err := ensureWindowsWFPSubLayer(engine, providerKey, subLayerKey); err != nil {
 		return err
 	}
-	if err := deleteWindowsWFPFilters(engine, windowsDenyWFPFilterSpecs()); err != nil {
+	if err := deleteWindowsWFPFilters(engine, windowsDenyWFPFilterSpecsToDelete()); err != nil {
 		return err
 	}
 	if plan.Mode == NetworkDeny {
@@ -184,7 +190,7 @@ func applyWindowsNetworkPlan(plan WindowsNetworkPlan) error {
 }
 
 func openWindowsWFPEngine() (windows.Handle, error) {
-	sessionName, err := windows.UTF16PtrFromString("Zero Windows Sandbox WFP")
+	sessionName, err := windows.UTF16PtrFromString("Codex Windows Sandbox WFP")
 	if err != nil {
 		return 0, err
 	}
@@ -225,11 +231,11 @@ func abortWindowsWFPTransaction(engine windows.Handle) {
 }
 
 func ensureWindowsWFPProvider(engine windows.Handle, providerKey windows.GUID) error {
-	name, err := windows.UTF16PtrFromString("Zero Windows Sandbox WFP")
+	name, err := windows.UTF16PtrFromString("Codex Windows Sandbox WFP")
 	if err != nil {
 		return err
 	}
-	description, err := windows.UTF16PtrFromString("Persistent WFP provider for Zero Windows sandbox filters")
+	description, err := windows.UTF16PtrFromString("Persistent WFP provider for Codex Windows sandbox filters")
 	if err != nil {
 		return err
 	}
@@ -246,11 +252,11 @@ func ensureWindowsWFPProvider(engine windows.Handle, providerKey windows.GUID) e
 }
 
 func ensureWindowsWFPSubLayer(engine windows.Handle, providerKey windows.GUID, subLayerKey windows.GUID) error {
-	name, err := windows.UTF16PtrFromString("Zero Windows Sandbox WFP")
+	name, err := windows.UTF16PtrFromString("Codex Windows Sandbox WFP")
 	if err != nil {
 		return err
 	}
-	description, err := windows.UTF16PtrFromString("Persistent WFP sublayer for Zero Windows sandbox filters")
+	description, err := windows.UTF16PtrFromString("Persistent WFP sublayer for Codex Windows sandbox filters")
 	if err != nil {
 		return err
 	}
@@ -297,18 +303,18 @@ func addWindowsWFPFilters(engine windows.Handle, providerKey windows.GUID, subLa
 		if err != nil {
 			return err
 		}
-		description, err := windows.UTF16PtrFromString("Block sandbox identity outbound connections")
+		descriptionText := spec.Description
+		if descriptionText == "" {
+			descriptionText = "Block sandbox identity outbound connections"
+		}
+		description, err := windows.UTF16PtrFromString(descriptionText)
 		if err != nil {
 			return err
 		}
-		conditions := []windowsFWPMFilterCondition0{{
-			FieldKey:  windowsWFPConditionALEUserID,
-			MatchType: windowsFWPMatchEqual,
-			ConditionValue: windowsFWPConditionValue0{
-				Type:  windowsFWPSecurityDescriptor,
-				Value: uintptr(unsafe.Pointer(&userCondition.Blob)),
-			},
-		}}
+		conditions, err := buildWindowsWFPFilterConditions(spec.Conditions, userCondition)
+		if err != nil {
+			return err
+		}
 		filter := windowsFWPMFilter0{
 			FilterKey:           key,
 			DisplayData:         windowsWFPDisplayData0{Name: name, Description: description},
@@ -377,12 +383,65 @@ func newWindowsWFPUserCondition(identitySIDs []string) (*windowsWFPUserCondition
 	}, nil
 }
 
+func buildWindowsWFPFilterConditions(specs []WindowsWFPConditionSpec, userCondition *windowsWFPUserCondition) ([]windowsFWPMFilterCondition0, error) {
+	if len(specs) == 0 {
+		specs = []WindowsWFPConditionSpec{windowsWFPUserConditionSpec()}
+	}
+	conditions := make([]windowsFWPMFilterCondition0, 0, len(specs))
+	seenUser := false
+	for _, spec := range specs {
+		switch strings.TrimSpace(spec.Kind) {
+		case "user":
+			seenUser = true
+			conditions = append(conditions, windowsFWPMFilterCondition0{
+				FieldKey:  windowsWFPConditionALEUserID,
+				MatchType: windowsFWPMatchEqual,
+				ConditionValue: windowsFWPConditionValue0{
+					Type:  windowsFWPSecurityDescriptor,
+					Value: uintptr(unsafe.Pointer(&userCondition.Blob)),
+				},
+			})
+		case "protocol":
+			if spec.Value > 0xff {
+				return nil, fmt.Errorf("windows WFP protocol condition %d overflows uint8", spec.Value)
+			}
+			conditions = append(conditions, windowsFWPMFilterCondition0{
+				FieldKey:  windowsWFPConditionIPProtocol,
+				MatchType: windowsFWPMatchEqual,
+				ConditionValue: windowsFWPConditionValue0{
+					Type:  windowsFWPUInt8,
+					Value: uintptr(byte(spec.Value)),
+				},
+			})
+		case "remote-port":
+			conditions = append(conditions, windowsFWPMFilterCondition0{
+				FieldKey:  windowsWFPConditionIPRemotePort,
+				MatchType: windowsFWPMatchEqual,
+				ConditionValue: windowsFWPConditionValue0{
+					Type:  windowsFWPUInt16,
+					Value: uintptr(spec.Value),
+				},
+			})
+		default:
+			return nil, fmt.Errorf("unsupported windows WFP condition kind %q", spec.Kind)
+		}
+	}
+	if !seenUser {
+		return nil, errors.New("windows WFP filter condition requires user scope")
+	}
+	return conditions, nil
+}
+
 func windowsWFPFilterLayerGUID(spec WindowsWFPFilterSpec) (windows.GUID, error) {
 	switch strings.TrimSpace(spec.Layer) {
 	case "ale-auth-connect-v4":
 		return windowsWFPLayerALEAuthConnectV4, nil
 	case "ale-auth-connect-v6":
 		return windowsWFPLayerALEAuthConnectV6, nil
+	case "ale-resource-assignment-v4":
+		return windowsWFPLayerALEResourceAssignmentV4, nil
+	case "ale-resource-assignment-v6":
+		return windowsWFPLayerALEResourceAssignmentV6, nil
 	default:
 		return windows.GUID{}, fmt.Errorf("unsupported windows WFP filter layer %q", spec.Layer)
 	}

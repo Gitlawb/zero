@@ -96,8 +96,9 @@ func TestSeatbeltProfileAllowsUserToolAncestorMetadata(t *testing.T) {
 	}
 }
 
-// On macOS the scrubbed sandbox environment must still expose the Homebrew bin
-// dir so `python3`/`node` resolve to the user's install, not a system stub.
+// On macOS the sandbox environment preserves the caller env while still exposing
+// the Homebrew bin dir so `python3`/`node` resolve to the user's install, not a
+// system stub.
 func TestSandboxEnvironmentExposesHomebrewOnMac(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("PATH augmentation is macOS-only")

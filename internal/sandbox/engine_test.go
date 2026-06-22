@@ -70,6 +70,23 @@ func TestEngineBashAllowGrantDoesNotBypassNetworkPrompt(t *testing.T) {
 	}
 }
 
+func TestUnsandboxedExecutionAllowedPreservesDeniedReads(t *testing.T) {
+	root := t.TempDir()
+	policy := DefaultPolicy()
+	policy.DenyRead = []string{filepath.Join(root, "secret.txt")}
+	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy})
+
+	if engine.UnsandboxedExecutionAllowed() {
+		t.Fatal("denied-read policy must not allow unsandboxed escalation")
+	}
+
+	policy.DenyRead = nil
+	engine = NewEngine(EngineOptions{WorkspaceRoot: root, Policy: policy})
+	if !engine.UnsandboxedExecutionAllowed() {
+		t.Fatal("policy without denied reads should allow unsandboxed escalation")
+	}
+}
+
 func TestEngineEvaluatesReadPromptAndPersistentDecisions(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewGrantStore(StoreOptions{

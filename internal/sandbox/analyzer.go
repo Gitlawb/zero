@@ -34,6 +34,15 @@ var networkPrograms = map[string]bool{
 	"ftp": true,
 }
 
+var localServerPrograms = map[string]bool{
+	"http-server": true,
+	"serve":       true,
+	"vite":        true,
+	"next":        true,
+	"nuxt":        true,
+	"astro":       true,
+}
+
 // AnalyzeCommand parses script and reports interactive/destructive/network usage
 // from the shell AST. A script that cannot be parsed yields TooComplex (with no
 // other flags set) so the caller can decide how to treat an unanalyzable command.
@@ -105,25 +114,37 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return true
 	}
 	words := literalWordTexts(args)
+	if localServerPrograms[prog] {
+		return true
+	}
 	switch prog {
 	case "python", "python2", "python3", "py":
 		return pythonModuleUsesNetwork(words)
 	case "npm":
-		return firstSubcommand(words, nil) == "install" ||
-			firstSubcommand(words, nil) == "add" ||
-			firstSubcommand(words, nil) == "publish" ||
-			firstSubcommand(words, nil) == "login"
+		return packageManagerUsesNetwork(words, map[string]string{
+			"run":  "run",
+			"exec": "exec",
+			"x":    "exec",
+		})
 	case "pnpm":
-		return firstSubcommand(words, nil) == "install" ||
-			firstSubcommand(words, nil) == "add" ||
-			firstSubcommand(words, nil) == "publish"
+		return packageManagerUsesNetwork(words, map[string]string{
+			"run":  "run",
+			"exec": "exec",
+			"dlx":  "exec",
+		})
 	case "yarn":
-		return firstSubcommand(words, nil) == "add" ||
-			firstSubcommand(words, nil) == "publish"
+		return packageManagerUsesNetwork(words, map[string]string{
+			"run":  "run",
+			"exec": "exec",
+			"dlx":  "exec",
+		})
 	case "bun":
-		return firstSubcommand(words, nil) == "add" ||
-			firstSubcommand(words, nil) == "install" ||
-			firstSubcommand(words, nil) == "publish"
+		return packageManagerUsesNetwork(words, map[string]string{
+			"run": "run",
+			"x":   "exec",
+		})
+	case "npx":
+		return npxUsesNetwork(words)
 	case "pip", "pip2", "pip3":
 		return firstSubcommand(words, nil) == "install"
 	case "go":
@@ -135,6 +156,40 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	default:
 		return false
 	}
+}
+
+func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
+	first := firstSubcommand(words, aliases)
+	switch first {
+	case "install", "add", "publish", "login":
+		return true
+	case "start", "serve", "dev", "preview":
+		return true
+	case "run":
+		second := secondSubcommand(words)
+		return second == "start" || second == "serve" || second == "dev" || second == "preview"
+	case "exec":
+		for _, word := range words {
+			if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
+				continue
+			}
+			if word == "exec" || word == "x" || word == "dlx" {
+				continue
+			}
+			return localServerPrograms[word]
+		}
+	}
+	return false
+}
+
+func npxUsesNetwork(words []string) bool {
+	for _, word := range words {
+		if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
+			continue
+		}
+		return true
+	}
+	return true
 }
 
 func literalWordTexts(args []*syntax.Word) []string {

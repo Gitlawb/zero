@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,6 +47,22 @@ func runBashToolHelper(command string) {
 	case "long-sleep":
 		time.Sleep(5 * time.Second)
 		fmt.Println("long sleep finished")
+	case "http-server":
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("listening", listener.Addr().String())
+		server := &http.Server{
+			Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				_, _ = response.Write([]byte("zero-server-ok"))
+			}),
+		}
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "unknown helper command")
 		os.Exit(2)
@@ -79,9 +97,14 @@ func TestCoreToolsExposeShellTools(t *testing.T) {
 func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 	tool := NewBashTool(t.TempDir())
 	schema := tool.Parameters()
-	description := strings.ToLower(tool.Description() + " " +
-		schema.Properties["command"].Description + " " +
-		schema.Properties["cwd"].Description)
+	descriptionParts := []string{tool.Description()}
+	for _, property := range schema.Properties {
+		descriptionParts = append(descriptionParts, property.Description)
+	}
+	description := strings.ToLower(strings.Join(descriptionParts, " "))
+	if !strings.Contains(description, "sandbox_permissions") || !strings.Contains(description, "require_escalated") {
+		t.Fatalf("expected sandbox escalation guidance in bash description, got %q", description)
+	}
 
 	if runtime.GOOS == "windows" {
 		if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {

@@ -40,6 +40,17 @@ func TestSandboxedBashAutoAllowedWhenSandboxActive(t *testing.T) {
 	}
 }
 
+func TestSandboxedBashRequireEscalatedStillPromptsWhenSandboxActive(t *testing.T) {
+	engine := sandboxedShellEngine(t, nativeWrappingBackend)
+	request := bashRequest()
+	request.Args["sandbox_permissions"] = "require_escalated"
+
+	decision := engine.Evaluate(context.Background(), request)
+	if decision.Action != ActionPrompt || decision.Reason != ReasonEscalatedSandboxRequired {
+		t.Fatalf("decision = %#v, want require_escalated prompt", decision)
+	}
+}
+
 func TestSandboxedBashStillPromptsWithoutSandbox(t *testing.T) {
 	engine := sandboxedShellEngine(t, Backend{Name: BackendUnavailable})
 	decision := engine.Evaluate(context.Background(), bashRequest())

@@ -56,6 +56,80 @@ func TestBashAutoAllowedWhenSandboxActive(t *testing.T) {
 	}
 }
 
+func TestBashRequireEscalatedPromptsWhenSandboxActive(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry()
+	registry.Register(NewBashTool(root))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandboxedBashPolicy(),
+		Backend:       nativeBackendStub(),
+	})
+
+	result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
+		"command":             "echo hi",
+		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
+	}, RunOptions{
+		PermissionGranted: false,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionModeAsk),
+		Autonomy:          "high",
+	})
+
+	if result.Status != StatusError || !strings.Contains(result.Output, sandbox.ReasonEscalatedSandboxRequired) {
+		t.Fatalf("expected require_escalated approval prompt, got %s: %q", result.Status, result.Output)
+	}
+	if result.SandboxDecision == nil || result.SandboxDecision.Action != sandbox.ActionPrompt {
+		t.Fatalf("sandbox decision = %#v, want prompt", result.SandboxDecision)
+	}
+}
+
+func TestBashRequireEscalatedBypassesNativeSandboxAfterApproval(t *testing.T) {
+	root := t.TempDir()
+	registry := NewRegistry()
+	registry.Register(NewBashTool(root))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandboxedBashPolicy(),
+		Backend:       nativeBackendStub(),
+	})
+
+	result := registry.RunWithOptions(context.Background(), "bash", map[string]any{
+		"command":             helperCommand("success"),
+		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
+	}, RunOptions{
+		PermissionGranted: true,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionModeAsk),
+		Autonomy:          "high",
+	})
+
+	if result.Status != StatusOK || !strings.Contains(result.Output, "hello from bash") {
+		t.Fatalf("expected approved require_escalated command to run direct, got %s: %q", result.Status, result.Output)
+	}
+	if result.Meta["sandbox_permissions"] != string(SandboxPermissionsRequireEscalated) {
+		t.Fatalf("sandbox_permissions meta = %q", result.Meta["sandbox_permissions"])
+	}
+	if result.Meta["sandbox_wrapped"] == "true" {
+		t.Fatalf("require_escalated command must not be wrapped; meta=%#v", result.Meta)
+	}
+}
+
+func TestBashRequireEscalatedKeepsSandboxWhenDeniedReadsActive(t *testing.T) {
+	root := t.TempDir()
+	policy := sandboxedBashPolicy()
+	policy.DenyRead = []string{root + "/secret.txt"}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        policy,
+		Backend:       nativeBackendStub(),
+	})
+
+	if commandEngineForSandboxPermissions(engine, SandboxPermissionsRequireEscalated) == nil {
+		t.Fatal("require_escalated must preserve the sandbox when denied reads are active")
+	}
+}
+
 func TestBashStillPromptsWithoutActiveSandbox(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()

@@ -35,6 +35,9 @@ func matchCommandPrefix(toolName string, args map[string]any, options Options) (
 	if !isShellCommandTool(toolName) || options.Sandbox == nil {
 		return sandbox.CommandPrefixGrant{}, false, false
 	}
+	if shellCommandAdditionalPermissionsRequested(args) {
+		return sandbox.CommandPrefixGrant{}, false, false
+	}
 	command, ok := firstStringArg(args, "command", "cmd", "script", "shell")
 	if !ok {
 		return sandbox.CommandPrefixGrant{}, false, false

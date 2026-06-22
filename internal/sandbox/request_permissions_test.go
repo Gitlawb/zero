@@ -97,6 +97,17 @@ func TestGrantRequestPermissionsNetworkOverlaysPolicyForTurn(t *testing.T) {
 	if after := engine.Evaluate(context.Background(), request); after.Action != ActionAllow {
 		t.Fatalf("network turn grant should allow shell network, got %#v", after)
 	}
+	plan, err := engine.BuildCommandPlan(CommandSpec{
+		Name: "/bin/sh",
+		Args: []string{"-c", "python3 -m http.server 8080 --bind 127.0.0.1"},
+		Dir:  workspace,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan with network grant: %v", err)
+	}
+	if plan.Policy.Network != NetworkAllow || plan.PermissionProfile.Network.Mode != NetworkAllow {
+		t.Fatalf("network turn grant should build a network-allow command plan, got policy=%s profile=%s", plan.Policy.Network, plan.PermissionProfile.Network.Mode)
+	}
 	cleanup()
 	if afterCleanup := engine.Evaluate(context.Background(), request); afterCleanup.Action != ActionPrompt || afterCleanup.Reason != ReasonNetworkBlocked {
 		t.Fatalf("network turn grant should be cleaned up, got %#v", afterCleanup)

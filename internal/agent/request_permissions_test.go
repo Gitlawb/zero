@@ -120,6 +120,54 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestInlineAdditionalPermissionsGrantAllowsNetworkCommand(t *testing.T) {
+	workspace := t.TempDir()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        sandbox.DefaultPolicy(),
+	})
+	args := map[string]any{
+		"sandbox_permissions": string(tools.SandboxPermissionsWithAdditionalPermissions),
+		"additional_permissions": map[string]any{
+			"network": map[string]any{"enabled": true},
+		},
+	}
+	cleanup, err := grantInlineAdditionalPermissions(args, sandbox.PermissionGrantScopeTurn, Options{
+		Sandbox: engine,
+		Cwd:     workspace,
+	})
+	if err != nil {
+		t.Fatalf("grantInlineAdditionalPermissions: %v", err)
+	}
+	defer cleanup()
+
+	decision := engine.Evaluate(context.Background(), sandbox.Request{
+		WorkspaceRoot:     workspace,
+		ToolName:          "exec_command",
+		SideEffect:        sandbox.SideEffectShell,
+		Permission:        sandbox.PermissionPrompt,
+		PermissionGranted: true,
+		PermissionMode:    sandbox.PermissionModeAsk,
+		Args:              map[string]any{"cmd": "python3 -m http.server 8080 --bind 127.0.0.1"},
+	})
+	if decision.Action != sandbox.ActionAllow {
+		t.Fatalf("inline network grant should allow shell network command, got %#v", decision)
+	}
+}
+
+func TestInlineAdditionalPermissionsRequiresPromptUnderAutoAllow(t *testing.T) {
+	args := map[string]any{
+		"sandbox_permissions": string(tools.SandboxPermissionsWithAdditionalPermissions),
+		"additional_permissions": map[string]any{
+			"network": map[string]any{"enabled": true},
+		},
+	}
+	decision := &sandbox.Decision{Action: sandbox.ActionAllow, AutoAllowed: true}
+	if !shouldRequestPermission(tools.NewBashTool(t.TempDir()), args, false, decision) {
+		t.Fatal("inline additional permissions must request approval even when a sandboxed shell would otherwise auto-allow")
+	}
+}
+
 func TestRequestPermissionsDenyReturnsEmptyGrantAndContinues(t *testing.T) {
 	workspace := t.TempDir()
 	registry := tools.NewRegistry()

@@ -158,15 +158,15 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 	args := []string{
 		"--new-session",
 		"--die-with-parent",
-		"--unshare-user",
-		"--unshare-pid",
-		"--unshare-ipc",
-		"--unshare-uts",
 	}
 	args = append(args, linuxBwrapFilesystemArgs(config.PermissionProfile)...)
 	if pathExists(helperPath) {
 		args = append(args, "--ro-bind", helperPath, helperPath)
 	}
+	args = append(args,
+		"--unshare-user",
+		"--unshare-pid",
+	)
 	if shouldUnshareLinuxNetwork(config.PermissionProfile.Network) {
 		args = append(args, "--unshare-net")
 	}
@@ -174,8 +174,7 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 		args = append(args, "--proc", "/proc")
 	}
 	args = append(args, "--chdir", commandCWD)
-	args = append(args, "--clearenv")
-	for _, env := range linuxHelperSandboxEnvironment(config.PermissionProfile, commandCWD) {
+	for _, env := range linuxHelperSandboxEnvironmentOverrides(config.PermissionProfile) {
 		key, value, ok := strings.Cut(env, "=")
 		if ok {
 			args = append(args, "--setenv", key, value)
@@ -189,10 +188,7 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 	fs := profile.FileSystem
 	if fs.Kind == FileSystemUnrestricted {
-		args := []string{"--ro-bind", "/", "/", "--dev", "/dev"}
-		if fs.AllowTemp {
-			args = append(args, "--tmpfs", "/tmp")
-		}
+		args := []string{"--bind", "/", "/"}
 		for _, root := range fs.WriteRoots {
 			if pathExists(root.Root) {
 				args = append(args, "--bind", root.Root, root.Root)
@@ -201,15 +197,20 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 		return args
 	}
 
-	args := []string{"--tmpfs", "/", "--dev", "/dev"}
-	if fs.IncludePlatformRoots {
-		for _, root := range linuxPlatformReadRoots() {
-			args = append(args, "--ro-bind", root, root)
+	args := []string{}
+	if linuxProfileHasFullReadRoot(fs) {
+		args = append(args, "--ro-bind", "/", "/", "--dev", "/dev")
+	} else {
+		args = append(args, "--tmpfs", "/", "--dev", "/dev")
+		if fs.IncludePlatformRoots {
+			for _, root := range linuxPlatformReadRoots() {
+				args = append(args, "--ro-bind", root, root)
+			}
 		}
-	}
-	for _, root := range fs.ReadRoots {
-		if pathExists(root) {
-			args = append(args, "--ro-bind", root, root)
+		for _, root := range fs.ReadRoots {
+			if pathExists(root) {
+				args = append(args, "--ro-bind", root, root)
+			}
 		}
 	}
 	if fs.AllowTemp {
@@ -234,6 +235,15 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 		args = appendUnreadableLinuxPathArgs(args, path)
 	}
 	return args
+}
+
+func linuxProfileHasFullReadRoot(fs FileSystemPolicy) bool {
+	for _, root := range fs.ReadRoots {
+		if filepath.Clean(root) == string(filepath.Separator) {
+			return true
+		}
+	}
+	return false
 }
 
 func linuxPlatformReadRoots() []string {
@@ -273,16 +283,16 @@ func shouldUnshareLinuxNetwork(policy NetworkPolicy) bool {
 	return NormalizeNetworkMode(policy.Mode) == NetworkDeny
 }
 
-func linuxHelperSandboxEnvironment(profile PermissionProfile, home string) []string {
-	env := []string{
-		"HOME=" + home,
-		"PATH=" + firstEnv("PATH", defaultPath()),
-		"TERM=" + firstEnv("TERM", "dumb"),
+func linuxHelperSandboxEnvironment(profile PermissionProfile, base []string) []string {
+	return upsertEnvList(base, linuxHelperSandboxEnvironmentOverrides(profile)...)
+}
+
+func linuxHelperSandboxEnvironmentOverrides(profile PermissionProfile) []string {
+	return []string{
 		EnvSandboxBackend + "=" + string(linuxSandboxBackendEnv),
 		"ZERO_SANDBOX_NETWORK=" + string(profile.Network.Mode),
 		EnvSandboxed + "=1",
 	}
-	return env
 }
 
 func pathExists(path string) bool {

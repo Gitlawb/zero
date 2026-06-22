@@ -131,3 +131,24 @@ func intArg(args map[string]any, key string, fallback int, min int, max int) (in
 func intPtr(value int) *int {
 	return &value
 }
+
+func additionalPermissionsProperties() map[string]PropertySchema {
+	return requestPermissionsProfileSchema().Properties
+}
+
+func sandboxPermissionsArg(args map[string]any) (SandboxPermissionOverride, error) {
+	raw, err := stringArgWithEmpty(args, "sandbox_permissions", string(SandboxPermissionsUseDefault), false, false)
+	if err != nil {
+		return "", err
+	}
+	switch SandboxPermissionOverride(strings.TrimSpace(raw)) {
+	case "", SandboxPermissionsUseDefault:
+		return SandboxPermissionsUseDefault, nil
+	case SandboxPermissionsWithAdditionalPermissions:
+		return SandboxPermissionsWithAdditionalPermissions, nil
+	case SandboxPermissionsRequireEscalated:
+		return SandboxPermissionsRequireEscalated, nil
+	default:
+		return "", fmt.Errorf("sandbox_permissions must be %q, %q, or %q", SandboxPermissionsUseDefault, SandboxPermissionsWithAdditionalPermissions, SandboxPermissionsRequireEscalated)
+	}
+}

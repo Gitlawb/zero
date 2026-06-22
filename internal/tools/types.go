@@ -9,6 +9,7 @@ import (
 type SideEffect string
 type Permission string
 type Status string
+type SandboxPermissionOverride string
 
 const (
 	// SideEffectNone marks a control-only tool that neither reads nor mutates
@@ -32,6 +33,24 @@ const (
 const (
 	StatusOK    Status = "ok"
 	StatusError Status = "error"
+)
+
+const (
+	SandboxPermissionsUseDefault                SandboxPermissionOverride = "use_default"
+	SandboxPermissionsRequireEscalated          SandboxPermissionOverride = "require_escalated"
+	SandboxPermissionsWithAdditionalPermissions SandboxPermissionOverride = "with_additional_permissions"
+)
+
+const (
+	SandboxLikelyDeniedMeta  = "sandbox_likely_denied"
+	SandboxDenialKindMeta    = "sandbox_denial_kind"
+	SandboxDenialReasonMeta  = "sandbox_denial_reason"
+	SandboxDenialKeywordMeta = "sandbox_denial_keyword"
+)
+
+const (
+	SandboxDenialKindSandbox = "sandbox"
+	SandboxDenialKindNetwork = "network"
 )
 
 type Safety struct {

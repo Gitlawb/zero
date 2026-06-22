@@ -100,7 +100,10 @@ func permissionProfileRoots(workspaceRoot string, scope *Scope) []string {
 }
 
 func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scope, writeRoots []string) []string {
-	readRoots := append([]string{}, writeRoots...)
+	// Workspace-write follows the upstream sandbox model: full disk is readable,
+	// while writes are narrowed to workspace/extra roots below.
+	readRoots := []string{profileRootPath()}
+	readRoots = append(readRoots, writeRoots...)
 	if scope != nil {
 		readRoots = dedupeStrings(append(readRoots, scope.ReadRoots()...))
 	} else if root := normalizeProfilePath(workspaceRoot); root != "" {
@@ -110,6 +113,10 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 		readRoots = dedupeStrings(append(readRoots, extra...))
 	}
 	return readRoots
+}
+
+func profileRootPath() string {
+	return filepath.Clean(string(filepath.Separator))
 }
 
 func normalizeProfileDirs(entries []string) []string {

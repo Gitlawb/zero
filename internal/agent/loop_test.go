@@ -37,6 +37,167 @@ func (provider *mockProvider) StreamCompletion(ctx context.Context, request zero
 	return ch, nil
 }
 
+type sandboxDeniedRetryTool struct {
+	calls []map[string]any
+}
+
+func (tool *sandboxDeniedRetryTool) Name() string        { return "bash" }
+func (tool *sandboxDeniedRetryTool) Description() string { return "test shell tool" }
+func (tool *sandboxDeniedRetryTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"command":             {Type: "string"},
+			"sandbox_permissions": {Type: "string"},
+		},
+		Required:             []string{"command"},
+		AdditionalProperties: false,
+	}
+}
+func (tool *sandboxDeniedRetryTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, Reason: "runs shell commands"}
+}
+func (tool *sandboxDeniedRetryTool) Run(_ context.Context, args map[string]any) tools.Result {
+	tool.calls = append(tool.calls, cloneArgs(args))
+	if args["sandbox_permissions"] == string(tools.SandboxPermissionsRequireEscalated) {
+		return tools.Result{Status: tools.StatusOK, Output: "installed"}
+	}
+	return tools.Result{
+		Status: tools.StatusError,
+		Output: "touch: cannot touch '/home/user/.npm/cache': Read-only file system",
+		Meta: map[string]string{
+			"exit_code":                    "1",
+			tools.SandboxLikelyDeniedMeta:  "true",
+			tools.SandboxDenialReasonMeta:  "sandbox blocked command execution",
+			tools.SandboxDenialKeywordMeta: "read-only file system",
+		},
+	}
+}
+
+type sandboxNetworkDeniedRetryTool struct {
+	calls []map[string]any
+}
+
+func (tool *sandboxNetworkDeniedRetryTool) Name() string        { return "bash" }
+func (tool *sandboxNetworkDeniedRetryTool) Description() string { return "test shell tool" }
+func (tool *sandboxNetworkDeniedRetryTool) Parameters() tools.Schema {
+	return tools.Schema{
+		Type: "object",
+		Properties: map[string]tools.PropertySchema{
+			"command": {Type: "string"},
+		},
+		Required:             []string{"command"},
+		AdditionalProperties: false,
+	}
+}
+func (tool *sandboxNetworkDeniedRetryTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt, Reason: "runs shell commands"}
+}
+func (tool *sandboxNetworkDeniedRetryTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return tool.RunWithOptions(ctx, args, tools.RunOptions{})
+}
+func (tool *sandboxNetworkDeniedRetryTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
+	tool.calls = append(tool.calls, cloneArgs(args))
+	if shellNetworkAllowed(ctx, options.Sandbox, args) {
+		return tools.Result{Status: tools.StatusOK, Output: "server started"}
+	}
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "Cannot open a network socket.",
+		Meta: map[string]string{
+			"exit_code":                    "0",
+			tools.SandboxLikelyDeniedMeta:  "true",
+			tools.SandboxDenialKindMeta:    tools.SandboxDenialKindNetwork,
+			tools.SandboxDenialReasonMeta:  "sandbox blocked command execution",
+			tools.SandboxDenialKeywordMeta: "cannot open a network socket",
+		},
+	}
+}
+
+func shellNetworkAllowed(ctx context.Context, engine *sandbox.Engine, args map[string]any) bool {
+	if engine == nil {
+		return false
+	}
+	decision := engine.Evaluate(ctx, sandbox.Request{
+		ToolName:          "bash",
+		SideEffect:        sandbox.SideEffectShell,
+		Permission:        sandbox.PermissionPrompt,
+		PermissionGranted: true,
+		PermissionMode:    sandbox.PermissionModeAsk,
+		Args:              map[string]any{"command": "curl https://example.com"},
+	})
+	return decision.Action == sandbox.ActionAllow
+}
+
+func agentNativeBackendStub() sandbox.Backend {
+	return sandbox.Backend{
+		Name:            sandbox.BackendLinuxBwrap,
+		Available:       true,
+		Executable:      "/nonexistent/zero-linux-sandbox-stub",
+		CommandWrapping: true,
+		NativeIsolation: true,
+	}
+}
+
+func TestRunRetriesNetworkDeniedShellWithNetworkGrant(t *testing.T) {
+	root := t.TempDir()
+	retryTool := &sandboxNetworkDeniedRetryTool{}
+	registry := tools.NewRegistry()
+	registry.Register(retryTool)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"node server.js"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+
+	result, err := Run(context.Background(), "start server", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       "medium",
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       agentNativeBackendStub(),
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approve network"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(retryTool.calls) != 2 {
+		t.Fatalf("tool calls = %#v, want denied attempt plus network-granted retry", retryTool.calls)
+	}
+	if _, escalated := retryTool.calls[1]["sandbox_permissions"]; escalated {
+		t.Fatalf("network retry must stay sandboxed, got retry args %#v", retryTool.calls[1])
+	}
+	if len(requests) != 1 || requests[0].Reason != sandbox.ReasonNetworkBlocked {
+		t.Fatalf("permission requests = %#v, want one network approval", requests)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("provider requests = %d, want retry result sent back to model", len(provider.requests))
+	}
+	last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(last.Content, "server started") {
+		t.Fatalf("tool result sent to model = %q, want network retry output", last.Content)
+	}
+}
+
 func TestIsRetriableToolError(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -61,6 +222,145 @@ func TestIsRetriableToolError(t *testing.T) {
 		if got := isRetriableToolError(c.result); got != c.want {
 			t.Errorf("%s: isRetriableToolError = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestRunRetriesShellUnsandboxedAfterSandboxDeniedExit(t *testing.T) {
+	root := t.TempDir()
+	retryTool := &sandboxDeniedRetryTool{}
+	registry := tools.NewRegistry()
+	registry.Register(retryTool)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"npm install --save http-server"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var events []PermissionEvent
+
+	result, err := Run(context.Background(), "install package", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       "medium",
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       agentNativeBackendStub(),
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "retry outside sandbox"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(retryTool.calls) != 2 {
+		t.Fatalf("tool calls = %#v, want sandboxed attempt plus unsandboxed retry", retryTool.calls)
+	}
+	if retryTool.calls[1]["sandbox_permissions"] != string(tools.SandboxPermissionsRequireEscalated) {
+		t.Fatalf("retry args = %#v, want require_escalated", retryTool.calls[1])
+	}
+	if len(requests) != 2 {
+		t.Fatalf("permission requests = %#v, want network approval plus retry approval", requests)
+	}
+	if requests[0].Reason != sandbox.ReasonNetworkBlocked {
+		t.Fatalf("first request reason = %q, want network approval", requests[0].Reason)
+	}
+	if !strings.Contains(requests[1].Reason, "sandbox blocked command execution") || !strings.Contains(requests[1].Reason, "read-only file system") {
+		t.Fatalf("retry request reason = %q", requests[1].Reason)
+	}
+	if len(events) != 1 || events[0].Action != PermissionActionAllow || events[0].DecisionAction != PermissionDecisionAllow {
+		t.Fatalf("permission events = %#v, want approved unsandboxed retry", events)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("provider requests = %d, want retry result sent back to model", len(provider.requests))
+	}
+	last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(last.Content, "installed") {
+		t.Fatalf("tool result sent to model = %q, want retry output", last.Content)
+	}
+}
+
+func TestRunDoesNotRetryUnsandboxedWhenDeniedReadsActive(t *testing.T) {
+	root := t.TempDir()
+	retryTool := &sandboxDeniedRetryTool{}
+	registry := tools.NewRegistry()
+	registry.Register(retryTool)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":"touch cache-file"}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	var requests []PermissionRequest
+	var events []PermissionEvent
+	policy := sandbox.DefaultPolicy()
+	policy.DenyRead = []string{filepath.Join(root, "secret.txt")}
+
+	result, err := Run(context.Background(), "touch cache", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       "medium",
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        policy,
+			Backend:       agentNativeBackendStub(),
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requests = append(requests, request)
+			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "unexpected"}, nil
+		},
+		OnPermission: func(event PermissionEvent) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("final answer = %q", result.FinalAnswer)
+	}
+	if len(retryTool.calls) != 1 {
+		t.Fatalf("tool calls = %#v, want only the original sandboxed attempt", retryTool.calls)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("permission requests = %#v, want no unsandboxed retry request", requests)
+	}
+	for _, event := range events {
+		if strings.Contains(event.Reason, "sandbox blocked command execution") {
+			t.Fatalf("permission events = %#v, want no unsandboxed retry event", events)
+		}
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("provider requests = %d, want tool result sent back to model", len(provider.requests))
+	}
+	last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+	if !strings.Contains(last.Content, "Read-only file system") {
+		t.Fatalf("tool result sent to model = %q, want original sandbox denial", last.Content)
 	}
 }
 
@@ -1025,7 +1325,7 @@ func TestAvailablePermissionDecisionsSplitDenyAndCancel(t *testing.T) {
 			got := availablePermissionDecisions(PermissionEvent{
 				ToolName: tc.tool,
 				Action:   PermissionActionPrompt,
-			}, options)
+			}, nil, options)
 			if !equalPermissionDecisions(got, tc.want) {
 				t.Fatalf("decisions = %#v, want %#v", got, tc.want)
 			}

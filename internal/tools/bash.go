@@ -37,10 +37,17 @@ func NewScopedBashTool(workspaceRoot string, scope PathScope) Tool {
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"command":     {Type: "string", Description: "Shell command to execute using the host shell. " + shellGuidance},
-					"cwd":         {Type: "string", Description: "Directory to run the command in. Relative paths stay in the workspace; use an absolute path to run in a granted extra directory. Defaults to workspace root. Prefer cwd over cd when changing directories.", Default: "."},
-					"timeout_ms":  {Type: "integer", Description: "Command timeout in milliseconds.", Default: defaultBashTimeoutMS, Minimum: intPtr(1), Maximum: intPtr(maxBashTimeoutMS)},
-					"prefix_rule": {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Optional reusable approval prefix for this command, for example [\"git\", \"status\"]. Only simple command prefixes are accepted."},
+					"command":             {Type: "string", Description: "Shell command to execute using the host shell. " + shellGuidance},
+					"cwd":                 {Type: "string", Description: "Directory to run the command in. Relative paths stay in the workspace; use an absolute path to run in a granted extra directory. Defaults to workspace root. Prefer cwd over cd when changing directories.", Default: "."},
+					"timeout_ms":          {Type: "integer", Description: "Command timeout in milliseconds.", Default: defaultBashTimeoutMS, Minimum: intPtr(1), Maximum: intPtr(maxBashTimeoutMS)},
+					"sandbox_permissions": {Type: "string", Enum: []string{string(SandboxPermissionsUseDefault), string(SandboxPermissionsWithAdditionalPermissions), string(SandboxPermissionsRequireEscalated)}, Description: "Per-command sandbox override. Defaults to `use_default`; use `with_additional_permissions` with `additional_permissions`, or `require_escalated` for unsandboxed execution.", Default: string(SandboxPermissionsUseDefault)},
+					"additional_permissions": {
+						Type:        "object",
+						Description: "Sandboxed filesystem or network access for this command; only with `sandbox_permissions: \"with_additional_permissions\"`.",
+						Properties:  additionalPermissionsProperties(),
+					},
+					"justification": {Type: "string", Description: "User-facing approval question for `require_escalated`; omit otherwise."},
+					"prefix_rule":   {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"]."},
 				},
 				Required:             []string{"command"},
 				AdditionalProperties: false,
@@ -73,6 +80,10 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 	if err != nil {
 		return errorResult("Error: Invalid arguments for bash: " + err.Error())
 	}
+	sandboxPermissions, err := sandboxPermissionsArg(args)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for bash: " + err.Error())
+	}
 	if issue := detectShellCommandIssue(commandText, runtime.GOOS); issue != nil {
 		return shellIssueBlockResult(*issue)
 	}
@@ -96,7 +107,11 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		"cwd":        relativeCwd,
 		"timeout_ms": strconv.Itoa(timeoutMS),
 	}
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, engine)
+	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
+	if commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated {
+		meta["sandbox_permissions"] = string(SandboxPermissionsRequireEscalated)
+	}
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
 	if err != nil {
 		meta["exit_code"] = "-1"
 		return Result{
@@ -141,6 +156,7 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 				Meta:   meta,
 			}
 		}
+		markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
 		return Result{
 			Status: StatusError,
 			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
@@ -148,11 +164,26 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, engine *zeroS
 		}
 	}
 
+	markLikelySandboxDenial(meta, plan, exitCode, stdout.String(), stderrText)
+	if meta[SandboxLikelyDeniedMeta] == "true" {
+		return Result{
+			Status: StatusError,
+			Output: formatBashOutputWithShellHint(commandText, stdout.String(), stderrText, exitCode, meta),
+			Meta:   meta,
+		}
+	}
 	return Result{
 		Status: StatusOK,
 		Output: formatBashOutput(stdout.String(), stderrText, exitCode),
 		Meta:   meta,
 	}
+}
+
+func commandEngineForSandboxPermissions(engine *zeroSandbox.Engine, sandboxPermissions SandboxPermissionOverride) *zeroSandbox.Engine {
+	if sandboxPermissions == SandboxPermissionsRequireEscalated && (engine == nil || engine.UnsandboxedExecutionAllowed()) {
+		return nil
+	}
+	return engine
 }
 
 // appendSandboxBlocks appends a <sandbox_blocks> block listing the denials

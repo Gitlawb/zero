@@ -388,21 +388,31 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 	if manager == nil {
 		manager = defaultExecSessionManager
 	}
-	shellGuidance := shellGuidanceForGOOS(runtimeGOOS())
+	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+	if runtimeGOOS() == "windows" {
+		description += "\n\n" + shellGuidanceForGOOS(runtimeGOOS())
+	}
 	return execCommandTool{
 		baseTool: baseTool{
 			name:        ExecCommandToolName,
-			description: "Runs a command and returns output or a session_id for ongoing interaction. Use this for long-running commands such as dev servers. " + shellGuidance,
+			description: description,
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"cmd":               {Type: "string", Description: "Shell command to execute using the host shell. " + shellGuidance},
-					"workdir":           {Type: "string", Description: "Working directory for the command. Defaults to the workspace root.", Default: "."},
-					"cwd":               {Type: "string", Description: "Alias for workdir. Prefer workdir.", Default: "."},
-					"yield_time_ms":     {Type: "integer", Description: "Wait before yielding output. If the command is still running after this, the result includes session_id.", Default: defaultExecYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxExecYieldTimeMS)},
-					"max_output_tokens": {Type: "integer", Description: "Output token budget. Defaults to 10000; larger requests may be capped.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
-					"prefix_rule":       {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Optional reusable approval prefix for this command, for example [\"git\", \"status\"]. Only simple command prefixes are accepted."},
-					"tty":               {Type: "boolean", Description: "Run the command attached to a pseudo-terminal when supported. Use this for interactive terminal-style programs; defaults to false.", Default: false},
+					"cmd":                 {Type: "string", Description: "Shell command to execute."},
+					"workdir":             {Type: "string", Description: "Working directory for the command. Defaults to the turn cwd.", Default: "."},
+					"cwd":                 {Type: "string", Description: "Alias for workdir. Prefer workdir.", Default: "."},
+					"yield_time_ms":       {Type: "integer", Description: "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.", Default: defaultExecYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxExecYieldTimeMS)},
+					"max_output_tokens":   {Type: "integer", Description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
+					"sandbox_permissions": {Type: "string", Enum: []string{string(SandboxPermissionsUseDefault), string(SandboxPermissionsWithAdditionalPermissions), string(SandboxPermissionsRequireEscalated)}, Description: "Per-command sandbox override. Defaults to `use_default`; use `with_additional_permissions` with `additional_permissions`, or `require_escalated` for unsandboxed execution.", Default: string(SandboxPermissionsUseDefault)},
+					"additional_permissions": {
+						Type:        "object",
+						Description: "Sandboxed filesystem or network access for this command; only with `sandbox_permissions: \"with_additional_permissions\"`.",
+						Properties:  additionalPermissionsProperties(),
+					},
+					"justification": {Type: "string", Description: "User-facing approval question for `require_escalated`; omit otherwise."},
+					"prefix_rule":   {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"]."},
+					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes.", Default: false},
 				},
 				Required:             []string{"cmd"},
 				AdditionalProperties: false,
@@ -456,6 +466,10 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
 	}
+	sandboxPermissions, err := sandboxPermissionsArg(args)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for exec_command: " + err.Error())
+	}
 	if issue := detectShellCommandIssue(commandText, runtimeGOOS()); issue != nil {
 		return shellIssueBlockResult(*issue)
 	}
@@ -467,7 +481,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		return errorResult("Error running exec_command: " + err.Error())
 	}
 
-	session, err := tool.startSession(commandText, absoluteCwd, relativeCwd, ttyRequested, engine)
+	session, err := tool.startSession(commandText, absoluteCwd, relativeCwd, ttyRequested, engine, sandboxPermissions)
 	if err != nil {
 		return errorResult("Error starting exec_command: " + err.Error())
 	}
@@ -493,10 +507,11 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	})
 }
 
-func (tool execCommandTool) startSession(commandText string, absoluteCwd string, relativeCwd string, ttyRequested bool, engine *zeroSandbox.Engine) (*execSession, error) {
+func (tool execCommandTool) startSession(commandText string, absoluteCwd string, relativeCwd string, ttyRequested bool, engine *zeroSandbox.Engine, sandboxPermissions SandboxPermissionOverride) (*execSession, error) {
 	id := tool.manager.allocateID()
 	commandCtx, cancel := context.WithCancel(context.Background())
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, engine)
+	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
+	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -606,14 +621,14 @@ func NewWriteStdinTool(manager *execSessionManager) Tool {
 	return writeStdinTool{
 		baseTool: baseTool{
 			name:        WriteStdinToolName,
-			description: "Writes characters to an existing exec_command session and returns recent output. Empty polls and Ctrl-C interrupts are allowed; other stdin bytes may require approval.",
+			description: "Writes characters to an existing unified exec session and returns recent output.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
-					"session_id":        {Type: "integer", Description: "Identifier returned by exec_command while the process is still running."},
-					"chars":             {Type: "string", Description: "Bytes to write to stdin. Defaults to empty, which polls without writing. Use \\u0003 to interrupt the session.", Default: ""},
-					"yield_time_ms":     {Type: "integer", Description: "Wait before yielding output. Empty polls default to 5000ms and can wait up to 300000ms.", Default: defaultPollYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxPollYieldTimeMS)},
-					"max_output_tokens": {Type: "integer", Description: "Output token budget. Defaults to 10000; larger requests may be capped.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
+					"session_id":        {Type: "integer", Description: "Identifier of the running unified exec session."},
+					"chars":             {Type: "string", Description: "Bytes to write to stdin. Defaults to empty, which polls without writing.", Default: ""},
+					"yield_time_ms":     {Type: "integer", Description: "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.", Default: defaultPollYieldTimeMS, Minimum: intPtr(1), Maximum: intPtr(maxPollYieldTimeMS)},
+					"max_output_tokens": {Type: "integer", Description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.", Default: defaultMaxOutputTokens, Minimum: intPtr(1), Maximum: intPtr(maxExecOutputTokenRequest)},
 				},
 				Required:             []string{"session_id"},
 				AdditionalProperties: false,
@@ -750,12 +765,15 @@ func execToolResult(input execToolResultInput) Result {
 		if input.interrupted {
 			meta["interrupted"] = "true"
 		}
+		if !input.interrupted {
+			markLikelySandboxDenial(meta, input.plan, input.exitCode, output)
+		}
 	} else {
 		meta["session_id"] = strconv.Itoa(input.sessionID)
 	}
 
 	status := StatusOK
-	if input.exited && input.exitCode != 0 && !input.interrupted {
+	if input.exited && ((input.exitCode != 0 && !input.interrupted) || meta[SandboxLikelyDeniedMeta] == "true") {
 		status = StatusError
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)

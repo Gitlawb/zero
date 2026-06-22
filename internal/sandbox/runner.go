@@ -205,6 +205,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	if err != nil {
 		return CommandPlan{}, err
 	}
+	env := sandboxEnvironmentForCommand(spec.Env, policy, BackendLinuxBwrap)
 	planDir := spec.Dir
 	if helper.Dir != "" {
 		planDir = helper.Dir
@@ -220,7 +221,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 		Name:              helper.Name,
 		Args:              append(append([]string{}, helper.ArgsPrefix...), args...),
 		Dir:               planDir,
-		Env:               cloneStrings(spec.Env),
+		Env:               env,
 		SandboxDir:        spec.Dir,
 	}
 	return withSandboxExecutionMetadata(plan, execRequest), nil
@@ -315,7 +316,7 @@ func seatbeltCommandPlanWithProfile(spec CommandSpec, workspaceRoot string, prof
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env := sandboxEnvironment(policy, envBackend, workspaceRoot)
+	env := sandboxEnvironmentForCommand(spec.Env, policy, envBackend)
 	plan := CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -369,28 +370,33 @@ func existingBubblewrapMounts() []string {
 	return mounts
 }
 
-func sandboxEnvironment(policy Policy, backend BackendName, home string) []string {
-	pathValue := firstEnv("PATH", defaultPath())
+func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
+	return sandboxEnvironmentForCommand(nil, policy, backend)
+}
+
+func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
+	env := cloneStrings(specEnv)
+	if specEnv == nil {
+		env = os.Environ()
+	}
+	pathValue := envListValue(env, "PATH", defaultPath())
 	if runtime.GOOS == "darwin" {
-		// The sandbox runs commands with a scrubbed, minimal PATH that omits the
-		// Homebrew / usr-local bin dirs, so a bare `python3`/`node` resolves to a
-		// system stub (the macOS /usr/bin/python3 placeholder) or is not found at
-		// all. Make the user-tool dirs reachable to match the read/map-executable
-		// allowances added for those trees.
+		// Preserve standard user tool locations so a bare `python3`/`node`
+		// resolves to the user's installed tool while the sandbox profile keeps
+		// filesystem access narrow via explicit allowances for those trees.
 		pathValue = ensureMacToolPaths(pathValue)
 	}
-	env := []string{
-		"HOME=" + home,
+	overrides := []string{
 		"PATH=" + pathValue,
-		"TERM=" + firstEnv("TERM", "dumb"),
+		"TERM=" + envListValue(env, "TERM", "dumb"),
 		EnvSandboxBackend + "=" + string(backend),
 		"ZERO_SANDBOX_NETWORK=" + string(policy.Network),
 		EnvSandboxed + "=1",
 	}
 	if runtime.GOOS == "windows" {
-		env = append(env, "COMSPEC="+firstEnv("COMSPEC", "cmd.exe"))
+		overrides = append(overrides, "COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"))
 	}
-	return env
+	return upsertEnvList(env, overrides...)
 }
 
 func cloneStrings(values []string) []string {
@@ -403,6 +409,16 @@ func cloneStrings(values []string) []string {
 func firstEnv(key string, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
+	}
+	return fallback
+}
+
+func envListValue(env []string, key string, fallback string) string {
+	for _, entry := range env {
+		existingKey, value, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(existingKey, key) && strings.TrimSpace(value) != "" {
+			return value
+		}
 	}
 	return fallback
 }

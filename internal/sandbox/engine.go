@@ -170,6 +170,19 @@ func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 	return NormalizeNetworkMode(policy.Network)
 }
 
+// UnsandboxedExecutionAllowed reports whether an escalated shell attempt may
+// bypass the native sandbox without dropping active denied-read restrictions.
+func (engine *Engine) UnsandboxedExecutionAllowed() bool {
+	if engine == nil {
+		return true
+	}
+	policy := engine.effectivePolicy(engine.policy)
+	if policy.Mode == ModeDisabled {
+		return true
+	}
+	return len(normalizeProfilePaths(policy.DenyRead)) == 0
+}
+
 // toolNetworkExempt reports whether a request is exempt from the engine-level
 // network deny because it is a first-party, in-process network tool. Such tools
 // do not use sandboxed shell egress; they keep their own SSRF/host safeguards. A
@@ -340,6 +353,14 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			return deny(request, risk, BlockDestructiveCommand, "", "destructive shell command requires approval", false)
 		}
 	}
+	if request.SideEffect == SideEffectShell && requestRequiresEscalatedSandbox(request) {
+		if !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
+			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonEscalatedSandboxRequired}
+		}
+		if !request.PermissionGranted {
+			return deny(request, risk, BlockDeniedPermission, "", ReasonEscalatedSandboxRequired, false)
+		}
+	}
 	if persistentAllow != nil {
 		return Decision{
 			Action:       ActionAllow,
@@ -378,6 +399,10 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
+}
+
+func requestRequiresEscalatedSandbox(request Request) bool {
+	return strings.TrimSpace(firstArgString(request.Args, "sandbox_permissions")) == "require_escalated"
 }
 
 func (engine *Engine) Grant(input GrantInput) (Grant, error) {

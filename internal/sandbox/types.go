@@ -106,6 +106,7 @@ const (
 )
 
 const ReasonNetworkBlocked = "network access requires approval"
+const ReasonEscalatedSandboxRequired = "unsandboxed shell command requires approval"
 
 const (
 	GrantAllow GrantDecision = "allow"

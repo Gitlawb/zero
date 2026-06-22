@@ -34,6 +34,9 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	if profile.FileSystem.WriteRoots[0].Root != scope.Roots()[0] || profile.FileSystem.WriteRoots[1].Root != scope.Roots()[1] {
 		t.Fatalf("write roots = %#v, want scope roots %#v", profile.FileSystem.WriteRoots, scope.Roots())
 	}
+	if !stringSliceContains(profile.FileSystem.ReadRoots, profileRootPath()) {
+		t.Fatalf("read roots = %#v, want full read root %q", profile.FileSystem.ReadRoots, profileRootPath())
+	}
 	if !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".git") || !stringSliceContains(profile.FileSystem.WriteRoots[0].ProtectedMetadataNames, ".zero") {
 		t.Fatalf("protected metadata names = %#v, want workspace metadata protected", profile.FileSystem.WriteRoots[0].ProtectedMetadataNames)
 	}
@@ -49,8 +52,10 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 }
 
 func TestUnknownNetworkModeFailsClosed(t *testing.T) {
-	if got := NormalizeNetworkMode(NetworkMode("scoped")); got != NetworkDeny {
-		t.Fatalf("NormalizeNetworkMode(scoped) = %q, want %q", got, NetworkDeny)
+	for _, mode := range []NetworkMode{"scoped", "proxy"} {
+		if got := NormalizeNetworkMode(mode); got != NetworkDeny {
+			t.Fatalf("NormalizeNetworkMode(%s) = %q, want %q", mode, got, NetworkDeny)
+		}
 	}
 	profile := PermissionProfileFromPolicy(t.TempDir(), Policy{
 		Mode:             ModeEnforce,

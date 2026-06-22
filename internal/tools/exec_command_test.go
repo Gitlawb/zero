@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
@@ -84,6 +87,40 @@ func TestExecCommandReturnsSessionAndWriteStdinPollsCompletion(t *testing.T) {
 	}
 }
 
+func TestExecCommandRequireEscalatedBypassesNativeSandboxAfterApproval(t *testing.T) {
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	registry := NewRegistry()
+	registry.Register(NewScopedExecCommandTool(root, nil, manager))
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend: sandbox.Backend{
+			Name:            sandbox.BackendLinuxBwrap,
+			Available:       true,
+			Executable:      "/nonexistent/zero-linux-sandbox-stub",
+			CommandWrapping: true,
+			NativeIsolation: true,
+		},
+	})
+
+	result := registry.RunWithOptions(context.Background(), ExecCommandToolName, map[string]any{
+		"cmd":                 helperCommand("success"),
+		"sandbox_permissions": string(SandboxPermissionsRequireEscalated),
+	}, RunOptions{
+		PermissionGranted: true,
+		Sandbox:           engine,
+		PermissionMode:    string(sandbox.PermissionModeAsk),
+	})
+
+	if result.Status != StatusOK || !strings.Contains(result.Output, "hello from bash") {
+		t.Fatalf("expected approved require_escalated exec_command to run direct, got %s: %q", result.Status, result.Output)
+	}
+	if result.Meta["sandbox_wrapped"] == "true" {
+		t.Fatalf("require_escalated exec_command must not be wrapped; meta=%#v", result.Meta)
+	}
+}
+
 func TestExecCommandReturnsExitCodeWhenCommandCompletesDuringInitialYield(t *testing.T) {
 	root := t.TempDir()
 	manager := newExecSessionManager()
@@ -105,6 +142,60 @@ func TestExecCommandReturnsExitCodeWhenCommandCompletesDuringInitialYield(t *tes
 	if manager.len() != 0 {
 		t.Fatalf("completed command should be removed immediately, manager has %d sessions", manager.len())
 	}
+}
+
+func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
+	root := t.TempDir()
+	manager := newExecSessionManager()
+	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
+
+	start := execTool.Run(context.Background(), map[string]any{
+		"cmd":           helperCommand("http-server"),
+		"yield_time_ms": 500,
+	})
+	if start.Status != StatusOK {
+		t.Fatalf("exec_command start status = %s: %s", start.Status, start.Output)
+	}
+	sessionID, err := strconv.Atoi(start.Meta["session_id"])
+	if err != nil {
+		t.Fatalf("foreground server should return session_id, meta=%#v output=%q", start.Meta, start.Output)
+	}
+	addr := parseListeningAddress(start.Output)
+	if addr == "" {
+		t.Fatalf("server output did not include listening address: %q", start.Output)
+	}
+	t.Cleanup(func() {
+		writeTool.Run(context.Background(), map[string]any{
+			"session_id": sessionID,
+			"chars":      "\u0003",
+		})
+	})
+
+	response, err := http.Get("http://" + addr)
+	if err != nil {
+		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, start.Output)
+	}
+	defer response.Body.Close()
+	bytes, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(bytes) != "zero-server-ok" {
+		t.Fatalf("server response = %q", string(bytes))
+	}
+}
+
+func parseListeningAddress(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for index, field := range fields {
+			if field == "listening" && index+1 < len(fields) {
+				return strings.TrimSpace(fields[index+1])
+			}
+		}
+	}
+	return ""
 }
 
 func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
