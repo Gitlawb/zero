@@ -319,7 +319,10 @@ func renderPlanStepLine(step planStep, now time.Time, maxContent int) string {
 	switch step.status {
 	case "completed":
 		icon = zeroTheme.green.Render("✓")
-		body = zeroTheme.green.Render(content)
+		// Quiet the completed body (muted, not saturated green) so the single
+		// in-progress accent step is the obvious focus: past=quiet, now=bright,
+		// future=faint. The green ✓ icon still marks success.
+		body = zeroTheme.muted.Render(content)
 		timeStr = formatElapsedSeconds(step.completedAt.Sub(step.startedAt))
 	case "in_progress":
 		icon = zeroTheme.accent.Render("•")

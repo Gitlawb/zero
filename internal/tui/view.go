@@ -167,17 +167,10 @@ func (m model) titleModelSegment() string {
 
 func (m model) composerDividerLine(width int) string {
 	model := displayValue(strings.TrimSpace(m.modelName), "no model")
-	label, style := m.modeLabel()
-	meta := zeroTheme.muted.Render(model) + zeroTheme.muted.Render(" · ") + style.Render(label)
-	if m.reasoningEffort != "" {
-		// Show the active reasoning effort in the brand lime so a just-cycled
-		// value (Ctrl+T) draws the eye. Omitted on "auto" (m.reasoningEffort ==
-		// "") so the segment appearing/disappearing is itself the auto-state
-		// feedback. Models without effort controls can't set a non-empty value
-		// here (handleModelCommand and the /effort picker both gate on
-		// availableReasoningEfforts), so no extra check is needed.
-		meta += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
-	}
+	// The composer rule is a quiet model reminder above the input. Permission mode
+	// and reasoning effort now live in the persistent status line (the conventional
+	// footer for run-state), so they're not duplicated on this rule.
+	meta := zeroTheme.muted.Render(model)
 	metaWidth := lipgloss.Width(meta)
 	if width < 8 {
 		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
@@ -189,25 +182,32 @@ func (m model) composerDividerLine(width int) string {
 	return zeroTheme.lineStrong.Render("╰"+rule+" ") + meta + zeroTheme.lineStrong.Render(" ╯")
 }
 
-// statusLine renders the bottom readout as ` │ `-separated groups: provider
-// on the left, then a flexible gap, then token/cost usage on the right. Groups
-// drop with the width tier: narrow keeps provider+usage, tiny shows provider.
+// statusLine renders the bottom readout as ` │ `-separated groups: the run-state
+// chip (permission mode + effort) on the left, a flexible gap, then the
+// context-fill gauge and token/cost usage on the right. The provider lives in the
+// title bar and is NOT duplicated here. Groups drop with the width tier.
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
 	prefix := "  "
-	providerName := displayValue(strings.TrimSpace(m.providerDisplayName()), "no provider")
+
+	// Left chip: the safety-relevant run-state — permission mode (auto/ask/unsafe)
+	// in its mode colour. This was previously only on the easy-to-miss composer
+	// rule; the persistent footer is where users look for "will it run commands?".
+	modeText, modeStyle := m.modeLabel()
+	left := prefix + zeroTheme.accent.Render("●") + " " + modeStyle.Render(modeText)
 
 	if tier == tierTiny {
 		if m.exitConfirmActive {
-			warning := prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
-			return fitStyledLine(warning, width)
+			return fitStyledLine(prefix+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(ctrlCExitConfirmText), width)
 		}
-		provider := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
-		return fitStyledLine(provider, width)
+		return fitStyledLine(left, width)
 	}
 
-	left := prefix + zeroTheme.accent.Render("●") + " " + zeroTheme.ink.Render(providerName)
+	// Non-tiny: append the active reasoning effort (brand lime, omitted on auto).
+	if m.reasoningEffort != "" {
+		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render(string(m.reasoningEffort))
+	}
 	if m.exitConfirmActive {
 		left = prefix + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if summary := m.backgroundTerminalSummary(); summary != "" {
@@ -215,9 +215,10 @@ func (m model) statusLine(width int) string {
 	}
 
 	rightGroups := []string{}
-	// The context-fill gauge needs the room a Medium+ terminal gives; below that
-	// the cumulative tok·cost segment alone keeps the line readable.
-	if tier >= tierMedium {
+	// Context-fill gauge: surface it down to the narrow tier (where it matters
+	// most), but skip it when the context sidebar is already showing the % so the
+	// figure isn't duplicated.
+	if tier >= tierNarrow && !m.sidebarActive() {
 		if gauge := m.contextWindowSegment(); gauge != "" {
 			rightGroups = append(rightGroups, gauge)
 		}
@@ -313,36 +314,47 @@ func (m model) usageStatusSegment() string {
 	)
 }
 
-// contextWindowSegment renders a live context-fill gauge: the last request's
-// input tokens against the active model's context window, as "◔ used/window ·
-// NN%", graded green (<75%) → amber (≥75%) → red (≥90%). Empty until a priced
-// request lands or when the model's window is unknown. This is the "you're at
-// X% of context" readout the compaction trigger already reasons about at 80%.
-func (m model) contextWindowSegment() string {
+// contextFillPercent returns the last request's context-window fill as a percent
+// (0-100), the tokens used, the model's window, and a colour graded for the fill
+// (green <75% → amber ≥75% → red ≥90%). ok is false until a priced request lands
+// or when the model's window is unknown. Shared by the status-line gauge and the
+// sidebar context chip so they grade identically. This is the "you're at X% of
+// context" reading the compaction trigger already reasons about at ~80%.
+func (m model) contextFillPercent() (pct, used, window int, style lipgloss.Style, ok bool) {
 	if m.usageTracker == nil {
-		return ""
+		return 0, 0, 0, lipgloss.Style{}, false
 	}
 	summary := m.usageTracker.Summary()
 	if summary.LastRecord == nil {
-		return ""
+		return 0, 0, 0, lipgloss.Style{}, false
 	}
-	used := summary.LastRecord.Usage.InputTokens
-	window := modelContextWindow(m.modelName)
+	used = summary.LastRecord.Usage.InputTokens
+	window = modelContextWindow(m.modelName)
 	if used <= 0 || window <= 0 {
-		return ""
+		return 0, 0, 0, lipgloss.Style{}, false
 	}
 	ratio := float64(used) / float64(window)
 	if ratio > 1 {
 		ratio = 1
 	}
-	style := zeroTheme.green
+	style = zeroTheme.green
 	switch {
 	case ratio >= 0.90:
 		style = zeroTheme.red
 	case ratio >= 0.75:
 		style = zeroTheme.amber
 	}
-	return style.Render(fmt.Sprintf("◔ %s/%s · %d%%", humanCount(used), humanCount(window), int(ratio*100+0.5)))
+	return int(ratio*100 + 0.5), used, window, style, true
+}
+
+// contextWindowSegment renders the status-line context-fill gauge as
+// "◔ used/window · NN%", graded by contextFillPercent.
+func (m model) contextWindowSegment() string {
+	pct, used, window, style, ok := m.contextFillPercent()
+	if !ok {
+		return ""
+	}
+	return style.Render(fmt.Sprintf("◔ %s/%s · %d%%", humanCount(used), humanCount(window), pct))
 }
 
 // humanCount renders a token count the way the status line wants it: 999,

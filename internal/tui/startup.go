@@ -38,7 +38,7 @@ const emptyStateTagline = "Any model. Every tool. Zero limits."
 // emptyState renders the centered stream-area block shown while the
 // transcript has no real content: the brand glyph and tagline.
 func (m model) emptyState(width int) string {
-	lines := emptyStateLines(width)
+	lines := m.emptyStateLines(width)
 
 	// Vertically center within the stream area: the frame around it (title bar,
 	// rules, composer, status line) occupies ~6 terminal rows.
@@ -63,21 +63,52 @@ func (m model) emptyStateWithOverlay(width int, overlay string) string {
 	return strings.Repeat("\n", gap) + strings.Join(lines, "\n") + strings.Repeat("\n", gap)
 }
 
-func emptyStateLines(width int) []string {
+func (m model) emptyStateLines(width int) []string {
 	lines := []string{}
 	for _, glyph := range zeroWordmarkLines() {
 		lines = append(lines, centerLine(glyph, width))
 	}
 	lines = append(lines, "")
 	lines = append(lines, centerLine(zeroTheme.muted.Render(emptyStateTagline), width))
+	// Orientation: where ZERO is pointed (cwd · branch · model) so a returning user
+	// sees the context before typing instead of a blank brand screen.
+	if orient := m.emptyStateOrientation(); orient != "" {
+		lines = append(lines, "")
+		lines = append(lines, centerLine(orient, width))
+	}
+	// A couple of example prompts to seed the first message.
+	lines = append(lines, "")
+	lines = append(lines, centerLine(zeroTheme.faint.Render(emptyStateExamples), width))
 	lines = append(lines, "")
 	lines = append(lines, centerLine(zeroTheme.faint.Render("Press ? for keyboard shortcuts · / for commands"), width))
-	// centerLine pads but never truncates; below ~62 cols the tagline would
-	// exceed the frame without this fit.
+	// centerLine pads but never truncates; below ~62 cols the lines would exceed
+	// the frame without this fit.
 	for index := range lines {
 		lines[index] = fitStyledLine(lines[index], width)
 	}
 	return lines
+}
+
+// emptyStateExamples seeds the first prompt with a few representative asks.
+const emptyStateExamples = `Try  "explain this codebase"  ·  "fix the failing test"  ·  "add a --json flag"`
+
+// emptyStateOrientation renders a faint "cwd · branch · model" line for the home
+// screen, omitting any piece that's unknown. Empty when nothing is known.
+func (m model) emptyStateOrientation() string {
+	parts := make([]string, 0, 3)
+	if cwd := strings.TrimSpace(m.cwd); cwd != "" {
+		parts = append(parts, shortenPath(cwd))
+	}
+	if branch := strings.TrimSpace(m.gitBranch); branch != "" {
+		parts = append(parts, branch)
+	}
+	if model := strings.TrimSpace(m.modelName); model != "" {
+		parts = append(parts, model)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return zeroTheme.faint.Render(strings.Join(parts, "  ·  "))
 }
 
 func zeroWordmarkLines() []string {

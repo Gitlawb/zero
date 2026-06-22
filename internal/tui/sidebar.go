@@ -14,6 +14,7 @@ import (
 	"image/color"
 	"regexp"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -37,15 +38,29 @@ func sidebarWidth(total int) int {
 	return clamp(total*30/100, sidebarMinWidth, sidebarMaxWidth)
 }
 
-// sidebarActive reports whether the two-column layout should render: only in
-// alt-screen managed mode, with a measured height, on a wide-enough terminal.
-// The subchat drill-in keeps its own single-column view, so the sidebar is
-// suppressed there.
+// sidebarActive reports whether the two-column layout should render right now:
+// the sidebar is available AND the user hasn't collapsed it with Ctrl+B.
 func (m model) sidebarActive() bool {
+	return !m.sidebarHidden && m.sidebarAvailable()
+}
+
+// sidebarAvailable reports whether the two-column layout CAN render: only in
+// alt-screen managed mode, with a measured height, on a wide-enough terminal,
+// outside subchat/overlays, with real conversation. It ignores the user's Ctrl+B
+// hide preference (sidebarHidden) so the toggle handler can tell whether Ctrl+B
+// would have any visible effect. The subchat drill-in keeps its own single-column
+// view, so the sidebar is suppressed there.
+func (m model) sidebarAvailable() bool {
 	if !m.altScreen || m.height <= 0 || m.subchat.active {
 		return false
 	}
 	if sidebarWidth(m.width) <= 0 {
+		return false
+	}
+	// Only split once the chat column survives it: require the medium tier (>=80
+	// cols). Between 60-79 the sidebar would starve the chat to ~30 cells, so the
+	// layout commits to two healthy columns or stays cleanly single-column.
+	if widthTier(m.width) < tierMedium {
 		return false
 	}
 	// Full-screen overlays (setup, wizards, pickers, the empty-state suggestion
@@ -71,7 +86,9 @@ func (m model) sidebarActive() bool {
 // agree on where the chat column ends.
 func (m model) chatColumnWidth() int {
 	if sw := m.sidebarWidthForLayout(); sw > 0 {
-		return chatWidth(m.width - sw - 1)
+		// Reserve 3 cells for the padded " │ " divider (a cell of air on each side
+		// of the rule) — see joinColumns.
+		return chatWidth(m.width - sw - 3)
 	}
 	return chatWidth(m.width)
 }
@@ -98,6 +115,12 @@ func (m model) sidebarSpecialists() []specialistInfo {
 		if a.status == specialistError && strings.Contains(strings.ToLower(a.errorMsg), "not found") {
 			continue
 		}
+		// Linger a finished specialist for sidebarAgentLinger (a fading ✓), then
+		// drop it — a smooth exit rather than an abrupt pop.
+		if a.status != specialistRunning && !a.completedAt.IsZero() &&
+			m.now().Sub(a.completedAt) >= sidebarAgentLinger {
+			continue
+		}
 		out = append(out, a)
 	}
 	return out
@@ -122,7 +145,7 @@ func (m model) sidebarAgentHeader(width int) string {
 	if n == 0 {
 		return sidebarHeader("AGENTS", width)
 	}
-	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d", n), width)
+	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d", n), zeroTheme.muted, width)
 }
 
 // swarmSpawnRe extracts a member id from a swarm_spawn tool result, whose text
@@ -133,8 +156,10 @@ var swarmSpawnRe = regexp.MustCompile(`as task (\S+) on team`)
 // stable id recovered from the spawn result, plus a human display name derived
 // from the spawn call's task briefing (falling back to the id).
 type swarmAgent struct {
-	id   string // e.g. "subagent-1" — the dedup key and fallback name
-	name string // the task briefing (argHint of the call row), or id when empty
+	id         string    // e.g. "subagent-1" — the dedup key and fallback name
+	name       string    // the task briefing (argHint of the call row), or id when empty
+	finishing  bool      // done/failed but still lingering before removal (smooth exit)
+	finishedAt time.Time // when first seen finished (zero until the spinner tick stamps it)
 }
 
 // swarmSpawnedAgents derives the swarm/team members from the transcript's
@@ -191,15 +216,22 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 			agents = append(agents, swarmAgent{id: id, name: name})
 		}
 	}
-	// Drop members the latest swarm_status reports as finished (done/failed) so
-	// they disappear from the sidebar once their work completes. Members not yet
-	// in a status report (just spawned) stay visible.
+	// Members the latest swarm_status reports finished LINGER briefly with a fading
+	// ✓ (a smooth exit, not an abrupt pop) then drop. Members not yet in a status
+	// report (just spawned) stay live. The done-time is stamped by the spinner tick
+	// (stampSwarmDone); until then a freshly-finished member shows as finishing.
 	if status := m.swarmMemberStatus(); len(status) > 0 {
 		live := agents[:0:0]
 		for _, a := range agents {
 			switch status[a.id] {
 			case "done", "failed", "completed", "cancelled":
-				// finished — hide it
+				doneAt, stamped := m.swarmDoneAt[a.id]
+				if stamped && m.now().Sub(doneAt) >= sidebarAgentLinger {
+					continue // past the linger window — remove
+				}
+				a.finishing = true
+				a.finishedAt = doneAt
+				live = append(live, a)
 			default:
 				live = append(live, a)
 			}
@@ -232,6 +264,26 @@ func (m model) swarmMemberStatus() map[string]string {
 	return status
 }
 
+// sidebarAgentLinger is how long a finished agent (specialist or swarm member)
+// stays in the AGENTS panel with a fading ✓ before it's removed, so the exit
+// reads as "done" rather than an abrupt pop.
+const sidebarAgentLinger = 1500 * time.Millisecond
+
+// stampSwarmDone records the first time each swarm member is seen finished, so
+// swarmSpawnedAgents can linger it for sidebarAgentLinger before dropping it. It
+// only adds entries (never clears) and is called from the spinner tick while the
+// sidebar holds agents. Mutates the (always-initialised) swarmDoneAt map.
+func (m *model) stampSwarmDone() {
+	for id, s := range m.swarmMemberStatus() {
+		switch s {
+		case "done", "failed", "completed", "cancelled":
+			if _, seen := m.swarmDoneAt[id]; !seen {
+				m.swarmDoneAt[id] = m.now()
+			}
+		}
+	}
+}
+
 // sidebarAgentLines renders one line per active agent. Specialist delegations
 // show a live status glyph (• running, ✓ done, ✗ error) plus a "↳ <tool>" working
 // line; swarm/team members (from swarm_spawn) show a ready dot and their id.
@@ -248,7 +300,10 @@ func (m model) sidebarAgentLines(width int) []string {
 		var icon string
 		switch a.status {
 		case specialistRunning:
-			icon = zeroTheme.accent.Render("•")
+			// A working specialist spins (same glyph its transcript card uses) so
+			// the sidebar reads "this one is busy" at a glance; the tick is kept
+			// alive by sidebarHasAgents. Static "•" stays for idle/parked members.
+			icon = zeroTheme.accent.Render(m.spinnerGlyph())
 		case specialistError:
 			icon = zeroTheme.red.Render("✗")
 		default: // completed
@@ -258,7 +313,18 @@ func (m model) sidebarAgentLines(width int) []string {
 		if name == "" {
 			name = "agent"
 		}
-		lines = append(lines, " "+icon+" "+zeroTheme.ink.Render(truncateStep(name, room)))
+		nameStyle := zeroTheme.ink
+		// As a finished specialist nears the end of its linger, dim the whole row
+		// toward faint so its removal reads as a fade-out rather than a pop.
+		if a.status != specialistRunning && m.agentExitFading(a.completedAt) {
+			glyph := "✓"
+			if a.status == specialistError {
+				glyph = "✗"
+			}
+			icon = zeroTheme.faint.Render(glyph)
+			nameStyle = zeroTheme.faint
+		}
+		lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(name, room)))
 		if a.status != specialistRunning {
 			continue
 		}
@@ -279,13 +345,31 @@ func (m model) sidebarAgentLines(width int) []string {
 			lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
 		}
 	}
-	// Swarm/team members: the whole task-name carries a mild, slow cool pulse
-	// (NOT a per-letter ripple) so a live member reads as alive without noise.
+	// Swarm/team members: a live member's whole task-name carries a mild, slow cool
+	// pulse (NOT a per-letter ripple). A finished member instead shows a green ✓
+	// that dims toward faint over its linger — a smooth exit before removal.
 	style := m.swarmNameStyle()
 	for _, a := range swarm {
+		if a.finishing {
+			icon := zeroTheme.green.Render("✓")
+			nameStyle := zeroTheme.muted
+			if m.agentExitFading(a.finishedAt) {
+				icon = zeroTheme.faint.Render("✓")
+				nameStyle = zeroTheme.faint
+			}
+			lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(a.name, room)))
+			continue
+		}
 		lines = append(lines, " "+zeroTheme.accent.Render("•")+" "+style.Render(truncateStep(a.name, room)))
 	}
 	return lines
+}
+
+// agentExitFading reports whether a finished agent is in the later half of its
+// linger window (sidebarAgentLinger), so its row dims toward faint just before
+// it's removed. A zero finishedAt (not yet stamped) is not fading.
+func (m model) agentExitFading(finishedAt time.Time) bool {
+	return !finishedAt.IsZero() && m.now().Sub(finishedAt) >= sidebarAgentLinger/2
 }
 
 // swarmNameStyle returns a gentle, whole-line cool tint for a live swarm member
@@ -430,17 +514,20 @@ func (m model) renderContextSidebar(width, height int) []string {
 	return lines
 }
 
-// sidebarHeader renders an uppercase faint section header with an optional
-// right-aligned suffix (used for the PLAN N/M count).
-func sidebarHeader(label string, width int) string {
-	return zeroTheme.faint.Render(strings.ToUpper(label))
+// sidebarHeader renders a bold-muted uppercase section label. Bold muted (vs the
+// faint body items and placeholders) gives the header enough weight to read as a
+// section heading rather than more filler. The width arg is unused — kept so it
+// shares a signature with sidebarHeaderWithCount.
+func sidebarHeader(label string, _ int) string {
+	return zeroTheme.muted.Bold(true).Render(strings.ToUpper(label))
 }
 
-// sidebarHeaderWithCount renders a section header with a right-aligned count
-// (e.g. "PLAN   2/5"), padded to width.
-func sidebarHeaderWithCount(label, count string, width int) string {
-	left := zeroTheme.faint.Render(strings.ToUpper(label))
-	right := zeroTheme.faint.Render(count)
+// sidebarHeaderWithCount renders a bold-muted section label with a right-aligned
+// count (e.g. "PLAN   2/5") rendered in countStyle, so a section can colour its
+// count by state — accent while in-flight, green when complete.
+func sidebarHeaderWithCount(label, count string, countStyle lipgloss.Style, width int) string {
+	left := zeroTheme.muted.Bold(true).Render(strings.ToUpper(label))
+	right := countStyle.Render(count)
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		return left
@@ -466,7 +553,12 @@ func (m model) sidebarPlanHeader(width int) string {
 			done++
 		}
 	}
-	return sidebarHeaderWithCount("PLAN", fmt.Sprintf("%d/%d", done, total), width)
+	// Stateful count: green once every step is done, accent while in-flight.
+	countStyle := zeroTheme.accent
+	if done == total {
+		countStyle = zeroTheme.green
+	}
+	return sidebarHeaderWithCount("PLAN", fmt.Sprintf("%d/%d", done, total), countStyle, width)
 }
 
 // sidebarPlanLines renders the plan step list for the sidebar using the same
@@ -509,7 +601,15 @@ func (m model) sidebarTokenLine(width int) string {
 	if label == "" {
 		label = "0 tokens"
 	}
-	return " " + zeroTheme.faint.Render(truncateRunes(label, maxInt(1, width-1)))
+	// Append the graded context-fill % — the at-a-glance "how full is the window"
+	// the compaction trigger reasons about. Reserve its width so the token label
+	// truncates around it rather than overflowing.
+	chip := ""
+	if pct, _, _, style, ok := m.contextFillPercent(); ok {
+		chip = zeroTheme.faint.Render(" · ") + style.Render(fmt.Sprintf("%d%%", pct))
+	}
+	budget := maxInt(1, width-1-lipgloss.Width(chip))
+	return " " + zeroTheme.faint.Render(truncateRunes(label, budget)) + chip
 }
 
 // sidebarTokenText computes the token figure shown at the sidebar floor: the
@@ -546,7 +646,11 @@ func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string 
 	if len(sidebar) > rows {
 		rows = len(sidebar)
 	}
-	divider := zeroTheme.line.Render("│")
+	// A cell of air on each side of the rule (" │ ") so the columns don't butt
+	// flush against it. The chat side gets its gutter from the leading space; the
+	// sidebar side from the trailing space (plus items' own leading inset, which
+	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
+	divider := " " + zeroTheme.line.Render("│") + " "
 	out := make([]string, rows)
 	for i := 0; i < rows; i++ {
 		left := ""

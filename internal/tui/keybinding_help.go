@@ -50,6 +50,7 @@ var keybindingGroups = []keybindingGroup{
 			{"PgUp / PgDn", "scroll the transcript by a page"},
 			{"↑ / ↓", "scroll, or move within a popup / multi-line input"},
 			{"Ctrl+O", "toggle the detailed (full-screen) transcript"},
+			{"Ctrl+B", "hide / show the right context sidebar"},
 			{"Ctrl+E", "release the mouse to drag-select & copy text"},
 			{"Tab", "accept the autocomplete / picker selection"},
 		},

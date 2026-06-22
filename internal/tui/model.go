@@ -172,7 +172,16 @@ type model struct {
 	// hidePinnedPlan suppresses the pinned plan panel above the composer. Set on
 	// the chat-column model copy in the two-column layout, where the plan is
 	// surfaced in the context sidebar instead so it isn't shown twice.
-	hidePinnedPlan   bool
+	hidePinnedPlan bool
+	// sidebarHidden is the user's Ctrl+B preference to collapse the right context
+	// sidebar; when set, the chat reflows to full width. Distinct from the
+	// availability conditions in sidebarAvailable (geometry / mode / overlays).
+	sidebarHidden bool
+	// swarmDoneAt records when each swarm member was first seen finished (done/
+	// failed) in a swarm_status report, so the sidebar can linger it briefly with a
+	// fading ✓ before dropping it (a smooth exit, not an abrupt pop). Stamped in the
+	// spinner tick; keyed by member id. Always non-nil (initialised in newModel).
+	swarmDoneAt      map[string]time.Time
 	now              func() time.Time
 	chatScrollOffset int
 	// chatBodyLines is the live body's line count at the last update; used to pin
@@ -544,6 +553,7 @@ func newModel(ctx context.Context, options Options) model {
 	m := model{
 		ctx:                    ctx,
 		cwd:                    cwd,
+		swarmDoneAt:            map[string]time.Time{},
 		userCommands:           loadedUserCommands,
 		composerCursorVisible:  true,
 		userConfigPath:         options.UserConfigPath,
@@ -1011,6 +1021,23 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.plan.expanded = !m.plan.expanded
 				return m, nil
 			}
+		case keyCtrl(msg, 'b'):
+			// Ctrl+B collapses / restores the right context sidebar. Only acts when
+			// the sidebar would otherwise be on screen (managed mode, wide enough,
+			// real conversation) so it's a no-op — not a confusing notice — on the
+			// home screen or a narrow terminal. Hiding reflows the chat to full
+			// width, so mirror the width-change bookkeeping (re-wrap the streaming
+			// fade, resize the composer) the WindowSizeMsg path does.
+			if m.noBlockingModal() && m.sidebarAvailable() {
+				m.sidebarHidden = !m.sidebarHidden
+				m.lineAges = nil
+				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
+				notice := "Context sidebar shown · Ctrl+B to hide"
+				if m.sidebarHidden {
+					notice = "Context sidebar hidden · Ctrl+B to show"
+				}
+				return m.appendSystemNotice(notice), nil
+			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -1254,6 +1281,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingReasoning += msg.delta
 		return m, nil
 	case spinner.TickMsg:
+		// Record when swarm members first finish so the sidebar can linger them
+		// with a fading ✓ before removal. Cheap (the tick only fires while a run is
+		// in flight or the sidebar holds agents — exactly when this can change).
+		m.stampSwarmDone()
 		// Not forwarding the tick while idle stops the spinner's self-scheduling,
 		// so no timer fires between runs. The one exception is an active sidebar
 		// holding agents: their cool ripple animation needs the phase to keep
@@ -1792,12 +1823,16 @@ func (m model) footerView(width int) string {
 		footer.WriteString(plan)
 		footer.WriteString("\n")
 	}
+	// The row above the composer: transient copy feedback takes priority; otherwise
+	// a faint idle affordance — discoverable key hints on the left, a jump-to-bottom
+	// cue on the right when scrolled up. Always one line (blank when nothing shows),
+	// so the footer height is unchanged.
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
 		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
-		footer.WriteString("\n")
-	} else {
-		footer.WriteString("\n")
+	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
+		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
 	}
+	footer.WriteString("\n")
 	footer.WriteString(m.composerBox(width))
 	if hint := m.composerDescriptionHint(width); hint != "" {
 		footer.WriteString("\n")
@@ -1810,6 +1845,43 @@ func (m model) footerView(width int) string {
 	footer.WriteString("\n")
 	footer.WriteString(m.statusLine(width))
 	return footer.String()
+}
+
+// composerIdleHint returns a faint one-line key-shortcut hint shown above the
+// composer on an empty, idle prompt, so the chord bindings are discoverable
+// without opening the ? overlay. Empty while typing, during a run, in the
+// full-screen transcript, or under any modal/overlay so it never competes for
+// attention. Width-tiered so a narrow terminal only shows the essential pointer.
+func (m model) composerIdleHint() string {
+	// Managed (alt-screen) mode only: inline mode prints to native scrollback where
+	// this footer row isn't a stable surface. Hidden while typing, during a run, in
+	// the full-screen transcript, or under any modal/overlay.
+	if !m.altScreen || m.pending || m.composerValue() != "" || !m.noBlockingModal() ||
+		m.subchat.active || m.suggestionsActive() || m.transcriptDetailed {
+		return ""
+	}
+	var hint string
+	switch widthTier(m.width) {
+	case tierTiny:
+		return "" // too cramped for a hint
+	case tierNarrow:
+		hint = "? shortcuts"
+	case tierMedium:
+		hint = "? shortcuts · Ctrl+B sidebar · Shift+Tab mode"
+	default:
+		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+O detail · Shift+Tab mode"
+	}
+	return zeroTheme.faint.Render(hint)
+}
+
+// jumpToBottomHint returns a faint "↓ N more · PgDn" cue when the transcript is
+// scrolled up (chatScrollOffset counts lines below the fold), so it's clear new
+// output may be below and how to catch up. Empty at the bottom.
+func (m model) jumpToBottomHint() string {
+	if m.chatScrollOffset <= 0 {
+		return ""
+	}
+	return zeroTheme.faint.Render(fmt.Sprintf("↓ %d more · PgDn", m.chatScrollOffset))
 }
 
 // pinnedPlanMaxHeight is the line budget for the pinned plan panel: at most a
@@ -2186,7 +2258,7 @@ func (m model) interimBlock(width int) string {
 		// branch keep rendering identically to before.
 		lines[index] = m.styleStreamingLine(line, index, len(lines))
 	}
-	lines = appendStreamingCursor(lines, width)
+	lines = m.appendStreamingCursor(lines, width)
 	blocks = append(blocks, strings.Join(lines, "\n"))
 	// Live preview of a file currently being written, so a long write_file/edit
 	// shows the code streaming in rather than looking frozen.
@@ -2288,8 +2360,14 @@ func previewTail(s string, width int) string {
 	return "…" + string(runes[len(runes)-(width-1):])
 }
 
-func appendStreamingCursor(lines []string, width int) []string {
+func (m model) appendStreamingCursor(lines []string, width int) []string {
+	// Pulse the caret on the shared spinner clock so the typing edge reads as alive
+	// even during fade-tick gaps or upstream stalls. Width-stable (bright ↔ dim,
+	// never on/off, so the line never jitters). Steady bright under reduced motion.
 	cursor := zeroTheme.accent.Render("▌")
+	if !m.reducedMotion && (m.spinnerPhase/6)%2 == 1 {
+		cursor = zeroTheme.faint.Render("▌")
+	}
 	if len(lines) == 0 {
 		return []string{cursor}
 	}

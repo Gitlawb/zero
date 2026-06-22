@@ -42,7 +42,6 @@ type tuiTheme struct {
 	toolName   lipgloss.Style // head-row tool name, ink bold
 	toolTarget lipgloss.Style // head-row target path, muted
 	toolArg    lipgloss.Style // one-line arg hint, faintest
-	autoTag    lipgloss.Style // `auto` auto-approval marker, amber
 	cardRun    lipgloss.Style // card border while the call runs (accent-mixed)
 	cardErr    lipgloss.Style // card border after an error (red-mixed)
 	bashPrompt lipgloss.Style // ❯ command gutter inside bash cards, accent bold
@@ -135,9 +134,9 @@ var darkPalette = palette{
 	line:      "#242429",
 	line2:     "#414147",
 	ink:       "#ececee",
-	muted:     "#8b8b93",
-	faint:     "#838389",
-	faintest:  "#7c7c82",
+	muted:     "#9a9aa2", // secondary text — lifted so it clearly out-ranks faint
+	faint:     "#8a8a92", // hints/metadata — nudged up to separate from faintest
+	faintest:  "#7c7c82", // line numbers/separators — pinned at the WCAG-AA floor on the dark panel
 	accent:    "#caff3f",
 	green:     "#5dd1a4",
 	red:       "#ff7a7a",
@@ -169,9 +168,9 @@ var lightPalette = palette{
 	line:      "#cfcfd5", // default borders
 	line2:     "#b0b0b8", // emphasized borders
 	ink:       "#1b1b1d", // primary text (near-black)
-	muted:     "#54545b", // secondary text
-	faint:     "#5b5b62", // hints, metadata
-	faintest:  "#646469", // line numbers, separators
+	muted:     "#4a4a52", // secondary text — darkened so it clearly out-ranks faint on light
+	faint:     "#57575f", // hints, metadata — nudged down to separate from faintest
+	faintest:  "#646469", // line numbers, separators — pinned at the WCAG-AA floor on the light panel
 	accent:    "#477006", // brand lime, darkened to AA contrast on light
 	green:     "#1c7a4a", // success / diff add
 	red:       "#c0322c", // errors / diff del
@@ -220,7 +219,6 @@ func buildTheme(p palette) tuiTheme {
 		toolName:   fg(p.ink).Bold(true),
 		toolTarget: fg(p.muted),
 		toolArg:    fg(p.faintest),
-		autoTag:    fg(p.amber),
 		cardRun:    fg(p.cardRun),
 		cardErr:    fg(p.cardErr),
 		bashPrompt: fg(p.accent).Bold(true),
@@ -246,8 +244,11 @@ func buildTheme(p palette) tuiTheme {
 		panel:           lipgloss.NewStyle().Background(col(p.panel)),
 		userPromptPanel: lipgloss.NewStyle().Background(col(p.promptBg)),
 
-		modeAuto:   fg(p.green).Bold(true),
-		modeAsk:    fg(p.amber).Bold(true),
+		modeAuto: fg(p.green).Bold(true),
+		// The steady "ask" footer label is calm (un-bolded) so it doesn't compete
+		// with the transient bold-amber permission badge (permBadge) shown when a
+		// tool is actually asking right now — a glance separates state from event.
+		modeAsk:    fg(p.amber),
 		modeUnsafe: fg(p.red).Bold(true),
 
 		accentColor: col(p.accent),

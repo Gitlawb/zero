@@ -70,12 +70,21 @@ func TestWidthTierSegments(t *testing.T) {
 		}
 
 		status := plainRender(t, m.statusLine(tc.width))
-		if strings.Contains(status, "interactive") || strings.Contains(status, "claude-sonnet-4.5") || strings.Contains(status, "auto-approve") {
-			t.Errorf("width %d: status should not include surface, model, or permission mode (%q)", tc.width, status)
+		// Status line now carries the run-state chip (permission mode), NOT the
+		// surface or model (those live in the title bar / composer rule).
+		if strings.Contains(status, "interactive") || strings.Contains(status, "claude-sonnet-4.5") {
+			t.Errorf("width %d: status should not include surface or model (%q)", tc.width, status)
+		}
+		if !strings.Contains(status, "auto-approve") {
+			t.Errorf("width %d: status should show the permission mode (%q)", tc.width, status)
 		}
 		divider := plainRender(t, m.composerDividerLine(tc.width))
-		if !strings.Contains(divider, "claude-sonnet-4.5") || !strings.Contains(divider, "auto-approve") {
-			t.Errorf("width %d: composer divider must keep model and mode labels (%q)", tc.width, divider)
+		// The composer rule is model-only now; mode/effort moved to the status line.
+		if !strings.Contains(divider, "claude-sonnet-4.5") {
+			t.Errorf("width %d: composer divider must keep the model label (%q)", tc.width, divider)
+		}
+		if strings.Contains(divider, "auto-approve") {
+			t.Errorf("width %d: composer divider should no longer show the mode (%q)", tc.width, divider)
 		}
 	}
 }
@@ -85,15 +94,20 @@ func TestTinyTierSingleSegmentAndRailLessCards(t *testing.T) {
 	m.width, m.height = 40, 20
 
 	status := plainRender(t, m.statusLine(40))
-	if !strings.Contains(status, "anthropic") {
-		t.Fatalf("tiny status = %q, want provider status", status)
+	// Tiny status shows the permission-mode chip (the safety-relevant run-state),
+	// not the provider or model.
+	if !strings.Contains(status, "auto-approve") {
+		t.Fatalf("tiny status = %q, want the permission-mode chip", status)
 	}
-	if strings.Contains(status, "claude-sonnet-4.5") || strings.Contains(status, "auto-approve") {
-		t.Fatalf("tiny status = %q, want provider only", status)
+	if strings.Contains(status, "anthropic") || strings.Contains(status, "claude-sonnet-4.5") {
+		t.Fatalf("tiny status = %q, want mode only (no provider/model)", status)
 	}
 	divider := plainRender(t, m.composerDividerLine(40))
-	if !strings.Contains(divider, "claude-sonnet-4.5") || !strings.Contains(divider, "auto-approve") {
-		t.Fatalf("tiny composer divider = %q, want model and mode labels", divider)
+	if !strings.Contains(divider, "claude-sonnet-4.5") {
+		t.Fatalf("tiny composer divider = %q, want the model label", divider)
+	}
+	if strings.Contains(divider, "auto-approve") {
+		t.Fatalf("tiny composer divider = %q, mode should have moved to the status line", divider)
 	}
 
 	row := transcriptRow{kind: rowToolResult, id: "c", tool: "grep", status: tools.StatusOK, detail: "a.go:1: x"}
@@ -131,16 +145,16 @@ func TestTitleBarKeepsWorkspaceWithLongBranchAndModel(t *testing.T) {
 
 func TestComposerDividerRendersMetaAtExactFit(t *testing.T) {
 	m := newModel(context.Background(), Options{
-		ModelName:      "m",
+		ModelName:      "gpt-4o",
 		PermissionMode: agent.PermissionModeAsk,
 	})
-	label, style := m.modeLabel()
-	meta := zeroTheme.muted.Render("m") + zeroTheme.muted.Render(" · ") + style.Render(label)
+	// The divider meta is model-only now (mode/effort moved to the status line).
+	meta := zeroTheme.muted.Render("gpt-4o")
 	width := lipgloss.Width(meta) + 4
 
 	got := plainRender(t, m.composerDividerLine(width))
-	if !strings.Contains(got, "m") || !strings.Contains(got, label) {
-		t.Fatalf("exact-fit composer divider = %q, want metadata", got)
+	if !strings.Contains(got, "gpt-4o") {
+		t.Fatalf("exact-fit composer divider = %q, want the model label", got)
 	}
 }
 

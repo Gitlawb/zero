@@ -1,12 +1,13 @@
 // ripple.go adds a slow cosine "breathing" colour wave for the working status
-// line: each character cycles through a cold-to-warm ramp of the curated theme
-// styles, and the wave travels across the text one character per phase tick. The
+// line: each character cycles through a dim→lime ramp blended from the brand
+// accent, and the wave travels across the text one character per phase tick. The
 // phase is sourced from the shared spinner clock (m.spinnerPhase, advanced by the
 // existing spinner.TickMsg handler) so the ripple and the braille spinner animate
 // in lock-step with no extra ticker.
 package tui
 
 import (
+	"image/color"
 	"math"
 	"strings"
 
@@ -86,11 +87,21 @@ func rippleText(text string, palette []lipgloss.Style, phase, waveLen int) strin
 // reflected. No hex literal appears here — every entry is a named theme style
 // (theme.go), satisfying the repo's no-hex-outside-theme rule.
 func ripplePalette() []lipgloss.Style {
-	return []lipgloss.Style{
-		zeroTheme.faint,  // dimmest (cosine trough)
-		zeroTheme.muted,  // dim
-		zeroTheme.amber,  // mid (warm)
-		zeroTheme.green,  // bright
-		zeroTheme.accent, // brightest (cosine peak)
+	// A dim→lime ramp blended from the brand accent — deliberately NOT the semantic
+	// amber (permission) / green (success) hues. Flashing those every spinner tick
+	// trains the eye to ignore the exact colours that signal a real permission
+	// prompt or a success, so the decorative working line stays in the brand lime.
+	// Falls back to a coarse named ramp if the theme has no parseable accent/faint.
+	bright := zeroTheme.accent.GetForeground()
+	dim := zeroTheme.faint.GetForeground()
+	if bright == nil || dim == nil {
+		return []lipgloss.Style{zeroTheme.faint, zeroTheme.muted, zeroTheme.accent}
 	}
+	blend := lipgloss.Blend1D(5, dim, bright)
+	out := make([]lipgloss.Style, len(blend))
+	for i, c := range blend {
+		r, g, b, a := c.RGBA()
+		out[i] = lipgloss.NewStyle().Foreground(color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)})
+	}
+	return out
 }

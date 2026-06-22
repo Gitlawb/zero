@@ -998,15 +998,20 @@ func TestComposerLineShowsRequiredCommandArgumentHint(t *testing.T) {
 	}
 }
 
-func TestComposerBoxFramesInputAndBottomModelModeLabel(t *testing.T) {
+func TestComposerBoxFramesInputAndBottomModelLabel(t *testing.T) {
 	m := limeTestModel()
 	m.input.SetValue("add a flag")
 
 	got := plainRender(t, m.composerBox(96))
-	for _, want := range []string{"╭", "│", "❯ add a flag", "╰", "test-model", "auto-approve"} {
+	// The box bottom rule shows the model only; the permission mode moved to the
+	// status line below the box.
+	for _, want := range []string{"╭", "│", "❯ add a flag", "╰", "test-model"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("composer box = %q, missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, "auto-approve") {
+		t.Fatalf("composer box = %q, should not show the mode (moved to status line)", got)
 	}
 	if strings.Contains(got, "run ↵") {
 		t.Fatalf("composer box = %q, should not show run hint", got)
@@ -1080,39 +1085,39 @@ func TestMalformedToolArgumentResultIsHiddenFromChatSurface(t *testing.T) {
 func TestStatusLineGroups(t *testing.T) {
 	m := limeTestModel()
 	got := plainRender(t, m.statusLine(110))
-	for _, want := range []string{"● test-provider"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("status line = %q, missing %q", got, want)
-		}
+	// Status line shows the run-state chip (permission mode), NOT the provider,
+	// surface, or model — those live in the title bar / composer rule.
+	if !strings.Contains(got, "● auto-approve") {
+		t.Fatalf("status line = %q, missing the permission-mode chip", got)
 	}
-	if strings.Contains(got, "interactive") || strings.Contains(got, "test-model") || strings.Contains(got, "auto-approve") {
-		t.Fatalf("status line = %q, should not include surface, model, or permission mode", got)
+	if strings.Contains(got, "interactive") || strings.Contains(got, "test-model") || strings.Contains(got, "test-provider") {
+		t.Fatalf("status line = %q, should not include surface, model, or provider", got)
 	}
 	divider := plainRender(t, m.composerDividerLine(110))
-	for _, want := range []string{"test-model", "auto-approve"} {
-		if !strings.Contains(divider, want) {
-			t.Fatalf("composer divider = %q, missing %q", divider, want)
-		}
+	if !strings.Contains(divider, "test-model") {
+		t.Fatalf("composer divider = %q, missing the model label", divider)
+	}
+	if strings.Contains(divider, "auto-approve") {
+		t.Fatalf("composer divider = %q, should not show the mode (moved to status line)", divider)
 	}
 }
 
-func TestComposerDividerShowsEffortWhenSet(t *testing.T) {
+func TestStatusLineShowsEffortWhenSet(t *testing.T) {
 	m := limeTestModel()
 	m.reasoningEffort = modelregistry.ReasoningEffortHigh
-	divider := plainRender(t, m.composerDividerLine(110))
-	if !strings.Contains(divider, "high") {
-		t.Fatalf("composer divider = %q, missing effort segment when set", divider)
+	status := plainRender(t, m.statusLine(110))
+	if !strings.Contains(status, "high") {
+		t.Fatalf("status line = %q, missing effort segment when set", status)
 	}
 }
 
-func TestComposerDividerOmitsEffortWhenAuto(t *testing.T) {
+func TestStatusLineOmitsEffortWhenAuto(t *testing.T) {
 	m := limeTestModel()
-	// reasoningEffort == "" (auto) by default — the segment is omitted entirely,
-	// matching opencode hiding the variant when unset.
-	divider := plainRender(t, m.composerDividerLine(110))
+	// reasoningEffort == "" (auto) by default — the effort segment is omitted.
+	status := plainRender(t, m.statusLine(110))
 	for _, effort := range []string{"low", "medium", "high", "minimal", "xhigh", "none"} {
-		if strings.Contains(divider, effort) {
-			t.Fatalf("composer divider = %q, should omit effort segment when auto", divider)
+		if strings.Contains(status, effort) {
+			t.Fatalf("status line = %q, should omit effort segment when auto", status)
 		}
 	}
 }
@@ -1171,17 +1176,14 @@ func TestGenericCustomProviderDisplayUsesEndpointName(t *testing.T) {
 		},
 	})
 
+	// The derived provider label lives in the title bar (no longer duplicated in
+	// the status line, which now shows the run-state chip instead).
 	title := plainRender(t, m.titleBar(120))
 	if !strings.Contains(title, "minimax/MiniMax-M3") {
 		t.Fatalf("title bar = %q, want derived custom provider label", title)
 	}
 	if strings.Contains(title, "custom-openai-compatible/MiniMax-M3") {
 		t.Fatalf("title bar = %q, should not show generic custom catalog id", title)
-	}
-
-	status := plainRender(t, m.statusLine(100))
-	if !strings.Contains(status, "● minimax") {
-		t.Fatalf("status line = %q, want derived custom provider label", status)
 	}
 }
 

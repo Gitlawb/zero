@@ -12,6 +12,7 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
@@ -1474,7 +1475,8 @@ func TestAgentEventRenderingMappingCoversRuntimeContract(t *testing.T) {
 	}
 	assertContains(t, m.usageStatusSegment(), "120 tok")
 	assertContains(t, m.composerDividerLine(96), "gpt-4.1")
-	assertContains(t, m.composerDividerLine(96), "ask")
+	// Permission mode moved from the composer rule to the status line.
+	assertContains(t, m.statusLine(96), "ask")
 }
 
 func TestToolResultRowDefaultsEmptyStatusToOK(t *testing.T) {
@@ -1666,8 +1668,10 @@ func TestCtrlCClearsComposerBeforeExitConfirmation(t *testing.T) {
 		t.Fatal("Ctrl+C with a draft should not mark model exiting")
 	}
 	status := plainRender(t, next.statusLine(80))
-	if strings.Contains(status, ctrlCExitConfirmText) || !strings.Contains(status, "tokenrouter") {
-		t.Fatalf("status line = %q, want provider restored with no exit confirmation", status)
+	// No exit confirmation armed, so the normal run-state chip shows (the status
+	// line carries the permission mode now, not the provider).
+	if strings.Contains(status, ctrlCExitConfirmText) || !strings.Contains(status, "auto-approve") {
+		t.Fatalf("status line = %q, want the run-state chip with no exit confirmation", status)
 	}
 
 	updated, cmd = next.Update(testKeyCtrl('c'))
@@ -1699,8 +1703,50 @@ func TestCtrlCExitConfirmationExpires(t *testing.T) {
 		t.Fatal("matching expiry should clear exit confirmation")
 	}
 	status := plainRender(t, next.statusLine(80))
-	if strings.Contains(status, ctrlCExitConfirmText) || !strings.Contains(status, "tokenrouter") {
-		t.Fatalf("status line after expiry = %q, want provider restored", status)
+	// After expiry the warning clears and the normal run-state chip is restored
+	// (the status line now shows the permission mode, not the provider).
+	if strings.Contains(status, ctrlCExitConfirmText) || !strings.Contains(status, "auto-approve") {
+		t.Fatalf("status line after expiry = %q, want the run-state chip restored", status)
+	}
+}
+
+func TestComposerIdleHintAndJumpCue(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.altScreen = true
+	m.width, m.height = 100, 30
+	m.transcript = append(m.transcript, transcriptRow{kind: rowAssistant, text: "hi", final: true})
+
+	// Idle, empty composer, managed mode -> the discoverability hint shows.
+	if h := plainRender(t, m.composerIdleHint()); !strings.Contains(h, "shortcuts") {
+		t.Fatalf("expected idle hint, got %q", h)
+	}
+	// Hidden during a run.
+	busy := m
+	busy.pending = true
+	if h := busy.composerIdleHint(); h != "" {
+		t.Fatalf("hint should hide during a run, got %q", h)
+	}
+	// Hidden in inline mode.
+	inline := m
+	inline.altScreen = false
+	if h := inline.composerIdleHint(); h != "" {
+		t.Fatalf("hint should hide in inline mode, got %q", h)
+	}
+	// Jump cue only when scrolled up.
+	if c := m.jumpToBottomHint(); c != "" {
+		t.Fatalf("jump cue should be empty at the bottom, got %q", c)
+	}
+	scrolled := m
+	scrolled.chatScrollOffset = 5
+	if c := plainRender(t, scrolled.jumpToBottomHint()); !strings.Contains(c, "5 more") {
+		t.Fatalf("expected jump cue with line count, got %q", c)
+	}
+	// The footer carrying the hint must never overflow its width.
+	w := m.chatColumnWidth()
+	for i, line := range strings.Split(plainRender(t, m.footerView(w)), "\n") {
+		if got := lipgloss.Width(line); got > w {
+			t.Fatalf("footer line %d width %d > %d: %q", i, got, w, line)
+		}
 	}
 }
 

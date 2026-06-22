@@ -68,13 +68,39 @@ func TestSidebarActiveGating(t *testing.T) {
 	}
 }
 
+func TestSidebarToggleHidesAndShows(t *testing.T) {
+	m := sidebarTestModel()
+	if !m.sidebarActive() || !m.sidebarAvailable() {
+		t.Fatal("sidebar should be active and available for the test model")
+	}
+
+	// Ctrl+B hide preference suppresses the sidebar even though it's available.
+	m.sidebarHidden = true
+	if m.sidebarActive() {
+		t.Fatal("sidebar should be inactive when hidden by the user")
+	}
+	if !m.sidebarAvailable() {
+		t.Fatal("sidebarAvailable must ignore the hide preference (so Ctrl+B can re-show)")
+	}
+	// Hidden → the chat reflows to full width.
+	if got, want := m.chatColumnWidth(), chatWidth(m.width); got != want {
+		t.Fatalf("hidden sidebar: chat width = %d, want full %d", got, want)
+	}
+
+	// Toggling back restores the two-column layout.
+	m.sidebarHidden = false
+	if !m.sidebarActive() {
+		t.Fatal("sidebar should be active again after un-hiding")
+	}
+}
+
 func TestChatColumnWidthLeavesRoomForSidebar(t *testing.T) {
 	m := sidebarTestModel()
 	chatW := m.chatColumnWidth()
 	sidebarW := sidebarWidth(m.width)
-	if chatW+1+sidebarW != m.width {
-		t.Fatalf("chat(%d) + divider(1) + sidebar(%d) = %d, want total width %d",
-			chatW, sidebarW, chatW+1+sidebarW, m.width)
+	if chatW+3+sidebarW != m.width {
+		t.Fatalf("chat(%d) + divider(3) + sidebar(%d) = %d, want total width %d",
+			chatW, sidebarW, chatW+3+sidebarW, m.width)
 	}
 
 	// When the sidebar is inactive, chat width is the full chat width.
@@ -206,8 +232,10 @@ func TestShortTaskName(t *testing.T) {
 	}
 }
 
-func TestSwarmAgentsDisappearWhenDone(t *testing.T) {
+func TestSwarmAgentsLingerThenDisappearWhenDone(t *testing.T) {
+	base := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	m := sidebarTestModel()
+	m.now = func() time.Time { return base }
 	m.transcript = append(m.transcript,
 		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "explore repo"},
 		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned teammate as task teammate-1 on team default."},
@@ -217,14 +245,36 @@ func TestSwarmAgentsDisappearWhenDone(t *testing.T) {
 	if got := len(m.swarmSpawnedAgents()); got != 2 {
 		t.Fatalf("expected 2 live members before any status report, got %d", got)
 	}
-	// A swarm_status marking teammate-1 done drops it; teammate-2 stays.
+	// teammate-1 reported done, teammate-2 still running.
 	m.transcript = append(m.transcript, transcriptRow{
 		kind: rowToolResult, tool: "swarm_status",
 		detail: "Swarm status (team default): 2 task(s)\n– teammate-1 [done] (cyan) explore repo\n– teammate-2 [running] (blue) review branch",
 	})
+	// Freshly done (not yet stamped by the tick): teammate-1 LINGERS (finishing).
 	agents := m.swarmSpawnedAgents()
+	if len(agents) != 2 {
+		t.Fatalf("a freshly-done member should linger, got %d: %+v", len(agents), agents)
+	}
+	var done *swarmAgent
+	for i := range agents {
+		if agents[i].id == "teammate-1" {
+			done = &agents[i]
+		}
+	}
+	if done == nil || !done.finishing {
+		t.Fatalf("teammate-1 should be finishing (lingering), got %+v", agents)
+	}
+
+	// The spinner tick stamps the done time; once the linger window elapses the
+	// member is removed.
+	m.stampSwarmDone()
+	if _, ok := m.swarmDoneAt["teammate-1"]; !ok {
+		t.Fatal("stampSwarmDone should record the finished member")
+	}
+	m.swarmDoneAt["teammate-1"] = base.Add(-2 * sidebarAgentLinger) // past the window
+	agents = m.swarmSpawnedAgents()
 	if len(agents) != 1 || agents[0].id != "teammate-2" {
-		t.Fatalf("the done member should disappear; want only teammate-2, got %+v", agents)
+		t.Fatalf("after the linger the done member should be gone; got %+v", agents)
 	}
 }
 
@@ -279,7 +329,7 @@ func TestJoinColumnsAligns(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("joined %d rows, want max(3,2)=3", len(rows))
 	}
-	want := chatW + 1 + sidebarW
+	want := chatW + 3 + sidebarW // " │ " padded divider
 	for i, row := range rows {
 		if w := lipgloss.Width(row); w != want {
 			t.Fatalf("row %d width = %d, want %d", i, w, want)
