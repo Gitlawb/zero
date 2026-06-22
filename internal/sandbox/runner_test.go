@@ -231,6 +231,37 @@ func TestSandboxExecProfileIncludesExtraWriteRoots(t *testing.T) {
 	}
 }
 
+func TestSeatbeltProfileGrantsAncestorMetadataForTraversal(t *testing.T) {
+	// A deeply-nested workspace: the (subpath …) read filter grants the root and
+	// its descendants but not its parents, so resolving `cd /Users/me/proj/app`
+	// must stat /Users, /Users/me, /Users/me/proj — none of which are granted by
+	// the subpath alone. Seatbelt then denies the chdir and reports the misleading
+	// "Not a directory". The path-ancestors metadata grant fixes the traversal.
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:                 FileSystemRestricted,
+			ReadRoots:            []string{"/Users/me/proj/app"},
+			WriteRoots:           []WritableRoot{{Root: "/Users/me/proj/app"}},
+			IncludePlatformRoots: true,
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	sbpl := seatbeltProfileFromPermissionProfile(profile, Policy{Mode: ModeEnforce}, "")
+	if !strings.Contains(sbpl, "(allow file-read-metadata file-test-existence") {
+		t.Fatalf("profile missing ancestor metadata rule:\n%s", sbpl)
+	}
+	if !strings.Contains(sbpl, `(path-ancestors "/Users/me/proj/app")`) {
+		t.Fatalf("profile missing path-ancestors for the workspace read root:\n%s", sbpl)
+	}
+	// Metadata only — the ancestors must NOT get a content-read (subpath) grant.
+	if strings.Contains(sbpl, `file-read-data`) && strings.Contains(sbpl, `(path-ancestors`) {
+		// guard against a future change that widens the ancestor grant to data
+		if strings.Contains(sbpl, `file-read* file-test-existence file-read-data`) {
+			t.Fatalf("ancestor grant must stay metadata-only:\n%s", sbpl)
+		}
+	}
+}
+
 func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{

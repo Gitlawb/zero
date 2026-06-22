@@ -598,7 +598,36 @@ func seatbeltReadRule(fs FileSystemPolicy) string {
 	if len(filters) == 0 {
 		return ""
 	}
-	return "(allow file-read* file-test-existence\n  " + strings.Join(filters, "\n  ") + ")"
+	rule := "(allow file-read* file-test-existence\n  " + strings.Join(filters, "\n  ") + ")"
+	// Grant stat/existence on the ANCESTOR chain of every granted read root so path
+	// resolution can traverse down to it. A (subpath "/a/b/ws") filter grants the
+	// root and its descendants but NOT its parents (/a, /a/b), so resolving an
+	// absolute path like `cd /a/b/ws` (or any path the kernel canonicalises) is
+	// denied at the first ungranted parent — and macOS seatbelt surfaces that
+	// denial as the misleading "cd: …: Not a directory" (ENOTDIR), not a clear
+	// permission error. This is metadata only: ancestor directory *contents* stay
+	// unreadable. Platform roots are top-level or already covered, so this only
+	// needs the dynamic read roots (workspace, write roots, granted dirs).
+	if ancestors := seatbeltAncestorMetadataRule(fs.ReadRoots); ancestors != "" {
+		rule += "\n" + ancestors
+	}
+	return rule
+}
+
+// seatbeltAncestorMetadataRule allows stat/test-existence on the ancestor
+// directories of each root via the path-ancestors filter, so chdir and
+// absolute-path resolution can traverse to a deeply-nested granted root.
+func seatbeltAncestorMetadataRule(roots []string) string {
+	filters := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if root = strings.TrimSpace(root); root != "" {
+			filters = append(filters, `(path-ancestors "`+sandboxProfileString(root)+`")`)
+		}
+	}
+	if len(filters) == 0 {
+		return ""
+	}
+	return "(allow file-read-metadata file-test-existence\n  " + strings.Join(filters, "\n  ") + ")"
 }
 
 func seatbeltWriteRule(fs FileSystemPolicy) string {
