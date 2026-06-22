@@ -495,7 +495,18 @@ func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, wi
 	if rendered == "" {
 		return "", nil
 	}
-	selectable := []transcriptSelectableLine{{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}}
+	// The first rendered line is the clickable toggle header; carry its text so a
+	// selection dragged through it copies the label too (the toggle flag still
+	// expands/collapses on a direct click, resolved on press before selection).
+	allLines := viewLines(rendered)
+	header := transcriptSelectableLine{bodyY: startBodyY, rowIndex: rowIndex, toggle: true}
+	if len(allLines) > 0 {
+		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY, allLines[0], false); ok {
+			header.text = meta.text
+			header.textStart = meta.textStart
+		}
+	}
+	selectable := []transcriptSelectableLine{header}
 	selectable = append(selectable, selectableLinesFromRendered(rowIndex, rendered, startBodyY, 1)...)
 	if !m.transcriptSelection.active {
 		return rendered, selectable
@@ -594,7 +605,10 @@ func (m model) renderRenderedSelection(rendered string, selectable []transcriptS
 	}
 	byY := make(map[int]transcriptSelectableLine, len(selectable))
 	for _, line := range selectable {
-		if line.text == "" || line.toggle || line.permOption || line.specialistCard {
+		// Toggle headers and specialist cards now carry text, so a selection
+		// dragged through them highlights and copies their content. Empty lines and
+		// permission buttons (no copyable content) stay excluded.
+		if line.text == "" || line.permOption {
 			continue
 		}
 		byY[line.bodyY] = line
@@ -635,14 +649,23 @@ func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, wi
 		return "", nil
 	}
 	lines := viewLines(rendered)
+	boxed := renderedLinesHaveBoxBorder(lines)
 	selectable := make([]transcriptSelectableLine, len(lines))
 	for i := range lines {
-		selectable[i] = transcriptSelectableLine{
+		sl := transcriptSelectableLine{
 			bodyY:          startBodyY + i,
 			rowIndex:       rowIndex,
 			specialistCard: true,
 			specialistID:   row.specialistInfo.childSessionID,
 		}
+		// Carry the line's plain text + start so a selection dragged THROUGH the
+		// card copies its content; the specialistCard flag still makes a direct
+		// click drill into the sub-session (handled on press, before selection).
+		if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY+i, lines[i], boxed); ok {
+			sl.text = meta.text
+			sl.textStart = meta.textStart
+		}
+		selectable[i] = sl
 	}
 	return rendered, selectable
 }

@@ -1867,9 +1867,9 @@ func (m model) composerIdleHint() string {
 	case tierNarrow:
 		hint = "? shortcuts"
 	case tierMedium:
-		hint = "? shortcuts · Ctrl+B sidebar · Shift+Tab mode"
+		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+E copy"
 	default:
-		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+O detail · Shift+Tab mode"
+		hint = "? shortcuts · Ctrl+B sidebar · Ctrl+O detail · Ctrl+E copy · Shift+Tab mode"
 	}
 	return zeroTheme.faint.Render(hint)
 }

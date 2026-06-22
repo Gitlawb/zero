@@ -1710,6 +1710,44 @@ func TestCtrlCExitConfirmationExpires(t *testing.T) {
 	}
 }
 
+func TestRunCancelledRendersPlainColoredLineNotBox(t *testing.T) {
+	got := plainRender(t, renderSystemNote("Run cancelled.", 80))
+	if strings.ContainsAny(got, "│╭╮╰╯") {
+		t.Fatalf("cancellation should be a plain line, not a box: %q", got)
+	}
+	if !strings.Contains(got, "Run cancelled.") {
+		t.Fatalf("cancellation text missing: %q", got)
+	}
+	// A regular system notice keeps the bordered box.
+	if boxed := plainRender(t, renderSystemNote("Mode set to ask.", 80)); !strings.Contains(boxed, "│") {
+		t.Fatalf("regular notice should stay boxed: %q", boxed)
+	}
+}
+
+func TestSpecialistCardLinesAreSelectableForCopy(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
+	m.width = 120
+	row := transcriptRow{kind: rowSpecialist, specialistInfo: &specialistInfo{
+		name: "explorer", description: "audit the code", status: specialistCompleted, childSessionID: "sess-x",
+	}}
+	rendered, selectable := m.renderSelectableSpecialistRow(0, row, 100, buildRowContext(nil), 0)
+	if rendered == "" || len(selectable) == 0 {
+		t.Fatal("expected a rendered specialist card with selectable lines")
+	}
+	hasText := false
+	for _, sl := range selectable {
+		if !sl.specialistCard {
+			t.Fatalf("card line lost its specialistCard click flag: %+v", sl)
+		}
+		if sl.text != "" {
+			hasText = true
+		}
+	}
+	if !hasText {
+		t.Fatal("specialist card lines must carry text so a dragged selection copies them")
+	}
+}
+
 func TestTranscriptReadingColumnHelpers(t *testing.T) {
 	if g := transcriptGutter(160); g != 4 {
 		t.Fatalf("wide gutter = %d, want 4", g)
