@@ -497,9 +497,11 @@ func TestSandboxExecCommandPlanUsesUniquePerPlanDenialTag(t *testing.T) {
 func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
 	profile := sandboxExecProfile([]string{"/ws"}, Policy{Mode: ModeEnforce, EnforceWorkspace: true}, "")
 
-	// Signalling own process group lets a sandboxed script kill the children it
-	// spawns; without it seatbelt denies kill() with "Operation not permitted".
-	if !strings.Contains(profile, "(allow signal (target self) (target pgrp))") {
+	// Signalling is allowed so a sandboxed command can kill the children it spawns
+	// AND user-owned processes the user asks it to terminate (e.g. a stale dev
+	// server from a previous session, in a different process group). The kernel
+	// still enforces UID ownership, so root/other-user processes stay protected.
+	if !strings.Contains(profile, "(allow signal)") {
 		t.Fatalf("profile missing signal allowance:\n%s", profile)
 	}
 	// Curated mach-lookup so keychain/opendirectory/preferences/network-config

@@ -565,11 +565,14 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		`(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))`,
 		"(allow ipc-posix-shm-read* (ipc-posix-name-prefix \"apple.cfprefs.\"))",
 		"(allow user-preference-read)",
-		// Let a sandboxed command signal itself and its own process group so scripts
-		// that spawn and kill children (e.g. `sleep 30 & kill %1`, test runners,
-		// timeouts) work. The target restriction keeps it from signalling any
-		// process outside its own group.
-		"(allow signal (target self) (target pgrp))",
+		// Let a sandboxed command send signals. This covers its own children (test
+		// runners, timeouts, `sleep 30 & kill %1`) AND user-owned processes the user
+		// asks the agent to terminate — e.g. a stale dev server left listening on a
+		// port by a previous session, which lives in a different process group and so
+		// was previously unkillable. The kernel still enforces UID ownership: a
+		// sandboxed command runs as the user, so it can only signal the user's own
+		// processes, never root's or another user's.
+		"(allow signal)",
 		sandboxMachLookupRule(),
 		seatbeltPlatformRuntimeRules(),
 		readRule,
