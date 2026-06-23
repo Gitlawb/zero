@@ -34,7 +34,14 @@ func shellGuidanceForGOOS(goos string) string {
 	if goos == "windows" {
 		return "Uses " + runtime.Syntax + " syntax on Windows; prefer cwd over cd when changing directories."
 	}
-	return "Uses " + runtime.Syntax + " syntax."
+	guidance := "Uses " + runtime.Syntax + " syntax."
+	if goos == "darwin" {
+		// `ps` is setuid root and cannot run under the macOS sandbox; `pgrep` needs a
+		// blocked system service. Point the model at the tools that DO work so it
+		// doesn't waste turns: lsof to find a process, kill to stop it.
+		guidance += " To find or stop a process, use `lsof -i :PORT` (or `lsof -nP -iTCP -sTCP:LISTEN`) for the PID then `kill <pid>`; `ps` and `pgrep` do not work under the sandbox."
+	}
+	return guidance
 }
 
 func detectShellCommandIssue(command string, goos string) *shellIssue {

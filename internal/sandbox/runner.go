@@ -553,7 +553,11 @@ func seatbeltProfileFromPermissionProfile(profile PermissionProfile, policy Poli
 		"(version 1)",
 		denyDefault,
 		"(allow process*)",
-		"(allow process-info* (target same-sandbox))",
+		// Process info for all processes so `ps`, `lsof`, `pgrep` and friends can find
+		// the processes the user asks the agent to inspect or terminate (e.g. a stale
+		// dev server). Read-only inspection; actually signalling them is governed by
+		// the signal rule below, and the kernel enforces UID ownership either way.
+		"(allow process-info*)",
 		"(allow sysctl-read)",
 		"(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))",
 		"(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))",
