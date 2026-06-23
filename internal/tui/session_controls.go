@@ -703,6 +703,8 @@ func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model,
 	if err != nil {
 		return m, []transcriptRow{{kind: rowError, text: "usage: " + err.Error()}}
 	}
+	m.lastUsage = normalized
+	m.lastUsageSeen = true
 	if _, err := m.usageTracker.Record(usage.RecordInput{
 		ModelID: modelID,
 		Usage:   runtimeUsage,
@@ -716,6 +718,16 @@ func (m model) recordUsageEvent(modelID string, event zeroruntime.Usage) (model,
 		return m, []transcriptRow{{kind: rowError, text: "usage: " + err.Error()}}
 	}
 	return m, nil
+}
+
+func (m model) latestUsageTokens(summary usage.Summary) int {
+	if m.lastUsageSeen && m.lastUsage.TotalTokens > 0 {
+		return m.lastUsage.TotalTokens
+	}
+	if summary.LastRecord != nil && summary.LastRecord.Usage.TotalTokens > 0 {
+		return summary.LastRecord.Usage.TotalTokens
+	}
+	return m.unpricedTokens
 }
 
 func isUnpricedUsageError(err error) bool {

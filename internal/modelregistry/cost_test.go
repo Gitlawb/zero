@@ -94,6 +94,33 @@ func TestRegistryCostIgnoresCachedInputWithoutCachePricing(t *testing.T) {
 	assertClose(t, cost.OutputCost, 0.03)
 }
 
+func TestRegistryCostTreatsReasoningAsOutputBreakdown(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry returned error: %v", err)
+	}
+
+	withReasoning, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
+		InputTokens:     1_000,
+		OutputTokens:    1_000,
+		ReasoningTokens: 400,
+	})
+	if err != nil {
+		t.Fatalf("EstimateCost(withReasoning) returned error: %v", err)
+	}
+	plain, err := registry.EstimateCost("gpt-4.1", zeroruntime.Usage{
+		InputTokens:  1_000,
+		OutputTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatalf("EstimateCost(plain) returned error: %v", err)
+	}
+
+	if withReasoning.OutputCost != plain.OutputCost || withReasoning.TotalCost != plain.TotalCost {
+		t.Fatalf("reasoning should be a breakdown of output cost, with=%#v plain=%#v", withReasoning, plain)
+	}
+}
+
 func TestRegistryCostSelectsTierForLongContextPricing(t *testing.T) {
 	registry, err := DefaultRegistry()
 	if err != nil {

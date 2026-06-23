@@ -288,7 +288,7 @@ func TestStreamCompletionEmitsTextUsageAndReasoningTokens(t *testing.T) {
 	want := []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "Hello"},
 		{Type: zeroruntime.StreamEventText, Content: " Zero"},
-		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 25, OutputTokens: 15, PromptTokens: 25, CompletionTokens: 15, ReasoningTokens: 3, CachedInputTokens: 7}},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 25, OutputTokens: 18, PromptTokens: 25, CompletionTokens: 18, ReasoningTokens: 3, CachedInputTokens: 7}},
 		{Type: zeroruntime.StreamEventDone},
 	}
 	if !reflect.DeepEqual(events, want) {

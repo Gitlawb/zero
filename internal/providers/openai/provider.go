@@ -310,6 +310,7 @@ func (provider *Provider) emitChunk(
 				PromptTokens:      chunk.Usage.PromptTokens,
 				CompletionTokens:  chunk.Usage.CompletionTokens,
 				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 			},
 		})
 	}

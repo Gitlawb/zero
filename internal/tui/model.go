@@ -107,6 +107,8 @@ type model struct {
 	lastCompactError      string
 	unpricedRequests      int
 	unpricedTokens        int
+	lastUsage             usage.Normalized
+	lastUsageSeen         bool
 	transcript            []transcriptRow
 	transcriptDetailed    bool
 	helpOverlay           bool // the `?` keyboard-shortcut overlay is open
@@ -164,6 +166,7 @@ type model struct {
 	// agentResponseMsg handler persists each such run's session events (only) so
 	// the checkpoints stay referenced, then removes the id.
 	flushRunIDs       map[int]string
+	liveUsageCounts   map[int]int
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
 	pendingSpecReview *pendingSpecReviewPrompt
@@ -322,6 +325,12 @@ type toolCallStreamDeltaMsg struct {
 type agentReasoningMsg struct {
 	runID int
 	delta string
+}
+
+type agentUsageMsg struct {
+	runID   int
+	modelID string
+	usage   zeroruntime.Usage
 }
 
 type agentResponseMsg struct {
@@ -595,6 +604,7 @@ func newModel(ctx context.Context, options Options) model {
 		now:                    time.Now,
 		notifier:               notifier,
 		altScreen:              options.AltScreen,
+		liveUsageCounts:        map[int]int{},
 		setup:                  newSetupState(options.Setup),
 		setupSave:              options.Setup.Save,
 	}
@@ -1404,13 +1414,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				delete(m.flushRunIDs, msg.runID)
 				// The cancelled run still consumed tokens; record them so the usage
 				// readout doesn't undercount interrupted turns.
-				for _, event := range msg.usageEvents {
+				liveUsageCount := m.liveUsageCounts[msg.runID]
+				for index, event := range msg.usageEvents {
+					if index < liveUsageCount {
+						continue
+					}
 					var usageRows []transcriptRow
 					m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
 					for _, row := range usageRows {
 						m.transcript = appendTranscriptRow(m.transcript, row)
 					}
 				}
+				delete(m.liveUsageCounts, msg.runID)
 				// Events are persisted into the session the run was recording into AT
 				// CANCEL TIME — the active session may have changed since (/resume),
 				// and writing there would contaminate its log with checkpoint payloads
@@ -1458,13 +1473,18 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		m.pendingPermission = nil
 		m.pendingAskUser = nil
-		for _, event := range msg.usageEvents {
+		liveUsageCount := m.liveUsageCounts[msg.runID]
+		for index, event := range msg.usageEvents {
+			if index < liveUsageCount {
+				continue
+			}
 			var usageRows []transcriptRow
 			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
 			for _, row := range usageRows {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
 		}
+		delete(m.liveUsageCounts, msg.runID)
 		var sessionRows []transcriptRow
 		m, sessionRows = m.appendSessionEvents(msg.sessionEvents)
 		for _, row := range sessionRows {
@@ -1544,6 +1564,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.plan.updateFromItems(msg.items, m.now())
+		return m, nil
+	case agentUsageMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		var usageRows []transcriptRow
+		m, usageRows = m.recordUsageEvent(msg.modelID, msg.usage)
+		if m.liveUsageCounts == nil {
+			m.liveUsageCounts = map[int]int{}
+		}
+		m.liveUsageCounts[msg.runID]++
+		for _, row := range usageRows {
+			m.transcript = appendTranscriptRow(m.transcript, row)
+		}
 		return m, nil
 	case specialistStartMsg:
 		if msg.runID != m.activeRunID {
@@ -3859,6 +3893,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventUsage,
 				Payload: usage.EventUsagePayload(event),
 			})
+			m.sendAgentUsage(runID, usageModelID, event)
 			if onUsage != nil {
 				onUsage(event)
 			}
@@ -3976,6 +4011,13 @@ func (m model) sendAgentReasoning(runID int, delta string) {
 		return
 	}
 	m.runtimeMessageSink(agentReasoningMsg{runID: runID, delta: delta})
+}
+
+func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage) {
+	if m.runtimeMessageSink == nil {
+		return
+	}
+	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event})
 }
 
 func toolResultRowText(result agent.ToolResult) string {

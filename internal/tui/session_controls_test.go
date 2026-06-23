@@ -628,6 +628,55 @@ func TestUsageEventsUpdateFooterAndContext(t *testing.T) {
 	}
 }
 
+func TestUsageRuntimeMessageUpdatesFooterBeforeFinalResponse(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}},
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	runtimeMessages := []tea.Msg{}
+	m := newModel(context.Background(), Options{
+		ModelName:    "gpt-4.1",
+		Provider:     provider,
+		Registry:     tools.NewRegistry(),
+		SessionStore: testSessionStore(t),
+		RuntimeMessageSink: func(msg tea.Msg) {
+			runtimeMessages = append(runtimeMessages, msg)
+		},
+	})
+	m.input.SetValue("track usage")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt to start agent run")
+	}
+	finalMsg := execCmd(cmd)
+
+	liveUsageCount := 0
+	for _, msg := range runtimeMessages {
+		if usageMsg, ok := msg.(agentUsageMsg); ok {
+			updated, _ = next.Update(usageMsg)
+			next = updated.(model)
+			liveUsageCount++
+		}
+	}
+	if liveUsageCount == 0 {
+		t.Fatalf("expected a live usage message, got %#v", runtimeMessages)
+	}
+
+	if !strings.Contains(next.usageSummaryText(), "15 tokens") {
+		t.Fatalf("expected live usage before final response, got %q", next.usageSummaryText())
+	}
+
+	updated, _ = next.Update(finalMsg)
+	next = updated.(model)
+	summary := next.usageTracker.Summary()
+	if summary.RecordCount != 1 || summary.TotalTokens != 15 {
+		t.Fatalf("expected final response not to double count live usage, got records=%d tokens=%d", summary.RecordCount, summary.TotalTokens)
+	}
+}
+
 func TestUsageEventsForwardExistingAgentCallback(t *testing.T) {
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}},
@@ -695,6 +744,30 @@ func TestUsageEventsForCustomModelUseTokenOnlyFallback(t *testing.T) {
 	}
 	if transcriptContains(next.transcript, "usage:") {
 		t.Fatalf("custom model usage should not append a transcript error, got %#v", next.transcript)
+	}
+}
+
+func TestUnpricedUsageStatusUsesLatestEventNotCumulative(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "custom-coder"})
+
+	var rows []transcriptRow
+	m, rows = m.recordUsageEvent("custom-coder", zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
+	if len(rows) != 0 {
+		t.Fatalf("unpriced usage should not append transcript rows, got %#v", rows)
+	}
+	m, rows = m.recordUsageEvent("custom-coder", zeroruntime.Usage{InputTokens: 10, OutputTokens: 5})
+	if len(rows) != 0 {
+		t.Fatalf("unpriced usage should not append transcript rows, got %#v", rows)
+	}
+
+	if !strings.Contains(m.usageSummaryText(), "135 tokens") {
+		t.Fatalf("expected cumulative usage summary to stay intact, got %q", m.usageSummaryText())
+	}
+	if got := m.usageStatusSegment(); !strings.Contains(got, "15 tok") || strings.Contains(got, "135") {
+		t.Fatalf("expected status to show latest usage only, got %q", got)
+	}
+	if got := m.sidebarTokenText(); !strings.Contains(got, "15 tokens") || strings.Contains(got, "135") {
+		t.Fatalf("expected sidebar to show latest usage only, got %q", got)
 	}
 }
 

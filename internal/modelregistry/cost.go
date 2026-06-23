@@ -92,11 +92,10 @@ func CalculateCost(model ModelEntry, usage zeroruntime.Usage) (CostBreakdown, er
 	if uncachedInputTokens < 0 {
 		uncachedInputTokens = 0
 	}
-	billableOutputTokens := outputTokens + reasoningTokens
 	inputCost := costForTokens(uncachedInputTokens, inputRate)
 	cachedInputCost := costForTokens(cachedInputTokens, cachedRate)
 	cacheWriteCost := costForTokens(cacheWriteTokens, cacheWriteRate)
-	outputCost := costForTokens(billableOutputTokens, outputRate)
+	outputCost := costForTokens(outputTokens, outputRate)
 
 	breakdown := CostBreakdown{
 		ModelID:           model.ID,

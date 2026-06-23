@@ -15,7 +15,7 @@ func TestContextWindowSegment(t *testing.T) {
 	if got := m.contextWindowSegment(); got != "" {
 		t.Fatalf("expected empty gauge before any request, got %q", got)
 	}
-	// 160k input against the 200k window = 80%.
+	// 161k latest-step tokens against the 200k window = 81%.
 	if _, err := m.usageTracker.Record(usage.RecordInput{
 		ModelID: "claude-sonnet-4.5",
 		Usage:   zeroruntime.Usage{InputTokens: 160_000, OutputTokens: 1000},
@@ -23,7 +23,7 @@ func TestContextWindowSegment(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 	got := plainRender(t, m.contextWindowSegment())
-	if !strings.Contains(got, "160K/200K") || !strings.Contains(got, "80%") {
-		t.Fatalf("gauge = %q, want 160K/200K · 80%%", got)
+	if !strings.Contains(got, "161K/200K") || !strings.Contains(got, "81%") {
+		t.Fatalf("gauge = %q, want 161K/200K · 81%%", got)
 	}
 }

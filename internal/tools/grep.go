@@ -171,7 +171,13 @@ func (tool grepTool) runWith(args map[string]any, exclude readExcluder) Result {
 			}
 		}
 		sort.Strings(files)
-		return okResult(strings.Join(files, "\n"))
+		budgeted := applyOutputBudget(strings.Join(files, "\n"), searchOutputBudgetBytes, "narrow path/glob/pattern to continue")
+		meta := outputBudgetMeta(budgeted)
+		if budgeted.Truncated {
+			meta["truncated"] = "true"
+			meta["truncation_reason"] = "byte_budget"
+		}
+		return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
 	default:
 		lines := make([]string, 0, len(matches))
 		for _, match := range matches {
@@ -180,10 +186,26 @@ func (tool grepTool) runWith(args map[string]any, exclude readExcluder) Result {
 			}
 			lines = append(lines, fmt.Sprintf("%s:%d: %s", match.file, match.line, match.text))
 		}
+		truncated := len(matches) > headLimit
+		output := strings.Join(lines, "\n")
+		if truncated {
+			output += fmt.Sprintf("\n\n[truncated: showing first %d of %d matches; narrow path/glob/pattern or increase head_limit]", len(lines), len(matches))
+		}
+		budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "narrow path/glob/pattern or increase head_limit")
+		meta := outputBudgetMeta(budgeted)
+		if truncated || budgeted.Truncated {
+			meta["truncated"] = "true"
+			if budgeted.Truncated {
+				meta["truncation_reason"] = "byte_budget"
+			} else {
+				meta["truncation_reason"] = "head_limit"
+			}
+		}
 		return Result{
 			Status:    StatusOK,
-			Output:    strings.Join(lines, "\n"),
-			Truncated: len(matches) > headLimit,
+			Output:    budgeted.Output,
+			Truncated: truncated || budgeted.Truncated,
+			Meta:      meta,
 		}
 	}
 }

@@ -212,8 +212,8 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *s
 	}
 	if payload.UsageMetadata != nil {
 		state.inputTokens = payload.UsageMetadata.PromptTokenCount
-		state.outputTokens = payload.UsageMetadata.CandidatesTokenCount
 		state.reasoningTokens = payload.UsageMetadata.ThoughtsTokenCount
+		state.outputTokens = payload.UsageMetadata.CandidatesTokenCount + state.reasoningTokens
 		state.cachedTokens = payload.UsageMetadata.CachedContentTokenCount
 		state.hasUsage = true
 	}

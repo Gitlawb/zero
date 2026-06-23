@@ -97,18 +97,32 @@ func (tool globTool) runWith(args map[string]any, exclude readExcluder) Result {
 	}
 
 	sort.Strings(matches)
-	truncated := len(matches) > limit
+	totalMatches := len(matches)
+	truncated := totalMatches > limit
 	if truncated {
 		matches = matches[:limit]
+	}
+	output := strings.Join(matches, "\n")
+	if truncated {
+		output += fmt.Sprintf("\n\n[truncated: showing first %d of %d matches; increase limit or narrow cwd/pattern]", len(matches), totalMatches)
+	}
+	budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "increase limit or narrow cwd/pattern")
+	meta := outputBudgetMeta(budgeted)
+	meta["pattern"] = pattern
+	if truncated || budgeted.Truncated {
+		meta["truncated"] = "true"
+		if budgeted.Truncated {
+			meta["truncation_reason"] = "byte_budget"
+		} else {
+			meta["truncation_reason"] = "limit"
+		}
 	}
 
 	return Result{
 		Status:    StatusOK,
-		Output:    strings.Join(matches, "\n"),
-		Truncated: truncated,
-		Meta: map[string]string{
-			"pattern": pattern,
-		},
+		Output:    budgeted.Output,
+		Truncated: truncated || budgeted.Truncated,
+		Meta:      meta,
 	}
 }
 

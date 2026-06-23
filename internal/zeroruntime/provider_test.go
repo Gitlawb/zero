@@ -103,11 +103,11 @@ func TestNormalizeUsageMapsProviderAliasesAndReasoningTokens(t *testing.T) {
 	if usage.ReasoningTokens != 10 {
 		t.Fatalf("reasoning tokens = %d, want 10", usage.ReasoningTokens)
 	}
-	if usage.TotalTokens() != 150 {
-		t.Fatalf("total tokens = %d, want 150", usage.TotalTokens())
+	if usage.TotalTokens() != 140 {
+		t.Fatalf("total tokens = %d, want 140", usage.TotalTokens())
 	}
-	if usage.BillableOutputTokens() != 50 {
-		t.Fatalf("billable output tokens = %d, want 50", usage.BillableOutputTokens())
+	if usage.BillableOutputTokens() != 40 {
+		t.Fatalf("billable output tokens = %d, want 40", usage.BillableOutputTokens())
 	}
 }
 
@@ -122,6 +122,23 @@ func TestNormalizeUsageClampsCachedInputTokens(t *testing.T) {
 	}
 	if usage.CachedInputTokens != 5 {
 		t.Fatalf("cached input tokens = %d, want 5", usage.CachedInputTokens)
+	}
+}
+
+func TestNormalizeUsageClampsReasoningTokensToOutput(t *testing.T) {
+	usage, err := NormalizeUsage(TokenUsage{
+		InputTokens:     10,
+		OutputTokens:    4,
+		ReasoningTokens: 9,
+	})
+	if err != nil {
+		t.Fatalf("NormalizeUsage returned error: %v", err)
+	}
+	if usage.ReasoningTokens != 4 {
+		t.Fatalf("reasoning tokens = %d, want 4", usage.ReasoningTokens)
+	}
+	if usage.TotalTokens() != 14 {
+		t.Fatalf("total tokens = %d, want 14", usage.TotalTokens())
 	}
 }
 
@@ -201,12 +218,12 @@ func TestCollectStreamAccumulatesNormalizedUsageAliases(t *testing.T) {
 	if collected.Usage.ReasoningTokens != 3 {
 		t.Fatalf("reasoning tokens = %d, want 3", collected.Usage.ReasoningTokens)
 	}
-	if collected.Usage.TotalTokens() != 20 {
-		t.Fatalf("total tokens = %d, want 20", collected.Usage.TotalTokens())
+	if collected.Usage.TotalTokens() != 17 {
+		t.Fatalf("total tokens = %d, want 17", collected.Usage.TotalTokens())
 	}
 }
 
-func TestCollectStreamAccumulatesMixedUsageShapes(t *testing.T) {
+func TestCollectStreamMergesMixedUsageSnapshots(t *testing.T) {
 	normalizedUsage, err := NormalizeUsage(TokenUsage{InputTokens: 6, OutputTokens: 3, ReasoningTokens: 2})
 	if err != nil {
 		t.Fatalf("NormalizeUsage returned error: %v", err)
@@ -222,11 +239,11 @@ func TestCollectStreamAccumulatesMixedUsageShapes(t *testing.T) {
 
 	collected := CollectStream(context.Background(), events)
 
-	if collected.Usage.EffectiveInputTokens() != 16 {
-		t.Fatalf("input tokens = %d, want 16", collected.Usage.EffectiveInputTokens())
+	if collected.Usage.EffectiveInputTokens() != 6 {
+		t.Fatalf("input tokens = %d, want 6", collected.Usage.EffectiveInputTokens())
 	}
-	if collected.Usage.EffectiveOutputTokens() != 7 {
-		t.Fatalf("output tokens = %d, want 7", collected.Usage.EffectiveOutputTokens())
+	if collected.Usage.EffectiveOutputTokens() != 3 {
+		t.Fatalf("output tokens = %d, want 3", collected.Usage.EffectiveOutputTokens())
 	}
 	if collected.Usage.CachedInputTokens != 3 {
 		t.Fatalf("cached input tokens = %d, want 3", collected.Usage.CachedInputTokens)
@@ -234,8 +251,41 @@ func TestCollectStreamAccumulatesMixedUsageShapes(t *testing.T) {
 	if collected.Usage.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want 2", collected.Usage.ReasoningTokens)
 	}
-	if collected.Usage.TotalTokens() != 25 {
-		t.Fatalf("total tokens = %d, want 25", collected.Usage.TotalTokens())
+	if collected.Usage.TotalTokens() != 9 {
+		t.Fatalf("total tokens = %d, want 9", collected.Usage.TotalTokens())
+	}
+}
+
+func TestCollectStreamReportsOneMergedUsageCallback(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{
+			PromptTokens:      100,
+			CachedInputTokens: 20,
+			CacheWriteTokens:  10,
+		}}
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{
+			CompletionTokens: 12,
+			ReasoningTokens:  4,
+		}}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+
+	var usageEvents []Usage
+	collected := CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsage: func(usage Usage) { usageEvents = append(usageEvents, usage) },
+	})
+
+	if len(usageEvents) != 1 {
+		t.Fatalf("usage callbacks = %#v, want one merged callback", usageEvents)
+	}
+	if collected.Usage.EffectiveInputTokens() != 100 ||
+		collected.Usage.EffectiveOutputTokens() != 12 ||
+		collected.Usage.CachedInputTokens != 20 ||
+		collected.Usage.CacheWriteTokens != 10 ||
+		collected.Usage.ReasoningTokens != 4 {
+		t.Fatalf("merged usage = %#v", collected.Usage)
 	}
 }
 

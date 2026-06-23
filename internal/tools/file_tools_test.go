@@ -57,6 +57,25 @@ func TestReadFileToolMarksTruncation(t *testing.T) {
 	}
 }
 
+func TestReadFileToolAppliesByteBudget(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "large.txt"), strings.Repeat("0123456789abcdef\n", 9000))
+
+	result := NewReadFileTool(root).Run(context.Background(), map[string]any{
+		"path": "large.txt",
+	})
+
+	if result.Status != StatusOK || !result.Truncated {
+		t.Fatalf("expected ok+truncated, got status=%s truncated=%v", result.Status, result.Truncated)
+	}
+	if !strings.Contains(result.Output, "output exceeded") || !strings.Contains(result.Output, "start_line") {
+		t.Fatalf("expected byte-budget continuation hint, got %q", result.Output[len(result.Output)-200:])
+	}
+	if result.Meta["raw_bytes"] == "" || result.Meta["emitted_bytes"] == "" {
+		t.Fatalf("expected output byte metadata, got %#v", result.Meta)
+	}
+}
+
 func TestReadFileToolRejectsOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -117,6 +136,9 @@ func TestGlobToolFindsMatchesWithLimit(t *testing.T) {
 	if result.Truncated != true {
 		t.Fatalf("expected truncated result")
 	}
+	if !strings.Contains(result.Output, "[truncated: showing first 1 of 2 matches") {
+		t.Fatalf("expected visible glob truncation marker, got %q", result.Output)
+	}
 	matchedPaths := regexp.MustCompile(`(?m)^[^\n]*\.go\b`).FindAllString(result.Output, -1)
 	if got := len(matchedPaths); got != 1 {
 		t.Fatalf("expected exactly one go match, got %d in %q", got, result.Output)
@@ -162,6 +184,24 @@ func TestGrepToolSearchesContent(t *testing.T) {
 	}
 	if strings.Contains(result.Output, "README.md") {
 		t.Fatalf("glob filter leaked README match: %q", result.Output)
+	}
+}
+
+func TestGrepToolMakesHeadLimitTruncationVisible(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "notes.txt"), "needle 1\nneedle 2\nneedle 3\n")
+
+	result := NewGrepTool(root).Run(context.Background(), map[string]any{
+		"pattern":    "needle",
+		"path":       ".",
+		"head_limit": 2,
+	})
+
+	if result.Status != StatusOK || !result.Truncated {
+		t.Fatalf("expected ok+truncated, got status=%s truncated=%v output=%q", result.Status, result.Truncated, result.Output)
+	}
+	if !strings.Contains(result.Output, "[truncated: showing first 2 of 3 matches") {
+		t.Fatalf("expected visible grep truncation marker, got %q", result.Output)
 	}
 }
 

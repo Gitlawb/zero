@@ -90,17 +90,23 @@ func CollectStream(ctx context.Context, events <-chan StreamEvent) CollectedStre
 func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, options CollectOptions) CollectedStream {
 	collected := CollectedStream{}
 	collector := newToolCallCollector()
+	usageSeen := false
+	finish := func() CollectedStream {
+		collector.flush(&collected)
+		if usageSeen && options.OnUsage != nil {
+			options.OnUsage(collected.Usage)
+		}
+		return collected
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			collected.Error = ctx.Err().Error()
-			collector.flush(&collected)
-			return collected
+			return finish()
 		case event, ok := <-events:
 			if !ok {
-				collector.flush(&collected)
-				return collected
+				return finish()
 			}
 
 			// A non-normal terminal stop reason can ride on any event (providers
@@ -144,27 +150,55 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 			case StreamEventToolCallDropped:
 				collected.DroppedToolCalls++
 			case StreamEventUsage:
-				inputTokens := event.Usage.EffectiveInputTokens()
-				outputTokens := event.Usage.EffectiveOutputTokens()
-				collected.Usage.InputTokens += inputTokens
-				collected.Usage.OutputTokens += outputTokens
-				collected.Usage.PromptTokens += inputTokens
-				collected.Usage.CompletionTokens += outputTokens
-				collected.Usage.CachedInputTokens += event.Usage.CachedInputTokens
-				collected.Usage.ReasoningTokens += event.Usage.ReasoningTokens
-				if options.OnUsage != nil {
-					options.OnUsage(event.Usage)
-				}
+				collected.Usage = mergeUsageSnapshot(collected.Usage, event.Usage)
+				usageSeen = true
 			case StreamEventError:
 				collected.Error = event.Error
-				collector.flush(&collected)
-				return collected
+				return finish()
 			case StreamEventDone:
-				collector.flush(&collected)
-				return collected
+				return finish()
 			}
 		}
 	}
+}
+
+func mergeUsageSnapshot(left Usage, right Usage) Usage {
+	inputTokens := left.EffectiveInputTokens()
+	if value := right.EffectiveInputTokens(); value != 0 {
+		inputTokens = value
+	}
+
+	outputTokens := left.EffectiveOutputTokens()
+	if value := right.EffectiveOutputTokens(); value != 0 {
+		outputTokens = value
+	}
+
+	cachedInputTokens := left.CachedInputTokens
+	if right.CachedInputTokens != 0 {
+		cachedInputTokens = right.CachedInputTokens
+	}
+
+	cacheWriteTokens := left.CacheWriteTokens
+	if right.CacheWriteTokens != 0 {
+		cacheWriteTokens = right.CacheWriteTokens
+	}
+
+	reasoningTokens := left.ReasoningTokens
+	if right.ReasoningTokens != 0 {
+		reasoningTokens = right.ReasoningTokens
+	}
+
+	usage, err := NormalizeUsage(TokenUsage{
+		InputTokens:       inputTokens,
+		OutputTokens:      outputTokens,
+		CachedInputTokens: cachedInputTokens,
+		CacheWriteTokens:  cacheWriteTokens,
+		ReasoningTokens:   reasoningTokens,
+	})
+	if err != nil {
+		return right
+	}
+	return usage
 }
 
 // toolCallCollector accumulates streamed tool calls in start order. Calls are

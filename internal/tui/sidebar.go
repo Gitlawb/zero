@@ -641,29 +641,21 @@ func (m model) sidebarTokenLine(width int) string {
 	return " " + zeroTheme.faint.Render(truncateRunes(label, budget)) + chip
 }
 
-// sidebarTokenText computes the token figure shown at the sidebar floor: the
-// last request's context usage when known, else the cumulative session tokens.
+// sidebarTokenText computes the token figure shown at the sidebar floor from
+// the latest provider step's token footprint.
 func (m model) sidebarTokenText() string {
 	if m.usageTracker == nil {
 		return ""
 	}
 	summary := m.usageTracker.Summary()
-	if summary.LastRecord != nil {
-		used := summary.LastRecord.Usage.InputTokens
-		if used > 0 {
-			if window := modelContextWindow(m.modelName); window > 0 {
-				return fmt.Sprintf("%s / %s tokens", humanCount(used), humanCount(window))
-			}
-			return humanCount(used) + " tokens"
-		}
+	used := m.latestUsageTokens(summary)
+	if used <= 0 {
+		return ""
 	}
-	if summary.RecordCount > 0 {
-		return humanCount(summary.InputTokens+summary.OutputTokens) + " tokens"
+	if window := modelContextWindow(m.modelName); window > 0 {
+		return fmt.Sprintf("%s / %s tokens", humanCount(used), humanCount(window))
 	}
-	if m.unpricedRequests > 0 {
-		return humanCount(m.unpricedTokens) + " tokens"
-	}
-	return ""
+	return humanCount(used) + " tokens"
 }
 
 // joinColumns splices a chat block and a sidebar block side-by-side, one

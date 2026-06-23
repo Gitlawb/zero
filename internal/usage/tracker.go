@@ -198,7 +198,7 @@ func Normalize(usage zeroruntime.Usage) (Normalized, zeroruntime.Usage, error) {
 		CacheWriteTokens:  cacheWriteTokens,
 		OutputTokens:      outputTokens,
 		ReasoningTokens:   reasoningTokens,
-		TotalTokens:       inputTokens + outputTokens + reasoningTokens,
+		TotalTokens:       inputTokens + outputTokens,
 	}
 	return normalized, zeroruntime.Usage{
 		InputTokens:       inputTokens,

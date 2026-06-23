@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/minify"
@@ -83,7 +84,30 @@ func (tool readMinifiedFileTool) RunWithOptions(_ context.Context, args map[stri
 			relativePath, rawLines, minLines)
 	}
 
-	return Result{Status: StatusOK, Output: header + "\n\n" + result.Content}
+	rawBytes := len(content)
+	compactBytes := len(result.Content)
+	savedTokens := 0
+	if savedBytes := rawBytes - compactBytes; savedBytes > 0 {
+		savedTokens = estimatedTokensFromBytes(savedBytes)
+	}
+	output := header + "\n\n" + result.Content
+	budgeted := applyOutputBudget(output, readOutputBudgetBytes, "use read_file with start_line/end_line or max_lines for a smaller exact range")
+	meta := outputBudgetMeta(budgeted)
+	meta["path"] = relativePath
+	meta["mode"] = result.Language
+	meta["compacted"] = strconv.FormatBool(result.Applied)
+	meta["raw_bytes"] = strconv.Itoa(rawBytes)
+	meta["compact_bytes"] = strconv.Itoa(compactBytes)
+	meta["emitted_bytes"] = strconv.Itoa(budgeted.EmittedBytes)
+	meta["raw_lines"] = strconv.Itoa(rawLines)
+	meta["emitted_lines"] = strconv.Itoa(minLines)
+	meta["estimated_tokens_saved"] = strconv.Itoa(savedTokens)
+	if budgeted.Truncated {
+		meta["truncated"] = "true"
+		meta["truncation_reason"] = "byte_budget"
+	}
+
+	return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string

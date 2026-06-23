@@ -30,6 +30,11 @@ func TestReadMinifiedFileStripsCommentsAndLineNumbers(t *testing.T) {
 	if !strings.Contains(res.Output, "minified go view") {
 		t.Errorf("expected a minified header note:\n%s", res.Output)
 	}
+	for _, key := range []string{"mode", "compacted", "raw_bytes", "emitted_bytes", "estimated_tokens_saved"} {
+		if res.Meta[key] == "" {
+			t.Fatalf("expected compact-read metadata key %q, got %#v", key, res.Meta)
+		}
+	}
 }
 
 func TestReadMinifiedFileRejectsTraversal(t *testing.T) {
@@ -37,5 +42,23 @@ func TestReadMinifiedFileRejectsTraversal(t *testing.T) {
 	res := NewReadMinifiedFileTool(dir).Run(context.Background(), map[string]any{"path": "../escape.go"})
 	if res.Status == StatusOK {
 		t.Fatalf("expected traversal rejection, got OK:\n%s", res.Output)
+	}
+}
+
+func TestReadMinifiedFileAppliesByteBudget(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "large.txt"), []byte(strings.Repeat("0123456789abcdef\n", 9000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := NewReadMinifiedFileTool(dir).Run(context.Background(), map[string]any{"path": "large.txt"})
+	if res.Status != StatusOK || !res.Truncated {
+		t.Fatalf("expected ok+truncated, got status=%s truncated=%v", res.Status, res.Truncated)
+	}
+	if !strings.Contains(res.Output, "output exceeded") || !strings.Contains(res.Output, "read_file") {
+		t.Fatalf("expected byte-budget continuation hint, got %q", res.Output[len(res.Output)-200:])
+	}
+	if res.Meta["truncated"] != "true" {
+		t.Fatalf("expected truncation metadata, got %#v", res.Meta)
 	}
 }

@@ -295,29 +295,30 @@ func (m model) modeLabel() (string, lipgloss.Style) {
 	}
 }
 
-// usageStatusSegment summarizes this session's consumption for the status
-// line: cumulative tokens, plus cost once anything is priced.
+// usageStatusSegment shows the latest provider step's token footprint, plus
+// cumulative cost once anything is priced.
 func (m model) usageStatusSegment() string {
 	if m.usageTracker == nil {
 		return ""
 	}
 	summary := m.usageTracker.Summary()
-	if summary.RecordCount == 0 {
-		if m.unpricedRequests > 0 {
-			return humanCount(m.unpricedTokens) + " tok"
-		}
+	tokens := m.latestUsageTokens(summary)
+	if tokens <= 0 {
 		return ""
 	}
+	if summary.RecordCount == 0 {
+		return humanCount(tokens) + " tok"
+	}
 	return fmt.Sprintf("%s tok · %s",
-		humanCount(summary.InputTokens+summary.OutputTokens),
+		humanCount(tokens),
 		summary.FormattedTotalCost,
 	)
 }
 
-// contextFillPercent returns the last request's context-window fill as a percent
+// contextFillPercent returns the latest request's context-window fill as a percent
 // (0-100), the tokens used, the model's window, and a colour graded for the fill
-// (green <75% → amber ≥75% → red ≥90%). ok is false until a priced request lands
-// or when the model's window is unknown. Shared by the status-line gauge and the
+// (green <75% → amber ≥75% → red ≥90%). ok is false until a usage event lands or
+// when the model's window is unknown. Shared by the status-line gauge and the
 // sidebar context chip so they grade identically. This is the "you're at X% of
 // context" reading the compaction trigger already reasons about at ~80%.
 func (m model) contextFillPercent() (pct, used, window int, style lipgloss.Style, ok bool) {
@@ -325,10 +326,7 @@ func (m model) contextFillPercent() (pct, used, window int, style lipgloss.Style
 		return 0, 0, 0, lipgloss.Style{}, false
 	}
 	summary := m.usageTracker.Summary()
-	if summary.LastRecord == nil {
-		return 0, 0, 0, lipgloss.Style{}, false
-	}
-	used = summary.LastRecord.Usage.InputTokens
+	used = m.latestUsageTokens(summary)
 	window = modelContextWindow(m.modelName)
 	if used <= 0 || window <= 0 {
 		return 0, 0, 0, lipgloss.Style{}, false

@@ -88,13 +88,18 @@ type streamFunctionDelta struct {
 }
 
 type usage struct {
-	PromptTokens        int                `json:"prompt_tokens"`
-	CompletionTokens    int                `json:"completion_tokens"`
-	PromptTokensDetails promptTokenDetails `json:"prompt_tokens_details"`
+	PromptTokens            int                    `json:"prompt_tokens"`
+	CompletionTokens        int                    `json:"completion_tokens"`
+	PromptTokensDetails     promptTokenDetails     `json:"prompt_tokens_details"`
+	CompletionTokensDetails completionTokenDetails `json:"completion_tokens_details"`
 }
 
 type promptTokenDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+type completionTokenDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type apiError struct {

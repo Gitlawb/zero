@@ -36,6 +36,9 @@ func NormalizeUsage(input TokenUsage) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
+	if reasoningTokens > outputTokens {
+		reasoningTokens = outputTokens
+	}
 
 	return Usage{
 		InputTokens:       inputTokens,

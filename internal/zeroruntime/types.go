@@ -128,6 +128,9 @@ type TokenUsage struct {
 // prompt size (uncached + cache-read + cache-write); CachedInputTokens (cache
 // read, discounted) and CacheWriteTokens (cache creation, premium) are subsets
 // of it, so uncached input = InputTokens - CachedInputTokens - CacheWriteTokens.
+// OutputTokens is the TOTAL output size, including hidden reasoning tokens when
+// a provider reports them separately; ReasoningTokens is a subset of OutputTokens,
+// not an additive count.
 type Usage struct {
 	InputTokens       int
 	OutputTokens      int
@@ -140,7 +143,7 @@ type Usage struct {
 
 // TotalTokens returns prompt plus completion tokens.
 func (usage Usage) TotalTokens() int {
-	return usage.EffectiveInputTokens() + usage.EffectiveOutputTokens() + usage.ReasoningTokens
+	return usage.EffectiveInputTokens() + usage.EffectiveOutputTokens()
 }
 
 func (usage Usage) EffectiveInputTokens() int {
@@ -158,7 +161,15 @@ func (usage Usage) EffectiveOutputTokens() int {
 }
 
 func (usage Usage) BillableOutputTokens() int {
-	return usage.EffectiveOutputTokens() + usage.ReasoningTokens
+	return usage.EffectiveOutputTokens()
+}
+
+func (usage Usage) VisibleOutputTokens() int {
+	visible := usage.EffectiveOutputTokens() - usage.ReasoningTokens
+	if visible < 0 {
+		return 0
+	}
+	return visible
 }
 
 // StreamEvent is one normalized event emitted by a streaming provider.

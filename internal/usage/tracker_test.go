@@ -51,6 +51,24 @@ func TestTrackerRejectsInvalidUsageAndUnknownModels(t *testing.T) {
 	}
 }
 
+func TestTrackerTreatsReasoningAsOutputBreakdown(t *testing.T) {
+	tracker := NewTracker(TrackerOptions{})
+	record, err := tracker.Record(RecordInput{
+		ModelID: "gpt-4.1",
+		Usage: zeroruntime.Usage{
+			InputTokens:     100,
+			OutputTokens:    40,
+			ReasoningTokens: 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if record.Usage.TotalTokens != 140 {
+		t.Fatalf("total tokens = %d, want 140", record.Usage.TotalTokens)
+	}
+}
+
 func TestTrackerResetClearsRecords(t *testing.T) {
 	tracker := NewTracker(TrackerOptions{})
 	if _, err := tracker.Record(RecordInput{ModelID: "gpt-4.1", Usage: zeroruntime.Usage{InputTokens: 1, OutputTokens: 1}}); err != nil {

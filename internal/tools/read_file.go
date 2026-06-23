@@ -122,9 +122,18 @@ func (tool readFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		body += fmt.Sprintf("\n\n[truncated: %d more line(s) in the requested range not shown; set start_line=%d to continue]", endLine-lastLine, lastLine+1)
 	}
 
+	output := header + "\n\n" + body
+	budgeted := applyOutputBudget(output, readOutputBudgetBytes, "use start_line/end_line or max_lines to continue with a smaller range")
+	meta := outputBudgetMeta(budgeted)
+	if budgeted.Truncated {
+		meta["truncated"] = "true"
+		meta["truncation_reason"] = "byte_budget"
+	}
+
 	return Result{
 		Status:    StatusOK,
-		Output:    header + "\n\n" + body,
-		Truncated: truncated,
+		Output:    budgeted.Output,
+		Truncated: truncated || budgeted.Truncated,
+		Meta:      meta,
 	}
 }

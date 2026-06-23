@@ -74,7 +74,14 @@ func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result
 	if len(entries) == 0 {
 		return okResult("Directory is empty: " + relativePath)
 	}
-	return okResult("Contents of " + relativePath + ":\n\n" + strings.Join(entries, "\n"))
+	output := "Contents of " + relativePath + ":\n\n" + strings.Join(entries, "\n")
+	budgeted := applyOutputBudget(output, searchOutputBudgetBytes, "use path, recursive=false, or a smaller max_depth to narrow the listing")
+	meta := outputBudgetMeta(budgeted)
+	if budgeted.Truncated {
+		meta["truncated"] = "true"
+		meta["truncation_reason"] = "byte_budget"
+	}
+	return Result{Status: StatusOK, Output: budgeted.Output, Truncated: budgeted.Truncated, Meta: meta}
 }
 
 func listDirectoryEntries(path string, depth int, maxDepth int) ([]string, error) {
