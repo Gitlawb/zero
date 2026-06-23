@@ -621,9 +621,14 @@ func seatbeltReadRule(fs FileSystemPolicy) string {
 	// denied at the first ungranted parent — and macOS seatbelt surfaces that
 	// denial as the misleading "cd: …: Not a directory" (ENOTDIR), not a clear
 	// permission error. This is metadata only: ancestor directory *contents* stay
-	// unreadable. Platform roots are top-level or already covered, so this only
-	// needs the dynamic read roots (workspace, write roots, granted dirs).
-	ancestorRoots := append(append([]string{}, fs.ReadRoots...), gitConfig...)
+	// unreadable. Platform read roots are included too: not all are top-level —
+	// /Library/Developer (the CLT toolchain) needs /Library stat-able, or a `cd`
+	// into it (and any chdir-style traversal) ENOTDIRs even though reads succeed.
+	ancestorRoots := append([]string{}, fs.ReadRoots...)
+	if fs.IncludePlatformRoots {
+		ancestorRoots = append(ancestorRoots, macosPlatformReadRoots()...)
+	}
+	ancestorRoots = append(ancestorRoots, gitConfig...)
 	if ancestors := seatbeltAncestorMetadataRule(ancestorRoots); ancestors != "" {
 		rule += "\n" + ancestors
 	}

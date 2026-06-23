@@ -297,6 +297,12 @@ func TestSeatbeltProfileGrantsCLTToolchain(t *testing.T) {
 	if !strings.Contains(sbpl, `(subpath "/Library/Developer")`) {
 		t.Fatalf("profile must grant read on the CLT toolchain (/Library/Developer):\n%s", sbpl)
 	}
+	// /Library/Developer is not top-level, so its ancestor (/Library) must be
+	// stat-able or a chdir-style traversal into the toolchain ENOTDIRs even though
+	// reads succeed. Platform read roots must get the ancestor-metadata grant too.
+	if !strings.Contains(sbpl, `(path-ancestors "/Library/Developer")`) {
+		t.Fatalf("profile must grant ancestor metadata for /Library/Developer so /Library is traversable:\n%s", sbpl)
+	}
 }
 
 func TestUserGitConfigReadPathsScopedToConfigFiles(t *testing.T) {
