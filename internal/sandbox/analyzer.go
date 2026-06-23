@@ -182,13 +182,7 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 	return false
 }
 
-func npxUsesNetwork(words []string) bool {
-	for _, word := range words {
-		if word == "" || strings.HasPrefix(word, "-") || isNumericToken(word) {
-			continue
-		}
-		return true
-	}
+func npxUsesNetwork(_ []string) bool {
 	return true
 }
 

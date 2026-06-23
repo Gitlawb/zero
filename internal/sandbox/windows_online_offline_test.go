@@ -56,8 +56,8 @@ func TestBuildWindowsNetworkInfraPlanIsModeIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allow infra plan: %v", err)
 	}
-	if len(denyPlan.Filters) != 12 || len(denyPlan.IdentitySIDs) != 1 {
-		t.Fatalf("infra plan should be 12 targeted block filters scoped to 1 offline SID, got %#v", denyPlan)
+	if len(denyPlan.Filters) != 14 || len(denyPlan.IdentitySIDs) != 1 {
+		t.Fatalf("infra plan should be 2 broad plus 12 targeted block filters scoped to 1 offline SID, got %#v", denyPlan)
 	}
 	denyHash, _ := WindowsNetworkInfraHash(denyPlan)
 	allowHash, _ := WindowsNetworkInfraHash(allowPlan)

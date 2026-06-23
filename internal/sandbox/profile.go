@@ -101,7 +101,9 @@ func permissionProfileRoots(workspaceRoot string, scope *Scope) []string {
 
 func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scope, writeRoots []string) []string {
 	// Workspace-write follows the upstream sandbox model: full disk is readable,
-	// while writes are narrowed to workspace/extra roots below.
+	// while writes are narrowed to workspace/extra roots below. This is a
+	// deliberate read-all/write-jail posture; callers that must hide secrets use
+	// DenyRead to carve them out.
 	readRoots := []string{profileRootPath()}
 	readRoots = append(readRoots, writeRoots...)
 	if scope != nil {

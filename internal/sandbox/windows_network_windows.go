@@ -190,7 +190,7 @@ func applyWindowsNetworkPlan(plan WindowsNetworkPlan) error {
 }
 
 func openWindowsWFPEngine() (windows.Handle, error) {
-	sessionName, err := windows.UTF16PtrFromString("Codex Windows Sandbox WFP")
+	sessionName, err := windows.UTF16PtrFromString("Zero Windows Sandbox WFP")
 	if err != nil {
 		return 0, err
 	}
@@ -231,11 +231,11 @@ func abortWindowsWFPTransaction(engine windows.Handle) {
 }
 
 func ensureWindowsWFPProvider(engine windows.Handle, providerKey windows.GUID) error {
-	name, err := windows.UTF16PtrFromString("Codex Windows Sandbox WFP")
+	name, err := windows.UTF16PtrFromString("Zero Windows Sandbox WFP")
 	if err != nil {
 		return err
 	}
-	description, err := windows.UTF16PtrFromString("Persistent WFP provider for Codex Windows sandbox filters")
+	description, err := windows.UTF16PtrFromString("Persistent WFP provider for Zero Windows sandbox filters")
 	if err != nil {
 		return err
 	}
@@ -252,11 +252,11 @@ func ensureWindowsWFPProvider(engine windows.Handle, providerKey windows.GUID) e
 }
 
 func ensureWindowsWFPSubLayer(engine windows.Handle, providerKey windows.GUID, subLayerKey windows.GUID) error {
-	name, err := windows.UTF16PtrFromString("Codex Windows Sandbox WFP")
+	name, err := windows.UTF16PtrFromString("Zero Windows Sandbox WFP")
 	if err != nil {
 		return err
 	}
-	description, err := windows.UTF16PtrFromString("Persistent WFP sublayer for Codex Windows sandbox filters")
+	description, err := windows.UTF16PtrFromString("Persistent WFP sublayer for Zero Windows sandbox filters")
 	if err != nil {
 		return err
 	}

@@ -357,6 +357,8 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		if !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonEscalatedSandboxRequired}
 		}
+		// Unsafe mode may auto-allow ordinary shell prompts, but it must not
+		// silently convert a sandboxed shell run into an unsandboxed one.
 		if !request.PermissionGranted {
 			return deny(request, risk, BlockDeniedPermission, "", ReasonEscalatedSandboxRequired, false)
 		}

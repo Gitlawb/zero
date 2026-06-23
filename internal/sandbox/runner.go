@@ -377,6 +377,9 @@ func sandboxEnvironment(policy Policy, backend BackendName, _ string) []string {
 func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend BackendName) []string {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
+		// Preserve the caller environment for sandboxed commands. The sandbox
+		// boundary is the filesystem/network policy, not env scrubbing; explicit
+		// command env values still replace inherited values below.
 		env = os.Environ()
 	}
 	pathValue := envListValue(env, "PATH", defaultPath())

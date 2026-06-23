@@ -167,6 +167,8 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 		"--unshare-user",
 		"--unshare-pid",
 	)
+	// Keep IPC and UTS shared for compatibility with the host CLI environment;
+	// network isolation is still applied below when the policy denies egress.
 	if shouldUnshareLinuxNetwork(config.PermissionProfile.Network) {
 		args = append(args, "--unshare-net")
 	}
@@ -188,6 +190,9 @@ func BuildLinuxSandboxBwrapArgs(options LinuxSandboxBwrapOptions) ([]string, err
 func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 	fs := profile.FileSystem
 	if fs.Kind == FileSystemUnrestricted {
+		// Disabled filesystem policy means no write jail: expose the host root
+		// read-write, including the host /dev tree, rather than synthesizing a
+		// restricted bubblewrap filesystem.
 		args := []string{"--bind", "/", "/"}
 		for _, root := range fs.WriteRoots {
 			if pathExists(root.Root) {
