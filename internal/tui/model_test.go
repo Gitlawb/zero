@@ -1754,6 +1754,33 @@ func TestSpecialistCardLinesAreSelectableForCopy(t *testing.T) {
 	}
 }
 
+func TestLiveReasoningExpandIsCappedAndAligned(t *testing.T) {
+	var m model
+	m.height = 20 // liveReasoningBodyCap = max(6, 10) = 10
+	width := 80
+	text := strings.Repeat("thinking about the problem in detail here\n", 30)
+	cap := m.liveReasoningBodyCap()
+
+	lines, selectable := m.renderSelectableReasoningBlock(-1, text, true, true, 0, width, 0)
+	// The selectable spans MUST stay 1:1 with the displayed lines, or the gutter
+	// highlighter lands on the wrong rows.
+	if len(lines) != len(selectable) {
+		t.Fatalf("display lines (%d) and selectable spans (%d) must align", len(lines), len(selectable))
+	}
+	// Capped to ~half-screen: header + marker + cap body, not all ~30 lines.
+	if len(lines) > cap+3 {
+		t.Fatalf("live reasoning not capped: %d lines for cap %d", len(lines), cap)
+	}
+	if !strings.Contains(plainRender(t, strings.Join(lines, "\n")), "earlier lines") {
+		t.Fatalf("expected the '… earlier lines' marker:\n%s", strings.Join(lines, "\n"))
+	}
+	// The display path must produce the same line count as the selectable path.
+	display := renderReasoningBlock(strings.TrimSpace(text), true, width, true, 0, cap)
+	if got := len(strings.Split(display, "\n")); got != len(lines) {
+		t.Fatalf("display path (%d lines) and selectable path (%d lines) must match", got, len(lines))
+	}
+}
+
 func TestSelectionHighlightUsesGutterShiftedCoordinate(t *testing.T) {
 	// Select screen columns 10..15 on body line 0. With a 4-cell reading gutter the
 	// rendered line is "    Hello world" and columns 10-14 are "world", so the

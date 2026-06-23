@@ -521,10 +521,16 @@ func renderAssistantRow(row transcriptRow, width int) string {
 }
 
 func renderReasoningRow(row transcriptRow, width int) string {
-	return renderReasoningBlock(row.text, row.expanded, width, false, row.turnElapsed)
+	// Committed rows live in the scrollable history, so show the whole body (no cap).
+	return renderReasoningBlock(row.text, row.expanded, width, false, row.turnElapsed, 0)
 }
 
-func renderReasoningBlock(text string, expanded bool, width int, running bool, elapsed time.Duration) string {
+// renderReasoningBlock renders a reasoning ("Thinking…") block. When expanded and
+// maxBodyLines > 0, the body is capped to the LATEST maxBodyLines (with a faint
+// "… N earlier" marker), so a live thought stays ~half-screen and its clickable
+// toggle header stays on-screen instead of filling the terminal. maxBodyLines = 0
+// shows the whole body.
+func renderReasoningBlock(text string, expanded bool, width int, running bool, elapsed time.Duration, maxBodyLines int) string {
 	text = strings.TrimSpace(text)
 	if strings.TrimSpace(text) == "" {
 		return ""
@@ -534,10 +540,22 @@ func renderReasoningBlock(text string, expanded bool, width int, running bool, e
 		return fitStyledLine(header, width)
 	}
 	lines := []string{fitStyledLine(header, width)}
-	for _, line := range renderReasoningBodyLines(text, width) {
+	body := renderReasoningBodyLines(text, width)
+	if maxBodyLines > 0 && len(body) > maxBodyLines {
+		hidden := len(body) - maxBodyLines
+		lines = append(lines, fitStyledLine("  "+reasoningHiddenMarker(hidden), width))
+		body = body[hidden:]
+	}
+	for _, line := range body {
 		lines = append(lines, fitStyledLine("  "+styleAssistantMarkdownLine(line, zeroTheme.sayText), width))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// reasoningHiddenMarker is the faint line shown in place of capped reasoning body
+// lines; the display and selectable paths share it so they stay line-aligned.
+func reasoningHiddenMarker(hidden int) string {
+	return zeroTheme.faint.Render(fmt.Sprintf("… %d earlier lines · Ctrl+O for all", hidden))
 }
 
 func renderReasoningBodyLines(text string, width int) []string {

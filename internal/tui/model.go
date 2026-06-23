@@ -2224,12 +2224,22 @@ func (m model) chatPageScrollLines() int {
 // Before the first delta arrives it falls back to the spinner so the surface
 // still shows liveness. The cursor needs no ticker — it appears exactly while
 // pending.
+// liveReasoningBodyCap caps an EXPANDED live ("Thinking…") reasoning block to
+// roughly half the screen so it doesn't fill the terminal and its clickable
+// toggle header stays on-screen. Returns 0 (no cap) when the height is unknown.
+func (m model) liveReasoningBodyCap() int {
+	if m.height <= 0 {
+		return 0
+	}
+	return maxInt(6, m.height/2)
+}
+
 func (m model) interimBlock(width int) string {
 	text := strings.TrimRight(m.streamingText, "\n")
 	reasoning := strings.TrimRight(m.streamingReasoning, "\n")
 	blocks := []string{}
 	if strings.TrimSpace(reasoning) != "" {
-		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0))
+		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0, m.liveReasoningBodyCap()))
 	}
 	if strings.TrimSpace(text) == "" {
 		if writing := m.streamingToolCallView(width); writing != "" {

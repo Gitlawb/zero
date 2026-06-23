@@ -777,13 +777,32 @@ func (m model) renderSelectableReasoningBlock(rowIndex int, text string, expande
 	if expanded {
 		renderedLines := renderReasoningBodyLines(text, width)
 		plainLines := renderAssistantMarkdownPlainText(text, maxInt(16, sayMeasure(width)-2), maxInt(16, sayMeasure(width)-2))
+		// A LIVE reasoning block is capped to ~half the screen so its toggle header
+		// stays on-screen. This MUST mirror renderReasoningBlock exactly (same cap,
+		// same marker line) so the selectable spans stay line-aligned with the
+		// displayed lines that finalizeTranscriptBodyRow highlights.
+		bodyOffset := 1
+		if running {
+			if bodyCap := m.liveReasoningBodyCap(); bodyCap > 0 && len(renderedLines) > bodyCap {
+				hidden := len(renderedLines) - bodyCap
+				selectable = append(selectable, transcriptSelectableLine{bodyY: startBodyY + 1, rowIndex: rowIndex, textStart: 2})
+				lines = append(lines, fitStyledLine("  "+reasoningHiddenMarker(hidden), width))
+				renderedLines = renderedLines[hidden:]
+				if hidden < len(plainLines) {
+					plainLines = plainLines[hidden:]
+				} else {
+					plainLines = nil
+				}
+				bodyOffset = 2
+			}
+		}
 		for index, line := range renderedLines {
 			plainLine := ""
 			if index < len(plainLines) {
 				plainLine = plainLines[index]
 			}
 			meta := transcriptSelectableLine{
-				bodyY:     startBodyY + index + 1,
+				bodyY:     startBodyY + index + bodyOffset,
 				rowIndex:  rowIndex,
 				textStart: 2,
 				text:      plainLine,
