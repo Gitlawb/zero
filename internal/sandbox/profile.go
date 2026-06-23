@@ -109,11 +109,6 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 	if extra := normalizeProfileDirs(policy.AllowRead); len(extra) > 0 {
 		readRoots = dedupeStrings(append(readRoots, extra...))
 	}
-	for _, path := range userGitConfigReadPaths() {
-		if normalized := normalizeProfilePath(path); normalized != "" {
-			readRoots = append(readRoots, normalized)
-		}
-	}
 	return dedupeStrings(readRoots)
 }
 
@@ -121,7 +116,9 @@ func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scop
 // sandboxed git can read identity and config (user.name/email, aliases) instead
 // of failing with "unable to access ~/.gitconfig". It is deliberately the config
 // files only — not the ~/.config/git directory, which can hold an XDG credential
-// store — so credentials and the rest of HOME stay unreadable.
+// store — so credentials and the rest of HOME stay unreadable. Granted at the
+// macOS-seatbelt read rule (not the cross-platform PermissionProfile) so the
+// HOME-dependent paths don't leak into the platform-agnostic policy snapshot.
 func userGitConfigReadPaths() []string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {

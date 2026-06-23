@@ -593,7 +593,12 @@ func seatbeltReadRule(fs FileSystemPolicy) string {
 	if fs.Kind == FileSystemUnrestricted {
 		return "(allow file-read*)"
 	}
-	filters := make([]string, 0, len(fs.ReadRoots)+len(macosPlatformReadRoots()))
+	// The user's global git config files so a sandboxed git can read identity and
+	// config. Granted here (macOS seatbelt) rather than the cross-platform
+	// PermissionProfile so the HOME-dependent paths don't leak into the platform-
+	// agnostic policy snapshot.
+	gitConfig := normalizeProfilePaths(userGitConfigReadPaths())
+	filters := make([]string, 0, len(fs.ReadRoots)+len(macosPlatformReadRoots())+len(gitConfig))
 	for _, root := range fs.ReadRoots {
 		filters = appendSeatbeltSubpathFilter(filters, root)
 	}
@@ -601,6 +606,9 @@ func seatbeltReadRule(fs FileSystemPolicy) string {
 		for _, root := range macosPlatformReadRoots() {
 			filters = appendSeatbeltSubpathFilter(filters, root)
 		}
+	}
+	for _, path := range gitConfig {
+		filters = appendSeatbeltSubpathFilter(filters, path)
 	}
 	if len(filters) == 0 {
 		return ""
@@ -615,7 +623,8 @@ func seatbeltReadRule(fs FileSystemPolicy) string {
 	// permission error. This is metadata only: ancestor directory *contents* stay
 	// unreadable. Platform roots are top-level or already covered, so this only
 	// needs the dynamic read roots (workspace, write roots, granted dirs).
-	if ancestors := seatbeltAncestorMetadataRule(fs.ReadRoots); ancestors != "" {
+	ancestorRoots := append(append([]string{}, fs.ReadRoots...), gitConfig...)
+	if ancestors := seatbeltAncestorMetadataRule(ancestorRoots); ancestors != "" {
 		rule += "\n" + ancestors
 	}
 	return rule
