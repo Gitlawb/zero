@@ -1754,6 +1754,29 @@ func TestSpecialistCardLinesAreSelectableForCopy(t *testing.T) {
 	}
 }
 
+func TestSelectionHighlightUsesGutterShiftedCoordinate(t *testing.T) {
+	// Select screen columns 10..15 on body line 0. With a 4-cell reading gutter the
+	// rendered line is "    Hello world" and columns 10-14 are "world", so the
+	// highlight must land on "world" — proving it's computed in the SAME shifted
+	// coordinate the mouse uses. The old bug painted it on the unshifted line, so it
+	// landed gutter cells off.
+	var m model
+	m.transcriptSelection = transcriptSelectionState{
+		active: true,
+		anchor: transcriptSelectionPoint{bodyY: 0, x: 10},
+		cursor: transcriptSelectionPoint{bodyY: 0, x: 15},
+	}
+	selectable := []transcriptSelectableLine{{bodyY: 0, rowIndex: 0, text: "Hello world", textStart: 0}}
+	item := m.finalizeTranscriptBodyRow("Hello world", selectable, 4, 0)
+	styled := strings.Join(item.lines, "\n")
+	if !strings.Contains(plainRender(t, styled), "    Hello world") {
+		t.Fatalf("expected a 4-cell gutter-padded line, got %q", styled)
+	}
+	if !strings.Contains(styled, zeroTheme.selection.Render("world")) {
+		t.Fatalf("expected 'world' highlighted at the gutter-shifted position, got %q", styled)
+	}
+}
+
 func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
 	m.width, m.height = 120, 40

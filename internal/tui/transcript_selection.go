@@ -146,6 +146,19 @@ func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcript
 	return lines
 }
 
+// finalizeTranscriptBodyRow indents a rendered row by the reading-column gutter,
+// shifts its selectable spans to match, and THEN paints the selection highlight —
+// so the highlight is computed in the same shifted coordinate the mouse maps to
+// and lands exactly where the user selected (instead of gutter cells off).
+func (m model) finalizeTranscriptBodyRow(rendered string, selectable []transcriptSelectableLine, gutter int, startBodyY int) transcriptBodyRenderedItem {
+	lines := padTranscriptBodyLines(viewLines(rendered), gutter)
+	shifted := shiftSelectableX(selectable, gutter)
+	if m.transcriptSelection.active {
+		lines = viewLines(m.renderRenderedSelection(strings.Join(lines, "\n"), shifted, startBodyY))
+	}
+	return transcriptBodyRenderedItem{lines: lines, selectable: shifted}
+}
+
 func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptBodyItem {
 	items := []transcriptBodyItem{}
 	// Transcript ROWS render in a reading column: wrapped to contentWidth and
@@ -238,10 +251,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				heightCacheStable: heightCacheStable,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
 					rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
-					return transcriptBodyRenderedItem{
-						lines:      padTranscriptBodyLines(viewLines(rendered), gutter),
-						selectable: shiftSelectableX(selectable, gutter),
-					}
+					return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
 				},
 			})
 			shownAny = true
@@ -288,10 +298,7 @@ func (m model) transcriptBodyItems(width int, emptyOverlay string) []transcriptB
 				render: func(startBodyY int) transcriptBodyRenderedItem {
 					// Streaming text shares the reading column so it doesn't snap
 					// width when the turn finalizes into a row.
-					return transcriptBodyRenderedItem{
-						lines:      padTranscriptBodyLines(viewLines(m.interimBlock(contentWidth)), gutter),
-						selectable: shiftSelectableX(m.renderSelectableStreamingReasoning(contentWidth, startBodyY), gutter),
-					}
+					return m.finalizeTranscriptBodyRow(m.interimBlock(contentWidth), m.renderSelectableStreamingReasoning(contentWidth, startBodyY), gutter, startBodyY)
 				},
 			})
 		}
@@ -361,10 +368,7 @@ func (m model) transcriptBodyItemsFromRows(rows []transcriptRow, width int) []tr
 			heightCacheKey: "subchat:" + strconv.Itoa(index) + ":" + strconv.Itoa(contentWidth),
 			render: func(startBodyY int) transcriptBodyRenderedItem {
 				rendered, selectable := m.renderTranscriptRow(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
-				return transcriptBodyRenderedItem{
-					lines:      padTranscriptBodyLines(viewLines(rendered), gutter),
-					selectable: shiftSelectableX(selectable, gutter),
-				}
+				return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
 			},
 		})
 		shownAny = true
@@ -515,10 +519,11 @@ func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, wi
 	}
 	selectable := []transcriptSelectableLine{header}
 	selectable = append(selectable, selectableLinesFromRendered(rowIndex, rendered, startBodyY, 1)...)
-	if !m.transcriptSelection.active {
-		return rendered, selectable
-	}
-	return m.renderRenderedSelection(rendered, selectable, startBodyY), selectable
+	// The selection highlight is painted once, at the body-item level, AFTER the
+	// reading-column gutter shift (finalizeTranscriptBodyRow) — in the same shifted
+	// coordinate the mouse maps to. Painting it here (unshifted) made the highlight
+	// land gutter cells off from where the user clicked.
+	return rendered, selectable
 }
 
 func (m model) renderSelectableRenderedRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
@@ -527,10 +532,11 @@ func (m model) renderSelectableRenderedRow(rowIndex int, row transcriptRow, widt
 		return "", nil
 	}
 	selectable := selectableLinesFromRendered(rowIndex, rendered, startBodyY, 0)
-	if !m.transcriptSelection.active {
-		return rendered, selectable
-	}
-	return m.renderRenderedSelection(rendered, selectable, startBodyY), selectable
+	// The selection highlight is painted once, at the body-item level, AFTER the
+	// reading-column gutter shift (finalizeTranscriptBodyRow) — in the same shifted
+	// coordinate the mouse maps to. Painting it here (unshifted) made the highlight
+	// land gutter cells off from where the user clicked.
+	return rendered, selectable
 }
 
 func selectableLinesFromRendered(rowIndex int, rendered string, startBodyY int, skipLeading int) []transcriptSelectableLine {
