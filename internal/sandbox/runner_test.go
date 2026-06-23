@@ -299,6 +299,27 @@ func TestSeatbeltProfileGrantsCLTToolchain(t *testing.T) {
 	}
 }
 
+func TestUserGitConfigReadPathsScopedToConfigFiles(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		t.Skip("no home dir")
+	}
+	paths := userGitConfigReadPaths()
+	found := false
+	for _, p := range paths {
+		if p == filepath.Join(home, ".gitconfig") {
+			found = true
+		}
+		// Must NOT grant the whole ~/.config/git dir — it can hold a credential store.
+		if p == filepath.Join(home, ".config", "git") {
+			t.Fatalf("must not grant the ~/.config/git directory (credential store): %v", paths)
+		}
+	}
+	if !found {
+		t.Fatalf("expected ~/.gitconfig in git config read paths, got %v", paths)
+	}
+}
+
 func TestSeatbeltProfileConsumesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
