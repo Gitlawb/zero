@@ -317,6 +317,55 @@ func TestSidebarShowsSwarmSpawnedAgents(t *testing.T) {
 
 // TestSwarmSpawnedAgentFallsBackToID covers a result row with no preceding call
 // row (e.g. a resumed transcript that dropped the call): the member is still
+// A finished member stays visible (and clickable) while the run is still in
+// flight, so the user can inspect it; only once the turn ends does it drop.
+func TestSwarmAgentsPersistWhileRunInFlight(t *testing.T) {
+	base := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	m := sidebarTestModel()
+	m.now = func() time.Time { return base }
+	m.pending = true // run still going
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "build homepage"},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-1 on team default."},
+		transcriptRow{kind: rowToolResult, tool: "swarm_collect", detail: "Results: 1 task(s)\n- subagent-1 [done] build homepage"},
+	)
+	// Long past the linger window — but it must still show while pending.
+	m.swarmDoneAt = map[string]time.Time{"subagent-1": base.Add(-10 * sidebarAgentLinger)}
+
+	agents := m.swarmSpawnedAgents()
+	if len(agents) != 1 {
+		t.Fatalf("a finished member must stay while the run is in flight, got %d: %+v", len(agents), agents)
+	}
+	if !agents[0].finishing {
+		t.Fatalf("a finished member should render done (✓), got %+v", agents[0])
+	}
+
+	// Once the turn ends, the long-finished member fades out and drops.
+	m.pending = false
+	if got := len(m.swarmSpawnedAgents()); got != 0 {
+		t.Fatalf("after the turn ends a long-finished member should drop, got %d", got)
+	}
+}
+
+// Members from a previous run must not reappear in a later run.
+func TestSwarmAgentsScopedToActiveRun(t *testing.T) {
+	m := sidebarTestModel()
+	m.pending = true
+	m.activeRunID = 2
+	m.transcript = append(m.transcript,
+		// Old run's spawn (runID 1) — should be ignored now.
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "old task", runID: 1},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task old-1 on team default.", runID: 1},
+		// Current run's spawn (runID 2).
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "new task", runID: 2},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task new-1 on team default.", runID: 2},
+	)
+	agents := m.swarmSpawnedAgents()
+	if len(agents) != 1 || agents[0].id != "new-1" {
+		t.Fatalf("only the current run's member should show, got %+v", agents)
+	}
+}
+
 // shown, named by its id.
 func TestSwarmSpawnedAgentFallsBackToID(t *testing.T) {
 	m := sidebarTestModel()
