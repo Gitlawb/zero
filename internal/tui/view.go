@@ -223,7 +223,13 @@ func (m model) statusLine(width int) string {
 			rightGroups = append(rightGroups, gauge)
 		}
 	}
-	if usage := m.usageStatusSegment(); usage != "" {
+	// The sidebar pins the token readout at its floor, so when it's open keep
+	// only the cost here — otherwise the token figure shows on both sides.
+	usage := m.usageStatusSegment()
+	if m.sidebarActive() {
+		usage = m.usageCostSegment()
+	}
+	if usage != "" {
 		rightGroups = append(rightGroups, zeroTheme.muted.Render(usage))
 	}
 	right := strings.Join(rightGroups, separator)
@@ -313,6 +319,21 @@ func (m model) usageStatusSegment() string {
 		humanCount(tokens),
 		summary.FormattedTotalCost,
 	)
+}
+
+// usageCostSegment returns just the session cost, with the token figure dropped.
+// Used in the status line when the sidebar is open and already showing tokens at
+// its floor, so the cost survives without duplicating the token count. Empty
+// until a priced usage record lands (no cost to show yet).
+func (m model) usageCostSegment() string {
+	if m.usageTracker == nil {
+		return ""
+	}
+	summary := m.usageTracker.Summary()
+	if summary.RecordCount == 0 {
+		return ""
+	}
+	return strings.TrimSpace(summary.FormattedTotalCost)
 }
 
 // contextFillPercent returns the latest request's context-window fill as a percent
