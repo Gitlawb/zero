@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -214,6 +215,12 @@ type model struct {
 	streamingText              string // live assistant text for the current segment
 	streamingReasoning         string // live provider reasoning for the current segment
 	streamingReasoningExpanded bool
+	// turnStreamedRunes accumulates every reasoning+answer rune streamed in the
+	// current turn so the working line can show a live, monotonic token estimate.
+	// It is NOT reset at segment boundaries (where streamingText/Reasoning clear),
+	// only at turn start (beginRun), so the count climbs across a multi-tool turn
+	// instead of snapping back to zero after each tool call.
+	turnStreamedRunes int
 	// Streaming-text fade state. lineAges is keyed to LOGICAL lines of
 	// streamingText (one entry per \n in the accumulated text), and
 	// lastStreamActivity is the time of the most recent delta (used for
@@ -1264,6 +1271,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// live "writing" block so it doesn't linger over new prose.
 		m.clearStreamingToolCall()
 		m.streamingText += msg.delta
+		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
 		// recordStreamingDelta appends a time.Time to lineAges for every
 		// newline in the delta and bumps lastStreamActivity. It also
 		// re-stamps the in-progress last entry so the line that's still
@@ -1289,6 +1297,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamingReasoning += msg.delta
+		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
 		return m, nil
 	case spinner.TickMsg:
 		// Record when swarm members first finish so the sidebar can linger them
@@ -2357,12 +2366,29 @@ func (m model) workingStatusLine() string {
 	if !m.turnStartedAt.IsZero() {
 		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
 	}
-	// Compact "↑ from-to/total ↓" scroll indicator for the in-flight transcript,
-	// so a long multi-tool run shows which slice the working line reports on.
-	if indicator := m.transcriptPhaseIndicator(); indicator != "" {
-		line += " " + zeroTheme.faint.Render(indicator)
-	}
+	// Live token estimate so the working line visibly climbs as the model reasons
+	// and writes, instead of a static figure. Shown from the start of the turn (at
+	// 0) so the counter is never missing — the authoritative totals stay in the
+	// status line and sidebar; this is the at-a-glance "it's generating" pulse.
+	line += zeroTheme.faint.Render("  ·  " + m.workingTokenIndicator())
 	return line
+}
+
+// workingTokenIndicator renders a live "↑ <n> tok" estimate of the tokens
+// generated so far in the current turn, so the working line keeps moving while
+// the model reasons and writes. It is shown for the whole turn — starting at
+// "↑ 0 tok" before the first delta and climbing — so the counter never blinks
+// out. Providers only report exact usage when a step finishes, so this estimates
+// from the streamed reasoning+answer length at the usual ~4 characters per
+// token; turnStreamedRunes accumulates across the whole turn (it survives the
+// per-segment buffer clears), giving a monotonic climb that resets on the next
+// turn.
+func (m model) workingTokenIndicator() string {
+	tokens := m.turnStreamedRunes / 4
+	if m.turnStreamedRunes > 0 && tokens < 1 {
+		tokens = 1
+	}
+	return "↑ " + humanCount(tokens) + " tok"
 }
 
 // formatWorkingElapsed renders a turn's running time compactly: "8s", "1m04s".
@@ -3365,6 +3391,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.specialists.clear()
 	m.plan.clear()
 	m.turnStartedAt = m.now()
+	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
 	return m
 }
