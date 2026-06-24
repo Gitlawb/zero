@@ -286,10 +286,14 @@ var swarmStatusRe = regexp.MustCompile(`(?m)^\s*[-–—]?\s*(\S+)\s+\[([a-zA-Z]
 // last report in transcript order wins. Empty when no report has run yet. This
 // is what lets a swarm_collect that runs while members are still working keep the
 // AGENTS panel populated instead of clearing it.
+//
+// Scoped to the active run, exactly like the spawn rows in swarmSpawnedAgents: a
+// prior run's status/collect (whose task ids can repeat) must not mark a current
+// member done/failed and drop or fade it.
 func (m model) swarmMemberStatus() map[string]string {
 	status := map[string]string{}
 	for _, row := range m.transcript {
-		if row.kind != rowToolResult {
+		if row.kind != rowToolResult || row.runID != m.activeRunID {
 			continue
 		}
 		if row.tool != "swarm_status" && row.tool != "swarm_collect" {
