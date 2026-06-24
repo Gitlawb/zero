@@ -12,10 +12,12 @@ type safetyTool struct {
 	safety tools.Safety
 }
 
-func (t safetyTool) Name() string            { return t.name }
-func (t safetyTool) Description() string      { return "test tool" }
-func (t safetyTool) Parameters() tools.Schema { return tools.Schema{Type: "object", AdditionalProperties: false} }
-func (t safetyTool) Safety() tools.Safety     { return t.safety }
+func (t safetyTool) Name() string        { return t.name }
+func (t safetyTool) Description() string { return "test tool" }
+func (t safetyTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (t safetyTool) Safety() tools.Safety { return t.safety }
 func (t safetyTool) Run(context.Context, map[string]any) tools.Result {
 	return tools.Result{Status: tools.StatusOK}
 }
