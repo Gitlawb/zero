@@ -1,7 +1,7 @@
 # Zero — Product Requirements Document (v1.0)
 
 **Status:** DRAFT v1.0
-**Target:** Compete with Claude Code + Cursor + OpenCode
+**Target:** Compete with Claude Code + Cursor + other multi-provider terminal agents
 **Timeline:** 6-12 months
 **Stack:** Go native core + npm distribution wrapper
 
@@ -14,7 +14,7 @@
 It combines the best of:
 - **Claude Code** — terminal-native agentic coding
 - **Cursor** — IDE integration + smart editing
-- **OpenCode** — multi-provider + headless
+- **Multi-provider terminal agents** — provider-agnostic + headless
 
 **One Go-native agent core. Three surfaces. Zero lock-in.**
 

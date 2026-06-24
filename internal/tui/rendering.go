@@ -1360,7 +1360,7 @@ func toolCardHead(name string, target string, arg string, headTag string, nameSt
 // edge, the head (with the status glyph right-aligned to the card edge) on the
 // first line, body lines below, and an optional footer line — no top, right, or
 // bottom borders. This matches the lighter inline style of specialist cards
-// (renderLeftRuleCard) and the reference TUIs (opencode, codex), instead of the
+// (renderLeftRuleCard) and comparable terminal agents, instead of the
 // older full rounded box. Every emitted line is exactly `width` cells, and the
 // inner content budget stays width-4, so the diff/read/bash body renderers
 // (which assume width-4) need no change. On the tiny tier the rail goes away

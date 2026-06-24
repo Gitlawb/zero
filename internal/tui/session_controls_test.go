@@ -75,7 +75,7 @@ func TestEffortCommandRejectsUnsupportedActiveModel(t *testing.T) {
 	}
 }
 
-// The Ctrl+T cycle walks the active model's supported ring opencode-style:
+// The Ctrl+T cycle walks the active model's supported ring:
 // auto ("") -> first supported -> ... -> last supported -> auto. These cover
 // every branch of cycleReasoningEffort: empty/auto start, mid-ring advance,
 // last-slot wrap, an effort the model doesn't support, and a model with no

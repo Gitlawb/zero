@@ -1016,7 +1016,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.transcriptDetailed {
 				return m, nil
 			}
-			// Ctrl+T cycles reasoning effort opencode-style (auto -> low ->
+			// Ctrl+T cycles reasoning effort (auto -> low ->
 			// medium -> high -> auto), but only when nothing modal is up — the
 			// same gate shift+tab uses above. Not gated on m.pending: cycling
 			// mid-run is allowed and takes effect on the next turn, matching
@@ -1791,7 +1791,7 @@ func (m model) transcriptView() string {
 
 	// Plan panel renders inline in the transcript body (as a transcript row),
 	// not pinned at the top. It appears above the specialist cards like a
-	// chat message, matching how opencode renders todo/plan updates inline.
+	// chat message, the way todo/plan updates render inline.
 	if m.altScreen && m.height > 0 {
 		header := m.pinnedTitleBar(width)
 		return m.scrollableTranscriptItemsView(header, bodyItems, footer, width, overlayForViewport)

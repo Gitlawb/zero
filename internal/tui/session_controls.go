@@ -148,7 +148,7 @@ func (m model) effortDisplay() string {
 	return string(m.reasoningEffort)
 }
 
-// cycleReasoningEffort advances the reasoning-effort ring opencode-style:
+// cycleReasoningEffort advances the reasoning-effort ring:
 // auto ("") -> first supported -> ... -> last supported -> auto. No-op (model
 // unchanged) when the active model exposes no effort controls, so Ctrl+T stays
 // quiet on non-reasoning models. Called from the Ctrl+T key case — a rare
