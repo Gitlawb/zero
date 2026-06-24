@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Extending Zero
 
-Zero is an open-source terminal coding agent in the same family as Claude Code, Codex, and Droid. Out of the box it does the obvious things — read, edit, run, search — but the design point of the project is that **every surface is configurable**. This document is the user-facing guide for that configuration.
+Zero is an open-source terminal coding agent. Out of the box it does the obvious things — read, edit, run, search — but the design point of the project is that **every surface is configurable**. This document is the user-facing guide for that configuration.
 
 If you only want to *use* Zero, the [README](README.md) is enough. This page is for the other three jobs:
 
