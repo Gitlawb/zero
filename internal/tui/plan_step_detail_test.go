@@ -55,3 +55,39 @@ func TestCaptureStepWork(t *testing.T) {
 		t.Errorf("isPlanCommandTool classification wrong")
 	}
 }
+
+// TestPlanStepDetailToggle: re-clicking the open step hides the card (no
+// stacking); clicking a different step switches; at most one card at a time.
+func TestPlanStepDetailToggle(t *testing.T) {
+	m := model{now: time.Now}
+	m.plan.steps = []planStep{
+		{content: "a", status: "completed"},
+		{content: "b", status: "in_progress"},
+	}
+	base := len(m.transcript)
+
+	m = m.openPlanStepDetail(0)
+	if !m.planDetailOpen || m.planDetailStep != 0 {
+		t.Fatalf("first click should open step 0: open=%v step=%d", m.planDetailOpen, m.planDetailStep)
+	}
+	if len(m.transcript) != base+1 {
+		t.Fatalf("first click should add one card: got %d, base %d", len(m.transcript), base)
+	}
+
+	m = m.openPlanStepDetail(0)
+	if m.planDetailOpen {
+		t.Error("re-clicking the same step should close it")
+	}
+	if len(m.transcript) != base {
+		t.Errorf("re-click should net zero growth: got %d, base %d", len(m.transcript), base)
+	}
+
+	m = m.openPlanStepDetail(0)
+	m = m.openPlanStepDetail(1)
+	if !m.planDetailOpen || m.planDetailStep != 1 {
+		t.Errorf("clicking a different step should switch: open=%v step=%d", m.planDetailOpen, m.planDetailStep)
+	}
+	if len(m.transcript) != base+1 {
+		t.Errorf("switching steps should keep exactly one card: got %d, base %d", len(m.transcript), base)
+	}
+}

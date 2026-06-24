@@ -118,12 +118,40 @@ func (m model) planStepAtMouse(msg tea.MouseMsg) (int, bool) {
 	return 0, false
 }
 
-// openPlanStepDetail appends a transcript card showing what was built for the
-// given plan step: its status and the file changes captured while it ran.
+// planStepDetailRowID is the stable transcript id for the single plan-step
+// detail card, so re-clicking toggles it instead of stacking duplicates.
+const planStepDetailRowID = "plan/step-detail"
+
+// dropTranscriptRowsByID returns the transcript with any rows carrying id removed.
+func dropTranscriptRowsByID(rows []transcriptRow, id string) []transcriptRow {
+	if id == "" {
+		return rows
+	}
+	out := make([]transcriptRow, 0, len(rows))
+	for _, r := range rows {
+		if r.id != id {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// openPlanStepDetail toggles a transcript card showing what was built for the
+// given plan step. Clicking the open step hides it; clicking a different step
+// replaces it — so at most one detail card is shown and re-clicks never stack.
 func (m model) openPlanStepDetail(stepIndex int) model {
 	if stepIndex < 0 || stepIndex >= len(m.plan.steps) {
 		return m
 	}
+	wasOpen := m.planDetailOpen && m.planDetailStep == stepIndex
+	m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
+	if wasOpen {
+		m.planDetailOpen = false
+		return m
+	}
+	m.planDetailOpen = true
+	m.planDetailStep = stepIndex
+
 	step := m.plan.steps[stepIndex]
 	work := m.stepWork[step.content]
 
@@ -165,7 +193,7 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 		}},
 		Hints: []string{"diffs + commands captured while this step was in progress"},
 	})
-	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "plan", text: card})
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "plan", id: planStepDetailRowID, text: card})
 	return m
 }
 
