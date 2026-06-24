@@ -187,6 +187,7 @@ var swarmSpawnRe = regexp.MustCompile(`as task (\S+) on team`)
 type swarmAgent struct {
 	id         string    // e.g. "subagent-1" — the dedup key and fallback name
 	name       string    // the task briefing (argHint of the call row), or id when empty
+	state      string    // latest reported state (running/done/failed/…), "" until a report lands
 	finishing  bool      // done/failed but still lingering before removal (smooth exit)
 	finishedAt time.Time // when first seen finished (zero until the spinner tick stamps it)
 }
@@ -200,14 +201,6 @@ type swarmAgent struct {
 // opaque "subagent-N". Only spawns that produced a result row (success) are
 // returned, and the list is deduped by id.
 func (m model) swarmSpawnedAgents() []swarmAgent {
-	// If a swarm_collect has run on any team, the swarm is considered closed
-	// and we no longer surface its members in the AGENTS sidebar.
-	for _, row := range m.transcript {
-		if row.tool == "swarm_collect" && row.kind == rowToolResult {
-			return nil
-		}
-	}
-
 	seen := map[string]bool{}
 	var agents []swarmAgent
 	// pendingTask holds the task from the most recent unmatched swarm_spawn call
@@ -252,7 +245,8 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 	if status := m.swarmMemberStatus(); len(status) > 0 {
 		live := agents[:0:0]
 		for _, a := range agents {
-			switch status[a.id] {
+			a.state = status[a.id]
+			switch a.state {
 			case "done", "failed", "completed", "cancelled":
 				doneAt, stamped := m.swarmDoneAt[a.id]
 				if stamped && m.now().Sub(doneAt) >= sidebarAgentLinger {
@@ -274,12 +268,19 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 // "– teammate-1 [done] (cyan) <task>" → captures the id and the status word.
 var swarmStatusRe = regexp.MustCompile(`(?m)^\s*[-–—]?\s*(\S+)\s+\[([a-zA-Z]+)\]`)
 
-// swarmMemberStatus parses the LATEST swarm_status result in the transcript into
-// id → status (lowercased). Empty when no swarm_status has run yet.
+// swarmMemberStatus parses the LATEST swarm roster report in the transcript into
+// id → status (lowercased). Both swarm_status and swarm_collect results list
+// every member with its "[state]", so either one refreshes the live roster; the
+// last report in transcript order wins. Empty when no report has run yet. This
+// is what lets a swarm_collect that runs while members are still working keep the
+// AGENTS panel populated instead of clearing it.
 func (m model) swarmMemberStatus() map[string]string {
 	status := map[string]string{}
 	for _, row := range m.transcript {
-		if row.tool != "swarm_status" || row.kind != rowToolResult {
+		if row.kind != rowToolResult {
+			continue
+		}
+		if row.tool != "swarm_status" && row.tool != "swarm_collect" {
 			continue
 		}
 		latest := map[string]string{}
@@ -389,7 +390,16 @@ func (m model) sidebarAgentLines(width int) []string {
 			lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(a.name, room)))
 			continue
 		}
-		lines = append(lines, " "+zeroTheme.accent.Render("•")+" "+style.Render(truncateStep(a.name, room)))
+		// A non-running state (pending/handoff/…) is shown faintly after the task
+		// so the panel reports the member's actual status; running is left implied
+		// by the live pulse to keep the common case clean.
+		nameRoom := room
+		suffix := ""
+		if st := strings.TrimSpace(a.state); st != "" && st != "running" {
+			suffix = " " + zeroTheme.faint.Render(st)
+			nameRoom = maxInt(4, room-len(st)-1)
+		}
+		lines = append(lines, " "+zeroTheme.accent.Render("•")+" "+style.Render(truncateStep(a.name, nameRoom))+suffix)
 	}
 	return lines
 }

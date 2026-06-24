@@ -278,6 +278,40 @@ func TestSwarmAgentsLingerThenDisappearWhenDone(t *testing.T) {
 	}
 }
 
+// Regression: a swarm_collect that runs WHILE members are still working must not
+// clear the AGENTS panel. Previously any swarm_collect result wiped the roster,
+// so the sidebar showed "no agents spawned" mid-run even with 4 subagents live.
+func TestSwarmAgentsStayVisibleWhileCollectRunsMidFlight(t *testing.T) {
+	m := sidebarTestModel()
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "build the homepage"},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-1 on team default."},
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "build the stylesheet"},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-2 on team default."},
+		// A collect mid-flight, both members still running.
+		transcriptRow{kind: rowToolResult, tool: "swarm_collect",
+			detail: "Results for team default: 2 task(s)\n- subagent-1 [running] build the homepage\n- subagent-2 [running] build the stylesheet"},
+	)
+
+	agents := m.swarmSpawnedAgents()
+	if len(agents) != 2 {
+		t.Fatalf("running members must survive a mid-flight swarm_collect, got %d: %+v", len(agents), agents)
+	}
+	for _, a := range agents {
+		if a.finishing {
+			t.Fatalf("a running member must not be marked finishing: %+v", a)
+		}
+		if a.state != "running" {
+			t.Fatalf("swarm_collect should set member state to running, got %q for %s", a.state, a.id)
+		}
+	}
+
+	plain := stripSidebar(m.sidebarAgentLines(sidebarWidth(m.width)))
+	if !strings.Contains(plain, "homepage") || !strings.Contains(plain, "stylesheet") {
+		t.Fatalf("sidebar should list the running members and their tasks:\n%s", plain)
+	}
+}
+
 func TestSidebarHidesNotFoundSpecialistMisroutes(t *testing.T) {
 	m := sidebarTestModel()
 	now := time.Now()
