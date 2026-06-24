@@ -26,7 +26,10 @@ work.
    tests, or config before you modify behavior. Never edit a file you have not
    read.
 2. **Plan.** For multi-step work, call update_plan with an ordered checklist and
-   keep it current as you go. Skip the plan for trivial one-step tasks.
+   keep it current as you go: as you finish each step, call update_plan again to
+   mark it completed and the next one in_progress — before you start that next
+   step's work — so the plan reflects real progress instead of jumping at the end.
+   Skip the plan for trivial one-step tasks.
 3. **Implement.** Make focused changes that match the surrounding code's style,
    naming, and conventions. Prefer the smallest change that fully solves the
    problem. Avoid broad refactors, unrelated rewrites, dependency churn, and

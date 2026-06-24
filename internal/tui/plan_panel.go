@@ -68,21 +68,33 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 	// both inherit the SAME prior entry's timestamps; positional order then breaks
 	// the tie, giving duplicate-text steps their own start/complete times (L22).
 	prevUsed := make([]bool, len(prev))
+	// When the plan length is unchanged the model usually edited steps in place
+	// (commonly just rewording the in-progress one). Fall back to positional
+	// carry-over for any item that didn't content-match, so a reworded step keeps
+	// its timers instead of resetting its elapsed clock to zero mid-progress.
+	sameCount := len(prev) == len(items)
 	next := make([]planStep, 0, len(items))
-	for _, item := range items {
+	for i, item := range items {
 		step := planStep{
 			content: item.Content,
 			status:  item.Status,
 			notes:   item.Notes,
 		}
 		// Carry over timestamps from the first unconsumed prior step with the same content.
+		matched := false
 		for pi := range prev {
 			if !prevUsed[pi] && prev[pi].content == step.content {
 				step.startedAt = prev[pi].startedAt
 				step.completedAt = prev[pi].completedAt
 				prevUsed[pi] = true
+				matched = true
 				break
 			}
+		}
+		if !matched && sameCount && i < len(prev) && !prevUsed[i] {
+			step.startedAt = prev[i].startedAt
+			step.completedAt = prev[i].completedAt
+			prevUsed[i] = true
 		}
 		switch step.status {
 		case "in_progress":
@@ -294,19 +306,43 @@ func (m model) renderPlanSummaryLine(width int) string {
 	return zeroTheme.accent.Render(label + truncateStep(current, room))
 }
 
+// currentStepContent returns the content of the step the plan is "on": the
+// in_progress step, else the first step not yet in a terminal status, else the
+// first step. Used by the header so the title names the step actually being
+// worked, not always step 1 (which read as a stuck plan).
+func currentStepContent(steps []planStep) string {
+	for _, step := range steps {
+		if step.status == "in_progress" {
+			return step.content
+		}
+	}
+	for _, step := range steps {
+		if step.status != "completed" && step.status != "failed" {
+			return step.content
+		}
+	}
+	if len(steps) > 0 {
+		return steps[0].content
+	}
+	return ""
+}
+
 // renderPlanHeader builds the single header line. While running it shows the
 // live spinner, the truncated first step, the done/total count, and the
 // elapsed time in the accent color; once complete it shows a green check and
 // "PLAN COMPLETE".
 func renderPlanHeader(state planPanelState, spinnerView string, done, total int, elapsed time.Duration) string {
-	first := ""
+	// Show the step the plan is currently ON (in_progress, else first incomplete),
+	// not always step 1 — otherwise the header text never advances and a running
+	// plan reads as stuck even while the done/total count climbs.
+	current := ""
 	if total > 0 {
-		first = truncateStep(state.steps[0].content, 40)
+		current = truncateStep(currentStepContent(state.steps), 40)
 	}
 	if state.isComplete() {
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN COMPLETE · %d/%d · %s", done, total, formatElapsedSeconds(elapsed)))
 	}
-	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, first, done, total, formatElapsedSeconds(elapsed)))
+	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, current, done, total, formatElapsedSeconds(elapsed)))
 }
 
 // renderPlanStepLine renders one step row: an indent, a status icon, the
