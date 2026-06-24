@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -130,6 +131,9 @@ func TestBuildLinuxSandboxBwrapArgsWrapsInnerSeccompStage(t *testing.T) {
 	if argsContainSequence(bwrapArgs, "--tmpfs", "/") {
 		t.Fatalf("default workspace-write profile must not start from an empty root: %#v", bwrapArgs)
 	}
+	if argsContainSequence(bwrapArgs, "--tmpfs", "/tmp") {
+		t.Fatalf("default workspace-write profile must not replace host /tmp: %#v", bwrapArgs)
+	}
 	if stringSliceContains(bwrapArgs, "--clearenv") {
 		t.Fatalf("Linux bwrap args must preserve caller environment like upstream: %#v", bwrapArgs)
 	}
@@ -192,6 +196,46 @@ func TestLinuxBwrapRootReadUsesReadOnlyHostRoot(t *testing.T) {
 	}
 }
 
+func TestLinuxBwrapTempUsesHostWriteRoots(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux bwrap temp root assertions use Unix paths")
+	}
+	tmpdir := t.TempDir()
+	t.Setenv("TMPDIR", tmpdir)
+	workspace := filepath.Join(tmpdir, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll workspace: %v", err)
+	}
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:       FileSystemRestricted,
+			ReadRoots:  []string{string(filepath.Separator)},
+			WriteRoots: []WritableRoot{{Root: workspace, ProtectedMetadataNames: []string{".git"}}},
+			AllowTemp:  true,
+		},
+		Network: NetworkPolicy{Mode: NetworkAllow},
+	}
+
+	args := linuxBwrapFilesystemArgs(profile)
+	if argsContainSequence(args, "--tmpfs", "/tmp") {
+		t.Fatalf("workspace-write temp access must bind host /tmp, not create private tmpfs: %#v", args)
+	}
+	for _, tempRoot := range defaultTempWriteRoots() {
+		if pathExists(tempRoot) {
+			assertArgsContainSequence(t, args, "--bind", tempRoot, tempRoot)
+		}
+	}
+	assertArgsContainSequence(t, args, "--bind", workspace, workspace)
+
+	if runtime.GOOS == "linux" {
+		tmpdirBind := argsSequenceIndex(args, "--bind", tmpdir, tmpdir)
+		workspaceBind := argsSequenceIndex(args, "--bind", workspace, workspace)
+		if tmpdirBind < 0 || workspaceBind < 0 || tmpdirBind > workspaceBind {
+			t.Fatalf("broader temp root must be bound before nested workspace root; args=%#v", args)
+		}
+	}
+}
+
 func TestLinuxBwrapUnrestrictedFilesystemUsesWritableHostRoot(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
@@ -251,8 +295,12 @@ func indexString(values []string, want string) int {
 }
 
 func argsContainSequence(args []string, sequence ...string) bool {
+	return argsSequenceIndex(args, sequence...) >= 0
+}
+
+func argsSequenceIndex(args []string, sequence ...string) int {
 	if len(sequence) == 0 {
-		return true
+		return 0
 	}
 	for index := 0; index <= len(args)-len(sequence); index++ {
 		matched := true
@@ -263,8 +311,8 @@ func argsContainSequence(args []string, sequence ...string) bool {
 			}
 		}
 		if matched {
-			return true
+			return index
 		}
 	}
-	return false
+	return -1
 }

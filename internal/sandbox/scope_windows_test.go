@@ -34,7 +34,7 @@ func TestScopeValidateHandlesVolumePathsOnWindows(t *testing.T) {
 
 	// An absolute path outside all roots must still be denied (no fail-open
 	// from drive-path mangling).
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := outsideDefaultTempPath(workspace, "escape.txt")
 	block := scope.validate(outside)
 	if block == nil {
 		t.Fatal("validate(outside all roots) = nil, want block (fail-open regression)")

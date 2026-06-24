@@ -14,7 +14,7 @@ import (
 func TestScopeValidateMultiRootSymlinkTraversalPreferred(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()
-	outside := t.TempDir()
+	outside := outsideDefaultTempPath(workspace, "symlink-target")
 	link := filepath.Join(extra, "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -46,7 +46,7 @@ func TestScopeValidateMultiRootSymlinkTraversalPreferred(t *testing.T) {
 // in-root symlink escaping outside is still caught as BlockSymlinkTraversal.
 func TestValidateResolvesAliasedPathPrefixes(t *testing.T) {
 	real := t.TempDir()
-	aliasParent := t.TempDir()
+	aliasParent := tempDirOutsideDefaultTemp(t)
 	alias := filepath.Join(aliasParent, "alias")
 	if err := os.Symlink(real, alias); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -58,7 +58,7 @@ func TestValidateResolvesAliasedPathPrefixes(t *testing.T) {
 	if block := scope.validate(filepath.Join(alias, "new.txt")); block != nil {
 		t.Fatalf("validate(alias-prefixed path) = %v, want nil", block)
 	}
-	outside := t.TempDir()
+	outside := outsideDefaultTempPath(real, "symlink-target")
 	link := filepath.Join(real, "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatalf("Symlink: %v", err)
@@ -71,8 +71,8 @@ func TestValidateResolvesAliasedPathPrefixes(t *testing.T) {
 // TestScopeAddNormalizesSymlinkedRoot verifies that Add resolves symlinks so
 // the stored root is the real path.
 func TestScopeAddNormalizesSymlinkedRoot(t *testing.T) {
-	real := t.TempDir()
-	linkParent := t.TempDir()
+	real := tempDirOutsideDefaultTemp(t)
+	linkParent := tempDirOutsideDefaultTemp(t)
 	link := filepath.Join(linkParent, "link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -93,8 +93,8 @@ func TestScopeAddNormalizesSymlinkedRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(real): %v", err)
 	}
-	if roots[1] != resolvedReal {
-		t.Fatalf("Roots()[1]=%q want resolved path %q (no symlink component)", roots[1], resolvedReal)
+	if !stringSliceContains(roots, resolvedReal) {
+		t.Fatalf("Roots()=%v want resolved path %q (no symlink component)", roots, resolvedReal)
 	}
 }
 
@@ -122,11 +122,14 @@ func TestNewScopeNormalizesAndValidatesExtraRoots(t *testing.T) {
 		t.Fatalf("NewScope: %v", err)
 	}
 	roots := scope.Roots()
-	if len(roots) != 2 {
-		t.Fatalf("Roots()=%v want workspace + 1 extra", roots)
-	}
 	if roots[0] != scope.WorkspaceRoot() {
 		t.Fatalf("Roots()[0]=%q want workspace root %q", roots[0], scope.WorkspaceRoot())
+	}
+	if !stringSliceContains(roots, normalizeWorkspaceRootBestEffort(extra)) {
+		t.Fatalf("Roots()=%v want extra root %q", roots, normalizeWorkspaceRootBestEffort(extra))
+	}
+	if pathExists("/tmp") && !stringSliceContains(roots, normalizeWorkspaceRootBestEffort("/tmp")) {
+		t.Fatalf("Roots()=%v want default /tmp write root", roots)
 	}
 }
 
@@ -175,9 +178,70 @@ func TestScopeAddIsIdempotentAndRejectsContainedPaths(t *testing.T) {
 	if _, err := scope.Add(workspace); err != nil {
 		t.Fatalf("Add (workspace itself): %v", err)
 	}
-	if got := scope.Roots(); len(got) != 2 {
-		t.Fatalf("Roots()=%v want exactly workspace + %q (idempotent adds)", got, added)
+	if got := scope.Roots(); !stringSliceContains(got, normalizeWorkspaceRootBestEffort(workspace)) {
+		t.Fatalf("Roots()=%v want workspace root", got)
+	} else if !stringSliceContains(got, normalizeWorkspaceRootBestEffort(added)) && !rootsCoverPath(got, normalizeWorkspaceRootBestEffort(added)) {
+		t.Fatalf("Roots()=%v want %q or a broader root covering it", got, added)
 	}
+}
+
+func TestDefaultTempWriteRootCandidatesMatchPlatformEnvironment(t *testing.T) {
+	env := func(values map[string]string) func(string) string {
+		return func(key string) string {
+			return values[key]
+		}
+	}
+
+	windows := defaultTempWriteRootCandidatesForGOOS("windows", env(map[string]string{
+		"TEMP":   `C:\Users\me\AppData\Local\Temp`,
+		"TMP":    `D:\scratch`,
+		"TMPDIR": `/ignored`,
+	}))
+	if len(windows) != 2 || windows[0] != `C:\Users\me\AppData\Local\Temp` || windows[1] != `D:\scratch` {
+		t.Fatalf("windows temp roots = %#v, want TEMP and TMP", windows)
+	}
+
+	unix := defaultTempWriteRootCandidatesForGOOS("linux", env(map[string]string{
+		"TMPDIR": "/var/tmp/zero",
+		"TEMP":   "/ignored",
+		"TMP":    "/ignored",
+	}))
+	if len(unix) != 2 || unix[0] != "/tmp" || unix[1] != "/var/tmp/zero" {
+		t.Fatalf("unix temp roots = %#v, want /tmp and TMPDIR", unix)
+	}
+}
+
+func rootsCoverPath(roots []string, path string) bool {
+	for _, root := range roots {
+		if pathWithinRoot(root, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func outsideDefaultTempPath(workspaceRoot string, elems ...string) string {
+	volume := filepath.VolumeName(workspaceRoot)
+	root := volume + string(filepath.Separator)
+	parts := append([]string{root, "zero-sandbox-outside-test"}, elems...)
+	return filepath.Join(parts...)
+}
+
+func tempDirOutsideDefaultTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".zero-sandbox-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp outside default temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("Abs(%q): %v", dir, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }
 
 func TestScopeValidateAllowsAnyRootButRelativeOnlyWorkspace(t *testing.T) {
@@ -198,7 +262,7 @@ func TestScopeValidateAllowsAnyRootButRelativeOnlyWorkspace(t *testing.T) {
 		t.Fatalf("validate(relative path) = %v, want nil (resolves against workspace)", block)
 	}
 
-	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
+	outside := outsideDefaultTempPath(workspace, "elsewhere.txt")
 	block := scope.validate(outside)
 	if block == nil {
 		t.Fatal("validate(outside all roots) = nil, want block")
@@ -213,7 +277,7 @@ func TestScopeValidateAllowsAnyRootButRelativeOnlyWorkspace(t *testing.T) {
 
 func TestScopeValidateKeepsSymlinkTraversalProtection(t *testing.T) {
 	workspace := t.TempDir()
-	outside := t.TempDir()
+	outside := outsideDefaultTempPath(workspace, "symlink-target")
 	link := filepath.Join(workspace, "link")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)

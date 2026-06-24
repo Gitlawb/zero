@@ -617,9 +617,6 @@ func TestRunAddDirWiresExtraWriteRootIntoTUISandboxScope(t *testing.T) {
 		t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")
 	}
 	roots := launchedOptions.AgentOptions.Sandbox.Scope().Roots()
-	if len(roots) != 2 {
-		t.Fatalf("scope roots = %v, want exactly workspace + extra", roots)
-	}
 	// The scope stores symlink-resolved roots (e.g. macOS /var -> /private/var),
 	// so compare against the resolved extra dir.
 	resolvedExtra, err := filepath.EvalSymlinks(extra)
@@ -679,10 +676,14 @@ func TestRunSkipPermissionsUnsafeMergesAddDirGrants(t *testing.T) {
 				t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")
 			}
 			roots := launchedOptions.AgentOptions.Sandbox.Scope().Roots()
-			if len(roots) != 2 {
-				t.Fatalf("scope roots = %v, want exactly workspace + extra", roots)
+			found := false
+			for _, root := range roots {
+				if root == resolvedExtra {
+					found = true
+					break
+				}
 			}
-			if roots[1] != resolvedExtra {
+			if !found {
 				t.Fatalf("scope roots = %v, want extra root %q", roots, resolvedExtra)
 			}
 		})

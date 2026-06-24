@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -28,11 +29,14 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	if profile.FileSystem.Kind != FileSystemRestricted {
 		t.Fatalf("filesystem kind = %q, want restricted", profile.FileSystem.Kind)
 	}
-	if len(profile.FileSystem.WriteRoots) != 2 {
-		t.Fatalf("write roots = %#v, want workspace + extra", profile.FileSystem.WriteRoots)
+	roots := scope.Roots()
+	if len(profile.FileSystem.WriteRoots) != len(roots) {
+		t.Fatalf("write roots = %#v, want scope roots %#v", profile.FileSystem.WriteRoots, roots)
 	}
-	if profile.FileSystem.WriteRoots[0].Root != scope.Roots()[0] || profile.FileSystem.WriteRoots[1].Root != scope.Roots()[1] {
-		t.Fatalf("write roots = %#v, want scope roots %#v", profile.FileSystem.WriteRoots, scope.Roots())
+	for i, root := range roots {
+		if profile.FileSystem.WriteRoots[i].Root != root {
+			t.Fatalf("write roots = %#v, want scope roots %#v", profile.FileSystem.WriteRoots, roots)
+		}
 	}
 	if !stringSliceContains(profile.FileSystem.ReadRoots, profileRootPath()) {
 		t.Fatalf("read roots = %#v, want full read root %q", profile.FileSystem.ReadRoots, profileRootPath())
@@ -49,6 +53,38 @@ func TestPermissionProfileFromPolicyBuildsWorkspaceWriteProfile(t *testing.T) {
 	if !profile.RequiresPlatformSandbox() {
 		t.Fatal("workspace-write profile must require a platform sandbox")
 	}
+}
+
+func TestPermissionProfileFromPolicyIncludesDefaultTempWriteRoots(t *testing.T) {
+	tmpdir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		t.Setenv("TEMP", tmpdir)
+		t.Setenv("TMP", tmpdir)
+	} else {
+		t.Setenv("TMPDIR", tmpdir)
+	}
+	workspace := t.TempDir()
+
+	profile := PermissionProfileFromPolicy(workspace, DefaultPolicy(), nil)
+	if !writeRootsContain(profile.FileSystem.WriteRoots, workspace) {
+		t.Fatalf("write roots = %#v, want workspace %q", profile.FileSystem.WriteRoots, workspace)
+	}
+	if !writeRootsContain(profile.FileSystem.WriteRoots, tmpdir) {
+		t.Fatalf("write roots = %#v, want temp root %q", profile.FileSystem.WriteRoots, tmpdir)
+	}
+	if pathExists("/tmp") && !writeRootsContain(profile.FileSystem.WriteRoots, "/tmp") {
+		t.Fatalf("write roots = %#v, want /tmp", profile.FileSystem.WriteRoots)
+	}
+}
+
+func writeRootsContain(roots []WritableRoot, want string) bool {
+	want = normalizeProfilePath(want)
+	for _, root := range roots {
+		if normalizeProfilePath(root.Root) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUnknownNetworkModeFailsClosed(t *testing.T) {

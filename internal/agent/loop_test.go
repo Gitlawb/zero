@@ -2075,7 +2075,7 @@ func TestRunEmitsPermissionEventForPersistentSandboxGrant(t *testing.T) {
 
 func TestRunPromptsAndAllowsOutsideWorkspaceWrite(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
@@ -2137,7 +2137,7 @@ func TestRunPromptsAndAllowsOutsideWorkspaceWrite(t *testing.T) {
 
 func TestRunSessionAllowsLaterOutsideWorkspaceWrite(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
 		WorkspaceRoot: root,
 		Policy:        sandbox.DefaultPolicy(),
@@ -2207,7 +2207,7 @@ func TestRunSessionAllowsLaterOutsideWorkspaceWrite(t *testing.T) {
 
 func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewWriteFileTool(root))
 	provider := providerCallingWritePathThenAnswer(outside, "sandbox handled")

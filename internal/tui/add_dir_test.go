@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,12 +34,13 @@ func newAddDirTestModel(t *testing.T) (model, *sandbox.Scope) {
 
 func TestHandleAddDirCommand(t *testing.T) {
 	m, scope := newAddDirTestModel(t)
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
+	initialRootCount := len(scope.Roots())
 
 	// Granting a directory widens the shared scope and confirms inline.
 	next := m.handleAddDirCommand(extra)
-	if roots := scope.Roots(); len(roots) != 2 {
-		t.Fatalf("expected 2 write roots after grant, got %#v", roots)
+	if roots := scope.Roots(); len(roots) != initialRootCount+1 {
+		t.Fatalf("expected one additional write root after grant, got %#v", roots)
 	}
 	notice := lastTranscriptText(next)
 	if !strings.Contains(notice, "write access added") || !strings.Contains(notice, "session only") {
@@ -56,4 +58,21 @@ func TestHandleAddDirCommand(t *testing.T) {
 	if notice := lastTranscriptText(bad); !strings.Contains(notice, "add-dir:") {
 		t.Fatalf("bad-path notice = %q, want an add-dir: error", notice)
 	}
+}
+
+func tempDirOutsideDefaultTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".zero-sandbox-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp outside default temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("Abs(%q): %v", dir, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }

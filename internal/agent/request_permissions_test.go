@@ -15,7 +15,7 @@ import (
 
 func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	workspace := t.TempDir()
-	outside := t.TempDir()
+	outside := tempDirOutsideDefaultTemp(t)
 	target := filepath.Join(outside, "vegetables.txt")
 	scope, err := sandbox.NewScope(workspace, nil)
 	if err != nil {
@@ -118,6 +118,23 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	if decision.Action != sandbox.ActionPrompt {
 		t.Fatalf("turn grant should be cleaned up after Run, got decision %#v", decision)
 	}
+}
+
+func tempDirOutsideDefaultTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".zero-sandbox-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp outside default temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("Abs(%q): %v", dir, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }
 
 func TestInlineAdditionalPermissionsGrantAllowsNetworkCommand(t *testing.T) {

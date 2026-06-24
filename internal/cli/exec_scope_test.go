@@ -44,7 +44,7 @@ func TestRunAddDirDispatchForwardsGrantIntoExecScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_DATA_HOME", t.TempDir())
 			cwd := t.TempDir()
-			extra := t.TempDir()
+			extra := tempDirOutsideDefaultTemp(t)
 			target := filepath.Join(extra, "granted.txt")
 
 			exitCode, stderr := runExecAddDirWriteProbe(t, cwd, tc.args(extra), target)
@@ -117,7 +117,7 @@ func runExecAddDirWriteProbe(t *testing.T, cwd string, args []string, target str
 // prove both the overwrite and the scoped enforcement it ships.
 func TestExecScopeReRegistrationSwapsCoreToolsByName(t *testing.T) {
 	root := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	inside := filepath.Join(extra, "inside.txt")
 
 	registry := newCoreRegistry(root)
@@ -160,7 +160,7 @@ func TestExecScopeReRegistrationSwapsCoreToolsByName(t *testing.T) {
 	}
 
 	// A path outside every scope root must still be denied after re-registration.
-	outside := filepath.Join(t.TempDir(), "outside.txt")
+	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "outside.txt")
 	deniedOutside := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
 		"path":    outside,
 		"content": "never",
@@ -174,4 +174,21 @@ func TestExecScopeReRegistrationSwapsCoreToolsByName(t *testing.T) {
 	if _, err := os.Stat(outside); !os.IsNotExist(err) {
 		t.Fatalf("expected outside file to remain absent, stat err=%v", err)
 	}
+}
+
+func tempDirOutsideDefaultTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".zero-sandbox-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp outside default temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("Abs(%q): %v", dir, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }

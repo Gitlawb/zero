@@ -9,7 +9,7 @@ import (
 
 func TestGrantRequestPermissionsReadDoesNotGrantWrite(t *testing.T) {
 	workspace := t.TempDir()
-	outside := t.TempDir()
+	outside := tempDirOutsideDefaultTemp(t)
 	target := filepath.Join(outside, "notes.txt")
 	scope, err := NewScope(workspace, nil)
 	if err != nil {
@@ -116,7 +116,7 @@ func TestGrantRequestPermissionsNetworkOverlaysPolicyForTurn(t *testing.T) {
 
 func TestGrantRequestPermissionsSessionPersists(t *testing.T) {
 	workspace := t.TempDir()
-	outside := t.TempDir()
+	outside := tempDirOutsideDefaultTemp(t)
 	target := filepath.Join(outside, "notes.txt")
 	engine := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: DefaultPolicy()})
 
@@ -142,7 +142,7 @@ func TestGrantRequestPermissionsSessionPersists(t *testing.T) {
 
 func TestPermissionProfileIncludesReadOnlyGrantAsReadRootOnly(t *testing.T) {
 	workspace := t.TempDir()
-	outside := t.TempDir()
+	outside := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, nil)
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)

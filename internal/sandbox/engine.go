@@ -46,7 +46,7 @@ func NewEngine(options EngineOptions) *Engine {
 		}
 	}
 	if scope == nil && workspaceRoot != "" {
-		scope = &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
+		scope = newScopeBestEffort(workspaceRoot)
 	}
 	return &Engine{
 		workspaceRoot:   workspaceRoot,
@@ -203,7 +203,15 @@ func (engine *Engine) scopeFor(requestRoot string) *Scope {
 	if engine.scope != nil && requestRoot == engine.workspaceRoot {
 		return engine.scope
 	}
-	return &Scope{workspaceRoot: requestRoot}
+	return newScopeBestEffort(requestRoot)
+}
+
+func newScopeBestEffort(workspaceRoot string) *Scope {
+	scope, err := NewScope(workspaceRoot, nil)
+	if err == nil {
+		return scope
+	}
+	return &Scope{workspaceRoot: normalizeWorkspaceRootBestEffort(workspaceRoot)}
 }
 
 // shellSandboxActive reports whether a native wrapping sandbox would actually
