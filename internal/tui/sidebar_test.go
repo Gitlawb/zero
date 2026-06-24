@@ -8,12 +8,14 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/Gitlawb/zero/internal/sessions"
 )
 
-func swarmSidebarTestModel(t *testing.T, sessions map[string]string) model {
+func swarmSidebarTestModel(t *testing.T, sessionIDs map[string]string) model {
 	t.Helper()
 	m := sidebarTestModel()
-	m.swarmSessionMap = sessions
+	m.swarmSessionMap = sessionIDs
 	m.transcript = append(m.transcript,
 		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "build the homepage"},
 		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-1 on team default."},
@@ -76,11 +78,30 @@ func TestSidebarLineAtMouseHitsMemberRow(t *testing.T) {
 }
 
 func TestSidebarMemberClickRoutesToSubchatDrillIn(t *testing.T) {
-	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
+	// A real session so the click can actually drill in (not just be "handled").
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "member: build the homepage", ModelID: "gpt-4.1", Provider: "openai"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": "assistant", "content": "member work output"},
+	}); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+
+	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": session.SessionID})
+	m.sessionStore = store
 	x := m.chatColumnWidth() + 3 + 2
-	_, _, handled := m.handleTranscriptSelectionMouse(testMouseClick(tea.MouseLeft, x, 1))
+	next, _, handled := m.handleTranscriptSelectionMouse(testMouseClick(tea.MouseLeft, x, 1))
 	if !handled {
-		t.Fatal("clicking a clickable member row should be handled (routed to the subchat drill-in)")
+		t.Fatal("clicking a clickable member row should be handled")
+	}
+	// It must actually enter the member's subchat session, not merely consume the click.
+	if !next.subchat.active || next.subchat.childSessionID != session.SessionID {
+		t.Fatalf("click should drill into member session %q, got active=%v id=%q",
+			session.SessionID, next.subchat.active, next.subchat.childSessionID)
 	}
 }
 
