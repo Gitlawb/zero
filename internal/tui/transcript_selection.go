@@ -944,6 +944,12 @@ func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd,
 			m.chatScrollOffset = 0
 			return m, nil, true
 		}
+		// A click on a PLAN step row drops a transcript card listing the file
+		// changes captured while that step was in progress.
+		if stepIndex, ok := m.planStepAtMouse(msg); ok {
+			m = m.openPlanStepDetail(stepIndex)
+			return m, nil, true
+		}
 		line, ok := m.transcriptLineAtMouse(msg)
 		if !ok {
 			if m.transcriptSelection.active {

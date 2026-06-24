@@ -124,6 +124,7 @@ type model struct {
 	// synced from the update_plan tool. See plan_panel.go.
 	plan        planPanelState
 	specialists specialistTracker
+	stepWork    map[string][]planStepWork // file mutations captured per in_progress plan step, for the clickable step detail
 	subchat     subchatState
 	altScreen   bool
 	setup       setupState
@@ -1674,6 +1675,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the chat with identical blocks.
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
+		m = m.captureStepWork(msg.row)
 		return m, nil
 	case swarmSessionsMsg:
 		// Merge completed swarm members' session ids so their AGENTS sidebar rows
@@ -3420,6 +3422,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
+	m.stepWork = nil
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
