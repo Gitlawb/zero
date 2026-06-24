@@ -48,8 +48,10 @@ func TestInterimBlockShowsWorkingLineWithStreamedText(t *testing.T) {
 // the model streams, replacing the old static scroll figure.
 func TestWorkingTokenIndicatorEstimatesFromStreamedRunes(t *testing.T) {
 	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
-	if got := m.workingTokenIndicator(); got != "" {
-		t.Fatalf("no streamed content yet should yield an empty indicator, got %q", got)
+	// Always visible during a run, starting at zero so the working line never
+	// drops the counter (the bug: it blinked out during the initial think).
+	if got := m.workingTokenIndicator(); !strings.Contains(got, "↑") || !strings.Contains(got, "0 tok") {
+		t.Fatalf("at turn start the counter should read like ↑ 0 tok, got %q", got)
 	}
 	m.turnStreamedRunes = 4000 // ~1000 tokens at ~4 chars/token
 	got := m.workingTokenIndicator()
@@ -84,6 +86,11 @@ func TestWorkingTokenIndicatorAccumulatesAcrossSegmentClears(t *testing.T) {
 
 	if m.turnStreamedRunes <= afterReasoning {
 		t.Fatalf("token estimate must keep climbing across the buffer clear: before=%d after=%d", afterReasoning, m.turnStreamedRunes)
+	}
+
+	// The climbing figure must actually reach the rendered working line.
+	if line := plainRender(t, m.workingStatusLine()); !strings.Contains(line, "tok") {
+		t.Fatalf("working status line should carry the live token counter, got %q", line)
 	}
 
 	// A fresh turn resets the accumulator to zero.

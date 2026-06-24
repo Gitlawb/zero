@@ -2367,27 +2367,25 @@ func (m model) workingStatusLine() string {
 		line += zeroTheme.faint.Render("  ·  " + formatWorkingElapsed(m.now().Sub(m.turnStartedAt)))
 	}
 	// Live token estimate so the working line visibly climbs as the model reasons
-	// and writes, instead of a static figure. The authoritative totals stay in the
+	// and writes, instead of a static figure. Shown from the start of the turn (at
+	// 0) so the counter is never missing — the authoritative totals stay in the
 	// status line and sidebar; this is the at-a-glance "it's generating" pulse.
-	if indicator := m.workingTokenIndicator(); indicator != "" {
-		line += zeroTheme.faint.Render("  ·  " + indicator)
-	}
+	line += zeroTheme.faint.Render("  ·  " + m.workingTokenIndicator())
 	return line
 }
 
 // workingTokenIndicator renders a live "↑ <n> tok" estimate of the tokens
 // generated so far in the current turn, so the working line keeps moving while
-// the model reasons and writes. Providers only report exact usage when a step
-// finishes, so this estimates from the streamed reasoning+answer length at the
-// usual ~4 characters per token; turnStreamedRunes accumulates across the whole
-// turn (it survives the per-segment buffer clears), giving a monotonic climb
-// that resets to zero on the next turn. Returns "" before anything has streamed.
+// the model reasons and writes. It is shown for the whole turn — starting at
+// "↑ 0 tok" before the first delta and climbing — so the counter never blinks
+// out. Providers only report exact usage when a step finishes, so this estimates
+// from the streamed reasoning+answer length at the usual ~4 characters per
+// token; turnStreamedRunes accumulates across the whole turn (it survives the
+// per-segment buffer clears), giving a monotonic climb that resets on the next
+// turn.
 func (m model) workingTokenIndicator() string {
-	if m.turnStreamedRunes <= 0 {
-		return ""
-	}
 	tokens := m.turnStreamedRunes / 4
-	if tokens < 1 {
+	if m.turnStreamedRunes > 0 && tokens < 1 {
 		tokens = 1
 	}
 	return "↑ " + humanCount(tokens) + " tok"
