@@ -852,8 +852,20 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 	if item.Favorite {
 		prefix = "* "
 	}
-	line := marker + surface(zeroTheme.ink).Render(prefix+label)
-	return fillPaletteLine(line, width, surface)
+	left := marker + surface(zeroTheme.ink).Render(prefix+label)
+	right := ""
+	if tag := strings.TrimSpace(item.Provider); tag != "" {
+		right = surface(zeroTheme.faintest).Render(tag)
+	}
+	// Right-align the provider slug so each row reads "<model> … <provider>".
+	// Drop it when the row is too narrow to keep a clear gap from the model
+	// name (mirrors the generic picker's gap math at pickerOverlay).
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if right == "" || gap < 2 {
+		return fillPaletteLine(left, width, surface)
+	}
+	line := left + surface(zeroTheme.ink).Render(strings.Repeat(" ", gap)) + right
+	return fitStyledLine(line, width)
 }
 
 func modelPickerItemDetail(item pickerItem) string {

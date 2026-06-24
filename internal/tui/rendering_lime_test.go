@@ -1462,6 +1462,46 @@ func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 	}
 }
 
+func TestModelPickerRowShowsProviderTag(t *testing.T) {
+	item := pickerItem{Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic", Remote: true}
+	got := plainRender(t, renderModelPickerRow(60, false, item))
+	if !strings.Contains(got, "Claude Sonnet 4.6") {
+		t.Fatalf("row = %q, missing model label", got)
+	}
+	if !strings.Contains(got, "anthropic") {
+		t.Fatalf("row = %q, missing right-aligned provider tag", got)
+	}
+	// The provider tag must trail the model name, not lead it.
+	if strings.Index(got, "anthropic") < strings.Index(got, "Claude") {
+		t.Fatalf("row = %q, provider tag should be right-aligned after the model name", got)
+	}
+}
+
+func TestModelPickerRowDropsProviderTagWhenNarrow(t *testing.T) {
+	item := pickerItem{Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic"}
+	got := plainRender(t, renderModelPickerRow(12, false, item))
+	if strings.Contains(got, "anthropic") {
+		t.Fatalf("narrow row = %q, should drop the provider tag rather than crowd the model name", got)
+	}
+}
+
+func TestModelPickerItemsCarryProviderTag(t *testing.T) {
+	m := limeTestModel()
+	picker := m.newModelPicker()
+	if picker == nil {
+		t.Fatal("expected a model picker")
+	}
+	tagged := 0
+	for _, item := range picker.items {
+		if strings.TrimSpace(item.Provider) != "" {
+			tagged++
+		}
+	}
+	if tagged == 0 {
+		t.Fatalf("expected catalog models to carry a provider tag, got %#v", picker.items[:minInt(3, len(picker.items))])
+	}
+}
+
 func TestSpecReviewCardShowsBadgePathAndKeys(t *testing.T) {
 	got := plainRender(t, renderFocusedSpecReviewPrompt(pendingSpecReviewPrompt{
 		SpecFilePath: "/repo/specs/zero-1.md",

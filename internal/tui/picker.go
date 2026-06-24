@@ -35,6 +35,7 @@ type pickerItem struct {
 	Label    string
 	Value    string
 	Meta     string
+	Provider string
 	Remote   bool
 	Local    bool
 	Favorite bool
@@ -287,6 +288,18 @@ func discoveredModelPickerItem(provider providercatalog.Descriptor, model provid
 func applyProviderPickerMeta(item *pickerItem, provider providercatalog.Descriptor) {
 	item.Remote = !provider.Local
 	item.Local = provider.Local
+	item.Provider = providerPickerTag(provider)
+}
+
+// providerPickerTag is the short, lowercase provider slug shown right-aligned on
+// each model row (e.g. "anthropic", "deepseek", "ollama"). Prefers the catalog
+// ID since it is already the stable lowercase identifier; falls back to a
+// lowercased display name for descriptors that only carry one.
+func providerPickerTag(provider providercatalog.Descriptor) string {
+	if id := strings.TrimSpace(provider.ID); id != "" {
+		return id
+	}
+	return strings.ToLower(strings.TrimSpace(provider.Name))
 }
 
 func registryModelPickerMeta(entry modelregistry.ModelEntry) string {
