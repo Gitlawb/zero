@@ -44,6 +44,55 @@ func TestInterimBlockShowsWorkingLineWithStreamedText(t *testing.T) {
 	}
 }
 
+// The working line carries a live token estimate ("↑ <n> tok") that climbs as
+// the model streams, replacing the old static scroll figure.
+func TestWorkingTokenIndicatorEstimatesFromStreamedRunes(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
+	if got := m.workingTokenIndicator(); got != "" {
+		t.Fatalf("no streamed content yet should yield an empty indicator, got %q", got)
+	}
+	m.turnStreamedRunes = 4000 // ~1000 tokens at ~4 chars/token
+	got := m.workingTokenIndicator()
+	for _, want := range []string{"↑", "tok", "1K"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("indicator = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// The estimate must keep climbing across the per-segment buffer clears (a tool
+// call wipes streamingText/Reasoning) — turnStreamedRunes accumulates over the
+// whole turn, so the counter never snaps back to zero mid-turn.
+func TestWorkingTokenIndicatorAccumulatesAcrossSegmentClears(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1"})
+	m = m.beginRun(nil)
+	rid := m.activeRunID
+
+	updated, _ := m.Update(agentReasoningMsg{runID: rid, delta: strings.Repeat("a", 40)})
+	m = updated.(model)
+	afterReasoning := m.turnStreamedRunes
+	if afterReasoning == 0 {
+		t.Fatal("reasoning deltas should accumulate streamed runes")
+	}
+
+	// Simulate the segment boundary that clears the live buffers, then stream
+	// answer text in the next segment.
+	m.streamingReasoning = ""
+	m.streamingText = ""
+	updated, _ = m.Update(agentTextMsg{runID: rid, delta: strings.Repeat("b", 40)})
+	m = updated.(model)
+
+	if m.turnStreamedRunes <= afterReasoning {
+		t.Fatalf("token estimate must keep climbing across the buffer clear: before=%d after=%d", afterReasoning, m.turnStreamedRunes)
+	}
+
+	// A fresh turn resets the accumulator to zero.
+	m = m.beginRun(nil)
+	if m.turnStreamedRunes != 0 {
+		t.Fatalf("beginRun should reset the per-turn token estimate, got %d", m.turnStreamedRunes)
+	}
+}
+
 func TestPreviewTail(t *testing.T) {
 	cases := []struct {
 		in    string
