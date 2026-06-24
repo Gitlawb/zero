@@ -138,10 +138,32 @@ func TestStatusAndCollectTools(t *testing.T) {
 	}
 }
 
+func TestCollectWaitTimeoutClampsAndOverflows(t *testing.T) {
+	// A huge timeout_seconds must clamp to the cap, not overflow the int64-ns
+	// Duration into a negative value (which would make collect return at once).
+	if got := collectWaitTimeout(map[string]any{"timeout_seconds": 1e20}); got != maxCollectWaitTimeout {
+		t.Fatalf("huge timeout = %v, want cap %v", got, maxCollectWaitTimeout)
+	}
+	if got := collectWaitTimeout(map[string]any{"timeout_seconds": float64(30)}); got != 30*time.Second {
+		t.Fatalf("30s timeout = %v, want 30s", got)
+	}
+	if got := collectWaitTimeout(map[string]any{}); got != defaultCollectWaitTimeout {
+		t.Fatalf("missing timeout = %v, want default %v", got, defaultCollectWaitTimeout)
+	}
+}
+
 // swarm_collect must BLOCK until the team's members finish, then return their
 // results in one call — this is what frees the orchestrator from polling.
 func TestCollectBlocksUntilMembersFinish(t *testing.T) {
 	gate := make(chan struct{})
+	gateClosed := false
+	// Release the gated member even if an assertion fails before the explicit
+	// close below, so a failing run can't leak the blocked member's goroutine.
+	defer func() {
+		if !gateClosed {
+			close(gate)
+		}
+	}()
 	l := newLauncher(okFor)
 	l.gate = gate // members block until the gate is closed
 	reg, sw := newToolSwarm(t, l)
@@ -168,6 +190,7 @@ func TestCollectBlocksUntilMembersFinish(t *testing.T) {
 	}
 
 	close(gate) // let the member finish
+	gateClosed = true
 	select {
 	case res := <-done:
 		if res.Status != tools.StatusOK || !strings.Contains(res.Output, "ok:compute") {

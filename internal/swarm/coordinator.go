@@ -215,28 +215,18 @@ func (c *Coordinator) List() []Task {
 		out = append(out, *t)
 	}
 	c.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
-	})
+	sortTasksByCreation(out)
 	return out
 }
 
-// scopedList returns task snapshots for one team, or every task when team=="".
-func (c *Coordinator) scopedList(team string) []Task {
-	all := c.List()
-	if team == "" {
-		return all
-	}
-	out := all[:0:0]
-	for _, t := range all {
-		if t.Team == team {
-			out = append(out, t)
+// sortTasksByCreation orders tasks by creation time then ID for stable output.
+func sortTasksByCreation(tasks []Task) {
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
+			return tasks[i].ID < tasks[j].ID
 		}
-	}
-	return out
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+	})
 }
 
 // WaitSettled blocks until every task in the scope (one team, or all teams when
@@ -247,27 +237,34 @@ func (c *Coordinator) scopedList(team string) []Task {
 // immediately, so an empty or unknown team never blocks. This is the primitive
 // that lets swarm_collect deliver final results in one call instead of forcing
 // the orchestrator to poll swarm_status in a loop.
+//
+// The settled decision and the returned snapshot are taken in the SAME locked
+// pass, so a concurrent Register/Reassign slipping in between cannot make the
+// call return a non-terminal task it never actually waited on.
 func (c *Coordinator) WaitSettled(ctx context.Context, team string) []Task {
 	for {
 		c.mu.RLock()
 		settled := true
+		snapshot := make([]Task, 0, len(c.tasks))
 		for _, t := range c.tasks {
 			if team != "" && t.Team != team {
 				continue
 			}
+			snapshot = append(snapshot, *t)
 			if !t.Status.terminal() {
 				settled = false
-				break
 			}
 		}
 		ch := c.changed
 		c.mu.RUnlock()
 		if settled || ch == nil {
-			return c.scopedList(team)
+			sortTasksByCreation(snapshot)
+			return snapshot
 		}
 		select {
 		case <-ctx.Done():
-			return c.scopedList(team)
+			sortTasksByCreation(snapshot)
+			return snapshot
 		case <-ch:
 		}
 	}

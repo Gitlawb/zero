@@ -441,10 +441,14 @@ const (
 func collectWaitTimeout(args map[string]any) time.Duration {
 	if v, ok := args["timeout_seconds"]; ok {
 		if f, ok := v.(float64); ok && f > 0 {
-			if d := time.Duration(f * float64(time.Second)); d < maxCollectWaitTimeout {
-				return d
+			// Clamp in float space first: a very large f * float64(time.Second)
+			// overflows the int64 nanosecond Duration and wraps negative, which
+			// would make context.WithTimeout fire immediately instead of honoring
+			// the cap. Compare seconds, then convert only a known-safe value.
+			if f >= maxCollectWaitTimeout.Seconds() {
+				return maxCollectWaitTimeout
 			}
-			return maxCollectWaitTimeout
+			return time.Duration(f * float64(time.Second))
 		}
 	}
 	return defaultCollectWaitTimeout
