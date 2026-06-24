@@ -13,20 +13,27 @@ import (
 )
 
 // planStepWork is one captured unit of implementation attributed to a plan step:
-// a file-mutating tool result recorded while that step was in_progress.
+// a file mutation or command run while that step was in_progress.
 type planStepWork struct {
 	tool    string
 	summary string
+	detail  string // the tool's full output — the diff for edits, stdout/stderr for commands
 }
 
 // isPlanWorkTool reports whether a tool's result counts as implementation worth
-// surfacing under a plan step — the file mutations.
+// surfacing under a plan step — the file mutations and the commands run.
 func isPlanWorkTool(name string) bool {
 	switch name {
-	case "write_file", "edit_file", "apply_patch":
+	case "write_file", "edit_file", "apply_patch", "bash", "exec_command":
 		return true
 	}
 	return false
+}
+
+// isPlanCommandTool reports whether a captured work item is a command run (vs a
+// file change), so the detail view can group them.
+func isPlanCommandTool(name string) bool {
+	return name == "bash" || name == "exec_command"
 }
 
 // planStepWorkSummary renders a concise one-line summary of a tool-result row
@@ -54,7 +61,7 @@ func (m model) captureStepWork(row transcriptRow) model {
 	if m.stepWork == nil {
 		m.stepWork = map[string][]planStepWork{}
 	}
-	m.stepWork[key] = append(m.stepWork[key], planStepWork{tool: row.tool, summary: planStepWorkSummary(row)})
+	m.stepWork[key] = append(m.stepWork[key], planStepWork{tool: row.tool, summary: planStepWorkSummary(row), detail: row.detail})
 	return m
 }
 
@@ -119,14 +126,32 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 	}
 	step := m.plan.steps[stepIndex]
 	work := m.stepWork[step.content]
-	lines := make([]string, 0, len(work)+1)
-	if len(work) == 0 {
-		lines = append(lines, "No file changes recorded for this step yet.")
-	} else {
-		for _, w := range work {
-			lines = append(lines, "• "+w.summary)
+
+	var changes, commands []planStepWork
+	for _, w := range work {
+		if isPlanCommandTool(w.tool) {
+			commands = append(commands, w)
+		} else {
+			changes = append(changes, w)
 		}
 	}
+
+	var lines []string
+	if len(changes) > 0 {
+		lines = append(lines, "Changes:")
+		lines = append(lines, planWorkLines(changes)...)
+	}
+	if len(commands) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "Commands:")
+		lines = append(lines, planWorkLines(commands)...)
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "No file changes or commands recorded for this step yet.")
+	}
+
 	status := step.status
 	if status == "" {
 		status = "pending"
@@ -138,8 +163,35 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 			Title: step.content + " · " + status,
 			Lines: lines,
 		}},
-		Hints: []string{"file changes made while this step was in progress"},
+		Hints: []string{"diffs + commands captured while this step was in progress"},
 	})
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "plan", text: card})
 	return m
+}
+
+// planWorkLines renders each work item as a summary line plus a short, indented
+// excerpt of its diff/output, truncated so one step's card can't flood the chat.
+func planWorkLines(items []planStepWork) []string {
+	const maxDetailLines = 6
+	var out []string
+	for _, w := range items {
+		out = append(out, "  • "+w.summary)
+		detail := strings.TrimRight(w.detail, "\n")
+		if strings.TrimSpace(detail) == "" {
+			continue
+		}
+		dl := strings.Split(detail, "\n")
+		more := 0
+		if len(dl) > maxDetailLines {
+			more = len(dl) - maxDetailLines
+			dl = dl[:maxDetailLines]
+		}
+		for _, line := range dl {
+			out = append(out, "      "+line)
+		}
+		if more > 0 {
+			out = append(out, fmt.Sprintf("      … (%d more lines)", more))
+		}
+	}
+	return out
 }

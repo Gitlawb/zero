@@ -31,19 +31,27 @@ func TestSidebarPlanSelectablesOffsets(t *testing.T) {
 	}
 }
 
-// TestCaptureStepWork: a file-mutation result is attributed to the in_progress
-// step; non-mutation tools are ignored.
+// TestCaptureStepWork: file mutations AND commands are attributed to the
+// in_progress step with their output captured; non-work tools and non-results
+// are ignored.
 func TestCaptureStepWork(t *testing.T) {
 	m := model{now: time.Now}
 	m.plan.steps = []planStep{{content: "build it", status: "in_progress"}}
-	m = m.captureStepWork(transcriptRow{kind: rowToolResult, tool: "write_file", text: "wrote style.css"})
-	m = m.captureStepWork(transcriptRow{kind: rowToolResult, tool: "read_file", text: "read x"}) // ignored
-	m = m.captureStepWork(transcriptRow{kind: rowToolCall, tool: "write_file", text: "call"})    // not a result
+	m = m.captureStepWork(transcriptRow{kind: rowToolResult, tool: "write_file", text: "wrote style.css", detail: "+ body {}"})
+	m = m.captureStepWork(transcriptRow{kind: rowToolResult, tool: "bash", text: "ran go build", detail: "exit 0"})
+	m = m.captureStepWork(transcriptRow{kind: rowToolResult, tool: "read_file", text: "read x"}) // ignored: not a work tool
+	m = m.captureStepWork(transcriptRow{kind: rowToolCall, tool: "write_file", text: "call"})    // ignored: not a result
 	work := m.stepWork["build it"]
-	if len(work) != 1 {
-		t.Fatalf("want 1 captured item, got %d", len(work))
+	if len(work) != 2 {
+		t.Fatalf("want 2 captured items (write_file + bash), got %d", len(work))
 	}
-	if work[0].summary != "wrote style.css" || work[0].tool != "write_file" {
-		t.Errorf("captured wrong item: %+v", work[0])
+	if work[0].tool != "write_file" || work[0].detail != "+ body {}" {
+		t.Errorf("change item wrong: %+v", work[0])
+	}
+	if work[1].tool != "bash" || work[1].detail != "exit 0" {
+		t.Errorf("command item wrong: %+v", work[1])
+	}
+	if !isPlanCommandTool("bash") || !isPlanCommandTool("exec_command") || isPlanCommandTool("write_file") {
+		t.Errorf("isPlanCommandTool classification wrong")
 	}
 }
