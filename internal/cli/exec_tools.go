@@ -81,6 +81,11 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 	switch strings.ToLower(strings.TrimSpace(options.autonomy)) {
 	case "", "low", "medium":
 		mode = agent.PermissionModeAuto
+	case "member":
+		// Internal autonomy for headless swarm/specialist members: Auto plus
+		// advertised in-workspace mutators (see PermissionModeMemberAuto). The
+		// swarm launcher sets this; it is not part of the public low|medium|high set.
+		mode = agent.PermissionModeMemberAuto
 	case "high":
 		mode = agent.PermissionModeUnsafe
 	default:

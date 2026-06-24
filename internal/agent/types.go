@@ -24,6 +24,15 @@ const (
 	PermissionModeAsk       PermissionMode = "ask"
 	PermissionModeUnsafe    PermissionMode = "unsafe"
 	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	// PermissionModeMemberAuto is a headless mode for swarm/specialist MEMBERS: it
+	// advertises the in-workspace mutators a member needs to build (write/edit +
+	// shell) on top of the Auto set, while the sandbox engine still gates them at
+	// call time — in-workspace writes and sandbox-backed shell auto-allow, but
+	// out-of-workspace writes, network, and destructive commands still prompt (and
+	// a headless member has no approver, so they are denied). It normalizes to Auto
+	// everywhere except ToolAdvertised, so authority is never widened beyond what an
+	// interactive auto agent already has inside the sandbox.
+	PermissionModeMemberAuto PermissionMode = "member-auto"
 )
 
 type StopReason string

@@ -80,6 +80,61 @@ func TestSpecialistAutonomyByPermissionMode(t *testing.T) {
 	}
 }
 
+func TestMemberAwareAutonomy(t *testing.T) {
+	// A non-unsafe member runs at "member" (write/edit + sandboxed shell), a plain
+	// specialist at "low" (read-only), and an unsafe parent at "high" either way.
+	cases := []struct {
+		mode   string
+		member bool
+		want   string
+	}{
+		{"auto", false, "low"},
+		{"ask", false, "low"},
+		{"auto", true, "member"},
+		{"ask", true, "member"},
+		{"", true, "member"},     // member, fail-safe non-unsafe, still write-capable
+		{"unsafe", true, "high"}, // unsafe parent keeps full autonomy
+		{"unsafe", false, "high"},
+	}
+	for _, c := range cases {
+		if got := memberAwareAutonomy(c.mode, c.member); got != c.want {
+			t.Errorf("memberAwareAutonomy(%q, %v) = %q, want %q", c.mode, c.member, got, c.want)
+		}
+	}
+}
+
+func TestBuildArgsMemberAutonomyEmitsMember(t *testing.T) {
+	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
+	manifest := Manifest{Metadata: Metadata{Name: "subagent"}, SystemPrompt: "x", ResolvedTools: []string{"read_file", "write_file"}}
+
+	// A non-unsafe member → --auto member (write-capable), not the read-only low.
+	res, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "auto", MemberAutonomy: true})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	if !containsSequence(res.Args, []string{"--auto", "member"}) {
+		t.Fatalf("non-unsafe member must yield --auto member, got %v", res.Args)
+	}
+
+	// Without the member flag, the same parent stays --auto low (unchanged).
+	plain, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "auto"})
+	if err != nil {
+		t.Fatalf("BuildArgs(plain): %v", err)
+	}
+	if !containsSequence(plain.Args, []string{"--auto", "low"}) || containsSequence(plain.Args, []string{"--auto", "member"}) {
+		t.Fatalf("a plain specialist must stay --auto low, got %v", plain.Args)
+	}
+
+	// An unsafe member still runs --auto high, never downgraded to member.
+	unsafe, err := executor.BuildArgs(BuildArgsInput{Manifest: manifest, Prompt: "p", PermissionMode: "unsafe", MemberAutonomy: true})
+	if err != nil {
+		t.Fatalf("BuildArgs(unsafe member): %v", err)
+	}
+	if !containsSequence(unsafe.Args, []string{"--auto", "high"}) {
+		t.Fatalf("unsafe member must yield --auto high, got %v", unsafe.Args)
+	}
+}
+
 func TestBuildArgsAutonomyHonorsPermissionMode(t *testing.T) {
 	executor := Executor{NewSessionID: func() (string, error) { return "child", nil }}
 	manifest := Manifest{Metadata: Metadata{Name: "reviewer"}, SystemPrompt: "x", ResolvedTools: []string{"read_file"}}

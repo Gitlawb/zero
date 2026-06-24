@@ -66,6 +66,12 @@ type BuildArgsInput struct {
 	// fail-safe "low", so a caller that forgets to wire it never escalates the
 	// child to unsafe. Authority is therefore never widened beyond the parent.
 	PermissionMode string
+	// MemberAutonomy marks a headless swarm member: when set and the parent is
+	// non-unsafe, the child runs at "--auto member" (PermissionModeMemberAuto) so
+	// it can write/edit + run sandboxed shell IN the workspace, instead of the
+	// read-only "--auto low". Off by default, so the Task tool's specialists are
+	// unchanged. The sandbox still confines writes to the workspace root.
+	MemberAutonomy bool
 }
 
 type BuildResumeArgsInput struct {
@@ -110,6 +116,10 @@ type TaskRunOptions struct {
 	// other value is fail-safe "low", so the child never gains more authority
 	// than the parent.
 	PermissionMode string
+	// MemberAutonomy marks a headless swarm member so it can write/edit + run
+	// sandboxed shell in the workspace (see BuildArgsInput.MemberAutonomy). Off
+	// for Task-tool specialists.
+	MemberAutonomy bool
 	// Progress, when set, is called with each stream-json event emitted by the
 	// child process while it runs. nil is a no-op.
 	Progress func(streamjson.Event)
@@ -129,6 +139,19 @@ func specialistAutonomy(permissionMode string) string {
 	default:
 		return "low" // unset/unknown modes do NOT inherit unsafe autonomy
 	}
+}
+
+// memberAwareAutonomy is specialistAutonomy with one extra rung for headless
+// swarm MEMBERS: a non-unsafe member runs at "member" (PermissionModeMemberAuto)
+// so it can write/edit + run sandboxed shell in the workspace, rather than the
+// read-only "low". An unsafe parent still yields "high" (full unsafe), and a
+// non-member (Task specialist) is unchanged. Authority stays sandbox-confined.
+func memberAwareAutonomy(permissionMode string, member bool) string {
+	autonomy := specialistAutonomy(permissionMode)
+	if member && autonomy == "low" {
+		return "member"
+	}
+	return autonomy
 }
 
 // permissionModeUnsafe mirrors agent.PermissionModeUnsafe without importing the
@@ -227,7 +250,7 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	args := []string{"exec", "--init-session-id", sessionID}
 	args = append(args, promptArgs...)
 	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
-	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
+	args = append(args, "--auto", memberAwareAutonomy(input.PermissionMode, input.MemberAutonomy), "--output-format", "stream-json")
 	toolAllowlist, err := resolvedToolAllowlist(input.Manifest)
 	if err != nil {
 		return BuildArgsResult{}, err
@@ -311,6 +334,7 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 		Description:           params.Description,
 		Cwd:                   options.Cwd,
 		PermissionMode:        options.PermissionMode,
+		MemberAutonomy:        options.MemberAutonomy,
 	})
 	if err != nil {
 		return ExecResult{}, err
