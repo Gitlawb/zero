@@ -188,6 +188,7 @@ type swarmAgent struct {
 	id         string    // e.g. "subagent-1" — the dedup key and fallback name
 	name       string    // the task briefing (argHint of the call row), or id when empty
 	state      string    // latest reported state (running/done/failed/…), "" until a report lands
+	sessionID  string    // member's durable child session id (from swarm_collect), "" until known
 	finishing  bool      // done/failed but still lingering before removal (smooth exit)
 	finishedAt time.Time // when first seen finished (zero until the spinner tick stamps it)
 }
@@ -235,7 +236,7 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 			if name == "" {
 				name = id
 			}
-			agents = append(agents, swarmAgent{id: id, name: name})
+			agents = append(agents, swarmAgent{id: id, name: name, sessionID: m.swarmSessionMap[id]})
 		}
 	}
 	// Members the latest swarm_status reports finished LINGER briefly with a fading
@@ -314,18 +315,36 @@ func (m *model) stampSwarmDone() {
 	}
 }
 
+// sidebarAgentHit marks a rendered agent line (by its index within the agent
+// lines block) that is clickable, carrying the member session to drill into.
+type sidebarAgentHit struct {
+	lineOffset int
+	sessionID  string
+	title      string
+}
+
 // sidebarAgentLines renders one line per active agent. Specialist delegations
 // show a live status glyph (• running, ✓ done, ✗ error) plus a "↳ <tool>" working
 // line; swarm/team members (from swarm_spawn) show a ready dot and their id.
 // Returns nil when there are none (the caller shows a placeholder).
 func (m model) sidebarAgentLines(width int) []string {
+	lines, _ := m.sidebarAgentRows(width)
+	return lines
+}
+
+// sidebarAgentRows renders the agent lines and, alongside, records which lines
+// are clickable swarm members (those whose member session is known), so a click
+// in the sidebar can drill into the member's subchat. lineOffset indexes the
+// returned lines slice.
+func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 	specialists := m.sidebarSpecialists()
 	swarm := m.swarmSpawnedAgents()
 	if len(specialists) == 0 && len(swarm) == 0 {
-		return nil
+		return nil, nil
 	}
 	room := maxInt(4, width-3)
 	var lines []string
+	var hits []sidebarAgentHit
 	for _, a := range specialists {
 		var icon string
 		switch a.status {
@@ -380,6 +399,11 @@ func (m model) sidebarAgentLines(width int) []string {
 	// that dims toward faint over its linger — a smooth exit before removal.
 	style := m.swarmNameStyle()
 	for _, a := range swarm {
+		// A member with a known session is clickable: record the hit at the index
+		// this line will occupy before appending it.
+		if a.sessionID != "" {
+			hits = append(hits, sidebarAgentHit{lineOffset: len(lines), sessionID: a.sessionID, title: a.name})
+		}
 		if a.finishing {
 			icon := zeroTheme.green.Render("✓")
 			nameStyle := zeroTheme.muted
@@ -401,7 +425,20 @@ func (m model) sidebarAgentLines(width int) []string {
 		}
 		lines = append(lines, " "+zeroTheme.accent.Render("•")+" "+style.Render(truncateStep(a.name, nameRoom))+suffix)
 	}
-	return lines
+	return lines, hits
+}
+
+// sidebarAgentSelectables returns the clickable swarm-member lines with their
+// ABSOLUTE index inside the rendered sidebar (the AGENTS header occupies index 0,
+// so agent rows start at index 1). Recomputed on demand by the mouse hit-test —
+// View cannot persist a registry on the value-receiver model — mirroring
+// transcriptLineAtMouse.
+func (m model) sidebarAgentSelectables(width int) []sidebarAgentHit {
+	_, hits := m.sidebarAgentRows(width)
+	for i := range hits {
+		hits[i].lineOffset++ // shift past the AGENTS header at sidebar index 0
+	}
+	return hits
 }
 
 // agentExitFading reports whether a finished agent is in the later half of its

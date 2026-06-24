@@ -934,6 +934,16 @@ func transcriptSelectionPointForMouse(line transcriptSelectableLine, x int) tran
 func (m model) handleTranscriptSelectionMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
 	switch {
 	case mouseLeftPress(msg):
+		// A click on a clickable AGENTS sidebar row drills into that swarm member's
+		// session, reusing the specialist-card subchat path. Checked before the
+		// transcript hit-test since the sidebar is outside the chat column.
+		if hit, ok := m.sidebarLineAtMouse(msg); ok {
+			if errMsg := m.subchat.enter(m.sessionStore, hit.sessionID, hit.title, m.chatScrollOffset); errMsg != "" {
+				m = m.appendSystemNotice(errMsg)
+			}
+			m.chatScrollOffset = 0
+			return m, nil, true
+		}
 		line, ok := m.transcriptLineAtMouse(msg)
 		if !ok {
 			if m.transcriptSelection.active {

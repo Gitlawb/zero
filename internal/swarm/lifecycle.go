@@ -73,7 +73,7 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 		}
 		_ = s.coord.Fail(m.TaskID, memberError(err))
 	} else {
-		_ = s.coord.Complete(m.TaskID, res.Result)
+		_ = s.coord.CompleteWithSession(m.TaskID, res.Result, res.SessionID)
 	}
 	t.removeMember(m.ID)
 	s.afterExit(t)

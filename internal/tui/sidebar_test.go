@@ -6,8 +6,100 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
+
+func swarmSidebarTestModel(t *testing.T, sessions map[string]string) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.swarmSessionMap = sessions
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "build the homepage"},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-1 on team default."},
+		transcriptRow{kind: rowToolCall, tool: "swarm_spawn", detail: "build the stylesheet"},
+		transcriptRow{kind: rowToolResult, tool: "swarm_spawn", detail: "Spawned subagent as task subagent-2 on team default."},
+	)
+	return m
+}
+
+func TestSwarmMemberRowCarriesSessionID(t *testing.T) {
+	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
+	agents := m.swarmSpawnedAgents()
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(agents))
+	}
+	if agents[0].sessionID != "sess-1" {
+		t.Fatalf("member 1 should carry its session id, got %q", agents[0].sessionID)
+	}
+	if agents[1].sessionID != "" {
+		t.Fatalf("member 2 has no mapped session yet, got %q", agents[1].sessionID)
+	}
+}
+
+func TestSidebarAgentSelectablesMapToScreenRows(t *testing.T) {
+	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1", "subagent-2": "sess-2"})
+	sel := m.sidebarAgentSelectables(sidebarWidth(m.width))
+	if len(sel) != 2 {
+		t.Fatalf("expected 2 selectable member rows, got %d: %+v", len(sel), sel)
+	}
+	// AGENTS header occupies sidebar index 0, so the two members are at 1 and 2.
+	if sel[0].lineOffset != 1 || sel[1].lineOffset != 2 {
+		t.Fatalf("selectable offsets = %d,%d, want 1,2", sel[0].lineOffset, sel[1].lineOffset)
+	}
+	if sel[0].sessionID != "sess-1" || sel[1].sessionID != "sess-2" {
+		t.Fatalf("selectable session ids = %q,%q", sel[0].sessionID, sel[1].sessionID)
+	}
+}
+
+func TestSidebarLineAtMouseHitsMemberRow(t *testing.T) {
+	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
+	// Sidebar starts at screen X = chatColumnWidth + 3 (the " │ " divider); the
+	// first member row is at sidebar line 1 → screen Y 1.
+	x := m.chatColumnWidth() + 3 + 2
+	hit, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 1))
+	if !ok || hit.sessionID != "sess-1" {
+		t.Fatalf("expected to hit member row (sess-1), got ok=%v hit=%+v", ok, hit)
+	}
+	// A click in the chat column (left of the divider) must miss the sidebar.
+	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, 2, 1)); ok {
+		t.Fatal("a click in the chat column should not hit the sidebar")
+	}
+	// The AGENTS header row (Y 0) is not a clickable member.
+	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 0)); ok {
+		t.Fatal("the AGENTS header row should not be clickable")
+	}
+	// A member with no known session (subagent-2 at Y 2) is not clickable.
+	if _, ok := m.sidebarLineAtMouse(testMouseClick(tea.MouseLeft, x, 2)); ok {
+		t.Fatal("a member without a session id should not be clickable")
+	}
+}
+
+func TestSidebarMemberClickRoutesToSubchatDrillIn(t *testing.T) {
+	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
+	x := m.chatColumnWidth() + 3 + 2
+	_, _, handled := m.handleTranscriptSelectionMouse(testMouseClick(tea.MouseLeft, x, 1))
+	if !handled {
+		t.Fatal("clicking a clickable member row should be handled (routed to the subchat drill-in)")
+	}
+}
+
+func TestSwarmSessionsMsgPopulatesMap(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	updated, _ := m.Update(swarmSessionsMsg{sessions: map[string]string{
+		"subagent-1": "sess-1", "": "skip", "subagent-2": "",
+	}})
+	next := updated.(model)
+	if next.swarmSessionMap["subagent-1"] != "sess-1" {
+		t.Fatalf("expected sess-1, got %q", next.swarmSessionMap["subagent-1"])
+	}
+	if _, ok := next.swarmSessionMap[""]; ok {
+		t.Fatal("an empty task id must be skipped")
+	}
+	if _, ok := next.swarmSessionMap["subagent-2"]; ok {
+		t.Fatal("an empty session id must be skipped")
+	}
+}
 
 func sidebarTestModel() model {
 	m := newModel(context.Background(), Options{ProviderName: "test-provider", ModelName: "test-model"})

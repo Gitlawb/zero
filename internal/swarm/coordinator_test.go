@@ -23,6 +23,21 @@ func TestCoordinatorRegisterAndDuplicate(t *testing.T) {
 	}
 }
 
+func TestCompleteWithSessionRecordsSessionID(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("t1", "a1", "team", "desc")
+	if err := c.CompleteWithSession("t1", "result", "sess-xyz"); err != nil {
+		t.Fatalf("CompleteWithSession: %v", err)
+	}
+	task, _ := c.Get("t1")
+	if task.Status != StatusDone || task.Result != "result" {
+		t.Fatalf("unexpected task state: %+v", task)
+	}
+	if task.SessionID != "sess-xyz" {
+		t.Fatalf("SessionID = %q, want sess-xyz", task.SessionID)
+	}
+}
+
 func TestCoordinatorLifecycleTransitions(t *testing.T) {
 	c := NewCoordinator()
 	_, _ = c.Register("t1", "a1", "team", "desc")

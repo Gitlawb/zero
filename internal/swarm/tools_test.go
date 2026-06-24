@@ -233,6 +233,25 @@ func TestCollectReturnsPartialOnTimeout(t *testing.T) {
 	}
 }
 
+// swarm_collect surfaces each completed member's durable session id in Meta so
+// the TUI can drill into the member's conversation.
+func TestCollectMetaCarriesMemberSessionIDs(t *testing.T) {
+	reg, _ := newToolSwarm(t, newLauncher(okFor))
+	spawn := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate", "task": "compute", "team": "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
+	id := spawn.Meta["task_id"]
+
+	// collect blocks until the member finishes, so its session id is recorded.
+	collect := reg.RunWithOptions(context.Background(), CollectToolName, map[string]any{"team": "alpha"}, tools.RunOptions{})
+	if collect.Meta == nil || collect.Meta[id] == "" {
+		t.Fatalf("collect Meta should carry the member session id for %s, got %#v", id, collect.Meta)
+	}
+	if want := "sess-" + id; collect.Meta[id] != want {
+		t.Fatalf("collect Meta[%s] = %q, want %q", id, collect.Meta[id], want)
+	}
+}
+
 func TestSpawnToolUnknownTypeListsAvailable(t *testing.T) {
 	_, sw := newToolSwarm(t, newLauncher(okFor))
 	tool := &spawnTool{sw: sw}

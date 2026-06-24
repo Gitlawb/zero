@@ -166,8 +166,13 @@ type model struct {
 	// contaminate the new session's log with the old run's events. The
 	// agentResponseMsg handler persists each such run's session events (only) so
 	// the checkpoints stay referenced, then removes the id.
-	flushRunIDs       map[int]string
-	liveUsageCounts   map[int]int
+	flushRunIDs     map[int]string
+	liveUsageCounts map[int]int
+	// swarmSessionMap maps a swarm task id to its member's durable child session
+	// id (carried up by swarm_collect's Meta), so the AGENTS sidebar rows can drill
+	// into a member's conversation. Persists across turns; only completed members
+	// have an entry.
+	swarmSessionMap   map[string]string
 	pendingPermission *pendingPermissionPrompt
 	pendingAskUser    *pendingAskUserPrompt
 	pendingSpecReview *pendingSpecReviewPrompt
@@ -384,6 +389,14 @@ type specialistCompleteMsg struct {
 	childSessionID string
 	status         specialistStatus
 	errorMsg       string
+}
+
+// swarmSessionsMsg carries swarm task_id -> member session_id pairs (from
+// swarm_collect's Meta) so the AGENTS sidebar rows can drill into a member's
+// session like a specialist card.
+type swarmSessionsMsg struct {
+	runID    int
+	sessions map[string]string
 }
 
 // specialistProgressMsg carries a live tool-call progress update from the
@@ -612,6 +625,7 @@ func newModel(ctx context.Context, options Options) model {
 		notifier:               notifier,
 		altScreen:              options.AltScreen,
 		liveUsageCounts:        map[int]int{},
+		swarmSessionMap:        map[string]string{},
 		setup:                  newSetupState(options.Setup),
 		setupSave:              options.Setup.Save,
 	}
@@ -1660,6 +1674,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the chat with identical blocks.
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
+		return m, nil
+	case swarmSessionsMsg:
+		// Merge completed swarm members' session ids so their AGENTS sidebar rows
+		// become drill-in clickable. Session ids are durable facts, so this is not
+		// gated on the active run.
+		if m.swarmSessionMap == nil {
+			m.swarmSessionMap = map[string]string{}
+		}
+		for taskID, sessionID := range msg.sessions {
+			if taskID != "" && sessionID != "" {
+				m.swarmSessionMap[taskID] = sessionID
+			}
+		}
 		return m, nil
 	case doctorCommandResultMsg:
 		if msg.id == 0 || msg.id == m.doctorCommandSeq {
@@ -3889,6 +3916,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 						errorMsg:       result.Output,
 					})
 				}
+			}
+			// swarm_collect carries task_id -> session_id for completed members, so
+			// the AGENTS sidebar rows can drill into a member's session like a
+			// specialist card.
+			if result.Name == "swarm_collect" && len(result.Meta) > 0 && m.runtimeMessageSink != nil {
+				m.runtimeMessageSink(swarmSessionsMsg{runID: runID, sessions: result.Meta})
 			}
 			if onToolResult != nil {
 				onToolResult(result)

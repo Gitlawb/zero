@@ -52,8 +52,11 @@ type Task struct {
 	Status      TaskStatus
 	Result      string
 	Err         string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// SessionID is the member's durable child session id, recorded on completion
+	// so the TUI can drill into the member's conversation. Empty until done.
+	SessionID string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // agentColors palette for stable per-agent coloring in the TUI/status. Provider
@@ -149,15 +152,21 @@ func (c *Coordinator) SetStatus(id string, status TaskStatus) error {
 
 // Complete marks a task done with its result.
 func (c *Coordinator) Complete(id, result string) error {
-	return c.finish(id, StatusDone, result, "")
+	return c.finish(id, StatusDone, result, "", "")
+}
+
+// CompleteWithSession marks a task done with its result and the member's durable
+// child session id (so the TUI can drill into the member's conversation).
+func (c *Coordinator) CompleteWithSession(id, result, sessionID string) error {
+	return c.finish(id, StatusDone, result, "", sessionID)
 }
 
 // Fail marks a task failed with an error message.
 func (c *Coordinator) Fail(id, errMsg string) error {
-	return c.finish(id, StatusFailed, "", errMsg)
+	return c.finish(id, StatusFailed, "", errMsg, "")
 }
 
-func (c *Coordinator) finish(id string, status TaskStatus, result, errMsg string) error {
+func (c *Coordinator) finish(id string, status TaskStatus, result, errMsg, sessionID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	t, ok := c.tasks[id]
@@ -170,6 +179,9 @@ func (c *Coordinator) finish(id string, status TaskStatus, result, errMsg string
 	t.Status = status
 	t.Result = result
 	t.Err = errMsg
+	if sessionID != "" {
+		t.SessionID = sessionID
+	}
 	t.UpdatedAt = c.now()
 	c.notifyChangeLocked()
 	return nil

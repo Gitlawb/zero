@@ -479,7 +479,19 @@ func (t *collectTool) RunWithOptions(ctx context.Context, args map[string]any, _
 		b.WriteString(line + "\n")
 	}
 	out := strings.TrimRight(b.String(), "\n")
-	return okResult(out, "swarm", fmt.Sprintf("%d task(s)", len(tasks)))
+	res := okResult(out, "swarm", fmt.Sprintf("%d task(s)", len(tasks)))
+	// Surface each completed member's durable session id (task_id -> session_id)
+	// so the TUI can make the AGENTS sidebar rows drill into the member's session.
+	meta := map[string]string{}
+	for _, task := range tasks {
+		if task.SessionID != "" {
+			meta[task.ID] = task.SessionID
+		}
+	}
+	if len(meta) > 0 {
+		res.Meta = meta
+	}
+	return res
 }
 
 // renderTasks formats a status summary + per-task lines, colored per agent.

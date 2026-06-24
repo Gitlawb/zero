@@ -153,6 +153,38 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// sidebarLineAtMouse maps a left-click in the AGENTS sidebar column to the swarm
+// member whose row was clicked, when that member's session is known. Geometry:
+// twoColumnTranscriptView is the full screen (sidebarActive ⇒ alt-screen), and
+// joinColumns lays out [chat(chatColumnWidth)][" │ " 3-cell divider][sidebar],
+// zipping row-by-row — so a sidebar line's screen Y equals its sidebar index and
+// the sidebar starts at screen X = chatColumnWidth + 3. Recomputed on demand
+// (View can't persist a registry on the value-receiver model), like
+// transcriptLineAtMouse.
+func (m model) sidebarLineAtMouse(msg tea.MouseMsg) (sidebarAgentHit, bool) {
+	if !m.sidebarActive() {
+		return sidebarAgentHit{}, false
+	}
+	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+		return sidebarAgentHit{}, false
+	}
+	sidebarW := sidebarWidth(m.width)
+	if sidebarW <= 0 {
+		return sidebarAgentHit{}, false
+	}
+	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
+	x, y := mouseX(msg), mouseY(msg)
+	if x < x0 || x >= x0+sidebarW {
+		return sidebarAgentHit{}, false
+	}
+	for _, hit := range m.sidebarAgentSelectables(sidebarW) {
+		if hit.lineOffset == y && hit.sessionID != "" {
+			return hit, true
+		}
+	}
+	return sidebarAgentHit{}, false
+}
+
 func (m model) repeatMouseSelection(target mouseSelectionTarget) bool {
 	return target.Scope != "" && m.lastMouseSelection == target
 }
