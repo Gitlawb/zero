@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -111,7 +112,7 @@ type spawnTool struct {
 
 func (t *spawnTool) Name() string { return SpawnToolName }
 func (t *spawnTool) Description() string {
-	return "Spawn a swarm member of the given agent type to run a task concurrently under a team. Returns a task id immediately; results are reported through swarm_status/swarm_collect."
+	return "Spawn a swarm member of the given agent type to run a task concurrently under a team. Returns a task id immediately and the member runs in the background. After spawning all members, call swarm_collect once to wait for them and read their results — do not poll swarm_status in a loop."
 }
 func (t *spawnTool) Parameters() tools.Schema {
 	return tools.Schema{
@@ -297,7 +298,8 @@ func (t *statusTool) Deferred() bool { return !t.sw.hasActiveSwarm() }
 
 func (t *statusTool) Name() string { return StatusToolName }
 func (t *statusTool) Description() string {
-	return "Report swarm task status: counts by state and per-task lines. Optionally scoped to one team."
+	return "Return a one-shot snapshot of swarm task status: counts by state and per-task lines, optionally scoped to one team. " +
+		"This does NOT wait. To wait for members to finish and read their results, call swarm_collect once — do not call swarm_status repeatedly in a loop."
 }
 func (t *statusTool) Parameters() tools.Schema {
 	return tools.Schema{
@@ -402,13 +404,16 @@ func (t *collectTool) Deferred() bool { return !t.sw.hasActiveSwarm() }
 
 func (t *collectTool) Name() string { return CollectToolName }
 func (t *collectTool) Description() string {
-	return "Collect the results of a team's tasks (status, result, and any error per task)."
+	return "Wait for a team's tasks to finish, then return each task's status, result, and any error. " +
+		"This BLOCKS until every member completes (bounded by a timeout), so call it once after spawning to get the results — " +
+		"do not poll swarm_status in a loop. Use swarm_status only for a quick mid-run snapshot."
 }
 func (t *collectTool) Parameters() tools.Schema {
 	return tools.Schema{
 		Type: "object",
 		Properties: map[string]tools.PropertySchema{
-			"team": {Type: "string", Description: "Team to collect from. Defaults to \"default\"."},
+			"team":            {Type: "string", Description: "Team to collect from. Defaults to \"default\"."},
+			"timeout_seconds": {Type: "number", Description: "Max seconds to wait for members to finish before returning partial results. Defaults to 600, capped at 1800."},
 		},
 		AdditionalProperties: false,
 	}
@@ -424,9 +429,39 @@ func (t *collectTool) Safety() tools.Safety {
 func (t *collectTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	return t.RunWithOptions(ctx, args, tools.RunOptions{})
 }
-func (t *collectTool) RunWithOptions(_ context.Context, args map[string]any, _ tools.RunOptions) tools.Result {
+
+const (
+	defaultCollectWaitTimeout = 10 * time.Minute
+	maxCollectWaitTimeout     = 30 * time.Minute
+)
+
+// collectWaitTimeout reads the optional timeout_seconds arg (JSON numbers arrive
+// as float64), falling back to the default and clamping to the max so a single
+// collect call can never block unboundedly.
+func collectWaitTimeout(args map[string]any) time.Duration {
+	if v, ok := args["timeout_seconds"]; ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			if d := time.Duration(f * float64(time.Second)); d < maxCollectWaitTimeout {
+				return d
+			}
+			return maxCollectWaitTimeout
+		}
+	}
+	return defaultCollectWaitTimeout
+}
+
+func (t *collectTool) RunWithOptions(ctx context.Context, args map[string]any, _ tools.RunOptions) tools.Result {
 	team := swarmStr(args, "team")
-	tasks := t.sw.Collect(team)
+	// Block until the team's members all finish so the orchestrator gets final
+	// results in one call instead of polling. Bounded by the run context (user
+	// cancel) and a timeout cap; on timeout/cancel it returns the latest partial
+	// state rather than hanging on a stuck member.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, collectWaitTimeout(args))
+	defer cancel()
+	tasks := t.sw.CollectWait(waitCtx, team)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Results for team %s: %d task(s)\n", displayTeam(team), len(tasks))
 	for _, task := range tasks {

@@ -7,6 +7,48 @@ import (
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
+func TestCollapseRepeatedStatusCardDropsDuplicate(t *testing.T) {
+	detail := "Swarm status (team default): 4 task(s) — 4 running"
+	rows := []transcriptRow{
+		{kind: rowAssistant, text: "let me check"},
+		{kind: rowToolCall, tool: "swarm_status"},
+		{kind: rowToolResult, tool: "swarm_status", detail: detail},
+		{kind: rowToolCall, tool: "swarm_status"}, // the new check's call row
+	}
+	out := collapseRepeatedStatusCard(rows, transcriptRow{kind: rowToolResult, tool: "swarm_status", detail: detail})
+	if len(out) != 2 {
+		t.Fatalf("duplicate status pair should collapse to 2 rows, got %d: %+v", len(out), out)
+	}
+	if out[0].kind != rowAssistant || out[1].kind != rowToolCall {
+		t.Fatalf("collapse kept the wrong rows: %+v", out)
+	}
+}
+
+func TestCollapseRepeatedStatusCardKeepsChangedState(t *testing.T) {
+	rows := []transcriptRow{
+		{kind: rowToolCall, tool: "swarm_status"},
+		{kind: rowToolResult, tool: "swarm_status", detail: "4 running"},
+		{kind: rowToolCall, tool: "swarm_status"},
+	}
+	out := collapseRepeatedStatusCard(rows, transcriptRow{kind: rowToolResult, tool: "swarm_status", detail: "2 running, 2 done"})
+	if len(out) != 3 {
+		t.Fatalf("a changed status must not collapse, got %d rows", len(out))
+	}
+}
+
+func TestCollapseRepeatedStatusCardIgnoresInterveningContent(t *testing.T) {
+	rows := []transcriptRow{
+		{kind: rowToolCall, tool: "swarm_status"},
+		{kind: rowToolResult, tool: "swarm_status", detail: "4 running"},
+		{kind: rowReasoning, text: "thinking"},
+		{kind: rowToolCall, tool: "swarm_status"},
+	}
+	out := collapseRepeatedStatusCard(rows, transcriptRow{kind: rowToolResult, tool: "swarm_status", detail: "4 running"})
+	if len(out) != 4 {
+		t.Fatalf("intervening content must prevent collapse, got %d rows", len(out))
+	}
+}
+
 func TestToolResultCollapsesLongOutputByDefault(t *testing.T) {
 	m := transcriptViewTestModel()
 	long := numberedLines(cardBodyMaxLines + 10)

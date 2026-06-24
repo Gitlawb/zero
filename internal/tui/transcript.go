@@ -136,6 +136,42 @@ func appendTranscriptRowsDedup(rows []transcriptRow, newRows []transcriptRow) []
 	return rows
 }
 
+// isSwarmStatusTool reports whether a tool is one of the swarm polling tools
+// whose repeated identical result cards should be collapsed in the transcript.
+func isSwarmStatusTool(name string) bool {
+	return name == "swarm_status" || name == "swarm_collect"
+}
+
+// collapseRepeatedStatusCard drops the immediately-preceding identical swarm
+// status card (its call+result pair) when newResult repeats it verbatim, so a
+// model that re-checks swarm_status/swarm_collect doesn't flood the chat with
+// the same card. It only fires when the tail is exactly
+// [prev call][prev identical result][new call] — two back-to-back checks with
+// nothing between them — so it never removes a card that has intervening content
+// or a changed state. The new call row at the tail is kept; the caller appends
+// the new result row afterwards.
+func collapseRepeatedStatusCard(rows []transcriptRow, newResult transcriptRow) []transcriptRow {
+	if newResult.kind != rowToolResult || !isSwarmStatusTool(newResult.tool) {
+		return rows
+	}
+	n := len(rows)
+	if n < 3 {
+		return rows
+	}
+	newCall, prevResult, prevCall := rows[n-1], rows[n-2], rows[n-3]
+	if newCall.kind != rowToolCall || newCall.tool != newResult.tool {
+		return rows
+	}
+	if prevResult.kind != rowToolResult || prevResult.tool != newResult.tool || prevResult.detail != newResult.detail {
+		return rows
+	}
+	if prevCall.kind != rowToolCall || prevCall.tool != newResult.tool {
+		return rows
+	}
+	// Drop the older call+result pair (n-3, n-2); keep the new call row (n-1).
+	return append(rows[:n-3], newCall)
+}
+
 func hasTranscriptRow(rows []transcriptRow, row transcriptRow) bool {
 	key := transcriptRowKey(row)
 	if key == "" {

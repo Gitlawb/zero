@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/tools"
@@ -134,6 +135,78 @@ func TestStatusAndCollectTools(t *testing.T) {
 	collect := reg.RunWithOptions(context.Background(), CollectToolName, map[string]any{"team": "alpha"}, tools.RunOptions{})
 	if collect.Status != tools.StatusOK || !strings.Contains(collect.Output, "ok:compute") {
 		t.Fatalf("collect output missing result: %q", collect.Output)
+	}
+}
+
+// swarm_collect must BLOCK until the team's members finish, then return their
+// results in one call — this is what frees the orchestrator from polling.
+func TestCollectBlocksUntilMembersFinish(t *testing.T) {
+	gate := make(chan struct{})
+	l := newLauncher(okFor)
+	l.gate = gate // members block until the gate is closed
+	reg, sw := newToolSwarm(t, l)
+
+	spawn := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate", "task": "compute", "team": "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
+	id := spawn.Meta["task_id"]
+	waitFor(t, "member running", func() bool {
+		task, ok := sw.Coordinator().Get(id)
+		return ok && task.Status == StatusRunning
+	})
+
+	done := make(chan tools.Result, 1)
+	go func() {
+		done <- reg.RunWithOptions(context.Background(), CollectToolName, map[string]any{"team": "alpha"}, tools.RunOptions{})
+	}()
+
+	// collect must not return while the member is still running.
+	select {
+	case res := <-done:
+		t.Fatalf("collect returned before the member finished: %q", res.Output)
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	close(gate) // let the member finish
+	select {
+	case res := <-done:
+		if res.Status != tools.StatusOK || !strings.Contains(res.Output, "ok:compute") {
+			t.Fatalf("collect after completion missing result: %q", res.Output)
+		}
+		if !strings.Contains(res.Output, "[done]") {
+			t.Fatalf("collect should report the task done: %q", res.Output)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("collect did not return after the member finished")
+	}
+}
+
+// A stuck member must not hang collect forever: with a small timeout it returns
+// the latest partial state (the still-running task) instead of blocking.
+func TestCollectReturnsPartialOnTimeout(t *testing.T) {
+	gate := make(chan struct{})
+	defer close(gate) // release the member at cleanup so the swarm closes cleanly
+	l := newLauncher(okFor)
+	l.gate = gate
+	reg, sw := newToolSwarm(t, l)
+
+	spawn := reg.RunWithOptions(context.Background(), SpawnToolName, map[string]any{
+		"agent_type": "teammate", "task": "compute", "team": "alpha",
+	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
+	id := spawn.Meta["task_id"]
+	waitFor(t, "member running", func() bool {
+		task, ok := sw.Coordinator().Get(id)
+		return ok && task.Status == StatusRunning
+	})
+
+	res := reg.RunWithOptions(context.Background(), CollectToolName, map[string]any{
+		"team": "alpha", "timeout_seconds": 0.03,
+	}, tools.RunOptions{})
+	if res.Status != tools.StatusOK {
+		t.Fatalf("collect status = %v output=%q", res.Status, res.Output)
+	}
+	if !strings.Contains(res.Output, "[running]") {
+		t.Fatalf("a stuck member should come back as running on timeout, got %q", res.Output)
 	}
 }
 

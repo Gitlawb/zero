@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"context"
 	"fmt"
 )
 
@@ -174,4 +175,12 @@ func (s *Swarm) Collect(teamName string) []Task {
 		}
 	}
 	return out
+}
+
+// CollectWait blocks until the team's tasks all reach a terminal state (or ctx is
+// done), then returns their snapshots. This is what swarm_collect uses so the
+// orchestrator gets final results in a single call instead of polling
+// swarm_status repeatedly while members are still running.
+func (s *Swarm) CollectWait(ctx context.Context, teamName string) []Task {
+	return s.coord.WaitSettled(ctx, sanitizeName(teamName))
 }

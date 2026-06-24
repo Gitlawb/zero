@@ -1647,6 +1647,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// preview so it doesn't linger or duplicate beneath the card.
 			m.clearStreamingToolCall()
 		}
+		// Collapse a repeated swarm status/collect card so re-checks don't flood
+		// the chat with identical blocks.
+		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
 		return m, nil
 	case doctorCommandResultMsg:

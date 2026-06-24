@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -67,15 +68,29 @@ type Coordinator struct {
 	colors     map[string]string // agentID -> color
 	colorIndex int
 	now        func() time.Time // injectable clock for tests
+	// changed is closed (and replaced) on every task state change so WaitSettled
+	// can block for a transition without polling. Always non-nil after construction.
+	changed chan struct{}
 }
 
 // NewCoordinator returns an empty coordinator using the wall clock.
 func NewCoordinator() *Coordinator {
 	return &Coordinator{
-		tasks:  map[string]*Task{},
-		colors: map[string]string{},
-		now:    time.Now,
+		tasks:   map[string]*Task{},
+		colors:  map[string]string{},
+		now:     time.Now,
+		changed: make(chan struct{}),
 	}
+}
+
+// notifyChangeLocked wakes every WaitSettled caller by closing the current change
+// channel and installing a fresh one. Must be called while holding c.mu for
+// writing; lazily initialises changed so a zero-value coordinator is still safe.
+func (c *Coordinator) notifyChangeLocked() {
+	if c.changed != nil {
+		close(c.changed)
+	}
+	c.changed = make(chan struct{})
 }
 
 // ErrTaskExists is returned when registering a duplicate task ID.
@@ -106,6 +121,7 @@ func (c *Coordinator) Register(id, agentID, team, description string) (Task, err
 	}
 	c.tasks[id] = t
 	c.assignColorLocked(agentID)
+	c.notifyChangeLocked()
 	return *t, nil
 }
 
@@ -127,6 +143,7 @@ func (c *Coordinator) SetStatus(id string, status TaskStatus) error {
 	}
 	t.Status = status
 	t.UpdatedAt = c.now()
+	c.notifyChangeLocked()
 	return nil
 }
 
@@ -154,6 +171,7 @@ func (c *Coordinator) finish(id string, status TaskStatus, result, errMsg string
 	t.Result = result
 	t.Err = errMsg
 	t.UpdatedAt = c.now()
+	c.notifyChangeLocked()
 	return nil
 }
 
@@ -173,6 +191,7 @@ func (c *Coordinator) Reassign(id, newAgentID string) error {
 	t.Status = StatusPending
 	t.UpdatedAt = c.now()
 	c.assignColorLocked(newAgentID)
+	c.notifyChangeLocked()
 	return nil
 }
 
@@ -203,6 +222,55 @@ func (c *Coordinator) List() []Task {
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})
 	return out
+}
+
+// scopedList returns task snapshots for one team, or every task when team=="".
+func (c *Coordinator) scopedList(team string) []Task {
+	all := c.List()
+	if team == "" {
+		return all
+	}
+	out := all[:0:0]
+	for _, t := range all {
+		if t.Team == team {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// WaitSettled blocks until every task in the scope (one team, or all teams when
+// team=="") has reached a terminal status, then returns a snapshot of the scope.
+// It also returns — with the latest partial state — as soon as ctx is done, so a
+// stuck or long-running member can't hang the caller forever (the caller bounds
+// it with a timeout / user-cancel context). A scope with no tasks is settled
+// immediately, so an empty or unknown team never blocks. This is the primitive
+// that lets swarm_collect deliver final results in one call instead of forcing
+// the orchestrator to poll swarm_status in a loop.
+func (c *Coordinator) WaitSettled(ctx context.Context, team string) []Task {
+	for {
+		c.mu.RLock()
+		settled := true
+		for _, t := range c.tasks {
+			if team != "" && t.Team != team {
+				continue
+			}
+			if !t.Status.terminal() {
+				settled = false
+				break
+			}
+		}
+		ch := c.changed
+		c.mu.RUnlock()
+		if settled || ch == nil {
+			return c.scopedList(team)
+		}
+		select {
+		case <-ctx.Done():
+			return c.scopedList(team)
+		case <-ch:
+		}
+	}
 }
 
 // Color returns the stable color assigned to an agent (assigning one on first
