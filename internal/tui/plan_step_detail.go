@@ -8,6 +8,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -136,9 +137,13 @@ func dropTranscriptRowsByID(rows []transcriptRow, id string) []transcriptRow {
 	return out
 }
 
-// openPlanStepDetail toggles a transcript card showing what was built for the
-// given plan step. Clicking the open step hides it; clicking a different step
-// replaces it — so at most one detail card is shown and re-clicks never stack.
+// openPlanStepDetail toggles a transcript card explaining a plan step. The card
+// adapts to the step's status: a finished step (completed/failed) reads as "what
+// we did" — the outcome, how long it took, the model's own note, and the file
+// changes + commands captured while it ran; an unfinished step (pending or
+// in_progress) reads as "what we will do / are doing" — its intent, the planned
+// approach, and any work captured so far. Clicking the open step hides it;
+// clicking a different step replaces it, so at most one card shows at a time.
 func (m model) openPlanStepDetail(stepIndex int) model {
 	if stepIndex < 0 || stepIndex >= len(m.plan.steps) {
 		return m
@@ -163,63 +168,252 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 			changes = append(changes, w)
 		}
 	}
+	done := step.status == "completed" || step.status == "failed"
 
-	var lines []string
+	// The lead section is titled with the step itself and opens with a
+	// status-aware sentence ("what we did" vs "what we will do").
+	sections := []commandSection{{
+		Title: step.content,
+		Lines: m.planStepOutcomeLines(step, len(changes), len(commands)),
+	}}
+
+	// The model's own per-step note is the clearest statement of intent (before)
+	// or record (after), so surface it verbatim under a status-appropriate label.
+	if note := strings.TrimSpace(step.notes); note != "" {
+		label := "Plan"
+		if done {
+			label = "Notes"
+		}
+		sections = append(sections, commandSection{Title: label, Lines: planWrapText(note, 76)})
+	}
+
 	if len(changes) > 0 {
-		lines = append(lines, "Changes:")
-		lines = append(lines, planWorkLines(changes)...)
+		sections = append(sections, commandSection{
+			Title: fmt.Sprintf("Files changed (%d)", len(changes)),
+			Lines: planChangeLines(changes),
+		})
 	}
 	if len(commands) > 0 {
-		if len(lines) > 0 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, "Commands:")
-		lines = append(lines, planWorkLines(commands)...)
-	}
-	if len(lines) == 0 {
-		lines = append(lines, "No file changes or commands recorded for this step yet.")
+		sections = append(sections, commandSection{
+			Title: fmt.Sprintf("Commands run (%d)", len(commands)),
+			Lines: planCommandLines(commands),
+		})
 	}
 
-	status := step.status
-	if status == "" {
-		status = "pending"
+	// A pending step with no note and no work has only its title; spell out
+	// what's coming so the card doesn't read as empty.
+	if step.status != "in_progress" && !done && len(work) == 0 && strings.TrimSpace(step.notes) == "" {
+		sections = append(sections, commandSection{
+			Title: "What's coming",
+			Lines: []string{"This step is queued. Its file changes and commands will appear here once the agent starts it."},
+		})
 	}
+
 	card := renderCommandOutput(commandOutput{
-		Title:  fmt.Sprintf("Plan step %d", stepIndex+1),
-		Status: commandStatusOK,
-		Sections: []commandSection{{
-			Title: step.content + " · " + status,
-			Lines: lines,
-		}},
-		Hints: []string{"diffs + commands captured while this step was in progress"},
+		Title:    fmt.Sprintf("Plan step %d of %d · %s", stepIndex+1, len(m.plan.steps), planStepStateLabel(step.status)),
+		Status:   planStepDetailStatus(step.status),
+		Sections: sections,
+		Hints:    []string{planStepDetailHint(step.status)},
 	})
 	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "plan", id: planStepDetailRowID, text: card})
 	return m
 }
 
-// planWorkLines renders each work item as a summary line plus a short, indented
-// excerpt of its diff/output, truncated so one step's card can't flood the chat.
-func planWorkLines(items []planStepWork) []string {
-	const maxDetailLines = 6
+// planStepOutcomeLines opens the lead section with a status-aware framing of the
+// step: a finished step gets an outcome + duration ("Done in 1m 20s.") and a
+// tally of what was built; an in_progress step gets its running clock and the
+// work so far; a pending step is framed forward-looking ("what this step will
+// do"), since no work has been captured yet.
+func (m model) planStepOutcomeLines(step planStep, nChanges, nCommands int) []string {
+	switch step.status {
+	case "completed":
+		head := "Done."
+		if d := formatPlanStepDuration(step.completedAt.Sub(step.startedAt)); d != "" {
+			head = "Done in " + d + "."
+		}
+		return []string{head, planWorkTally("Built", nChanges, nCommands)}
+	case "failed":
+		head := "Failed."
+		if d := formatPlanStepDuration(step.completedAt.Sub(step.startedAt)); d != "" {
+			head = "Failed after " + d + "."
+		}
+		return []string{head, planWorkTally("Attempted", nChanges, nCommands)}
+	case "in_progress":
+		head := "In progress."
+		if d := formatPlanStepDuration(m.planNow().Sub(step.startedAt)); d != "" {
+			head = "In progress — running for " + d + "."
+		}
+		return []string{head, planWorkTally("So far", nChanges, nCommands)}
+	default: // pending
+		return []string{"Not started yet — here's what this step will do."}
+	}
+}
+
+// planWorkTally summarizes how much work a step captured, or notes that none was
+// recorded yet. verb frames it for the step's state ("Built", "So far", …).
+func planWorkTally(verb string, nChanges, nCommands int) string {
+	if nChanges == 0 && nCommands == 0 {
+		return "No file changes or commands recorded yet."
+	}
+	var parts []string
+	if nChanges > 0 {
+		parts = append(parts, pluralCount(nChanges, "file change"))
+	}
+	if nCommands > 0 {
+		parts = append(parts, pluralCount(nCommands, "command"))
+	}
+	return verb + " " + strings.Join(parts, " and ") + "."
+}
+
+// planChangeLines lists each file mutation as a bullet with a +added/−removed
+// diffstat and a short excerpt of the changed lines.
+func planChangeLines(items []planStepWork) []string {
 	var out []string
 	for _, w := range items {
-		out = append(out, "  • "+w.summary)
-		detail := strings.TrimRight(w.detail, "\n")
-		if strings.TrimSpace(detail) == "" {
+		head := "• " + w.summary
+		if add, del := planDiffStat(w.detail); add+del > 0 {
+			head += fmt.Sprintf("  (+%d −%d)", add, del)
+		}
+		out = append(out, head)
+		out = append(out, planDetailExcerpt(w.detail, 3)...)
+	}
+	return out
+}
+
+// planCommandLines lists each command run as a bullet with a short excerpt of
+// its output.
+func planCommandLines(items []planStepWork) []string {
+	var out []string
+	for _, w := range items {
+		out = append(out, "• "+w.summary)
+		out = append(out, planDetailExcerpt(w.detail, 3)...)
+	}
+	return out
+}
+
+// planDiffStat counts added/removed lines in a unified diff, ignoring the
+// +++/--- file headers. Output that isn't a diff (e.g. a written file's body or
+// command stdout) yields no counts.
+func planDiffStat(detail string) (added, removed int) {
+	for _, line := range strings.Split(detail, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+			continue
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	return added, removed
+}
+
+// planDetailExcerpt returns up to max non-blank lines of a tool's output for the
+// card, trimmed, with a trailing "… (N more lines)" when truncated. The card
+// renderer collapses indentation, so this only needs to keep each line short.
+func planDetailExcerpt(detail string, max int) []string {
+	if strings.TrimSpace(detail) == "" {
+		return nil
+	}
+	var kept []string
+	for _, line := range strings.Split(detail, "\n") {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		dl := strings.Split(detail, "\n")
-		more := 0
-		if len(dl) > maxDetailLines {
-			more = len(dl) - maxDetailLines
-			dl = dl[:maxDetailLines]
+		kept = append(kept, strings.TrimSpace(line))
+	}
+	more := 0
+	if len(kept) > max {
+		more = len(kept) - max
+		kept = kept[:max]
+	}
+	if more > 0 {
+		kept = append(kept, fmt.Sprintf("… (%d more line%s)", more, map[bool]string{true: "s", false: ""}[more != 1]))
+	}
+	return kept
+}
+
+// planStepStateLabel is the short human label after "Plan step N of M ·" in the
+// card title.
+func planStepStateLabel(status string) string {
+	switch status {
+	case "completed":
+		return "done"
+	case "failed":
+		return "failed"
+	case "in_progress":
+		return "in progress"
+	default:
+		return "up next"
+	}
+}
+
+// planStepDetailStatus maps a step's status to the card's status banner: a
+// completed step reads ok, a failed step blocked, everything else neutral info.
+func planStepDetailStatus(status string) commandStatus {
+	switch status {
+	case "completed":
+		return commandStatusOK
+	case "failed":
+		return commandStatusBlocked
+	default:
+		return commandStatusInfo
+	}
+}
+
+// planStepDetailHint is the trailing one-line hint, framing the card as a record
+// ("what was done") or a preview ("what this step will do").
+func planStepDetailHint(status string) string {
+	switch status {
+	case "completed", "failed":
+		return "what was done in this step"
+	case "in_progress":
+		return "what this step is doing now"
+	default:
+		return "what this step will do"
+	}
+}
+
+// formatPlanStepDuration renders a step's span in a friendlier form than the raw
+// footer clock: seconds under a minute, "Nm Ns" above. A zero or negative span
+// renders empty so callers can drop the clause.
+func formatPlanStepDuration(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()+0.5))
+	}
+	mins := int(d / time.Minute)
+	secs := int((d % time.Minute) / time.Second)
+	if secs == 0 {
+		return fmt.Sprintf("%dm", mins)
+	}
+	return fmt.Sprintf("%dm %ds", mins, secs)
+}
+
+// planWrapText word-wraps s to width columns, returning one line per wrapped
+// row, so a long note isn't truncated by the card's single-line fitter.
+func planWrapText(s string, width int) []string {
+	if width < 8 {
+		width = 8
+	}
+	var out []string
+	for _, para := range strings.Split(strings.TrimSpace(s), "\n") {
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			continue
 		}
-		for _, line := range dl {
-			out = append(out, "      "+line)
+		line := words[0]
+		for _, w := range words[1:] {
+			if len(line)+1+len(w) > width {
+				out = append(out, line)
+				line = w
+				continue
+			}
+			line += " " + w
 		}
-		if more > 0 {
-			out = append(out, fmt.Sprintf("      … (%d more lines)", more))
-		}
+		out = append(out, line)
 	}
 	return out
 }

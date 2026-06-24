@@ -1,9 +1,58 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+// lastCardText returns the text of the most recently appended transcript row —
+// the plan-step detail card built by openPlanStepDetail.
+func lastCardText(m model) string {
+	if len(m.transcript) == 0 {
+		return ""
+	}
+	return m.transcript[len(m.transcript)-1].text
+}
+
+// TestPlanStepDetailByStatus: a completed step reads as "what we did" (outcome,
+// duration, the model's note, and the captured changes/commands); a pending
+// step reads as "what we will do" (forward framing + the planned approach).
+func TestPlanStepDetailByStatus(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return t0.Add(5 * time.Minute) }}
+	m.plan.steps = []planStep{
+		{content: "ship the button", status: "completed", notes: "wired the click handler", startedAt: t0, completedAt: t0.Add(80 * time.Second)},
+		{content: "write the docs", status: "pending", notes: "cover the new flag"},
+	}
+	m.stepWork = map[string][]planStepWork{
+		"ship the button": {
+			{tool: "edit_file", summary: "edit button.go", detail: "+added line\n-removed line"},
+			{tool: "bash", summary: "go build", detail: "exit 0"},
+		},
+	}
+
+	// Completed step -> "what we did".
+	m = m.openPlanStepDetail(0)
+	done := lastCardText(m)
+	for _, want := range []string{"Done in 1m 20s.", "Built 1 file change and 1 command.", "wired the click handler", "Files changed (1)", "Commands run (1)", "what was done in this step"} {
+		if !strings.Contains(done, want) {
+			t.Errorf("completed card missing %q\n---\n%s", want, done)
+		}
+	}
+
+	// Pending step -> "what we will do".
+	m = m.openPlanStepDetail(1)
+	pending := lastCardText(m)
+	for _, want := range []string{"what this step will do", "cover the new flag", "what this step will do"} {
+		if !strings.Contains(pending, want) {
+			t.Errorf("pending card missing %q\n---\n%s", want, pending)
+		}
+	}
+	if strings.Contains(pending, "Files changed") {
+		t.Errorf("pending card should record no work yet:\n%s", pending)
+	}
+}
 
 // TestSidebarPlanSelectablesOffsets locks the click-to-step mapping against the
 // renderContextSidebar layout: with no agents the AGENTS section is header +
