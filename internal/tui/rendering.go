@@ -506,6 +506,12 @@ func renderUserRow(row transcriptRow, width int) string {
 
 const userPromptPrefix = "▌  "
 
+// narrationPrefix is the 2-col gutter on the agent's interim narration: a "●"
+// bullet on the first line marks each story beat; continuation lines indent to
+// match. Width 2 (● is single-width + a space), so wrapping to assistantMeasure-2
+// keeps every composed line within the chat column.
+const narrationPrefix = "● "
+
 func userPromptContentWidth(width int) int {
 	if width <= 0 {
 		return 0
@@ -527,17 +533,26 @@ func renderUserPromptStyledLine(styledText string, contentWidth int) string {
 // as interim-style prose.
 func renderAssistantRow(row transcriptRow, width int) string {
 	tableMeasure := width
-	// Committed row: highlighting runs here (once, behind the render cache).
-	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure, true)
 	if !row.final {
-		// Interim prose is the agent's connective narration ("Now the stylesheet.")
-		// — render it bright (ink), not muted, so the build reads as a clear story.
-		// It already streams bright; this keeps it bright once committed.
-		for index := range lines {
-			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
+		// Interim prose is the agent's connective narration ("Now the stylesheet.").
+		// Render it bright (ink) and mark each block with a leading "●" so the build
+		// reads as a clear story. Wrap to a 2-col-narrower measure so the bullet /
+		// indent never pushes a line past the chat width; fitStyledLine backstops it.
+		gutter := lipgloss.Width(narrationPrefix)
+		narr := renderAssistantMarkdownText(row.text, maxInt(16, assistantMeasure(width)-gutter), tableMeasure, true)
+		out := make([]string, 0, len(narr))
+		for index, line := range narr {
+			styled := styleAssistantMarkdownLine(line, zeroTheme.ink)
+			prefix := "  "
+			if index == 0 {
+				prefix = zeroTheme.accent.Render("●") + " "
+			}
+			out = append(out, fitStyledLine(prefix+styled, width))
 		}
-		return strings.Join(lines, "\n")
+		return strings.Join(out, "\n")
 	}
+	// Committed final answer: highlighting runs here (once, behind the render cache).
+	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure, true)
 	for index := range lines {
 		lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
 	}

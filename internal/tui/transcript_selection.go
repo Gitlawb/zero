@@ -709,15 +709,25 @@ func (m model) renderSelectableUserRow(rowIndex int, row transcriptRow, width in
 
 func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, width int, startBodyY int) (string, []transcriptSelectableLine) {
 	tableMeasure := width
+	// Interim narration carries a 2-col "● " gutter (see renderAssistantRow), so it
+	// wraps 2 cols narrower and its selectable columns start at textStart=gutter;
+	// the final answer keeps the full width and textStart=0.
+	gutter := lipgloss.Width(narrationPrefix)
+	measure := assistantMeasure(width)
+	textStart := 0
+	if !row.final {
+		measure = maxInt(16, assistantMeasure(width)-gutter)
+		textStart = gutter
+	}
 	// Committed/selectable row: highlight (the result is cached per row).
-	wrapped := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure, true)
+	wrapped := renderAssistantMarkdownText(row.text, measure, tableMeasure, true)
 	selectable := make([]transcriptSelectableLine, 0, len(wrapped))
 	for index, line := range wrapped {
 		plainLine := stripMarkdownRenderControls(line)
 		meta := transcriptSelectableLine{
 			bodyY:     startBodyY + index,
 			rowIndex:  rowIndex,
-			textStart: 0,
+			textStart: textStart,
 			text:      plainLine,
 		}
 		selectable = append(selectable, meta)
@@ -732,6 +742,13 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 	for index, line := range wrapped {
 		meta := selectable[index]
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
+		if !row.final {
+			prefix := "  "
+			if index == 0 {
+				prefix = zeroTheme.accent.Render("●") + " "
+			}
+			rendered = fitStyledLine(prefix+rendered, width)
+		}
 		lines = append(lines, rendered)
 	}
 	if row.final && row.turnElapsed >= longTurnBookend {
