@@ -653,7 +653,11 @@ func newModel(ctx context.Context, options Options) model {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
-	m.fadeDisabled = defaultFadeDisabled() || m.reducedMotion
+	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
+	// disabled: it read as a distracting glow rather than a subtle liveness cue.
+	// Streaming text always renders statically at base ink (the disabled path in
+	// styleStreamingLine), so no accent glow and no per-line fade ticks.
+	m.fadeDisabled = true
 	m.refreshMCPViewState()
 	return m
 }

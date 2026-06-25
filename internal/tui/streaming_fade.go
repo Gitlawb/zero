@@ -11,38 +11,6 @@ import (
 	"github.com/charmbracelet/colorprofile"
 )
 
-// defaultFadeDisabled resolves streamingFadeDisabled from the live process
-// environment and the env-detected color profile, at model construction.
-func defaultFadeDisabled() bool {
-	return streamingFadeDisabled(os.Getenv, colorprofile.Env(os.Environ()))
-}
-
-// streamingFadeDisabled reports whether the streaming-text fade should be OFF.
-// The fade re-renders every ~150ms while text streams; that stutters over remote
-// links and terminal multiplexers, and the age→color ramp reads poorly with few
-// colors. Disabled when: ZERO_NO_FADE is set, the session is over SSH
-// (SSH_CONNECTION), TERM is a screen/tmux multiplexer, or the color profile is
-// no-TTY / ASCII / 16-color. When disabled, streaming text renders statically at
-// the base ink color (styleStreamingLine's pre-fade path), which always sits at
-// full readable contrast against the active theme.
-func streamingFadeDisabled(env func(string) string, profile colorprofile.Profile) bool {
-	if v := strings.TrimSpace(env("ZERO_NO_FADE")); v != "" && v != "0" && !strings.EqualFold(v, "false") {
-		return true
-	}
-	if strings.TrimSpace(env("SSH_CONNECTION")) != "" || strings.TrimSpace(env("SSH_TTY")) != "" {
-		return true
-	}
-	term := strings.ToLower(strings.TrimSpace(env("TERM")))
-	if strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux") {
-		return true
-	}
-	switch profile {
-	case colorprofile.NoTTY, colorprofile.ASCII, colorprofile.ANSI:
-		return true
-	}
-	return false
-}
-
 // defaultReducedMotion resolves reducedMotionEnabled from the live environment
 // and the env-detected color profile, at model construction.
 func defaultReducedMotion() bool {
