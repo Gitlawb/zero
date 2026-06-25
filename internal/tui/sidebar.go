@@ -230,7 +230,9 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 	pendingTask := ""
 	havePending := false
 	for _, row := range m.transcript {
-		if row.tool != "swarm_spawn" {
+		// Scope to the current run's spawns so finished members from an earlier
+		// turn don't reappear when a later run keeps members visible (below).
+		if row.tool != "swarm_spawn" || row.runID != m.activeRunID {
 			continue
 		}
 		switch row.kind {
@@ -260,21 +262,30 @@ func (m model) swarmSpawnedAgents() []swarmAgent {
 			agents = append(agents, swarmAgent{id: id, name: name, sessionID: m.swarmSessionMap[id]})
 		}
 	}
-	// Members the latest swarm_status reports finished LINGER briefly with a fading
-	// ✓ (a smooth exit, not an abrupt pop) then drop. Members not yet in a status
-	// report (just spawned) stay live. The done-time is stamped by the spinner tick
-	// (stampSwarmDone); until then a freshly-finished member shows as finishing.
+	// Finished members stay in the panel (✓, still clickable) while the run is in
+	// flight, so the user can drill into what each subagent did even after it
+	// completes mid-turn. Only once the turn ends do they LINGER briefly with a
+	// fading ✓ then drop — a smooth exit, not an abrupt pop. Members not yet in a
+	// status report (just spawned) stay live. The done-time is stamped by the
+	// spinner tick (stampSwarmDone) for the post-turn fade.
 	if status := m.swarmMemberStatus(); len(status) > 0 {
 		live := agents[:0:0]
 		for _, a := range agents {
 			a.state = status[a.id]
 			switch a.state {
 			case "done", "failed", "completed", "cancelled":
+				a.finishing = true
+				if m.pending {
+					// Run still going: keep it visible and clickable, no fade.
+					a.finishedAt = time.Time{}
+					live = append(live, a)
+					continue
+				}
+				// Turn ended: fade out over the linger window, then drop.
 				doneAt, stamped := m.swarmDoneAt[a.id]
 				if stamped && m.now().Sub(doneAt) >= sidebarAgentLinger {
 					continue // past the linger window — remove
 				}
-				a.finishing = true
 				a.finishedAt = doneAt
 				live = append(live, a)
 			default:
@@ -296,10 +307,14 @@ var swarmStatusRe = regexp.MustCompile(`(?m)^\s*[-–—]?\s*(\S+)\s+\[([a-zA-Z]
 // last report in transcript order wins. Empty when no report has run yet. This
 // is what lets a swarm_collect that runs while members are still working keep the
 // AGENTS panel populated instead of clearing it.
+//
+// Scoped to the active run, exactly like the spawn rows in swarmSpawnedAgents: a
+// prior run's status/collect (whose task ids can repeat) must not mark a current
+// member done/failed and drop or fade it.
 func (m model) swarmMemberStatus() map[string]string {
 	status := map[string]string{}
 	for _, row := range m.transcript {
-		if row.kind != rowToolResult {
+		if row.kind != rowToolResult || row.runID != m.activeRunID {
 			continue
 		}
 		if row.tool != "swarm_status" && row.tool != "swarm_collect" {

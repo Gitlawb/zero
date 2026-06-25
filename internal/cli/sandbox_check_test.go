@@ -31,8 +31,8 @@ func TestRunSandboxCheckJSONDeniesOutOfWorkspaceWrite(t *testing.T) {
 	deps, _ := sandboxCheckDeps(t)
 	// An absolute path outside the workspace, portable across OSes: a Unix literal
 	// like /etc/passwd is not absolute on Windows (it would be joined into the
-	// workspace and allowed), so build one under a separate temp dir instead.
-	outside := filepath.Join(t.TempDir(), "outside.txt")
+	// workspace and allowed), so build one under a non-temp test dir instead.
+	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "outside.txt")
 	var stdout, stderr bytes.Buffer
 	exitCode := runWithDeps([]string{"sandbox", "check", "write_file", "--side-effect", "write", "--path", outside, "--json"}, &stdout, &stderr, deps)
 	if exitCode != exitSuccess {

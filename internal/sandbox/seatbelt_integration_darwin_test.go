@@ -32,7 +32,7 @@ func TestSeatbeltEnforcesExtraWriteRoots(t *testing.T) {
 	extra := t.TempDir()
 	// The "outside" target must live OUTSIDE the sandbox's baseline-writable temp
 	// trees: the profile now allows /tmp and /var/folders for parity with the
-	// bubblewrap backend (--tmpfs /tmp, --dev /dev). t.TempDir() lives under
+	// Linux backend's shared host temp roots. t.TempDir() lives under
 	// $TMPDIR (/var/folders on macOS), which is writable, so a write there would no
 	// longer be denied. Use a directory under $HOME to prove the kernel denies a
 	// write to an ungranted, non-temp location.

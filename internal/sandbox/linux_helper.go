@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -219,9 +220,9 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 		}
 	}
 	if fs.AllowTemp {
-		args = append(args, "--tmpfs", "/tmp")
+		fs.WriteRoots = linuxWriteRootsWithTemp(fs)
 	}
-	for _, root := range fs.WriteRoots {
+	for _, root := range linuxSortedWriteRoots(fs.WriteRoots) {
 		if !pathExists(root.Root) {
 			continue
 		}
@@ -240,6 +241,43 @@ func linuxBwrapFilesystemArgs(profile PermissionProfile) []string {
 		args = appendUnreadableLinuxPathArgs(args, path)
 	}
 	return args
+}
+
+func linuxWriteRootsWithTemp(fs FileSystemPolicy) []WritableRoot {
+	roots := append([]WritableRoot{}, fs.WriteRoots...)
+	for _, tempRoot := range defaultTempWriteRoots() {
+		found := false
+		for _, root := range roots {
+			if filepath.Clean(root.Root) == filepath.Clean(tempRoot) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			roots = append(roots, WritableRoot{Root: tempRoot})
+		}
+	}
+	return roots
+}
+
+func linuxSortedWriteRoots(roots []WritableRoot) []WritableRoot {
+	sorted := append([]WritableRoot{}, roots...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return pathDepth(sorted[i].Root) < pathDepth(sorted[j].Root)
+	})
+	return sorted
+}
+
+func pathDepth(path string) int {
+	cleaned := filepath.Clean(path)
+	if cleaned == "" || filepath.Dir(cleaned) == cleaned {
+		return 0
+	}
+	trimmed := strings.Trim(cleaned, string(filepath.Separator))
+	if trimmed == "" {
+		return 0
+	}
+	return strings.Count(trimmed, string(filepath.Separator)) + 1
 }
 
 func linuxProfileHasFullReadRoot(fs FileSystemPolicy) bool {

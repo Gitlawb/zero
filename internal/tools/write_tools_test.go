@@ -250,6 +250,70 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	}
 }
 
+func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")
+	res := NewEditFileTool(root).Run(context.Background(), map[string]any{
+		"path": "code.go", "old_string": "const a = 1", "new_string": "const a = 42",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("edit failed: %s", res.Output)
+	}
+	// The model-facing Output stays the one-line summary; the red/green diff lives
+	// on the card-only Display.Preview, so it costs the model zero tokens.
+	if !strings.HasPrefix(res.Output, "Successfully edited") {
+		t.Fatalf("summary must be the Output: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "@@") {
+		t.Fatalf("Output must NOT carry the diff (card-only preview): %q", res.Output)
+	}
+	for _, want := range []string{"@@", "-const a = 1", "+const a = 42"} {
+		if !strings.Contains(res.Display.Preview, want) {
+			t.Fatalf("edit preview missing diff marker %q: %q", want, res.Display.Preview)
+		}
+	}
+}
+
+func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
+	root := t.TempDir()
+	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path": "new.txt", "content": "line one\nline two\n",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("write failed: %s", res.Output)
+	}
+	if strings.Contains(res.Output, "@@") {
+		t.Fatalf("Output must stay summary-only (the diff is card-only): %q", res.Output)
+	}
+	for _, want := range []string{"@@", "+line one", "+line two"} {
+		if !strings.Contains(res.Display.Preview, want) {
+			t.Fatalf("new-file preview missing additions diff %q: %q", want, res.Display.Preview)
+		}
+	}
+	if strings.Contains(res.Display.Preview, "\n-line") {
+		t.Fatalf("a fresh-create diff must have no removed lines: %q", res.Display.Preview)
+	}
+}
+
+func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "f.txt"), "old line\nkeep\n")
+	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path": "f.txt", "content": "new line\nkeep\n", "overwrite": true,
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("overwrite failed: %s", res.Output)
+	}
+	if strings.Contains(res.Output, "@@") {
+		t.Fatalf("Output must stay summary-only (the diff is card-only): %q", res.Output)
+	}
+	for _, want := range []string{"-old line", "+new line"} {
+		if !strings.Contains(res.Display.Preview, want) {
+			t.Fatalf("overwrite preview missing %q: %q", want, res.Display.Preview)
+		}
+	}
+}
+
 func TestEditFileToolAllowsDeletingRegions(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "notes.txt")

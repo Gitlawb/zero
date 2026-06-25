@@ -505,6 +505,49 @@ func TestRunExecModeToolFilterReflectedInListTools(t *testing.T) {
 	}
 }
 
+func TestResolveExecPermissionModeMember(t *testing.T) {
+	cases := []struct {
+		autonomy string
+		want     agent.PermissionMode
+	}{
+		{"", agent.PermissionModeAuto},
+		{"low", agent.PermissionModeAuto},
+		{"medium", agent.PermissionModeAuto},
+		{"member", agent.PermissionModeMemberAuto}, // headless members: write + sandboxed shell
+		{"high", agent.PermissionModeUnsafe},
+	}
+	for _, c := range cases {
+		got, err := resolveExecPermissionMode(execOptions{autonomy: c.autonomy})
+		if err != nil {
+			t.Fatalf("resolveExecPermissionMode(%q): %v", c.autonomy, err)
+		}
+		if got != c.want {
+			t.Errorf("resolveExecPermissionMode(%q) = %q, want %q", c.autonomy, got, c.want)
+		}
+	}
+	if _, err := resolveExecPermissionMode(execOptions{autonomy: "bogus"}); err == nil {
+		t.Fatal("an unknown autonomy level must still be rejected")
+	}
+}
+
+// A member-auto headless tool list must include the in-workspace mutators that
+// plain Auto hides, so a swarm member can actually build. Match the tool ENTRY
+// line ("  write_file [") — a bare substring would false-match tool descriptions.
+func TestExecMemberAutoToolListIncludesMutators(t *testing.T) {
+	registry := newCoreRegistry(t.TempDir())
+	const writeEntry = "\n  write_file ["
+
+	member := formatExecToolList(registry, execOptions{}, agent.PermissionModeMemberAuto)
+	if !strings.Contains(member, writeEntry) {
+		t.Fatalf("member-auto tool list must include write_file, got %q", member)
+	}
+	// Plain Auto must still hide it (unchanged behavior — this is the read-only gate).
+	auto := formatExecToolList(registry, execOptions{}, agent.PermissionModeAuto)
+	if strings.Contains(auto, writeEntry) {
+		t.Fatalf("plain Auto must still hide write_file, got %q", auto)
+	}
+}
+
 func TestRunExecAcceptsLegacyModelProfileFlags(t *testing.T) {
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{
 		"exec",

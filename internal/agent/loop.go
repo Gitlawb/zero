@@ -2368,6 +2368,21 @@ func ToolAdvertised(tool tools.Tool, permissionMode PermissionMode) bool {
 	if permissionMode == PermissionModeAuto {
 		return tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto
 	}
+	if permissionMode == PermissionModeMemberAuto {
+		// Like Auto, plus the in-workspace mutators a headless member needs to
+		// build. The sandbox engine still decides at call time: in-workspace writes
+		// and sandbox-backed shell auto-allow, while out-of-workspace writes,
+		// network, and destructive commands prompt → denied headless. So this
+		// advertises capability without widening sandbox authority.
+		if tool.Safety().Permission == tools.PermissionAllow || tool.Safety().AdvertiseInAuto {
+			return true
+		}
+		switch tool.Safety().SideEffect {
+		case tools.SideEffectWrite, tools.SideEffectShell:
+			return true
+		}
+		return false
+	}
 	return true
 }
 

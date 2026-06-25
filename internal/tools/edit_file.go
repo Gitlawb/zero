@@ -113,6 +113,8 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: editDiffPreview(relativePath, content, oldString, newString)}
+	// Card-only preview (Display.Preview): the model's Output stays the one-line
+	// summary, so the red/green diff costs zero model tokens.
+	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: boundedUnifiedDiff(relativePath, content, updated)}
 	return result
 }

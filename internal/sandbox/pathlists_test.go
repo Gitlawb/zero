@@ -84,10 +84,10 @@ func TestWritePrecedenceMatrix(t *testing.T) {
 	ws := resolvedTempDir(t)
 	mkdir(t, filepath.Join(ws, "src"))
 	wsSecret := mkdir(t, filepath.Join(ws, "secret"))
-	ext := resolvedTempDir(t)
+	ext := tempDirOutsideDefaultTemp(t)
 	mkdir(t, filepath.Join(ext, "build"))
 	extProtected := mkdir(t, filepath.Join(ext, "build", "protected"))
-	outside := resolvedTempDir(t) // never allowed
+	outside := outsideDefaultTempPath(ws, "outside")
 
 	scope, err := NewScope(ws, nil)
 	if err != nil {
@@ -348,7 +348,7 @@ func TestEvaluateAppliesReadDeny(t *testing.T) {
 // but permitted once the path is on AllowWrite.
 func TestEvaluateAppliesWriteAllow(t *testing.T) {
 	ws := resolvedTempDir(t)
-	ext := resolvedTempDir(t)
+	ext := tempDirOutsideDefaultTemp(t)
 	build := mkdir(t, filepath.Join(ext, "build"))
 
 	base := Policy{Mode: ModeEnforce, EnforceWorkspace: true}
@@ -381,7 +381,7 @@ func TestEvaluateAppliesWriteAllow(t *testing.T) {
 // backend write binds (so a sandboxed shell can write there).
 func TestWriteRootsReflectAllowWrite(t *testing.T) {
 	ws := resolvedTempDir(t)
-	ext := resolvedTempDir(t)
+	ext := tempDirOutsideDefaultTemp(t)
 	build := mkdir(t, filepath.Join(ext, "build"))
 
 	engine := NewEngine(EngineOptions{

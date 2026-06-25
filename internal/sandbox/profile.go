@@ -93,10 +93,12 @@ func permissionProfileRoots(workspaceRoot string, scope *Scope) []string {
 	if scope != nil {
 		return scope.Roots()
 	}
+	var roots []string
 	if root := normalizeProfilePath(workspaceRoot); root != "" {
-		return []string{root}
+		roots = append(roots, root)
 	}
-	return nil
+	roots = append(roots, defaultTempWriteRoots()...)
+	return dedupeStrings(roots)
 }
 
 func permissionProfileReadRoots(workspaceRoot string, policy Policy, scope *Scope, writeRoots []string) []string {

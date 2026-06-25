@@ -10,6 +10,23 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
+func tempDirOutsideDefaultTemp(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".zero-sandbox-outside-")
+	if err != nil {
+		t.Fatalf("MkdirTemp outside default temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("Abs(%q): %v", dir, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
+}
+
 func TestCoreReadOnlyToolsExposeSafeMetadata(t *testing.T) {
 	toolset := CoreReadOnlyTools(t.TempDir())
 	if len(toolset) != 9 {
@@ -192,7 +209,7 @@ func TestRegistryReportsUnknownTools(t *testing.T) {
 
 func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 	registry := NewRegistry()
 	registry.Register(NewWriteFileTool(root))
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
@@ -225,7 +242,7 @@ func TestRegistryAppliesSandboxBeforeToolExecution(t *testing.T) {
 func TestRegistrySandboxGatesPathAliasKeys(t *testing.T) {
 	for _, key := range []string{"file_path", "filename", "filepath"} {
 		root := t.TempDir()
-		outside := filepath.Join(t.TempDir(), "escape.txt")
+		outside := filepath.Join(tempDirOutsideDefaultTemp(t), "escape.txt")
 		registry := NewRegistry()
 		registry.Register(NewWriteFileTool(root))
 		engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Policy: sandbox.DefaultPolicy()})

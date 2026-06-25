@@ -47,6 +47,11 @@ func NewSpecialistLauncher(executor specialist.Executor) MemberLauncher {
 			ParentModel:    spec.Model,
 			Cwd:            spec.Cwd,
 			PermissionMode: permissionMode,
+			// A swarm member runs headless and is meant to do real work, so it
+			// gets in-workspace write/edit + sandboxed shell (member autonomy)
+			// rather than the read-only "low" a plain specialist child would get.
+			// Still clamped to non-unsafe and sandbox-confined to the workspace.
+			MemberAutonomy: true,
 		})
 		if err != nil {
 			return MemberResult{}, err

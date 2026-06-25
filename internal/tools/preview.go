@@ -10,74 +10,9 @@ import (
 // Preview) — the model never sees it — so this bound is purely about readability.
 const previewBodyLines = 15
 
-// splitDiffLines splits s into diff body lines, preserving interior and trailing
-// blank lines, but dropping the single empty element a trailing "\n" produces (a
-// file ending in "\n" has no extra line). Empty input yields no lines — not a
-// fake blank "+" line.
-func splitDiffLines(s string) []string {
-	if s == "" {
-		return nil
-	}
-	lines := strings.Split(s, "\n")
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		lines = lines[:n-1]
-	}
-	return lines
-}
-
-// capDiffLines truncates a diff body to max lines, appending a plain "… +N lines"
-// trailer (a context-style line, so it survives looksLikeDiff and renders muted).
-func capDiffLines(lines []string, max int) []string {
-	if len(lines) <= max {
-		return lines
-	}
-	out := append([]string{}, lines[:max]...)
-	return append(out, fmt.Sprintf("… +%d lines", len(lines)-max))
-}
-
-// newFileDiffPreview synthesizes an all-additions unified diff for a freshly
-// written file — the first previewBodyLines content lines as "+". existed=false
-// renders as a true create (--- /dev/null) so the card shows a NEW FILE badge.
-func newFileDiffPreview(path, content string, lines int, existed bool) string {
-	from := "--- a/" + path
-	if !existed {
-		from = "--- /dev/null"
-	}
-	header := []string{from, "+++ b/" + path, fmt.Sprintf("@@ -0,0 +1,%d @@", lines)}
-	body := make([]string, 0, lines)
-	for _, line := range splitDiffLines(content) {
-		body = append(body, "+"+line)
-	}
-	return strings.Join(append(header, capDiffLines(body, previewBodyLines)...), "\n")
-}
-
-// editDiffPreview builds a small unified-diff hunk for an edit_file replacement:
-// the old block as "-" lines, the new block as "+" lines, located at the first
-// occurrence of oldString in the original content. Capped.
-func editDiffPreview(path, content, oldString, newString string) string {
-	start := 1
-	if idx := strings.Index(content, oldString); idx >= 0 {
-		start = strings.Count(content[:idx], "\n") + 1
-	}
-	oldLines := splitDiffLines(oldString)
-	newLines := splitDiffLines(newString)
-	header := []string{
-		"--- a/" + path,
-		"+++ b/" + path,
-		fmt.Sprintf("@@ -%d,%d +%d,%d @@", start, len(oldLines), start, len(newLines)),
-	}
-	body := make([]string, 0, len(oldLines)+len(newLines))
-	for _, l := range oldLines {
-		body = append(body, "-"+l)
-	}
-	for _, l := range newLines {
-		body = append(body, "+"+l)
-	}
-	return strings.Join(append(header, capDiffLines(body, previewBodyLines)...), "\n")
-}
-
-// capPreviewDiff caps an already-formed unified diff (e.g. an apply_patch payload)
-// to a glanceable head, appending "… +N lines" when truncated.
+// capPreviewDiff caps an already-formed unified diff (e.g. an apply_patch payload,
+// which the model supplies pre-diffed) to a glanceable head, appending "… +N
+// lines" when truncated. Writes/edits synthesize their diffs via boundedUnifiedDiff.
 func capPreviewDiff(diff string) string {
 	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
 	const headCap = previewBodyLines + 4 // headers + a hunk of body
