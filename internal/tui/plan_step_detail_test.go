@@ -115,6 +115,45 @@ func TestPlanStepDetailAIExplanation(t *testing.T) {
 	}
 }
 
+// TestPlanStepDetailSecondClickHides: the second click on a step removes the
+// detail card — even when the model write-up is still in flight, a late response
+// must NOT pop the card back open after the user closed it.
+func TestPlanStepDetailSecondClickHides(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "late explanation"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return t0 }, provider: provider}
+	m.plan.steps = []planStep{{content: "do the thing", status: "completed", startedAt: t0, completedAt: t0.Add(time.Minute)}}
+	base := len(m.transcript)
+
+	// First click opens the card (and dispatches the write-up request).
+	m, cmd := m.openPlanStepDetail(0)
+	if !m.planDetailOpen || len(m.transcript) != base+1 {
+		t.Fatalf("first click should open one card: open=%v rows=%d", m.planDetailOpen, len(m.transcript)-base)
+	}
+
+	// Second click — before the response lands — must hide it.
+	m, _ = m.openPlanStepDetail(0)
+	if m.planDetailOpen {
+		t.Error("second click should close the card")
+	}
+	if len(m.transcript) != base {
+		t.Errorf("second click should remove the card: rows=%d", len(m.transcript)-base)
+	}
+
+	// The in-flight response now arrives — it must not reopen the closed card.
+	updated, _ := m.Update(cmd())
+	m = updated.(model)
+	if m.planDetailOpen {
+		t.Error("a late model response must not reopen a closed card")
+	}
+	if len(m.transcript) != base {
+		t.Errorf("late response should not re-add the card: rows=%d", len(m.transcript)-base)
+	}
+}
+
 // TestCaptureStepNarration: assistant prose is attributed to the in_progress
 // step, blank/duplicate segments are dropped, and no step swallows another's.
 func TestCaptureStepNarration(t *testing.T) {

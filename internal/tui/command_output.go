@@ -66,6 +66,24 @@ func commandCardTranscriptPayload(text string) (string, bool) {
 	return strings.TrimPrefix(text, commandCardTranscriptPrefix), true
 }
 
+// planCardTranscriptPrefix tags the plan-step detail card so it renders through
+// renderPlanCardRow — a minimal variant (dim grey border, calm status-tinted
+// title, no loud lime headers) — instead of the standard command-card styling.
+const planCardTranscriptPrefix = "\x00plan-card\x00"
+
+// renderPlanCard formats a plan-step detail card with the same structured text
+// as a command card, but tagged so it renders minimally.
+func renderPlanCard(output commandOutput) string {
+	return planCardTranscriptPrefix + formatCommandOutput(output)
+}
+
+func planCardTranscriptPayload(text string) (string, bool) {
+	if !strings.HasPrefix(text, planCardTranscriptPrefix) {
+		return text, false
+	}
+	return strings.TrimPrefix(text, planCardTranscriptPrefix), true
+}
+
 func renderCommandCard(card commandCard) string {
 	lines := []string{}
 

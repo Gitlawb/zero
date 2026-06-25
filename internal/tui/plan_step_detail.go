@@ -266,7 +266,7 @@ func (m model) appendPlanStepCard(stepIndex int, explanation string, loading boo
 		})
 	}
 
-	card := renderCommandOutput(commandOutput{
+	card := renderPlanCard(commandOutput{
 		Title:    fmt.Sprintf("Plan step %d of %d · %s", stepIndex+1, len(m.plan.steps), planStepStateLabel(step.status)),
 		Status:   planStepDetailStatus(step.status),
 		Sections: sections,

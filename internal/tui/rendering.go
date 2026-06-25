@@ -194,6 +194,9 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 	case rowReasoning:
 		return renderReasoningRow(row, width)
 	case rowSystem:
+		if payload, ok := planCardTranscriptPayload(row.text); ok {
+			return renderPlanCardRow(payload, width)
+		}
 		if payload, ok := commandCardTranscriptPayload(row.text); ok {
 			return renderCommandCardRow(payload, width)
 		}
@@ -670,6 +673,56 @@ func renderCommandCardRow(text string, width int) string {
 		}
 	}
 	return styledBlockFillTitle(width, title, lines, zeroTheme.accent, lipgloss.NewStyle())
+}
+
+// renderPlanCardRow renders the plan-step detail card with a deliberately
+// minimal look: a dim grey border (not the loud lime command-card border), a
+// calm status-tinted title, and soft group headers instead of bright accent
+// ones. The payload structure is identical to a command card, so it reuses the
+// same line classification — only the colours differ.
+func renderPlanCardRow(text string, width int) string {
+	raw := strings.Split(strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n"), "\n")
+	if len(raw) == 0 {
+		return renderSystemNote(text, width)
+	}
+
+	title := strings.TrimSpace(raw[0])
+	lines := make([]string, 0, len(raw)-1)
+	for _, line := range raw[1:] {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			lines = append(lines, "")
+		case isCommandCardStatusLine(trimmed):
+			// The border + title already convey state; drop the structural
+			// "status: …" line entirely for the minimal card.
+		case isCommandCardHintLine(trimmed):
+			lines = append(lines, zeroTheme.faint.Render(line))
+		case isIndentedCommandCardRow(line):
+			lines = append(lines, styleCommandCardContentRow(line))
+		default:
+			// A section group header (What we did / Files changed …): soft grey,
+			// not the loud lime accent the command cards use.
+			lines = append(lines, zeroTheme.muted.Bold(true).Render(line))
+		}
+	}
+	return styledBlockFillTitleStyled(width, title, lines, zeroTheme.faintest, lipgloss.NewStyle(), planCardTitleStyle(title))
+}
+
+// planCardTitleStyle tints the plan card's title by the step state encoded in its
+// suffix (· done / · failed / · in progress / · up next), staying calm: success
+// green, failure red, otherwise plain ink/faint — no loud lime.
+func planCardTitleStyle(title string) lipgloss.Style {
+	switch {
+	case strings.HasSuffix(title, "· done"):
+		return zeroTheme.green
+	case strings.HasSuffix(title, "· failed"):
+		return zeroTheme.red
+	case strings.HasSuffix(title, "· in progress"):
+		return zeroTheme.ink
+	default: // · up next (pending)
+		return zeroTheme.faint
+	}
 }
 
 // isIndentedCommandCardRow reports whether a line is an indented content row
