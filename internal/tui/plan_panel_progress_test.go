@@ -31,6 +31,24 @@ func TestCurrentStepContent(t *testing.T) {
 	}
 }
 
+// TestPlanReconcileClearsStaleCompletion: a positional carry-over (same step
+// count, no content match) must NOT bleed a prior completed step's completedAt
+// into a new in_progress/pending step — that would show an old finished duration.
+func TestPlanReconcileClearsStaleCompletion(t *testing.T) {
+	var s planPanelState
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.updateFromItems([]tools.PlanItem{{Content: "old step", Status: "completed"}}, t0)
+	if s.steps[0].completedAt.IsZero() {
+		t.Fatal("a completed step should carry a completedAt")
+	}
+	// Reword to a NEW in_progress step (same count -> positional carry-over copies
+	// the old completedAt); it must be cleared so the live step shows a running clock.
+	s.updateFromItems([]tools.PlanItem{{Content: "new step", Status: "in_progress"}}, t0.Add(time.Minute))
+	if !s.steps[0].completedAt.IsZero() {
+		t.Errorf("in_progress step must not inherit a stale completedAt, got %v", s.steps[0].completedAt)
+	}
+}
+
 // TestPlanCompleteRemaining: force-completing a stuck plan flips every
 // non-terminal step to completed, backfills timestamps, preserves a failed step,
 // and is a clean no-op on empty / already-complete plans.

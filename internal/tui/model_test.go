@@ -1199,6 +1199,41 @@ func TestToolResultDetailPrefersPreview(t *testing.T) {
 	}
 }
 
+// TestStaleExplanationDropped: a plan-step explanation result from a previous run
+// (older planDetailGen) is ignored, so it can't repopulate the cleared cache.
+func TestStaleExplanationDropped(t *testing.T) {
+	m := model{now: time.Now, planDetailGen: 2}
+	m.plan.steps = []planStep{{content: "x", status: "completed"}}
+
+	updated, _ := m.Update(planStepExplanationMsg{stepIndex: 0, key: "k", gen: 1, text: "stale"})
+	m = updated.(model)
+	if _, ok := m.stepExplanation["k"]; ok {
+		t.Error("a stale-generation explanation must not populate the cache")
+	}
+
+	updated, _ = m.Update(planStepExplanationMsg{stepIndex: 0, key: "k", gen: 2, text: "fresh"})
+	m = updated.(model)
+	if m.stepExplanation["k"] != "fresh" {
+		t.Errorf("a current-gen explanation should cache, got %q", m.stepExplanation["k"])
+	}
+}
+
+// TestBeginRunResetsSidebarHidden: a new run clears the sidebar's content, so the
+// stale Ctrl+B hide preference is reset (the new run's sidebar isn't suppressed)
+// and the explanation generation advances.
+func TestBeginRunResetsSidebarHidden(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.sidebarHidden = true
+	gen := m.planDetailGen
+	m = m.beginRun(nil)
+	if m.sidebarHidden {
+		t.Error("beginRun should reset the Ctrl+B hide preference for the new run")
+	}
+	if m.planDetailGen <= gen {
+		t.Errorf("beginRun should bump planDetailGen, was %d now %d", gen, m.planDetailGen)
+	}
+}
+
 func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = false

@@ -128,6 +128,7 @@ type model struct {
 	stepNarration   map[string][]string       // the agent's own prose narration captured per in_progress plan step, for the step detail's explanation
 	planDetailOpen  bool                      // a plan-step detail card is currently shown (click-to-toggle)
 	planDetailStep  int                       // which step index the shown detail card is for
+	planDetailGen   int                       // bumped each run; an in-flight explanation result from an older gen is dropped
 	stepExplanation map[string]string         // model-written step write-ups, keyed by planStepExplanationKey, cached so re-clicking is instant
 	subchat         subchatState
 	altScreen       bool
@@ -388,6 +389,7 @@ type planUpdateMsg struct {
 type planStepExplanationMsg struct {
 	stepIndex int
 	key       string
+	gen       int // the planDetailGen when the request started; stale gens are ignored
 	text      string
 	err       error
 }
@@ -1638,6 +1640,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.plan.updateFromItems(msg.items, m.now())
 		return m, nil
 	case planStepExplanationMsg:
+		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
+		// stepExplanation, so a stale in-flight write-up must not repopulate the
+		// cache or overwrite the new run's data.
+		if msg.gen != m.planDetailGen {
+			return m, nil
+		}
 		// Cache the write-up so re-clicking the step is instant; an empty result
 		// (failed/blank) caches "" so the card shows the local fallback summary and
 		// we don't retry the model on every re-click. Only re-render the card when
@@ -3571,6 +3579,11 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.stepNarration = nil
 	m.stepExplanation = nil
 	m.planDetailOpen = false
+	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
+	// A new run clears the sidebar's content (plan/agents), so the user's Ctrl+B
+	// hide was for the OLD context — reset it so the new run's sidebar isn't
+	// suppressed by a stale preference.
+	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true

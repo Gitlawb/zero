@@ -98,6 +98,10 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 		}
 		switch step.status {
 		case "in_progress":
+			// A reworded/carried-over step that became in_progress must not inherit a
+			// prior terminal step's completedAt — that would render an old finished
+			// duration instead of a live running clock.
+			step.completedAt = time.Time{}
 			if step.startedAt.IsZero() {
 				step.startedAt = now
 			}
@@ -108,6 +112,8 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 			if step.completedAt.IsZero() {
 				step.completedAt = now
 			}
+		default: // pending: never carries a completion timestamp.
+			step.completedAt = time.Time{}
 		}
 		next = append(next, step)
 	}

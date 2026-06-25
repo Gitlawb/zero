@@ -369,6 +369,7 @@ func (m model) requestPlanStepExplanation(stepIndex int, step planStep) tea.Cmd 
 	system, user := planStepExplanationPrompt(step, m.stepWork[step.content], m.stepNarration[step.content])
 	effort := string(m.reasoningEffort)
 	key := planStepExplanationKey(step)
+	gen := m.planDetailGen // a new run bumps this; a result from an older gen is dropped
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), planStepExplanationTimeout)
 		defer cancel()
@@ -377,13 +378,13 @@ func (m model) requestPlanStepExplanation(stepIndex int, step planStep) tea.Cmd 
 			ReasoningEffort: effort,
 		})
 		if err != nil {
-			return planStepExplanationMsg{stepIndex: stepIndex, key: key, err: err}
+			return planStepExplanationMsg{stepIndex: stepIndex, key: key, gen: gen, err: err}
 		}
 		collected := zeroruntime.CollectStream(ctx, events)
 		if collected.Error != "" {
-			return planStepExplanationMsg{stepIndex: stepIndex, key: key, err: fmt.Errorf("%s", collected.Error)}
+			return planStepExplanationMsg{stepIndex: stepIndex, key: key, gen: gen, err: fmt.Errorf("%s", collected.Error)}
 		}
-		return planStepExplanationMsg{stepIndex: stepIndex, key: key, text: strings.TrimSpace(collected.Text)}
+		return planStepExplanationMsg{stepIndex: stepIndex, key: key, gen: gen, text: strings.TrimSpace(collected.Text)}
 	}
 }
 
@@ -463,10 +464,8 @@ func planStepDigestItems(items []planStepWork, max int) []string {
 			out = append(out, fmt.Sprintf("(+%d more)", len(items)-max))
 			break
 		}
-		s := strings.TrimSpace(w.summary)
-		if len(s) > 100 {
-			s = s[:100] + "…"
-		}
+		// Rune-safe truncation: byte slicing would split a multi-byte rune.
+		s := truncateRunes(strings.TrimSpace(w.summary), 100)
 		out = append(out, s)
 	}
 	return out
