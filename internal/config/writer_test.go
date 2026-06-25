@@ -272,6 +272,37 @@ func TestSetFavoriteModelsPersistsUserPreferences(t *testing.T) {
 	}
 }
 
+func TestRecapsPreferenceRoundTrips(t *testing.T) {
+	// Default (unset) is ON.
+	if !(PreferencesConfig{}).RecapsEnabled() {
+		t.Error("unset recaps should default to ON")
+	}
+
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
+
+	// Persist OFF, then read it back.
+	cfg, err := SetRecapsEnabled(path, false)
+	if err != nil {
+		t.Fatalf("SetRecapsEnabled(false) error = %v", err)
+	}
+	if cfg.Preferences.RecapsEnabled() {
+		t.Error("after SetRecapsEnabled(false), RecapsEnabled() should be false")
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.Preferences.Recaps == nil || *persisted.Preferences.Recaps {
+		t.Errorf("persisted recaps should be explicit false, got %v", persisted.Preferences.Recaps)
+	}
+	if persisted.ActiveProvider != "openai" {
+		t.Errorf("unrelated config must be preserved, got %q", persisted.ActiveProvider)
+	}
+
+	// Flip back ON.
+	if cfg, _ := SetRecapsEnabled(path, true); !cfg.Preferences.RecapsEnabled() {
+		t.Error("after SetRecapsEnabled(true), RecapsEnabled() should be true")
+	}
+}
+
 func TestSetFavoriteModelsCreatesMissingConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero", "config.json")
 

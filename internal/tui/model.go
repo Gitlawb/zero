@@ -291,6 +291,8 @@ type model struct {
 	mcpManager                   *mcpManagerState
 	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
+	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
+	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
@@ -611,6 +613,7 @@ func newModel(ctx context.Context, options Options) model {
 		modelName:              options.ModelName,
 		providerProfile:        options.ProviderProfile,
 		favoriteModels:         favoriteModelSet(options.FavoriteModels),
+		recapsEnabled:          options.RecapsEnabled,
 		provider:               options.Provider,
 		newProvider:            options.NewProvider,
 		probeProviderHealth:    options.ProbeProviderHealth,
@@ -1581,14 +1584,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A successful turn gives the session real content; if it still carries its
 		// default first-message title, generate a concise one in the background
 		// (one-shot per session). A failed turn is skipped — there's nothing to name.
-		var titleCmd tea.Cmd
+		var titleCmd, recapCmd tea.Cmd
 		if msg.err == nil {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
+			// Post-turn recap (gated on the recaps preference): one short sentence
+			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
+			var finalAnswer string
+			for _, row := range msg.rows {
+				if row.kind == rowAssistant && row.final {
+					finalAnswer = row.text
+				}
+			}
+			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
 		}
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, queuedCmd)
+		return next, tea.Batch(titleCmd, recapCmd, queuedCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
+	case recapGeneratedMsg:
+		return m.handleRecapGenerated(msg)
 	case compactResultMsg:
 		if !m.compactInFlight {
 			return m, nil
@@ -3261,6 +3275,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
 	case commandConfig:
+		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg != "" {
+			var text string
+			m, text = m.handleConfigCommand(arg)
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+			return m, nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.configText()})
 		return m, nil
 	case commandDebug:

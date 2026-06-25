@@ -92,6 +92,15 @@ type ToolsConfig struct {
 
 type PreferencesConfig struct {
 	FavoriteModels []string `json:"favoriteModels,omitempty"`
+	// Recaps is a tri-state: nil (unset) defaults to ON; an explicit false means
+	// the user turned post-turn recaps off. A *bool is its own tri-state, so no
+	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
+	Recaps *bool `json:"recaps,omitempty"`
+}
+
+// RecapsEnabled reports whether post-turn recaps are on. Unset defaults to ON.
+func (p PreferencesConfig) RecapsEnabled() bool {
+	return p.Recaps == nil || *p.Recaps
 }
 
 // SwarmConfig tunes the multi-agent swarm. MaxTeamSize caps how many members run

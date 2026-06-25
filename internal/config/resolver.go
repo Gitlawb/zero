@@ -182,6 +182,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
+	if src.Preferences.Recaps != nil {
+		dst.Preferences.Recaps = src.Preferences.Recaps
+	}
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {

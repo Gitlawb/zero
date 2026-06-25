@@ -266,9 +266,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/config",
-		usage:       "/config",
+		usage:       "/config [recaps on|off]",
 		group:       commandGroupRuntime,
-		description: "Show active configuration summary.",
+		description: "Show active configuration; toggle settings (recaps on|off).",
 		kind:        commandConfig,
 	},
 	{

@@ -258,9 +258,19 @@ func (m model) renderRowModeUncached(row transcriptRow, width int, rc rowContext
 			return m.renderSpecialistCard(*row.specialistInfo, width)
 		}
 		return ""
+	case rowRecap:
+		return renderRecapRow(row, width)
 	default:
 		return row.text
 	}
+}
+
+// renderRecapRow renders the post-turn "※ recap: …" footnote — a faint one-line
+// recap that lands below the answer's done-line (it is a separate transcript row
+// appended after the final answer). Uses the same faint metadata style as the
+// "worked for …" done-line.
+func renderRecapRow(row transcriptRow, width int) string {
+	return fitStyledLine(zeroTheme.faint.Render("※ recap: "+strings.TrimSpace(row.text)), width)
 }
 
 func isInternalToolArgumentError(row transcriptRow) bool {
