@@ -1510,6 +1510,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCancel = nil
 		m.activeRunID = 0
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
+		// A fully successful turn means the task is done. Weaker models often
+		// forget the final update_plan, leaving the panel stuck mid-progress;
+		// reconcile it to complete here. Read pendingAskUser/pendingPermission
+		// BEFORE the reset below clears them, and skip spec-draft reviews — those
+		// are legitimate mid-plan err==nil yields where the plan is NOT done.
+		if msg.err == nil && msg.specReview == nil &&
+			m.pendingAskUser == nil && m.pendingPermission == nil {
+			m.plan.completeRemaining(m.now())
+		}
 		m.pendingPermission = nil
 		m.pendingAskUser = nil
 		liveUsageCount := m.liveUsageCounts[msg.runID]

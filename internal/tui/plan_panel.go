@@ -150,6 +150,44 @@ func (s planPanelState) isComplete() bool {
 	return true
 }
 
+// completeRemaining force-completes the plan when the agent finished the whole
+// task but never sent a final update_plan marking the last steps done. It flips
+// every non-terminal step to "completed" and backfills any missing timestamps,
+// then stamps the panel-level completedAt — the same end state updateFromItems
+// produces for a fully-completed plan — so the panel reads "PLAN COMPLETE"
+// instead of staying stuck mid-progress. No-op on an empty or already-complete
+// plan; a legitimately failed step keeps its "failed" status. Callers must
+// invoke this ONLY when the run genuinely finished (no error, no mid-plan yield
+// for ask_user/permission/spec-review), since it asserts the remaining work was
+// actually done.
+func (s *planPanelState) completeRemaining(now time.Time) {
+	if len(s.steps) == 0 || s.isComplete() {
+		return
+	}
+	for i := range s.steps {
+		switch s.steps[i].status {
+		case "completed", "failed":
+			// Already terminal: preserve status, just backfill timestamps so the
+			// per-step duration doesn't render a zero span.
+			if s.steps[i].startedAt.IsZero() {
+				s.steps[i].startedAt = now
+			}
+			if s.steps[i].completedAt.IsZero() {
+				s.steps[i].completedAt = now
+			}
+		default: // "pending" or "in_progress": the agent finished it without reporting it.
+			s.steps[i].status = "completed"
+			if s.steps[i].startedAt.IsZero() {
+				s.steps[i].startedAt = now
+			}
+			s.steps[i].completedAt = now
+		}
+	}
+	if s.completedAt.IsZero() {
+		s.completedAt = now
+	}
+}
+
 // visible reports whether renderPlanPanel should emit anything. A finished
 // plan hides itself once completedHideAfter has elapsed, unless expanded.
 func (s planPanelState) visible(now time.Time) bool {

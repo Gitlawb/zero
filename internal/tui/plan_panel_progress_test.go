@@ -31,6 +31,71 @@ func TestCurrentStepContent(t *testing.T) {
 	}
 }
 
+// TestPlanCompleteRemaining: force-completing a stuck plan flips every
+// non-terminal step to completed, backfills timestamps, preserves a failed step,
+// and is a clean no-op on empty / already-complete plans.
+func TestPlanCompleteRemaining(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	t.Run("force-completes a mid-progress plan", func(t *testing.T) {
+		started := now.Add(-time.Minute)
+		s := planPanelState{steps: []planStep{
+			{content: "a", status: "completed", startedAt: started, completedAt: now.Add(-30 * time.Second)},
+			{content: "b", status: "in_progress", startedAt: started},
+			{content: "c", status: "pending"},
+		}}
+		s.completeRemaining(now)
+		if !s.isComplete() {
+			t.Fatalf("plan should be complete, steps=%+v", s.steps)
+		}
+		if s.completedAt != now {
+			t.Errorf("panel completedAt = %v, want %v", s.completedAt, now)
+		}
+		// in_progress keeps its real startedAt; gets completedAt=now (real duration).
+		if s.steps[1].startedAt != started || s.steps[1].completedAt != now {
+			t.Errorf("in_progress timestamps wrong: %+v", s.steps[1])
+		}
+		// pending gets startedAt=completedAt=now.
+		if s.steps[2].status != "completed" || s.steps[2].startedAt != now || s.steps[2].completedAt != now {
+			t.Errorf("pending step not completed cleanly: %+v", s.steps[2])
+		}
+	})
+
+	t.Run("preserves a failed step", func(t *testing.T) {
+		s := planPanelState{steps: []planStep{
+			{content: "a", status: "failed", startedAt: now, completedAt: now},
+			{content: "b", status: "pending"},
+		}}
+		s.completeRemaining(now)
+		if s.steps[0].status != "failed" {
+			t.Errorf("failed step should stay failed, got %q", s.steps[0].status)
+		}
+		if !s.isComplete() {
+			t.Error("failed + completed should count as complete")
+		}
+	})
+
+	t.Run("no-op on empty plan", func(t *testing.T) {
+		var s planPanelState
+		s.completeRemaining(now)
+		if !s.completedAt.IsZero() || len(s.steps) != 0 {
+			t.Errorf("empty plan should stay empty: completedAt=%v steps=%d", s.completedAt, len(s.steps))
+		}
+	})
+
+	t.Run("preserves completedAt on an already-complete plan", func(t *testing.T) {
+		orig := now.Add(-time.Hour)
+		s := planPanelState{
+			steps:       []planStep{{content: "a", status: "completed", startedAt: orig, completedAt: orig}},
+			completedAt: orig,
+		}
+		s.completeRemaining(now)
+		if s.completedAt != orig {
+			t.Errorf("completedAt should be preserved, got %v want %v", s.completedAt, orig)
+		}
+	})
+}
+
 // TestPlanRewordKeepsTimer: when the model rewords a step in place (same step
 // count), its elapsed clock must NOT reset — the positional carry-over preserves
 // startedAt that the content-only match used to drop.

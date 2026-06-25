@@ -1128,6 +1128,52 @@ func TestEscCancelsPendingRun(t *testing.T) {
 	}
 }
 
+func TestAgentResponseCompletesStuckPlan(t *testing.T) {
+	runningPlan := func() planPanelState {
+		var s planPanelState
+		s.updateFromItems([]tools.PlanItem{
+			{Content: "a", Status: "completed"},
+			{Content: "b", Status: "in_progress"},
+			{Content: "c", Status: "pending"},
+		}, time.Now())
+		return s
+	}
+
+	t.Run("successful turn reconciles the stuck plan to complete", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		updated, _ := m.Update(agentResponseMsg{runID: 7, rows: []transcriptRow{{kind: rowAssistant, text: "done", final: true}}})
+		if next := updated.(model); !next.plan.isComplete() {
+			t.Fatalf("a successful turn should complete the plan, steps=%+v", next.plan.steps)
+		}
+	})
+
+	t.Run("errored turn leaves the plan incomplete", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		updated, _ := m.Update(agentResponseMsg{runID: 7, err: errors.New("boom")})
+		if next := updated.(model); next.plan.isComplete() {
+			t.Error("an errored turn must not force the plan complete")
+		}
+	})
+
+	t.Run("pending ask_user leaves the plan incomplete", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		m.pendingAskUser = &pendingAskUserPrompt{}
+		updated, _ := m.Update(agentResponseMsg{runID: 7, rows: []transcriptRow{{kind: rowAssistant, text: "done", final: true}}})
+		if next := updated.(model); next.plan.isComplete() {
+			t.Error("a mid-plan ask_user yield must not force the plan complete")
+		}
+	})
+}
+
 func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = false
