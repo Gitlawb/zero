@@ -6,11 +6,14 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 // planStepWork is one captured unit of implementation attributed to a plan step:
@@ -163,24 +166,56 @@ func dropTranscriptRowsByID(rows []transcriptRow, id string) []transcriptRow {
 
 // openPlanStepDetail toggles a transcript card explaining a plan step. The card
 // adapts to the step's status: a finished step (completed/failed) reads as "what
-// we did" — the outcome, how long it took, the model's own note, and the file
-// changes + commands captured while it ran; an unfinished step (pending or
-// in_progress) reads as "what we will do / are doing" — its intent, the planned
-// approach, and any work captured so far. Clicking the open step hides it;
-// clicking a different step replaces it, so at most one card shows at a time.
-func (m model) openPlanStepDetail(stepIndex int) model {
+// we did"; an unfinished step (pending or in_progress) reads as "what we will do
+// / are doing". The card shows the local structured sections (outcome, the
+// model's own note, the file changes + commands captured while it ran)
+// immediately; the natural-language explanation is written FRESH BY THE MODEL on
+// click. While that one-shot request is in flight the explanation reads "Writing
+// explanation…" and the returned tea.Cmd produces the text, which replaces the
+// card in place (by stable row id). Once written, the explanation is cached per
+// step (content+status) so re-clicking is instant with no second model call.
+// Clicking the open step hides it; clicking a different step replaces it, so at
+// most one card shows at a time.
+func (m model) openPlanStepDetail(stepIndex int) (model, tea.Cmd) {
 	if stepIndex < 0 || stepIndex >= len(m.plan.steps) {
-		return m
+		return m, nil
 	}
 	wasOpen := m.planDetailOpen && m.planDetailStep == stepIndex
 	m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
 	if wasOpen {
 		m.planDetailOpen = false
-		return m
+		return m, nil
 	}
 	m.planDetailOpen = true
 	m.planDetailStep = stepIndex
 
+	step := m.plan.steps[stepIndex]
+	key := planStepExplanationKey(step)
+
+	// Cached (or no provider available): render the final card immediately, no
+	// model call. With no provider, the local status-aware summary stands in.
+	explanation, cached := m.stepExplanation[key]
+	if cached {
+		m.transcript = m.appendPlanStepCard(stepIndex, explanation, false)
+		return m, nil
+	}
+	if m.provider == nil {
+		m.transcript = m.appendPlanStepCard(stepIndex, "", false)
+		return m, nil
+	}
+
+	// Not cached: drop the loading card now (immediate feedback) and dispatch the
+	// one-shot write-up request; its result replaces this card in place.
+	m.transcript = m.appendPlanStepCard(stepIndex, "", true)
+	return m, m.requestPlanStepExplanation(stepIndex, step)
+}
+
+// appendPlanStepCard builds the plan-step detail card and appends it to the
+// transcript (replacing any prior card by stable id is the caller's job). The
+// explanation section shows: the loading line when loading is set; else the
+// supplied model-written explanation; else (empty, not loading) a local
+// status-aware fallback summary. The structured sections are always local.
+func (m model) appendPlanStepCard(stepIndex int, explanation string, loading bool) []transcriptRow {
 	step := m.plan.steps[stepIndex]
 	work := m.stepWork[step.content]
 
@@ -201,12 +236,11 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 		Lines: m.planStepOutcomeLines(step, len(changes), len(commands)),
 	}}
 
-	// The centerpiece: a prose explanation of the step, framed by status — "what
-	// we did" for a finished step, "what we'll do" for a queued one. It replays
-	// the agent's own narration when captured, else a status-aware summary.
+	// The centerpiece: a fresh, plain-English explanation written by the model on
+	// click — "what we did" for a finished step, "what we'll do" for a queued one.
 	sections = append(sections, commandSection{
 		Title: planStepExplanationTitle(step.status),
-		Lines: m.planStepExplanationLines(step),
+		Lines: m.planStepExplanationLines(step, explanation, loading),
 	})
 
 	// The model's own per-step note is a second, distilled statement of intent
@@ -238,8 +272,15 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 		Sections: sections,
 		Hints:    []string{planStepDetailHint(step.status)},
 	})
-	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "plan", id: planStepDetailRowID, text: card})
-	return m
+	return appendTranscriptRow(m.transcript, transcriptRow{kind: rowSystem, tool: "plan", id: planStepDetailRowID, text: card})
+}
+
+// planStepExplanationKey is the cache key for a step's written explanation:
+// content + status, so a step re-explains itself when it transitions (e.g.
+// pending → completed reads forward then back), but a re-click in the same state
+// is served from cache with no second model call.
+func planStepExplanationKey(step planStep) string {
+	return step.status + "\x00" + step.content
 }
 
 // planStepOutcomeLines opens the lead section with a status-aware framing of the
@@ -286,24 +327,149 @@ func planStepExplanationTitle(status string) string {
 	}
 }
 
-// planStepExplanationLines is the elaborate, prose explanation of a step. When
-// the agent narrated its work while the step was in_progress, those segments are
-// replayed verbatim (the most faithful account of what happened); otherwise a
-// status-aware summary stands in, pointing at the structured sections below.
-func (m model) planStepExplanationLines(step planStep) []string {
-	if segs := m.stepNarration[step.content]; len(segs) > 0 {
-		return planWrapText(strings.Join(segs, "\n"), 76)
+// planStepExplanationLines is the prose explanation of a step. The model writes
+// it fresh on click: while that one-shot request is in flight, loading is set
+// and a "Writing explanation…" line shows; once it returns, explanation carries
+// the written paragraph. When no model text is available (loading off, empty
+// explanation — e.g. no provider, or the write-up failed) a local status-aware
+// summary stands in, pointing at the structured sections below.
+func (m model) planStepExplanationLines(step planStep, explanation string, loading bool) []string {
+	if loading {
+		return []string{"Writing explanation…"}
+	}
+	if e := strings.TrimSpace(explanation); e != "" {
+		return planWrapText(e, 76)
 	}
 	switch step.status {
 	case "completed":
-		return planWrapText("This step finished. The agent didn't post a written summary, so the files and commands it touched are listed below.", 76)
+		return planWrapText("This step finished. The files and commands it touched are listed below.", 76)
 	case "failed":
-		return planWrapText("This step failed. The agent didn't post a written summary; what it attempted is listed below.", 76)
+		return planWrapText("This step failed. What it attempted is listed below.", 76)
 	case "in_progress":
-		return planWrapText("Work is underway — the agent hasn't summarized this step yet. Changes and commands appear below as they happen.", 76)
+		return planWrapText("Work is underway. Changes and commands appear below as they happen.", 76)
 	default: // pending
-		return planWrapText("This step is queued and hasn't started. Once the agent reaches it, its explanation, file changes, and commands will appear here.", 76)
+		return planWrapText("This step is queued and hasn't started. Once the agent reaches it, its file changes and commands will appear here.", 76)
 	}
+}
+
+// planStepExplanationModel is the maximum time a one-shot step write-up may take
+// before it's abandoned (the card then falls back to the local summary).
+const planStepExplanationTimeout = 30 * time.Second
+
+// requestPlanStepExplanation returns a tea.Cmd that asks the model, in ONE
+// non-turn request, for a short plain-English write-up of the step — past tense
+// for a finished step, future tense for an unsolved one. It reuses the TUI's own
+// provider (no new client, no hardcoded provider) and emits a
+// planStepExplanationMsg. The request is built from already-captured local data
+// (the step text/status/notes plus a compact digest of the file edits, commands,
+// and the agent's narration for that step), so it sends no code and asks for no
+// jargon. It runs only on click — never pre-computed or in the background.
+func (m model) requestPlanStepExplanation(stepIndex int, step planStep) tea.Cmd {
+	provider := m.provider
+	system, user := planStepExplanationPrompt(step, m.stepWork[step.content], m.stepNarration[step.content])
+	effort := string(m.reasoningEffort)
+	key := planStepExplanationKey(step)
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), planStepExplanationTimeout)
+		defer cancel()
+		events, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{
+			Messages:        zeroruntime.SeedMessages(system, user),
+			ReasoningEffort: effort,
+		})
+		if err != nil {
+			return planStepExplanationMsg{stepIndex: stepIndex, key: key, err: err}
+		}
+		collected := zeroruntime.CollectStream(ctx, events)
+		if collected.Error != "" {
+			return planStepExplanationMsg{stepIndex: stepIndex, key: key, err: fmt.Errorf("%s", collected.Error)}
+		}
+		return planStepExplanationMsg{stepIndex: stepIndex, key: key, text: strings.TrimSpace(collected.Text)}
+	}
+}
+
+// planStepExplanationPrompt builds the system + user prompts for the one-shot
+// step write-up. The user prompt carries the step's text, status, notes, and a
+// compact digest of the captured work (file edits + commands) and the agent's
+// own narration, and asks for a few plain, non-technical sentences framed in the
+// tense that matches the step's state.
+func planStepExplanationPrompt(step planStep, work []planStepWork, narration []string) (system, user string) {
+	done := step.status == "completed" || step.status == "failed"
+	tense := "future tense (what this step is going to do / is doing)"
+	if done {
+		tense = "past tense (what was accomplished in this step)"
+	}
+	system = "You explain one step of a coding agent's task plan to a non-technical person. " +
+		"Write a SHORT, friendly, plain-English explanation — a few sentences at most. " +
+		"No code, no file paths, no command lines, no jargon. Do not use bullet points or headings; " +
+		"reply with the explanation prose only, nothing else. Frame it in " + tense + "."
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Step: %s\n", strings.TrimSpace(step.content))
+	fmt.Fprintf(&b, "Status: %s\n", step.status)
+	if note := strings.TrimSpace(step.notes); note != "" {
+		fmt.Fprintf(&b, "The agent's own note for this step: %s\n", note)
+	}
+
+	var changes, commands []planStepWork
+	for _, w := range work {
+		if isPlanCommandTool(w.tool) {
+			commands = append(commands, w)
+		} else {
+			changes = append(changes, w)
+		}
+	}
+	if len(changes) > 0 {
+		b.WriteString("Files changed during this step:\n")
+		for _, w := range planStepDigestItems(changes, 8) {
+			fmt.Fprintf(&b, "- %s\n", w)
+		}
+	}
+	if len(commands) > 0 {
+		b.WriteString("Commands run during this step:\n")
+		for _, w := range planStepDigestItems(commands, 8) {
+			fmt.Fprintf(&b, "- %s\n", w)
+		}
+	}
+	if len(narration) > 0 {
+		b.WriteString("The agent's running notes while doing this step:\n")
+		digest := narration
+		if len(digest) > 6 {
+			digest = digest[len(digest)-6:]
+		}
+		for _, n := range digest {
+			if n = strings.TrimSpace(n); n != "" {
+				fmt.Fprintf(&b, "- %s\n", n)
+			}
+		}
+	}
+	if len(work) == 0 && len(narration) == 0 {
+		b.WriteString("(No file changes, commands, or notes were captured for this step yet.)\n")
+	}
+	if done {
+		b.WriteString("\nIn a few plain sentences, tell the user what we DID in this step.")
+	} else {
+		b.WriteString("\nIn a few plain sentences, tell the user what we ARE GOING TO DO (or are doing) in this step.")
+	}
+	return system, b.String()
+}
+
+// planStepDigestItems returns up to max one-line summaries of captured work for
+// the prompt digest, trimmed to a sane length so a giant diff can't blow up the
+// request. A trailing "(+N more)" marks truncation.
+func planStepDigestItems(items []planStepWork, max int) []string {
+	out := make([]string, 0, max+1)
+	for i, w := range items {
+		if i >= max {
+			out = append(out, fmt.Sprintf("(+%d more)", len(items)-max))
+			break
+		}
+		s := strings.TrimSpace(w.summary)
+		if len(s) > 100 {
+			s = s[:100] + "…"
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // planWorkTally summarizes how much work a step captured, or notes that none was

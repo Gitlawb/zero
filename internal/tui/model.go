@@ -126,8 +126,9 @@ type model struct {
 	specialists    specialistTracker
 	stepWork       map[string][]planStepWork // file mutations + commands captured per in_progress plan step, for the clickable step detail
 	stepNarration  map[string][]string       // the agent's own prose narration captured per in_progress plan step, for the step detail's explanation
-	planDetailOpen bool                      // a plan-step detail card is currently shown (click-to-toggle)
-	planDetailStep int                       // which step index the shown detail card is for
+	planDetailOpen  bool                      // a plan-step detail card is currently shown (click-to-toggle)
+	planDetailStep  int                       // which step index the shown detail card is for
+	stepExplanation map[string]string         // model-written step write-ups, keyed by planStepExplanationKey, cached so re-clicking is instant
 	subchat        subchatState
 	altScreen      bool
 	setup          setupState
@@ -374,6 +375,19 @@ type agentRowMsg struct {
 type planUpdateMsg struct {
 	runID int
 	items []tools.PlanItem
+}
+
+// planStepExplanationMsg carries the model's fresh, plain-English write-up of a
+// clicked plan step back to the live model (the one-shot request runs on a
+// goroutine via a tea.Cmd, so it can't mutate m directly). text is the written
+// explanation; err is set when the request failed (the card then falls back to
+// the local summary). key caches the result so re-clicking the step in the same
+// state is instant; stepIndex re-renders the card in place when it's still open.
+type planStepExplanationMsg struct {
+	stepIndex int
+	key       string
+	text      string
+	err       error
 }
 
 // specialistStartMsg carries specialist start info from the OnToolCall
@@ -1591,6 +1605,27 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.plan.updateFromItems(msg.items, m.now())
+		return m, nil
+	case planStepExplanationMsg:
+		// Cache the write-up so re-clicking the step is instant; an empty result
+		// (failed/blank) caches "" so the card shows the local fallback summary and
+		// we don't retry the model on every re-click. Only re-render the card when
+		// this step's detail is still the one open (the user may have closed it or
+		// clicked another step while the request was in flight).
+		if m.stepExplanation == nil {
+			m.stepExplanation = map[string]string{}
+		}
+		text := strings.TrimSpace(msg.text)
+		if msg.err != nil {
+			text = ""
+		}
+		m.stepExplanation[msg.key] = text
+		if m.planDetailOpen && m.planDetailStep == msg.stepIndex &&
+			msg.stepIndex >= 0 && msg.stepIndex < len(m.plan.steps) &&
+			planStepExplanationKey(m.plan.steps[msg.stepIndex]) == msg.key {
+			m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
+			m.transcript = m.appendPlanStepCard(msg.stepIndex, text, false)
+		}
 		return m, nil
 	case agentUsageMsg:
 		if msg.runID != m.activeRunID {
@@ -3431,6 +3466,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.plan.clear()
 	m.stepWork = nil
 	m.stepNarration = nil
+	m.stepExplanation = nil
 	m.planDetailOpen = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0

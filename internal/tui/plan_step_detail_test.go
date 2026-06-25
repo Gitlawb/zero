@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 // lastCardText returns the text of the most recently appended transcript row —
@@ -17,7 +19,9 @@ func lastCardText(m model) string {
 
 // TestPlanStepDetailByStatus: a completed step reads as "what we did" (outcome,
 // duration, the model's note, and the captured changes/commands); a pending
-// step reads as "what we will do" (forward framing + the planned approach).
+// step reads as "what we will do" (forward framing + the planned approach). With
+// no provider configured the explanation falls back to the local summary, so the
+// structured sections and status framing render synchronously.
 func TestPlanStepDetailByStatus(t *testing.T) {
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	m := model{now: func() time.Time { return t0.Add(5 * time.Minute) }}
@@ -31,22 +35,21 @@ func TestPlanStepDetailByStatus(t *testing.T) {
 			{tool: "bash", summary: "go build", detail: "exit 0"},
 		},
 	}
-	// The agent narrated this step while it ran; the card should replay it.
-	m.stepNarration = map[string][]string{
-		"ship the button": {"Let me wire the click handler into the button so it dispatches the action."},
-	}
 
-	// Completed step -> "what we did", led by the agent's own narration.
-	m = m.openPlanStepDetail(0)
+	// Completed step -> "what we did" (local fallback, no provider).
+	m, cmd := m.openPlanStepDetail(0)
+	if cmd != nil {
+		t.Error("no provider: openPlanStepDetail should not dispatch a model call")
+	}
 	done := lastCardText(m)
-	for _, want := range []string{"Done in 1m 20s.", "Built 1 file change and 1 command.", "What we did", "wire the click handler into the button", "wired the click handler", "Files changed (1)", "Commands run (1)", "what was done in this step"} {
+	for _, want := range []string{"Done in 1m 20s.", "Built 1 file change and 1 command.", "What we did", "wired the click handler", "Files changed (1)", "Commands run (1)", "what was done in this step"} {
 		if !strings.Contains(done, want) {
 			t.Errorf("completed card missing %q\n---\n%s", want, done)
 		}
 	}
 
 	// Pending step -> "what we will do".
-	m = m.openPlanStepDetail(1)
+	m, _ = m.openPlanStepDetail(1)
 	pending := lastCardText(m)
 	for _, want := range []string{"What we'll do", "what this step will do", "cover the new flag", "queued"} {
 		if !strings.Contains(pending, want) {
@@ -55,6 +58,60 @@ func TestPlanStepDetailByStatus(t *testing.T) {
 	}
 	if strings.Contains(pending, "Files changed") {
 		t.Errorf("pending card should record no work yet:\n%s", pending)
+	}
+}
+
+// TestPlanStepDetailAIExplanation: clicking a step with a provider shows the
+// "Writing explanation…" loading line and dispatches a one-shot model call; the
+// returned message updates the card in place with the model's text and caches
+// it, so re-clicking the same step is instant with no second call.
+func TestPlanStepDetailAIExplanation(t *testing.T) {
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "We added the new button and wired up its click."},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return t0 }, provider: provider}
+	m.plan.steps = []planStep{{content: "ship the button", status: "completed", startedAt: t0, completedAt: t0.Add(time.Minute)}}
+
+	// Click -> immediate loading card + a dispatched model request.
+	m, cmd := m.openPlanStepDetail(0)
+	if cmd == nil {
+		t.Fatal("with a provider, clicking a step should dispatch a model call")
+	}
+	if loading := lastCardText(m); !strings.Contains(loading, "Writing explanation…") {
+		t.Errorf("loading card should show the writing line:\n%s", loading)
+	}
+
+	// Run the cmd and feed its message back through Update.
+	msg := cmd()
+	exp, ok := msg.(planStepExplanationMsg)
+	if !ok {
+		t.Fatalf("expected planStepExplanationMsg, got %T", msg)
+	}
+	if exp.err != nil || exp.text == "" {
+		t.Fatalf("expected a written explanation, got text=%q err=%v", exp.text, exp.err)
+	}
+	updated, _ := m.Update(exp)
+	m = updated.(model)
+	if got := lastCardText(m); !strings.Contains(got, "We added the new button") {
+		t.Errorf("card should update in place with the model text:\n%s", got)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected exactly one model request, got %d", len(provider.requests))
+	}
+
+	// Re-click closes (toggle); click again -> served from cache, no new call.
+	m, _ = m.openPlanStepDetail(0)
+	m, cmd = m.openPlanStepDetail(0)
+	if cmd != nil {
+		t.Error("re-opening a cached step should not dispatch a second model call")
+	}
+	if got := lastCardText(m); !strings.Contains(got, "We added the new button") {
+		t.Errorf("cached re-open should show the stored explanation:\n%s", got)
+	}
+	if len(provider.requests) != 1 {
+		t.Errorf("cache should prevent a second model request, got %d", len(provider.requests))
 	}
 }
 
@@ -137,7 +194,7 @@ func TestPlanStepDetailToggle(t *testing.T) {
 	}
 	base := len(m.transcript)
 
-	m = m.openPlanStepDetail(0)
+	m, _ = m.openPlanStepDetail(0)
 	if !m.planDetailOpen || m.planDetailStep != 0 {
 		t.Fatalf("first click should open step 0: open=%v step=%d", m.planDetailOpen, m.planDetailStep)
 	}
@@ -145,7 +202,7 @@ func TestPlanStepDetailToggle(t *testing.T) {
 		t.Fatalf("first click should add one card: got %d, base %d", len(m.transcript), base)
 	}
 
-	m = m.openPlanStepDetail(0)
+	m, _ = m.openPlanStepDetail(0)
 	if m.planDetailOpen {
 		t.Error("re-clicking the same step should close it")
 	}
@@ -153,8 +210,8 @@ func TestPlanStepDetailToggle(t *testing.T) {
 		t.Errorf("re-click should net zero growth: got %d, base %d", len(m.transcript), base)
 	}
 
-	m = m.openPlanStepDetail(0)
-	m = m.openPlanStepDetail(1)
+	m, _ = m.openPlanStepDetail(0)
+	m, _ = m.openPlanStepDetail(1)
 	if !m.planDetailOpen || m.planDetailStep != 1 {
 		t.Errorf("clicking a different step should switch: open=%v step=%d", m.planDetailOpen, m.planDetailStep)
 	}
