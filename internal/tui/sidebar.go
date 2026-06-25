@@ -111,29 +111,30 @@ func (m model) chatColumnWidth() int {
 	return chatWidth(m.width)
 }
 
-// transcriptContentCap is the readable measure the chat BODY wraps to, so text
-// on a wide terminal doesn't run edge-to-edge. The frame/composer/sidebar keep
-// the full chatColumnWidth; only transcript rows use the reading column.
-const transcriptContentCap = 90
+// transcriptGutterMinColumn is the column width below which the body uses the
+// full width (no side margins). Narrow columns (e.g. the chat column in the
+// two-column layout) have no space to waste, so they stay flush; the breathing
+// room is only for wide terminals where text would otherwise leave a big void.
+const transcriptGutterMinColumn = 98
 
-// transcriptGutter is the fixed left margin applied to transcript body rows so
-// the reading column floats off the left edge. Zero on terminals too narrow to
-// afford it (the body then uses the full column, just capped).
+// transcriptGutter is the side margin applied to transcript body rows so the
+// reading column floats off both edges instead of running flush. It scales gently
+// with the column (a wider terminal earns a little more breathing room), is
+// applied on the left as an indent, and is mirrored on the right by
+// transcriptContentWidth. Zero on terminals too narrow to spare it.
 func transcriptGutter(columnWidth int) int {
-	if columnWidth <= transcriptContentCap+8 {
+	if columnWidth <= transcriptGutterMinColumn {
 		return 0
 	}
-	return 4
+	return clamp(columnWidth/20, 4, 12)
 }
 
 // transcriptContentWidth is the wrap width for transcript body rows: the column
-// width minus the gutter, capped at transcriptContentCap. Degrades to the full
-// column on tiny terminals so prose never collapses to the wrap floor.
+// minus a margin on each side, so the chat fills most of a wide terminal with a
+// little breathing room rather than stopping at a fixed reading cap. Degrades to
+// the full column on tiny terminals so prose never collapses to the wrap floor.
 func transcriptContentWidth(columnWidth int) int {
-	cw := columnWidth - transcriptGutter(columnWidth)
-	if cw > transcriptContentCap {
-		cw = transcriptContentCap
-	}
+	cw := columnWidth - 2*transcriptGutter(columnWidth)
 	if cw < 24 {
 		return columnWidth
 	}

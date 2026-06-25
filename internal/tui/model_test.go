@@ -1831,17 +1831,24 @@ func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
 }
 
 func TestTranscriptReadingColumnHelpers(t *testing.T) {
-	if g := transcriptGutter(160); g != 4 {
-		t.Fatalf("wide gutter = %d, want 4", g)
+	// Wide terminal: a scaled side margin on each side, and the content fills the
+	// rest (column minus both margins) instead of stopping at a fixed cap.
+	if g := transcriptGutter(160); g != 8 {
+		t.Fatalf("wide gutter = %d, want 8", g)
 	}
-	if cw := transcriptContentWidth(160); cw != transcriptContentCap {
-		t.Fatalf("wide contentWidth = %d, want cap %d", cw, transcriptContentCap)
+	if cw := transcriptContentWidth(160); cw != 160-2*8 {
+		t.Fatalf("wide contentWidth = %d, want %d (column minus both margins)", cw, 160-2*8)
 	}
-	if g := transcriptGutter(70); g != 0 {
-		t.Fatalf("narrow gutter = %d, want 0", g)
+	// Very wide terminal: the margin is clamped so it never grows unbounded.
+	if g := transcriptGutter(400); g != 12 {
+		t.Fatalf("very wide gutter = %d, want clamp ceiling 12", g)
 	}
-	if cw := transcriptContentWidth(70); cw != 70 {
-		t.Fatalf("narrow contentWidth = %d, want full 70", cw)
+	// Tiny terminal: no margins, full width so prose never collapses.
+	if g := transcriptGutter(40); g != 0 {
+		t.Fatalf("tiny gutter = %d, want 0", g)
+	}
+	if cw := transcriptContentWidth(40); cw != 40 {
+		t.Fatalf("tiny contentWidth = %d, want full 40", cw)
 	}
 }
 
@@ -1871,10 +1878,11 @@ func TestTranscriptBodyRowsUseReadingColumnAndAlignSelection(t *testing.T) {
 	}
 	rendered := row.render(0)
 
+	maxLine := transcriptContentWidth(width) + gutter // content plus the left indent
 	wroteIndented := false
 	for _, line := range rendered.lines {
-		if w := lipgloss.Width(line); w > transcriptContentCap+gutter {
-			t.Fatalf("body line width %d exceeds reading column %d: %q", w, transcriptContentCap+gutter, line)
+		if w := lipgloss.Width(line); w > maxLine {
+			t.Fatalf("body line width %d exceeds reading column %d: %q", w, maxLine, line)
 		}
 		if strings.TrimSpace(line) != "" {
 			if !strings.HasPrefix(line, strings.Repeat(" ", gutter)) {
