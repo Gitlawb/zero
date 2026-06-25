@@ -122,17 +122,17 @@ type model struct {
 	composerSelection     composerSelectionState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
-	plan           planPanelState
-	specialists    specialistTracker
-	stepWork       map[string][]planStepWork // file mutations + commands captured per in_progress plan step, for the clickable step detail
-	stepNarration  map[string][]string       // the agent's own prose narration captured per in_progress plan step, for the step detail's explanation
+	plan            planPanelState
+	specialists     specialistTracker
+	stepWork        map[string][]planStepWork // file mutations + commands captured per in_progress plan step, for the clickable step detail
+	stepNarration   map[string][]string       // the agent's own prose narration captured per in_progress plan step, for the step detail's explanation
 	planDetailOpen  bool                      // a plan-step detail card is currently shown (click-to-toggle)
 	planDetailStep  int                       // which step index the shown detail card is for
 	stepExplanation map[string]string         // model-written step write-ups, keyed by planStepExplanationKey, cached so re-clicking is instant
-	subchat        subchatState
-	altScreen      bool
-	setup          setupState
-	setupSave      func(SetupSelection) (SetupResult, error)
+	subchat         subchatState
+	altScreen       bool
+	setup           setupState
+	setupSave       func(SetupSelection) (SetupResult, error)
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
