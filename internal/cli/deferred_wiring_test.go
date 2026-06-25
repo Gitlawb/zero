@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -128,8 +127,8 @@ func TestValidateExecToolFiltersAllowsToolSearch(t *testing.T) {
 // TestRunExecListToolsAdvertisesMCPToolsWithoutToolSearch verifies that
 // `exec --list-tools` lists the core + MCP tools WITHOUT tool_search. This is
 // independent of the deferral threshold: --list-tools short-circuits and returns
-// before resolveConfig and registerToolSearchIfEligible ever run (see exec.go),
-// so tool_search is never registered on this path. The threshold gate itself is
+// before registerToolSearchIfEligible runs (see exec.go), so tool_search is
+// never registered on this path. The threshold gate itself is
 // exercised by TestRegisterToolSearchIfEligible{RegistersAtThreshold,
 // SkipsBelowThreshold,SkipsWhenThresholdZero} and the end-to-end at-threshold
 // path in TestTUIRunThreadsDeferThresholdAndRegistersToolSearch.
@@ -141,7 +140,7 @@ func TestRunExecListToolsAdvertisesMCPToolsWithoutToolSearch(t *testing.T) {
 	exitCode := runWithDeps([]string{"exec", "--list-tools"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+			return execResolvedConfig(), nil
 		},
 		resolveMCPConfig: func(string) (config.MCPConfig, error) {
 			return config.MCPConfig{Servers: map[string]config.MCPServerConfig{
@@ -176,7 +175,7 @@ func TestRunExecListToolsHonorsJSONFormat(t *testing.T) {
 	exitCode := runWithDeps([]string{"exec", "--list-tools", "-o", "json"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) { return cwd, nil },
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+			return execResolvedConfig(), nil
 		},
 		resolveMCPConfig: func(string) (config.MCPConfig, error) { return config.MCPConfig{}, nil },
 		newMCPStore:      func() (*mcp.PermissionStore, error) { return nil, nil },

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
@@ -52,7 +53,7 @@ func newBrowserInstallTool(options localcontrol.BrowserOptions) Tool {
 				},
 				AdditionalProperties: false,
 			},
-			safety: localControlSafety(options.Enabled, SideEffectNetwork, "Downloads browser runtime files for local browser automation."),
+			safety: localControlSafety(options.Enabled, SideEffectLocalBrowser, "Downloads browser runtime files for local browser automation."),
 		},
 		browser: localcontrol.NewBrowser(options),
 	}
@@ -544,9 +545,93 @@ func browserActionArgs(args map[string]any) (string, []string, error) {
 		}
 		return "", nil, fmt.Errorf("%s requires between %d and %d args", command, spec.min, spec.max)
 	}
-	commandArgs := append([]string{}, spec.argv...)
-	commandArgs = append(commandArgs, values...)
+	commandArgs, err := browserActionCommandArgs(command, spec, values)
+	if err != nil {
+		return "", nil, err
+	}
 	return command, commandArgs, nil
+}
+
+func browserActionCommandArgs(command string, spec browserActionSpec, values []string) ([]string, error) {
+	switch command {
+	case "connect":
+		target, err := browserConnectTargetFromString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		return append(commandArgs, target), nil
+	case "click", "dblclick", "hover", "check", "uncheck", "scroll_into_view", "get_text", "get_html", "get_value":
+		ref, err := browserRefFromString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		return append(commandArgs, ref), nil
+	case "fill", "type", "select":
+		ref, err := browserRefFromString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		commandArgs = append(commandArgs, ref)
+		commandArgs = append(commandArgs, values[1:]...)
+		return commandArgs, nil
+	case "drag":
+		fromRef, err := browserRefFromString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		toRef, err := browserRefFromString(values[1])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		return append(commandArgs, fromRef, toRef), nil
+	case "press":
+		key, err := browserKeyFromString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		return append(commandArgs, key), nil
+	case "get_attr":
+		ref, err := browserRefFromString(values[0])
+		if err != nil {
+			return nil, err
+		}
+		attr, err := browserSingleToken("attr", values[1])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		return append(commandArgs, ref, attr), nil
+	case "scroll":
+		x, err := browserIntegerToken("x", values[0])
+		if err != nil {
+			return nil, err
+		}
+		y, err := browserIntegerToken("y", values[1])
+		if err != nil {
+			return nil, err
+		}
+		commandArgs := append([]string{}, spec.argv...)
+		return append(commandArgs, x, y), nil
+	case "tab":
+		commandArgs := append([]string{}, spec.argv...)
+		for _, value := range values {
+			arg, err := browserSingleToken("tab argument", value)
+			if err != nil {
+				return nil, err
+			}
+			commandArgs = append(commandArgs, arg)
+		}
+		return commandArgs, nil
+	default:
+		commandArgs := append([]string{}, spec.argv...)
+		commandArgs = append(commandArgs, values...)
+		return commandArgs, nil
+	}
 }
 
 func browserOpenURLArg(args map[string]any) (string, error) {
@@ -576,6 +661,10 @@ func browserConnectTargetArg(args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return browserConnectTargetFromString(target)
+}
+
+func browserConnectTargetFromString(target string) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return "", fmt.Errorf("target is required")
@@ -586,7 +675,54 @@ func browserConnectTargetArg(args map[string]any) (string, error) {
 	if strings.HasPrefix(target, "-") {
 		return "", fmt.Errorf("target must be a CDP port or URL, not an option")
 	}
+	if port, err := strconv.Atoi(target); err == nil && port >= 1 && port <= 65535 {
+		return target, nil
+	}
+	host, err := browserConnectTargetHost(target)
+	if err != nil {
+		return "", err
+	}
+	if !isLoopbackHost(host) {
+		return "", fmt.Errorf("target must be a bare port or loopback host")
+	}
 	return target, nil
+}
+
+func browserConnectTargetHost(target string) (string, error) {
+	parsed, err := url.Parse(target)
+	if err == nil && parsed.Host != "" {
+		if !validBrowserPort(parsed.Port()) {
+			return "", fmt.Errorf("target URL must include a valid port")
+		}
+		return parsed.Hostname(), nil
+	}
+	if !strings.Contains(target, "://") {
+		parsed, err = url.Parse("http://" + target)
+		if err == nil && parsed.Host != "" {
+			if !validBrowserPort(parsed.Port()) {
+				return "", fmt.Errorf("target must include a valid port")
+			}
+			return parsed.Hostname(), nil
+		}
+	}
+	return "", fmt.Errorf("target must be a bare port or loopback host:port/URL")
+}
+
+func validBrowserPort(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	port, err := strconv.Atoi(raw)
+	return err == nil && port >= 1 && port <= 65535
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func browserRefArg(args map[string]any) (string, error) {
@@ -594,6 +730,10 @@ func browserRefArg(args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return browserRefFromString(ref)
+}
+
+func browserRefFromString(ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", fmt.Errorf("ref is required")
@@ -627,6 +767,10 @@ func browserKeyArg(args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return browserKeyFromString(key)
+}
+
+func browserKeyFromString(key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return "", fmt.Errorf("key is required")
@@ -638,6 +782,31 @@ func browserKeyArg(args map[string]any) (string, error) {
 		return "", fmt.Errorf("key must be a key name, not an option")
 	}
 	return key, nil
+}
+
+func browserSingleToken(name string, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	if strings.ContainsAny(value, " \t\r\n;") {
+		return "", fmt.Errorf("%s must be a single token", name)
+	}
+	if strings.HasPrefix(value, "-") {
+		return "", fmt.Errorf("%s must not be an option", name)
+	}
+	return value, nil
+}
+
+func browserIntegerToken(name string, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	if _, err := strconv.Atoi(value); err != nil {
+		return "", fmt.Errorf("%s must be an integer", name)
+	}
+	return value, nil
 }
 
 func validateBrowserSnapshotSelector(selector string) error {

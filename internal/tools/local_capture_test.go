@@ -122,6 +122,21 @@ func TestCaptureArtifactRejectsDisabledDriverBeforePermission(t *testing.T) {
 	}
 }
 
+func TestCaptureArtifactRejectsMissingArtifactDirBeforePermission(t *testing.T) {
+	tool := newCaptureArtifactTool(LocalControlArtifactOptions{
+		Browser: localcontrol.BrowserOptions{Enabled: true},
+	})
+	if tool.Safety().Permission != PermissionDeny {
+		t.Fatalf("permission = %s, want deny", tool.Safety().Permission)
+	}
+	result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{
+		"action": "browser_screenshot",
+	})
+	if !rejected || result.Status != StatusError || !strings.Contains(result.Output, "artifact directory") {
+		t.Fatalf("reject = (%v, %#v), want missing artifact directory", rejected, result)
+	}
+}
+
 func TestCaptureArtifactDesktopWindowStateBuildsDriverArgs(t *testing.T) {
 	dir := t.TempDir()
 	runner := &fakeArtifactRunner{}

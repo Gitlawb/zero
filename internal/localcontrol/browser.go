@@ -389,6 +389,13 @@ func manifestEnv(entry manifestEntry) []string {
 	return envMapToList(env)
 }
 
+func normalizeEnvKey(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
+}
+
 func mergeEnv(base []string, overlay []string) []string {
 	if len(overlay) == 0 {
 		return base
@@ -397,7 +404,7 @@ func mergeEnv(base []string, overlay []string) []string {
 	index := map[string]int{}
 	for i, item := range merged {
 		if key, _, ok := strings.Cut(item, "="); ok {
-			index[key] = i
+			index[normalizeEnvKey(key)] = i
 		}
 	}
 	for _, item := range overlay {
@@ -405,10 +412,11 @@ func mergeEnv(base []string, overlay []string) []string {
 		if !ok || key == "" {
 			continue
 		}
-		if existing, ok := index[key]; ok {
+		normalized := normalizeEnvKey(key)
+		if existing, ok := index[normalized]; ok {
 			merged[existing] = item
 		} else {
-			index[key] = len(merged)
+			index[normalized] = len(merged)
 			merged = append(merged, item)
 		}
 	}

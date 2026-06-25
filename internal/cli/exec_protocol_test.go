@@ -51,13 +51,18 @@ func TestRunExecListsFilteredToolsWithoutPromptOrProvider(t *testing.T) {
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	providerBuilt := false
 
 	exitCode := runWithDeps([]string{"exec", "--list-tools", "--enabled-tools", "read_file,grep"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerBuilt = true
+			return nil, errors.New("provider should not be constructed for --list-tools")
 		},
 	})
 
@@ -66,6 +71,9 @@ func TestRunExecListsFilteredToolsWithoutPromptOrProvider(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	if providerBuilt {
+		t.Fatal("provider should not be constructed for --list-tools")
 	}
 	for _, want := range []string{"Tools visible to model", "read_file", "grep"} {
 		if !strings.Contains(stdout.String(), want) {
@@ -81,13 +89,18 @@ func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	providerBuilt := false
 
 	exitCode := runWithDeps([]string{"exec", "--list-tools", "--output-format", "stream-json", "--enabled-tools", "read_file"}, &stdout, &stderr, appDeps{
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerBuilt = true
+			return nil, errors.New("provider should not be constructed for --list-tools")
 		},
 	})
 
@@ -96,6 +109,9 @@ func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	}
+	if providerBuilt {
+		t.Fatal("provider should not be constructed for --list-tools")
 	}
 	events := decodeJSONLines(t, stdout.String())
 	if len(events) != 3 {
@@ -115,11 +131,11 @@ func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
 	}
 }
 
-func TestRunExecListsMCPToolsWithoutProviderResolution(t *testing.T) {
+func TestRunExecListsMCPToolsWithoutProviderConstruction(t *testing.T) {
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	providerResolved := false
+	providerBuilt := false
 	closed := false
 
 	exitCode := runWithDeps([]string{"exec", "--list-tools", "--enabled-tools", "mcp_docs_lookup"}, &stdout, &stderr, appDeps{
@@ -127,8 +143,11 @@ func TestRunExecListsMCPToolsWithoutProviderResolution(t *testing.T) {
 			return cwd, nil
 		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-			providerResolved = true
-			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+			return execResolvedConfig(), nil
+		},
+		newProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			providerBuilt = true
+			return nil, errors.New("provider should not be constructed for --list-tools")
 		},
 		resolveMCPConfig: func(workspaceRoot string) (config.MCPConfig, error) {
 			if workspaceRoot != cwd {
@@ -150,8 +169,8 @@ func TestRunExecListsMCPToolsWithoutProviderResolution(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if providerResolved {
-		t.Fatal("provider config should not be resolved for --list-tools")
+	if providerBuilt {
+		t.Fatal("provider should not be constructed for --list-tools")
 	}
 	if !closed {
 		t.Fatal("MCP runtime was not closed after --list-tools")

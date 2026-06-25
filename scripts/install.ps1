@@ -73,7 +73,14 @@ function Find-ZeroOptionalExtractedDirectory {
     return $candidate
   }
 
-  $matches = @(Get-ChildItem -Path $Root -Filter $DirectoryName -Directory -Recurse)
+  $matches = @(
+    Get-ChildItem -Path $Root -Directory | ForEach-Object {
+      $child = Join-Path $_.FullName $DirectoryName
+      if (Test-Path $child -PathType Container) {
+        Get-Item $child
+      }
+    }
+  )
   if ($matches.Count -eq 0) {
     return $null
   }

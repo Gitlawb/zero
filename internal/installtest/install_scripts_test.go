@@ -142,7 +142,11 @@ func newUnixInstallFixture(t *testing.T) unixInstallFixture {
 	writeFile(t, filepath.Join(packageDir, "zero"), []byte("#!/usr/bin/env sh\necho mock-zero\n"), 0o755)
 	writeFile(t, filepath.Join(packageDir, "zero-linux-sandbox"), []byte("#!/usr/bin/env sh\n"), 0o755)
 	writeFile(t, filepath.Join(packageDir, "zero-seccomp"), []byte("#!/usr/bin/env sh\n"), 0o755)
-	writeFile(t, filepath.Join(packageDir, "helpers", "node_modules", ".bin", "agent-browser"), []byte("#!/usr/bin/env sh\n"), 0o755)
+	mustMkdirAll(t, filepath.Join(packageDir, "helpers", "node_modules", "agent-browser", "bin"))
+	writeFile(t, filepath.Join(packageDir, "helpers", "node_modules", "agent-browser", "bin", "agent-browser.js"), []byte("#!/usr/bin/env node\n"), 0o755)
+	if err := os.Symlink("../agent-browser/bin/agent-browser.js", filepath.Join(packageDir, "helpers", "node_modules", ".bin", "agent-browser")); err != nil {
+		t.Fatalf("Symlink agent-browser helper: %v", err)
+	}
 	writeFile(t, filepath.Join(packageDir, "helpers", "node_modules", ".bin", "tuistory"), []byte("#!/usr/bin/env sh\n"), 0o755)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

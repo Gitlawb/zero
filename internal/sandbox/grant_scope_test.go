@@ -142,6 +142,9 @@ func TestDeriveScope(t *testing.T) {
 		{name: "web fetch invalid url is tool-wide", tool: "web_fetch", args: map[string]any{"url": "://bad"}, wantRaw: "", wantKind: ScopeToolWide},
 		{name: "browser open url host", tool: "browser_open", args: map[string]any{"url": "https://Example.COM/path?q=1"}, wantRaw: "example.com", wantKind: ScopeHost},
 		{name: "browser open bare host", tool: "browser_open", args: map[string]any{"url": "Example.COM/path"}, wantRaw: "example.com", wantKind: ScopeHost},
+		{name: "browser open loopback bare host with port", tool: "browser_open", args: map[string]any{"url": "localhost:8080/path"}, wantRaw: "localhost", wantKind: ScopeHost},
+		{name: "browser open about blank is tool-wide", tool: "browser_open", args: map[string]any{"url": "about:blank"}, wantRaw: "", wantKind: ScopeToolWide},
+		{name: "browser open javascript url is tool-wide", tool: "browser_open", args: map[string]any{"url": "javascript:alert(1)"}, wantRaw: "", wantKind: ScopeToolWide},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

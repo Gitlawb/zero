@@ -36,7 +36,7 @@ type captureArtifactTool struct {
 }
 
 func newCaptureArtifactTool(options LocalControlArtifactOptions) Tool {
-	enabled := options.Browser.Enabled || options.Desktop.Enabled || options.Terminal.Enabled
+	enabled := strings.TrimSpace(options.ArtifactsDir) != "" && (options.Browser.Enabled || options.Desktop.Enabled || options.Terminal.Enabled)
 	return captureArtifactTool{
 		baseTool: baseTool{
 			name:        "capture_artifact",
@@ -71,6 +71,9 @@ func (tool captureArtifactTool) RejectBeforePermission(args map[string]any) (Res
 	if err != nil {
 		return errorResult("Error: Invalid arguments for capture_artifact: " + err.Error()), true
 	}
+	if strings.TrimSpace(tool.artifactsDir) == "" {
+		return errorResult("Error: capture_artifact is disabled because no artifact directory is configured."), true
+	}
 	if !tool.actionEnabled(request.action) {
 		return errorResult("Error: Local control driver for " + request.action + " is disabled."), true
 	}
@@ -84,6 +87,9 @@ func (tool captureArtifactTool) Run(ctx context.Context, args map[string]any) Re
 	}
 	if !tool.actionEnabled(request.action) {
 		return errorResult("Error: Local control driver for " + request.action + " is disabled.")
+	}
+	if strings.TrimSpace(tool.artifactsDir) == "" {
+		return errorResult("Error: capture_artifact is disabled because no artifact directory is configured.")
 	}
 
 	path, err := artifactOutputPath(tool.artifactsDir, request.name, request.extension())

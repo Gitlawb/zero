@@ -220,6 +220,13 @@ func TestBrowserInstallRunsHelperInstall(t *testing.T) {
 	}
 }
 
+func TestBrowserInstallUsesLocalBrowserSafety(t *testing.T) {
+	tool := newBrowserInstallTool(localcontrol.BrowserOptions{Enabled: true})
+	if tool.Safety().SideEffect != SideEffectLocalBrowser {
+		t.Fatalf("browser_install side effect = %s, want %s", tool.Safety().SideEffect, SideEffectLocalBrowser)
+	}
+}
+
 func TestBrowserConnectRunsHelperConnect(t *testing.T) {
 	runner := &fakeBrowserRunner{}
 	tool := newBrowserConnectTool(localBrowserTestOptions(t, runner))
@@ -233,9 +240,40 @@ func TestBrowserConnectRunsHelperConnect(t *testing.T) {
 	}
 }
 
+func TestBrowserConnectAcceptsLoopbackTargetsBeforePermission(t *testing.T) {
+	tool := newBrowserConnectTool(localcontrol.BrowserOptions{Enabled: true})
+	for _, target := range []string{
+		"9222",
+		"localhost:9222",
+		"127.0.0.1:9222",
+		"http://127.0.0.1:9222/json/version",
+		"ws://[::1]:9222/devtools/browser/abc",
+	} {
+		if result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{"target": target}); rejected {
+			t.Fatalf("target %q rejected before permission: %#v", target, result)
+		}
+	}
+}
+
 func TestBrowserConnectRejectsShellLikeTargetsBeforePermission(t *testing.T) {
 	tool := newBrowserConnectTool(localcontrol.BrowserOptions{Enabled: true})
 	for _, target := range []string{"--version", "9222;rm", "http://127.0.0.1:9222/json list"} {
+		result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{"target": target})
+		if !rejected || result.Status != StatusError || !strings.Contains(result.Output, "browser_connect") {
+			t.Fatalf("target %q reject = (%v, %#v), want target rejection", target, rejected, result)
+		}
+	}
+}
+
+func TestBrowserConnectRejectsRemoteTargetsBeforePermission(t *testing.T) {
+	tool := newBrowserConnectTool(localcontrol.BrowserOptions{Enabled: true})
+	for _, target := range []string{
+		"example.com:9222",
+		"192.168.1.20:9222",
+		"https://example.com:9222/json/version",
+		"ws://example.com:9222/devtools/browser/abc",
+		"localhost:notaport",
+	} {
 		result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{"target": target})
 		if !rejected || result.Status != StatusError || !strings.Contains(result.Output, "browser_connect") {
 			t.Fatalf("target %q reject = (%v, %#v), want target rejection", target, rejected, result)
@@ -296,6 +334,40 @@ func TestBrowserActionMapsAllowedCommand(t *testing.T) {
 	}
 }
 
+func TestBrowserActionConnectAcceptsLoopbackTarget(t *testing.T) {
+	runner := &fakeBrowserRunner{}
+	tool := newBrowserActionTool(localBrowserTestOptions(t, runner))
+
+	result := tool.Run(context.Background(), map[string]any{
+		"command": "connect",
+		"args":    []any{"127.0.0.1:9222"},
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %s output = %q", result.Status, result.Output)
+	}
+	want := []string{"connect", "127.0.0.1:9222"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestBrowserActionScrollAcceptsSignedIntegerDeltas(t *testing.T) {
+	runner := &fakeBrowserRunner{}
+	tool := newBrowserActionTool(localBrowserTestOptions(t, runner))
+
+	result := tool.Run(context.Background(), map[string]any{
+		"command": "scroll",
+		"args":    []any{"0", "-500"},
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %s output = %q", result.Status, result.Output)
+	}
+	want := []string{"scroll", "0", "-500"}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
 func TestBrowserActionRejectsUnknownCommandBeforePermission(t *testing.T) {
 	tool := newBrowserActionTool(localcontrol.BrowserOptions{Enabled: true})
 	result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{
@@ -303,6 +375,48 @@ func TestBrowserActionRejectsUnknownCommandBeforePermission(t *testing.T) {
 	})
 	if !rejected || result.Status != StatusError || !strings.Contains(result.Output, "command must be one of") {
 		t.Fatalf("reject = (%v, %#v), want command rejection", rejected, result)
+	}
+}
+
+func TestBrowserActionRejectsInvalidStructuredArgsBeforePermission(t *testing.T) {
+	tool := newBrowserActionTool(localcontrol.BrowserOptions{Enabled: true})
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{
+			name: "remote connect",
+			args: map[string]any{"command": "connect", "args": []any{"example.com:9222"}},
+			want: "loopback",
+		},
+		{
+			name: "click ref with space",
+			args: map[string]any{"command": "click", "args": []any{"e 1"}},
+			want: "ref",
+		},
+		{
+			name: "type ref option",
+			args: map[string]any{"command": "type", "args": []any{"--ref", "hello"}},
+			want: "ref",
+		},
+		{
+			name: "press key with space",
+			args: map[string]any{"command": "press", "args": []any{"Control L"}},
+			want: "key",
+		},
+		{
+			name: "drag target ref with space",
+			args: map[string]any{"command": "drag", "args": []any{"e1", "e 2"}},
+			want: "ref",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(tc.args)
+			if !rejected || result.Status != StatusError || !strings.Contains(result.Output, tc.want) {
+				t.Fatalf("reject = (%v, %#v), want %q", rejected, result, tc.want)
+			}
+		})
 	}
 }
 

@@ -465,7 +465,7 @@ func TestRunExecModeModelSurfacesDeprecationNoticeViaSharedPath(t *testing.T) {
 func TestRunExecListToolsAppliesModeBeforeListing(t *testing.T) {
 	// applyExecMode now runs before tool-filter validation and the --list-tools
 	// branch, so a --mode preset is expanded for --list-tools. Combining a mode
-	// with --list-tools must still succeed and never resolve a provider.
+	// with --list-tools must still succeed without constructing a provider.
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -475,7 +475,7 @@ func TestRunExecListToolsAppliesModeBeforeListing(t *testing.T) {
 			return cwd, nil
 		},
 		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
-			return config.ResolvedConfig{}, errors.New("provider should not be resolved for --list-tools")
+			return execResolvedConfig(), nil
 		},
 	})
 

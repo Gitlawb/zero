@@ -200,6 +200,44 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.useSpec {
 		specmode.RegisterDraftTools(registry, workspaceRoot, deps.now)
 	}
+	// Build the model registry once and reuse it across every model-aware
+	// lookup in this exec run (model resolution, reasoning-effort advisory, and
+	// context-window sizing). DefaultRegistry builds the full catalog and
+	// compiles its match patterns, so rebuilding it per lookup is wasteful.
+	// modelRegistry is the zero Registry when the catalog fails to build; the
+	// helpers below degrade to safe no-op behavior in that case.
+	modelRegistry, _ := modelregistry.DefaultRegistry()
+
+	overrides := config.Overrides{}
+	modelOverride := options.model
+	if options.useSpec && options.specModel != "" {
+		modelOverride = options.specModel
+	}
+	if modelOverride != "" {
+		resolvedModel, notice := resolveSelectedModel(modelRegistry, modelOverride)
+		overrides.Provider.Model = resolvedModel
+		if notice != "" {
+			if _, err := fmt.Fprintln(stderr, notice); err != nil {
+				return exitCrash
+			}
+		}
+	}
+	if options.maxTurns > 0 {
+		overrides.MaxTurns = options.maxTurns
+	}
+	resolved, err := deps.resolveConfig(workspaceRoot, overrides)
+	if err != nil {
+		if !options.listTools {
+			if preflightErr := preflightExecSession(options); preflightErr != nil {
+				return writeExecFormatUsageError(stdout, stderr, options.outputFormat, preflightErr.Error())
+			}
+			if _, _, promptErr := resolveExecPrompt(options, workspaceRoot, deps.stdin); promptErr != nil {
+				return writeExecFormatUsageError(stdout, stderr, options.outputFormat, promptErr.Error())
+			}
+		}
+		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
+	}
+	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	if err := validateExecToolFilters(options, registry); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -228,35 +266,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 	sessionTitle := execSessionTitle(options, prompt)
 
-	// Build the model registry once and reuse it across every model-aware
-	// lookup in this exec run (model resolution, reasoning-effort advisory, and
-	// context-window sizing). DefaultRegistry builds the full catalog and
-	// compiles its match patterns, so rebuilding it per lookup is wasteful.
-	// modelRegistry is the zero Registry when the catalog fails to build; the
-	// helpers below degrade to safe no-op behavior in that case.
-	modelRegistry, _ := modelregistry.DefaultRegistry()
-
-	overrides := config.Overrides{}
-	modelOverride := options.model
-	if options.useSpec && options.specModel != "" {
-		modelOverride = options.specModel
-	}
-	if modelOverride != "" {
-		resolvedModel, notice := resolveSelectedModel(modelRegistry, modelOverride)
-		overrides.Provider.Model = resolvedModel
-		if notice != "" {
-			if _, err := fmt.Fprintln(stderr, notice); err != nil {
-				return exitCrash
-			}
-		}
-	}
-	if options.maxTurns > 0 {
-		overrides.MaxTurns = options.maxTurns
-	}
-	resolved, err := deps.resolveConfig(workspaceRoot, overrides)
-	if err != nil {
-		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
-	}
 	if !config.HasProviderProfile(resolved.Provider) {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", "No provider configured. Run `zero setup` (guided), `zero auth` (OAuth providers), set a provider API key env var (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY), or add .zero/config.json.")
 	}
@@ -313,7 +322,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
 		registry.Register(tool)
 	}
-	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())

@@ -224,6 +224,7 @@ func TestNodeWrapperReportsMissingNativeBinary(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
 	defer cancel()
 	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), "ZERO_LOCAL_CONTROL_HELPERS=")
 	output, err := command.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("wrapper timed out reporting missing native binary: %v; output: %s", ctx.Err(), output)
@@ -309,6 +310,9 @@ func TestNodeWrapperPassesLocalControlHelperManifest(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &manifest); err != nil {
 		t.Fatalf("manifest JSON = %q: %v", output, err)
 	}
+	if manifest.Version != 1 {
+		t.Fatalf("manifest version = %d, want 1", manifest.Version)
+	}
 	for _, name := range []string{"agent-browser", "tuistory"} {
 		helper, ok := manifest.Helpers[name]
 		if !ok {
@@ -325,6 +329,34 @@ func TestNodeWrapperPassesLocalControlHelperManifest(t *testing.T) {
 	}
 }
 
+func TestNodeWrapperClearsInheritedLocalControlHelperManifestWhenNoHelpers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	nativePath := filepath.Join(root, "zero")
+	if err := os.WriteFile(nativePath, []byte("#!/usr/bin/env sh\nif [ -n \"${ZERO_LOCAL_CONTROL_HELPERS+x}\" ]; then printf 'set\\n'; else printf 'unset\\n'; fi\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile native fixture: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	command.Env = append(withoutEnvKey(command.Env, "ZERO_LOCAL_CONTROL_HELPERS"), `ZERO_LOCAL_CONTROL_HELPERS={"version":1,"helpers":{"agent-browser":{"command":"stale"}}}`)
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching native binary: %v; output: %s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != "unset" {
+		t.Fatalf("ZERO_LOCAL_CONTROL_HELPERS state = %q, want unset", got)
+	}
+}
+
 func canonicalTestPath(t *testing.T, path string) string {
 	t.Helper()
 	realPath, err := filepath.EvalSymlinks(path)
@@ -332,6 +364,18 @@ func canonicalTestPath(t *testing.T, path string) string {
 		t.Fatalf("EvalSymlinks %s: %v", path, err)
 	}
 	return realPath
+}
+
+func withoutEnvKey(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func copyWrapperFixture(t *testing.T) string {

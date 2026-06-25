@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -115,6 +116,9 @@ func (launcher BrowserAppLauncher) LaunchBrowserApp(ctx context.Context, request
 func browserAppLaunchSpec(app string, port int) (browserAppSpec, error) {
 	switch strings.ToLower(strings.TrimSpace(app)) {
 	case "discord":
+		if runtime.GOOS != "linux" {
+			return browserAppSpec{}, fmt.Errorf("discord launch is only supported for Linux flatpak installs")
+		}
 		return browserAppSpec{
 			name:     "discord",
 			command:  "flatpak",

@@ -453,6 +453,24 @@ func TestStageLocalControlHelpersUsesPackageDependencies(t *testing.T) {
     "tuistory": "0.10.0"
   }
 }`)
+	mustWriteFile(t, filepath.Join(root, "package-lock.json"), `{
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "dependencies": {
+        "agent-browser": "0.30.1",
+        "tuistory": "0.10.0"
+      }
+    },
+    "node_modules/agent-browser": {
+      "version": "0.30.1"
+    },
+    "node_modules/tuistory": {
+      "version": "0.10.0"
+    }
+  }
+}`)
 	fakeBin := t.TempDir()
 	writeFakeNPM(t, fakeBin)
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -470,6 +488,9 @@ func TestStageLocalControlHelpersUsesPackageDependencies(t *testing.T) {
 			t.Fatalf("helper package.json missing %s:\n%s", want, manifest)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(helpers, "package-lock.json")); err != nil {
+		t.Fatalf("helper package-lock.json was not copied: %v", err)
+	}
 	for _, name := range localControlHelperPackages {
 		found := false
 		for _, shimName := range localControlHelperShimNames(name, runtime.GOOS) {
@@ -481,6 +502,23 @@ func TestStageLocalControlHelpersUsesPackageDependencies(t *testing.T) {
 		if !found {
 			t.Fatalf("missing shim for %s", name)
 		}
+	}
+}
+
+func TestStageLocalControlHelpersRequiresPackageLock(t *testing.T) {
+	root := t.TempDir()
+	helpers := filepath.Join(t.TempDir(), "helpers")
+	mustWriteFile(t, filepath.Join(root, "package.json"), `{
+  "version": "0.1.0",
+  "dependencies": {
+    "agent-browser": "0.30.1",
+    "tuistory": "0.10.0"
+  }
+}`)
+
+	err := stageLocalControlHelpers(context.Background(), root, helpers)
+	if err == nil || !strings.Contains(err.Error(), "package-lock.json is required") {
+		t.Fatalf("stageLocalControlHelpers error = %v, want package-lock requirement", err)
 	}
 }
 
@@ -520,6 +558,10 @@ func writeFakeNPM(t *testing.T, dir string) {
 	if runtime.GOOS == "windows" {
 		path := filepath.Join(dir, "npm.cmd")
 		content := `@echo off
+if not "%1"=="ci" (
+  echo expected npm ci 1>&2
+  exit /b 2
+)
 mkdir node_modules 2>NUL
 mkdir node_modules\.bin 2>NUL
 echo @echo off> node_modules\.bin\agent-browser.cmd
@@ -532,6 +574,10 @@ exit /b 0
 	path := filepath.Join(dir, "npm")
 	content := `#!/usr/bin/env sh
 set -eu
+if [ "${1:-}" != "ci" ]; then
+  echo "expected npm ci" >&2
+  exit 2
+fi
 mkdir -p node_modules/.bin
 for name in agent-browser tuistory; do
   printf '#!/usr/bin/env sh\n' > "node_modules/.bin/$name"

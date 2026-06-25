@@ -27,6 +27,25 @@ func TestDesktopSnapshotBuildsDriverJSON(t *testing.T) {
 	}
 }
 
+func TestDesktopWindowsRejectsInvalidPIDBeforePermission(t *testing.T) {
+	tool := newDesktopWindowsTool(localcontrol.DesktopOptions{Enabled: true})
+	result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{"pid": float64(0)})
+	if !rejected || result.Status != StatusError || !strings.Contains(result.Output, "pid") {
+		t.Fatalf("reject = (%v, %#v), want pid rejection", rejected, result)
+	}
+}
+
+func TestDesktopSnapshotRejectsInvalidWindowArgsBeforePermission(t *testing.T) {
+	tool := newDesktopSnapshotTool(localcontrol.DesktopOptions{Enabled: true})
+	result, rejected := tool.(PrePermissionRejecter).RejectBeforePermission(map[string]any{
+		"pid":       float64(123),
+		"window_id": float64(0),
+	})
+	if !rejected || result.Status != StatusError || !strings.Contains(result.Output, "window_id") {
+		t.Fatalf("reject = (%v, %#v), want window_id rejection", rejected, result)
+	}
+}
+
 func TestDesktopActionMapsAllowedCommand(t *testing.T) {
 	runner := &fakeBrowserRunner{}
 	tool := newDesktopActionTool(localBrowserTestOptions(t, runner))

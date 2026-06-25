@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ func (runner *fakeBrowserAppRunner) StartDetached(_ context.Context, path string
 }
 
 func TestBrowserAppLauncherMapsDiscordToFlatpakDevToolsLaunch(t *testing.T) {
+	requireLinuxFlatpakLaunch(t)
 	runner := &fakeBrowserAppRunner{}
 	launcher := NewBrowserAppLauncher(BrowserAppLaunchOptions{Runner: runner})
 
@@ -68,6 +70,7 @@ func TestBrowserAppLauncherMapsDiscordToFlatpakDevToolsLaunch(t *testing.T) {
 }
 
 func TestBrowserAppLauncherDefaultsPortAndCanSkipStop(t *testing.T) {
+	requireLinuxFlatpakLaunch(t)
 	runner := &fakeBrowserAppRunner{}
 	launcher := NewBrowserAppLauncher(BrowserAppLaunchOptions{Runner: runner})
 
@@ -99,9 +102,28 @@ func TestBrowserAppLauncherRejectsUnsupportedApp(t *testing.T) {
 }
 
 func TestBrowserAppLauncherReportsStartFailure(t *testing.T) {
+	requireLinuxFlatpakLaunch(t)
 	launcher := NewBrowserAppLauncher(BrowserAppLaunchOptions{Runner: &fakeBrowserAppRunner{err: errors.New("boom")}})
 	_, err := launcher.LaunchBrowserApp(context.Background(), BrowserAppLaunchRequest{App: "discord", Wait: false})
 	if err == nil || !strings.Contains(err.Error(), "launch discord") {
 		t.Fatalf("error = %v, want launch failure", err)
+	}
+}
+
+func TestBrowserAppLauncherRejectsDiscordOnUnsupportedPlatform(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("discord launch is supported on Linux")
+	}
+	launcher := NewBrowserAppLauncher(BrowserAppLaunchOptions{Runner: &fakeBrowserAppRunner{}})
+	_, err := launcher.LaunchBrowserApp(context.Background(), BrowserAppLaunchRequest{App: "discord", Wait: false})
+	if err == nil || !strings.Contains(err.Error(), "only supported") {
+		t.Fatalf("error = %v, want unsupported platform", err)
+	}
+}
+
+func requireLinuxFlatpakLaunch(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("discord launch uses Linux flatpak")
 	}
 }

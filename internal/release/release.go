@@ -732,12 +732,22 @@ func stageLocalControlHelpers(ctx context.Context, rootDir string, helpersDir st
 	if err := os.WriteFile(filepath.Join(helpersDir, "package.json"), append(bytes, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write local-control helper package.json: %w", err)
 	}
+	lockfilePath := filepath.Join(rootDir, "package-lock.json")
+	if _, err := os.Stat(lockfilePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("package-lock.json is required to package local-control helpers")
+		}
+		return fmt.Errorf("stat package-lock.json: %w", err)
+	}
+	if err := copyFile(lockfilePath, filepath.Join(helpersDir, "package-lock.json"), 0o644); err != nil {
+		return fmt.Errorf("copy local-control helper package-lock.json: %w", err)
+	}
 
 	npmPath, err := exec.LookPath("npm")
 	if err != nil {
 		return fmt.Errorf("npm is required to package local-control helpers: %w", err)
 	}
-	command := exec.CommandContext(ctx, npmPath, "install", "--omit=dev", "--no-audit", "--no-fund", "--loglevel=error")
+	command := exec.CommandContext(ctx, npmPath, "ci", "--omit=dev", "--no-audit", "--no-fund", "--loglevel=error")
 	command.Dir = helpersDir
 	command.Env = append(os.Environ(), "npm_config_update_notifier=false")
 	output, err := command.CombinedOutput()

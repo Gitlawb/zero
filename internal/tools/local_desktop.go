@@ -41,14 +41,17 @@ func newDesktopWindowsTool(options localcontrol.DesktopOptions) Tool {
 	}
 }
 
+func (tool desktopWindowsTool) RejectBeforePermission(args map[string]any) (Result, bool) {
+	if _, err := desktopWindowsInput(args); err != nil {
+		return errorResult("Error: Invalid arguments for desktop_windows: " + err.Error()), true
+	}
+	return Result{}, false
+}
+
 func (tool desktopWindowsTool) Run(ctx context.Context, args map[string]any) Result {
-	input := map[string]any{}
-	if _, ok := args["pid"]; ok {
-		pid, err := intArg(args, "pid", 0, 1, 0)
-		if err != nil {
-			return errorResult("Error: Invalid arguments for desktop_windows: " + err.Error())
-		}
-		input["pid"] = pid
+	input, err := desktopWindowsInput(args)
+	if err != nil {
+		return errorResult("Error: Invalid arguments for desktop_windows: " + err.Error())
 	}
 	payload, err := json.Marshal(input)
 	if err != nil {
@@ -84,19 +87,17 @@ func newDesktopSnapshotTool(options localcontrol.DesktopOptions) Tool {
 	}
 }
 
+func (tool desktopSnapshotTool) RejectBeforePermission(args map[string]any) (Result, bool) {
+	if _, err := desktopSnapshotInput(args); err != nil {
+		return errorResult("Error: Invalid arguments for desktop_snapshot: " + err.Error()), true
+	}
+	return Result{}, false
+}
+
 func (tool desktopSnapshotTool) Run(ctx context.Context, args map[string]any) Result {
-	input, err := desktopWindowInput(args)
+	input, err := desktopSnapshotInput(args)
 	if err != nil {
 		return errorResult("Error: Invalid arguments for desktop_snapshot: " + err.Error())
-	}
-	for _, key := range []string{"query", "session"} {
-		value, err := stringArgWithEmpty(args, key, "", false, false)
-		if err != nil {
-			return errorResult("Error: Invalid arguments for desktop_snapshot: " + err.Error())
-		}
-		if strings.TrimSpace(value) != "" {
-			input[key] = value
-		}
 	}
 	payload, err := json.Marshal(input)
 	if err != nil {
@@ -184,6 +185,35 @@ func desktopActionArgs(args map[string]any) (string, string, error) {
 		return "", "", err
 	}
 	return command, string(payload), nil
+}
+
+func desktopWindowsInput(args map[string]any) (map[string]any, error) {
+	input := map[string]any{}
+	if _, ok := args["pid"]; ok {
+		pid, err := intArg(args, "pid", 0, 1, 0)
+		if err != nil {
+			return nil, err
+		}
+		input["pid"] = pid
+	}
+	return input, nil
+}
+
+func desktopSnapshotInput(args map[string]any) (map[string]any, error) {
+	input, err := desktopWindowInput(args)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"query", "session"} {
+		value, err := stringArgWithEmpty(args, key, "", false, false)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(value) != "" {
+			input[key] = value
+		}
+	}
+	return input, nil
 }
 
 func desktopWindowInput(args map[string]any) (map[string]any, error) {

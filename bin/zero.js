@@ -63,6 +63,8 @@ if (!existsSync(nativePath)) {
 const env = { ...process.env };
 if (localControlHelpers) {
   env.ZERO_LOCAL_CONTROL_HELPERS = localControlHelpers;
+} else {
+  delete env.ZERO_LOCAL_CONTROL_HELPERS;
 }
 
 const child = spawnSync(nativePath, process.argv.slice(2), {

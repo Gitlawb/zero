@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -123,6 +124,27 @@ func TestBrowserRunUsesManifestPrefixArgs(t *testing.T) {
 	want := []string{"/d", "/s", "/c", `C:\zero\agent-browser.cmd`, "open", "https://example.com"}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("runner args = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestMergeEnvReplacesPathCaseInsensitivelyOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows env keys are case-insensitive")
+	}
+	env := mergeEnv([]string{`Path=C:\Windows`, "ZERO=1"}, []string{`PATH=C:\Zero`})
+	pathCount := 0
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || !strings.EqualFold(key, "PATH") {
+			continue
+		}
+		pathCount++
+		if value != `C:\Zero` {
+			t.Fatalf("PATH value = %q, want C:\\Zero", value)
+		}
+	}
+	if pathCount != 1 {
+		t.Fatalf("PATH entries = %d in %#v, want 1", pathCount, env)
 	}
 }
 
