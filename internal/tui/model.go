@@ -1299,6 +1299,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamCallDecoder.feed(msg.fragment)
+		// A streamed tool-call argument (e.g. a file's contents in write_file) is
+		// real generated output: count it toward the live token estimate so the
+		// "↑ N tok" pulse climbs during a long write, and bump lastStreamActivity so
+		// the quiet-generation hint stays clear of an actively-streaming provider.
+		m.turnStreamedRunes += utf8.RuneCountInString(msg.fragment)
+		m.lastStreamActivity = m.now()
 		return m, nil
 	case agentTextMsg:
 		if msg.runID != m.activeRunID {
@@ -2470,6 +2476,13 @@ func (m model) workingStatusLine() string {
 	// 0) so the counter is never missing — the authoritative totals stay in the
 	// status line and sidebar; this is the at-a-glance "it's generating" pulse.
 	line += zeroTheme.faint.Render("  ·  " + m.workingTokenIndicator())
+	// If the model has gone quiet (no streamed text, reasoning, OR tool-call output
+	// for a while — common when a provider buffers a large tool call instead of
+	// streaming it), say so plainly with an advancing timer, so a long silent
+	// generation never reads as a frozen screen.
+	if hint := m.quietGenerationHint(); hint != "" {
+		line += zeroTheme.amber.Render("  ·  " + hint)
+	}
 	// A second line carries live plan progress (how far along + the current step)
 	// so a long working stretch shows the task advancing without consulting the
 	// sidebar. Replaces the old per-call update_plan transcript cards. Empty when
@@ -2516,6 +2529,33 @@ func (m model) workingTokenIndicator() string {
 		tokens = 1
 	}
 	return "↑ " + humanCount(tokens) + " tok"
+}
+
+// quietWorkingHint is how long the stream must be silent (no streamed text,
+// reasoning, or tool-call output) during an active turn before the working line
+// calls out that it's still generating — so a provider that buffers a big tool
+// call (instead of streaming the file as it's written) doesn't read as stuck.
+const quietWorkingHint = 8 * time.Second
+
+// quietGenerationHint returns a "still generating…" cue with an advancing
+// quiet-timer when the active turn has produced no streamed output for a while,
+// else "". The advancing number is itself the liveness signal.
+func (m model) quietGenerationHint() string {
+	if m.activeRunID == 0 {
+		return ""
+	}
+	last := m.lastStreamActivity
+	if last.IsZero() {
+		last = m.turnStartedAt
+	}
+	if last.IsZero() {
+		return ""
+	}
+	quiet := m.now().Sub(last)
+	if quiet < quietWorkingHint {
+		return ""
+	}
+	return "still generating… " + formatWorkingElapsed(quiet)
 }
 
 // formatWorkingElapsed renders a turn's running time compactly: "8s", "1m04s".

@@ -65,6 +65,39 @@ func TestHiddenPlumbingToolsSkippedFromTranscript(t *testing.T) {
 	}
 }
 
+// TestQuietGenerationHint: after a silent stretch during an active run, the
+// working line shows a "still generating…" cue with an advancing timer; while
+// output is flowing (recent activity) or when idle, it stays empty.
+func TestQuietGenerationHint(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return base.Add(30 * time.Second) }}
+	m.activeRunID = 7
+	m.turnStartedAt = base
+
+	// Recently active -> no hint.
+	m.lastStreamActivity = base.Add(28 * time.Second)
+	if got := m.quietGenerationHint(); got != "" {
+		t.Errorf("recent activity: want no hint, got %q", got)
+	}
+
+	// Quiet for >= the threshold -> a "still generating…" cue appears, and shows
+	// up on the rendered working line.
+	m.lastStreamActivity = base.Add(5 * time.Second) // 25s quiet at now
+	if got := m.quietGenerationHint(); !strings.Contains(got, "still generating") {
+		t.Errorf("quiet stretch: want a still-generating hint, got %q", got)
+	}
+	if line := plainRender(t, m.workingStatusLine()); !strings.Contains(line, "still generating") {
+		t.Errorf("working line should carry the quiet hint, got %q", line)
+	}
+
+	// No active run -> never a hint.
+	idle := m
+	idle.activeRunID = 0
+	if got := idle.quietGenerationHint(); got != "" {
+		t.Errorf("idle: want no hint, got %q", got)
+	}
+}
+
 func TestFormatWorkingElapsed(t *testing.T) {
 	cases := map[time.Duration]string{
 		0:                 "0s",
