@@ -314,13 +314,24 @@ func TestNodeWrapperPassesLocalControlHelperManifest(t *testing.T) {
 		if !ok {
 			t.Fatalf("manifest missing helper %q: %#v", name, manifest.Helpers)
 		}
-		if helper.Command != filepath.Join(binDir, name) {
-			t.Fatalf("%s command = %q, want %q", name, helper.Command, filepath.Join(binDir, name))
+		wantCommand := canonicalTestPath(t, filepath.Join(binDir, name))
+		if helper.Command != wantCommand {
+			t.Fatalf("%s command = %q, want %q", name, helper.Command, wantCommand)
 		}
-		if len(helper.PathPrepend) != 1 || helper.PathPrepend[0] != binDir {
-			t.Fatalf("%s pathPrepend = %#v, want [%q]", name, helper.PathPrepend, binDir)
+		wantBinDir := canonicalTestPath(t, binDir)
+		if len(helper.PathPrepend) != 1 || helper.PathPrepend[0] != wantBinDir {
+			t.Fatalf("%s pathPrepend = %#v, want [%q]", name, helper.PathPrepend, wantBinDir)
 		}
 	}
+}
+
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks %s: %v", path, err)
+	}
+	return realPath
 }
 
 func copyWrapperFixture(t *testing.T) string {
