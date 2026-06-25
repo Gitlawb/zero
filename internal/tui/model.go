@@ -2382,6 +2382,14 @@ func (m model) workingActivity() string {
 	return "thinking"
 }
 
+// toolCardSuppressedInTranscript reports tools whose transcript card is redundant
+// because a dedicated UI surface already shows their state: Task (its specialist
+// card) and update_plan (the pinned plan panel + PLAN sidebar). Their session
+// events are still recorded; only the visible card is skipped.
+func toolCardSuppressedInTranscript(name string) bool {
+	return name == "Task" || name == "update_plan"
+}
+
 func (m model) workingStatusLine() string {
 	// Cosine ripple FX: "Working" breathes through a cold-to-warm theme ramp, the
 	// wave moving one character per spinner tick (shared m.spinnerPhase clock). A
@@ -3779,9 +3787,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				arg:    argHintSecondary(call.Arguments),
 				runID:  runID,
 			}
-			// A Task delegation is shown by the specialist card below, so skip its
-			// redundant "tool call: Task" transcript row — the card supersedes it.
-			if call.Name != "Task" {
+			// A Task delegation is shown by the specialist card below, and update_plan
+			// is shown by the pinned plan panel + PLAN sidebar, so skip both redundant
+			// transcript cards — the dedicated UI supersedes them.
+			if !toolCardSuppressedInTranscript(call.Name) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
@@ -3862,9 +3871,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				detail: result.Output,
 				runID:  runID,
 			}
-			// A Task result is shown by the specialist card (its completion state),
-			// so skip its redundant "tool result: Task" transcript row.
-			if result.Name != "Task" {
+			// A Task result is shown by the specialist card, and update_plan by the
+			// plan panel/sidebar, so skip both redundant transcript rows.
+			if !toolCardSuppressedInTranscript(result.Name) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
