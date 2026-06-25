@@ -231,6 +231,61 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	}
 }
 
+func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")
+	res := NewEditFileTool(root).Run(context.Background(), map[string]any{
+		"path": "code.go", "old_string": "const a = 1", "new_string": "const a = 42",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("edit failed: %s", res.Output)
+	}
+	// The summary stays the first line; a unified diff follows so the card can
+	// render the change red/green instead of a bare byte count.
+	if !strings.HasPrefix(res.Output, "Successfully edited") {
+		t.Fatalf("summary must remain the first line: %q", res.Output)
+	}
+	for _, want := range []string{"@@", "-const a = 1", "+const a = 42"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("edit output missing diff marker %q: %q", want, res.Output)
+		}
+	}
+}
+
+func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
+	root := t.TempDir()
+	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path": "new.txt", "content": "line one\nline two\n",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("write failed: %s", res.Output)
+	}
+	for _, want := range []string{"@@", "+line one", "+line two"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("new-file output missing additions diff %q: %q", want, res.Output)
+		}
+	}
+	if strings.Contains(res.Output, "\n-line") {
+		t.Fatalf("a fresh-create diff must have no removed lines: %q", res.Output)
+	}
+}
+
+func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "f.txt"), "old line\nkeep\n")
+	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path": "f.txt", "content": "new line\nkeep\n", "overwrite": true,
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("overwrite failed: %s", res.Output)
+	}
+	for _, want := range []string{"-old line", "+new line"} {
+		if !strings.Contains(res.Output, want) {
+			t.Fatalf("overwrite output missing %q: %q", want, res.Output)
+		}
+	}
+}
+
 func TestEditFileToolAllowsDeletingRegions(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "notes.txt")

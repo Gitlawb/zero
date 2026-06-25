@@ -111,7 +111,14 @@ func (tool editFileTool) RunWithOptions(_ context.Context, args map[string]any, 
 		suffix = "s"
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
-	result := okResult(summary)
+	output := summary
+	// Append a unified diff so the card renders the change as red/green instead of
+	// a bare byte-count. The summary stays the first line for any consumer that
+	// reads it (the swarm/Task result bubbles it up).
+	if diff := boundedUnifiedDiff(relativePath, content, updated); diff != "" {
+		output += "\n" + diff
+	}
+	result := okResult(output)
 	result.ChangedFiles = []string{relativePath}
 	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff"}
 	return result

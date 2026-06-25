@@ -91,6 +91,15 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 		}
 	}
 
+	// Capture the prior content (before we replace it) so an overwrite can show a
+	// real diff; a fresh create stays "" and previews as all-additions.
+	priorContent := ""
+	if existed {
+		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
+			priorContent = string(prev)
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
@@ -110,7 +119,14 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 		verb = "Overwrote"
 	}
 	summary := fmt.Sprintf("%s %s (%d bytes).", verb, relativePath, len([]byte(content)))
-	result := okResult(summary)
+	output := summary
+	// Append a diff so the card previews the file (all-green additions for a new
+	// file, red/green for an overwrite) instead of a bare byte count. The summary
+	// stays the first line for any consumer that reads it.
+	if diff := boundedUnifiedDiff(relativePath, priorContent, content); diff != "" {
+		output += "\n" + diff
+	}
+	result := okResult(output)
 	result.ChangedFiles = []string{relativePath}
 	result.Display = Display{Summary: summary, Kind: "file"}
 	return result
