@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // TestWorkingPlanLine: the working indicator's second line carries the plan's
@@ -55,6 +57,12 @@ func TestHiddenPlumbingToolsSkippedFromTranscript(t *testing.T) {
 	}
 	if rc.skip(rows[4]) {
 		t.Error("a normal tool result (bash) must not be skipped")
+	}
+
+	// A FAILED plumbing result must still render — its error has to surface.
+	failed := transcriptRow{kind: rowToolResult, tool: "update_plan", id: "c9", runID: 1, status: tools.StatusError, text: "tool result: update_plan error boom"}
+	if buildRowContext([]transcriptRow{failed}).skip(failed) {
+		t.Error("a failed plumbing result must NOT be skipped (the error must show)")
 	}
 
 	if !isHiddenPlumbingTool("update_plan") || !isHiddenPlumbingTool("tool_search") {

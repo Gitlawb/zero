@@ -108,6 +108,12 @@ func (m model) maybeRecapTurn(runID int, answer string) (model, tea.Cmd) {
 // empty generation is silent (and releases the per-run gate so a future turn can
 // recap normally).
 func (m model) handleRecapGenerated(msg recapGeneratedMsg) (model, tea.Cmd) {
+	// Drop a recap whose run is no longer the latest: a newer turn has started, so
+	// appending now would land the recap on the wrong (current) conversation.
+	if msg.runID != m.runID {
+		delete(m.recappedRuns, msg.runID)
+		return m, nil
+	}
 	recap := strings.TrimSpace(msg.recap)
 	if msg.err != nil || recap == "" {
 		delete(m.recappedRuns, msg.runID)
@@ -118,17 +124,16 @@ func (m model) handleRecapGenerated(msg recapGeneratedMsg) (model, tea.Cmd) {
 }
 
 // handleConfigCommand applies a "/config <setting> <value>" toggle and returns a
-// status string. Currently only "recaps on|off".
+// status string. Currently only "recaps on|off". A failed persist surfaces an
+// error instead of falsely reporting success.
 func (m model) handleConfigCommand(arg string) (model, string) {
 	switch arg {
-	case "recaps on":
-		m.recapsEnabled = true
-		_ = m.persistRecapsEnabled()
-		return m, "Config\nrecaps: on"
-	case "recaps off":
-		m.recapsEnabled = false
-		_ = m.persistRecapsEnabled()
-		return m, "Config\nrecaps: off"
+	case "recaps on", "recaps off":
+		m.recapsEnabled = arg == "recaps on"
+		if err := m.persistRecapsEnabled(); err != nil {
+			return m, "Config\nFailed to save recaps preference: " + err.Error()
+		}
+		return m, "Config\nrecaps: " + onOff(m.recapsEnabled)
 	default:
 		return m, "Config\nUnknown setting: " + arg + " (use: recaps on|off)"
 	}

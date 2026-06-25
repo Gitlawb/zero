@@ -704,6 +704,10 @@ func (m model) sidebarPlanLines(width int) []string {
 // not a scrolling log.
 const maxSidebarActivityLines = 5
 
+// maxSidebarActivityScan bounds how many trailing transcript rows the activity
+// feed inspects per render, so a sparse-work transcript stays O(window).
+const maxSidebarActivityScan = 200
+
 // sidebarActivityLines builds the ACTIVITY feed: a live "generating…" pulse (when
 // the run has gone quiet) atop the most recent completed work (files written,
 // commands run). It scans the transcript BACKWARD and stops after the cap, so the
@@ -716,7 +720,12 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 	room := maxInt(4, width-3)
 	limit := minInt(maxSidebarActivityLines, budget)
 	var work []string
-	for i := len(m.transcript) - 1; i >= 0 && len(work) < limit; i-- {
+	// Bound the rows inspected per render so a long, work-sparse transcript can't
+	// turn this hot path into a full O(transcript) walk; recent work sits near the
+	// end, so a window comfortably finds the latest items.
+	scanned := 0
+	for i := len(m.transcript) - 1; i >= 0 && len(work) < limit && scanned < maxSidebarActivityScan; i-- {
+		scanned++
 		row := m.transcript[i]
 		if row.kind != rowToolResult || !isPlanWorkTool(row.tool) {
 			continue
@@ -750,7 +759,7 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 // (1045 lines).").
 func (m model) activitySummary(row transcriptRow) string {
 	if isPlanCommandTool(row.tool) {
-		if cmd := m.activityCommandForRow(row.id); cmd != "" {
+		if cmd := m.activityCommandForRow(row.id, row.runID); cmd != "" {
 			return row.tool + " · " + cmd
 		}
 		return row.tool
@@ -768,14 +777,15 @@ func (m model) activitySummary(row transcriptRow) string {
 }
 
 // activityCommandForRow recovers a command tool's command-line from its paired
-// call row (whose arg hint carries the command), or "" if not found.
-func (m model) activityCommandForRow(id string) string {
+// call row (whose arg hint carries the command), matched by BOTH id and runID so
+// a reused tool-call id from a later run can't attribute the wrong command.
+func (m model) activityCommandForRow(id string, runID int) string {
 	if id == "" {
 		return ""
 	}
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		row := m.transcript[i]
-		if row.kind == rowToolCall && row.id == id {
+		if row.kind == rowToolCall && row.id == id && row.runID == runID {
 			return row.arg
 		}
 	}

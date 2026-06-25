@@ -1343,6 +1343,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamingReasoning += msg.delta
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
+		// Reasoning IS live provider output, so refresh the activity clock — else the
+		// quiet-generation hint can wrongly read "still generating…" mid-think.
+		if msg.delta != "" {
+			m.lastStreamActivity = m.now()
+		}
 		return m, nil
 	case spinner.TickMsg:
 		// Record when swarm members first finish so the sidebar can linger them

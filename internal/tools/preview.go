@@ -10,6 +10,21 @@ import (
 // Preview) — the model never sees it — so this bound is purely about readability.
 const previewBodyLines = 15
 
+// splitDiffLines splits s into diff body lines, preserving interior and trailing
+// blank lines, but dropping the single empty element a trailing "\n" produces (a
+// file ending in "\n" has no extra line). Empty input yields no lines — not a
+// fake blank "+" line.
+func splitDiffLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.Split(s, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
+}
+
 // capDiffLines truncates a diff body to max lines, appending a plain "… +N lines"
 // trailer (a context-style line, so it survives looksLikeDiff and renders muted).
 func capDiffLines(lines []string, max int) []string {
@@ -30,7 +45,7 @@ func newFileDiffPreview(path, content string, lines int, existed bool) string {
 	}
 	header := []string{from, "+++ b/" + path, fmt.Sprintf("@@ -0,0 +1,%d @@", lines)}
 	body := make([]string, 0, lines)
-	for _, line := range strings.Split(strings.TrimRight(content, "\n"), "\n") {
+	for _, line := range splitDiffLines(content) {
 		body = append(body, "+"+line)
 	}
 	return strings.Join(append(header, capDiffLines(body, previewBodyLines)...), "\n")
@@ -44,8 +59,8 @@ func editDiffPreview(path, content, oldString, newString string) string {
 	if idx := strings.Index(content, oldString); idx >= 0 {
 		start = strings.Count(content[:idx], "\n") + 1
 	}
-	oldLines := strings.Split(strings.TrimRight(oldString, "\n"), "\n")
-	newLines := strings.Split(strings.TrimRight(newString, "\n"), "\n")
+	oldLines := splitDiffLines(oldString)
+	newLines := splitDiffLines(newString)
 	header := []string{
 		"--- a/" + path,
 		"+++ b/" + path,

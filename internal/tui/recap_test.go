@@ -1,9 +1,26 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestHandleConfigCommandReportsPersistError: a failed persist surfaces an error
+// instead of falsely reporting "recaps: on/off".
+func TestHandleConfigCommandReportsPersistError(t *testing.T) {
+	// Point the config path under a regular file, so the write can't create it.
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "afile")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := model{userConfigPath: filepath.Join(parent, "config.json")}
+	if _, text := m.handleConfigCommand("recaps off"); !strings.Contains(text, "Failed to save") {
+		t.Errorf("a failed persist should report failure, got %q", text)
+	}
+}
 
 // TestMaybeRecapTurnGating: a recap fires only when enabled, a provider exists,
 // and there's a final answer — and at most once per run.
@@ -41,12 +58,11 @@ func TestMaybeRecapTurnGating(t *testing.T) {
 // TestHandleRecapGenerated: a successful recap appends a "※ recap:" row; a
 // failed/empty one appends nothing and releases the gate.
 func TestHandleRecapGenerated(t *testing.T) {
-	m := model{recappedRuns: map[int]bool{5: true}}
-	base := len(m.transcript)
-
+	// runID matches the latest run -> the recap appends.
+	m := model{runID: 5, recappedRuns: map[int]bool{5: true}}
 	m, _ = m.handleRecapGenerated(recapGeneratedMsg{runID: 5, recap: "Built a fashion site with cart and blog"})
-	if len(m.transcript) != base+1 {
-		t.Fatalf("a recap should append one row, got %d", len(m.transcript)-base)
+	if len(m.transcript) != 1 {
+		t.Fatalf("a recap for the current run should append one row, got %d", len(m.transcript))
 	}
 	last := m.transcript[len(m.transcript)-1]
 	if last.kind != rowRecap || !strings.Contains(last.text, "fashion site") {
@@ -56,8 +72,19 @@ func TestHandleRecapGenerated(t *testing.T) {
 		t.Errorf("recap render should show the ※ marker, got %q", got)
 	}
 
+	// A recap from a STALE run (a newer turn started) is dropped, not appended to
+	// the wrong conversation; the gate is released.
+	stale := model{runID: 8, recappedRuns: map[int]bool{6: true}}
+	stale, _ = stale.handleRecapGenerated(recapGeneratedMsg{runID: 6, recap: "old run recap"})
+	if len(stale.transcript) != 0 {
+		t.Error("a stale-run recap must not be appended")
+	}
+	if stale.recappedRuns[6] {
+		t.Error("a stale-run recap must release the per-run gate")
+	}
+
 	// Failed recap: no row, gate released.
-	m2 := model{recappedRuns: map[int]bool{9: true}}
+	m2 := model{runID: 9, recappedRuns: map[int]bool{9: true}}
 	m2, _ = m2.handleRecapGenerated(recapGeneratedMsg{runID: 9, err: errExampleRecap})
 	if len(m2.transcript) != 0 {
 		t.Error("a failed recap must append nothing")

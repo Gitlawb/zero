@@ -297,9 +297,16 @@ func TestRecapsPreferenceRoundTrips(t *testing.T) {
 		t.Errorf("unrelated config must be preserved, got %q", persisted.ActiveProvider)
 	}
 
-	// Flip back ON.
-	if cfg, _ := SetRecapsEnabled(path, true); !cfg.Preferences.RecapsEnabled() {
+	// Flip back ON — the write must succeed and persist an explicit true.
+	cfg, err = SetRecapsEnabled(path, true)
+	if err != nil {
+		t.Fatalf("SetRecapsEnabled(true) error = %v", err)
+	}
+	if !cfg.Preferences.RecapsEnabled() {
 		t.Error("after SetRecapsEnabled(true), RecapsEnabled() should be true")
+	}
+	if reread := readConfigFixture(t, path); reread.Preferences.Recaps == nil || !*reread.Preferences.Recaps {
+		t.Errorf("re-enable should persist an explicit true, got %v", reread.Preferences.Recaps)
 	}
 }
 

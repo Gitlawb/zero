@@ -1199,6 +1199,21 @@ func TestToolResultDetailPrefersPreview(t *testing.T) {
 	}
 }
 
+// TestReasoningRefreshesActivityClock: a reasoning delta is live provider output,
+// so it must bump lastStreamActivity (else the quiet hint mis-fires mid-think).
+func TestReasoningRefreshesActivityClock(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	now := base
+	m := model{now: func() time.Time { return now }}
+	m.activeRunID = 7
+	m.lastStreamActivity = base
+	now = base.Add(20 * time.Second)
+	updated, _ := m.Update(agentReasoningMsg{runID: 7, delta: "thinking…"})
+	if got := updated.(model).lastStreamActivity; !got.Equal(now) {
+		t.Errorf("reasoning delta should refresh lastStreamActivity to now, got %v", got)
+	}
+}
+
 // TestStaleExplanationDropped: a plan-step explanation result from a previous run
 // (older planDetailGen) is ignored, so it can't repopulate the cleared cache.
 func TestStaleExplanationDropped(t *testing.T) {

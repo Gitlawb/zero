@@ -39,6 +39,27 @@ func TestEditDiffPreview(t *testing.T) {
 	}
 }
 
+func TestPreviewPreservesEmptyAndTrailingLines(t *testing.T) {
+	// Empty content -> the 3 header lines only, no fake body line.
+	if got := newFileDiffPreview("e.txt", "", 0, false); strings.Count(got, "\n")+1 != 3 {
+		t.Errorf("empty file should be 3 header lines only, got:\n%s", got)
+	}
+	// Trailing blank lines preserved: "a\n\n\n" -> body +a,+,+ (3) atop 3 headers.
+	if got := newFileDiffPreview("t.txt", "a\n\n\n", 3, false); strings.Count(got, "\n")+1 != 6 {
+		t.Errorf("expected 3 headers + 3 body lines = 6, got:\n%s", got)
+	}
+	// splitDiffLines: empty -> nil; trailing "\n" artifact dropped; no-trailing kept.
+	if got := splitDiffLines(""); got != nil {
+		t.Errorf(`splitDiffLines("") = %v, want nil`, got)
+	}
+	if got := splitDiffLines("a\nb\n"); len(got) != 2 {
+		t.Errorf("splitDiffLines should drop the trailing artifact, got %v", got)
+	}
+	if got := splitDiffLines("a\nb"); len(got) != 2 {
+		t.Errorf("splitDiffLines with no trailing newline should keep all, got %v", got)
+	}
+}
+
 func TestCapPreviewDiff(t *testing.T) {
 	short := "--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a\n+b"
 	if got := capPreviewDiff(short); got != short {

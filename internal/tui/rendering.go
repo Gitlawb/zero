@@ -141,7 +141,9 @@ func (rc rowContext) skip(row transcriptRow) bool {
 		}
 		return row.id != "" && rc.resolved[rcKey(row.runID, row.id)]
 	case rowToolResult:
-		return isHiddenPlumbingTool(row.tool)
+		// Hide only SUCCESSFUL plumbing results; a failed update_plan/tool_search
+		// must still surface its error.
+		return isHiddenPlumbingTool(row.tool) && row.status != tools.StatusError
 	case rowPermission:
 		event := row.permission
 		if event == nil || event.ToolCallID == "" {
