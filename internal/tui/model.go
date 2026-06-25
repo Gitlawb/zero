@@ -1078,14 +1078,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// width, so mirror the width-change bookkeeping (re-wrap the streaming
 			// fade, resize the composer) the WindowSizeMsg path does.
 			if m.noBlockingModal() && m.sidebarAvailable() {
+				// Just show/hide — no transcript notice. The reflow IS the feedback,
+				// and emitting a line every toggle piled up noise in the chat.
 				m.sidebarHidden = !m.sidebarHidden
 				m.lineAges = nil
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
-				notice := "Context sidebar shown · Ctrl+B to hide"
-				if m.sidebarHidden {
-					notice = "Context sidebar hidden · Ctrl+B to show"
-				}
-				return m.appendSystemNotice(notice), nil
+				return m, nil
 			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
