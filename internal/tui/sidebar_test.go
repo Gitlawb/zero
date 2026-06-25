@@ -10,7 +10,47 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 )
+
+// TestSidebarActivityLines: the ACTIVITY feed is a bounded, newest-first list of
+// recent completed work (stripped of the "tool result:" prefix), with a live
+// "generating…" pulse when the run is active and quiet.
+func TestSidebarActivityLines(t *testing.T) {
+	m := model{now: time.Now}
+	m.transcript = []transcriptRow{
+		{kind: rowToolCall, tool: "bash", id: "c1", arg: "mkdir -p boutique-site"},
+		{kind: rowToolResult, tool: "bash", id: "c1", status: tools.StatusOK, text: "tool result: bash ok Command completed with no output."},
+		{kind: rowToolResult, tool: "write_file", id: "c2", status: tools.StatusOK, text: "tool result: write_file ok Created styles.css (1045 lines)."},
+		{kind: rowAssistant, text: "Now the JS…"}, // ignored: not a work result
+	}
+	joined := plainRender(t, strings.Join(m.sidebarActivityLines(40, 10), "\n"))
+
+	wfIdx := strings.Index(joined, "Created styles.css (1045 lines).")
+	bashIdx := strings.Index(joined, "mkdir -p boutique-site")
+	if wfIdx < 0 || bashIdx < 0 {
+		t.Fatalf("activity should list the write_file summary and the bash command:\n%s", joined)
+	}
+	if wfIdx > bashIdx {
+		t.Errorf("activity should be newest-first (write_file before bash):\n%s", joined)
+	}
+	if strings.Contains(joined, "tool result:") {
+		t.Errorf("activity must strip the 'tool result:' prefix:\n%s", joined)
+	}
+	if got := m.sidebarActivityLines(40, 0); got != nil {
+		t.Errorf("zero budget: want nil, got %v", got)
+	}
+
+	// Active + quiet run -> a live "generating…" pulse.
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	live := model{now: func() time.Time { return base.Add(30 * time.Second) }}
+	live.activeRunID = 7
+	live.turnStartedAt = base
+	live.lastStreamActivity = base.Add(2 * time.Second) // 28s quiet
+	if got := plainRender(t, strings.Join(live.sidebarActivityLines(40, 10), "\n")); !strings.Contains(got, "generating") {
+		t.Errorf("active+quiet run should show a generating pulse:\n%s", got)
+	}
+}
 
 func swarmSidebarTestModel(t *testing.T, sessionIDs map[string]string) model {
 	t.Helper()
@@ -131,6 +171,10 @@ func sidebarTestModel() model {
 	// Real conversation content so the home-screen gate doesn't suppress the
 	// sidebar (it stays single-column until the transcript has non-welcome rows).
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	// A plan gives the sidebar content so it isn't auto-hidden as empty (the panel
+	// only claims a column when there are agents or an active plan). Tests that
+	// exercise specific agent/plan states set their own and override this.
+	m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
 	return m
 }
 
@@ -247,6 +291,34 @@ func TestRenderContextSidebarDimensions(t *testing.T) {
 	}
 	if !strings.Contains(plain, "tokens") {
 		t.Fatalf("sidebar missing token floor:\n%s", plain)
+	}
+}
+
+// TestSidebarAutoHidesWhenEmpty: with no agents and no active plan the panel
+// auto-hides and the chat reclaims the full width; adding a plan or an agent
+// brings it back.
+func TestSidebarAutoHidesWhenEmpty(t *testing.T) {
+	m := sidebarTestModel() // has a plan -> sidebar active
+	if !m.sidebarActive() {
+		t.Fatal("expected sidebar active when the model has a plan")
+	}
+
+	// Clear the only content (the plan) -> empty -> auto-hidden.
+	m.plan.steps = nil
+	if m.sidebarHasContent() {
+		t.Fatal("model should have no sidebar content after clearing the plan")
+	}
+	if m.sidebarActive() {
+		t.Error("sidebar should auto-hide with no agents and no active plan")
+	}
+	if got, want := m.chatColumnWidth(), chatWidth(m.width); got != want {
+		t.Errorf("empty sidebar: chat width = %d, want full %d", got, want)
+	}
+
+	// A spawned agent brings the panel back.
+	m.specialists.start("explorer", "look around", "sess-x", time.Now())
+	if !m.sidebarHasContent() || !m.sidebarActive() {
+		t.Error("sidebar should return once an agent spawns")
 	}
 }
 

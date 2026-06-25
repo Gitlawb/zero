@@ -28,6 +28,7 @@ type Options struct {
 	ModelName              string
 	ProviderProfile        config.ProviderProfile
 	FavoriteModels         []string
+	RecapsEnabled          bool
 	Provider               zeroruntime.Provider
 	NewProvider            func(config.ProviderProfile) (zeroruntime.Provider, error)
 	ProbeProviderHealth    func(context.Context, providerhealth.Options) providerhealth.Result

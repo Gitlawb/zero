@@ -340,7 +340,7 @@ func TestTranscriptSelectionOnlyStartsOnTranscriptText(t *testing.T) {
 }
 
 func TestTranscriptSelectionExtractsVisibleTextRange(t *testing.T) {
-	m := mouseTestModel()
+	m := withSidebarContent(mouseTestModel())
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 	textY := firstTranscriptTextMouseY(t, m)
@@ -356,7 +356,7 @@ func TestTranscriptSelectionExtractsVisibleTextRange(t *testing.T) {
 }
 
 func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
-	m := mouseTestModel()
+	m := withSidebarContent(mouseTestModel())
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 	textY := firstTranscriptTextMouseY(t, m)
@@ -372,7 +372,7 @@ func TestTranscriptSelectionUpdatesOnGenericMotion(t *testing.T) {
 }
 
 func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
-	m := mouseTestModel()
+	m := withSidebarContent(mouseTestModel())
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 	textY := firstTranscriptTextMouseY(t, m)
@@ -390,7 +390,7 @@ func TestTranscriptSelectionLeftDragDoesNotResetAnchor(t *testing.T) {
 }
 
 func TestTranscriptSelectionReleaseExtendsRangeWithoutMotion(t *testing.T) {
-	m := mouseTestModel()
+	m := withSidebarContent(mouseTestModel())
 	m.mouseCapture = true
 	m.transcript = appendRow(m.transcript, rowUser, "hello world")
 	textY := firstTranscriptTextMouseY(t, m)
@@ -736,6 +736,14 @@ func mouseTestModel() model {
 	m.height = 30
 	m.altScreen = true
 	m.headerPrinted = true
+	return m
+}
+
+// withSidebarContent gives the model an active plan so the two-column sidebar
+// stays put (an empty panel now auto-hides), for tests that depend on the
+// narrower chat-column geometry.
+func withSidebarContent(m model) model {
+	m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
 	return m
 }
 

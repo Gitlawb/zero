@@ -10,6 +10,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/atotto/clipboard v0.1.4
+	github.com/aymanbagabas/go-udiff v0.4.1
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728

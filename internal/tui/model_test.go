@@ -1128,6 +1128,127 @@ func TestEscCancelsPendingRun(t *testing.T) {
 	}
 }
 
+func TestAgentResponseCompletesStuckPlan(t *testing.T) {
+	runningPlan := func() planPanelState {
+		var s planPanelState
+		s.updateFromItems([]tools.PlanItem{
+			{Content: "a", Status: "completed"},
+			{Content: "b", Status: "in_progress"},
+			{Content: "c", Status: "pending"},
+		}, time.Now())
+		return s
+	}
+
+	t.Run("successful turn reconciles the stuck plan to complete", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		updated, _ := m.Update(agentResponseMsg{runID: 7, rows: []transcriptRow{{kind: rowAssistant, text: "done", final: true}}})
+		if next := updated.(model); !next.plan.isComplete() {
+			t.Fatalf("a successful turn should complete the plan, steps=%+v", next.plan.steps)
+		}
+	})
+
+	t.Run("errored turn leaves the plan incomplete", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		updated, _ := m.Update(agentResponseMsg{runID: 7, err: errors.New("boom")})
+		if next := updated.(model); next.plan.isComplete() {
+			t.Error("an errored turn must not force the plan complete")
+		}
+	})
+
+	t.Run("pending ask_user leaves the plan incomplete", func(t *testing.T) {
+		m := newModel(context.Background(), Options{})
+		m.pending = true
+		m.activeRunID = 7
+		m.plan = runningPlan()
+		m.pendingAskUser = &pendingAskUserPrompt{}
+		updated, _ := m.Update(agentResponseMsg{runID: 7, rows: []transcriptRow{{kind: rowAssistant, text: "done", final: true}}})
+		if next := updated.(model); next.plan.isComplete() {
+			t.Error("a mid-plan ask_user yield must not force the plan complete")
+		}
+	})
+}
+
+// TestToolResultDetailPrefersPreview: the card body uses the rich card-only
+// Display.Preview on a successful result, falls back to Output when there's no
+// preview, and always uses Output (the failure) on an error.
+func TestToolResultDetailPrefersPreview(t *testing.T) {
+	withPreview := agent.ToolResult{
+		Name:    "write_file",
+		Status:  tools.StatusOK,
+		Output:  "Created x.js (300 lines).",
+		Display: tools.Display{Summary: "Created x.js (300 lines).", Kind: "file", Preview: "--- /dev/null\n+++ b/x.js\n@@ -0,0 +1,300 @@\n+const x = 1"},
+	}
+	if got := toolResultDetail(withPreview); !strings.Contains(got, "+const x = 1") {
+		t.Errorf("successful result should use the preview, got %q", got)
+	}
+
+	noPreview := agent.ToolResult{Name: "bash", Status: tools.StatusOK, Output: "exit 0"}
+	if got := toolResultDetail(noPreview); got != "exit 0" {
+		t.Errorf("no preview: want Output, got %q", got)
+	}
+
+	errResult := agent.ToolResult{Name: "write_file", Status: tools.StatusError, Output: "Error: permission denied", Display: tools.Display{Preview: "must not show on error"}}
+	if got := toolResultDetail(errResult); got != "Error: permission denied" {
+		t.Errorf("error result must use Output (the failure), got %q", got)
+	}
+}
+
+// TestReasoningRefreshesActivityClock: a reasoning delta is live provider output,
+// so it must bump lastStreamActivity (else the quiet hint mis-fires mid-think).
+func TestReasoningRefreshesActivityClock(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	now := base
+	m := model{now: func() time.Time { return now }}
+	m.activeRunID = 7
+	m.lastStreamActivity = base
+	now = base.Add(20 * time.Second)
+	updated, _ := m.Update(agentReasoningMsg{runID: 7, delta: "thinking…"})
+	if got := updated.(model).lastStreamActivity; !got.Equal(now) {
+		t.Errorf("reasoning delta should refresh lastStreamActivity to now, got %v", got)
+	}
+}
+
+// TestStaleExplanationDropped: a plan-step explanation result from a previous run
+// (older planDetailGen) is ignored, so it can't repopulate the cleared cache.
+func TestStaleExplanationDropped(t *testing.T) {
+	m := model{now: time.Now, planDetailGen: 2}
+	m.plan.steps = []planStep{{content: "x", status: "completed"}}
+
+	updated, _ := m.Update(planStepExplanationMsg{stepIndex: 0, key: "k", gen: 1, text: "stale"})
+	m = updated.(model)
+	if _, ok := m.stepExplanation["k"]; ok {
+		t.Error("a stale-generation explanation must not populate the cache")
+	}
+
+	updated, _ = m.Update(planStepExplanationMsg{stepIndex: 0, key: "k", gen: 2, text: "fresh"})
+	m = updated.(model)
+	if m.stepExplanation["k"] != "fresh" {
+		t.Errorf("a current-gen explanation should cache, got %q", m.stepExplanation["k"])
+	}
+}
+
+// TestBeginRunResetsSidebarHidden: a new run clears the sidebar's content, so the
+// stale Ctrl+B hide preference is reset (the new run's sidebar isn't suppressed)
+// and the explanation generation advances.
+func TestBeginRunResetsSidebarHidden(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	m.sidebarHidden = true
+	gen := m.planDetailGen
+	m = m.beginRun(nil)
+	if m.sidebarHidden {
+		t.Error("beginRun should reset the Ctrl+B hide preference for the new run")
+	}
+	if m.planDetailGen <= gen {
+		t.Errorf("beginRun should bump planDetailGen, was %d now %d", gen, m.planDetailGen)
+	}
+}
+
 func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = false
@@ -1831,17 +1952,24 @@ func TestReasoningAfterToolCardGetsBlankSeparator(t *testing.T) {
 }
 
 func TestTranscriptReadingColumnHelpers(t *testing.T) {
-	if g := transcriptGutter(160); g != 4 {
-		t.Fatalf("wide gutter = %d, want 4", g)
+	// Wide terminal: a scaled side margin on each side, and the content fills the
+	// rest (column minus both margins) instead of stopping at a fixed cap.
+	if g := transcriptGutter(160); g != 8 {
+		t.Fatalf("wide gutter = %d, want 8", g)
 	}
-	if cw := transcriptContentWidth(160); cw != transcriptContentCap {
-		t.Fatalf("wide contentWidth = %d, want cap %d", cw, transcriptContentCap)
+	if cw := transcriptContentWidth(160); cw != 160-2*8 {
+		t.Fatalf("wide contentWidth = %d, want %d (column minus both margins)", cw, 160-2*8)
 	}
-	if g := transcriptGutter(70); g != 0 {
-		t.Fatalf("narrow gutter = %d, want 0", g)
+	// Very wide terminal: the margin is clamped so it never grows unbounded.
+	if g := transcriptGutter(400); g != 12 {
+		t.Fatalf("very wide gutter = %d, want clamp ceiling 12", g)
 	}
-	if cw := transcriptContentWidth(70); cw != 70 {
-		t.Fatalf("narrow contentWidth = %d, want full 70", cw)
+	// Tiny terminal: no margins, full width so prose never collapses.
+	if g := transcriptGutter(40); g != 0 {
+		t.Fatalf("tiny gutter = %d, want 0", g)
+	}
+	if cw := transcriptContentWidth(40); cw != 40 {
+		t.Fatalf("tiny contentWidth = %d, want full 40", cw)
 	}
 }
 
@@ -1871,10 +1999,11 @@ func TestTranscriptBodyRowsUseReadingColumnAndAlignSelection(t *testing.T) {
 	}
 	rendered := row.render(0)
 
+	maxLine := transcriptContentWidth(width) + gutter // content plus the left indent
 	wroteIndented := false
 	for _, line := range rendered.lines {
-		if w := lipgloss.Width(line); w > transcriptContentCap+gutter {
-			t.Fatalf("body line width %d exceeds reading column %d: %q", w, transcriptContentCap+gutter, line)
+		if w := lipgloss.Width(line); w > maxLine {
+			t.Fatalf("body line width %d exceeds reading column %d: %q", w, maxLine, line)
 		}
 		if strings.TrimSpace(line) != "" {
 			if !strings.HasPrefix(line, strings.Repeat(" ", gutter)) {

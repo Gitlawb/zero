@@ -128,6 +128,25 @@ func TestWriteFileToolCreatesAndProtectsExistingFiles(t *testing.T) {
 	}
 }
 
+func TestWriteFileSummaryReportsLineCount(t *testing.T) {
+	root := t.TempDir()
+	tool := NewWriteFileTool(root)
+	// Three lines, no trailing newline -> "3 lines" (not a byte count).
+	result := tool.Run(context.Background(), map[string]any{
+		"path":    "multi.txt",
+		"content": "one\ntwo\nthree",
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "(3 lines)") {
+		t.Fatalf("summary should report a line count, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, "bytes") {
+		t.Errorf("summary should no longer report bytes: %q", result.Output)
+	}
+}
+
 func TestWriteFileToolAllowsEmptyContent(t *testing.T) {
 	root := t.TempDir()
 
@@ -228,6 +247,70 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	}
 	if string(content) != "const a = 42\nconst b = 2\n" {
 		t.Fatalf("unexpected edited content: %q", string(content))
+	}
+}
+
+func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")
+	res := NewEditFileTool(root).Run(context.Background(), map[string]any{
+		"path": "code.go", "old_string": "const a = 1", "new_string": "const a = 42",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("edit failed: %s", res.Output)
+	}
+	// The model-facing Output stays the one-line summary; the red/green diff lives
+	// on the card-only Display.Preview, so it costs the model zero tokens.
+	if !strings.HasPrefix(res.Output, "Successfully edited") {
+		t.Fatalf("summary must be the Output: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "@@") {
+		t.Fatalf("Output must NOT carry the diff (card-only preview): %q", res.Output)
+	}
+	for _, want := range []string{"@@", "-const a = 1", "+const a = 42"} {
+		if !strings.Contains(res.Display.Preview, want) {
+			t.Fatalf("edit preview missing diff marker %q: %q", want, res.Display.Preview)
+		}
+	}
+}
+
+func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
+	root := t.TempDir()
+	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path": "new.txt", "content": "line one\nline two\n",
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("write failed: %s", res.Output)
+	}
+	if strings.Contains(res.Output, "@@") {
+		t.Fatalf("Output must stay summary-only (the diff is card-only): %q", res.Output)
+	}
+	for _, want := range []string{"@@", "+line one", "+line two"} {
+		if !strings.Contains(res.Display.Preview, want) {
+			t.Fatalf("new-file preview missing additions diff %q: %q", want, res.Display.Preview)
+		}
+	}
+	if strings.Contains(res.Display.Preview, "\n-line") {
+		t.Fatalf("a fresh-create diff must have no removed lines: %q", res.Display.Preview)
+	}
+}
+
+func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "f.txt"), "old line\nkeep\n")
+	res := NewWriteFileTool(root).Run(context.Background(), map[string]any{
+		"path": "f.txt", "content": "new line\nkeep\n", "overwrite": true,
+	})
+	if res.Status != StatusOK {
+		t.Fatalf("overwrite failed: %s", res.Output)
+	}
+	if strings.Contains(res.Output, "@@") {
+		t.Fatalf("Output must stay summary-only (the diff is card-only): %q", res.Output)
+	}
+	for _, want := range []string{"-old line", "+new line"} {
+		if !strings.Contains(res.Display.Preview, want) {
+			t.Fatalf("overwrite preview missing %q: %q", want, res.Display.Preview)
+		}
 	}
 }
 

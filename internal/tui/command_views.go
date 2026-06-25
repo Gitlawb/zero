@@ -629,6 +629,14 @@ func contextCompactionStatus(status string) string {
 	return status
 }
 
+// onOff renders a boolean preference as "on"/"off" for config display.
+func onOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
+}
+
 func (m model) configText() string {
 	return renderCommandOutput(commandOutput{
 		Title:  "Config",
@@ -640,6 +648,7 @@ func (m model) configText() string {
 					"runtime: go",
 					fmt.Sprintf("max turns: %d", m.agentOptions.MaxTurns),
 					"permission mode: " + string(m.permissionMode),
+					"recaps: " + onOff(m.recapsEnabled),
 				},
 			},
 			{

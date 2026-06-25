@@ -4,7 +4,128 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
+
+// TestWorkingPlanLine: the working indicator's second line carries the plan's
+// done/total and the in-progress step while a plan is active, and is empty when
+// there's no plan or the plan is complete.
+func TestWorkingPlanLine(t *testing.T) {
+	m := model{now: time.Now}
+	if got := m.workingPlanLine(); got != "" {
+		t.Errorf("no plan: want empty, got %q", got)
+	}
+
+	m.plan.steps = []planStep{
+		{content: "Research the topic", status: "completed"},
+		{content: "Add product catalog", status: "in_progress"},
+		{content: "Write the docs", status: "pending"},
+	}
+	got := plainRender(t, m.workingPlanLine())
+	if !strings.Contains(got, "plan 1/3") {
+		t.Errorf("active plan line missing count: %q", got)
+	}
+	if !strings.Contains(got, "Add product catalog") {
+		t.Errorf("active plan line missing current step: %q", got)
+	}
+
+	for i := range m.plan.steps {
+		m.plan.steps[i].status = "completed"
+	}
+	if got := m.workingPlanLine(); got != "" {
+		t.Errorf("complete plan: want empty, got %q", got)
+	}
+}
+
+// TestHiddenPlumbingToolsSkippedFromTranscript: the plumbing tools (update_plan,
+// tool_search) render nothing — their call AND result rows are dropped; real
+// work tools still render.
+func TestHiddenPlumbingToolsSkippedFromTranscript(t *testing.T) {
+	rows := []transcriptRow{
+		{kind: rowToolCall, tool: "update_plan", id: "c1", runID: 1},
+		{kind: rowToolResult, tool: "update_plan", id: "c1", runID: 1, text: "10 steps · 2 done"},
+		{kind: rowToolCall, tool: "tool_search", id: "c2", runID: 1},
+		{kind: rowToolResult, tool: "tool_search", id: "c2", runID: 1, text: "select:swarm_spawn,…"},
+		{kind: rowToolResult, tool: "bash", id: "c3", runID: 1, text: "ok"},
+	}
+	rc := buildRowContext(rows)
+	for _, i := range []int{0, 1, 2, 3} {
+		if !rc.skip(rows[i]) {
+			t.Errorf("plumbing row %d (%s/%v) should be skipped", i, rows[i].tool, rows[i].kind)
+		}
+	}
+	if rc.skip(rows[4]) {
+		t.Error("a normal tool result (bash) must not be skipped")
+	}
+
+	// A FAILED plumbing result must still render — its error has to surface.
+	failed := transcriptRow{kind: rowToolResult, tool: "update_plan", id: "c9", runID: 1, status: tools.StatusError, text: "tool result: update_plan error boom"}
+	if buildRowContext([]transcriptRow{failed}).skip(failed) {
+		t.Error("a failed plumbing result must NOT be skipped (the error must show)")
+	}
+
+	if !isHiddenPlumbingTool("update_plan") || !isHiddenPlumbingTool("tool_search") {
+		t.Error("update_plan and tool_search must be hidden plumbing")
+	}
+	if isHiddenPlumbingTool("write_file") || isHiddenPlumbingTool("web_search") {
+		t.Error("real work tools must NOT be hidden")
+	}
+}
+
+// TestQuietGenerationHint: after a silent stretch during an active run, the
+// working line shows a "still generating…" cue with an advancing timer; while
+// output is flowing (recent activity) or when idle, it stays empty.
+func TestQuietGenerationHint(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := model{now: func() time.Time { return base.Add(30 * time.Second) }}
+	m.activeRunID = 7
+	m.turnStartedAt = base
+
+	// Recently active -> no hint.
+	m.lastStreamActivity = base.Add(28 * time.Second)
+	if got := m.quietGenerationHint(); got != "" {
+		t.Errorf("recent activity: want no hint, got %q", got)
+	}
+
+	// Quiet for >= the threshold -> a "still generating…" cue appears, and shows
+	// up on the rendered working line.
+	m.lastStreamActivity = base.Add(5 * time.Second) // 25s quiet at now
+	if got := m.quietGenerationHint(); !strings.Contains(got, "still generating") {
+		t.Errorf("quiet stretch: want a still-generating hint, got %q", got)
+	}
+	if line := plainRender(t, m.workingStatusLine()); !strings.Contains(line, "still generating") {
+		t.Errorf("working line should carry the quiet hint, got %q", line)
+	}
+
+	// No active run -> never a hint.
+	idle := m
+	idle.activeRunID = 0
+	if got := idle.quietGenerationHint(); got != "" {
+		t.Errorf("idle: want no hint, got %q", got)
+	}
+}
+
+// TestQuietHintHiddenWhenSidebarShowsIt: when the context sidebar is up (it
+// carries the "generating…" pulse in ACTIVITY), the working line must NOT also
+// show the hint — it appears in exactly one place.
+func TestQuietHintHiddenWhenSidebarShowsIt(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := sidebarTestModel() // alt-screen + a plan -> sidebar active
+	m.now = func() time.Time { return base.Add(30 * time.Second) }
+	m.activeRunID = 7
+	m.turnStartedAt = base
+	m.lastStreamActivity = base.Add(2 * time.Second) // 28s quiet
+	if !m.sidebarActive() {
+		t.Fatal("precondition: sidebar should be active for this model")
+	}
+	if line := plainRender(t, m.workingStatusLine()); strings.Contains(line, "still generating") {
+		t.Errorf("working line must NOT duplicate the hint when the sidebar shows it:\n%s", line)
+	}
+	if act := plainRender(t, strings.Join(m.sidebarActivityLines(sidebarWidth(m.width), 10), "\n")); !strings.Contains(act, "generating") {
+		t.Errorf("the sidebar ACTIVITY should carry the generating pulse instead:\n%s", act)
+	}
+}
 
 func TestFormatWorkingElapsed(t *testing.T) {
 	cases := map[time.Duration]string{

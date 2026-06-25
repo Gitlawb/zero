@@ -343,6 +343,17 @@ func (t denyTool) Run(context.Context, map[string]any) Result { return Result{St
 
 // Regression (Vasanthdev2004): the EARLY denial/permission/unknown-tool returns
 // must be scrubbed too, not just the tool-execution paths.
+func TestScrubResultSecretsRedactsPreview(t *testing.T) {
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	res := scrubResultSecrets(Result{Display: Display{Preview: "+++ b/x\n+token := \"" + secret + "\""}})
+	if strings.Contains(res.Display.Preview, secret) {
+		t.Errorf("Display.Preview (the card-only code preview) must be redacted, leaked: %q", res.Display.Preview)
+	}
+	if !res.Redacted {
+		t.Error("scrubbing a secret from the preview should set Redacted")
+	}
+}
+
 func TestRunWithOptionsScrubsSecretsOnDenialPaths(t *testing.T) {
 	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	reg := NewRegistry()

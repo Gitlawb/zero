@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type writeFileTool struct {
@@ -91,6 +92,15 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 		}
 	}
 
+	// Capture the prior content (before we replace it) so an overwrite can show a
+	// real diff; a fresh create stays "" and previews as all-additions.
+	priorContent := ""
+	if existed {
+		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
+			priorContent = string(prev)
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
@@ -109,10 +119,19 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 	if existed {
 		verb = "Overwrote"
 	}
-	summary := fmt.Sprintf("%s %s (%d bytes).", verb, relativePath, len([]byte(content)))
+	// Report line count (not bytes): "Wrote 282 lines" reads as real work at a
+	// glance, where a byte total is opaque noise.
+	lines := strings.Count(content, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		lines++
+	}
+	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	result.Display = Display{Summary: summary, Kind: "file"}
+	// Card-only preview: a real unified diff (all-green for a create, red/green for
+	// an overwrite) on Display.Preview. Output stays the summary, so the model never
+	// re-reads the file — the rich preview costs zero model tokens.
+	result.Display = Display{Summary: summary, Kind: "file", Preview: boundedUnifiedDiff(relativePath, priorContent, content)}
 	return result
 }
 

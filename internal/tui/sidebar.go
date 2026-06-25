@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // sidebar geometry. The sidebar takes ~30% of the width, clamped so it never
@@ -76,7 +78,25 @@ func (m model) sidebarAvailable() bool {
 	if m.transcriptEmpty() {
 		return false
 	}
+	// Auto-hide when the panel has nothing to show (no sub-agents and no active
+	// plan): a fixed-width column of mostly empty space is wasted, so reclaim it
+	// for the full-width chat. The panel returns the moment an agent spawns or a
+	// plan starts. (Ctrl+B still force-hides it when there IS content.)
+	if !m.sidebarHasContent() {
+		return false
+	}
 	return true
+}
+
+// sidebarHasContent reports whether the context sidebar has anything worth a
+// column: at least one agent (a specialist delegation or a swarm member) or a
+// non-empty plan. Used to auto-hide the panel — and reclaim its width for the
+// chat — during plain idle stretches with neither.
+func (m model) sidebarHasContent() bool {
+	if len(m.sidebarSpecialists()) > 0 || len(m.swarmSpawnedAgents()) > 0 {
+		return true
+	}
+	return !m.plan.isEmpty()
 }
 
 // chatColumnWidth is the chat's render width: the full chat width normally, and
@@ -93,29 +113,30 @@ func (m model) chatColumnWidth() int {
 	return chatWidth(m.width)
 }
 
-// transcriptContentCap is the readable measure the chat BODY wraps to, so text
-// on a wide terminal doesn't run edge-to-edge. The frame/composer/sidebar keep
-// the full chatColumnWidth; only transcript rows use the reading column.
-const transcriptContentCap = 90
+// transcriptGutterMinColumn is the column width below which the body uses the
+// full width (no side margins). Narrow columns (e.g. the chat column in the
+// two-column layout) have no space to waste, so they stay flush; the breathing
+// room is only for wide terminals where text would otherwise leave a big void.
+const transcriptGutterMinColumn = 98
 
-// transcriptGutter is the fixed left margin applied to transcript body rows so
-// the reading column floats off the left edge. Zero on terminals too narrow to
-// afford it (the body then uses the full column, just capped).
+// transcriptGutter is the side margin applied to transcript body rows so the
+// reading column floats off both edges instead of running flush. It scales gently
+// with the column (a wider terminal earns a little more breathing room), is
+// applied on the left as an indent, and is mirrored on the right by
+// transcriptContentWidth. Zero on terminals too narrow to spare it.
 func transcriptGutter(columnWidth int) int {
-	if columnWidth <= transcriptContentCap+8 {
+	if columnWidth <= transcriptGutterMinColumn {
 		return 0
 	}
-	return 4
+	return clamp(columnWidth/20, 4, 12)
 }
 
 // transcriptContentWidth is the wrap width for transcript body rows: the column
-// width minus the gutter, capped at transcriptContentCap. Degrades to the full
-// column on tiny terminals so prose never collapses to the wrap floor.
+// minus a margin on each side, so the chat fills most of a wide terminal with a
+// little breathing room rather than stopping at a fixed reading cap. Degrades to
+// the full column on tiny terminals so prose never collapses to the wrap floor.
 func transcriptContentWidth(columnWidth int) int {
-	cw := columnWidth - transcriptGutter(columnWidth)
-	if cw > transcriptContentCap {
-		cw = transcriptContentCap
-	}
+	cw := columnWidth - 2*transcriptGutter(columnWidth)
 	if cw < 24 {
 		return columnWidth
 	}
@@ -581,6 +602,16 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, planLines...)
 	}
 
+	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
+	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
+	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
+	// rather than letting the end-truncation eat into the plan. Absent when empty.
+	if activityLines := m.sidebarActivityLines(width, maxInt(0, height-1-len(lines))); len(activityLines) > 0 {
+		add("")
+		add(sidebarHeader("ACTIVITY", width))
+		lines = append(lines, activityLines...)
+	}
+
 	// Token readout pinned to the bottom.
 	tokenLine := m.sidebarTokenLine(width)
 	// Reserve the bottom row for tokens; pad the gap so it sits at the floor.
@@ -682,6 +713,98 @@ func (m model) sidebarPlanLines(width int) []string {
 		lines = append(lines, " "+icon+" "+body)
 	}
 	return lines
+}
+
+// maxSidebarActivityLines caps the ACTIVITY feed so it stays a glanceable tail,
+// not a scrolling log.
+const maxSidebarActivityLines = 5
+
+// maxSidebarActivityScan bounds how many trailing transcript rows the activity
+// feed inspects per render, so a sparse-work transcript stays O(window).
+const maxSidebarActivityScan = 200
+
+// sidebarActivityLines builds the ACTIVITY feed: a live "generating…" pulse (when
+// the run has gone quiet) atop the most recent completed work (files written,
+// commands run). It scans the transcript BACKWARD and stops after the cap, so the
+// cost is bounded by the cap — never a full-transcript walk per frame. budget is
+// the rows available before the token floor; the feed clips itself to it.
+func (m model) sidebarActivityLines(width, budget int) []string {
+	if budget <= 0 {
+		return nil
+	}
+	room := maxInt(4, width-3)
+	limit := minInt(maxSidebarActivityLines, budget)
+	var work []string
+	// Bound the rows inspected per render so a long, work-sparse transcript can't
+	// turn this hot path into a full O(transcript) walk; recent work sits near the
+	// end, so a window comfortably finds the latest items.
+	scanned := 0
+	for i := len(m.transcript) - 1; i >= 0 && len(work) < limit && scanned < maxSidebarActivityScan; i-- {
+		scanned++
+		row := m.transcript[i]
+		if row.kind != rowToolResult || !isPlanWorkTool(row.tool) {
+			continue
+		}
+		glyph := zeroTheme.green.Render("✓")
+		if row.status == tools.StatusError {
+			glyph = zeroTheme.red.Render("✗")
+		}
+		work = append(work, " "+glyph+" "+zeroTheme.muted.Render(truncateStep(m.activitySummary(row), room)))
+	}
+	live := ""
+	if m.activeRunID != 0 {
+		if hint := m.quietGenerationHint(); hint != "" {
+			live = " " + zeroTheme.accent.Render("•") + " " + zeroTheme.faint.Render(truncateStep(hint, room))
+		}
+	}
+	lines := make([]string, 0, len(work)+1)
+	if live != "" {
+		lines = append(lines, live)
+	}
+	lines = append(lines, work...)
+	if len(lines) > budget {
+		lines = lines[:budget]
+	}
+	return lines
+}
+
+// activitySummary renders one ACTIVITY line: a command's command-line (recovered
+// from its call row) for bash/exec, else the tool result's first line with the
+// "tool result: <tool> <status> " prefix stripped (e.g. "Created styles.css
+// (1045 lines).").
+func (m model) activitySummary(row transcriptRow) string {
+	if isPlanCommandTool(row.tool) {
+		if cmd := m.activityCommandForRow(row.id, row.runID); cmd != "" {
+			return row.tool + " · " + cmd
+		}
+		return row.tool
+	}
+	text := strings.TrimSpace(strings.SplitN(row.text, "\n", 2)[0])
+	status := row.status
+	if status == "" {
+		status = tools.StatusOK
+	}
+	text = strings.TrimPrefix(text, fmt.Sprintf("tool result: %s %s ", row.tool, status))
+	if strings.TrimSpace(text) == "" {
+		return row.tool
+	}
+	return text
+}
+
+// activityCommandForRow recovers a command tool's command-line from its paired
+// call row (whose arg hint carries the command), matched by BOTH id and runID so
+// a reused tool-call id from a later run can't attribute the wrong command.
+func (m model) activityCommandForRow(id string, runID int) string {
+	if id == "" {
+		return ""
+	}
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		row := m.transcript[i]
+		if row.kind == rowToolCall && row.id == id && row.runID == runID {
+			return row.arg
+		}
+	}
+	return ""
 }
 
 // sidebarTokenLine renders the bottom token/context readout. It prefers the

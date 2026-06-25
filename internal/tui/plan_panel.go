@@ -68,24 +68,40 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 	// both inherit the SAME prior entry's timestamps; positional order then breaks
 	// the tie, giving duplicate-text steps their own start/complete times (L22).
 	prevUsed := make([]bool, len(prev))
+	// When the plan length is unchanged the model usually edited steps in place
+	// (commonly just rewording the in-progress one). Fall back to positional
+	// carry-over for any item that didn't content-match, so a reworded step keeps
+	// its timers instead of resetting its elapsed clock to zero mid-progress.
+	sameCount := len(prev) == len(items)
 	next := make([]planStep, 0, len(items))
-	for _, item := range items {
+	for i, item := range items {
 		step := planStep{
 			content: item.Content,
 			status:  item.Status,
 			notes:   item.Notes,
 		}
 		// Carry over timestamps from the first unconsumed prior step with the same content.
+		matched := false
 		for pi := range prev {
 			if !prevUsed[pi] && prev[pi].content == step.content {
 				step.startedAt = prev[pi].startedAt
 				step.completedAt = prev[pi].completedAt
 				prevUsed[pi] = true
+				matched = true
 				break
 			}
 		}
+		if !matched && sameCount && i < len(prev) && !prevUsed[i] {
+			step.startedAt = prev[i].startedAt
+			step.completedAt = prev[i].completedAt
+			prevUsed[i] = true
+		}
 		switch step.status {
 		case "in_progress":
+			// A reworded/carried-over step that became in_progress must not inherit a
+			// prior terminal step's completedAt — that would render an old finished
+			// duration instead of a live running clock.
+			step.completedAt = time.Time{}
 			if step.startedAt.IsZero() {
 				step.startedAt = now
 			}
@@ -96,6 +112,8 @@ func (s *planPanelState) updateFromItems(items []tools.PlanItem, now time.Time) 
 			if step.completedAt.IsZero() {
 				step.completedAt = now
 			}
+		default: // pending: never carries a completion timestamp.
+			step.completedAt = time.Time{}
 		}
 		next = append(next, step)
 	}
@@ -136,6 +154,44 @@ func (s planPanelState) isComplete() bool {
 		}
 	}
 	return true
+}
+
+// completeRemaining force-completes the plan when the agent finished the whole
+// task but never sent a final update_plan marking the last steps done. It flips
+// every non-terminal step to "completed" and backfills any missing timestamps,
+// then stamps the panel-level completedAt — the same end state updateFromItems
+// produces for a fully-completed plan — so the panel reads "PLAN COMPLETE"
+// instead of staying stuck mid-progress. No-op on an empty or already-complete
+// plan; a legitimately failed step keeps its "failed" status. Callers must
+// invoke this ONLY when the run genuinely finished (no error, no mid-plan yield
+// for ask_user/permission/spec-review), since it asserts the remaining work was
+// actually done.
+func (s *planPanelState) completeRemaining(now time.Time) {
+	if len(s.steps) == 0 || s.isComplete() {
+		return
+	}
+	for i := range s.steps {
+		switch s.steps[i].status {
+		case "completed", "failed":
+			// Already terminal: preserve status, just backfill timestamps so the
+			// per-step duration doesn't render a zero span.
+			if s.steps[i].startedAt.IsZero() {
+				s.steps[i].startedAt = now
+			}
+			if s.steps[i].completedAt.IsZero() {
+				s.steps[i].completedAt = now
+			}
+		default: // "pending" or "in_progress": the agent finished it without reporting it.
+			s.steps[i].status = "completed"
+			if s.steps[i].startedAt.IsZero() {
+				s.steps[i].startedAt = now
+			}
+			s.steps[i].completedAt = now
+		}
+	}
+	if s.completedAt.IsZero() {
+		s.completedAt = now
+	}
 }
 
 // visible reports whether renderPlanPanel should emit anything. A finished
@@ -232,12 +288,16 @@ func (m model) renderPlanPanel(width int) string {
 // full list via m.plan.expanded, but the height budget always wins to keep the
 // composer on screen.
 func (m model) renderPinnedPlanPanel(width int, maxHeight int) string {
-	// When the two-column layout is active the plan lives in the context
-	// sidebar (FILES / PLAN / tokens), so suppress the pinned panel above the
-	// composer to avoid showing it twice. Both the real model (sidebarActive)
-	// and the narrow chat-column copy (hidePinnedPlan) suppress it, so the
-	// view and the mouse-geometry frame stay aligned.
-	if m.hidePinnedPlan || m.sidebarActive() {
+	// The pinned panel is only for terminals where the context sidebar CANNOT
+	// host the plan (too narrow / inline mode). Whenever the two-column layout is
+	// available — whether the sidebar is shown OR collapsed with Ctrl+B — the
+	// plan's home is the sidebar, so suppress the pinned copy: a Ctrl+B hide
+	// should hide the plan entirely, not resurrect it above the composer. Gating
+	// on sidebarAvailable (not sidebarActive) covers the hidden case too. The
+	// hidePinnedPlan flag additionally suppresses it in the two-column chat-column
+	// copy. Both the view and the mouse-geometry frame call footerView, so this
+	// stays consistent.
+	if m.hidePinnedPlan || m.sidebarAvailable() {
 		return ""
 	}
 	if !m.plan.visible(m.now()) {
@@ -294,19 +354,43 @@ func (m model) renderPlanSummaryLine(width int) string {
 	return zeroTheme.accent.Render(label + truncateStep(current, room))
 }
 
+// currentStepContent returns the content of the step the plan is "on": the
+// in_progress step, else the first step not yet in a terminal status, else the
+// first step. Used by the header so the title names the step actually being
+// worked, not always step 1 (which read as a stuck plan).
+func currentStepContent(steps []planStep) string {
+	for _, step := range steps {
+		if step.status == "in_progress" {
+			return step.content
+		}
+	}
+	for _, step := range steps {
+		if step.status != "completed" && step.status != "failed" {
+			return step.content
+		}
+	}
+	if len(steps) > 0 {
+		return steps[0].content
+	}
+	return ""
+}
+
 // renderPlanHeader builds the single header line. While running it shows the
 // live spinner, the truncated first step, the done/total count, and the
 // elapsed time in the accent color; once complete it shows a green check and
 // "PLAN COMPLETE".
 func renderPlanHeader(state planPanelState, spinnerView string, done, total int, elapsed time.Duration) string {
-	first := ""
+	// Show the step the plan is currently ON (in_progress, else first incomplete),
+	// not always step 1 — otherwise the header text never advances and a running
+	// plan reads as stuck even while the done/total count climbs.
+	current := ""
 	if total > 0 {
-		first = truncateStep(state.steps[0].content, 40)
+		current = truncateStep(currentStepContent(state.steps), 40)
 	}
 	if state.isComplete() {
 		return zeroTheme.green.Render(fmt.Sprintf("✓ PLAN COMPLETE · %d/%d · %s", done, total, formatElapsedSeconds(elapsed)))
 	}
-	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, first, done, total, formatElapsedSeconds(elapsed)))
+	return zeroTheme.accent.Render(fmt.Sprintf("%s PLAN · %s · %d/%d · %s", spinnerView, current, done, total, formatElapsedSeconds(elapsed)))
 }
 
 // renderPlanStepLine renders one step row: an indent, a status icon, the

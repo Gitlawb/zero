@@ -122,12 +122,18 @@ type model struct {
 	composerSelection     composerSelectionState
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
-	plan        planPanelState
-	specialists specialistTracker
-	subchat     subchatState
-	altScreen   bool
-	setup       setupState
-	setupSave   func(SetupSelection) (SetupResult, error)
+	plan            planPanelState
+	specialists     specialistTracker
+	stepWork        map[string][]planStepWork // file mutations + commands captured per in_progress plan step, for the clickable step detail
+	stepNarration   map[string][]string       // the agent's own prose narration captured per in_progress plan step, for the step detail's explanation
+	planDetailOpen  bool                      // a plan-step detail card is currently shown (click-to-toggle)
+	planDetailStep  int                       // which step index the shown detail card is for
+	planDetailGen   int                       // bumped each run; an in-flight explanation result from an older gen is dropped
+	stepExplanation map[string]string         // model-written step write-ups, keyed by planStepExplanationKey, cached so re-clicking is instant
+	subchat         subchatState
+	altScreen       bool
+	setup           setupState
+	setupSave       func(SetupSelection) (SetupResult, error)
 	// spinner animates the running-tool glyph in card heads. Its tick is started
 	// with each run and stops itself once pending clears (the TickMsg is simply
 	// not forwarded), so an idle UI schedules no timers.
@@ -286,6 +292,8 @@ type model struct {
 	mcpManager                   *mcpManagerState
 	mcpAddWizard                 *mcpAddWizardState
 	favoriteModels               map[string]bool
+	recapsEnabled                bool         // post-turn "※ recap:" line (config: recaps on|off)
+	recappedRuns                 map[int]bool // per-run guard so a recap fires at most once per turn
 	modelPickerLoading           bool
 	modelPickerLoadingProviderID string
 	modelPickerLoadError         string
@@ -370,6 +378,20 @@ type agentRowMsg struct {
 type planUpdateMsg struct {
 	runID int
 	items []tools.PlanItem
+}
+
+// planStepExplanationMsg carries the model's fresh, plain-English write-up of a
+// clicked plan step back to the live model (the one-shot request runs on a
+// goroutine via a tea.Cmd, so it can't mutate m directly). text is the written
+// explanation; err is set when the request failed (the card then falls back to
+// the local summary). key caches the result so re-clicking the step in the same
+// state is instant; stepIndex re-renders the card in place when it's still open.
+type planStepExplanationMsg struct {
+	stepIndex int
+	key       string
+	gen       int // the planDetailGen when the request started; stale gens are ignored
+	text      string
+	err       error
 }
 
 // specialistStartMsg carries specialist start info from the OnToolCall
@@ -593,6 +615,7 @@ func newModel(ctx context.Context, options Options) model {
 		modelName:              options.ModelName,
 		providerProfile:        options.ProviderProfile,
 		favoriteModels:         favoriteModelSet(options.FavoriteModels),
+		recapsEnabled:          options.RecapsEnabled,
 		provider:               options.Provider,
 		newProvider:            options.NewProvider,
 		probeProviderHealth:    options.ProbeProviderHealth,
@@ -635,7 +658,11 @@ func newModel(ctx context.Context, options Options) model {
 		applyTheme(m.themeMode, true)
 	}
 	m.reducedMotion = defaultReducedMotion()
-	m.fadeDisabled = defaultFadeDisabled() || m.reducedMotion
+	// The streaming-text fade (a lime→ink glow on freshly streamed lines) is
+	// disabled: it read as a distracting glow rather than a subtle liveness cue.
+	// Streaming text always renders statically at base ink (the disabled path in
+	// styleStreamingLine), so no accent glow and no per-line fade ticks.
+	m.fadeDisabled = true
 	m.refreshMCPViewState()
 	return m
 }
@@ -1060,14 +1087,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// width, so mirror the width-change bookkeeping (re-wrap the streaming
 			// fade, resize the composer) the WindowSizeMsg path does.
 			if m.noBlockingModal() && m.sidebarAvailable() {
+				// Just show/hide — no transcript notice. The reflow IS the feedback,
+				// and emitting a line every toggle piled up noise in the chat.
 				m.sidebarHidden = !m.sidebarHidden
 				m.lineAges = nil
 				m.input.SetWidth(maxInt(20, m.chatColumnWidth()-14))
-				notice := "Context sidebar shown · Ctrl+B to hide"
-				if m.sidebarHidden {
-					notice = "Context sidebar hidden · Ctrl+B to show"
-				}
-				return m.appendSystemNotice(notice), nil
+				return m, nil
 			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
@@ -1276,6 +1301,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streamCallDecoder.feed(msg.fragment)
+		// A streamed tool-call argument (e.g. a file's contents in write_file) is
+		// real generated output: count it toward the live token estimate so the
+		// "↑ N tok" pulse climbs during a long write, and bump lastStreamActivity so
+		// the quiet-generation hint stays clear of an actively-streaming provider.
+		m.turnStreamedRunes += utf8.RuneCountInString(msg.fragment)
+		m.lastStreamActivity = m.now()
 		return m, nil
 	case agentTextMsg:
 		if msg.runID != m.activeRunID {
@@ -1312,6 +1343,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.streamingReasoning += msg.delta
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
+		// Reasoning IS live provider output, so refresh the activity clock — else the
+		// quiet-generation hint can wrongly read "still generating…" mid-think.
+		if msg.delta != "" {
+			m.lastStreamActivity = m.now()
+		}
 		return m, nil
 	case spinner.TickMsg:
 		// Record when swarm members first finish so the sidebar can linger them
@@ -1494,6 +1530,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runCancel = nil
 		m.activeRunID = 0
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
+		// A fully successful turn means the task is done. Weaker models often
+		// forget the final update_plan, leaving the panel stuck mid-progress;
+		// reconcile it to complete here. Read pendingAskUser/pendingPermission
+		// BEFORE the reset below clears them, and skip spec-draft reviews — those
+		// are legitimate mid-plan err==nil yields where the plan is NOT done.
+		if msg.err == nil && msg.specReview == nil &&
+			m.pendingAskUser == nil && m.pendingPermission == nil {
+			m.plan.completeRemaining(m.now())
+		}
 		m.pendingPermission = nil
 		m.pendingAskUser = nil
 		liveUsageCount := m.liveUsageCounts[msg.runID]
@@ -1552,14 +1597,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A successful turn gives the session real content; if it still carries its
 		// default first-message title, generate a concise one in the background
 		// (one-shot per session). A failed turn is skipped — there's nothing to name.
-		var titleCmd tea.Cmd
+		var titleCmd, recapCmd tea.Cmd
 		if msg.err == nil {
 			m, titleCmd = m.maybeAutoTitleActiveSession()
+			// Post-turn recap (gated on the recaps preference): one short sentence
+			// summarizing the turn's final answer, shown as a "※ recap:" footnote.
+			var finalAnswer string
+			for _, row := range msg.rows {
+				if row.kind == rowAssistant && row.final {
+					finalAnswer = row.text
+				}
+			}
+			m, recapCmd = m.maybeRecapTurn(msg.runID, finalAnswer)
 		}
 		next, queuedCmd := m.launchQueuedMessageIfReady()
-		return next, tea.Batch(titleCmd, queuedCmd)
+		return next, tea.Batch(titleCmd, recapCmd, queuedCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
+	case recapGeneratedMsg:
+		return m.handleRecapGenerated(msg)
 	case compactResultMsg:
 		if !m.compactInFlight {
 			return m, nil
@@ -1587,6 +1643,33 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.plan.updateFromItems(msg.items, m.now())
+		return m, nil
+	case planStepExplanationMsg:
+		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
+		// stepExplanation, so a stale in-flight write-up must not repopulate the
+		// cache or overwrite the new run's data.
+		if msg.gen != m.planDetailGen {
+			return m, nil
+		}
+		// Cache the write-up so re-clicking the step is instant; an empty result
+		// (failed/blank) caches "" so the card shows the local fallback summary and
+		// we don't retry the model on every re-click. Only re-render the card when
+		// this step's detail is still the one open (the user may have closed it or
+		// clicked another step while the request was in flight).
+		if m.stepExplanation == nil {
+			m.stepExplanation = map[string]string{}
+		}
+		text := strings.TrimSpace(msg.text)
+		if msg.err != nil {
+			text = ""
+		}
+		m.stepExplanation[msg.key] = text
+		if m.planDetailOpen && m.planDetailStep == msg.stepIndex &&
+			msg.stepIndex >= 0 && msg.stepIndex < len(m.plan.steps) &&
+			planStepExplanationKey(m.plan.steps[msg.stepIndex]) == msg.key {
+			m.transcript = dropTranscriptRowsByID(m.transcript, planStepDetailRowID)
+			m.transcript = m.appendPlanStepCard(msg.stepIndex, text, false)
+		}
 		return m, nil
 	case agentUsageMsg:
 		if msg.runID != m.activeRunID {
@@ -1664,6 +1747,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
+				// This interim narration is the agent explaining what it's about to
+				// do — attribute it to the active plan step so the step-detail card
+				// can replay the agent's own account of the work.
+				m = m.captureStepNarration(text)
 			}
 			m.streamingText = ""
 			// The tool call has finalized into its card — drop the live "writing"
@@ -1674,6 +1761,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the chat with identical blocks.
 		m.transcript = collapseRepeatedStatusCard(m.transcript, msg.row)
 		m.transcript = appendTranscriptRow(m.transcript, msg.row)
+		m = m.captureStepWork(msg.row)
 		return m, nil
 	case swarmSessionsMsg:
 		// Merge completed swarm members' session ids so their AGENTS sidebar rows
@@ -2382,6 +2470,14 @@ func (m model) workingActivity() string {
 	return "thinking"
 }
 
+// toolCardSuppressedInTranscript reports tools whose transcript card is redundant
+// because a dedicated UI surface already shows their state: Task (its specialist
+// card) and update_plan (the pinned plan panel + PLAN sidebar). Their session
+// events are still recorded; only the visible card is skipped.
+func toolCardSuppressedInTranscript(name string) bool {
+	return name == "Task" || name == "update_plan"
+}
+
 func (m model) workingStatusLine() string {
 	// Cosine ripple FX: "Working" breathes through a cold-to-warm theme ramp, the
 	// wave moving one character per spinner tick (shared m.spinnerPhase clock). A
@@ -2401,7 +2497,46 @@ func (m model) workingStatusLine() string {
 	// 0) so the counter is never missing — the authoritative totals stay in the
 	// status line and sidebar; this is the at-a-glance "it's generating" pulse.
 	line += zeroTheme.faint.Render("  ·  " + m.workingTokenIndicator())
+	// If the model has gone quiet (no streamed text, reasoning, OR tool-call output
+	// for a while — common when a provider buffers a large tool call instead of
+	// streaming it), say so plainly with an advancing timer, so a long silent
+	// generation never reads as a frozen screen. Only on the working line when the
+	// context sidebar isn't showing it — the sidebar's ACTIVITY pulse carries it
+	// whenever the sidebar is up, so it never appears in both places at once.
+	if !m.sidebarActive() {
+		if hint := m.quietGenerationHint(); hint != "" {
+			line += zeroTheme.amber.Render("  ·  " + hint)
+		}
+	}
+	// A second line carries live plan progress (how far along + the current step)
+	// so a long working stretch shows the task advancing without consulting the
+	// sidebar. Replaces the old per-call update_plan transcript cards. Empty when
+	// there is no active plan.
+	if planLine := m.workingPlanLine(); planLine != "" {
+		line += "\n" + planLine
+	}
 	return line
+}
+
+// workingPlanLine is the optional second line under the working indicator: the
+// plan's done/total and the step currently in progress. Empty when there is no
+// plan or the plan is already complete.
+func (m model) workingPlanLine() string {
+	if m.plan.isEmpty() || m.plan.isComplete() {
+		return ""
+	}
+	total := len(m.plan.steps)
+	done := 0
+	for _, step := range m.plan.steps {
+		if step.status == "completed" || step.status == "failed" {
+			done++
+		}
+	}
+	text := fmt.Sprintf("· plan %d/%d", done, total)
+	if current := truncateStep(currentStepContent(m.plan.steps), 48); current != "" {
+		text += " · " + current
+	}
+	return "  " + zeroTheme.faint.Render(text)
 }
 
 // workingTokenIndicator renders a live "↑ <n> tok" estimate of the tokens
@@ -2419,6 +2554,33 @@ func (m model) workingTokenIndicator() string {
 		tokens = 1
 	}
 	return "↑ " + humanCount(tokens) + " tok"
+}
+
+// quietWorkingHint is how long the stream must be silent (no streamed text,
+// reasoning, or tool-call output) during an active turn before the working line
+// calls out that it's still generating — so a provider that buffers a big tool
+// call (instead of streaming the file as it's written) doesn't read as stuck.
+const quietWorkingHint = 8 * time.Second
+
+// quietGenerationHint returns a "still generating…" cue with an advancing
+// quiet-timer when the active turn has produced no streamed output for a while,
+// else "". The advancing number is itself the liveness signal.
+func (m model) quietGenerationHint() string {
+	if m.activeRunID == 0 {
+		return ""
+	}
+	last := m.lastStreamActivity
+	if last.IsZero() {
+		last = m.turnStartedAt
+	}
+	if last.IsZero() {
+		return ""
+	}
+	quiet := m.now().Sub(last)
+	if quiet < quietWorkingHint {
+		return ""
+	}
+	return "still generating… " + formatWorkingElapsed(quiet)
 }
 
 // formatWorkingElapsed renders a turn's running time compactly: "8s", "1m04s".
@@ -3178,6 +3340,12 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
 	case commandConfig:
+		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg != "" {
+			var text string
+			m, text = m.handleConfigCommand(arg)
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+			return m, nil
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.configText()})
 		return m, nil
 	case commandDebug:
@@ -3420,6 +3588,15 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
+	m.stepWork = nil
+	m.stepNarration = nil
+	m.stepExplanation = nil
+	m.planDetailOpen = false
+	m.planDetailGen++ // invalidate any in-flight step-explanation from the prior run
+	// A new run clears the sidebar's content (plan/agents), so the user's Ctrl+B
+	// hide was for the OLD context — reset it so the new run's sidebar isn't
+	// suppressed by a stale preference.
+	m.sidebarHidden = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
@@ -3779,9 +3956,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				arg:    argHintSecondary(call.Arguments),
 				runID:  runID,
 			}
-			// A Task delegation is shown by the specialist card below, so skip its
-			// redundant "tool call: Task" transcript row — the card supersedes it.
-			if call.Name != "Task" {
+			// A Task delegation is shown by the specialist card below, and update_plan
+			// is shown by the pinned plan panel + PLAN sidebar, so skip both redundant
+			// transcript cards — the dedicated UI supersedes them.
+			if !toolCardSuppressedInTranscript(call.Name) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
@@ -3859,12 +4037,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				text:   toolResultRowText(result),
 				tool:   result.Name,
 				status: result.Status,
-				detail: result.Output,
+				detail: toolResultDetail(result),
 				runID:  runID,
 			}
-			// A Task result is shown by the specialist card (its completion state),
-			// so skip its redundant "tool result: Task" transcript row.
-			if result.Name != "Task" {
+			// A Task result is shown by the specialist card, and update_plan by the
+			// plan panel/sidebar, so skip both redundant transcript rows.
+			if !toolCardSuppressedInTranscript(result.Name) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
@@ -4081,6 +4259,16 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 		return
 	}
 	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event})
+}
+
+// toolResultDetail is the card body source: the rich card-only Display.Preview
+// (a code/diff preview) when present on a successful result, else the Output that
+// the model also saw. Error results keep their Output so the failure shows.
+func toolResultDetail(result agent.ToolResult) string {
+	if result.Status != tools.StatusError && strings.TrimSpace(result.Display.Preview) != "" {
+		return result.Display.Preview
+	}
+	return result.Output
 }
 
 func toolResultRowText(result agent.ToolResult) string {

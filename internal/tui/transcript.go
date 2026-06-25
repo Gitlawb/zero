@@ -24,6 +24,7 @@ const (
 	rowSystem
 	rowError
 	rowSpecialist
+	rowRecap
 )
 
 type transcriptRow struct {

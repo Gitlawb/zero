@@ -191,6 +191,19 @@ func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
 			style = markdownDisplayNormal
 			index += len(markdownBoldEnd)
 			continue
+		case line[index] == '\x1b':
+			// Already-styled input (highlighted code, headings, tables) carries real
+			// ANSI. Emit each escape verbatim instead of treating its bytes as runes
+			// and re-Render()ing them: re-wrapping doubles the SGR density and a
+			// flush()/truncate can then slice mid-escape, leaking "[38;2;…" / "[1;4;…"
+			// fragments into the visible text. Mirrors truncateStyledLine. The bold
+			// markers above are matched first, so their semantic style switch is kept.
+			if end := ansiSequenceEnd(line, index); end > index {
+				flush()
+				builder.WriteString(line[index:end])
+				index = end
+				continue
+			}
 		}
 
 		r, size := utf8.DecodeRuneInString(line[index:])

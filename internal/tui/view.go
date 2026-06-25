@@ -570,6 +570,13 @@ func renderSuggestionPalette(items []selectableListItem, selected, width int, ti
 }
 
 func styledBlockFillTitle(width int, title string, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style) string {
+	return styledBlockFillTitleStyled(width, title, lines, borderStyle, fill, zeroTheme.ink.Bold(true))
+}
+
+// styledBlockFillTitleStyled is styledBlockFillTitle with a caller-supplied style
+// for the inset title text, so a card can pick a calmer/status-tinted title
+// without changing the default bright-bold heading every other card uses.
+func styledBlockFillTitleStyled(width int, title string, lines []string, borderStyle lipgloss.Style, fill lipgloss.Style, titleStyle lipgloss.Style) string {
 	if width < 4 {
 		width = 4
 	}
@@ -585,7 +592,7 @@ func styledBlockFillTitle(width int, title string, lines []string, borderStyle l
 
 	leftRule := "──"
 	rightRule := strings.Repeat("─", maxInt(0, ruleWidth-lipgloss.Width(leftRule)-titleWidth))
-	top := borderStyle.Render("╭"+leftRule) + zeroTheme.ink.Bold(true).Render(titleText) + borderStyle.Render(rightRule+"╮")
+	top := borderStyle.Render("╭"+leftRule) + titleStyle.Render(titleText) + borderStyle.Render(rightRule+"╮")
 	bottom := borderStyle.Render("╰" + strings.Repeat("─", width-2) + "╯")
 
 	body := make([]string, 0, len(lines)+2)

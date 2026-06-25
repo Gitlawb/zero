@@ -23,7 +23,7 @@ func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {
 		"avoid broad refactors",
 		"search the web before answering",
 		"do not recognize",
-		"final response",
+		"how each requirement is met",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected core system prompt to include %q, got:\n%s", want, buildSystemPrompt(Options{}))

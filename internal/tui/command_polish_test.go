@@ -53,7 +53,8 @@ func TestProviderAndConfigCommandsUseStableStatusOutput(t *testing.T) {
 			APIKey:       "sk-sensitive",
 			Model:        "gpt-4.1",
 		},
-		AgentOptions: agent.Options{MaxTurns: 42},
+		AgentOptions:  agent.Options{MaxTurns: 42},
+		RecapsEnabled: true,
 	})
 
 	m.input.SetValue("/provider status")
@@ -75,7 +76,7 @@ func TestProviderAndConfigCommandsUseStableStatusOutput(t *testing.T) {
 		t.Fatal("expected /config to be handled without starting an agent run")
 	}
 	configText := transcriptText(next.transcript)
-	for _, want := range []string{"Config", "status: ok", "runtime: go", "max turns: 42", "permission mode:"} {
+	for _, want := range []string{"Config", "status: ok", "runtime: go", "max turns: 42", "permission mode:", "recaps: on"} {
 		assertContains(t, configText, want)
 	}
 	assertNotContains(t, configText, "sk-sensitive")

@@ -34,6 +34,46 @@ func limeTestModel() model {
 	return newModel(context.Background(), Options{ProviderName: "test-provider", ModelName: "test-model"})
 }
 
+// Already-styled markdown lines (highlighted code, headings, tables carry real
+// ANSI) must pass through styleAssistantMarkdownLine VERBATIM, not get their
+// escape bytes treated as runes and the whole line re-wrapped in base.Render —
+// that double-wrapping inflated SGR density and let a downstream truncation slice
+// mid-escape, leaking "[38;2;…" / "[1;4;…" garbage into the visible transcript.
+func TestStyleAssistantMarkdownLinePassesAnsiVerbatim(t *testing.T) {
+	old := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
+	defer func() { lipgloss.Writer.Profile = old }()
+
+	in := "\x1b[31mtoken\x1b[0m" // an already-colored code token
+	out := styleAssistantMarkdownLine(in, lipgloss.NewStyle().Bold(true))
+
+	// With the fix the input escape leads the output verbatim. Without it, the
+	// whole line is re-wrapped so the output would START with base's own "\x1b[1m"
+	// and the input escape would be nested inside it.
+	if !strings.HasPrefix(out, "\x1b[31m") {
+		t.Fatalf("already-styled input was re-wrapped instead of passed verbatim: %q", out)
+	}
+	// The input's reset must also survive, not be re-encoded as runes.
+	if !strings.Contains(out, "\x1b[0m") {
+		t.Fatalf("input reset escape not preserved: %q", out)
+	}
+}
+
+// update_plan and Task render as a dedicated UI (plan panel / specialist card),
+// so their transcript tool cards are suppressed; everything else still shows.
+func TestToolCardSuppressedInTranscript(t *testing.T) {
+	for _, name := range []string{"Task", "update_plan"} {
+		if !toolCardSuppressedInTranscript(name) {
+			t.Errorf("%q should be suppressed from the transcript (shown by a dedicated UI)", name)
+		}
+	}
+	for _, name := range []string{"read_file", "write_file", "edit_file", "bash", "swarm_spawn"} {
+		if toolCardSuppressedInTranscript(name) {
+			t.Errorf("%q must still show its transcript card", name)
+		}
+	}
+}
+
 func TestUserRowRendersPromptGutter(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{kind: rowUser, text: "add a --version flag"}
@@ -694,12 +734,59 @@ func TestDoneLineOnlyOnLongTurns(t *testing.T) {
 	}
 }
 
-func TestInterimAssistantRowRendersAsProse(t *testing.T) {
+func TestInterimAssistantRowRendersAsBulletedProse(t *testing.T) {
 	m := limeTestModel()
 	row := transcriptRow{kind: rowAssistant, text: "No provider configured."}
 	got := plainRender(t, m.renderRow(row, 96, buildRowContext(nil)))
-	if strings.Contains(got, "│") || strings.Contains(got, "●") {
-		t.Fatalf("non-final assistant row = %q, must not carry rail or done line", got)
+	if strings.Contains(got, "│") {
+		t.Fatalf("non-final assistant row = %q, must not carry a card rail", got)
+	}
+	// Narration carries a leading "●" bullet so each story beat stands out.
+	if !strings.Contains(got, "●") {
+		t.Fatalf("non-final assistant row should carry the narration bullet, got %q", got)
+	}
+	if !strings.Contains(got, "No provider configured.") {
+		t.Fatalf("non-final assistant row should carry the body text, got %q", got)
+	}
+}
+
+// TestNarrationBulletSelectionGeometry locks the bullet's column math: the
+// narration block wraps 2 cols narrower, every selectable meta starts at the
+// gutter (so copy/selection stays aligned and copied text is gutter-free), no
+// line overflows the width, and the final answer keeps no bullet / textStart 0.
+func TestNarrationBulletSelectionGeometry(t *testing.T) {
+	m := limeTestModel()
+	gutter := lipgloss.Width(narrationPrefix)
+	narr := transcriptRow{kind: rowAssistant, text: "Now the stylesheet. " + strings.Repeat("word ", 60)}
+	rendered, metas := m.renderSelectableAssistantRow(0, narr, 90, 0)
+
+	if !strings.Contains(plainRender(t, rendered), "●") {
+		t.Fatalf("narration display should carry the bullet:\n%s", rendered)
+	}
+	if len(metas) < 2 {
+		t.Fatalf("expected the long narration to wrap to multiple lines, got %d", len(metas))
+	}
+	for i, meta := range metas {
+		if meta.textStart != gutter {
+			t.Errorf("meta %d textStart = %d, want %d (gutter)", i, meta.textStart, gutter)
+		}
+		if strings.Contains(meta.text, "●") {
+			t.Errorf("meta %d copy text should be gutter-free, got %q", i, meta.text)
+		}
+	}
+	for _, line := range strings.Split(rendered, "\n") {
+		if w := lipgloss.Width(line); w > 90 {
+			t.Errorf("narration line width %d exceeds 90: %q", w, line)
+		}
+	}
+
+	final := transcriptRow{kind: rowAssistant, text: "All done.", final: true}
+	frendered, fmetas := m.renderSelectableAssistantRow(0, final, 90, 0)
+	if strings.Contains(plainRender(t, frendered), "●") {
+		t.Errorf("final answer must not carry the narration bullet:\n%s", frendered)
+	}
+	if len(fmetas) > 0 && fmetas[0].textStart != 0 {
+		t.Errorf("final answer meta textStart = %d, want 0", fmetas[0].textStart)
 	}
 }
 
