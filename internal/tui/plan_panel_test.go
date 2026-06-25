@@ -281,6 +281,38 @@ func TestPinnedPlanHiddenWhenEmpty(t *testing.T) {
 	}
 }
 
+// TestPinnedPlanHiddenWhenSidebarToggledOff: Ctrl+B (sidebarHidden) on a wide
+// alt-screen terminal hides the plan entirely — it must NOT fall back to the
+// pinned panel above the composer, since the sidebar is the plan's home there.
+func TestPinnedPlanHiddenWhenSidebarToggledOff(t *testing.T) {
+	m := runningPlanModel(t, 3)
+	m.altScreen = true
+	m.height = 40
+	m.headerPrinted = true
+	// Real conversation so the sidebar is available (not gated by the home screen).
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+
+	if !m.sidebarActive() {
+		t.Fatal("precondition: sidebar should be active for a wide alt-screen model with a plan")
+	}
+	// Sidebar shown: the plan lives in the sidebar, no pinned panel.
+	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got != "" {
+		t.Fatalf("sidebar shown: pinned plan should be suppressed, got:\n%s", got)
+	}
+
+	// Ctrl+B collapses the sidebar -> the plan must be hidden entirely, not pinned.
+	m.sidebarHidden = true
+	if got := m.renderPinnedPlanPanel(m.chatColumnWidth(), 10); got != "" {
+		t.Fatalf("Ctrl+B should hide the plan entirely, but the pinned panel showed:\n%s", got)
+	}
+
+	// Sidebar unavailable (no alt-screen): the pinned panel is the plan's only
+	// home and must still show.
+	if got := runningPlanModel(t, 3).renderPinnedPlanPanel(80, 10); got == "" {
+		t.Fatal("sidebar unavailable: the pinned plan must still show")
+	}
+}
+
 func TestFooterIncludesPinnedPlanAboveComposer(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.height = 40

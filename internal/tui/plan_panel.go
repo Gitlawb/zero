@@ -282,12 +282,16 @@ func (m model) renderPlanPanel(width int) string {
 // full list via m.plan.expanded, but the height budget always wins to keep the
 // composer on screen.
 func (m model) renderPinnedPlanPanel(width int, maxHeight int) string {
-	// When the two-column layout is active the plan lives in the context
-	// sidebar (FILES / PLAN / tokens), so suppress the pinned panel above the
-	// composer to avoid showing it twice. Both the real model (sidebarActive)
-	// and the narrow chat-column copy (hidePinnedPlan) suppress it, so the
-	// view and the mouse-geometry frame stay aligned.
-	if m.hidePinnedPlan || m.sidebarActive() {
+	// The pinned panel is only for terminals where the context sidebar CANNOT
+	// host the plan (too narrow / inline mode). Whenever the two-column layout is
+	// available — whether the sidebar is shown OR collapsed with Ctrl+B — the
+	// plan's home is the sidebar, so suppress the pinned copy: a Ctrl+B hide
+	// should hide the plan entirely, not resurrect it above the composer. Gating
+	// on sidebarAvailable (not sidebarActive) covers the hidden case too. The
+	// hidePinnedPlan flag additionally suppresses it in the two-column chat-column
+	// copy. Both the view and the mouse-geometry frame call footerView, so this
+	// stays consistent.
+	if m.hidePinnedPlan || m.sidebarAvailable() {
 		return ""
 	}
 	if !m.plan.visible(m.now()) {
