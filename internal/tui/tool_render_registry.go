@@ -93,7 +93,7 @@ func planSummaryCardBody(req toolBodyRequest) cardBody {
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
 	}
-	return cardBody{lines: []string{zeroTheme.onPanel(zeroTheme.faint).Render(strings.Join(parts, " · "))}}
+	return cardBody{lines: []string{zeroTheme.faint.Render(strings.Join(parts, " · "))}}
 }
 
 // isNumberedPlanLine reports whether a line begins with "<n>." (a plan item).

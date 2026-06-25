@@ -1458,10 +1458,10 @@ func toolCard(head string, glyph string, body []string, footer string, borderSty
 			lines = append(lines, fitted)
 			continue
 		}
-		// Fill to the full card width (not just innerWidth) so the panel band
-		// reads as one solid block now that there is no right border; the extra
-		// two cells are bare panel background.
-		pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, width-railWidth-lipgloss.Width(fitted))))
+		// Fill to the full card width (not just innerWidth) with plain spaces so
+		// the row spans the same cells as before; the trailing region falls
+		// through to the bare terminal background (no panel band).
+		pad := strings.Repeat(" ", maxInt(0, width-railWidth-lipgloss.Width(fitted)))
 		lines = append(lines, rail+fitted+pad)
 	}
 
@@ -1470,7 +1470,7 @@ func toolCard(head string, glyph string, body []string, footer string, borderSty
 		if tiny {
 			lines = append(lines, fittedFooter)
 		} else {
-			pad := zeroTheme.panel.Render(strings.Repeat(" ", maxInt(0, width-railWidth-lipgloss.Width(fittedFooter))))
+			pad := strings.Repeat(" ", maxInt(0, width-railWidth-lipgloss.Width(fittedFooter)))
 			lines = append(lines, rail+fittedFooter+pad)
 		}
 	}
@@ -1496,14 +1496,14 @@ func capCardLines(lines []string, cap int) []string {
 	}
 	hidden := len(lines) - cap
 	lines = lines[:cap]
-	return append(lines, zeroTheme.onPanel(zeroTheme.faint).Render(fmt.Sprintf("… %d more lines", hidden)))
+	return append(lines, zeroTheme.faint.Render(fmt.Sprintf("… %d more lines", hidden)))
 }
 
 func genericCardBody(detail string, opts cardRenderOptions) cardBody {
 	raw := strings.Split(detail, "\n")
 	lines := make([]string, 0, len(raw))
 	for _, line := range raw {
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
+		lines = append(lines, zeroTheme.muted.Render(line))
 	}
 	return cardBody{lines: capCardLines(lines, opts.bodyCap)}
 }
@@ -1537,16 +1537,16 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	// The edited file's path is a clickable OSC 8 link, so the edited place in
 	// history opens straight from the terminal.
 	headLeft := hyperlink(fileURL(opts.cwd, path),
-		zeroTheme.onPanel(zeroTheme.ink).Render(middleTruncate(path, maxInt(16, innerWidth/2))))
+		zeroTheme.ink.Render(middleTruncate(path, maxInt(16, innerWidth/2))))
 	if newFile {
-		headLeft += zeroTheme.panel.Render("  ") + zeroTheme.addSign.Render(" NEW FILE ")
+		headLeft += "  " + zeroTheme.addSign.Render(" NEW FILE ")
 	}
 	counts := []string{}
 	if adds > 0 {
-		counts = append(counts, zeroTheme.onPanel(zeroTheme.diffAdd).Render(fmt.Sprintf("+%d", adds)))
+		counts = append(counts, zeroTheme.diffAdd.Render(fmt.Sprintf("+%d", adds)))
 	}
 	if dels > 0 {
-		counts = append(counts, zeroTheme.onPanel(zeroTheme.diffDel).Render(fmt.Sprintf("−%d", dels)))
+		counts = append(counts, zeroTheme.diffDel.Render(fmt.Sprintf("−%d", dels)))
 	}
 	lines := []string{joinHeaderLine(headLeft, strings.Join(counts, " "), innerWidth)}
 
@@ -1571,12 +1571,12 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 				newLine, _ = strconv.Atoi(match[2])
 				inHunk = true
 			}
-			lines = append(lines, zeroTheme.onPanel(zeroTheme.diffMeta).Render(truncateRunes(line, innerWidth)))
+			lines = append(lines, zeroTheme.diffMeta.Render(truncateRunes(line, innerWidth)))
 		case !inHunk, strings.HasPrefix(line, `\`):
 			// Preamble ("diff --git", "index …", a stray "stdout:") and the
 			// "\ No newline at end of file" marker are not content lines: no
 			// gutter number, and the hunk counters must not advance.
-			lines = append(lines, zeroTheme.onPanel(zeroTheme.diffMeta).Render(truncateRunes(line, innerWidth)))
+			lines = append(lines, zeroTheme.diffMeta.Render(truncateRunes(line, innerWidth)))
 		case strings.HasPrefix(line, "+"):
 			text := truncateRunes(strings.TrimPrefix(line, "+"), textBudget)
 			lines = append(lines, diffBodyLine(newLine, "+", text, true, textBudget, gutter))
@@ -1601,9 +1601,9 @@ func diffCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 			oldLine++
 		default:
 			text := truncateRunes(strings.TrimPrefix(line, " "), textBudget)
-			row := zeroTheme.panel.Render("   ") + zeroTheme.onPanel(zeroTheme.muted).Render(text)
+			row := "   " + zeroTheme.muted.Render(text)
 			if gutter {
-				row = zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4d", newLine)) + row
+				row = zeroTheme.faintest.Render(fmt.Sprintf("%4d", newLine)) + row
 			}
 			lines = append(lines, row)
 			oldLine++
@@ -1742,14 +1742,14 @@ func readCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 				first = number
 			}
 			last = number
-			row := zeroTheme.onPanel(zeroTheme.muted).Render(match[2])
+			row := zeroTheme.muted.Render(match[2])
 			if gutter {
-				row = zeroTheme.onPanel(zeroTheme.faintest).Render(fmt.Sprintf("%4s", match[1])) + zeroTheme.panel.Render(" ") + row
+				row = zeroTheme.faintest.Render(fmt.Sprintf("%4s", match[1])) + " " + row
 			}
 			lines = append(lines, row)
 			continue
 		}
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
+		lines = append(lines, zeroTheme.muted.Render(line))
 	}
 	headTag := ""
 	if first > 0 && last >= first {
@@ -1762,8 +1762,8 @@ func bashCardBody(command string, detail string, width int, opts cardRenderOptio
 	innerWidth := width - 4
 	lines := []string{}
 	if command = strings.TrimSpace(command); command != "" {
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.bashPrompt).Render("❯ ")+zeroTheme.onPanel(zeroTheme.ink).Render(truncateRunes(command, maxInt(8, innerWidth-2))))
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.line).Render(strings.Repeat("─", maxInt(1, innerWidth))))
+		lines = append(lines, zeroTheme.bashPrompt.Render("❯ ")+zeroTheme.ink.Render(truncateRunes(command, maxInt(8, innerWidth-2))))
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", maxInt(1, innerWidth))))
 	}
 
 	footer := ""
@@ -1786,7 +1786,7 @@ func bashCardBody(command string, detail string, width int, opts cardRenderOptio
 			if section == "stderr" {
 				style = zeroTheme.delText
 			}
-			lines = append(lines, zeroTheme.panel.Render("  ")+zeroTheme.onPanel(style).Render(line))
+			lines = append(lines, "  "+style.Render(line))
 		}
 	}
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
@@ -1796,8 +1796,8 @@ func execCommandCardBody(command string, detail string, width int, opts cardRend
 	innerWidth := width - 4
 	lines := []string{}
 	if command = strings.TrimSpace(command); command != "" {
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.bashPrompt).Render("❯ ")+zeroTheme.onPanel(zeroTheme.ink).Render(truncateRunes(command, maxInt(8, innerWidth-2))))
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.line).Render(strings.Repeat("─", maxInt(1, innerWidth))))
+		lines = append(lines, zeroTheme.bashPrompt.Render("❯ ")+zeroTheme.ink.Render(truncateRunes(command, maxInt(8, innerWidth-2))))
+		lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", maxInt(1, innerWidth))))
 	}
 
 	footer := ""
@@ -1828,7 +1828,7 @@ func execCommandCardBody(command string, detail string, width int, opts cardRend
 			if section == "" && strings.HasPrefix(line, "Command is still running.") {
 				style = zeroTheme.faint
 			}
-			lines = append(lines, zeroTheme.panel.Render("  ")+zeroTheme.onPanel(style).Render(line))
+			lines = append(lines, "  "+style.Render(line))
 		}
 	}
 	return cardBody{lines: capCardLines(lines, opts.bodyCap), footer: footer}
@@ -1874,16 +1874,16 @@ func grepCardBody(detail string, width int, opts cardRenderOptions) cardBody {
 	for _, line := range raw {
 		if match := grepMatchPattern.FindStringSubmatch(line); match != nil {
 			matches++
-			location := zeroTheme.onPanel(zeroTheme.grepLoc).Render(match[1])
+			location := zeroTheme.grepLoc.Render(match[1])
 			// match[1] is "path:line" — link the file so a hit is one click away.
 			if path, _, ok := strings.Cut(match[1], ":"); ok && path != "" {
 				location = hyperlink(fileURL(opts.cwd, path), location)
 			}
 			budget := maxInt(8, innerWidth-lipgloss.Width(match[1])-2)
-			lines = append(lines, location+zeroTheme.panel.Render("  ")+zeroTheme.onPanel(zeroTheme.muted).Render(truncateRunes(match[2], budget)))
+			lines = append(lines, location+"  "+zeroTheme.muted.Render(truncateRunes(match[2], budget)))
 			continue
 		}
-		lines = append(lines, zeroTheme.onPanel(zeroTheme.muted).Render(line))
+		lines = append(lines, zeroTheme.muted.Render(line))
 	}
 	footer := ""
 	if matches > 0 {
