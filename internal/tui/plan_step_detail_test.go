@@ -31,11 +31,15 @@ func TestPlanStepDetailByStatus(t *testing.T) {
 			{tool: "bash", summary: "go build", detail: "exit 0"},
 		},
 	}
+	// The agent narrated this step while it ran; the card should replay it.
+	m.stepNarration = map[string][]string{
+		"ship the button": {"Let me wire the click handler into the button so it dispatches the action."},
+	}
 
-	// Completed step -> "what we did".
+	// Completed step -> "what we did", led by the agent's own narration.
 	m = m.openPlanStepDetail(0)
 	done := lastCardText(m)
-	for _, want := range []string{"Done in 1m 20s.", "Built 1 file change and 1 command.", "wired the click handler", "Files changed (1)", "Commands run (1)", "what was done in this step"} {
+	for _, want := range []string{"Done in 1m 20s.", "Built 1 file change and 1 command.", "What we did", "wire the click handler into the button", "wired the click handler", "Files changed (1)", "Commands run (1)", "what was done in this step"} {
 		if !strings.Contains(done, want) {
 			t.Errorf("completed card missing %q\n---\n%s", want, done)
 		}
@@ -44,13 +48,31 @@ func TestPlanStepDetailByStatus(t *testing.T) {
 	// Pending step -> "what we will do".
 	m = m.openPlanStepDetail(1)
 	pending := lastCardText(m)
-	for _, want := range []string{"what this step will do", "cover the new flag", "what this step will do"} {
+	for _, want := range []string{"What we'll do", "what this step will do", "cover the new flag", "queued"} {
 		if !strings.Contains(pending, want) {
 			t.Errorf("pending card missing %q\n---\n%s", want, pending)
 		}
 	}
 	if strings.Contains(pending, "Files changed") {
 		t.Errorf("pending card should record no work yet:\n%s", pending)
+	}
+}
+
+// TestCaptureStepNarration: assistant prose is attributed to the in_progress
+// step, blank/duplicate segments are dropped, and no step swallows another's.
+func TestCaptureStepNarration(t *testing.T) {
+	m := model{now: time.Now}
+	m.plan.steps = []planStep{{content: "build it", status: "in_progress"}}
+	m = m.captureStepNarration("First I'll scaffold the file.")
+	m = m.captureStepNarration("First I'll scaffold the file.") // duplicate -> collapsed
+	m = m.captureStepNarration("   ")                           // blank -> ignored
+	m = m.captureStepNarration("Now I'll wire it up.")
+	got := m.stepNarration["build it"]
+	if len(got) != 2 {
+		t.Fatalf("want 2 narration segments, got %d: %v", len(got), got)
+	}
+	if got[0] != "First I'll scaffold the file." || got[1] != "Now I'll wire it up." {
+		t.Errorf("narration wrong: %v", got)
 	}
 }
 

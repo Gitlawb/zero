@@ -66,6 +66,30 @@ func (m model) captureStepWork(row transcriptRow) model {
 	return m
 }
 
+// captureStepNarration attributes a finalized assistant prose segment to the
+// plan step that was in_progress when it streamed — the agent's own running
+// account of the work, replayed as the step-detail card's explanation.
+// Consecutive duplicates are collapsed so a re-emitted segment doesn't repeat.
+func (m model) captureStepNarration(text string) model {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return m
+	}
+	key := currentStepContent(m.plan.steps)
+	if key == "" {
+		return m
+	}
+	if m.stepNarration == nil {
+		m.stepNarration = map[string][]string{}
+	}
+	prev := m.stepNarration[key]
+	if n := len(prev); n > 0 && prev[n-1] == text {
+		return m
+	}
+	m.stepNarration[key] = append(prev, text)
+	return m
+}
+
 // planStepHit is a clickable plan-step row in the context sidebar.
 type planStepHit struct {
 	lineOffset int
@@ -171,14 +195,22 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 	done := step.status == "completed" || step.status == "failed"
 
 	// The lead section is titled with the step itself and opens with a
-	// status-aware sentence ("what we did" vs "what we will do").
+	// status-aware outcome line ("Done in 1m 20s." / "Not started yet…").
 	sections := []commandSection{{
 		Title: step.content,
 		Lines: m.planStepOutcomeLines(step, len(changes), len(commands)),
 	}}
 
-	// The model's own per-step note is the clearest statement of intent (before)
-	// or record (after), so surface it verbatim under a status-appropriate label.
+	// The centerpiece: a prose explanation of the step, framed by status — "what
+	// we did" for a finished step, "what we'll do" for a queued one. It replays
+	// the agent's own narration when captured, else a status-aware summary.
+	sections = append(sections, commandSection{
+		Title: planStepExplanationTitle(step.status),
+		Lines: m.planStepExplanationLines(step),
+	})
+
+	// The model's own per-step note is a second, distilled statement of intent
+	// (before) or record (after); surface it verbatim under a fitting label.
 	if note := strings.TrimSpace(step.notes); note != "" {
 		label := "Plan"
 		if done {
@@ -197,15 +229,6 @@ func (m model) openPlanStepDetail(stepIndex int) model {
 		sections = append(sections, commandSection{
 			Title: fmt.Sprintf("Commands run (%d)", len(commands)),
 			Lines: planCommandLines(commands),
-		})
-	}
-
-	// A pending step with no note and no work has only its title; spell out
-	// what's coming so the card doesn't read as empty.
-	if step.status != "in_progress" && !done && len(work) == 0 && strings.TrimSpace(step.notes) == "" {
-		sections = append(sections, commandSection{
-			Title: "What's coming",
-			Lines: []string{"This step is queued. Its file changes and commands will appear here once the agent starts it."},
 		})
 	}
 
@@ -246,6 +269,40 @@ func (m model) planStepOutcomeLines(step planStep, nChanges, nCommands int) []st
 		return []string{head, planWorkTally("So far", nChanges, nCommands)}
 	default: // pending
 		return []string{"Not started yet — here's what this step will do."}
+	}
+}
+
+// planStepExplanationTitle is the header for the prose explanation section,
+// matching the status framing the user asked for: "what we did" for a finished
+// step, "what we'll do" for a queued one.
+func planStepExplanationTitle(status string) string {
+	switch status {
+	case "completed", "failed":
+		return "What we did"
+	case "in_progress":
+		return "What we're doing"
+	default:
+		return "What we'll do"
+	}
+}
+
+// planStepExplanationLines is the elaborate, prose explanation of a step. When
+// the agent narrated its work while the step was in_progress, those segments are
+// replayed verbatim (the most faithful account of what happened); otherwise a
+// status-aware summary stands in, pointing at the structured sections below.
+func (m model) planStepExplanationLines(step planStep) []string {
+	if segs := m.stepNarration[step.content]; len(segs) > 0 {
+		return planWrapText(strings.Join(segs, "\n"), 76)
+	}
+	switch step.status {
+	case "completed":
+		return planWrapText("This step finished. The agent didn't post a written summary, so the files and commands it touched are listed below.", 76)
+	case "failed":
+		return planWrapText("This step failed. The agent didn't post a written summary; what it attempted is listed below.", 76)
+	case "in_progress":
+		return planWrapText("Work is underway — the agent hasn't summarized this step yet. Changes and commands appear below as they happen.", 76)
+	default: // pending
+		return planWrapText("This step is queued and hasn't started. Once the agent reaches it, its explanation, file changes, and commands will appear here.", 76)
 	}
 }
 

@@ -125,6 +125,7 @@ type model struct {
 	plan           planPanelState
 	specialists    specialistTracker
 	stepWork       map[string][]planStepWork // file mutations + commands captured per in_progress plan step, for the clickable step detail
+	stepNarration  map[string][]string       // the agent's own prose narration captured per in_progress plan step, for the step detail's explanation
 	planDetailOpen bool                      // a plan-step detail card is currently shown (click-to-toggle)
 	planDetailStep int                       // which step index the shown detail card is for
 	subchat        subchatState
@@ -1667,6 +1668,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if text := strings.TrimRight(m.streamingText, "\n"); strings.TrimSpace(text) != "" {
 				m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: text})
+				// This interim narration is the agent explaining what it's about to
+				// do — attribute it to the active plan step so the step-detail card
+				// can replay the agent's own account of the work.
+				m = m.captureStepNarration(text)
 			}
 			m.streamingText = ""
 			// The tool call has finalized into its card — drop the live "writing"
@@ -3425,6 +3430,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.specialists.clear()
 	m.plan.clear()
 	m.stepWork = nil
+	m.stepNarration = nil
 	m.planDetailOpen = false
 	m.turnStartedAt = m.now()
 	m.turnStreamedRunes = 0
