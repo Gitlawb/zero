@@ -324,7 +324,7 @@ func TestGrepReturnsCleanRelativePathsUnderSymlinkedRoot(t *testing.T) {
 
 func TestScopedToolsAllowExtraRootWrites(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := sandbox.NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -346,7 +346,7 @@ func TestScopedToolsAllowExtraRootWrites(t *testing.T) {
 
 func TestScopedToolsAllowReadOnlyRootsWithoutWrite(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := sandbox.NewScope(workspace, nil)
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -375,7 +375,7 @@ func TestScopedToolsAllowReadOnlyRootsWithoutWrite(t *testing.T) {
 
 func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := sandbox.NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -394,7 +394,7 @@ func TestScopedToolsKeepRelativePathsInWorkspace(t *testing.T) {
 
 func TestScopedGlobReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := sandbox.NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -436,7 +436,7 @@ func TestScopedGlobReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
 
 func TestScopedGrepReturnsAbsoluteMatchesForExtraRoot(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := sandbox.NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -509,7 +509,7 @@ func TestUnscopedWriteRefusesInRootSymlinkTraversal(t *testing.T) {
 
 func TestScopedWriteThroughSymlinkIntoGrantedRoot(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	link := filepath.Join(workspace, "into-extra")
 	if err := os.Symlink(extra, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -529,7 +529,7 @@ func TestScopedWriteThroughSymlinkIntoGrantedRoot(t *testing.T) {
 	}
 	// A symlink escaping a granted root to ungated territory stays denied.
 	escape := filepath.Join(extra, "out")
-	if err := os.Symlink(t.TempDir(), escape); err != nil {
+	if err := os.Symlink(filepath.Join(tempDirOutsideDefaultTemp(t), "target"), escape); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	res = NewScopedWriteFileTool(workspace, scope).Run(context.Background(), map[string]any{
@@ -601,7 +601,7 @@ func TestGrepSkipsAlwaysExcludedDirectories(t *testing.T) {
 
 func TestScopedWriteRefusesSameRootSymlinkTraversal(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	if err := os.MkdirAll(filepath.Join(extra, "subdir"), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestScopedWriteRefusesSameRootSymlinkTraversal(t *testing.T) {
 
 func TestScopedWriteReportsAbsolutePathForExtraRoot(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := sandbox.NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)

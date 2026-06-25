@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -29,6 +30,11 @@ func NewScope(workspaceRoot string, extras []string) (*Scope, error) {
 	for _, extra := range extras {
 		if _, err := scope.Add(extra); err != nil {
 			return nil, fmt.Errorf("write root %q: %w", extra, err)
+		}
+	}
+	if scope.workspaceRoot != "" {
+		for _, root := range defaultTempWriteRootCandidates() {
+			_, _ = scope.Add(root)
 		}
 	}
 	return scope, nil
@@ -373,6 +379,33 @@ func normalizeScopeRoot(path string) (string, error) {
 		return "", fmt.Errorf("refusing filesystem root %s as a write root", resolved)
 	}
 	return resolved, nil
+}
+
+func defaultTempWriteRootCandidates() []string {
+	return defaultTempWriteRootCandidatesForGOOS(runtime.GOOS, os.Getenv)
+}
+
+func defaultTempWriteRootCandidatesForGOOS(goos string, getenv func(string) string) []string {
+	var roots []string
+	if goos == "windows" {
+		for _, key := range []string{"TEMP", "TMP"} {
+			if root := strings.TrimSpace(getenv(key)); root != "" {
+				roots = append(roots, root)
+			}
+		}
+		return roots
+	}
+	if goos != "windows" {
+		roots = append(roots, "/tmp")
+	}
+	if tmpdir := strings.TrimSpace(getenv("TMPDIR")); tmpdir != "" {
+		roots = append(roots, tmpdir)
+	}
+	return roots
+}
+
+func defaultTempWriteRoots() []string {
+	return normalizeProfileDirs(defaultTempWriteRootCandidates())
 }
 
 func pathWithinRoot(root string, candidate string) bool {

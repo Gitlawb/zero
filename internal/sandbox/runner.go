@@ -486,7 +486,8 @@ var sandboxWritableDevices = []string{
 }
 
 // sandboxWritableSubpaths are non-workspace trees the sandbox-exec profile must
-// keep writable for parity with the bubblewrap backend's writable /tmp tmpfs.
+// keep writable for parity with the shared host temp roots used by the Linux
+// bubblewrap backend.
 // macOS resolves /tmp and /var to their /private counterparts before the sandbox
 // check, so both forms are listed. /dev/fd covers process-substitution writes.
 var sandboxWritableSubpaths = []string{

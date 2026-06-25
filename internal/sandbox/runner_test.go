@@ -120,13 +120,14 @@ func TestBuildCommandPlanRejectsUnavailableFallback(t *testing.T) {
 }
 
 func TestBuildCommandPlanRejectsOutsideDirectory(t *testing.T) {
+	root := t.TempDir()
 	engine := NewEngine(EngineOptions{
-		WorkspaceRoot: t.TempDir(),
+		WorkspaceRoot: root,
 		Policy:        DefaultPolicy(),
 		Backend:       Backend{Name: BackendUnavailable},
 	})
 
-	_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: t.TempDir()})
+	_, err := engine.BuildCommandPlan(CommandSpec{Name: "/bin/sh", Dir: tempDirOutsideDefaultTemp(t)})
 	if err == nil || !strings.Contains(err.Error(), "outside_workspace") {
 		t.Fatalf("error = %v, want outside workspace block", err)
 	}
@@ -532,7 +533,7 @@ func TestSandboxExecProfileGrantsSignalAndMachLookup(t *testing.T) {
 
 func TestLinuxHelperPlanCarriesExtraWriteRoots(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -559,7 +560,7 @@ func TestLinuxHelperPlanCarriesExtraWriteRoots(t *testing.T) {
 
 func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -568,14 +569,14 @@ func TestResolveCommandDirAllowsExtraRootCwd(t *testing.T) {
 	if _, _, err := engine.resolveCommandDir(extra, engine.policy); err != nil {
 		t.Fatalf("resolveCommandDir(extra root) = %v, want nil", err)
 	}
-	if _, _, err := engine.resolveCommandDir(t.TempDir(), engine.policy); err == nil {
+	if _, _, err := engine.resolveCommandDir(tempDirOutsideDefaultTemp(t), engine.policy); err == nil {
 		t.Fatal("resolveCommandDir(outside all roots) = nil error, want block")
 	}
 }
 
 func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)

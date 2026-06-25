@@ -61,10 +61,10 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 
 	relative, err := filepath.Rel(root, target)
 	if err != nil {
-		return "", "", err
+		return "", "", outsideWorkspaceError(requestedPath)
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", "", fmt.Errorf("%s must stay inside the workspace", requestedPath)
+		return "", "", outsideWorkspaceError(requestedPath)
 	}
 	if relative == "." {
 		return target, ".", nil
@@ -126,10 +126,10 @@ func resolveWorkspaceTargetPath(workspaceRoot string, requestedPath string) (str
 
 	relative, err := filepath.Rel(root, resolved)
 	if err != nil {
-		return "", "", err
+		return "", "", outsideWorkspaceError(requestedPath)
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", "", fmt.Errorf("%s must stay inside the workspace", requestedPath)
+		return "", "", outsideWorkspaceError(requestedPath)
 	}
 	if relative == "." {
 		return resolved, ".", nil
@@ -162,10 +162,10 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 
 	relative, err := filepath.Rel(root, target)
 	if err != nil {
-		return err
+		return outsideWorkspaceError(requestedPath)
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return fmt.Errorf("%s must stay inside the workspace", requestedPath)
+		return outsideWorkspaceError(requestedPath)
 	}
 	if relative == "." {
 		return nil
@@ -195,6 +195,10 @@ func recheckWorkspaceWriteTarget(workspaceRoot string, requestedPath string) err
 	}
 
 	return nil
+}
+
+func outsideWorkspaceError(requestedPath string) error {
+	return fmt.Errorf("%s must stay inside the workspace", requestedPath)
 }
 
 func shouldSkipDirectory(name string) bool {

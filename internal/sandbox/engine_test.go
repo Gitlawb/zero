@@ -239,7 +239,7 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 		SideEffect:     SideEffectWrite,
 		Permission:     PermissionPrompt,
 		PermissionMode: PermissionModeAsk,
-		Args:           map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
+		Args:           map[string]any{"path": outsideDefaultTempPath(root, "escape.txt")},
 	})
 	if outside.Action != ActionPrompt || outside.Block == nil || outside.Block.Code != BlockOutsideWorkspace || !outside.Block.Recoverable {
 		t.Fatalf("outside workspace mutation decision = %#v, want recoverable prompt", outside)
@@ -325,7 +325,7 @@ func TestEngineSessionGrantDoesNotMatchSiblingFile(t *testing.T) {
 
 func TestEnginePersistentGrantAllowsPromptableOutsideWorkspacePath(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := outsideDefaultTempPath(root, "escape.txt")
 	store, err := NewGrantStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "sandbox-grants.json"),
 		Now:      fixedSandboxTime("2026-06-05T14:00:00Z"),
@@ -362,7 +362,7 @@ func TestEnginePersistentGrantAllowsPromptableOutsideWorkspacePath(t *testing.T)
 
 func TestEnginePersistentGrantDoesNotBypassSymlinkTraversal(t *testing.T) {
 	root := t.TempDir()
-	outside := t.TempDir()
+	outside := outsideDefaultTempPath(root, "symlink-target")
 	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestEnginePersistentGrantDoesNotBypassSymlinkTraversal(t *testing.T) {
 
 func TestEngineDeniesAutoAllowedSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
-	outside := t.TempDir()
+	outside := outsideDefaultTempPath(root, "symlink-target")
 	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestEngineGrantScopesWebFetchToHost(t *testing.T) {
 
 func TestEngineDeniesOutOfWorkspacePaths(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := outsideDefaultTempPath(root, "escape.txt")
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
 
 	decision := engine.Evaluate(context.Background(), Request{
@@ -484,7 +484,7 @@ func TestEngineDeniesOutOfWorkspacePaths(t *testing.T) {
 
 func TestEnginePrecheckReportsBlocksBeforeExecution(t *testing.T) {
 	root := t.TempDir()
-	outside := filepath.Join(t.TempDir(), "escape.txt")
+	outside := outsideDefaultTempPath(root, "escape.txt")
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
 
 	// A denied request reports its block without running anything.
@@ -519,7 +519,7 @@ func TestEnginePrecheckReportsBlocksBeforeExecution(t *testing.T) {
 
 func TestEngineDeniesWorkspaceSymlinkTraversal(t *testing.T) {
 	root := t.TempDir()
-	outside := t.TempDir()
+	outside := outsideDefaultTempPath(root, "symlink-target")
 	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
@@ -642,7 +642,7 @@ func TestEngineReportsContextCancellation(t *testing.T) {
 
 func TestEvaluateOverrideRootDoesNotInheritEngineScope(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -702,7 +702,7 @@ func promptWorkspaceWritePolicy() Policy {
 
 func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -730,7 +730,7 @@ func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {
 		ToolName:   "write_file",
 		SideEffect: SideEffectWrite,
 		Permission: PermissionAllow,
-		Args:       map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
+		Args:       map[string]any{"path": outsideDefaultTempPath(workspace, "escape.txt")},
 	})
 	if outside.Action != ActionPrompt || outside.Block == nil || !outside.Block.Recoverable {
 		t.Fatalf("outside write Action=%q, want recoverable prompt with block", outside.Action)
@@ -747,7 +747,7 @@ func TestEvaluateAllowsWritesInsideExtraScopeRoot(t *testing.T) {
 // skip, turning the engine into an escape hatch.
 func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 	workspace := t.TempDir()
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	scope, err := NewScope(workspace, []string{extra})
 	if err != nil {
 		t.Fatalf("NewScope: %v", err)
@@ -764,7 +764,7 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 		ToolName:   "write_file",
 		SideEffect: SideEffectWrite,
 		Permission: PermissionAllow,
-		Args:       map[string]any{"path": filepath.Join(t.TempDir(), "escape.txt")},
+		Args:       map[string]any{"path": outsideDefaultTempPath(workspace, "escape.txt")},
 	})
 	if outside.Action != ActionPrompt || outside.Block == nil {
 		t.Fatalf("scope-only engine, out-of-scope write Action=%q, want prompt with block", outside.Action)
@@ -779,5 +779,33 @@ func TestNewEngineDerivesWorkspaceRootFromScope(t *testing.T) {
 	})
 	if inside.Action != ActionAllow {
 		t.Fatalf("scope-only engine, in-workspace write Action=%q (%s), want allow", inside.Action, inside.Reason)
+	}
+}
+
+func TestEvaluateAllowsWritesInsideDefaultTempRoot(t *testing.T) {
+	workspace := t.TempDir()
+	tempRoot := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	scope, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Scope:         scope,
+	})
+
+	decision := engine.Evaluate(context.Background(), Request{
+		ToolName:   "write_file",
+		SideEffect: SideEffectWrite,
+		Permission: PermissionAllow,
+		Args:       map[string]any{"path": filepath.Join(tempRoot, "zero-toolcheck", "go.mod")},
+	})
+	if decision.Action != ActionAllow {
+		t.Fatalf("temp-root write Action=%q (%s), want allow", decision.Action, decision.Reason)
+	}
+	if HasRiskCategory(decision.Risk, "out_of_workspace") {
+		t.Fatalf("temp-root write risk=%v, must not be out_of_workspace", decision.Risk)
 	}
 }

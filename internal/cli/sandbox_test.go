@@ -510,13 +510,92 @@ func TestRunSandboxPolicyJSONGoldenIncludesManagerBaselineFields(t *testing.T) {
 	got := stdout.String()
 	got = replacePathToken(got, workspace, "$WORKSPACE")
 	got = replacePathToken(got, store.FilePath(), "$GRANTS")
+	gotBytes := normalizeSandboxPolicyGoldenTempRoots(t, []byte(got), workspace)
 	wantBytes, err := os.ReadFile(filepath.Join("testdata", "sandbox_policy_windows_unavailable.golden.json"))
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	if !jsonValuesEqual(t, wantBytes, []byte(got)) {
-		t.Fatalf("policy JSON golden mismatch\nwant:\n%s\ngot:\n%s", string(wantBytes), got)
+	if !jsonValuesEqual(t, wantBytes, gotBytes) {
+		t.Fatalf("policy JSON golden mismatch\nwant:\n%s\ngot:\n%s", string(wantBytes), string(gotBytes))
 	}
+}
+
+func normalizeSandboxPolicyGoldenTempRoots(t *testing.T, gotBytes []byte, workspace string) []byte {
+	t.Helper()
+	scope, err := sandbox.NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope(%q): %v", workspace, err)
+	}
+	roots := scope.Roots()
+	if len(roots) <= 1 {
+		return gotBytes
+	}
+	tempRoots := map[string]struct{}{}
+	for _, root := range roots[1:] {
+		tempRoots[root] = struct{}{}
+	}
+	var value any
+	if err := json.Unmarshal(gotBytes, &value); err != nil {
+		t.Fatalf("decode got JSON for normalization: %v\n%s", err, string(gotBytes))
+	}
+	plan, _ := value.(map[string]any)["plan"].(map[string]any)
+	profile, _ := plan["permissionProfile"].(map[string]any)
+	fileSystem, _ := profile["fileSystem"].(map[string]any)
+	fileSystem["readRoots"] = filterJSONStringRoots(fileSystem["readRoots"], tempRoots)
+	fileSystem["writeRoots"] = filterJSONWriteRoots(fileSystem["writeRoots"], tempRoots)
+	normalized, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatalf("encode normalized policy JSON: %v", err)
+	}
+	return append(normalized, '\n')
+}
+
+func filterJSONStringRoots(value any, excluded map[string]struct{}) any {
+	roots, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(roots))
+	for _, root := range roots {
+		text, ok := root.(string)
+		if !ok {
+			out = append(out, root)
+			continue
+		}
+		if _, skip := excluded[text]; !skip {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
+func filterJSONWriteRoots(value any, excluded map[string]struct{}) any {
+	roots, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	out := make([]any, 0, len(roots))
+	for _, root := range roots {
+		entry, ok := root.(map[string]any)
+		if !ok {
+			out = append(out, root)
+			continue
+		}
+		text, _ := entry["root"].(string)
+		if _, skip := excluded[text]; !skip {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func jsonValuesEqual(t *testing.T, wantBytes []byte, gotBytes []byte) bool {
@@ -675,7 +754,7 @@ func TestEffectiveSandboxPolicyShowsWriteRootsError(t *testing.T) {
 
 func TestRunSandboxPolicyEffectiveListsConfiguredWriteRoots(t *testing.T) {
 	store := newSandboxTestStore(t)
-	extra := t.TempDir()
+	extra := tempDirOutsideDefaultTemp(t)
 	resolvedExtra, err := filepath.EvalSymlinks(extra)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q) returned error: %v", extra, err)
@@ -714,11 +793,11 @@ func TestRunSandboxPolicyEffectiveListsConfiguredWriteRoots(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("decode effective JSON: %v\n%s", err, stdout.String())
 	}
-	if len(payload.WriteRoots) != 2 {
-		t.Fatalf("writeRoots = %#v, want workspace root + extra root", payload.WriteRoots)
+	if len(payload.WriteRoots) < 2 {
+		t.Fatalf("writeRoots = %#v, want workspace root, extra root, and default temp roots", payload.WriteRoots)
 	}
-	if payload.WriteRoots[1] != resolvedExtra {
-		t.Fatalf("writeRoots[1] = %q, want %q", payload.WriteRoots[1], resolvedExtra)
+	if !containsString(payload.WriteRoots, resolvedExtra) {
+		t.Fatalf("writeRoots = %#v, want configured extra root %q", payload.WriteRoots, resolvedExtra)
 	}
 	if strings.Contains(stdout.String(), "writeRootsError") {
 		t.Fatalf("unexpected writeRootsError key for valid roots:\n%s", stdout.String())
@@ -766,8 +845,11 @@ func TestRunSandboxPolicyEffectiveWriteRootsFailSoft(t *testing.T) {
 	if !strings.Contains(payload.WriteRootsError, missing) {
 		t.Fatalf("writeRootsError = %q, want it to name the stale root %q", payload.WriteRootsError, missing)
 	}
-	if len(payload.WriteRoots) != 1 {
-		t.Fatalf("writeRoots = %#v, want workspace-only fallback", payload.WriteRoots)
+	if len(payload.WriteRoots) == 0 {
+		t.Fatalf("writeRoots = %#v, want workspace/default-temp fallback", payload.WriteRoots)
+	}
+	if containsString(payload.WriteRoots, missing) {
+		t.Fatalf("writeRoots = %#v, must not include stale root %q", payload.WriteRoots, missing)
 	}
 }
 
