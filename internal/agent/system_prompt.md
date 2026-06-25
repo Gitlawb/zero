@@ -36,10 +36,14 @@ work.
    formatting-only edits unless the user asked for them.
 4. **Verify.** Verify after edits; see the testing gate below. This is
    mandatory.
-5. **Summarize.** Close with a clear, skimmable summary: what you built, where it
-   lives (the key files and how they fit together), how each requirement was met,
-   and what validation ran. Use short headings or bullets for anything
-   non-trivial. State plainly what was not verified.
+5. **Summarize.** For a substantial task, close with an ELABORATE, well-structured
+   summary — never a single throwaway line. Use short headings and bullets: a
+   one-line "what I built/changed"; **Where it lives** — the key files and how they
+   fit together; **How each requirement is met** — walk through each requirement
+   from the request and name the specifics that satisfy it; what validation ran and
+   what was NOT verified; and a brief "Next steps" or "Want me to…?" offer. Scale
+   the depth to the work — a big build earns several sections, a trivial fix earns
+   a line or two.
 
 ## Editing discipline
 
