@@ -98,6 +98,27 @@ func TestQuietGenerationHint(t *testing.T) {
 	}
 }
 
+// TestQuietHintHiddenWhenSidebarShowsIt: when the context sidebar is up (it
+// carries the "generating…" pulse in ACTIVITY), the working line must NOT also
+// show the hint — it appears in exactly one place.
+func TestQuietHintHiddenWhenSidebarShowsIt(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	m := sidebarTestModel() // alt-screen + a plan -> sidebar active
+	m.now = func() time.Time { return base.Add(30 * time.Second) }
+	m.activeRunID = 7
+	m.turnStartedAt = base
+	m.lastStreamActivity = base.Add(2 * time.Second) // 28s quiet
+	if !m.sidebarActive() {
+		t.Fatal("precondition: sidebar should be active for this model")
+	}
+	if line := plainRender(t, m.workingStatusLine()); strings.Contains(line, "still generating") {
+		t.Errorf("working line must NOT duplicate the hint when the sidebar shows it:\n%s", line)
+	}
+	if act := plainRender(t, strings.Join(m.sidebarActivityLines(sidebarWidth(m.width), 10), "\n")); !strings.Contains(act, "generating") {
+		t.Errorf("the sidebar ACTIVITY should carry the generating pulse instead:\n%s", act)
+	}
+}
+
 func TestFormatWorkingElapsed(t *testing.T) {
 	cases := map[time.Duration]string{
 		0:                 "0s",

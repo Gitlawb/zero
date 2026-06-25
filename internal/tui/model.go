@@ -2479,9 +2479,13 @@ func (m model) workingStatusLine() string {
 	// If the model has gone quiet (no streamed text, reasoning, OR tool-call output
 	// for a while — common when a provider buffers a large tool call instead of
 	// streaming it), say so plainly with an advancing timer, so a long silent
-	// generation never reads as a frozen screen.
-	if hint := m.quietGenerationHint(); hint != "" {
-		line += zeroTheme.amber.Render("  ·  " + hint)
+	// generation never reads as a frozen screen. Only on the working line when the
+	// context sidebar isn't showing it — the sidebar's ACTIVITY pulse carries it
+	// whenever the sidebar is up, so it never appears in both places at once.
+	if !m.sidebarActive() {
+		if hint := m.quietGenerationHint(); hint != "" {
+			line += zeroTheme.amber.Render("  ·  " + hint)
+		}
 	}
 	// A second line carries live plan progress (how far along + the current step)
 	// so a long working stretch shows the task advancing without consulting the
