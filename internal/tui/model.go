@@ -2456,7 +2456,35 @@ func (m model) workingStatusLine() string {
 	// 0) so the counter is never missing — the authoritative totals stay in the
 	// status line and sidebar; this is the at-a-glance "it's generating" pulse.
 	line += zeroTheme.faint.Render("  ·  " + m.workingTokenIndicator())
+	// A second line carries live plan progress (how far along + the current step)
+	// so a long working stretch shows the task advancing without consulting the
+	// sidebar. Replaces the old per-call update_plan transcript cards. Empty when
+	// there is no active plan.
+	if planLine := m.workingPlanLine(); planLine != "" {
+		line += "\n" + planLine
+	}
 	return line
+}
+
+// workingPlanLine is the optional second line under the working indicator: the
+// plan's done/total and the step currently in progress. Empty when there is no
+// plan or the plan is already complete.
+func (m model) workingPlanLine() string {
+	if m.plan.isEmpty() || m.plan.isComplete() {
+		return ""
+	}
+	total := len(m.plan.steps)
+	done := 0
+	for _, step := range m.plan.steps {
+		if step.status == "completed" || step.status == "failed" {
+			done++
+		}
+	}
+	text := fmt.Sprintf("· plan %d/%d", done, total)
+	if current := truncateStep(currentStepContent(m.plan.steps), 48); current != "" {
+		text += " · " + current
+	}
+	return "  " + zeroTheme.faint.Render(text)
 }
 
 // workingTokenIndicator renders a live "↑ <n> tok" estimate of the tokens

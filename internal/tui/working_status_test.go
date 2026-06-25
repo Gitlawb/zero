@@ -6,6 +6,65 @@ import (
 	"time"
 )
 
+// TestWorkingPlanLine: the working indicator's second line carries the plan's
+// done/total and the in-progress step while a plan is active, and is empty when
+// there's no plan or the plan is complete.
+func TestWorkingPlanLine(t *testing.T) {
+	m := model{now: time.Now}
+	if got := m.workingPlanLine(); got != "" {
+		t.Errorf("no plan: want empty, got %q", got)
+	}
+
+	m.plan.steps = []planStep{
+		{content: "Research the topic", status: "completed"},
+		{content: "Add product catalog", status: "in_progress"},
+		{content: "Write the docs", status: "pending"},
+	}
+	got := plainRender(t, m.workingPlanLine())
+	if !strings.Contains(got, "plan 1/3") {
+		t.Errorf("active plan line missing count: %q", got)
+	}
+	if !strings.Contains(got, "Add product catalog") {
+		t.Errorf("active plan line missing current step: %q", got)
+	}
+
+	for i := range m.plan.steps {
+		m.plan.steps[i].status = "completed"
+	}
+	if got := m.workingPlanLine(); got != "" {
+		t.Errorf("complete plan: want empty, got %q", got)
+	}
+}
+
+// TestHiddenPlumbingToolsSkippedFromTranscript: the plumbing tools (update_plan,
+// tool_search) render nothing — their call AND result rows are dropped; real
+// work tools still render.
+func TestHiddenPlumbingToolsSkippedFromTranscript(t *testing.T) {
+	rows := []transcriptRow{
+		{kind: rowToolCall, tool: "update_plan", id: "c1", runID: 1},
+		{kind: rowToolResult, tool: "update_plan", id: "c1", runID: 1, text: "10 steps · 2 done"},
+		{kind: rowToolCall, tool: "tool_search", id: "c2", runID: 1},
+		{kind: rowToolResult, tool: "tool_search", id: "c2", runID: 1, text: "select:swarm_spawn,…"},
+		{kind: rowToolResult, tool: "bash", id: "c3", runID: 1, text: "ok"},
+	}
+	rc := buildRowContext(rows)
+	for _, i := range []int{0, 1, 2, 3} {
+		if !rc.skip(rows[i]) {
+			t.Errorf("plumbing row %d (%s/%v) should be skipped", i, rows[i].tool, rows[i].kind)
+		}
+	}
+	if rc.skip(rows[4]) {
+		t.Error("a normal tool result (bash) must not be skipped")
+	}
+
+	if !isHiddenPlumbingTool("update_plan") || !isHiddenPlumbingTool("tool_search") {
+		t.Error("update_plan and tool_search must be hidden plumbing")
+	}
+	if isHiddenPlumbingTool("write_file") || isHiddenPlumbingTool("web_search") {
+		t.Error("real work tools must NOT be hidden")
+	}
+}
+
 func TestFormatWorkingElapsed(t *testing.T) {
 	cases := map[time.Duration]string{
 		0:                 "0s",

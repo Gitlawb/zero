@@ -113,6 +113,19 @@ func buildRowContext(rows []transcriptRow) rowContext {
 	return rc
 }
 
+// isHiddenPlumbingTool reports whether a tool is internal mechanism the user
+// never needs to see in the transcript: update_plan (the plan is surfaced live
+// in the context sidebar and the clickable step detail) and tool_search (the
+// on-demand loading of tool schemas — the "select:…" noise). Their cards are
+// suppressed so the chat reads as a clean narrative of real work.
+func isHiddenPlumbingTool(name string) bool {
+	switch name {
+	case "update_plan", "tool_search":
+		return true
+	}
+	return false
+}
+
 // skip reports whether a row renders nothing itself: a tool call whose result
 // arrived collapses into the result's card; a permission prompt that has been
 // decided collapses into its decision line; an unprompted allow is already
@@ -120,7 +133,15 @@ func buildRowContext(rows []transcriptRow) rowContext {
 func (rc rowContext) skip(row transcriptRow) bool {
 	switch row.kind {
 	case rowToolCall:
+		// Pure-plumbing tools (the plan lives in the sidebar; tool_search just
+		// loads tool schemas) are mechanism the user never needs — drop their
+		// call and result cards so the chat stays a readable narrative of work.
+		if isHiddenPlumbingTool(row.tool) {
+			return true
+		}
 		return row.id != "" && rc.resolved[rcKey(row.runID, row.id)]
+	case rowToolResult:
+		return isHiddenPlumbingTool(row.tool)
 	case rowPermission:
 		event := row.permission
 		if event == nil || event.ToolCallID == "" {

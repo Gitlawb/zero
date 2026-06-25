@@ -128,6 +128,25 @@ func TestWriteFileToolCreatesAndProtectsExistingFiles(t *testing.T) {
 	}
 }
 
+func TestWriteFileSummaryReportsLineCount(t *testing.T) {
+	root := t.TempDir()
+	tool := NewWriteFileTool(root)
+	// Three lines, no trailing newline -> "3 lines" (not a byte count).
+	result := tool.Run(context.Background(), map[string]any{
+		"path":    "multi.txt",
+		"content": "one\ntwo\nthree",
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("expected ok, got %s: %s", result.Status, result.Output)
+	}
+	if !strings.Contains(result.Output, "(3 lines)") {
+		t.Fatalf("summary should report a line count, got %q", result.Output)
+	}
+	if strings.Contains(result.Output, "bytes") {
+		t.Errorf("summary should no longer report bytes: %q", result.Output)
+	}
+}
+
 func TestWriteFileToolAllowsEmptyContent(t *testing.T) {
 	root := t.TempDir()
 

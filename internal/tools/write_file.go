@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type writeFileTool struct {
@@ -109,7 +110,13 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 	if existed {
 		verb = "Overwrote"
 	}
-	summary := fmt.Sprintf("%s %s (%d bytes).", verb, relativePath, len([]byte(content)))
+	// Report line count (not bytes): "Wrote 282 lines" reads as real work at a
+	// glance, where a byte total is opaque noise.
+	lines := strings.Count(content, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		lines++
+	}
+	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	result.Display = Display{Summary: summary, Kind: "file"}
