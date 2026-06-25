@@ -76,7 +76,25 @@ func (m model) sidebarAvailable() bool {
 	if m.transcriptEmpty() {
 		return false
 	}
+	// Auto-hide when the panel has nothing to show (no sub-agents and no active
+	// plan): a fixed-width column of mostly empty space is wasted, so reclaim it
+	// for the full-width chat. The panel returns the moment an agent spawns or a
+	// plan starts. (Ctrl+B still force-hides it when there IS content.)
+	if !m.sidebarHasContent() {
+		return false
+	}
 	return true
+}
+
+// sidebarHasContent reports whether the context sidebar has anything worth a
+// column: at least one agent (a specialist delegation or a swarm member) or a
+// non-empty plan. Used to auto-hide the panel — and reclaim its width for the
+// chat — during plain idle stretches with neither.
+func (m model) sidebarHasContent() bool {
+	if len(m.sidebarSpecialists()) > 0 || len(m.swarmSpawnedAgents()) > 0 {
+		return true
+	}
+	return !m.plan.isEmpty()
 }
 
 // chatColumnWidth is the chat's render width: the full chat width normally, and

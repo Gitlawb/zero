@@ -131,6 +131,10 @@ func sidebarTestModel() model {
 	// Real conversation content so the home-screen gate doesn't suppress the
 	// sidebar (it stays single-column until the transcript has non-welcome rows).
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
+	// A plan gives the sidebar content so it isn't auto-hidden as empty (the panel
+	// only claims a column when there are agents or an active plan). Tests that
+	// exercise specific agent/plan states set their own and override this.
+	m.plan.steps = []planStep{{content: "wire it up", status: "in_progress"}}
 	return m
 }
 
@@ -247,6 +251,34 @@ func TestRenderContextSidebarDimensions(t *testing.T) {
 	}
 	if !strings.Contains(plain, "tokens") {
 		t.Fatalf("sidebar missing token floor:\n%s", plain)
+	}
+}
+
+// TestSidebarAutoHidesWhenEmpty: with no agents and no active plan the panel
+// auto-hides and the chat reclaims the full width; adding a plan or an agent
+// brings it back.
+func TestSidebarAutoHidesWhenEmpty(t *testing.T) {
+	m := sidebarTestModel() // has a plan -> sidebar active
+	if !m.sidebarActive() {
+		t.Fatal("expected sidebar active when the model has a plan")
+	}
+
+	// Clear the only content (the plan) -> empty -> auto-hidden.
+	m.plan.steps = nil
+	if m.sidebarHasContent() {
+		t.Fatal("model should have no sidebar content after clearing the plan")
+	}
+	if m.sidebarActive() {
+		t.Error("sidebar should auto-hide with no agents and no active plan")
+	}
+	if got, want := m.chatColumnWidth(), chatWidth(m.width); got != want {
+		t.Errorf("empty sidebar: chat width = %d, want full %d", got, want)
+	}
+
+	// A spawned agent brings the panel back.
+	m.specialists.start("explorer", "look around", "sess-x", time.Now())
+	if !m.sidebarHasContent() || !m.sidebarActive() {
+		t.Error("sidebar should return once an agent spawns")
 	}
 }
 
