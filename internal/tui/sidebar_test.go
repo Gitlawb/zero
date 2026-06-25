@@ -10,7 +10,47 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Gitlawb/zero/internal/tools"
 )
+
+// TestSidebarActivityLines: the ACTIVITY feed is a bounded, newest-first list of
+// recent completed work (stripped of the "tool result:" prefix), with a live
+// "generating…" pulse when the run is active and quiet.
+func TestSidebarActivityLines(t *testing.T) {
+	m := model{now: time.Now}
+	m.transcript = []transcriptRow{
+		{kind: rowToolCall, tool: "bash", id: "c1", arg: "mkdir -p boutique-site"},
+		{kind: rowToolResult, tool: "bash", id: "c1", status: tools.StatusOK, text: "tool result: bash ok Command completed with no output."},
+		{kind: rowToolResult, tool: "write_file", id: "c2", status: tools.StatusOK, text: "tool result: write_file ok Created styles.css (1045 lines)."},
+		{kind: rowAssistant, text: "Now the JS…"}, // ignored: not a work result
+	}
+	joined := plainRender(t, strings.Join(m.sidebarActivityLines(40, 10), "\n"))
+
+	wfIdx := strings.Index(joined, "Created styles.css (1045 lines).")
+	bashIdx := strings.Index(joined, "mkdir -p boutique-site")
+	if wfIdx < 0 || bashIdx < 0 {
+		t.Fatalf("activity should list the write_file summary and the bash command:\n%s", joined)
+	}
+	if wfIdx > bashIdx {
+		t.Errorf("activity should be newest-first (write_file before bash):\n%s", joined)
+	}
+	if strings.Contains(joined, "tool result:") {
+		t.Errorf("activity must strip the 'tool result:' prefix:\n%s", joined)
+	}
+	if got := m.sidebarActivityLines(40, 0); got != nil {
+		t.Errorf("zero budget: want nil, got %v", got)
+	}
+
+	// Active + quiet run -> a live "generating…" pulse.
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	live := model{now: func() time.Time { return base.Add(30 * time.Second) }}
+	live.activeRunID = 7
+	live.turnStartedAt = base
+	live.lastStreamActivity = base.Add(2 * time.Second) // 28s quiet
+	if got := plainRender(t, strings.Join(live.sidebarActivityLines(40, 10), "\n")); !strings.Contains(got, "generating") {
+		t.Errorf("active+quiet run should show a generating pulse:\n%s", got)
+	}
+}
 
 func swarmSidebarTestModel(t *testing.T, sessionIDs map[string]string) model {
 	t.Helper()

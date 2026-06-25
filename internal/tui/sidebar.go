@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // sidebar geometry. The sidebar takes ~30% of the width, clamped so it never
@@ -585,6 +587,16 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, planLines...)
 	}
 
+	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
+	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
+	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
+	// rather than letting the end-truncation eat into the plan. Absent when empty.
+	if activityLines := m.sidebarActivityLines(width, maxInt(0, height-1-len(lines))); len(activityLines) > 0 {
+		add("")
+		add(sidebarHeader("ACTIVITY", width))
+		lines = append(lines, activityLines...)
+	}
+
 	// Token readout pinned to the bottom.
 	tokenLine := m.sidebarTokenLine(width)
 	// Reserve the bottom row for tokens; pad the gap so it sits at the floor.
@@ -686,6 +698,88 @@ func (m model) sidebarPlanLines(width int) []string {
 		lines = append(lines, " "+icon+" "+body)
 	}
 	return lines
+}
+
+// maxSidebarActivityLines caps the ACTIVITY feed so it stays a glanceable tail,
+// not a scrolling log.
+const maxSidebarActivityLines = 5
+
+// sidebarActivityLines builds the ACTIVITY feed: a live "generating…" pulse (when
+// the run has gone quiet) atop the most recent completed work (files written,
+// commands run). It scans the transcript BACKWARD and stops after the cap, so the
+// cost is bounded by the cap — never a full-transcript walk per frame. budget is
+// the rows available before the token floor; the feed clips itself to it.
+func (m model) sidebarActivityLines(width, budget int) []string {
+	if budget <= 0 {
+		return nil
+	}
+	room := maxInt(4, width-3)
+	limit := minInt(maxSidebarActivityLines, budget)
+	var work []string
+	for i := len(m.transcript) - 1; i >= 0 && len(work) < limit; i-- {
+		row := m.transcript[i]
+		if row.kind != rowToolResult || !isPlanWorkTool(row.tool) {
+			continue
+		}
+		glyph := zeroTheme.green.Render("✓")
+		if row.status == tools.StatusError {
+			glyph = zeroTheme.red.Render("✗")
+		}
+		work = append(work, " "+glyph+" "+zeroTheme.muted.Render(truncateStep(m.activitySummary(row), room)))
+	}
+	live := ""
+	if m.activeRunID != 0 {
+		if hint := m.quietGenerationHint(); hint != "" {
+			live = " " + zeroTheme.accent.Render("•") + " " + zeroTheme.faint.Render(truncateStep(hint, room))
+		}
+	}
+	lines := make([]string, 0, len(work)+1)
+	if live != "" {
+		lines = append(lines, live)
+	}
+	lines = append(lines, work...)
+	if len(lines) > budget {
+		lines = lines[:budget]
+	}
+	return lines
+}
+
+// activitySummary renders one ACTIVITY line: a command's command-line (recovered
+// from its call row) for bash/exec, else the tool result's first line with the
+// "tool result: <tool> <status> " prefix stripped (e.g. "Created styles.css
+// (1045 lines).").
+func (m model) activitySummary(row transcriptRow) string {
+	if isPlanCommandTool(row.tool) {
+		if cmd := m.activityCommandForRow(row.id); cmd != "" {
+			return row.tool + " · " + cmd
+		}
+		return row.tool
+	}
+	text := strings.TrimSpace(strings.SplitN(row.text, "\n", 2)[0])
+	status := row.status
+	if status == "" {
+		status = tools.StatusOK
+	}
+	text = strings.TrimPrefix(text, fmt.Sprintf("tool result: %s %s ", row.tool, status))
+	if strings.TrimSpace(text) == "" {
+		return row.tool
+	}
+	return text
+}
+
+// activityCommandForRow recovers a command tool's command-line from its paired
+// call row (whose arg hint carries the command), or "" if not found.
+func (m model) activityCommandForRow(id string) string {
+	if id == "" {
+		return ""
+	}
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		row := m.transcript[i]
+		if row.kind == rowToolCall && row.id == id {
+			return row.arg
+		}
+	}
+	return ""
 }
 
 // sidebarTokenLine renders the bottom token/context readout. It prefers the
