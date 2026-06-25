@@ -106,6 +106,10 @@ type Result struct {
 type Display struct {
 	Summary string
 	Kind    string // e.g. file, diff, search, shell
+	// Preview is a multi-line, card-only body (e.g. a unified diff or file head)
+	// for the TUI. It is NEVER sent to the model — Output stays the short summary
+	// the model sees — so a rich code preview costs zero model tokens.
+	Preview string
 }
 
 type Tool interface {

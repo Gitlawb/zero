@@ -37,6 +37,9 @@ func newDefaultToolBodyRegistry() *toolBodyRegistry {
 	diffOrFallback := diffFirstToolBodyRenderer{next: fallback}
 	registry.register("edit_file", diffOrFallback)
 	registry.register("apply_patch", diffOrFallback)
+	// write_file's card-only Display.Preview is a synthesized all-additions diff
+	// (the new file's head), so render it through the same diff path.
+	registry.register("write_file", diffOrFallback)
 	registry.register("read_file", diffFirstToolBodyRenderer{next: toolBodyRendererFunc(func(req toolBodyRequest) cardBody {
 		return readCardBody(req.detail, req.width, req.opts)
 	})})

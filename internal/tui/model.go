@@ -4010,7 +4010,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				text:   toolResultRowText(result),
 				tool:   result.Name,
 				status: result.Status,
-				detail: result.Output,
+				detail: toolResultDetail(result),
 				runID:  runID,
 			}
 			// A Task result is shown by the specialist card (its completion state),
@@ -4232,6 +4232,16 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 		return
 	}
 	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event})
+}
+
+// toolResultDetail is the card body source: the rich card-only Display.Preview
+// (a code/diff preview) when present on a successful result, else the Output that
+// the model also saw. Error results keep their Output so the failure shows.
+func toolResultDetail(result agent.ToolResult) string {
+	if result.Status != tools.StatusError && strings.TrimSpace(result.Display.Preview) != "" {
+		return result.Display.Preview
+	}
+	return result.Output
 }
 
 func toolResultRowText(result agent.ToolResult) string {

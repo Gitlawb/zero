@@ -214,6 +214,12 @@ func scrubResultSecrets(res Result) Result {
 		res.Display.Summary = scrubbed
 		res.Redacted = true
 	}
+	// Display.Preview is a file head / diff that can contain secrets, so scrub it at
+	// the same boundary as Output/Summary before it reaches the card.
+	if scrubbed := redaction.RedactString(res.Display.Preview, redaction.Options{}); scrubbed != res.Display.Preview {
+		res.Display.Preview = scrubbed
+		res.Redacted = true
+	}
 	// Meta values carry model-controlled strings (e.g. glob pattern, bash cwd) and
 	// are forwarded into the transcript, so they are part of the boundary too.
 	for key, value := range res.Meta {

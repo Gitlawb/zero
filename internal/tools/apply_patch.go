@@ -100,7 +100,7 @@ func (tool applyPatchTool) RunWithOptions(ctx context.Context, args map[string]a
 	}
 	result := okResult(summary)
 	result.ChangedFiles = changedFilesFromPatch(relativeRoot, patch)
-	result.Display = Display{Summary: summary, Kind: "diff"}
+	result.Display = Display{Summary: summary, Kind: "diff", Preview: capPreviewDiff(patch)}
 	// git apply already rejects a patch whose context drifted, so it has its own
 	// staleness guard. Drop any tracked baseline for the files it rewrote so a
 	// subsequent edit_file/write_file re-reads instead of false-flagging the

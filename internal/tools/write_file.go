@@ -119,7 +119,7 @@ func (tool writeFileTool) RunWithOptions(_ context.Context, args map[string]any,
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	result.Display = Display{Summary: summary, Kind: "file"}
+	result.Display = Display{Summary: summary, Kind: "file", Preview: newFileDiffPreview(relativePath, content, lines, existed)}
 	return result
 }
 

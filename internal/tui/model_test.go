@@ -1174,6 +1174,31 @@ func TestAgentResponseCompletesStuckPlan(t *testing.T) {
 	})
 }
 
+// TestToolResultDetailPrefersPreview: the card body uses the rich card-only
+// Display.Preview on a successful result, falls back to Output when there's no
+// preview, and always uses Output (the failure) on an error.
+func TestToolResultDetailPrefersPreview(t *testing.T) {
+	withPreview := agent.ToolResult{
+		Name:    "write_file",
+		Status:  tools.StatusOK,
+		Output:  "Created x.js (300 lines).",
+		Display: tools.Display{Summary: "Created x.js (300 lines).", Kind: "file", Preview: "--- /dev/null\n+++ b/x.js\n@@ -0,0 +1,300 @@\n+const x = 1"},
+	}
+	if got := toolResultDetail(withPreview); !strings.Contains(got, "+const x = 1") {
+		t.Errorf("successful result should use the preview, got %q", got)
+	}
+
+	noPreview := agent.ToolResult{Name: "bash", Status: tools.StatusOK, Output: "exit 0"}
+	if got := toolResultDetail(noPreview); got != "exit 0" {
+		t.Errorf("no preview: want Output, got %q", got)
+	}
+
+	errResult := agent.ToolResult{Name: "write_file", Status: tools.StatusError, Output: "Error: permission denied", Display: tools.Display{Preview: "must not show on error"}}
+	if got := toolResultDetail(errResult); got != "Error: permission denied" {
+		t.Errorf("error result must use Output (the failure), got %q", got)
+	}
+}
+
 func TestStaleAgentResponseAfterCancelIsIgnored(t *testing.T) {
 	m := newModel(context.Background(), Options{})
 	m.pending = false
