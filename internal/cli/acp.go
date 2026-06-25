@@ -56,7 +56,9 @@ func runACP(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int
 			if err != nil {
 				return nil, nil, err
 			}
-			return newCoreRegistryScoped(workspaceRoot, scope), engine, nil
+			registry := newCoreRegistryScoped(workspaceRoot, scope)
+			registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+			return registry, engine, nil
 		},
 		ResolveWorkspaceRoot: acpWorkspaceRootResolver(deps),
 		Store:                deps.newSessionStore(),

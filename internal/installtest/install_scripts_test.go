@@ -31,6 +31,9 @@ func TestUnixInstallerScriptMatchesReleaseContracts(t *testing.T) {
 		`tar -xzf "$archive_path" -C "$extract_dir"`,
 		`find_extracted_binary "$extract_dir"`,
 		`cp "$binary_path" "$ZERO_INSTALL_DIR/zero"`,
+		`copy_optional_file "zero-linux-sandbox"`,
+		`copy_optional_file "zero-seccomp"`,
+		`copy_optional_dir "helpers"`,
 	})
 }
 
@@ -48,6 +51,8 @@ func TestPowerShellInstallerScriptMatchesWindowsReleaseContracts(t *testing.T) {
 		`"zero-windows-command-runner.exe"`,
 		`"zero-windows-sandbox-setup.exe"`,
 		`Copy-Item -Path $sourcePath -Destination (Join-Path $InstallDir $fileName) -Force`,
+		`Find-ZeroOptionalExtractedDirectory -Root $extractDir -DirectoryName "helpers"`,
+		`Copy-Item -Path $helpersPath -Destination $targetHelpersPath -Recurse -Force`,
 	})
 }
 
@@ -67,6 +72,12 @@ func TestUnixInstallerInstallsFromPrefixedReleaseArchiveWithoutNetwork(t *testin
 	installed := readFile(t, filepath.Join(fixture.installDir, "zero"))
 	if !strings.Contains(string(installed), "mock-zero") {
 		t.Fatalf("installed binary = %q, want mock-zero script", string(installed))
+	}
+	if _, err := os.Stat(filepath.Join(fixture.installDir, "helpers", "node_modules", ".bin", "agent-browser")); err != nil {
+		t.Fatalf("installed helper package missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.installDir, "zero-linux-sandbox")); err != nil {
+		t.Fatalf("installed linux sandbox helper missing: %v", err)
 	}
 }
 
@@ -127,7 +138,12 @@ func newUnixInstallFixture(t *testing.T) unixInstallFixture {
 	mustMkdirAll(t, packageDir)
 	mustMkdirAll(t, filepath.Dir(fixture.archivePath))
 	mustMkdirAll(t, fixture.installDir)
+	mustMkdirAll(t, filepath.Join(packageDir, "helpers", "node_modules", ".bin"))
 	writeFile(t, filepath.Join(packageDir, "zero"), []byte("#!/usr/bin/env sh\necho mock-zero\n"), 0o755)
+	writeFile(t, filepath.Join(packageDir, "zero-linux-sandbox"), []byte("#!/usr/bin/env sh\n"), 0o755)
+	writeFile(t, filepath.Join(packageDir, "zero-seccomp"), []byte("#!/usr/bin/env sh\n"), 0o755)
+	writeFile(t, filepath.Join(packageDir, "helpers", "node_modules", ".bin", "agent-browser"), []byte("#!/usr/bin/env sh\n"), 0o755)
+	writeFile(t, filepath.Join(packageDir, "helpers", "node_modules", ".bin", "tuistory"), []byte("#!/usr/bin/env sh\n"), 0o755)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

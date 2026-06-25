@@ -243,6 +243,9 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 	if err := copyPackageFiles(rootDir, stagingDir, artifactPath, stagedBinaryPath, goos, version, helperArtifacts); err != nil {
 		return PackageResult{}, err
 	}
+	if err := stageLocalControlHelpers(ctx, rootDir, filepath.Join(stagingDir, "helpers")); err != nil {
+		return PackageResult{}, err
+	}
 	if err := createArchive(stagingDir, archivePath, goos); err != nil {
 		return PackageResult{}, err
 	}
@@ -707,6 +710,95 @@ func copyPackageFiles(rootDir string, stagingDir string, artifactPath string, st
 	return nil
 }
 
+var localControlHelperPackages = []string{"agent-browser", "tuistory"}
+
+func stageLocalControlHelpers(ctx context.Context, rootDir string, helpersDir string) error {
+	dependencies, err := localControlHelperDependencies(rootDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(helpersDir, 0o755); err != nil {
+		return fmt.Errorf("create local-control helper staging dir: %w", err)
+	}
+	manifest := map[string]any{
+		"private":      true,
+		"type":         "module",
+		"dependencies": dependencies,
+	}
+	bytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(helpersDir, "package.json"), append(bytes, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write local-control helper package.json: %w", err)
+	}
+
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		return fmt.Errorf("npm is required to package local-control helpers: %w", err)
+	}
+	command := exec.CommandContext(ctx, npmPath, "install", "--omit=dev", "--no-audit", "--no-fund", "--loglevel=error")
+	command.Dir = helpersDir
+	command.Env = append(os.Environ(), "npm_config_update_notifier=false")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("install local-control helper packages: %s", message)
+	}
+	if err := verifyStagedLocalControlHelpers(helpersDir, runtime.GOOS); err != nil {
+		return err
+	}
+	return nil
+}
+
+func localControlHelperDependencies(rootDir string) (map[string]string, error) {
+	bytes, err := os.ReadFile(filepath.Join(rootDir, "package.json"))
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(bytes, &payload); err != nil {
+		return nil, fmt.Errorf("parse package.json: %w", err)
+	}
+	dependencies := map[string]string{}
+	for _, name := range localControlHelperPackages {
+		version := strings.TrimSpace(payload.Dependencies[name])
+		if version == "" {
+			return nil, fmt.Errorf("package.json dependency %q is required for packaged local-control helpers", name)
+		}
+		dependencies[name] = version
+	}
+	return dependencies, nil
+}
+
+func verifyStagedLocalControlHelpers(helpersDir string, goos string) error {
+	for _, name := range localControlHelperPackages {
+		found := false
+		for _, shimName := range localControlHelperShimNames(name, goos) {
+			if info, err := os.Stat(filepath.Join(helpersDir, "node_modules", ".bin", shimName)); err == nil && !info.IsDir() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("local-control helper package did not create a %s executable shim", name)
+		}
+	}
+	return nil
+}
+
+func localControlHelperShimNames(name string, goos string) []string {
+	if goos == "windows" {
+		return []string{name + ".cmd", name + ".exe", name}
+	}
+	return []string{name}
+}
+
 func copyFile(source string, destination string, mode fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
@@ -763,7 +855,14 @@ func createTarGzArchive(stagingDir string, archivePath string) error {
 		if err != nil {
 			return err
 		}
-		header, err := tar.FileInfoHeader(info, "")
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			return err
 		}
@@ -771,7 +870,7 @@ func createTarGzArchive(stagingDir string, archivePath string) error {
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return err
 		}
-		if entry.IsDir() {
+		if entry.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 		entryFile, err := os.Open(path)

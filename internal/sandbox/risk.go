@@ -93,6 +93,14 @@ func classifyWithScope(request Request, scope *Scope) Risk {
 		add("shell", RiskHigh)
 	case SideEffectNetwork:
 		add("network", RiskHigh)
+	case SideEffectLocalControl:
+		add("local_control", RiskHigh)
+	case SideEffectLocalBrowser:
+		add("local_browser", RiskHigh)
+	case SideEffectLocalDesktop:
+		add("local_desktop", RiskHigh)
+	case SideEffectLocalTerminal:
+		add("local_terminal", RiskHigh)
 	case SideEffectOutOfWorkspace:
 		add("out_of_workspace", RiskCritical)
 	case SideEffectNone:

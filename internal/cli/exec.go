@@ -313,6 +313,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
 		registry.Register(tool)
 	}
+	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	sandboxEngine, err := buildExecSandboxEngine(workspaceRoot, resolved, deps, execScope)
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())

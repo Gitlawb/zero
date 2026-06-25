@@ -109,6 +109,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Tools:          cfg.Tools,
 		Swarm:          cfg.Swarm,
 		Preferences:    cfg.Preferences,
+		LocalControl:   cfg.LocalControl,
 	}, nil
 }
 
@@ -182,6 +183,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
+	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
@@ -225,6 +227,9 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
+	// Local control is intentionally user-config/override only. A cloned project
+	// must not be able to make browser, desktop, or terminal automation tools
+	// appear in the model's tool surface.
 	return nil
 }
 
@@ -555,6 +560,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 		cfg.Tools.DeferThreshold = overrides.Tools.DeferThreshold
 		cfg.Tools.deferThresholdSet = true
 	}
+	mergeLocalControlConfig(&cfg.LocalControl, overrides.LocalControl)
 	for _, provider := range overrides.Providers {
 		mergeProvider(cfg, provider)
 	}
@@ -562,6 +568,32 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 		mergeProvider(cfg, overrides.Provider)
 	}
 	mergeMCPConfig(&cfg.MCP, overrides.MCP)
+}
+
+func mergeLocalControlConfig(dst *LocalControlConfig, src LocalControlConfig) {
+	if src.enabledSet {
+		dst.Enabled = src.Enabled
+		dst.enabledSet = true
+	}
+	mergeLocalControlDriverConfig(&dst.Browser, src.Browser)
+	mergeLocalControlDriverConfig(&dst.Desktop, src.Desktop)
+	mergeLocalControlDriverConfig(&dst.Terminal, src.Terminal)
+	if artifactsDir := strings.TrimSpace(src.ArtifactsDir); artifactsDir != "" {
+		dst.ArtifactsDir = artifactsDir
+	}
+}
+
+func mergeLocalControlDriverConfig(dst *LocalControlDriverConfig, src LocalControlDriverConfig) {
+	if src.enabledSet {
+		dst.Enabled = src.Enabled
+		dst.enabledSet = true
+	}
+	if helperPath := strings.TrimSpace(src.HelperPath); helperPath != "" {
+		dst.HelperPath = helperPath
+	}
+	if driver := strings.TrimSpace(src.Driver); driver != "" {
+		dst.Driver = driver
+	}
 }
 
 func mergeMCPConfig(dst *MCPConfig, src MCPConfig) {

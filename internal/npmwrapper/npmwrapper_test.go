@@ -25,6 +25,7 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 		Scripts    map[string]string `json:"scripts"`
 		License    string            `json:"license"`
 		Files      []string          `json:"files"`
+		Deps       map[string]string `json:"dependencies"`
 		Repository json.RawMessage   `json:"repository"`
 		Engines    map[string]string `json:"engines"`
 	}
@@ -59,6 +60,11 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	}
 	if pkg.Engines["node"] == "" {
 		t.Fatalf("package.json engines.node is empty; the wrapper and installer require a modern Node")
+	}
+	for _, name := range []string{"agent-browser", "tuistory"} {
+		if pkg.Deps[name] == "" {
+			t.Fatalf("package.json dependencies is missing %q", name)
+		}
 	}
 	wantFiles := map[string]bool{"bin/zero.js": false, "scripts/postinstall.mjs": false}
 	for _, f := range pkg.Files {
@@ -258,6 +264,62 @@ func TestNodeWrapperLaunchesNativeBinary(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(output)); got != "mock-zero --version" {
 		t.Fatalf("wrapper output = %q", got)
+	}
+}
+
+func TestNodeWrapperPassesLocalControlHelperManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	node := requireNode(t)
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	nativePath := filepath.Join(root, "zero")
+	if err := os.WriteFile(nativePath, []byte("#!/usr/bin/env sh\nprintf '%s\\n' \"$ZERO_LOCAL_CONTROL_HELPERS\"\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile native fixture: %v", err)
+	}
+	binDir := filepath.Join(root, "node_modules", ".bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll node_modules/.bin: %v", err)
+	}
+	for _, name := range []string{"agent-browser", "tuistory"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile helper %s: %v", name, err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), nodeWrapperTimeout())
+	defer cancel()
+	command := nodeWrapperCommand(ctx, node, wrapperPath, "--version")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrapper timed out launching native binary: %v; output: %s", ctx.Err(), output)
+	}
+	if err != nil {
+		t.Fatalf("wrapper returned error: %v; output: %s", err, output)
+	}
+	var manifest struct {
+		Version int `json:"version"`
+		Helpers map[string]struct {
+			Command     string   `json:"command"`
+			PrefixArgs  []string `json:"prefixArgs"`
+			PathPrepend []string `json:"pathPrepend"`
+		} `json:"helpers"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &manifest); err != nil {
+		t.Fatalf("manifest JSON = %q: %v", output, err)
+	}
+	for _, name := range []string{"agent-browser", "tuistory"} {
+		helper, ok := manifest.Helpers[name]
+		if !ok {
+			t.Fatalf("manifest missing helper %q: %#v", name, manifest.Helpers)
+		}
+		if helper.Command != filepath.Join(binDir, name) {
+			t.Fatalf("%s command = %q, want %q", name, helper.Command, filepath.Join(binDir, name))
+		}
+		if len(helper.PathPrepend) != 1 || helper.PathPrepend[0] != binDir {
+			t.Fatalf("%s pathPrepend = %#v, want [%q]", name, helper.PathPrepend, binDir)
+		}
 	}
 }
 

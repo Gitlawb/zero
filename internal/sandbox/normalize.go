@@ -30,7 +30,7 @@ func NormalizePermission(value Permission) Permission {
 func NormalizeSideEffect(value SideEffect) SideEffect {
 	normalized := SideEffect(strings.ToLower(strings.TrimSpace(string(value))))
 	switch normalized {
-	case SideEffectRead, SideEffectWrite, SideEffectShell, SideEffectNetwork, SideEffectOutOfWorkspace, SideEffectNone:
+	case SideEffectRead, SideEffectWrite, SideEffectShell, SideEffectNetwork, SideEffectLocalControl, SideEffectLocalBrowser, SideEffectLocalDesktop, SideEffectLocalTerminal, SideEffectOutOfWorkspace, SideEffectNone:
 		return normalized
 	default:
 		return SideEffectOutOfWorkspace

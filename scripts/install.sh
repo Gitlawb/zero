@@ -124,23 +124,57 @@ verify_checksum() {
   fi
 }
 
-find_extracted_binary() {
+find_extracted_entry() {
   local root="$1"
+  local name="$2"
+  local kind="$3"
   local candidate
 
-  if [ -f "$root/zero" ]; then
-    echo "$root/zero"
+  if [ "$kind" = "dir" ] && [ -d "$root/$name" ]; then
+    echo "$root/$name"
+    return 0
+  fi
+  if [ "$kind" = "file" ] && [ -f "$root/$name" ]; then
+    echo "$root/$name"
     return 0
   fi
 
-  for candidate in "$root"/*/zero; do
-    if [ -f "$candidate" ]; then
+  for candidate in "$root"/*/"$name"; do
+    if [ "$kind" = "dir" ] && [ -d "$candidate" ]; then
+      echo "$candidate"
+      return 0
+    fi
+    if [ "$kind" = "file" ] && [ -f "$candidate" ]; then
       echo "$candidate"
       return 0
     fi
   done
 
   return 1
+}
+
+find_extracted_binary() {
+  find_extracted_entry "$1" "zero" "file"
+}
+
+copy_optional_file() {
+  local name="$1"
+  local source_path
+
+  if source_path="$(find_extracted_entry "$extract_dir" "$name" "file")"; then
+    cp "$source_path" "$ZERO_INSTALL_DIR/$name"
+    chmod 755 "$ZERO_INSTALL_DIR/$name"
+  fi
+}
+
+copy_optional_dir() {
+  local name="$1"
+  local source_path
+
+  if source_path="$(find_extracted_entry "$extract_dir" "$name" "dir")"; then
+    rm -rf "$ZERO_INSTALL_DIR/$name"
+    cp -R "$source_path" "$ZERO_INSTALL_DIR/$name"
+  fi
 }
 
 need_command uname
@@ -190,6 +224,9 @@ binary_path="$(find_extracted_binary "$extract_dir")" || fail "release archive d
 mkdir -p "$ZERO_INSTALL_DIR"
 cp "$binary_path" "$ZERO_INSTALL_DIR/zero"
 chmod 755 "$ZERO_INSTALL_DIR/zero"
+copy_optional_file "zero-linux-sandbox"
+copy_optional_file "zero-seccomp"
+copy_optional_dir "helpers"
 
 echo "Installed $ZERO_INSTALL_DIR/zero"
 

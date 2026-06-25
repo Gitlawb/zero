@@ -10,7 +10,7 @@ func TestSideEffectNoneConstant(t *testing.T) {
 	}
 	// It must be distinct from every existing side-effect value.
 	for _, other := range []SideEffect{
-		SideEffectRead, SideEffectWrite, SideEffectShell, SideEffectNetwork, SideEffectOutOfWorkspace,
+		SideEffectRead, SideEffectWrite, SideEffectShell, SideEffectNetwork, SideEffectLocalControl, SideEffectLocalBrowser, SideEffectLocalDesktop, SideEffectLocalTerminal, SideEffectOutOfWorkspace,
 	} {
 		if SideEffectNone == other {
 			t.Fatalf("SideEffectNone collides with existing side effect %q", other)

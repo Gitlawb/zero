@@ -41,6 +41,11 @@ var scopeArgKeys = []struct {
 // no scoped argument is present, the value is not a string, or the value points
 // at the workspace root (".") -- in those cases the grant is plainly tool-wide.
 func DeriveScope(toolName string, args map[string]any) (string, ScopeKind) {
+	if toolName == "browser_open" {
+		if host, ok := deriveBrowserHostScope(args["url"]); ok {
+			return host, ScopeHost
+		}
+	}
 	if toolName == "web_fetch" {
 		if host, ok := deriveHostScope(args["url"]); ok {
 			return host, ScopeHost
@@ -76,6 +81,18 @@ func deriveHostScope(value any) (string, bool) {
 	}
 	host := normalizeHostScope(parsed.Hostname())
 	return host, host != ""
+}
+
+func deriveBrowserHostScope(value any) (string, bool) {
+	raw, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed != "" && !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+	return deriveHostScope(trimmed)
 }
 
 // resolveScopeAbs converts a raw scope to an absolute, cleaned path. A relative

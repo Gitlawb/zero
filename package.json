@@ -17,6 +17,10 @@
   "engines": {
     "node": ">=18"
   },
+  "dependencies": {
+    "agent-browser": "^0.30.1",
+    "tuistory": "^0.10.0"
+  },
   "os": [
     "linux",
     "darwin",

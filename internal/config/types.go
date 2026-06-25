@@ -94,6 +94,57 @@ type PreferencesConfig struct {
 	FavoriteModels []string `json:"favoriteModels,omitempty"`
 }
 
+// LocalControlConfig controls local browser/desktop/terminal automation helpers.
+// Helpers are discovered lazily by the tool that needs them; no setup command or
+// background probe is required during startup.
+type LocalControlConfig struct {
+	Enabled      bool                     `json:"enabled,omitempty"`
+	Browser      LocalControlDriverConfig `json:"browser,omitempty"`
+	Desktop      LocalControlDriverConfig `json:"desktop,omitempty"`
+	Terminal     LocalControlDriverConfig `json:"terminal,omitempty"`
+	ArtifactsDir string                   `json:"artifactsDir,omitempty"`
+	enabledSet   bool
+}
+
+type LocalControlDriverConfig struct {
+	Enabled    bool   `json:"enabled,omitempty"`
+	HelperPath string `json:"helperPath,omitempty"`
+	Driver     string `json:"driver,omitempty"`
+	enabledSet bool
+}
+
+func (cfg LocalControlConfig) BrowserEnabled() bool {
+	return !cfg.Disabled() && (!cfg.Browser.enabledSet || cfg.Browser.Enabled)
+}
+
+func (cfg LocalControlConfig) DesktopEnabled() bool {
+	return !cfg.Disabled() && cfg.Desktop.enabledSet && cfg.Desktop.Enabled
+}
+
+func (cfg LocalControlConfig) TerminalEnabled() bool {
+	return !cfg.Disabled() && (!cfg.Terminal.enabledSet || cfg.Terminal.Enabled)
+}
+
+func (cfg LocalControlConfig) Disabled() bool {
+	return cfg.enabledSet && !cfg.Enabled
+}
+
+func (cfg LocalControlConfig) Empty() bool {
+	return !cfg.Enabled &&
+		!cfg.enabledSet &&
+		cfg.ArtifactsDir == "" &&
+		cfg.Browser.Empty() &&
+		cfg.Desktop.Empty() &&
+		cfg.Terminal.Empty()
+}
+
+func (cfg LocalControlDriverConfig) Empty() bool {
+	return !cfg.Enabled &&
+		!cfg.enabledSet &&
+		cfg.HelperPath == "" &&
+		cfg.Driver == ""
+}
+
 // SwarmConfig tunes the multi-agent swarm. MaxTeamSize caps how many members run
 // concurrently per team; 0 uses the built-in default (8). Spawns past the cap
 // queue and launch as slots free, so lowering it bounds parallelism (and provider
@@ -128,15 +179,46 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 }
 
 type FileConfig struct {
-	ActiveProvider string            `json:"activeProvider,omitempty"`
-	Providers      []ProviderProfile `json:"providers,omitempty"`
-	MaxTurns       int               `json:"maxTurns,omitempty"`
-	MCP            MCPConfig         `json:"mcp,omitempty"`
-	Sandbox        SandboxConfig     `json:"sandbox,omitempty"`
-	Notify         NotifyConfig      `json:"notify,omitempty"`
-	Tools          ToolsConfig       `json:"tools,omitempty"`
-	Swarm          SwarmConfig       `json:"swarm,omitempty"`
-	Preferences    PreferencesConfig `json:"preferences,omitempty"`
+	ActiveProvider string             `json:"activeProvider,omitempty"`
+	Providers      []ProviderProfile  `json:"providers,omitempty"`
+	MaxTurns       int                `json:"maxTurns,omitempty"`
+	MCP            MCPConfig          `json:"mcp,omitempty"`
+	Sandbox        SandboxConfig      `json:"sandbox,omitempty"`
+	Notify         NotifyConfig       `json:"notify,omitempty"`
+	Tools          ToolsConfig        `json:"tools,omitempty"`
+	Swarm          SwarmConfig        `json:"swarm,omitempty"`
+	Preferences    PreferencesConfig  `json:"preferences,omitempty"`
+	LocalControl   LocalControlConfig `json:"localControl,omitempty"`
+}
+
+func (cfg FileConfig) MarshalJSON() ([]byte, error) {
+	type rawConfig struct {
+		ActiveProvider string              `json:"activeProvider,omitempty"`
+		Providers      []ProviderProfile   `json:"providers,omitempty"`
+		MaxTurns       int                 `json:"maxTurns,omitempty"`
+		MCP            MCPConfig           `json:"mcp,omitempty"`
+		Sandbox        SandboxConfig       `json:"sandbox,omitempty"`
+		Notify         NotifyConfig        `json:"notify,omitempty"`
+		Tools          ToolsConfig         `json:"tools,omitempty"`
+		Swarm          SwarmConfig         `json:"swarm,omitempty"`
+		Preferences    PreferencesConfig   `json:"preferences,omitempty"`
+		LocalControl   *LocalControlConfig `json:"localControl,omitempty"`
+	}
+	raw := rawConfig{
+		ActiveProvider: cfg.ActiveProvider,
+		Providers:      cfg.Providers,
+		MaxTurns:       cfg.MaxTurns,
+		MCP:            cfg.MCP,
+		Sandbox:        cfg.Sandbox,
+		Notify:         cfg.Notify,
+		Tools:          cfg.Tools,
+		Swarm:          cfg.Swarm,
+		Preferences:    cfg.Preferences,
+	}
+	if !cfg.LocalControl.Empty() {
+		raw.LocalControl = &cfg.LocalControl
+	}
+	return json.Marshal(raw)
 }
 
 type ResolveOptions struct {
@@ -156,6 +238,7 @@ type Overrides struct {
 	Sandbox        SandboxConfig
 	Notify         NotifyConfig
 	Tools          ToolsConfig
+	LocalControl   LocalControlConfig
 }
 
 type ResolvedConfig struct {
@@ -169,6 +252,7 @@ type ResolvedConfig struct {
 	Tools          ToolsConfig
 	Swarm          SwarmConfig
 	Preferences    PreferencesConfig
+	LocalControl   LocalControlConfig
 }
 
 type MCPConfig struct {
@@ -214,6 +298,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Tools           ToolsConfig                `json:"tools"`
 		Swarm           SwarmConfig                `json:"swarm"`
 		Preferences     PreferencesConfig          `json:"preferences"`
+		LocalControl    LocalControlConfig         `json:"localControl"`
 		MCPServers      map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -239,6 +324,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Tools = raw.Tools
 	cfg.Swarm = raw.Swarm
 	cfg.Preferences = raw.Preferences
+	cfg.LocalControl = raw.LocalControl
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}
 	}
@@ -252,6 +338,94 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		cfg.MCP.Servers[name] = server
 	}
 	return nil
+}
+
+func (cfg *LocalControlConfig) UnmarshalJSON(data []byte) error {
+	type rawLocalControl struct {
+		Enabled      *bool                    `json:"enabled"`
+		Browser      LocalControlDriverConfig `json:"browser"`
+		Desktop      LocalControlDriverConfig `json:"desktop"`
+		Terminal     LocalControlDriverConfig `json:"terminal"`
+		ArtifactsDir string                   `json:"artifactsDir"`
+	}
+	var raw rawLocalControl
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*cfg = LocalControlConfig{
+		Browser:      raw.Browser,
+		Desktop:      raw.Desktop,
+		Terminal:     raw.Terminal,
+		ArtifactsDir: raw.ArtifactsDir,
+	}
+	if raw.Enabled != nil {
+		cfg.Enabled = *raw.Enabled
+		cfg.enabledSet = true
+	}
+	return nil
+}
+
+func (cfg LocalControlConfig) MarshalJSON() ([]byte, error) {
+	type rawLocalControl struct {
+		Enabled      *bool                     `json:"enabled,omitempty"`
+		Browser      *LocalControlDriverConfig `json:"browser,omitempty"`
+		Desktop      *LocalControlDriverConfig `json:"desktop,omitempty"`
+		Terminal     *LocalControlDriverConfig `json:"terminal,omitempty"`
+		ArtifactsDir string                    `json:"artifactsDir,omitempty"`
+	}
+	raw := rawLocalControl{
+		ArtifactsDir: cfg.ArtifactsDir,
+	}
+	if cfg.enabledSet || cfg.Enabled {
+		raw.Enabled = &cfg.Enabled
+	}
+	if !cfg.Browser.Empty() {
+		raw.Browser = &cfg.Browser
+	}
+	if !cfg.Desktop.Empty() {
+		raw.Desktop = &cfg.Desktop
+	}
+	if !cfg.Terminal.Empty() {
+		raw.Terminal = &cfg.Terminal
+	}
+	return json.Marshal(raw)
+}
+
+func (cfg *LocalControlDriverConfig) UnmarshalJSON(data []byte) error {
+	type rawDriver struct {
+		Enabled    *bool  `json:"enabled"`
+		HelperPath string `json:"helperPath"`
+		Driver     string `json:"driver"`
+	}
+	var raw rawDriver
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*cfg = LocalControlDriverConfig{
+		HelperPath: raw.HelperPath,
+		Driver:     raw.Driver,
+	}
+	if raw.Enabled != nil {
+		cfg.Enabled = *raw.Enabled
+		cfg.enabledSet = true
+	}
+	return nil
+}
+
+func (cfg LocalControlDriverConfig) MarshalJSON() ([]byte, error) {
+	type rawDriver struct {
+		Enabled    *bool  `json:"enabled,omitempty"`
+		HelperPath string `json:"helperPath,omitempty"`
+		Driver     string `json:"driver,omitempty"`
+	}
+	raw := rawDriver{
+		HelperPath: cfg.HelperPath,
+		Driver:     cfg.Driver,
+	}
+	if cfg.enabledSet || cfg.Enabled {
+		raw.Enabled = &cfg.Enabled
+	}
+	return json.Marshal(raw)
 }
 
 func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {

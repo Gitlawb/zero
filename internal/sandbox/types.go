@@ -50,6 +50,10 @@ const (
 	SideEffectWrite          SideEffect = "write"
 	SideEffectShell          SideEffect = "shell"
 	SideEffectNetwork        SideEffect = "network"
+	SideEffectLocalControl   SideEffect = "local_control"
+	SideEffectLocalBrowser   SideEffect = "local_browser"
+	SideEffectLocalDesktop   SideEffect = "local_desktop"
+	SideEffectLocalTerminal  SideEffect = "local_terminal"
 	SideEffectOutOfWorkspace SideEffect = "out_of_workspace"
 	// SideEffectNone marks a control-only tool that performs no read/write/
 	// shell/network effect (e.g. escalate_model). It must be recognized so it is

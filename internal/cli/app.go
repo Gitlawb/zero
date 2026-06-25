@@ -17,6 +17,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Gitlawb/zero/internal/localcontrol"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/plugins"
@@ -553,6 +554,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
+	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
@@ -724,7 +726,69 @@ func newCoreRegistryScoped(workspaceRoot string, scope tools.PathScope) *tools.R
 	for _, tool := range tools.CoreToolsScoped(workspaceRoot, scope) {
 		registry.Register(tool)
 	}
+	registerLocalControlTools(registry, workspaceRoot, config.LocalControlConfig{})
 	return registry
+}
+
+func registerLocalControlTools(registry *tools.Registry, workspaceRoot string, cfg config.LocalControlConfig) {
+	if registry == nil {
+		return
+	}
+	browserOptions := localBrowserOptionsFromConfig(cfg)
+	desktopOptions := localDesktopOptionsFromConfig(cfg)
+	terminalOptions := localTerminalOptionsFromConfig(cfg)
+	for _, tool := range tools.NewLocalBrowserTools(browserOptions) {
+		registry.Register(tool)
+	}
+	for _, tool := range tools.NewLocalDesktopTools(desktopOptions) {
+		registry.Register(tool)
+	}
+	for _, tool := range tools.NewLocalTerminalTools(terminalOptions) {
+		registry.Register(tool)
+	}
+	for _, tool := range tools.NewLocalControlArtifactTools(tools.LocalControlArtifactOptions{
+		Browser:      browserOptions,
+		Desktop:      desktopOptions,
+		Terminal:     terminalOptions,
+		ArtifactsDir: localArtifactsDirFromConfig(workspaceRoot, cfg),
+	}) {
+		registry.Register(tool)
+	}
+}
+
+func localBrowserOptionsFromConfig(cfg config.LocalControlConfig) localcontrol.BrowserOptions {
+	return localcontrol.BrowserOptions{
+		Enabled:    cfg.BrowserEnabled(),
+		Driver:     cfg.Browser.Driver,
+		HelperPath: cfg.Browser.HelperPath,
+	}
+}
+
+func localDesktopOptionsFromConfig(cfg config.LocalControlConfig) localcontrol.DesktopOptions {
+	return localcontrol.DesktopOptions{
+		Enabled:    cfg.DesktopEnabled(),
+		Driver:     cfg.Desktop.Driver,
+		HelperPath: cfg.Desktop.HelperPath,
+	}
+}
+
+func localTerminalOptionsFromConfig(cfg config.LocalControlConfig) localcontrol.TerminalOptions {
+	return localcontrol.TerminalOptions{
+		Enabled:    cfg.TerminalEnabled(),
+		Driver:     cfg.Terminal.Driver,
+		HelperPath: cfg.Terminal.HelperPath,
+	}
+}
+
+func localArtifactsDirFromConfig(workspaceRoot string, cfg config.LocalControlConfig) string {
+	dir := strings.TrimSpace(cfg.ArtifactsDir)
+	if dir == "" {
+		dir = filepath.Join(".zero", "artifacts")
+	}
+	if filepath.IsAbs(dir) {
+		return dir
+	}
+	return filepath.Join(workspaceRoot, dir)
 }
 
 // agentToolRuntime bundles the specialist runtime with the swarm it backs so

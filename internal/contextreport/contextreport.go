@@ -221,7 +221,12 @@ func estimateRegistryTools(registry *tools.Registry) (int, int) {
 		return all[left].Name() < all[right].Name()
 	})
 	total := 0
+	count := 0
 	for _, tool := range all {
+		if tool.Safety().Permission == tools.PermissionDeny {
+			continue
+		}
+		count++
 		total += estimateTextTokens(tool.Name())
 		total += estimateTextTokens(tool.Description())
 		if encoded, err := json.Marshal(tool.Parameters()); err == nil {
@@ -229,7 +234,7 @@ func estimateRegistryTools(registry *tools.Registry) (int, int) {
 		}
 		total += toolDefinitionOverheadTokens
 	}
-	return len(all), total
+	return count, total
 }
 
 func readProjectGuidelines(root string, names []string) (string, string) {

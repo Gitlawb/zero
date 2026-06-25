@@ -2147,6 +2147,8 @@ func permissionSupportsPersistentDecision(toolName string) bool {
 	switch toolName {
 	case "bash", "exec_command", "write_stdin", "apply_patch":
 		return false
+	case "browser_install", "browser_launch", "browser_connect", "browser_open", "browser_snapshot", "browser_click", "browser_type", "browser_press", "browser_action", "desktop_windows", "desktop_snapshot", "desktop_action", "terminal_session", "capture_artifact":
+		return false
 	default:
 		return true
 	}

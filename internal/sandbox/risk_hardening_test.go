@@ -230,6 +230,13 @@ func TestClassifyNoneSideEffectIsLowRisk(t *testing.T) {
 	}
 }
 
+func TestClassifyLocalControlSideEffectIsHighRisk(t *testing.T) {
+	risk := Classify(Request{ToolName: "capture_artifact", SideEffect: SideEffectLocalControl})
+	if risk.Level != RiskHigh || !HasRiskCategory(risk, "local_control") {
+		t.Fatalf("local-control side-effect risk = %#v, want high local_control", risk)
+	}
+}
+
 // The following tests cover the AST analyzer wired into classifyWithScope as a
 // second opinion to the regex detectors.
 

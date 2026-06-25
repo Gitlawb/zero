@@ -357,6 +357,32 @@ func TestCreateArchivesWithRootPackageFiles(t *testing.T) {
 	})
 }
 
+func TestCreateTarArchivePreservesSymlinkTargets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink archive behavior")
+	}
+	stagingDir := packageStagingFixture(t, "zero")
+	linkPath := filepath.Join(stagingDir, "helpers", "node_modules", ".bin", "agent-browser")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	linkTarget := "../agent-browser/bin/agent-browser.js"
+	if err := os.Symlink(linkTarget, linkPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "zero-v0.1.0-linux-x64.tar.gz")
+	if err := createArchive(stagingDir, archivePath, "linux"); err != nil {
+		t.Fatalf("createArchive returned error: %v", err)
+	}
+	header := tarArchiveHeaders(t, archivePath)["helpers/node_modules/.bin/agent-browser"]
+	if header == nil {
+		t.Fatal("archive missing symlink header")
+	}
+	if header.Typeflag != tar.TypeSymlink || header.Linkname != linkTarget {
+		t.Fatalf("symlink header type/link = %v/%q, want %v/%q", header.Typeflag, header.Linkname, tar.TypeSymlink, linkTarget)
+	}
+}
+
 func TestCopyPackageFilesStagesLinuxSandboxHelper(t *testing.T) {
 	root := t.TempDir()
 	staging := t.TempDir()
@@ -417,6 +443,57 @@ func TestCopyPackageFilesStagesWindowsSandboxHelpers(t *testing.T) {
 	}
 }
 
+func TestStageLocalControlHelpersUsesPackageDependencies(t *testing.T) {
+	root := t.TempDir()
+	helpers := filepath.Join(t.TempDir(), "helpers")
+	mustWriteFile(t, filepath.Join(root, "package.json"), `{
+  "version": "0.1.0",
+  "dependencies": {
+    "agent-browser": "0.30.1",
+    "tuistory": "0.10.0"
+  }
+}`)
+	fakeBin := t.TempDir()
+	writeFakeNPM(t, fakeBin)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := stageLocalControlHelpers(context.Background(), root, helpers); err != nil {
+		t.Fatalf("stageLocalControlHelpers: %v", err)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(helpers, "package.json"))
+	if err != nil {
+		t.Fatalf("ReadFile helper package.json: %v", err)
+	}
+	manifest := string(manifestBytes)
+	for _, want := range []string{`"agent-browser": "0.30.1"`, `"tuistory": "0.10.0"`} {
+		if !strings.Contains(manifest, want) {
+			t.Fatalf("helper package.json missing %s:\n%s", want, manifest)
+		}
+	}
+	for _, name := range localControlHelperPackages {
+		found := false
+		for _, shimName := range localControlHelperShimNames(name, runtime.GOOS) {
+			if _, err := os.Stat(filepath.Join(helpers, "node_modules", ".bin", shimName)); err == nil {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing shim for %s", name)
+		}
+	}
+}
+
+func TestLocalControlHelperDependenciesRequiresConfiguredPackages(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "package.json"), `{"version":"0.1.0","dependencies":{"agent-browser":"0.30.1"}}`)
+
+	_, err := localControlHelperDependencies(root)
+	if err == nil || !strings.Contains(err.Error(), `dependency "tuistory"`) {
+		t.Fatalf("localControlHelperDependencies error = %v, want missing tuistory", err)
+	}
+}
+
 func packageStagingFixture(t *testing.T, binaryName string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -438,6 +515,35 @@ func packageStagingFixture(t *testing.T, binaryName string) string {
 	return dir
 }
 
+func writeFakeNPM(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "npm.cmd")
+		content := `@echo off
+mkdir node_modules 2>NUL
+mkdir node_modules\.bin 2>NUL
+echo @echo off> node_modules\.bin\agent-browser.cmd
+echo @echo off> node_modules\.bin\tuistory.cmd
+exit /b 0
+`
+		mustWriteFile(t, path, content)
+		return
+	}
+	path := filepath.Join(dir, "npm")
+	content := `#!/usr/bin/env sh
+set -eu
+mkdir -p node_modules/.bin
+for name in agent-browser tuistory; do
+  printf '#!/usr/bin/env sh\n' > "node_modules/.bin/$name"
+  chmod 755 "node_modules/.bin/$name"
+done
+`
+	mustWriteFile(t, path, content)
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("Chmod fake npm: %v", err)
+	}
+}
+
 func mustWriteFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -449,6 +555,16 @@ func mustWriteFile(t *testing.T, path string, content string) {
 }
 
 func tarArchiveNames(t *testing.T, archivePath string) map[string]bool {
+	t.Helper()
+	headers := tarArchiveHeaders(t, archivePath)
+	names := map[string]bool{}
+	for name := range headers {
+		names[name] = true
+	}
+	return names
+}
+
+func tarArchiveHeaders(t *testing.T, archivePath string) map[string]*tar.Header {
 	t.Helper()
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -465,7 +581,7 @@ func tarArchiveNames(t *testing.T, archivePath string) map[string]bool {
 		_ = gzipReader.Close()
 	}()
 	reader := tar.NewReader(gzipReader)
-	names := map[string]bool{}
+	headers := map[string]*tar.Header{}
 	for {
 		header, err := reader.Next()
 		if err != nil {
@@ -474,9 +590,10 @@ func tarArchiveNames(t *testing.T, archivePath string) map[string]bool {
 			}
 			t.Fatalf("tar Next: %v", err)
 		}
-		names[header.Name] = true
+		copied := *header
+		headers[header.Name] = &copied
 	}
-	return names
+	return headers
 }
 
 func zipArchiveNames(t *testing.T, archivePath string) map[string]bool {
