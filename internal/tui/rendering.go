@@ -530,8 +530,11 @@ func renderAssistantRow(row transcriptRow, width int) string {
 	// Committed row: highlighting runs here (once, behind the render cache).
 	lines := renderAssistantMarkdownText(row.text, assistantMeasure(width), tableMeasure, true)
 	if !row.final {
+		// Interim prose is the agent's connective narration ("Now the stylesheet.")
+		// — render it bright (ink), not muted, so the build reads as a clear story.
+		// It already streams bright; this keeps it bright once committed.
 		for index := range lines {
-			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.sayText)
+			lines[index] = styleAssistantMarkdownLine(lines[index], zeroTheme.ink)
 		}
 		return strings.Join(lines, "\n")
 	}

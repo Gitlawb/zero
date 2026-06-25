@@ -726,10 +726,9 @@ func (m model) renderSelectableAssistantRow(rowIndex int, row transcriptRow, wid
 		return m.renderRow(row, width, rowContext{}), selectable
 	}
 	lines := make([]string, 0, len(wrapped)+1)
-	textStyle := zeroTheme.sayText
-	if row.final {
-		textStyle = zeroTheme.ink
-	}
+	// Interim narration and the final answer both render bright (ink); only
+	// reasoning bodies stay muted. Mirrors renderAssistantRow.
+	textStyle := zeroTheme.ink
 	for index, line := range wrapped {
 		meta := selectable[index]
 		rendered := m.renderTranscriptSelectableMarkdownText(meta, line, textStyle)
