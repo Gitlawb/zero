@@ -20,10 +20,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `zero-release package` builds + smoke-tests natively (host==target), so each
+        # target platform needs its own native runner. These five cover the platforms
+        # install.sh / install.ps1 / the npm wrapper resolve.
         os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
+          - ubuntu-latest      # linux-x64
+          - ubuntu-24.04-arm   # linux-arm64
+          - macos-latest       # macos-arm64 (Apple Silicon)
+          - macos-13           # macos-x64 (Intel)
+          - windows-latest     # windows-x64
 
     steps:
       - name: Checkout
