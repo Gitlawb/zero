@@ -114,6 +114,101 @@ func planStatusRemaining(status string) bool {
 	}
 }
 
+// acceptanceNudgeMarker is a stable substring for tests; it is embedded verbatim
+// in acceptanceVerificationNudge.
+const acceptanceNudgeMarker = "verify your work against the task's stated success criterion"
+
+// selfReportPhrases are high-signal admissions of guessing, fallback, or
+// uncertainty about correctness. Admissions of INABILITY are matched separately by
+// inabilityStems below, which generalize over the verb/tense so the detector is
+// not defeated by re-phrasing.
+var selfReportPhrases = []string{
+	// admitted guessing / fallback / placeholder
+	"i guessed", "my best guess", "best guess", "this is a guess", "just a guess",
+	"as a fallback", "fell back to", "fall back to", "placeholder value", "as a placeholder",
+	"i assumed a", "i had to assume",
+	// admitted lack of capability / external dependency
+	"without proper", "would need a tool", "do not have the ability", "don't have the ability",
+	"lack the ability", "no way for me to", "not possible for me to",
+	// admitted uncertainty about correctness of the result
+	"may not be correct", "might not be correct", "may be incorrect", "might be incorrect",
+	"this may not work", "this might not work", "not fully functional", "not fully working",
+}
+
+// inabilityStems are first-person "I cannot / can't / could not / am unable to /
+// do not have" stems. Matching the STEM (not a fixed verb) generalizes over
+// whatever action the model claims it could not perform — "analyze", "determine",
+// "do", "complete", "verify", "see", etc. — so the detector is not defeated by
+// re-phrasing (the chess case slipped a fixed "cannot analyze" list by writing
+// "…which I cannot do without proper image analysis capabilities").
+var inabilityStems = []string{
+	"i cannot ", "i can't ", "i can not ", "i could not ", "i couldn't ",
+	"i am unable to", "i'm unable to", "i was unable to", "i wasn't able to",
+	"i was not able to", "i do not have", "i don't have", "unable to ",
+	"without being able to",
+}
+
+// successNegationTails are negated phrasings that indicate SUCCESS, not an
+// admission ("I could not find any remaining issues", "I cannot reproduce the
+// bug"). When an inability stem is immediately followed by one of these, it is not
+// treated as an admission, so a clean result is not misreported as INCOMPLETE.
+var successNegationTails = []string{
+	"find any", "found any", "find a ", "see any", "detect any", "identify any",
+	"reproduce", "spot any", "locate any",
+}
+
+// selfReportedIncompletion returns a short reason when the model's final text
+// admits it guessed or could not meet the objective, else "". Case-insensitive.
+func selfReportedIncompletion(text string) string {
+	lower := strings.ToLower(text)
+	for _, phrase := range selfReportPhrases {
+		if strings.Contains(lower, phrase) {
+			return selfReportReason(phrase)
+		}
+	}
+	for _, stem := range inabilityStems {
+		idx := strings.Index(lower, stem)
+		if idx < 0 {
+			continue
+		}
+		tail := strings.TrimSpace(lower[idx+len(stem):])
+		if hasAnyPrefix(tail, successNegationTails) {
+			continue // "could not find any …" etc. — a success statement, not an admission
+		}
+		return selfReportReason(strings.TrimSpace(stem) + " …")
+	}
+	return ""
+}
+
+func selfReportReason(marker string) string {
+	return `the final message admits the objective was not met ("` + marker + `")`
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// acceptanceVerificationNudge forces a TASK-GROUNDED acceptance check before a run
+// may finalize as success. It explicitly rejects the three false-success patterns
+// the bug-hunt surfaced: well-formed output treated as correct; pre-existing tests
+// passing treated as the objective being met; and a result that merely matches a
+// baseline the task asked to beat or improve. General — no task-specific content.
+func acceptanceVerificationNudge() string {
+	return "Before this task can be marked complete, " + acceptanceNudgeMarker + " — " +
+		"NOT the shape or format of your output, NOT that pre-existing tests pass, and NOT that your " +
+		"result merely matches a baseline you were asked to beat or improve. " +
+		"Re-read the original task, then run a concrete check that exercises the actual requirement: " +
+		"execute the program or tests that demonstrate the required behavior, or directly probe the specific " +
+		"thing the task asked you to produce, recover, fix, or optimize. " +
+		"If that check passes, reply PASS and cite the evidence. " +
+		"If it does not pass — or you cannot run such a check — say so plainly and keep working; do not claim success."
+}
+
 // toolFailureHintMarker is a stable substring for tests.
 const toolFailureHintMarker = "kept failing with the same error"
 

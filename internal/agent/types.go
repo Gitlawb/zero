@@ -288,10 +288,15 @@ type Result struct {
 	FinishReason string
 	// Incomplete reports that a headless run (RequireCompletionSignal) stopped with
 	// work clearly unfinished: the model ended a turn with no tool call while plan
-	// items were pending or the message ended mid-step, and the continue-nudge
-	// budget was exhausted. Callers map it to a non-success terminal status / exit
+	// items were pending or the message ended mid-step, the model admitted it
+	// guessed / could not meet the objective, and/or it failed a task-grounded
+	// acceptance check. Callers map it to a non-success terminal status / exit
 	// code. False for every normal completion.
 	Incomplete bool
+	// IncompleteReason is a short, model-derived explanation of why the run was
+	// marked Incomplete (e.g. "pending plan items remain"). Empty when Incomplete
+	// is false. Surfaced in logs / run_end so an abandoned run is debuggable.
+	IncompleteReason string
 }
 
 // Truncated reports whether the final response ended abnormally (cut off at the

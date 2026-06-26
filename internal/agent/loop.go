@@ -134,6 +134,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// (Options.RequireCompletionSignal) has re-prompted a no-tool-call turn that
 	// stopped with work still unfinished. Bounded by maxContinueNudges.
 	continueNudges := 0
+	// acceptanceRequested records that the one-time task-grounded acceptance check
+	// has already been demanded this run, so it fires at most once.
+	acceptanceRequested := false
 
 	result := Result{Messages: copyMessages(messages)}
 	for turn := 0; turn < maxTurns; turn++ {
@@ -359,9 +362,37 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					// Budget spent and the model is still stalling: report INCOMPLETE
 					// rather than passing the unfinished work off as success.
 					result.Incomplete = true
+					result.IncompleteReason = incompleteReason
 					result.FinalAnswer = collected.Text
 					result.Messages = copyMessages(messages)
 					return result, nil
+				}
+
+				// Self-report downgrade: the model's own final message admits it
+				// guessed or could not meet the objective. An admitted non-completion
+				// is never reported as success — downgrade to INCOMPLETE.
+				if reason := selfReportedIncompletion(collected.Text); reason != "" {
+					result.Incomplete = true
+					result.IncompleteReason = reason
+					result.FinalAnswer = collected.Text
+					result.Messages = copyMessages(messages)
+					return result, nil
+				}
+
+				// Task-grounded acceptance: before accepting a "done" turn as success,
+				// require ONE acceptance check grounded in the task's stated criterion
+				// (only when self-correct is on). This rejects the "well-formed ==
+				// correct", "existing tests pass == objective met", and "result ==
+				// baseline" false successes. Bounded to a single pass; the run still
+				// respects maxTurns / the deadline. A genuine post-check completion
+				// (no admission, nothing pending) then finalizes as success next turn.
+				if options.SelfCorrect != nil && !acceptanceRequested {
+					acceptanceRequested = true
+					messages = append(messages, zeroruntime.Message{
+						Role:    zeroruntime.MessageRoleUser,
+						Content: acceptanceVerificationNudge(),
+					})
+					continue
 				}
 			}
 			result.FinalAnswer = collected.Text
