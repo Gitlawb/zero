@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -44,7 +45,74 @@ const (
 	// with the same error, so NO model (weak or strong) burns turns looping on a
 	// bad call.
 	toolFailureStopAt = 4
+
+	// maxContinueNudges bounds how many times the headless completion gate
+	// (Options.RequireCompletionSignal) re-prompts a model that stopped without a
+	// tool call while work clearly remained. Once spent, the run finalizes as
+	// INCOMPLETE rather than nudging forever (and it is still bounded by maxTurns
+	// and the run deadline).
+	maxContinueNudges = 3
 )
+
+// continueNudgeMarker is a stable substring for tests.
+const continueNudgeMarker = "the task is not finished"
+
+// continueNudge tells a model that stopped without a tool call — while work
+// clearly remained — to keep going, or to mark the plan complete and summarize if
+// it is genuinely done. The second path gives it a clean route to a legitimate
+// completion (a finished plan + no continuation cue then exits as success).
+func continueNudge(reason string) string {
+	return "You stopped without calling a tool, but " + continueNudgeMarker + " (" + reason + "). " +
+		"Do not stop here: take the next concrete action with a tool now. " +
+		"If you are genuinely finished, first mark the plan complete with update_plan, then give your final summary."
+}
+
+// endsWithContinuationCue reports whether an assistant message ends mid-thought —
+// announcing a next action it then failed to take — rather than concluding. A
+// trailing colon is the strongest signal ("…Let me check the SSH configuration:");
+// otherwise the last non-empty line is matched against explicit lead-in phrases.
+// Deliberately conservative: a false positive costs at most one bounded re-prompt,
+// while a genuine final answer rarely ends on these cues.
+func endsWithContinuationCue(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasSuffix(trimmed, ":") {
+		return true
+	}
+	lines := strings.Split(trimmed, "\n")
+	last := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(lines[i]); s != "" {
+			last = strings.ToLower(s)
+			break
+		}
+	}
+	for _, cue := range []string{
+		"let me ", "let's ", "now i'll ", "now i will ", "now let me ",
+		"i'll now ", "i will now ", "next i'll ", "next, i", "let me now ",
+	} {
+		if strings.HasPrefix(last, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+// planStatusRemaining reports whether a raw update_plan status string represents
+// unfinished work. Anything not clearly completed/failed (incl. empty/unknown,
+// which the update_plan tool coerces to "pending") counts as remaining, matching
+// that tool's own status normalization.
+func planStatusRemaining(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "done", "finished", "resolved", "✓", "x", "[x]",
+		"failed", "fail", "error", "errored", "blocked", "cancelled", "canceled", "abandoned", "skipped":
+		return false
+	default:
+		return true
+	}
+}
 
 // toolFailureHintMarker is a stable substring for tests.
 const toolFailureHintMarker = "kept failing with the same error"
@@ -177,6 +245,10 @@ type guardState struct {
 	staleReminderSent    bool
 	toolOnlyTurns        int
 	toolOnlyReminderSent bool
+	// planItemsPending is the number of remaining (pending/in_progress) items in
+	// the most recent update_plan call, so the headless completion gate can tell
+	// whether work is unfinished when the model stops without a tool call.
+	planItemsPending int
 	// toolFailures tracks consecutive same-error failures per tool, keyed by tool
 	// name, so the loop can hint then halt instead of looping forever.
 	toolFailures map[string]*toolFailureRecord
@@ -245,12 +317,42 @@ func (state *guardState) observeTurn(collected zeroruntime.CollectedStream) (sto
 			state.toolCallsSincePlanUpdate = 0
 			// A fresh plan update opens a new stale interval.
 			state.staleReminderSent = false
+			// Record how many items remain so the completion gate knows whether
+			// work is unfinished if the model later stops without a tool call.
+			state.observePlanUpdate(call.Arguments)
 		} else {
 			state.toolCallsSincePlanUpdate++
 		}
 	}
 
 	return state.emptyTurns >= maxEmptyTurns
+}
+
+// pendingPlanItems reports whether the most recent update_plan call still has
+// unfinished (pending/in_progress) items. False when no plan was ever recorded.
+func (state *guardState) pendingPlanItems() bool {
+	return state.planItemsPending > 0
+}
+
+// observePlanUpdate parses an update_plan call's raw arguments and records how
+// many items are still remaining. Malformed arguments leave the prior count
+// unchanged (best-effort — the plan panel itself tolerates the same).
+func (state *guardState) observePlanUpdate(arguments string) {
+	var parsed struct {
+		Plan []struct {
+			Status string `json:"status"`
+		} `json:"plan"`
+	}
+	if json.Unmarshal([]byte(arguments), &parsed) != nil {
+		return
+	}
+	pending := 0
+	for _, item := range parsed.Plan {
+		if planStatusRemaining(item.Status) {
+			pending++
+		}
+	}
+	state.planItemsPending = pending
 }
 
 func (state *guardState) progressReminder() string {

@@ -130,6 +130,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// loaded tool's full schema; it lives only for the run (v1 within-run scope).
 	loaded := map[string]bool{}
 
+	// continueNudges counts how many times the headless completion gate
+	// (Options.RequireCompletionSignal) has re-prompted a no-tool-call turn that
+	// stopped with work still unfinished. Bounded by maxContinueNudges.
+	continueNudges := 0
+
 	result := Result{Messages: copyMessages(messages)}
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
@@ -326,6 +331,38 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 						"Continue the task by using a tool or reply with your final answer.",
 				})
 				continue
+			}
+			// Completion gate (headless): a turn with text but no tool call is the
+			// model's final answer ONLY when the work is actually done. With
+			// RequireCompletionSignal set, if work clearly remains — pending
+			// update_plan items, or the message ends mid-step on a continuation cue —
+			// nudge the model to continue instead of accepting the text as the answer.
+			// Bounded by maxContinueNudges (and still by maxTurns / the run deadline);
+			// once the budget is spent the run finalizes as INCOMPLETE, not success.
+			// The option defaults off, so interactive runs stay byte-identical.
+			if options.RequireCompletionSignal {
+				incompleteReason := ""
+				if guards.pendingPlanItems() {
+					incompleteReason = "pending plan items remain"
+				} else if endsWithContinuationCue(collected.Text) {
+					incompleteReason = "your message ended mid-step"
+				}
+				if incompleteReason != "" {
+					if continueNudges < maxContinueNudges {
+						continueNudges++
+						messages = append(messages, zeroruntime.Message{
+							Role:    zeroruntime.MessageRoleUser,
+							Content: continueNudge(incompleteReason),
+						})
+						continue
+					}
+					// Budget spent and the model is still stalling: report INCOMPLETE
+					// rather than passing the unfinished work off as success.
+					result.Incomplete = true
+					result.FinalAnswer = collected.Text
+					result.Messages = copyMessages(messages)
+					return result, nil
+				}
 			}
 			result.FinalAnswer = collected.Text
 			result.Messages = copyMessages(messages)
