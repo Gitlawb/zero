@@ -280,6 +280,29 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 	}
 }
 
+func TestSandboxManagerInfersPlatformFromExplicitBackend(t *testing.T) {
+	tests := []struct {
+		name     string
+		backend  BackendName
+		wantGOOS string
+	}{
+		{name: "linux helper", backend: BackendLinuxBwrap, wantGOOS: "linux"},
+		{name: "macos seatbelt", backend: BackendMacOSSeatbelt, wantGOOS: "darwin"},
+		{name: "windows runner", backend: BackendWindowsRestrictedToken, wantGOOS: "windows"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := NewSandboxManager(SandboxManagerOptions{
+				Backend: Backend{Name: test.backend, Available: true, Executable: "sandbox-helper"},
+			})
+			if manager.goos != test.wantGOOS || manager.backend.Platform != test.wantGOOS {
+				t.Fatalf("manager = %#v, want platform/goos %q", manager, test.wantGOOS)
+			}
+		})
+	}
+}
+
 func TestSelectBackendDelegatesToSandboxManagerSelection(t *testing.T) {
 	backend := SelectBackend(BackendOptions{
 		GOOS: "linux",
